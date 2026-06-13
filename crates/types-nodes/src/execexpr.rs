@@ -476,6 +476,13 @@ pub enum ExprEvalStepData<'mcx> {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         /// `FunctionCallInfo fcinfo_data` — arguments etc.
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+        /// Per-argument result cells: the `&fcinfo->args[i].value` /
+        /// `&fcinfo->args[i].isnull` aliasing targets the argument
+        /// sub-expressions evaluate into (one [`ResultCellId`] per argument).
+        /// In C the recursion writes directly through `&fcinfo->args[i]`; in the
+        /// owned model the interpreter gathers these arena cells into the fcinfo
+        /// args immediately before the call. Empty for a 0-arg function.
+        arg_cells: Option<PgVec<'mcx, ResultCellId>>,
         /// `PGFunction fn_addr` — actual call address.
         fn_addr: Option<PGFunction>,
         /// number of arguments
@@ -485,8 +492,10 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `boolexpr` — for EEOP_BOOL_*_STEP.
     BoolExpr {
-        /// `bool *anynull` — track if any input was NULL.
-        anynull: Option<PgBox<'mcx, bool>>,
+        /// `bool *anynull` — track if any input was NULL. In the owned model an
+        /// is-null cell in the [`ResultCellArena`] (the BoolExpr arm allocates a
+        /// dedicated cell shared by all the AND/OR steps of one expression).
+        anynull: ResultCellId,
         /// jump here if result determined
         jumpdone: i32,
     },
@@ -522,17 +531,19 @@ pub enum ExprEvalStepData<'mcx> {
         /// OID of parameter's datatype
         paramtype: Oid,
     },
-    /// `casetest` — for EEOP_CASE_TESTVAL/DOMAIN_TESTVAL.
+    /// `casetest` — for EEOP_CASE_TESTVAL/DOMAIN_TESTVAL. `value`/`isnull` are a
+    /// [`ResultCellId`] naming the innermost CASE/domain test cell to read from
+    /// (the C `Datum *value`/`bool *isnull` aliasing the caller's
+    /// `caseValue_datum`/`domainValue_datum` workspace).
     CaseTest {
-        /// `Datum *value` — value to return.
-        value: Option<PgBox<'mcx, Datum>>,
-        isnull: Option<PgBox<'mcx, bool>>,
+        /// `Datum *value` / `bool *isnull` — the test value cell.
+        value: ResultCellId,
     },
-    /// `make_readonly` — for EEOP_MAKE_READONLY.
+    /// `make_readonly` — for EEOP_MAKE_READONLY. `value`/`isnull` are a
+    /// [`ResultCellId`] naming the source cell to read.
     MakeReadOnly {
-        /// `Datum *value` — value to coerce to read-only.
-        value: Option<PgBox<'mcx, Datum>>,
-        isnull: Option<PgBox<'mcx, bool>>,
+        /// `Datum *value` / `bool *isnull` — the source cell.
+        value: ResultCellId,
     },
     /// `iocoerce` — for EEOP_IOCOERCE.
     IoCoerce {
@@ -652,9 +663,9 @@ pub enum ExprEvalStepData<'mcx> {
     DomainCheck {
         /// name of constraint
         constraintname: Option<PgString<'mcx>>,
-        /// `Datum *checkvalue` — where the CHECK result is stored.
-        checkvalue: Option<PgBox<'mcx, Datum>>,
-        checknull: Option<PgBox<'mcx, bool>>,
+        /// `Datum *checkvalue` / `bool *checknull` — the cell holding the CHECK
+        /// expression result ([`ResultCellId`] into the arena).
+        checkvalue: ResultCellId,
         /// OID of domain type
         resulttype: Oid,
         /// `ErrorSaveContext *escontext` — parked until the soft-error sink is
@@ -826,10 +837,16 @@ pub enum ExprEvalStepData<'mcx> {
 pub struct ExprEvalStep<'mcx> {
     /// `intptr_t opcode` — the instruction discriminant.
     pub opcode: ExprEvalOp,
-    /// `Datum *resvalue` — where to store the result of this step.
-    pub resvalue: Option<PgBox<'mcx, Datum>>,
-    /// `bool *resnull`.
-    pub resnull: Option<PgBox<'mcx, bool>>,
+    /// `Datum *resvalue` — where to store the result of this step. In the owned
+    /// model this is a [`ResultCellId`] index into the owning [`ExprState`]'s
+    /// [`ResultCellArena`] (mirroring `SlotId`/`EcxtId`); the well-known cell
+    /// [`STATE_RESULT_CELL`] is the `ExprState`'s own `resvalue`/`resnull`, i.e.
+    /// the C `&state->resvalue`/`&state->resnull` default target.
+    pub resvalue: ResultCellId,
+    /// `bool *resnull` — paired is-null cell. Shares its [`ResultCellId`] with
+    /// `resvalue` (the C `resvalue`/`resnull` pointer pair always point at the
+    /// matching `Datum`/`bool` of one logical cell).
+    pub resnull: ResultCellId,
     /// `union d` — inline payload selected by `opcode`.
     pub d: ExprEvalStepData<'mcx>,
 }
@@ -865,6 +882,12 @@ pub struct SubscriptExecSteps {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResultCellId(pub u32);
 
+/// The well-known result cell that aliases the owning [`ExprState`]'s own
+/// `resvalue`/`resnull` fields — the C `&state->resvalue` / `&state->resnull`
+/// default output target threaded through `ExecInitExprRec` as `resv`/`resnull`.
+/// Always present (allocated first) in every [`ResultCellArena`].
+pub const STATE_RESULT_CELL: ResultCellId = ResultCellId(0);
+
 /// One per-step result cell: the `(Datum, bool)` pair a `Datum *`/`bool *`
 /// pointer pair points at in C. Stored in the [`ResultCellArena`] and addressed
 /// by [`ResultCellId`].
@@ -896,6 +919,26 @@ impl<'mcx> ResultCellArena<'mcx> {
             .as_ref()
             .and_then(|c| c.get(id.0 as usize).copied())
             .unwrap_or_default()
+    }
+
+    /// Write a cell by id (extends the arena with default cells if needed).
+    pub fn set(&mut self, id: ResultCellId, cell: ResultCell) {
+        if let Some(cells) = self.cells.as_mut() {
+            let i = id.0 as usize;
+            if i < cells.len() {
+                cells[i] = cell;
+            }
+        }
+    }
+
+    /// Number of cells currently allocated.
+    pub fn len(&self) -> usize {
+        self.cells.as_ref().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Whether the arena has no cells.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -942,14 +985,14 @@ pub struct ExprState<'mcx> {
     /// `ParamListInfo ext_params` — for compiling PARAM_EXTERN nodes (opaque
     /// address; the param-list owner threads the real list).
     pub ext_params: usize,
-    /// `Datum *innermost_caseval`.
-    pub innermost_caseval: Option<PgBox<'mcx, Datum>>,
-    /// `bool *innermost_casenull`.
-    pub innermost_casenull: Option<PgBox<'mcx, bool>>,
-    /// `Datum *innermost_domainval`.
-    pub innermost_domainval: Option<PgBox<'mcx, Datum>>,
-    /// `bool *innermost_domainnull`.
-    pub innermost_domainnull: Option<PgBox<'mcx, bool>>,
+    /// `Datum *innermost_caseval` / `bool *innermost_casenull` — the arena cell
+    /// holding the innermost CASE test value while compiling a `CaseExpr` arm
+    /// (`None` outside any enclosing CASE). [`ResultCellId`] into `result_cells`.
+    pub innermost_caseval: Option<ResultCellId>,
+    /// `Datum *innermost_domainval` / `bool *innermost_domainnull` — the arena
+    /// cell holding the innermost domain value while compiling a `CoerceToDomain`
+    /// (`None` outside any enclosing domain coercion).
+    pub innermost_domainval: Option<ResultCellId>,
     /// `ErrorSaveContext *escontext` — soft-error sink; NULL means throw
     /// (opaque address until the sink is threaded here).
     pub escontext: usize,
@@ -981,9 +1024,7 @@ impl<'mcx> Clone for ExprState<'mcx> {
             parent: None,
             ext_params: self.ext_params,
             innermost_caseval: None,
-            innermost_casenull: None,
             innermost_domainval: None,
-            innermost_domainnull: None,
             escontext: self.escontext,
         }
     }

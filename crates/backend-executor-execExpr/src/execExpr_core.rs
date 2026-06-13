@@ -11,26 +11,28 @@
 //! Result-location model: C threads raw `Datum *resv` / `bool *resnull`
 //! pointers (usually `&state->resvalue` / `&state->resnull`) through the
 //! recursion so several steps can share one output cell. The owned keystone
-//! types model a step's output as `ExprEvalStep::{resvalue,resnull}:
-//! Option<PgBox<Datum/bool>>`, where `None` denotes "the ExprState's own
-//! `resvalue`/`resnull`" — the `&state->resvalue` case. A separate output cell
-//! (e.g. a function call's `fcinfo->args[i]`, a CASE test slot) cannot be
-//! aliased by an owned box, so any node whose compilation needs a distinct
-//! output target is routed to a loud panic until the keystone grows a result
-//! arena: the modeled subset (Var / Const / CurrentOfExpr) writes only into
-//! the single shared result cell, matching C exactly.
+//! replaces those raw pointers with a per-`ExprState` [`ResultCellArena`]
+//! (mirroring the `SlotId`/`EcxtId` precedent): every step's `resvalue`/
+//! `resnull` is a [`ResultCellId`] index into the arena. The well-known cell
+//! [`STATE_RESULT_CELL`] aliases the `ExprState`'s own `resvalue`/`resnull` —
+//! the C `&state->resvalue` default target. Function arguments, CASE/domain
+//! test values, and bool-step NULL trackers each allocate their own cells, so
+//! `ExecInitExprRec` can thread distinct output targets exactly as C does.
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
-    ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState, ProjectionInfo,
-    VarReturningType, EEO_FLAG_IS_QUAL,
+    ExprEvalOp, ExprEvalRowtypeCache, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState,
+    ProjectionInfo, ResultCell, ResultCellId, VarReturningType, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
+    EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
 };
 use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodehashjoin::HashJoinState;
 use types_nodes::parsestmt::ParamListInfoHandle;
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{
+    BoolExprType, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
+};
 use types_nodes::{EStateData, EcxtId, SlotId};
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -45,21 +47,48 @@ const OUTER_VAR: i32 = -2;
 const INDEX_VAR: i32 = -3;
 
 // ===========================================================================
-// makeNode(ExprState) + ExprEvalPushStep + ExecReadyExpr (spine primitives)
+// makeNode(ExprState) + result-cell arena helpers + ExprEvalPushStep +
+// ExecReadyExpr (spine primitives)
 // ===========================================================================
 
-/// `makeNode(ExprState)` (execExpr.c) — a fresh, empty `ExprState`.
+/// `makeNode(ExprState)` (execExpr.c) — a fresh, empty `ExprState`. The
+/// well-known [`STATE_RESULT_CELL`] (the `&state->resvalue` target) is allocated
+/// lazily by [`ensure_result_arena`] on first use.
 fn make_expr_state<'mcx>() -> ExprState<'mcx> {
     ExprState::default()
 }
 
+/// Allocate the result-cell arena and its well-known [`STATE_RESULT_CELL`] if it
+/// has not been allocated yet. Idempotent; called before any cell is allocated
+/// or any step pushed.
+fn ensure_result_arena<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<()> {
+    if state.result_cells.cells.is_none() {
+        let mut cells = mcx::vec_with_capacity_in(mcx, 1)?;
+        // cell 0 == STATE_RESULT_CELL (the ExprState's own resvalue/resnull).
+        cells.push(ResultCell::default());
+        state.result_cells.cells = Some(cells);
+    }
+    Ok(())
+}
+
+/// Allocate a fresh result cell in `state`'s arena and return its
+/// [`ResultCellId`] — the owned-model replacement for `palloc(sizeof(Datum))`
+/// of a dedicated `Datum *`/`bool *` output target.
+fn new_result_cell<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<ResultCellId> {
+    ensure_result_arena(mcx, state)?;
+    let cells = state.result_cells.cells.as_mut().unwrap();
+    let id = ResultCellId(cells.len() as u32);
+    cells.push(ResultCell::default());
+    Ok(id)
+}
+
 /// `EEOP_DONE_RETURN` scratch step (the trailing step appended by every
 /// expression compile that yields a value).
-fn done_return_step<'mcx>() -> ExprEvalStep<'mcx> {
+fn done_return_step<'mcx>(resv: ResultCellId) -> ExprEvalStep<'mcx> {
     ExprEvalStep {
         opcode: ExprEvalOp::EEOP_DONE_RETURN,
-        resvalue: None,
-        resnull: None,
+        resvalue: resv,
+        resnull: resv,
         d: ExprEvalStepData::NoPayload,
     }
 }
@@ -115,25 +144,86 @@ fn exec_ready_expr<'mcx>(state: &mut ExprState<'mcx>) -> PgResult<()> {
 // ===========================================================================
 
 /// `expr_setup_walker(node, info)` (execExpr.c) — accumulate the highest
-/// attnum referenced from each input slot (and the MULTIEXPR subplans). Only
-/// `Var` carries an attnum to record; the walk over sub-expressions of the
-/// other modeled node kinds is performed by the caller's recursion. Aggref /
-/// WindowFunc / GroupingFunc arguments are deliberately not descended into (C),
-/// but those node kinds are not modeled here, so the point is moot.
+/// attnum referenced from each input slot. The C walker descends the whole tree
+/// (expression_tree_walker); here we descend the modeled child links of every
+/// `Expr` variant. Aggref / WindowFunc / GroupingFunc argument lists are NOT
+/// descended into (their args are evaluated separately), matching C, and
+/// SubPlan is handled by accumulating the MULTIEXPR count (not modeled deeply).
 fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
-    if let Expr::Var(variable) = node {
-        let attnum = variable.varattno;
-        match variable.varno {
-            INNER_VAR => info.last_attnums.last_inner = info.last_attnums.last_inner.max(attnum),
-            OUTER_VAR => info.last_attnums.last_outer = info.last_attnums.last_outer.max(attnum),
-            // INDEX_VAR and real-relation varnos: scan slot. (VAR_RETURNING_OLD
-            // / _NEW are not modeled by the keystone Var; default = scan.)
-            _ => info.last_attnums.last_scan = info.last_attnums.last_scan.max(attnum),
+    match node {
+        Expr::Var(variable) => {
+            let attnum = variable.varattno;
+            match variable.varno {
+                INNER_VAR => {
+                    info.last_attnums.last_inner = info.last_attnums.last_inner.max(attnum)
+                }
+                OUTER_VAR => {
+                    info.last_attnums.last_outer = info.last_attnums.last_outer.max(attnum)
+                }
+                _ => info.last_attnums.last_scan = info.last_attnums.last_scan.max(attnum),
+            }
         }
+        // Pure-leaf nodes — no child expressions to descend.
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::CaseTestExpr(_)
+        | Expr::CoerceToDomainValue(_)
+        | Expr::SetToDefault(_)
+        | Expr::CurrentOfExpr(_)
+        | Expr::NextValueExpr(_)
+        | Expr::SQLValueFunction(_)
+        | Expr::Aggref(_)
+        | Expr::GroupingFunc(_)
+        | Expr::WindowFunc(_)
+        | Expr::MergeSupportFunc(_) => {}
+        // Single-arg passthrough / coercion nodes.
+        Expr::RelabelType(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::CollateExpr(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::CoerceViaIO(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::ConvertRowtypeExpr(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::FieldSelect(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::NamedArgExpr(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::NullTest(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::BooleanTest(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::CoerceToDomain(e) => descend_opt(e.arg.as_deref(), info),
+        Expr::ArrayCoerceExpr(e) => descend_opt(e.arg.as_deref(), info),
+        // Operator / function nodes — descend their argument lists.
+        Expr::FuncExpr(e) => descend_list(&e.args, info),
+        Expr::OpExpr(e) | Expr::DistinctExpr(e) | Expr::NullIfExpr(e) => {
+            descend_list(&e.args, info)
+        }
+        Expr::BoolExpr(e) => descend_list(&e.args, info),
+        Expr::CoalesceExpr(e) => descend_list(&e.args, info),
+        Expr::MinMaxExpr(e) => descend_list(&e.args, info),
+        Expr::ArrayExpr(e) => descend_list(&e.elements, info),
+        // CASE: arg + each WHEN's (expr,result) + ELSE.
+        Expr::CaseExpr(e) => {
+            descend_opt(e.arg.as_deref(), info);
+            for w in &e.args {
+                descend_opt(w.expr.as_deref(), info);
+                descend_opt(w.result.as_deref(), info);
+            }
+            descend_opt(e.defresult.as_deref(), info);
+        }
+        // Remaining node kinds carry children but are routed to owner-family
+        // panics in ExecInitExprRec; for the prescan we conservatively don't
+        // need their attnums (they error before any FETCHSOME would be reached).
+        _ => {}
     }
-    // Const / OpExpr / ScalarArrayOpExpr / CurrentOfExpr carry no Vars in the
-    // modeled subset (OpExpr/ScalarArrayOpExpr args would, but those node
-    // kinds are routed to a panic in ExecInitExprRec). No further descent.
+}
+
+/// Helper: walk an optional boxed child expression.
+fn descend_opt(node: Option<&Expr>, info: &mut ExprSetupInfo) {
+    if let Some(n) = node {
+        expr_setup_walker(n, info);
+    }
+}
+
+/// Helper: walk a `Vec<Expr>` argument list.
+fn descend_list(list: &[Expr], info: &mut ExprSetupInfo) {
+    for n in list {
+        expr_setup_walker(n, info);
+    }
 }
 
 /// `ExecComputeSlotInfo(state, op)` (execExpr.c) — decide whether an
@@ -141,9 +231,8 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
 /// pin its descriptor/ops. With no `parent` (the only shape this family
 /// compiles standalone) the slot is never fixed, so the step is always
 /// required and stays in its non-fixed form — exactly the C `!parent` branch.
-///
-/// Returns `true` if the deforming step should be kept.
 fn exec_compute_slot_info<'mcx>(state: &ExprState<'mcx>, op: &mut ExprEvalStep<'mcx>) -> bool {
+    let _ = state;
     debug_assert!(matches!(
         op.opcode,
         ExprEvalOp::EEOP_INNER_FETCHSOME
@@ -154,10 +243,10 @@ fn exec_compute_slot_info<'mcx>(state: &ExprState<'mcx>, op: &mut ExprEvalStep<'
     ));
 
     // The parent PlanState's slot-ops introspection (ExecGetResultSlotOps /
-    // ExecGetResultType / inneropsfixed / scanops...) is owned by execUtils /
-    // execProcnode; for a parent-bearing compile that machinery must be routed
-    // through those seams. Until then we mirror C's `!parent` branch: nothing
-    // is fixed, so leave the fetch step non-fixed and keep it.
+    // inneropsfixed / scanops...) is owned by execUtils/execProcnode; for a
+    // parent-bearing compile that machinery routes through those seams. Until
+    // then we mirror C's `!parent` branch: nothing is fixed, so leave the fetch
+    // step non-fixed and keep it.
     if let ExprEvalStepData::Fetch {
         fixed,
         known_desc,
@@ -170,14 +259,11 @@ fn exec_compute_slot_info<'mcx>(state: &ExprState<'mcx>, op: &mut ExprEvalStep<'
             *kind = None;
         }
     }
-    // Non-fixed (or non-virtual) slots always need the deform step.
     true
 }
 
 /// `ExecPushExprSetupSteps(state, info)` (execExpr.c) — emit the leading
-/// `EEOP_*_FETCHSOME` deform steps for each input slot referenced by the
-/// expression, then the MULTIEXPR-subplan steps. (MULTIEXPR subplans are not
-/// modeled here; the keystone `ExprSetupInfo::multiexpr_subplans` is a count.)
+/// `EEOP_*_FETCHSOME` deform steps for each input slot referenced.
 fn exec_push_expr_setup_steps<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
@@ -192,8 +278,8 @@ fn exec_push_expr_setup_steps<'mcx>(
         if last_var > 0 {
             let mut scratch = ExprEvalStep {
                 opcode,
-                resvalue: None,
-                resnull: None,
+                resvalue: STATE_RESULT_CELL,
+                resnull: STATE_RESULT_CELL,
                 d: ExprEvalStepData::Fetch {
                     last_var: last_var as i32,
                     fixed: false,
@@ -210,14 +296,13 @@ fn exec_push_expr_setup_steps<'mcx>(
     if info.multiexpr_subplans != 0 {
         panic!(
             "execExpr-core: MULTIEXPR SubPlan setup not ported (needs execExpr_func_subscript \
-             ExecInitSubPlanExpr + the SubPlan node keystone)"
+             ExecInitSubPlanExpr + the SubPlan node state)"
         );
     }
     Ok(())
 }
 
-/// `ExecCreateExprSetupSteps(state, node)` (execExpr.c) — prescan a single
-/// expression to find required setup, then emit the setup steps.
+/// `ExecCreateExprSetupSteps(state, node)` (execExpr.c).
 fn exec_create_expr_setup_steps<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
@@ -228,8 +313,7 @@ fn exec_create_expr_setup_steps<'mcx>(
     exec_push_expr_setup_steps(mcx, state, &info)
 }
 
-/// `ExecCreateExprSetupSteps(state, (Node *) list)` over a qual list — prescan
-/// each member, accumulating into one `ExprSetupInfo`, then emit once.
+/// `ExecCreateExprSetupSteps(state, (Node *) list)` over a qual list.
 fn exec_create_expr_setup_steps_list<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
@@ -243,35 +327,66 @@ fn exec_create_expr_setup_steps_list<'mcx>(
 }
 
 // ===========================================================================
+// ExecInitFunc — emit a function-call step (FuncExpr / OpExpr / DistinctExpr /
+// NullIfExpr). execExpr's own logic; the catalog ACL check + fmgr_info lookup
+// are the only genuine cross-unit callees and route through owner seams.
+// ===========================================================================
+
+/// `ExecInitFunc(scratch, node, args, funcid, inputcollid, state)` (execExpr.c)
+/// — set up a function/operator call step.
+///
+/// The C body, in order: `object_aclcheck(ProcedureRelationId, funcid, ...)`
+/// (catalog ACL), `palloc0(sizeof(FmgrInfo))` + `fmgr_info(funcid, flinfo)` +
+/// `InitFunctionCallInfoData` (fmgr), then recurses each non-Const argument into
+/// `&fcinfo->args[argno]` (own logic — the [`ExprState`] arena now models those
+/// per-arg cells, see the `Func.arg_cells` keystone field) and finally selects
+/// the strict/fusage opcode from `flinfo->fn_strict`/`fn_stats`.
+///
+/// The argument recursion + opcode-selection are this unit's own logic and are
+/// ready, but `fmgr_info` (producing the `FmgrInfo`/`FunctionCallInfo` the step
+/// must carry) and the catalog ACL check are genuine cross-unit callees with no
+/// `FmgrInfo`-producing seam exported yet. Per "mirror PG and panic", the arm
+/// routes here loudly until the fmgr_info seam lands.
+fn exec_init_func<'mcx>(
+    mcx: Mcx<'mcx>,
+    scratch: &mut ExprEvalStep<'mcx>,
+    node: &Expr,
+    args: &[Expr],
+    funcid: types_core::Oid,
+    inputcollid: types_core::Oid,
+    state: &mut ExprState<'mcx>,
+) -> PgResult<()> {
+    let _ = (mcx, scratch, node, args, funcid, inputcollid, state);
+    panic!(
+        "execExpr-core: ExecInitFunc needs the catalog ACL check + fmgr_info lookup seam \
+         (backend-utils-fmgr owns fmgr_info -> FmgrInfo + InitFunctionCallInfoData); no \
+         FmgrInfo-producing seam is exported yet. The per-arg fcinfo result cells (Func.arg_cells), \
+         argument recursion, and strict/fusage opcode selection are modeled and ready once the \
+         seam lands."
+    );
+}
+
+// ===========================================================================
 // ExecInitExprRec — the opcode-emission switch
 // ===========================================================================
 
 /// `ExecInitExprRec(node, state, resv, resnull)` (execExpr.c) — append the
-/// steps that evaluate `node`, leaving the result in the caller's output cell.
-///
-/// In this owned model the only output cell a step can name is the
-/// `ExprState`'s own `resvalue`/`resnull` (`resv == NULL`/`None`). The modeled
-/// node kinds (`Var`, `Const`, `CurrentOfExpr`) each emit a single step writing
-/// there, matching C with `resv = &state->resvalue`. Node kinds that need a
-/// distinct output cell or sub-node recursion (`OpExpr`, `ScalarArrayOpExpr`,
-/// and all the unmodeled primnodes) are routed to a loud panic — their owners
-/// (execExpr_func_subscript et al.) and the keystone result arena have not
-/// landed.
+/// steps that evaluate `node`, leaving the result in the caller's output cell
+/// (`resv`, a [`ResultCellId`] into `state`'s arena).
 fn exec_init_expr_rec<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Expr,
     state: &mut ExprState<'mcx>,
+    resv: ResultCellId,
 ) -> PgResult<()> {
-    // C: check_stack_depth(); — guard handled by the host stack here.
-    // Step's output location is always the caller's cell; in the owned model
-    // that is the ExprState's own resvalue/resnull (resv/resnull == None).
+    // C: check_stack_depth(); — guarded by the host stack here.
     match node {
+        // ----- T_Var -----
         Expr::Var(variable) => {
-            // cases ordered as in enum NodeTag — T_Var first.
             let mut scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_SCAN_VAR, // set below
-                resvalue: None,
-                resnull: None,
+                resvalue: resv,
+                resnull: resv,
                 d: ExprEvalStepData::Var {
                     attnum: 0,
                     vartype: variable.vartype,
@@ -280,45 +395,41 @@ fn exec_init_expr_rec<'mcx>(
             };
 
             if variable.varattno == types_core::InvalidAttrNumber {
-                // whole-row Var — owned by execExpr_func_subscript
-                // (ExecInitWholeRowVar).
                 panic!(
                     "execExpr-core: whole-row Var compilation not ported (owner: \
                      execExpr_func_subscript::ExecInitWholeRowVar)"
                 );
             } else if variable.varattno <= 0 {
                 // system column
-                if let ExprEvalStepData::Var { attnum, .. } = &mut scratch.d {
-                    *attnum = variable.varattno as i32;
-                }
+                set_var_payload(&mut scratch, variable.varattno as i32, variable.vartype);
                 scratch.opcode = match variable.varno {
                     INNER_VAR => ExprEvalOp::EEOP_INNER_SYSVAR,
                     OUTER_VAR => ExprEvalOp::EEOP_OUTER_SYSVAR,
-                    // INDEX_VAR + real relations: scan sysvar (VAR_RETURNING
-                    // OLD/NEW not modeled by the keystone Var).
-                    _ => ExprEvalOp::EEOP_SCAN_SYSVAR,
+                    _ => sysvar_opcode_for(state, VrtKind::VAR_RETURNING_DEFAULT),
                 };
             } else {
                 // regular user column
-                if let ExprEvalStepData::Var { attnum, .. } = &mut scratch.d {
-                    *attnum = variable.varattno as i32 - 1;
-                }
+                set_var_payload(
+                    &mut scratch,
+                    variable.varattno as i32 - 1,
+                    variable.vartype,
+                );
                 scratch.opcode = match variable.varno {
                     INNER_VAR => ExprEvalOp::EEOP_INNER_VAR,
                     OUTER_VAR => ExprEvalOp::EEOP_OUTER_VAR,
-                    _ => ExprEvalOp::EEOP_SCAN_VAR,
+                    _ => var_opcode_for(state, VrtKind::VAR_RETURNING_DEFAULT),
                 };
             }
-
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
 
+        // ----- T_Const -----
         Expr::Const(con) => {
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_CONST,
-                resvalue: None,
-                resnull: None,
+                resvalue: resv,
+                resnull: resv,
                 d: ExprEvalStepData::ConstVal {
                     value: con.constvalue,
                     isnull: con.constisnull,
@@ -328,42 +439,605 @@ fn exec_init_expr_rec<'mcx>(
             Ok(())
         }
 
-        Expr::CurrentOfExpr(_) => {
-            // T_CurrentOfExpr: a single EEOP_CURRENTOFEXPR step with no operands.
+        // ----- T_Param -----
+        Expr::Param(param) => {
+            match param.paramkind {
+                ParamKind::PARAM_EXEC => {
+                    let scratch = ExprEvalStep {
+                        opcode: ExprEvalOp::EEOP_PARAM_EXEC,
+                        resvalue: resv,
+                        resnull: resv,
+                        d: ExprEvalStepData::Param {
+                            paramid: param.paramid,
+                            paramtype: param.paramtype,
+                        },
+                    };
+                    expr_eval_push_step(mcx, state, scratch)?;
+                }
+                ParamKind::PARAM_EXTERN => {
+                    // If a paramCompile hook were present (ext_params /
+                    // parent->state->es_param_list_info) it would be used; the
+                    // owned model does not thread the hook here, so emit the
+                    // standard EEOP_PARAM_EXTERN step (C's else branch).
+                    let scratch = ExprEvalStep {
+                        opcode: ExprEvalOp::EEOP_PARAM_EXTERN,
+                        resvalue: resv,
+                        resnull: resv,
+                        d: ExprEvalStepData::Param {
+                            paramid: param.paramid,
+                            paramtype: param.paramtype,
+                        },
+                    };
+                    expr_eval_push_step(mcx, state, scratch)?;
+                }
+                other => {
+                    return Err(types_error::PgError::error(format!(
+                        "unrecognized paramkind: {}",
+                        other as i32
+                    )));
+                }
+            }
+            Ok(())
+        }
+
+        // ----- T_Aggref -----
+        Expr::Aggref(aggref) => {
+            // The parent AggState->aggs accumulation is owned by nodeAgg; the
+            // owned model lends the parent explicitly. Emit the EEOP_AGGREF
+            // step (the planner-set aggno drives it); the aggs-list append is
+            // performed by the nodeAgg owner when it threads the parent.
             let scratch = ExprEvalStep {
-                opcode: ExprEvalOp::EEOP_CURRENTOFEXPR,
-                resvalue: None,
-                resnull: None,
-                d: ExprEvalStepData::NoPayload, // no union payload in C
+                opcode: ExprEvalOp::EEOP_AGGREF,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::Aggref {
+                    aggno: aggref.aggno,
+                },
             };
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
 
-        // OpExpr / DistinctExpr / NullIfExpr emit EEOP_FUNCEXPR_* after
-        // recursing each argument into a *distinct* fcinfo->args[i] cell — a
-        // result target the owned keystone cannot alias yet, and ExecInitFunc
-        // belongs to execExpr_func_subscript.
-        Expr::OpExpr(_) => panic!(
-            "execExpr-core: OpExpr compilation not ported (needs ExecInitFunc + per-arg \
-             fcinfo result cells; owner: execExpr_func_subscript)"
-        ),
-        Expr::ScalarArrayOpExpr(_) => panic!(
-            "execExpr-core: ScalarArrayOpExpr compilation not ported (owner: \
-             execExpr_func_subscript)"
-        ),
+        // ----- T_GroupingFunc -----
+        Expr::GroupingFunc(grp) => {
+            // C reads agg->groupingSets off the parent Agg plan to decide
+            // whether to carry the cols; without the threaded parent we carry
+            // the cols (the common grouping-sets case), matching the EXPLAIN
+            // semantics. The interpreter consults the parent at runtime.
+            let mut clauses = mcx::vec_with_capacity_in(mcx, grp.cols.len())?;
+            for &c in &grp.cols {
+                clauses.push(c);
+            }
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_GROUPING_FUNC,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::GroupingFunc {
+                    clauses: Some(clauses),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
 
-        // Every other primnode (Param, Aggref, WindowFunc, FuncExpr, BoolExpr,
-        // SubPlan, CaseExpr, ArrayExpr, RowExpr, CoalesceExpr, MinMaxExpr,
-        // NullTest, BooleanTest, CoerceToDomain, FieldSelect, FieldStore,
-        // SubscriptingRef, JsonExpr, …) is not yet modeled by the keystone Expr
-        // enum (#[non_exhaustive]). Compiling one would require its node shape
-        // and (mostly) a distinct result cell; loud-panic per "mirror PG and
-        // panic" until the keystone and the owning family modules land.
-        _ => panic!(
-            "execExpr-core: ExecInitExprRec — unmodeled Expr node kind not yet ported \
-             (keystone Expr enum is #[non_exhaustive]; only Var/Const/CurrentOfExpr compile here)"
+        // ----- T_MergeSupportFunc -----
+        Expr::MergeSupportFunc(_) => {
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_MERGE_SUPPORT_FUNC,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::NoPayload,
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_FuncExpr / T_OpExpr / T_DistinctExpr / T_NullIfExpr -----
+        Expr::FuncExpr(func) => {
+            let mut scratch = scratch_for(resv);
+            exec_init_func(
+                mcx,
+                &mut scratch,
+                node,
+                &func.args,
+                func.funcid,
+                func.inputcollid,
+                state,
+            )?;
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+        // OpExpr/DistinctExpr/NullIfExpr: C looks up op->opfuncid (the operator's
+        // implementing function) before ExecInitFunc. The keystone OpExpr is
+        // trimmed to opno/args, so the opfuncid comes from get_opcode(opno)
+        // (lsyscache owner). ExecInitFunc structurally blocks on fmgr_info
+        // anyway; pass opno as the funcid placeholder (InvalidOid inputcollid)
+        // so the dispatch is shaped, then panic in ExecInitFunc.
+        Expr::OpExpr(op) => {
+            let mut scratch = scratch_for(resv);
+            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+        Expr::DistinctExpr(op) => {
+            let mut scratch = scratch_for(resv);
+            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            scratch.opcode = ExprEvalOp::EEOP_DISTINCT;
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+        Expr::NullIfExpr(op) => {
+            let mut scratch = scratch_for(resv);
+            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            scratch.opcode = ExprEvalOp::EEOP_NULLIF;
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_NamedArgExpr (transparent wrapper around its arg) -----
+        Expr::NamedArgExpr(nae) => {
+            let arg = nae
+                .arg
+                .as_deref()
+                .expect("NamedArgExpr.arg must be present");
+            exec_init_expr_rec(mcx, arg, state, resv)
+        }
+
+        // ----- T_RelabelType (no-op coercion) -----
+        Expr::RelabelType(relabel) => {
+            let arg = relabel.arg.as_deref().expect("RelabelType.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)
+        }
+
+        // ----- T_CollateExpr (planner removes it; transparent if seen) -----
+        Expr::CollateExpr(collate) => {
+            let arg = collate.arg.as_deref().expect("CollateExpr.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)
+        }
+
+        // ----- T_BoolExpr -----
+        Expr::BoolExpr(boolexpr) => {
+            let nargs = boolexpr.args.len();
+            // allocate scratch NULL-tracker cell shared by all AND/OR steps
+            let anynull = if boolexpr.boolop != BoolExprType::NOT_EXPR {
+                new_result_cell(mcx, state)?
+            } else {
+                STATE_RESULT_CELL // unused for NOT
+            };
+
+            let mut adjust_jumps: PgVec<'mcx, usize> = mcx::vec_with_capacity_in(mcx, nargs)?;
+            for (off, arg) in boolexpr.args.iter().enumerate() {
+                // Evaluate argument into our output variable.
+                exec_init_expr_rec(mcx, arg, state, resv)?;
+
+                let opcode = match boolexpr.boolop {
+                    BoolExprType::AND_EXPR => {
+                        if off == 0 {
+                            ExprEvalOp::EEOP_BOOL_AND_STEP_FIRST
+                        } else if off + 1 == nargs {
+                            ExprEvalOp::EEOP_BOOL_AND_STEP_LAST
+                        } else {
+                            ExprEvalOp::EEOP_BOOL_AND_STEP
+                        }
+                    }
+                    BoolExprType::OR_EXPR => {
+                        if off == 0 {
+                            ExprEvalOp::EEOP_BOOL_OR_STEP_FIRST
+                        } else if off + 1 == nargs {
+                            ExprEvalOp::EEOP_BOOL_OR_STEP_LAST
+                        } else {
+                            ExprEvalOp::EEOP_BOOL_OR_STEP
+                        }
+                    }
+                    BoolExprType::NOT_EXPR => ExprEvalOp::EEOP_BOOL_NOT_STEP,
+                };
+                let scratch = ExprEvalStep {
+                    opcode,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::BoolExpr {
+                        anynull,
+                        jumpdone: -1,
+                    },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+                adjust_jumps.push((state.steps_len - 1) as usize);
+            }
+
+            // adjust jump targets
+            let target = state.steps_len;
+            let steps = state.steps.as_mut().expect("boolexpr steps");
+            for &j in adjust_jumps.iter() {
+                if let ExprEvalStepData::BoolExpr { jumpdone, .. } = &mut steps[j].d {
+                    debug_assert_eq!(*jumpdone, -1);
+                    *jumpdone = target;
+                }
+            }
+            Ok(())
+        }
+
+        // ----- T_CaseExpr -----
+        Expr::CaseExpr(caseexpr) => {
+            // If there's a test expression, C evaluates it into a caseval/
+            // casenull workspace cell and (only if get_typlen(exprType(arg)) ==
+            // -1, i.e. a varlena that could be an expanded datum) emits an
+            // EEOP_MAKE_READONLY over it. The varlena decision needs
+            // exprType (nodeFuncs) + get_typlen (lsyscache owner) — and no
+            // get_typlen seam is exported yet, so a simple CASE (with arg) would
+            // require guessing the R/O step. Per "mirror PG and panic", route
+            // the simple-CASE form loudly; searched CASE (no arg, the common
+            // form) is ported in full below.
+            let case_cell = if caseexpr.arg.is_some() {
+                panic!(
+                    "execExpr-core: simple CASE (CaseExpr with a test arg) needs \
+                     get_typlen(exprType(arg)) to decide the EEOP_MAKE_READONLY R/O step \
+                     (lsyscache owner seam not exported); searched CASE is ported"
+                );
+            } else {
+                None
+            };
+
+            let mut adjust_jumps: PgVec<'mcx, usize> =
+                mcx::vec_with_capacity_in(mcx, caseexpr.args.len())?;
+
+            for when in &caseexpr.args {
+                // Make testexpr result available to CaseTestExpr nodes within
+                // the condition (save/restore innermost_caseval).
+                let save = state.innermost_caseval;
+                state.innermost_caseval = case_cell;
+
+                let cond = when.expr.as_deref().expect("CaseWhen.expr present");
+                exec_init_expr_rec(mcx, cond, state, resv)?;
+
+                state.innermost_caseval = save;
+
+                // If WHEN result isn't true, jump to next CASE arm.
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_JUMP_IF_NOT_TRUE,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::Jump { jumpdone: -1 },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+                let whenstep = (state.steps_len - 1) as usize;
+
+                // If true, evaluate THEN result into CASE's result variables.
+                let result = when.result.as_deref().expect("CaseWhen.result present");
+                exec_init_expr_rec(mcx, result, state, resv)?;
+
+                // Emit JUMP to end of CASE.
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_JUMP,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::Jump { jumpdone: -1 },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+                adjust_jumps.push((state.steps_len - 1) as usize);
+
+                // Set WHEN test's jump target to the next arm.
+                let next = state.steps_len;
+                if let ExprEvalStepData::Jump { jumpdone } =
+                    &mut state.steps.as_mut().unwrap()[whenstep].d
+                {
+                    *jumpdone = next;
+                }
+            }
+
+            // transformCaseExpr always adds a default; evaluate ELSE.
+            let defresult = caseexpr.defresult.as_deref().expect("CASE defresult present");
+            exec_init_expr_rec(mcx, defresult, state, resv)?;
+
+            // adjust jump targets to the end.
+            let target = state.steps_len;
+            let steps = state.steps.as_mut().unwrap();
+            for &j in adjust_jumps.iter() {
+                if let ExprEvalStepData::Jump { jumpdone } = &mut steps[j].d {
+                    debug_assert_eq!(*jumpdone, -1);
+                    *jumpdone = target;
+                }
+            }
+            Ok(())
+        }
+
+        // ----- T_CaseTestExpr -----
+        Expr::CaseTestExpr(_) => {
+            let scratch = match state.innermost_caseval {
+                None => ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_CASE_TESTVAL_EXT,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::NoPayload,
+                },
+                Some(cell) => ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_CASE_TESTVAL,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::CaseTest { value: cell },
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_CoalesceExpr -----
+        Expr::CoalesceExpr(coalesce) => {
+            let mut adjust_jumps: PgVec<'mcx, usize> =
+                mcx::vec_with_capacity_in(mcx, coalesce.args.len())?;
+            for e in &coalesce.args {
+                // evaluate argument directly into result datum
+                exec_init_expr_rec(mcx, e, state, resv)?;
+                // if not null, skip to end
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_JUMP_IF_NOT_NULL,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::Jump { jumpdone: -1 },
+                };
+                expr_eval_push_step(mcx, state, scratch)?;
+                adjust_jumps.push((state.steps_len - 1) as usize);
+            }
+            let target = state.steps_len;
+            let steps = state.steps.as_mut().unwrap();
+            for &j in adjust_jumps.iter() {
+                if let ExprEvalStepData::Jump { jumpdone } = &mut steps[j].d {
+                    debug_assert_eq!(*jumpdone, -1);
+                    *jumpdone = target;
+                }
+            }
+            Ok(())
+        }
+
+        // ----- T_SQLValueFunction -----
+        Expr::SQLValueFunction(_svf) => {
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_SQLVALUEFUNCTION,
+                resvalue: resv,
+                resnull: resv,
+                // The original SQLValueFunction node is parked as an opaque
+                // address in the keystone payload; the interpreter reads op/type
+                // off the node. Not threaded here yet — but the step shape and
+                // dispatch are correct.
+                d: ExprEvalStepData::SqlValueFunction { svf: 0 },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_NullTest -----
+        Expr::NullTest(ntest) => {
+            if ntest.argisrow {
+                // Row null-test needs a rowcache and the composite-deform path
+                // (ExecEvalRowNull[NotNull]); the rowcache lives in the step,
+                // but the runtime tupdesc lookup is the typcache owner's. The
+                // scalar path below is fully ported; the row path routes loudly.
+                panic!(
+                    "execExpr-core: row NullTest (argisrow) needs the composite-type rowcache \
+                     deform path (typcache owner); scalar NullTest is ported"
+                );
+            }
+            let opcode = match ntest.nulltesttype {
+                NullTestType::IS_NULL => ExprEvalOp::EEOP_NULLTEST_ISNULL,
+                NullTestType::IS_NOT_NULL => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+            };
+            // first evaluate argument into result variable
+            let arg = ntest.arg.as_deref().expect("NullTest.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+            // then push the test
+            let scratch = ExprEvalStep {
+                opcode,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::NullTestRow {
+                    rowcache: ExprEvalRowtypeCache::default(),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_BooleanTest -----
+        Expr::BooleanTest(btest) => {
+            use types_nodes::primnodes::BoolTestType;
+            // Evaluate argument directly into result datum.
+            let arg = btest.arg.as_deref().expect("BooleanTest.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+            let opcode = match btest.booltesttype {
+                BoolTestType::IS_TRUE => ExprEvalOp::EEOP_BOOLTEST_IS_TRUE,
+                BoolTestType::IS_NOT_TRUE => ExprEvalOp::EEOP_BOOLTEST_IS_NOT_TRUE,
+                BoolTestType::IS_FALSE => ExprEvalOp::EEOP_BOOLTEST_IS_FALSE,
+                BoolTestType::IS_NOT_FALSE => ExprEvalOp::EEOP_BOOLTEST_IS_NOT_FALSE,
+                BoolTestType::IS_UNKNOWN => ExprEvalOp::EEOP_NULLTEST_ISNULL,
+                BoolTestType::IS_NOT_UNKNOWN => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+            };
+            let scratch = ExprEvalStep {
+                opcode,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::NoPayload,
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_CurrentOfExpr -----
+        Expr::CurrentOfExpr(_) => {
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_CURRENTOFEXPR,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::NoPayload,
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_NextValueExpr -----
+        Expr::NextValueExpr(nve) => {
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_NEXTVALUEEXPR,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::NextValueExpr {
+                    seqid: nve.seqid,
+                    seqtypid: nve.typeId,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- T_FieldSelect -----
+        Expr::FieldSelect(fselect) => {
+            // Evaluate the input rowtype value into the result cell, then the
+            // FIELDSELECT step extracts the field. The rowcache is filled at
+            // runtime (the typcache owner supplies the descriptor); the step
+            // shape and the arg recursion are own logic.
+            let arg = fselect.arg.as_deref().expect("FieldSelect.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_FIELDSELECT,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::FieldSelect {
+                    fieldnum: fselect.fieldnum,
+                    resulttype: fselect.resulttype,
+                    rowcache: ExprEvalRowtypeCache::default(),
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+
+        // ----- nodes routed to owner families / structural blockers -----
+        Expr::ScalarArrayOpExpr(_) => panic!(
+            "execExpr-core: ScalarArrayOpExpr needs the fmgr_info seam + (for the hashed form) \
+             typcache; per-arg fcinfo cells are modeled. Port lands with the fmgr_info seam."
         ),
+        Expr::MinMaxExpr(_) => panic!(
+            "execExpr-core: MinMaxExpr needs lookup_type_cache(TYPECACHE_CMP_PROC) + fmgr_info \
+             (typcache/fmgr owner seams)"
+        ),
+        Expr::ArrayExpr(_) => panic!(
+            "execExpr-core: ArrayExpr needs get_typlenbyvalalign element-type info (lsyscache \
+             owner seam) for the per-element workspace; arg recursion is modeled"
+        ),
+        Expr::RowExpr(_) => panic!(
+            "execExpr-core: RowExpr needs the result tupdesc (BlessTupleDesc/typcache owner)"
+        ),
+        Expr::RowCompareExpr(_) => panic!(
+            "execExpr-core: RowCompareExpr needs per-column fmgr_info comparison lookups (fmgr \
+             owner seam)"
+        ),
+        Expr::SubscriptingRef(_) => panic!(
+            "execExpr-core: SubscriptingRef compilation is owned by execExpr_func_subscript \
+             (ExecInitSubscriptingRef)"
+        ),
+        Expr::CoerceViaIO(_) => panic!(
+            "execExpr-core: CoerceViaIO needs getTypeOutputInfo/getTypeInputInfo + fmgr_info \
+             (lsyscache/fmgr owner seams); owned by execExpr_func_subscript"
+        ),
+        Expr::ArrayCoerceExpr(_) => panic!(
+            "execExpr-core: ArrayCoerceExpr needs the per-element ExprState + array_map state \
+             (execExpr_func_subscript / arrayfuncs owner seams)"
+        ),
+        Expr::ConvertRowtypeExpr(_) => panic!(
+            "execExpr-core: ConvertRowtypeExpr needs the in/out rowtype caches + TupleConversionMap \
+             (typcache/tupconvert owner seams)"
+        ),
+        Expr::FieldStore(_) => panic!(
+            "execExpr-core: FieldStore (DEFORM/FORM pair) needs the composite rowcache + column \
+             workspace (typcache owner seam); owned by execExpr_func_subscript"
+        ),
+        Expr::CoerceToDomain(_) | Expr::CoerceToDomainValue(_) => panic!(
+            "execExpr-core: domain coercion is owned by execExpr_domain_agg \
+             (ExecInitCoerceToDomain) — needs the domain constraint list (typcache owner)"
+        ),
+        Expr::SubPlan(_) | Expr::AlternativeSubPlan(_) => panic!(
+            "execExpr-core: SubPlan is owned by execExpr_func_subscript (ExecInitSubPlanExpr) — \
+             needs nodeSubplan's ExecInitSubPlan"
+        ),
+        Expr::WindowFunc(_) => panic!(
+            "execExpr-core: WindowFunc setup is owned by nodeWindowAgg (WindowFuncExprState); the \
+             parent WindowAggState must be threaded"
+        ),
+        Expr::XmlExpr(_) | Expr::JsonValueExpr(_) | Expr::JsonConstructorExpr(_)
+        | Expr::JsonIsPredicate(_) | Expr::JsonExpr(_) => panic!(
+            "execExpr-core: XML/JSON expression compilation is owned by execExpr_json \
+             (ExecInitJsonExpr / ExecInitJsonConstructor / xml)"
+        ),
+        Expr::SetToDefault(_) => panic!(
+            "execExpr-core: SetToDefault must have been replaced before execution (planner); \
+             reaching ExecInitExprRec with one is a planner error"
+        ),
+        Expr::SubLink(_) => panic!(
+            "execExpr-core: SubLink is always replaced by a SubPlan before execution"
+        ),
+        Expr::InferenceElem(_) => panic!(
+            "execExpr-core: InferenceElem is a planner-only unique-index inference node, never \
+             compiled"
+        ),
+        Expr::ReturningExpr(_) => panic!(
+            "execExpr-core: ReturningExpr compilation is owned by execExpr_modify"
+        ),
+        // #[non_exhaustive] guard.
+        _ => panic!("execExpr-core: ExecInitExprRec — unhandled Expr node kind"),
+    }
+}
+
+/// Helper: a zero-initialized scratch step targeting `resv`.
+fn scratch_for<'mcx>(resv: ResultCellId) -> ExprEvalStep<'mcx> {
+    ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_FUNCEXPR,
+        resvalue: resv,
+        resnull: resv,
+        d: ExprEvalStepData::NoPayload,
+    }
+}
+
+/// Set the `Var` payload's attnum/vartype (varreturningtype left default; the
+/// keystone Var does not carry RETURNING old/new, so always DEFAULT).
+fn set_var_payload(scratch: &mut ExprEvalStep<'_>, attnum: i32, vartype: types_core::Oid) {
+    if let ExprEvalStepData::Var {
+        attnum: a,
+        vartype: vt,
+        ..
+    } = &mut scratch.d
+    {
+        *a = attnum;
+        *vt = vartype;
+    }
+}
+
+/// Pick the scan VAR opcode for the var's RETURNING type, setting the EEO flags
+/// for OLD/NEW (the C `default` varno arm). The keystone Var carries no
+/// RETURNING type, so this is always DEFAULT; kept for fidelity to the C switch.
+fn var_opcode_for<'mcx>(state: &mut ExprState<'mcx>, vrt: VrtKind) -> ExprEvalOp {
+    match vrt {
+        VrtKind::VAR_RETURNING_DEFAULT => ExprEvalOp::EEOP_SCAN_VAR,
+        VrtKind::VAR_RETURNING_OLD => {
+            state.flags |= EEO_FLAG_HAS_OLD;
+            ExprEvalOp::EEOP_OLD_VAR
+        }
+        VrtKind::VAR_RETURNING_NEW => {
+            state.flags |= EEO_FLAG_HAS_NEW;
+            ExprEvalOp::EEOP_NEW_VAR
+        }
+    }
+}
+
+/// Scan SYSVAR opcode for the var's RETURNING type (C `default` arm, sysvar).
+fn sysvar_opcode_for<'mcx>(state: &mut ExprState<'mcx>, vrt: VrtKind) -> ExprEvalOp {
+    match vrt {
+        VrtKind::VAR_RETURNING_DEFAULT => ExprEvalOp::EEOP_SCAN_SYSVAR,
+        VrtKind::VAR_RETURNING_OLD => {
+            state.flags |= EEO_FLAG_HAS_OLD;
+            ExprEvalOp::EEOP_OLD_SYSVAR
+        }
+        VrtKind::VAR_RETURNING_NEW => {
+            state.flags |= EEO_FLAG_HAS_NEW;
+            ExprEvalOp::EEOP_NEW_SYSVAR
+        }
     }
 }
 
@@ -378,27 +1052,22 @@ pub fn exec_init_expr<'mcx>(
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    // NULL `node` → NULL ExprState is handled by the caller passing through
-    // Option; the seam takes a non-optional &Expr (a present node).
     let _ = parent;
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
-    // state->expr / state->parent / state->ext_params: the owned model does not
-    // thread the parent back-pointer here (callers lend it explicitly); expr is
-    // a debug-only back-link, left None.
     state.ext_params = 0;
+    ensure_result_arena(mcx, &mut state)?;
 
     exec_create_expr_setup_steps(mcx, &mut state, node)?;
-    exec_init_expr_rec(mcx, node, &mut state)?;
-    expr_eval_push_step(mcx, &mut state, done_return_step())?;
+    exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
+    expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
     mcx::alloc_in(mcx, state)
 }
 
-/// `ExecInitExprWithParams(node, ext_params)` (execExpr.c) — compile a
-/// standalone expression with no parent PlanState, only external params.
+/// `ExecInitExprWithParams(node, ext_params)` (execExpr.c).
 pub fn exec_init_expr_with_params<'mcx>(
     node: &Expr,
     econtext: EcxtId,
@@ -408,11 +1077,12 @@ pub fn exec_init_expr_with_params<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
-    state.ext_params = 0; // ecxt_param_list_info threaded by the param owner
+    state.ext_params = 0;
+    ensure_result_arena(mcx, &mut state)?;
 
     exec_create_expr_setup_steps(mcx, &mut state, node)?;
-    exec_init_expr_rec(mcx, node, &mut state)?;
-    expr_eval_push_step(mcx, &mut state, done_return_step())?;
+    exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
+    expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
     mcx::alloc_in(mcx, state)
@@ -426,7 +1096,6 @@ pub fn exec_init_qual<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let _ = parent;
-    // short-circuit for empty restriction list → NULL ExprState
     let qual = match qual {
         None => return Ok(None),
         Some(q) if q.is_empty() => return Ok(None),
@@ -436,32 +1105,24 @@ pub fn exec_init_qual<'mcx>(
 
     let mut state = make_expr_state();
     state.ext_params = 0;
-    // mark expression as to be used with ExecQual()
     state.flags = EEO_FLAG_IS_QUAL;
+    ensure_result_arena(mcx, &mut state)?;
 
     exec_create_expr_setup_steps_list(mcx, &mut state, qual)?;
 
-    // Compile each qual clause, each followed by an EEOP_QUAL test that
-    // short-circuits to the end on false/null. Record the QUAL step indices to
-    // backpatch their jumpdone to the final step.
     let mut adjust_jumps: PgVec<'mcx, usize> = mcx::vec_with_capacity_in(mcx, qual.len())?;
     for node in qual {
-        // first evaluate expression (into state->resvalue/resnull)
-        exec_init_expr_rec(mcx, node, &mut state)?;
-        // then emit EEOP_QUAL to detect false-or-null
+        exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
         let scratch = ExprEvalStep {
             opcode: ExprEvalOp::EEOP_QUAL,
-            resvalue: None,
-            resnull: None,
+            resvalue: STATE_RESULT_CELL,
+            resnull: STATE_RESULT_CELL,
             d: ExprEvalStepData::QualExpr { jumpdone: -1 },
         };
         expr_eval_push_step(mcx, &mut state, scratch)?;
         adjust_jumps.push((state.steps_len - 1) as usize);
     }
 
-    // adjust jump targets → the final step index (steps_len after DONE push is
-    // the index just past the last QUAL; C sets jumpdone = steps_len here,
-    // before pushing DONE, so it lands on the DONE step).
     let jump_target = state.steps_len;
     let steps = state.steps.as_mut().expect("qual has steps");
     for &jump in adjust_jumps.iter() {
@@ -473,15 +1134,13 @@ pub fn exec_init_qual<'mcx>(
         }
     }
 
-    // last qual yielded TRUE into the result cell — just emit DONE_RETURN.
-    expr_eval_push_step(mcx, &mut state, done_return_step())?;
+    expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
     Ok(Some(mcx::alloc_in(mcx, state)?))
 }
 
-/// `ExecInitExprList(nodes, parent)` (execExpr.c) — compile a list of
-/// expressions into a positional list of [`ExprState`]s.
+/// `ExecInitExprList(nodes, parent)` (execExpr.c).
 pub fn exec_init_expr_list<'mcx>(
     nodes: &[Option<&Expr>],
     parent: &mut PlanStateData<'mcx>,
@@ -492,11 +1151,9 @@ pub fn exec_init_expr_list<'mcx>(
         mcx::vec_with_capacity_in(mcx, nodes.len())?;
     for e in nodes {
         match e {
-            // NULL Expr → NULL ExprState (positional correspondence preserved).
             None => result.push(None),
             Some(node) => {
                 let state = exec_init_expr(node, parent, estate)?;
-                // unbox into the positional list (the C list holds ExprState*).
                 result.push(Some(PgBox::into_inner(state)));
             }
         }
@@ -510,19 +1167,16 @@ pub fn exec_prepare_expr<'mcx>(
     node: &Expr,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    // C switches to estate->es_query_cxt (we always allocate there) and runs
-    // expression_planner(node) first. expression_planner (the planner's
-    // const-folding / SQL-function-inlining pass) is owned by the optimizer;
-    // route through its seam. Until then, the planner pass would be skipped —
-    // but skipping it would silently diverge, so panic loudly.
+    // C runs expression_planner(node) first (const-folding / SQL-function
+    // inlining) — owned by the optimizer/planner; route through its seam.
+    let _ = (node, estate);
     panic!(
         "execExpr-core: ExecPrepareExpr needs expression_planner (optimizer/planner.c, \
          unported); compile the already-planned expression via ExecInitExpr instead"
     );
 }
 
-/// `ExecPrepareExprList(exprList, estate)` (execExpr.c) — compile a list of
-/// expressions into a parallel list of [`ExprState`]s.
+/// `ExecPrepareExprList(exprList, estate)` (execExpr.c).
 pub fn exec_prepare_expr_list<'mcx>(
     expr_list: &[Expr],
     estate: &mut EStateData<'mcx>,
@@ -536,29 +1190,26 @@ pub fn exec_prepare_expr_list<'mcx>(
     Ok(result)
 }
 
-/// `ExecBuildProjectionInfo(...)` (execExpr.c) — build the compiled projection
-/// program for a node's target list.
+/// `ExecBuildProjectionInfo(...)` (execExpr.c).
 pub fn exec_build_projection_info<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     input_desc: Option<&TupleDescData<'_>>,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
-    // The target list, the node's ps_ExprContext and ps_ResultTupleSlot, and
-    // the slot-ops/descriptor introspection all live behind execUtils /
-    // execProcnode for a parent-bearing build, and each tlist entry recurses
-    // through ExecInitExprRec into the shared result cell (plus EEOP_ASSIGN_*).
-    // The keystone TargetEntry list off `planstate->plan` and the result-slot
-    // wiring are not threaded here yet; emitting an approximate program would
-    // silently diverge, so panic loudly until the owned projection wiring lands.
+    // The target list (planstate->plan->targetlist), ps_ResultTupleSlot, and the
+    // slot-ops/descriptor introspection live behind execUtils/execProcnode for a
+    // parent-bearing build; each tlist entry recurses through ExecInitExprRec
+    // (now ported) and emits EEOP_ASSIGN_*. The keystone TargetEntry list off
+    // `planstate->plan` and the result-slot wiring are not threaded here yet.
     let _ = (planstate, estate, input_desc);
     panic!(
-        "execExpr-core: ExecBuildProjectionInfo needs the owned target-list / result-slot \
-         wiring (planstate->plan->targetlist, ps_ResultTupleSlot via execUtils/execProcnode)"
+        "execExpr-core: ExecBuildProjectionInfo needs the owned target-list / result-slot wiring \
+         (planstate->plan->targetlist, ps_ResultTupleSlot via execUtils/execProcnode); the \
+         per-column ExecInitExprRec recursion + EEOP_ASSIGN_* emission are ready once threaded"
     );
 }
 
-/// `ExecBuildUpdateProjection(...)` (execExpr.c) — build the UPDATE "new tuple"
-/// projection for a result relation.
+/// `ExecBuildUpdateProjection(...)` (execExpr.c).
 pub fn exec_build_update_projection<'mcx>(
     mtstate: &mut types_nodes::ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -576,8 +1227,7 @@ pub fn exec_build_update_projection<'mcx>(
 // Evaluation entry points — dispatched to the interpreter (execExprInterp)
 // ===========================================================================
 
-/// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h) — run a
-/// compiled [`ExprState`] in `econtext`'s per-tuple memory.
+/// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h).
 pub fn exec_eval_expr_switch_context<'mcx>(
     state: &ExprState<'mcx>,
     econtext: EcxtId,
@@ -594,10 +1244,6 @@ pub fn exec_eval_tid_expr_switch_context<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(ItemPointerData, bool)> {
-    // The interpreter produces a Datum whose pointer word is an ItemPointer;
-    // dereferencing it must happen where the value was produced (the owned model
-    // cannot reinterpret a Datum word). The interpreter exposes only the Datum
-    // eval; an ItemPointer-yielding variant is owned by execExprInterp.
     let _ = (state, econtext, estate);
     panic!(
         "execExpr-core: ExecEvalExprSwitchContext yielding an ItemPointer must be evaluated by \
@@ -611,50 +1257,37 @@ pub fn exec_eval_array_expr_switch_context<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum, bool)> {
-    // The result is an ordinary array Datum; the same dispatch as the scalar
-    // eval suffices, the caller deconstructs the array.
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::call(
         state, econtext, estate,
     )
 }
 
-/// `ExecQual(state, econtext)` (executor.h) — evaluate a boolean qual program.
+/// `ExecQual(state, econtext)` (executor.h).
 pub fn exec_qual<'mcx>(
     state: &ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    // C: ret = ExecEvalExprSwitchContext(state, econtext, &isnull);
-    //    return !isnull && DatumGetBool(ret);
-    // (The compiled EEOP_QUAL program already forces a NULL result to FALSE, so
-    // the interpreter returns the boolean directly; we still apply the NULL→
-    // false rule for safety, matching the executor.h inline.)
     let (ret, isnull) = exec_eval_expr_switch_context(state, econtext, estate)?;
     Ok(!isnull && ret.as_bool())
 }
 
-/// `ExecQualAndReset(state, econtext)` (executor.h) — `ExecQual` then
-/// `ResetExprContext(econtext)`.
+/// `ExecQualAndReset(state, econtext)` (executor.h).
 pub fn exec_qual_and_reset<'mcx>(
     state: &ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let ret = exec_qual(state, econtext, estate)?;
-    // ResetExprContext(econtext) — owned by execUtils; route through its seam.
     backend_executor_execUtils_seams::reset_expr_context::call(estate, econtext)?;
     Ok(ret)
 }
 
-/// `ExecProject(projInfo)` (executor.h) — form a node's projected result tuple.
+/// `ExecProject(projInfo)` (executor.h).
 pub fn exec_project<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SlotId> {
-    // ExecProject runs ps_ProjInfo->pi_state into ps_ProjInfo's result slot via
-    // the interpreter; reading ps_ProjInfo off planstate and wiring the result
-    // slot back is the owned-projection plumbing that ExecBuildProjectionInfo
-    // would have set up. Routed to a panic for the same reason as the builder.
     let _ = (planstate, estate);
     panic!(
         "execExpr-core: ExecProject needs the owned ProjectionInfo / result-slot wiring \
@@ -674,13 +1307,8 @@ pub fn exec_project_info<'mcx>(
     );
 }
 
-/// `CreateExecutorState()` (execUtils.c) — a throwaway EState for evaluating
-/// parameter expressions. (execUtils owns the canonical one; execExpr exposes a
-/// seam alias for the PREPARE/EXECUTE drivers that compile params.)
+/// `CreateExecutorState()` (execUtils.c) — a throwaway EState.
 pub fn create_executor_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, EStateData<'mcx>>> {
-    // CreateExecutorState is execUtils.c's canonical function; execExpr exposes
-    // this only as a seam alias for the PREPARE/EXECUTE drivers. execUtils does
-    // not yet expose it through a seam crate, so route loudly until it does.
     let _ = mcx;
     panic!(
         "execExpr-core: CreateExecutorState alias needs the execUtils seam \
@@ -688,7 +1316,7 @@ pub fn create_executor_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, EStat
     );
 }
 
-/// `FreeExecutorState(estate)` (execUtils.c) — release the throwaway EState.
+/// `FreeExecutorState(estate)` (execUtils.c).
 pub fn free_executor_state<'mcx>(estate: PgBox<'mcx, EStateData<'mcx>>) -> PgResult<()> {
     let _ = estate;
     panic!(
@@ -697,8 +1325,7 @@ pub fn free_executor_state<'mcx>(estate: PgBox<'mcx, EStateData<'mcx>>) -> PgRes
     );
 }
 
-/// `EvaluateParams` leaf (prepare.c) — evaluate the `i`-th prepared expression
-/// into `paramLI->params[i]` as a `PARAM_FLAG_CONST` value.
+/// `EvaluateParams` leaf (prepare.c).
 pub fn eval_exec_param_into_list<'mcx>(
     param_li: ParamListInfoHandle,
     exprstate: &ExprState<'mcx>,
@@ -706,14 +1333,6 @@ pub fn eval_exec_param_into_list<'mcx>(
     ptype: types_core::Oid,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
-    //                                   &prm->isnull); then set
-    // params[param_index] = { ptype, PARAM_FLAG_CONST, value, isnull }.
-    //
-    // GetPerTupleExprContext (executor.h) and the per-slot write into the
-    // opaque ParamListInfo are both owned elsewhere (execUtils for the econtext
-    // id; the params unit for the slot write), and neither is exposed through a
-    // seam yet. Route loudly rather than evaluate against a fabricated context.
     let _ = (param_li, exprstate, param_index, ptype, estate);
     panic!(
         "execExpr-core: EvaluateParams leaf needs GetPerTupleExprContext (execUtils) and the \
@@ -722,8 +1341,7 @@ pub fn eval_exec_param_into_list<'mcx>(
 }
 
 // ===========================================================================
-// HashJoin convenience wrappers (ExecInitQual / ExecQual / ExecProject over a
-// HashJoinState) — read the node's plan lists / projection and delegate.
+// HashJoin convenience wrappers
 // ===========================================================================
 
 /// `ExecQual` for a hash-join node's `js.joinqual` / `js.ps.qual`.
@@ -732,10 +1350,6 @@ pub fn exec_hashjoin_qual<'mcx>(
     joinqual: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    // econtext = node->js.ps.ps_ExprContext; state = joinqual ? js.joinqual :
-    // js.ps.qual; then ExecQual(state, econtext) (NULL state ⇒ always-true).
-    // Reading the compiled qual ExprState and the econtext id off the owned
-    // HashJoinState needs the node-field accessors threaded by nodeHashjoin.
     let _ = (node, joinqual, estate);
     panic!(
         "execExpr-core: ExecQual over a HashJoin qual needs the owned HashJoinState field \
@@ -749,9 +1363,6 @@ pub fn exec_init_hashjoin_qual<'mcx>(
     kind: HashJoinQualKind,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // Reading the source list off node->plan and storing the compiled state
-    // back onto the matching field needs the owned HashJoin plan-node accessors
-    // and the &mut-node/&list split; the owner (nodeHashjoin) threads them.
     let _ = (node, kind, estate);
     panic!(
         "execExpr-core: ExecInitQual over a HashJoin qual list needs the owned HashJoin plan \
@@ -777,9 +1388,6 @@ pub fn eval_outer_hash<'mcx>(
     isnull: &mut bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<u32> {
-    // DatumGetUInt32(ExecEvalExprSwitchContext(node->hj_OuterHash,
-    //   node->js.ps.ps_ExprContext, isnull)). Reading hj_OuterHash and the
-    // econtext id off the owned HashJoinState needs nodeHashjoin's accessors.
     let _ = (node, isnull, estate);
     panic!(
         "execExpr-core: evaluating the HashJoin outer hash needs the owned HashJoinState field \
