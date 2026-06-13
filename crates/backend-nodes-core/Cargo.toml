@@ -17,4 +17,8 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-tidbitmap = { path = "../types-tidbitmap" }
+types-execparallel = { path = "../types-execparallel" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }
