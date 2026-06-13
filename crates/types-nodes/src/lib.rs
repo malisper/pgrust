@@ -26,6 +26,7 @@ pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
+pub mod nodesort;
 pub mod parsenodes;
 pub mod pathnodes;
 pub mod planstate;
@@ -45,6 +46,11 @@ pub use jointype::{
     JOIN_RIGHT_ANTI, JOIN_SEMI,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use nodesort::{
+    SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
+    TuplesortMethod, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
+    TUPLESORT_RANDOMACCESS,
+};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;

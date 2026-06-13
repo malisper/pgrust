@@ -1675,6 +1675,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSort"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeSort-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeSort-seams"
 version = "0.0.0"
 dependencies = [
@@ -3601,6 +3624,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-tuplesort-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-time-combocid"
 version = "0.0.0"
 dependencies = [
@@ -3789,6 +3825,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeSort",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

@@ -49,6 +49,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `slot_getsomeattrs(slot, attnum)` then `(slot->tts_values[attnum-1],
+    /// slot->tts_isnull[attnum-1])` (tuptable.h, via execTuples.c): ensure the
+    /// first `attnum` columns are extracted and return the `(value, isnull)` of
+    /// the 1-based `attnum`th. nodeSort's Datum sort reads attribute 1.
+    /// Deforming can detoast/allocate, so the call is fallible.
+    pub fn slot_getsomeattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: i32,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecClearTuple(slot); slot->tts_values[0] = val; slot->tts_isnull[0] =
+    /// isnull; ExecStoreVirtualTuple(slot)` (tuptable.h, via execTuples.c):
+    /// store a single-Datum virtual tuple in the (single-column) result slot.
+    /// nodeSort's Datum-sort output path. Storing can allocate, fallible.
+    pub fn exec_store_first_datum<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        val: types_datum::Datum,
+        is_null: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h): copy the source slot's
     /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). The
     /// copy allocates in `mcx`, the destination slot's memory context (C:
