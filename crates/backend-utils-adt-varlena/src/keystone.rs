@@ -120,10 +120,22 @@ pub struct VarStringSortSupport<'mcx> {
     pub typid: types_core::Oid,
     /// `prop_card` — required cardinality proportion.
     pub prop_card: f64,
-    /// `locale` — resolved collation.
-    pub locale: types_locale::PgLocale<'mcx>,
-    // NOTE: `abbr_card` / `full_card` (hyperLogLogState) are added by the
-    // sortsupport family port together with the HyperLogLog dependency.
+    /// `locale` — the collation OID this support state resolved (the C
+    /// `pg_locale_t` is reached by OID through the `pg_locale` seams; `None`
+    /// when `collate_c`, mirroring the C `sss->locale = NULL`).
+    pub locale: Option<types_core::Oid>,
+    /// `locale->deterministic` — cached deterministic flag of the resolved
+    /// `pg_locale_t` (the C comparator reads `sss->locale->deterministic` to
+    /// decide whether to apply the `strcmp` tiebreak). `false` when
+    /// `collate_c` / no locale.
+    pub locale_deterministic: bool,
+    /// `abbr_card` (`hyperLogLogState`) — abbreviated-key cardinality counter,
+    /// held as the opaque HyperLogLog handle word from the `backend-lib-*`
+    /// owner; `None` until abbreviation is planned.
+    pub abbr_card: Option<usize>,
+    /// `full_card` (`hyperLogLogState`) — authoritative-key cardinality counter
+    /// handle; `None` until abbreviation is planned.
+    pub full_card: Option<usize>,
 }
 
 /// C: `SplitTextOutputData` (varlena.c) — `split_text()` output sink, either
