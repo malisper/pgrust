@@ -7041,6 +7041,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-catcache"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-relcache-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-catcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -8573,6 +8592,7 @@ dependencies = [
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-catcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
