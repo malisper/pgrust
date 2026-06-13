@@ -210,3 +210,85 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn buffer_manager_shmem_init() -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Free Space Map page round-trip + buffer primitives (freespace.c/fsmpage.c
+// consumer). The FSM page is `(FSMPage) PageGetContents(page)` of a buffer in
+// the `FSM_FORKNUM`; the buffer manager owns the shared page, so the FSM
+// algorithm reads the page body out as an owned `FSMPageData` and writes the
+// mutated body back, bracketed by the lock seams exactly where C holds the
+// content lock. No raw `Page` pointer crosses the boundary.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `(FSMPage) PageGetContents(BufferGetPage(buf))` materialized as an owned
+    /// [`types_fsm::FSMPageData`] (fsm_internals.h). The caller holds the
+    /// appropriate buffer content lock. `Err` carries OOM building the owned
+    /// node array.
+    pub fn fsm_buffer_get_page(
+        buf: types_storage::Buffer,
+    ) -> types_error::PgResult<types_fsm::FSMPageData>
+);
+
+seam_core::seam!(
+    /// Store a mutated FSM page body back into `(FSMPage)
+    /// PageGetContents(BufferGetPage(buf))` (the C in-place page mutation).
+    /// The caller holds the exclusive content lock. `Err` carries OOM.
+    pub fn fsm_buffer_set_page(
+        buf: types_storage::Buffer,
+        page: types_fsm::FSMPageData,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BufferGetTag(buf, &rlocator, &forknum, &blknum)` (bufmgr.c) — the
+    /// relation/fork/block this buffer currently holds, returned as one owned
+    /// triple. Used by the FSM torn-page `DEBUG1` notice.
+    pub fn buffer_get_tag(
+        buf: types_storage::Buffer,
+    ) -> types_error::PgResult<(
+        types_storage::RelFileLocator,
+        types_core::primitive::ForkNumber,
+        types_core::primitive::BlockNumber,
+    )>
+);
+
+seam_core::seam!(
+    /// `LockBuffer(buffer, mode)` (bufmgr.c) — `mode` is one of the
+    /// `BUFFER_LOCK_*` constants (`UNLOCK`/`SHARE`/`EXCLUSIVE`). `Err` carries
+    /// the lock-manager `ereport(ERROR)`s.
+    pub fn lock_buffer(
+        buffer: types_storage::Buffer,
+        mode: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PageInit(BufferGetPage(buf), BLCKSZ, 0)` (bufpage.c) — initialize a
+    /// fresh (all-zero) FSM page's header. The caller holds the exclusive
+    /// content lock. `Err` carries any page-init `ereport(ERROR)`.
+    pub fn page_init(buf: types_storage::Buffer) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, forknum, blkno, RBM_ZERO_ON_ERROR, NULL)`
+    /// (bufmgr.c) for the FSM fork — pin (reading in, zeroing a torn page) a
+    /// block of the relation's `FSM_FORKNUM`. `Err` carries the smgr read
+    /// `ereport(ERROR)`s.
+    pub fn read_buffer_extended_fsm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRelTo(BMR_REL(rel), FSM_FORKNUM, NULL,
+    /// EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE, fsm_nblocks,
+    /// RBM_ZERO_ON_ERROR)` (bufmgr.c) — ensure the FSM fork is at least
+    /// `fsm_nblocks` long, extending with all-zero pages, and pin the target
+    /// block. `Err` carries the extension `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_to_fsm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        fsm_nblocks: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);

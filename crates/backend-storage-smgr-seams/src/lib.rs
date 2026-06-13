@@ -35,6 +35,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationGetSmgr(rel)->smgr_cached_nblocks[forknum]` (smgr.h) — peek the
+    /// cached block count for the fork WITHOUT forcing a kernel `lseek`.
+    /// Returns `InvalidBlockNumber` when the count is not cached yet. Used by
+    /// `fsm_does_block_exist` to avoid an `lseek` when the cached MAIN-fork
+    /// size already proves the block exists. Pure read of smgr-owned state.
+    pub fn smgr_cached_nblocks(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+    ) -> types_core::primitive::BlockNumber
+);
+
+seam_core::seam!(
     /// `AtEOXact_SMgr()` — close transient SMgrRelation objects.
     pub fn at_eoxact_smgr()
 );
