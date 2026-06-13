@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 
 use backend_utils_error::ereport;
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, MemoryContext, PgString};
 use types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
@@ -1318,6 +1318,58 @@ pub fn init_seams() {
         // C: InitPostgres(NULL, InvalidOid, NULL, InvalidOid, 0, NULL).
         InitPostgres(mcx, None, InvalidOid, None, InvalidOid, 0, None)
     });
+    backend_utils_init_postinit_seams::init_postgres_by_name::set(
+        |dbname, username, init_flags| {
+            // C: InitPostgres(dbname, InvalidOid, username, InvalidOid,
+            // init_flags, NULL) — the background-worker by-name attach.
+            // Unlike the bootstrap seam, the consumer
+            // (BackgroundWorkerInitializeConnection) carries no Mcx, matching
+            // C where InitPostgres allocates through TopMemoryContext rather
+            // than a passed-in context; supply that handle here.
+            InitPostgres(
+                top_memory_context(),
+                dbname,
+                InvalidOid,
+                username,
+                InvalidOid,
+                init_flags,
+                None,
+            )
+        },
+    );
+    backend_utils_init_postinit_seams::init_postgres_by_oid::set(|dboid, useroid, init_flags| {
+        // C: InitPostgres(NULL, dboid, NULL, useroid, init_flags, NULL) — the
+        // background-worker by-OID attach. See init_postgres_by_name for why
+        // TopMemoryContext is sourced here.
+        InitPostgres(
+            top_memory_context(),
+            None,
+            dboid,
+            None,
+            useroid,
+            init_flags,
+            None,
+        )
+    });
+}
+
+thread_local! {
+    /// The per-backend `TopMemoryContext`-equivalent handle. In C,
+    /// `InitPostgres` allocates in `TopMemoryContext` (process-lifetime), which
+    /// is established before the background worker's connection-attach path
+    /// runs. The by-name/by-OID seams declare no `Mcx` argument (mirroring the
+    /// C signature, where the context is implicit), so the owner supplies the
+    /// process-lifetime handle here. Leaked once per backend so the resulting
+    /// `Mcx<'static>` lives for the whole process, exactly like C's
+    /// `TopMemoryContext`.
+    static TOP_MEMORY_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("TopMemoryContext")));
+}
+
+/// The process-lifetime `Mcx<'static>` standing in for C's `TopMemoryContext`,
+/// used by the `init_postgres_by_name`/`init_postgres_by_oid` seam delegates.
+fn top_memory_context() -> Mcx<'static> {
+    TOP_MEMORY_CONTEXT.with(|ctx| ctx.mcx())
 }
 
 #[cfg(test)]
