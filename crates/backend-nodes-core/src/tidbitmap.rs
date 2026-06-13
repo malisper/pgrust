@@ -1868,11 +1868,33 @@ pub fn tbm_iterate(
     }
 }
 
+/// Seam provider for `tbm_create(maxbytes, dsa)`: build the bitmap with the
+/// in-crate constructor, then box the opaque carrier into the caller's query
+/// context (the C palloc lives in `CurrentMemoryContext`).
+fn provide_tbm_create<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    maxbytes: usize,
+    dsa: Option<DsaAreaHandle>,
+) -> PgResult<mcx::PgBox<'mcx, types_tidbitmap::TIDBitmap>> {
+    let tbm = tbm_create(maxbytes, dsa);
+    Ok(mcx::PgBox::new_in(tbm, mcx))
+}
+
+/// Seam provider for `tbm_union(a, b)`.
+fn provide_tbm_union(
+    a: &mut types_tidbitmap::TIDBitmap,
+    b: &types_tidbitmap::TIDBitmap,
+) -> PgResult<()> {
+    tbm_union(a, b)
+}
+
 /// Install this family's inward seams. Called from
 /// [`crate::init_seams`] once the family is filled.
 pub fn init_seams() {
     backend_nodes_core_seams::tbm_add_tuple::set(provide_tbm_add_tuple);
 
+    backend_nodes_core_tidbitmap_seams::tbm_create::set(provide_tbm_create);
+    backend_nodes_core_tidbitmap_seams::tbm_union::set(provide_tbm_union);
     backend_nodes_core_tidbitmap_seams::tbm_prepare_shared_iterate::set(
         provide_tbm_prepare_shared_iterate,
     );
