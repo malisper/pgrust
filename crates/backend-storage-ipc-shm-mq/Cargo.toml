@@ -12,6 +12,8 @@ path = "src/lib.rs"
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
@@ -22,5 +24,7 @@ types-bgworker = { path = "../types-bgworker" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-execparallel = { path = "../types-execparallel" }
+types-parallel = { path = "../types-parallel" }
 types-pgstat = { path = "../types-pgstat" }
 types-storage = { path = "../types-storage" }

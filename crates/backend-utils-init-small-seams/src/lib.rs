@@ -79,6 +79,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend = value` (globals.c): set by
+    /// `InitializeFastPathLocks` (postinit) once `max_locks_per_xact` is known.
+    pub fn set_fast_path_lock_groups_per_backend(value: i32)
+);
+
+seam_core::seam!(
     /// `max_parallel_workers` (globals.c): the GUC capping concurrently
     /// active parallel workers.
     pub fn max_parallel_workers() -> i32

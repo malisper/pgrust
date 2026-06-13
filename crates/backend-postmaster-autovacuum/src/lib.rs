@@ -77,4 +77,7 @@ pub fn init_seams() {
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match.
     backend_postmaster_autovacuum_seams::autovacuum_worker_slots::set(core::autovacuum_worker_slots);
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_init::set(shmem::AutoVacuumShmemInit);
+    // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
+    // is now the infallible `-> Size` shape, matching the C `Size` return.
+    backend_postmaster_autovacuum_seams::auto_vacuum_shmem_size::set(shmem::AutoVacuumShmemSize);
 }

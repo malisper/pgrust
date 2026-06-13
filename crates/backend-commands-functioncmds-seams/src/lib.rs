@@ -13,13 +13,11 @@
 //! they belong to the not-yet-ported owners and reference the parse-tree
 //! vocabulary in `types-parsenodes`.
 
-use mcx::Mcx;
 use types_acl::{AclMode, AclResult};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
-use types_parsenodes::{CallStmt, DefElem, InlineCodeBlock, Node, TypeName};
-use types_tuple::TupleDesc;
+use types_parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
 
 // ---------------------------------------------------------------------------
 // Signature carriers
@@ -386,16 +384,13 @@ seam_core::seam!(
     pub fn execute_inline_handler(laninline: Oid, codeblock: InlineCodeBlock) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// The full body of `ExecuteCallStmt`.
-    pub fn execute_call_stmt(stmt: CallStmt, atomic: bool) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `build_function_result_tupdesc_t(tuple)` + the in-crate `outargs` fixup.
-    /// Allocates the descriptor in the caller's context.
-    pub fn call_stmt_result_desc<'mcx>(mcx: Mcx<'mcx>, stmt: CallStmt) -> PgResult<TupleDesc<'mcx>>
-);
+// NOTE: `execute_call_stmt` and `call_stmt_result_desc` were re-homed out of
+// this crate by the call_stmt decomp: their bodies are genuine unported-owner
+// work (the planner `FuncExpr` expression tree + execExpr eval + runtime
+// params/dest for the former; funcapi `build_function_result_tupdesc_t` +
+// nodeFuncs `exprType` for the latter), not functioncmds' own logic.
+// `execute_call_stmt` now lives in `backend-executor-execMain-seams`;
+// `call_stmt_result_desc` in `backend-utils-fmgr-funcapi-seams`.
 
 seam_core::seam!(
     /// `LookupTypeName(...)` + `typisdefined` + `typeTypeId` + `ReleaseSysCache`.

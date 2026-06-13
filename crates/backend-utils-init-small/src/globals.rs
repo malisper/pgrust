@@ -370,6 +370,12 @@ scalar_global!(
     /// `int MaxBackends = 0;`
     MAX_BACKENDS, MaxBackends, SetMaxBackends, i32, 0
 );
+scalar_global!(
+    /// `int FastPathLockGroupsPerBackend = 0;` — the number of fast-path lock
+    /// groups per backend, computed at startup by `InitializeFastPathLocks`.
+    FAST_PATH_LOCK_GROUPS_PER_BACKEND, fast_path_lock_groups_per_backend,
+    set_fast_path_lock_groups_per_backend, i32, 0
+);
 
 scalar_global!(
     /// `int VacuumBufferUsageLimit = 2048;`

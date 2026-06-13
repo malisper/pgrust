@@ -1488,6 +1488,9 @@ pub fn init_seams() {
     );
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     backend_postmaster_bgworker_seams::background_worker_shmem_init::set(BackgroundWorkerShmemInit);
+    // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
+    // is now the infallible `-> Size` shape, matching the C `Size` return.
+    backend_postmaster_bgworker_seams::background_worker_shmem_size::set(BackgroundWorkerShmemSize);
 }
 
 /// Marshal for the `background_worker_main` inward seam.

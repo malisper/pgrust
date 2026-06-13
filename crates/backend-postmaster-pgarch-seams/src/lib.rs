@@ -9,15 +9,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PgArchShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
-    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
-    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn pg_arch_shmem_size() -> types_error::PgResult<types_core::Size>
+    /// `PgArchShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
+    /// shared-memory bytes this subsystem needs. Infallible in C, so the seam
+    /// returns a bare `Size`.
+    pub fn pg_arch_shmem_size() -> types_core::Size
 );
 
 seam_core::seam!(
-    /// `PgArchShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
-    /// this subsystem's shared-memory structures. `Err` carries the C
-    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn pg_arch_shmem_init() -> types_error::PgResult<()>
+    /// `PgArchShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate the
+    /// `PgArch` shared-memory control block. Infallible in C (`void`); the owner
+    /// body returns `()`.
+    pub fn pg_arch_shmem_init()
 );

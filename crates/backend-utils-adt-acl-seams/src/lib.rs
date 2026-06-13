@@ -17,6 +17,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_role_oid(rolname, missing_ok)` (acl.c): the OID of the role with
+    /// the given name. With `missing_ok = false` a missing role raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
+    /// `Ok(InvalidOid)`.
+    pub fn get_role_oid(rolname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `check_can_set_role(member, role)` (acl.c): error unless `member` may
     /// `SET ROLE` to `role`. Raises `ERRCODE_INSUFFICIENT_PRIVILEGE`
     /// ("must be able to SET ROLE \"%s\"") otherwise.
