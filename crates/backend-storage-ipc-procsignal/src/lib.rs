@@ -886,6 +886,11 @@ pub fn init_seams() {
     backend_storage_ipc_procsignal_seams::procsignal_sigusr1_handler::set(
         |_postgres_signal_arg| procsignal_sigusr1_handler(),
     );
+    backend_storage_ipc_procsignal_seams::send_proc_signal::set(SendProcSignal);
+    // `types_core::Size` is `usize`, so `ProcSignalShmemSize`'s
+    // `PgResult<usize>` matches the seam's `PgResult<types_core::Size>`.
+    backend_storage_ipc_procsignal_seams::proc_signal_shmem_size::set(ProcSignalShmemSize);
+    backend_storage_ipc_procsignal_seams::proc_signal_shmem_init::set(ProcSignalShmemInit);
 }
 
 #[cfg(test)]

@@ -129,6 +129,51 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_assign_expr_context::set(ExecAssignExprContext);
     backend_executor_execUtils_seams::create_expr_context::set(CreateExprContext);
     backend_executor_execUtils_seams::exec_assign_projection_info::set(ExecAssignProjectionInfo);
+
+    // `ExecOpenScanRelation(estate, scanrelid, eflags)` — the C / seam signature
+    // has no parallel-worker flag; the non-parallel call path passes `false`.
+    backend_executor_execUtils_seams::exec_open_scan_relation::set(|estate, scanrelid, eflags| {
+        ExecOpenScanRelation(estate, scanrelid, eflags, false)
+    });
+
+    // `exec_rt_fetch(scanrelid, estate)->rellockmode` (executor.h): pure array
+    // fetch of the planner-recorded lock mode.
+    backend_executor_execUtils_seams::exec_rt_fetch_rellockmode::set(|estate, scanrelid| {
+        exec_rt_fetch(scanrelid, estate).rellockmode
+    });
+
+    // `ResetExprContext(econtext)` (executor.h): reset the per-tuple memory
+    // context of the pooled ExprContext named by `econtext`.
+    backend_executor_execUtils_seams::reset_expr_context::set(|estate, econtext| {
+        ResetExprContext(estate.ecxt_mut(econtext));
+        Ok(())
+    });
+
+    // `ResetExprContext(node->ps_ExprContext)` (executor.h): reset the node's
+    // per-tuple expression context.
+    backend_executor_execUtils_seams::reset_per_tuple_expr_context::set(|estate, ps| {
+        let id = ps
+            .ps_ExprContext
+            .expect("ResetPerTupleExprContext: node has no ps_ExprContext");
+        ResetExprContext(estate.ecxt_mut(id));
+        Ok(())
+    });
+
+    // `GetPerTupleExprContext(estate)` / `MakePerTupleExprContext(estate)`
+    // (executor.h): the EState's per-output-tuple ExprContext, created on first
+    // use.
+    backend_executor_execUtils_seams::get_per_tuple_expr_context::set(MakePerTupleExprContext);
+
+    // `UpdateChangedParamSet(node, newchg)` (execUtils.c): the seam always
+    // passes a present `newchg` set; the body takes an `Option`.
+    backend_executor_execUtils_seams::update_changed_param_set::set(|mcx, node, newchg| {
+        UpdateChangedParamSet(node, Some(newchg), mcx)
+    });
+
+    // `ExecGetAllNullSlot(estate, relInfo)` (execUtils.c): the result
+    // relation's lazily-created all-NULL slot.
+    backend_executor_execUtils_seams::exec_get_all_null_slot::set(ExecGetAllNullSlot);
+
     backend_executor_execUtils_seams::exec_get_result_slot_ops_isfixed::set(|planstate, estate| {
         let mut isfixed = false;
         let ops = ExecGetResultSlotOps(planstate, estate, Some(&mut isfixed));

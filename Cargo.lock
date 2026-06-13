@@ -1379,6 +1379,7 @@ dependencies = [
  "backend-utils-misc-guc-file-seams",
  "backend-utils-misc-more2-seams",
  "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",
  "libc",
  "mcx",
@@ -1447,6 +1448,7 @@ dependencies = [
 name = "backend-access-transam-xlogprefetcher"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlogprefetcher-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-smgr-seams",
@@ -4795,12 +4797,14 @@ dependencies = [
  "backend-postmaster-launch-backend-seams",
  "backend-postmaster-syslogger-seams",
  "backend-storage-file-fd-seams",
+ "backend-storage-ipc-latch",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-seams",
  "backend-storage-ipc-waiteventset-seams",
  "backend-timezone-pgtz-seams",
  "backend-timezone-strftime-seams",
  "backend-utils-error",
+ "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
  "backend-utils-misc-guc-tables",
@@ -4814,6 +4818,7 @@ dependencies = [
  "types-pgstat",
  "types-pgtime",
  "types-signal",
+ "types-startup",
  "types-storage",
 ]
 
@@ -6044,6 +6049,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "backend-utils-misc-timeout-seams",
+ "backend-utils-time-snapmgr-pc-seams",
  "mcx",
  "port-pgsleep-seams",
  "types-core",
@@ -6152,6 +6158,7 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-stringinfo",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6365,6 +6372,7 @@ dependencies = [
  "backend-postmaster-postmaster-seams",
  "backend-replication-walsender-seams",
  "backend-storage-file-seams",
+ "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-seams",
  "backend-storage-lmgr-proc-seams",
@@ -7594,6 +7602,7 @@ dependencies = [
  "backend-tcop-pquery-pc-seams",
  "backend-tcop-utility-pc-seams",
  "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-plancache-seams",
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-misc-backendstate-pc-seams",
  "backend-utils-mmgr-mcxt-pc-seams",
@@ -9226,6 +9235,7 @@ dependencies = [
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-plancache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
@@ -9249,6 +9259,7 @@ dependencies = [
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
  "backend-utils-misc-timeout",
+ "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-sortsupport",

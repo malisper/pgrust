@@ -9,6 +9,7 @@ name = "backend_access_transam_xlogprefetcher"
 path = "src/lib.rs"
 
 [dependencies]
+backend-access-transam-xlogprefetcher-seams = { path = "../backend-access-transam-xlogprefetcher-seams" }
 backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }

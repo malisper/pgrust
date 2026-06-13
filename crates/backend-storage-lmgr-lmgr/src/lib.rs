@@ -1143,6 +1143,43 @@ fn seam_describe_lock_tag(tag: LOCKTAG) -> alloc::string::String {
     alloc::string::String::from(buf.as_str())
 }
 
+/// The `lock_tuple` inward seam. The C `LockTuple(Relation, tid, lockmode)`
+/// reads `relation->rd_lockInfo.lockRelId` for the tag's `dbId`; the seam
+/// crosses only the relation OID, so we resolve `dbId` exactly as the OID lock
+/// entry points do (`InvalidOid` for a shared relation, else `MyDatabaseId`),
+/// then split the `ItemPointerData` into block/offset for `LockTuple`.
+fn seam_lock_tuple(
+    relid: Oid,
+    tid: types_tuple::heaptuple::ItemPointerData,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let lock_rel_id = lock_rel_id_from_oid(relid);
+    LockTuple(&lock_rel_id, tid.ip_blkid.block_number(), tid.ip_posid, lockmode)
+}
+
+/// The `unlock_tuple` inward seam — release counterpart to [`seam_lock_tuple`],
+/// resolving `dbId` the same way so the release tag matches acquisition.
+fn seam_unlock_tuple(
+    relid: Oid,
+    tid: types_tuple::heaptuple::ItemPointerData,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let lock_rel_id = lock_rel_id_from_oid(relid);
+    UnlockTuple(&lock_rel_id, tid.ip_blkid.block_number(), tid.ip_posid, lockmode)
+}
+
+/// Resolve the `LockRelId` for a bare relation OID, choosing `dbId` exactly as
+/// `SetLocktagRelationOid` does: shared (catalog) relations use `InvalidOid`,
+/// all others use the current database OID.
+fn lock_rel_id_from_oid(relid: Oid) -> LockRelId {
+    let dbId = if catalog::is_shared_relation::call(relid) {
+        0
+    } else {
+        initsmall::my_database_id::call()
+    };
+    LockRelId { relId: relid, dbId }
+}
+
 /// Install every seam declared in `backend-storage-lmgr-lmgr-seams`.
 pub fn init_seams() {
     inward::check_relation_locked_by_me::set(seam_check_relation_locked_by_me);
@@ -1159,6 +1196,15 @@ pub fn init_seams() {
     // owns; install the inward seams that xact.c consumes.
     inward::xact_lock_table_insert::set(XactLockTableInsert);
     inward::xact_lock_table_delete::set(XactLockTableDelete);
+    // Bare-OID relation lock-held probe (check_relation_locked_by_me crosses a
+    // LockRelId-derived relation; this is the OID-resolving variant).
+    inward::check_relation_oid_locked_by_me::set(CheckRelationOidLockedByMe);
+    // Heavyweight tuple-tag lock/unlock (in-place-update tuple lock).
+    inward::lock_tuple::set(seam_lock_tuple);
+    inward::unlock_tuple::set(seam_unlock_tuple);
+    // Session-level apply-transaction locks (parallel-apply deadlock detection).
+    inward::lock_apply_transaction_for_session::set(LockApplyTransactionForSession);
+    inward::unlock_apply_transaction_for_session::set(UnlockApplyTransactionForSession);
     // plancache's slice of lmgr.c (the -pc-seams crate this unit also owns):
     // bare-OID LockRelationOid/UnlockRelationOid for revalidation locking.
     inward_pc::lock_relation_oid::set(LockRelationOid);
