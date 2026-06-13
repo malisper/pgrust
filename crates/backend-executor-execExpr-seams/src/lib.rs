@@ -36,6 +36,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitExprWithParams(node, ext_params)` (execExpr.c): compile a
+    /// standalone expression tree with no parent `PlanState`, using only the
+    /// supplied external params (C: `econtext->ecxt_param_list_info`). The owned
+    /// model passes the evaluating `ExprContext`'s id and the estate so the
+    /// owner reads `ecxt_param_list_info` off it; the compiled `ExprState` is
+    /// allocated in the per-query context. Fallible on OOM and on unsupported
+    /// expression shapes (`ereport(ERROR)`).
+    pub fn exec_init_expr_with_params<'mcx>(
+        node: &types_nodes::primnodes::Expr,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+);
+
+seam_core::seam!(
     /// `ExecInitQual(qual, parent)` (execExpr.c): compile an implicitly-ANDed
     /// list of qual clauses into a single `ExprState`. A `None`/empty qual
     /// compiles to `None` (the C `NULL` ExprState, treated as always-true).

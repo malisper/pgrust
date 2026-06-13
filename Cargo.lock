@@ -1398,6 +1398,7 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
  "backend-executor-nodeModifyTable-seams",
  "backend-nodes-core-seams",
  "backend-partitioning-core-seams",

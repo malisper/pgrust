@@ -34,3 +34,7 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+
+# Direct dependency (no cycle): execUtils owns CreateExprContext and
+# ExecGetRangeTableRelation, both consumed by the pruning family.
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
