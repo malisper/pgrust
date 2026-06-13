@@ -1829,6 +1829,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-autovacuum"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-autovacuum-ext-seams",
+ "backend-postmaster-autovacuum-seams",
+ "backend-utils-error",
+ "types-autovacuum",
+ "types-core",
+ "types-error",
+ "types-reloptions",
+ "types-startup",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-postmaster-autovacuum-ext-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-autovacuum",
+ "types-core",
+ "types-error",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-postmaster-autovacuum-seams"
 version = "0.0.0"
 dependencies = [
@@ -3553,6 +3579,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
+ "backend-postmaster-autovacuum",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
@@ -3626,6 +3653,15 @@ name = "types-amvalidate"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-autovacuum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-reloptions",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -3866,6 +3902,13 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "types-vacuum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
