@@ -211,6 +211,19 @@ impl ItemPointerData {
     }
 }
 
+/// `InvalidOffsetNumber` (`storage/off.h`): `((OffsetNumber) 0)`.
+pub const INVALID_OFFSET_NUMBER: OffsetNumber = 0;
+/// `FirstOffsetNumber` (`storage/off.h`): `((OffsetNumber) 1)`.
+pub const FIRST_OFFSET_NUMBER: OffsetNumber = 1;
+
+/// `ItemPointerIsValid(pointer)` (`storage/itemptr.h`): a TID is valid iff its
+/// offset number is not the invalid sentinel. (The C macro also null-checks the
+/// pointer; the owned `&` makes that unnecessary.)
+#[inline]
+pub fn item_pointer_is_valid(pointer: &ItemPointerData) -> bool {
+    pointer.ip_posid != INVALID_OFFSET_NUMBER
+}
+
 /// Was a C `union` of `t_heap` / `t_datum`; rewritten as a Rust enum.
 #[derive(Clone, Debug)]
 pub enum HeapTupleHeaderChoice {
