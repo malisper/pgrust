@@ -2,7 +2,7 @@
 //! `nodeTag`/`IsA` infrastructure from `nodes/nodes.h`.
 //!
 //! In the owned-tree model a value node is a fixed-size owned Rust value
-//! (`Integer`/`Float`/`Boolean`/`StringNode`/`BitString` in `types_nodes`),
+//! (`Integer`/`Float`/`Boolean`/`StringNode`/`BitString` in `types_parsenodes`),
 //! so the C `makeNode` (= `palloc0` + tag write) collapses to a total,
 //! infallible constructor — no allocator, no seam. This family is the shared
 //! node-identity foundation the `read`/`print`/`makefuncs` families build on.
@@ -10,37 +10,81 @@
 //! Depends on the keystone only for the `NodeTag` identity it shares.
 //!
 //! C functions: `makeInteger`, `makeFloat`, `makeBoolean`, `makeString`,
-//! `makeBitString` (value.c) + the `newNode` infra (nodes.h). Skeleton: the
-//! value-node structs already live in `types_nodes`; the constructors land
-//! when this family is filled.
+//! `makeBitString` (value.c) + the `newNode` infra (nodes.h). The C functions
+//! each return a typed value-node pointer (`Integer *`, `Float *`, …); since a
+//! value node is just a tagged member of the raw-parser `Node` enum, the owned
+//! constructors return the `Node` variant directly so node identity
+//! (`IsA`/`nodeTag`) is preserved.
 
 #![allow(unused)]
 
+use types_parsenodes::{BitString, Boolean, Float, Integer, Node, StringNode};
+
 // makeInteger / makeFloat / makeBoolean / makeString / makeBitString and the
 // newNode core land here; signatures are total (no Mcx, no PgResult) per the
-// owned-value model. Stubbed until this family is filled.
+// owned-value model.
+//
+// The C `newNode(size, tag)` / `makeNode(_type_)` macro pair is `palloc0` +
+// tag write; in the owned model the tag is the `Node` enum discriminant, so
+// "allocate a zeroed node of this type and stamp the tag" is exactly building
+// the corresponding `Node` variant from its (default-initialised) carrier.
 
-/// `makeInteger(i)` (value.c).
-pub fn make_integer(_i: i32) {
-    todo!("value_core: makeInteger")
+/// `makeInteger(i)` (value.c):
+///
+/// ```c
+/// Integer *v = makeNode(Integer);
+/// v->ival = i;
+/// return v;
+/// ```
+pub fn make_integer(i: i32) -> Node {
+    Node::Integer(Integer { ival: i })
 }
 
-/// `makeFloat(numericStr)` (value.c) — takes ownership of the string.
-pub fn make_float(_numeric_str: String) {
-    todo!("value_core: makeFloat")
+/// `makeFloat(numericStr)` (value.c) — takes ownership of the string (C: the
+/// caller passes a palloc'd `char *`, stored directly in `v->fval`).
+///
+/// ```c
+/// Float *v = makeNode(Float);
+/// v->fval = numericStr;
+/// return v;
+/// ```
+pub fn make_float(numeric_str: String) -> Node {
+    Node::Float(Float {
+        fval: Some(numeric_str),
+    })
 }
 
-/// `makeBoolean(val)` (value.c).
-pub fn make_boolean(_val: bool) {
-    todo!("value_core: makeBoolean")
+/// `makeBoolean(val)` (value.c):
+///
+/// ```c
+/// Boolean *v = makeNode(Boolean);
+/// v->boolval = val;
+/// return v;
+/// ```
+pub fn make_boolean(val: bool) -> Node {
+    Node::Boolean(Boolean { boolval: val })
 }
 
-/// `makeString(str)` (value.c) — takes ownership of the string.
-pub fn make_string(_s: String) {
-    todo!("value_core: makeString")
+/// `makeString(str)` (value.c) — takes ownership of the string (C: the caller
+/// passes a palloc'd `char *`, stored directly in `v->sval`).
+///
+/// ```c
+/// String *v = makeNode(String);
+/// v->sval = str;
+/// return v;
+/// ```
+pub fn make_string(s: String) -> Node {
+    Node::String(StringNode { sval: Some(s) })
 }
 
-/// `makeBitString(str)` (value.c) — takes ownership of the string.
-pub fn make_bit_string(_s: String) {
-    todo!("value_core: makeBitString")
+/// `makeBitString(str)` (value.c) — takes ownership of the string (C: the
+/// caller passes a palloc'd `char *`, stored directly in `v->bsval`).
+///
+/// ```c
+/// BitString *v = makeNode(BitString);
+/// v->bsval = str;
+/// return v;
+/// ```
+pub fn make_bit_string(s: String) -> Node {
+    Node::BitString(BitString { bsval: Some(s) })
 }
