@@ -95,6 +95,7 @@ pub fn init_all() {
     backend_replication_logical_slotsync::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
+    backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
