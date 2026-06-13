@@ -22,12 +22,6 @@ pub fn BufferIsValid(bufnum: Buffer) -> bool {
 /// `LocationIndex` (`storage/bufpage.h`) — a byte offset within a page.
 pub type LocationIndex = uint16;
 
-/// `Buffer` (`storage/buf.h`) — a buffer-pool slot identifier: positive for a
-/// shared buffer, negative for a local buffer, `InvalidBuffer` (0) for none.
-pub type Buffer = i32;
-/// `InvalidBuffer` (`storage/buf.h`) — the C `0` sentinel.
-pub const InvalidBuffer: Buffer = 0;
-
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

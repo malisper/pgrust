@@ -36,6 +36,9 @@ pub struct Plan<'mcx> {
     pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `int plan_node_id` — unique across the entire final plan tree; used as
+    /// the DSM TOC key for a node's parallel state.
+    pub plan_node_id: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -77,6 +80,7 @@ impl Plan<'_> {
             targetlist,
             qual,
             parallel_aware: self.parallel_aware,
+            plan_node_id: self.plan_node_id,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,

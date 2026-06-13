@@ -81,15 +81,12 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
-<<<<<<< HEAD
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
-=======
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
->>>>>>> main
         }
     }
 }

@@ -15,9 +15,10 @@
 //! slot fill and name-cstring fix-up decision, the EvalPlanQual-recheck stub
 //! [`IndexOnlyRecheck`], and the init/rescan/teardown/parallel control flow —
 //! is this crate's owned logic. The `execScan.c` driver
-//! (`ExecScan`/`ExecScanExtended`/`ExecScanFetch`) is compiled into
-//! `nodeIndexonlyscan.o` in C and reproduced here as private functions, so the
-//! qual/projection/EPQ control flow stays faithful. Operations below the
+//! (`ExecScan`/`ExecScanExtended`/`ExecScanFetch`) is a separate translation
+//! unit (`execScan.o`); this node delegates to it through the execScan seam,
+//! passing its own `IndexOnlyNext`/`IndexOnlyRecheck` methods, so the
+//! qual/projection/EPQ control flow lives in its owning unit. Operations below the
 //! executor-node layer go through their owners' seam crates: the generic index
 //! AM (genam/indexam), the visibility map, the buffer manager, predicate
 //! locking, expression eval (execExpr), slots/tupdesc (execTuples), the
@@ -56,16 +57,7 @@ pub const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
 
 /// `INDEX_VAR` (`nodes/primnodes.h`) — varno of Vars referencing the scan
 /// tuple of an index-only scan's targetlist.
-const INDEX_VAR: i32 = 65000;
-
-// Internal access/recheck method "pointers" (the C `ExecScanAccessMtd` /
-// `ExecScanRecheckMtd` reinterpreted from `IndexOnlyNext`/`IndexOnlyRecheck`).
-// `IndexOnlyNext` leaves the result tuple in the node's scan slot and returns
-// `Ok(true)` when one is available, `Ok(false)` at end of scan.
-type AccessMtd =
-    for<'mcx> fn(&mut IndexOnlyScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
-type RecheckMtd =
-    for<'mcx> fn(&mut IndexOnlyScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+const INDEX_VAR: i32 = -3;
 
 /// `elog(ERROR, msg)` — plain internal error.
 fn elog(message: &'static str) -> PgError {
@@ -351,169 +343,6 @@ fn IndexOnlyRecheck<'mcx>(
 }
 
 // ===========================================================================
-// execScan.c driver, compiled into nodeIndexonlyscan.o in C; reproduced here.
-// ===========================================================================
-
-/// `ExecScanFetch` — check interrupts and fetch the next potential tuple,
-/// substituting an EPQ test tuple when inside a recheck.
-fn ExecScanFetch<'mcx>(
-    node: &mut IndexOnlyScanState<'mcx>,
-    access_mtd: AccessMtd,
-    recheck_mtd: RecheckMtd,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    tcop_postgres::check_for_interrupts::call()?;
-
-    if let Some(epqstate) = estate.es_epq_active {
-        // Inside an EvalPlanQual recheck.
-        let scanrelid = scan_scanrelid(node)?;
-        let scan_slot = node
-            .ss
-            .ss_ScanTupleSlot
-            .ok_or_else(|| elog("index-only scan has no scan tuple slot"))?;
-
-        if scanrelid == 0 {
-            // A ForeignScan/CustomScan that pushed a join to the remote side.
-            if execMain::epq_param_is_member_of_ext_param::call(
-                epqstate,
-                node.ss.ps.plan.and_then(|p| p.plan_head().extParam.as_deref()),
-            ) {
-                if !recheck_mtd(node, estate)? {
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
-                }
-                return Ok(!estate.slot(scan_slot).is_empty());
-            }
-        } else if execMain::epq_relsubs_done::call(epqstate, scanrelid - 1) {
-            // No EPQ tuple for this rel, or we already returned it.
-            execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
-            return Ok(false);
-        } else if execMain::epq_relsubs_slot_present::call(epqstate, scanrelid - 1) {
-            // Return replacement tuple provided by the EPQ caller.
-            let loaded = execMain::epq_load_relsubs_slot::call(
-                epqstate,
-                estate,
-                scanrelid - 1,
-                scan_slot,
-            )?;
-            // Mark that we shouldn't return it again.
-            execMain::epq_set_relsubs_done::call(epqstate, scanrelid - 1, true);
-            // Return empty slot if we haven't got a test tuple.
-            if !loaded || estate.slot(scan_slot).is_empty() {
-                return Ok(false);
-            }
-            // Check the access-method conditions.
-            if !recheck_mtd(node, estate)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
-                return Ok(false);
-            }
-            return Ok(true);
-        } else if execMain::epq_relsubs_rowmark_present::call(epqstate, scanrelid - 1) {
-            // Fetch a replacement tuple using a non-locking rowmark.
-            execMain::epq_set_relsubs_done::call(epqstate, scanrelid - 1, true);
-            if !execMain::eval_plan_qual_fetch_row_mark::call(
-                epqstate,
-                estate,
-                scanrelid,
-                scan_slot,
-            )? {
-                return Ok(false);
-            }
-            if estate.slot(scan_slot).is_empty() {
-                return Ok(false);
-            }
-            if !recheck_mtd(node, estate)? {
-                execTuples::exec_clear_tuple::call(estate.slot_mut(scan_slot))?;
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-    }
-
-    // Run the access-method function to get the next tuple.
-    access_mtd(node, estate)
-}
-
-/// `ExecScanExtended` — scan using the access method, optionally checking the
-/// tuple against `qual` and applying `proj_info`.
-#[allow(clippy::too_many_arguments)]
-fn ExecScanExtended<'mcx>(
-    node: &mut IndexOnlyScanState<'mcx>,
-    access_mtd: AccessMtd,
-    recheck_mtd: RecheckMtd,
-    has_qual: bool,
-    has_proj_info: bool,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    let econtext = node
-        .ss
-        .ps
-        .ps_ExprContext
-        .ok_or_else(|| elog("index-only scan has no expr context"))?;
-
-    // If neither a qual to check nor a projection to do, skip the overhead.
-    if !has_qual && !has_proj_info {
-        execUtils::reset_expr_context::call(estate, econtext)?;
-        return ExecScanFetch(node, access_mtd, recheck_mtd, estate);
-    }
-
-    // Reset per-tuple memory from the previous cycle.
-    execUtils::reset_expr_context::call(estate, econtext)?;
-
-    // Loop until we obtain a tuple that passes the qualification.
-    loop {
-        let have_tuple = ExecScanFetch(node, access_mtd, recheck_mtd, estate)?;
-
-        if !have_tuple {
-            // Nothing more to scan; return an empty (projection-result) slot.
-            if has_proj_info {
-                if let Some(result_slot) = node.ss.ps.ps_ResultTupleSlot {
-                    execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
-                }
-            }
-            return Ok(false);
-        }
-
-        // econtext->ecxt_scantuple = slot — the scan tuple is the input;
-        // ExecQual reads it through the node's expr context.
-
-        // Check that the current tuple satisfies the qual.
-        let passed = if !has_qual {
-            true
-        } else {
-            match &node.ss.ps.qual {
-                Some(q) => execExpr::exec_qual::call(q, econtext, estate)?,
-                None => true,
-            }
-        };
-        if passed {
-            if has_proj_info {
-                // Form a projection tuple, store it in the result slot, return.
-                execExpr::exec_project::call(&mut node.ss.ps, estate)?;
-                return Ok(true);
-            } else {
-                // Not projecting; return the scan tuple.
-                return Ok(true);
-            }
-        }
-
-        // Tuple fails qual; free per-tuple memory and try again.
-        execUtils::reset_expr_context::call(estate, econtext)?;
-    }
-}
-
-/// `ExecScan` — the non-inlined execScan.c driver.
-fn ExecScan<'mcx>(
-    node: &mut IndexOnlyScanState<'mcx>,
-    access_mtd: AccessMtd,
-    recheck_mtd: RecheckMtd,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    let has_qual = node.ss.ps.qual.is_some();
-    let has_proj_info = node.ss.ps.ps_ProjInfo.is_some();
-    ExecScanExtended(node, access_mtd, recheck_mtd, has_qual, has_proj_info, estate)
-}
-
-// ===========================================================================
 // Public node entry points (1:1).
 // ===========================================================================
 
@@ -528,7 +357,11 @@ pub fn ExecIndexOnlyScan<'mcx>(
         ExecReScanIndexOnlyScan(node, estate)?;
     }
 
-    ExecScan(node, IndexOnlyNext, IndexOnlyRecheck, estate)
+    // return ExecScan(&node->ss, IndexOnlyNext, IndexOnlyRecheck);
+    // The execScan.c driver (qual/projection + the EvalPlanQual
+    // replacement-tuple decision tree) is owned by the execScan unit; we pass
+    // this node's own access/recheck methods.
+    execScan::exec_scan_indexonly::call(node, estate, IndexOnlyNext, IndexOnlyRecheck)
 }
 
 /// `ExecReScanIndexOnlyScan(node)` — recalculate runtime scan keys, then rescan
@@ -556,7 +389,7 @@ pub fn ExecReScanIndexOnlyScan<'mcx>(
     }
 
     // ExecScanReScan(&node->ss);
-    execScan::exec_scan_rescan::call(&mut node.ss, estate)
+    execScan::exec_scan_rescan_ss::call(&mut node.ss, estate)
 }
 
 /// `ExecEndIndexOnlyScan(node)` — release all storage.
@@ -661,11 +494,19 @@ pub fn ExecIndexOnlyRestrPos<'mcx>(
 /// `ExecInitIndexOnlyScan(node, estate, eflags)` — initialize the index scan's
 /// state, create scan keys, and open the base and index relations.
 pub fn ExecInitIndexOnlyScan<'mcx>(
-    node: &'mcx IndexOnlyScan<'mcx>,
+    node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<mcx::PgBox<'mcx, IndexOnlyScanState<'mcx>>> {
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
+
+    // IndexOnlyScan *node — the enclosing plan-tree node (the C `IndexOnlyScan
+    // *` is the same pointer via struct embedding). Panics if it is not an
+    // `IndexOnlyScan` (the C `castNode`).
+    let ios: &'mcx IndexOnlyScan<'mcx> = match node {
+        types_nodes::nodes::Node::IndexOnlyScan(n) => n,
+        other => panic!("castNode(IndexOnlyScan, node) failed: {other:?}"),
+    };
 
     // create state structure (makeNode(IndexOnlyScanState))
     let mut indexstate = IndexOnlyScanState::make_boxed_in(mcx)?;
@@ -673,14 +514,14 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
     // indexstate->ss.ps.plan = (Plan *) node;
     // indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
     // (The plan-node link aliases the shared read-only plan tree.)
-    indexstate.ss.ps.plan = Some(node_as_node(node));
+    indexstate.ss.ps.plan = Some(node);
     indexstate.ss.ps.ExecProcNode = Some(exec_proc_node_trampoline);
 
     // Miscellaneous initialization: create expression context for node.
     execUtils::exec_assign_expr_context::call(estate, &mut indexstate.ss.ps)?;
 
     // open the scan relation
-    let scanrelid = node.scan.scanrelid;
+    let scanrelid = ios.scan.scanrelid;
     let current_relation = execUtils::exec_open_scan_relation::call(estate, scanrelid, eflags)?;
     indexstate.ss.ss_currentRelation = Some(current_relation);
     // indexstate->ss.ss_currentScanDesc = NULL; (no heap scan here)
@@ -690,7 +531,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
     // slot (virtual ops).
     let tup_desc = execTuples::exec_type_from_tl::call(
         mcx,
-        node.indextlist.as_deref().unwrap_or(&[]),
+        ios.indextlist.as_deref().unwrap_or(&[]),
     )?;
     execTuples::exec_init_scan_tuple_slot::call(
         estate,
@@ -716,12 +557,12 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
 
     // initialize child expressions (qual + recheckqual)
     indexstate.ss.ps.qual = execExpr::exec_init_qual::call(
-        node.scan.plan.qual.as_deref(),
+        ios.scan.plan.qual.as_deref(),
         &mut indexstate.ss.ps,
         estate,
     )?;
     indexstate.recheckqual = execExpr::exec_init_qual::call(
-        node.recheckqual.as_deref(),
+        ios.recheckqual.as_deref(),
         &mut indexstate.ss.ps,
         estate,
     )?;
@@ -736,7 +577,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
     // lockmode = exec_rt_fetch(scanrelid, estate)->rellockmode;
     // indexRelation = index_open(node->indexid, lockmode);
     let lockmode = execUtils::exec_rt_fetch_rellockmode::call(estate, scanrelid);
-    let index_relation = indexam::index_open::call(mcx, node.indexid, lockmode)?;
+    let index_relation = indexam::index_open::call(mcx, ios.indexid, lockmode)?;
     indexstate.ioss_RelationDesc = Some(index_relation);
 
     // Initialize index-specific scan state.
@@ -755,7 +596,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
             &mut indexstate,
             estate,
             index,
-            node.indexqual.as_deref(),
+            ios.indexqual.as_deref(),
             false,
         )?;
     }
@@ -770,7 +611,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
             &mut indexstate,
             estate,
             index,
-            node.indexorderby.as_deref(),
+            ios.indexorderby.as_deref(),
             true,
         )?;
     }
@@ -977,15 +818,18 @@ pub fn ExecIndexOnlyScanInitializeWorker<'mcx>(
     let plan_node_id = plan_node_id(node)?;
 
     // piscan = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
-    // if (instrument) node->ioss_SharedInfo = OffsetToPointer(piscan, ps_offset_ins);
     let piscan = shm_toc::toc_lookup_piscan::call(mcx, pwcxt, plan_node_id)?;
+
+    // if (instrument)
+    //     node->ioss_SharedInfo = (SharedIndexScanInstrumentation *)
+    //         OffsetToPointer(piscan, piscan->ps_offset_ins);
+    //
+    // The offset arithmetic into the DSM blob is owned by the parallel
+    // index-scan infrastructure (the seam); the assignment to the worker
+    // node's SharedInfo is this node's own logic.
     if instrument {
-        // SharedInfo lives at piscan->ps_offset_ins; the owned model's
-        // descriptor carries it once the parallel-scan setup wires it. Until
-        // index_parallelscan_initialize lands, this offset read is the parallel
-        // owner's, reached through the lookup above; the SharedInfo pointer is
-        // set by that owner. Here we leave ioss_SharedInfo as installed by DSM.
-        let _ = &piscan;
+        let shared = indexam::index_scan_resolve_shared_info::call(&piscan)?;
+        node.ioss_SharedInfo = Some(mcx::alloc_in(mcx, shared)?);
     }
 
     if !parallel_aware {
@@ -1102,16 +946,12 @@ fn plan_parallel_aware(node: &IndexOnlyScanState<'_>) -> PgResult<bool> {
 }
 
 /// `node->ss.ps.plan->plan_node_id` — the planner-assigned id used as the DSM
-/// TOC key. The trimmed `Plan` does not yet carry `plan_node_id`; until it
-/// lands, derive it is impossible, so this is the frontier with the planner.
-fn plan_node_id(_node: &IndexOnlyScanState<'_>) -> PgResult<i32> {
-    // `plan_node_id` is a `Plan` field the trimmed node model has not adopted
-    // yet (no consumer needed it before the parallel path). The parallel
-    // methods are only reachable through execParallel's opaque-handle dispatch,
-    // which itself is unwired; this panic marks that frontier.
-    Err(elog(
-        "index-only scan parallel DSM: plan_node_id not modeled until execParallel wiring lands",
-    ))
+/// TOC key.
+fn plan_node_id(node: &IndexOnlyScanState<'_>) -> PgResult<i32> {
+    match node.ss.ps.plan {
+        Some(n) => Ok(n.plan_head().plan_node_id),
+        None => Err(elog("index-only scan has no plan")),
+    }
 }
 
 /// `RelationGetDescr(currentRelation)` — the scan relation's tuple descriptor,
@@ -1157,21 +997,6 @@ fn index_attr_is_namecstring(node: &IndexOnlyScanState<'_>, attnum: i32) -> PgRe
         .as_ref()
         .ok_or_else(|| elog("index-only scan has no index relation"))?;
     Ok(rel.index_attr_is_namecstring(attnum))
-}
-
-/// The plan node link (`(Plan *) node`) — the read-only shared plan tree the
-/// state node aliases.
-fn node_as_node<'mcx>(node: &'mcx IndexOnlyScan<'mcx>) -> &'mcx types_nodes::nodes::Node<'mcx> {
-    // SAFETY-free: the executor holds the plan tree as Node::IndexOnlyScan, but
-    // the init API hands us the inner `IndexOnlyScan`. The state node only needs
-    // the plan for `scanrelid`/`indexorderdir`/`parallel_aware`, which it reads
-    // back through the enum; the executor wires the actual Node alias. This is
-    // the plan-link frontier with execProcnode's dispatch.
-    let _ = node;
-    panic!(
-        "ExecInitIndexOnlyScan plan link: the Node::IndexOnlyScan alias is supplied by \
-         execProcnode's dispatch, not yet wired"
-    )
 }
 
 /// The `ExecProcNode` callback trampoline installed into `ps.ExecProcNode`.

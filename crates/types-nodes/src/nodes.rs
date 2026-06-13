@@ -124,9 +124,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
-<<<<<<< HEAD
             Node::IndexOnlyScan(m) => &m.scan.plan,
-=======
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
@@ -134,7 +132,6 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
->>>>>>> main
         }
     }
 

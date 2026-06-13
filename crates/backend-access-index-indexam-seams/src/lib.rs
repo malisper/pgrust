@@ -181,3 +181,17 @@ seam_core::seam!(
         parallel_handle: u64,
     ) -> *mut types_nbtree::BTParallelScanDescData
 );
+
+seam_core::seam!(
+    /// `(SharedIndexScanInstrumentation *) OffsetToPointer(piscan, piscan->ps_offset_ins)`
+    /// (nodeIndexonlyscan.c `ExecIndexOnlyScanInitializeWorker`) — resolve the
+    /// `SharedIndexScanInstrumentation` that `index_parallelscan_initialize`
+    /// placed inside the DSM-resident `ParallelIndexScanDesc` blob, at offset
+    /// `ps_offset_ins`. The blob layout / offset arithmetic into shared memory
+    /// is owned by the parallel index-scan infrastructure (indexam/genam); the
+    /// worker node only assigns the result to `node->ioss_SharedInfo`. The
+    /// owned model returns the live shared struct. Fallible on `ereport(ERROR)`.
+    pub fn index_scan_resolve_shared_info<'mcx>(
+        piscan: &types_nodes::ParallelIndexScanDescData,
+    ) -> types_error::PgResult<types_nodes::SharedIndexScanInstrumentation>
+);
