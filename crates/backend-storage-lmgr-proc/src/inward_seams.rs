@@ -143,6 +143,79 @@ fn set_delay_chkpt_start(_on: bool) {
     todo!("proc.c: set/clear DELAY_CHKPT_START in MyProc->delayChkptFlags")
 }
 
+// --- wait-queue PGPROC accessors (proc_waitqueue family) --------------------
+// Bodies remain todo!() until InitProcGlobal / InitProcess land the real
+// ProcGlobal->allProcs array and per-backend MyProc.
+
+fn pgproc_number(_proc: &types_storage::storage::PGPROC) -> ProcNumber {
+    todo!("proc.c: GetNumberFromPGProc(proc)")
+}
+
+fn proc_lock_group_leader(_procno: ProcNumber) -> ProcNumber {
+    todo!("proc.c: GetPGProcByNumber(procno)->lockGroupLeader as ProcNumber")
+}
+
+fn set_proc_held_locks(_procno: ProcNumber, _mask: types_storage::lock::LOCKMASK) {
+    todo!("proc.c: GetPGProcByNumber(procno)->heldLocks = mask")
+}
+
+fn proc_held_locks(_procno: ProcNumber) -> types_storage::lock::LOCKMASK {
+    todo!("proc.c: read GetPGProcByNumber(procno)->heldLocks")
+}
+
+fn proc_wait_lock_mode(_procno: ProcNumber) -> types_storage::lock::LOCKMODE {
+    todo!("proc.c: read GetPGProcByNumber(procno)->waitLockMode")
+}
+
+fn proc_wait_status(_procno: ProcNumber) -> types_storage::storage::ProcWaitStatus {
+    todo!("proc.c: read GetPGProcByNumber(procno)->waitStatus")
+}
+
+fn set_proc_wait_fields(
+    _procno: ProcNumber,
+    _lock: types_storage::lock::LOCKTAG,
+    _holder: ProcNumber,
+    _lockmode: types_storage::lock::LOCKMODE,
+) {
+    todo!("proc.c: MyProc->{{waitLock,waitProcLock,waitLockMode,waitStatus}}")
+}
+
+fn set_proc_wait_start(_procno: ProcNumber, _value: u64) {
+    todo!("proc.c: pg_atomic_write_u64(&GetPGProcByNumber(procno)->waitStart, value)")
+}
+
+fn proc_wait_link_is_detached(_procno: ProcNumber) -> bool {
+    todo!("proc.c: dlist_node_is_detached(&GetPGProcByNumber(procno)->links)")
+}
+
+fn wakeup_proc_clear_wait(_procno: ProcNumber, _status: types_storage::storage::ProcWaitStatus) {
+    todo!("proc.c: ProcWakeup state reset (waitLock/waitProcLock/waitStatus/waitStart)")
+}
+
+fn proc_unlinked_from_wait_queue(_procno: ProcNumber) -> bool {
+    todo!("proc.c: MyProc->links.prev == NULL || MyProc->links.next == NULL")
+}
+
+fn proc_is_waiting_on_lock(_procno: ProcNumber) -> bool {
+    todo!("proc.c: MyProc->waitLock != NULL")
+}
+
+fn proc_wait_lock_tag(_procno: ProcNumber) -> types_storage::lock::LOCKTAG {
+    todo!("proc.c: MyProc->waitLock->tag")
+}
+
+fn proc_pgxactoff(_procno: ProcNumber) -> i32 {
+    todo!("proc.c: GetPGProcByNumber(procno)->pgxactoff")
+}
+
+fn proc_global_status_flags(_pgxactoff: i32) -> u8 {
+    todo!("proc.c: ProcGlobal->statusFlags[pgxactoff]")
+}
+
+fn proc_pid(_procno: ProcNumber) -> i32 {
+    todo!("proc.c: GetPGProcByNumber(procno)->pid")
+}
+
 /// Install every inward seam this unit owns.
 pub(crate) fn install() {
     seams::proc_lw_waiting::set(proc_lw_waiting);
@@ -176,4 +249,22 @@ pub(crate) fn install() {
     seams::proc_vxid::set(proc_vxid);
     seams::prepared_xact_procno::set(prepared_xact_procno);
     seams::set_delay_chkpt_start::set(set_delay_chkpt_start);
+
+    // wait-queue PGPROC accessors
+    seams::pgproc_number::set(pgproc_number);
+    seams::proc_lock_group_leader::set(proc_lock_group_leader);
+    seams::set_proc_held_locks::set(set_proc_held_locks);
+    seams::proc_held_locks::set(proc_held_locks);
+    seams::proc_wait_lock_mode::set(proc_wait_lock_mode);
+    seams::proc_wait_status::set(proc_wait_status);
+    seams::set_proc_wait_fields::set(set_proc_wait_fields);
+    seams::set_proc_wait_start::set(set_proc_wait_start);
+    seams::proc_wait_link_is_detached::set(proc_wait_link_is_detached);
+    seams::wakeup_proc_clear_wait::set(wakeup_proc_clear_wait);
+    seams::proc_unlinked_from_wait_queue::set(proc_unlinked_from_wait_queue);
+    seams::proc_is_waiting_on_lock::set(proc_is_waiting_on_lock);
+    seams::proc_wait_lock_tag::set(proc_wait_lock_tag);
+    seams::proc_pgxactoff::set(proc_pgxactoff);
+    seams::proc_global_status_flags::set(proc_global_status_flags);
+    seams::proc_pid::set(proc_pid);
 }

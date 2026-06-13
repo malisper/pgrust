@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h): if an interrupt is pending,
     /// service it via `ProcessInterrupts()` (tcop/postgres.c). A query-cancel
@@ -32,4 +34,33 @@ seam_core::seam!(
     /// PROCSIG_RECOVERY_CONFLICT_* arms of `procsignal_sigusr1_handler`.
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_recovery_conflict_interrupt(reason: types_storage::ProcSignalReason)
+);
+
+seam_core::seam!(
+    /// `ProcSleep`'s `ereport(LOG, errmsg(msg), errdetail_log_plural(detail_s,
+    /// detail_p, n, ...))` for the lock-wait progress messages. `detail_*` are
+    /// `None` for the "acquired" case (a bare `errmsg`); when present they are
+    /// the singular/plural errdetail_log forms selected by `holders_num`.
+    pub fn report_lock_wait_log(
+        message: alloc::string::String,
+        detail_singular: Option<alloc::string::String>,
+        detail_plural: Option<alloc::string::String>,
+        holders_num: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcSleep`'s autovac-cancel `ereport(DEBUG1, errmsg_internal("sending
+    /// cancel to blocking autovacuum PID %d", pid), errdetail_log("%s", logbuf))`.
+    pub fn report_autovac_cancel(
+        pid: i32,
+        detail_log: alloc::string::String,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `kill(pid, SIGINT)` against a blocking autovacuum worker. `ESRCH` (the
+    /// worker already exited) is ignored inside the impl; any other errno warns
+    /// (`ereport(WARNING, "could not send signal to process %d: %m")`).
+    pub fn signal_autovacuum_worker(pid: i32) -> types_error::PgResult<()>
 );
