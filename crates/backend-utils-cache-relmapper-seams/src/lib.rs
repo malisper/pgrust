@@ -26,8 +26,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `AtCCI_RelationMap()` — make pending relation-map changes visible to
-    /// this transaction.
-    pub fn at_cci_relation_map()
+    /// this transaction. C is `void`, but the merge can `elog(ERROR)` ("ran
+    /// out of space in relation map") which longjmps; the owned port surfaces
+    /// that as `Err`, so the seam returns `PgResult<()>`.
+    pub fn at_cci_relation_map() -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -41,4 +43,11 @@ seam_core::seam!(
     /// `AtPrepare_RelationMap()` — errors out if the transaction changed the
     /// map (not supported under 2PC).
     pub fn at_prepare_relation_map() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationMapFinishBootstrap()` (relmapper.c): write out the initial
+    /// relation-map files at the end of bootstrap. `ereport(ERROR/FATAL)` on
+    /// an I/O failure.
+    pub fn relation_map_finish_bootstrap() -> types_error::PgResult<()>
 );

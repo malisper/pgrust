@@ -40,6 +40,10 @@ pub mod ipc;
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::{option_sets, vars, GucVarAccessors};
 
+    backend_storage_ipc_dsm_core_seams::dsm_detach_all::set(|| {
+        dsm::dsm_detach_all().expect("dsm_detach_all failed")
+    });
+
     backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
     backend_storage_ipc_seams::on_proc_exit::set(ipc::on_proc_exit);
     backend_storage_ipc_seams::on_shmem_exit::set(ipc::on_shmem_exit);

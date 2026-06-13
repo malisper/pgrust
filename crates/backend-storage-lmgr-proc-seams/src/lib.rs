@@ -11,8 +11,18 @@ use types_core::LocalTransactionId;
 use types_core::Oid;
 use types_core::ProcNumber;
 use types_core::TimestampTz;
+use types_deadlock::{LockId, LockSpace};
 use types_error::PgResult;
 use types_storage::{proclist_node, LWLockMode, LWLockWaitState};
+
+seam_core::seam!(
+    /// `ProcLockWakeup(GetLocksMethodTable(lock), lock)` (proc.c) — after the
+    /// deadlock detector rearranges a wait queue to resolve a soft deadlock, wake
+    /// any waiters that are now grantable. Takes `&mut LockSpace` because the
+    /// wakeup inspects the shared lock/proc state; the detector holds all
+    /// partition locks while it runs.
+    pub fn proc_lock_wakeup(space: &mut LockSpace, lock: LockId)
+);
 
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->lwWaiting`.
@@ -217,4 +227,11 @@ seam_core::seam!(
     /// `MyProc->roleId = userid` (`storage/proc.c`) — stamp this backend's
     /// PGPROC entry with the authenticated user id (an atomic store; no lock).
     pub fn set_my_proc_role_id(userid: Oid)
+);
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c): initialize the per-backend `PGPROC` entry,
+    /// claiming a slot from the shared `ProcGlobal` free list. `ereport(FATAL)`
+    /// when no slot is available ("sorry, too many clients already").
+    pub fn init_process() -> types_error::PgResult<()>
 );

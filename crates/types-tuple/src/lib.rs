@@ -14,6 +14,7 @@ pub mod attmap;
 pub mod backend_access_common_heaptuple;
 pub mod heap;
 pub mod heaptuple;
+pub mod pg_type;
 pub mod rel;
 pub mod tupconvert;
 pub mod toast_helper;
