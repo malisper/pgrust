@@ -2908,6 +2908,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-nodeSubplan-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-sort-tuplesort-seams",
  "mcx",
  "types-core",
  "types-datum",
