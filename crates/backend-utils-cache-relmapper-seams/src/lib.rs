@@ -46,6 +46,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationMapInvalidate(shared)` (relmapper.c): reload the active
+    /// relation map (the `shared` map when `shared`, else this database's
+    /// local map) from the on-disk file — the `SHAREDINVALRELMAP_ID` arm of
+    /// `LocalExecuteInvalidationMessage`. Reads the file, so can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_map_invalidate(shared: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `RelationMapFinishBootstrap()` (relmapper.c): write out the initial
     /// relation-map files at the end of bootstrap. `ereport(ERROR/FATAL)` on
     /// an I/O failure.
