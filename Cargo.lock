@@ -113,6 +113,8 @@ name = "backend-access-common-reloptions-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-reloptions",
 ]
@@ -263,6 +265,32 @@ dependencies = [
  "types-error",
  "types-rel",
  "types-scan",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-index-indexam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-common-reloptions-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-tableam",
+ "backend-catalog-index-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -2606,6 +2634,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -3533,6 +3562,7 @@ dependencies = [
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-index-indexam",
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
@@ -3843,9 +3873,11 @@ name = "types-tableam"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-snapshot",
  "types-storage",
  "types-tuple",

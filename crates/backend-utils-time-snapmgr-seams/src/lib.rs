@@ -29,6 +29,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnregisterSnapshot(snapshot)` (snapmgr.c): drop the resource-owner
+    /// registration taken by [`register_snapshot`], freeing the snapshot when
+    /// its last registration goes away. The owned `SnapshotData` is consumed.
+    /// Cannot `ereport` in C; modeled infallible bare.
+    pub fn unregister_snapshot(snapshot: types_snapshot::SnapshotData)
+);
+
+seam_core::seam!(
     /// `EstimateSnapshotSpace(snapshot)` (snapmgr.c): bytes needed to
     /// serialize the snapshot. Pure size computation; cannot `ereport`.
     pub fn estimate_snapshot_space(snapshot: &types_snapshot::SnapshotData) -> usize
