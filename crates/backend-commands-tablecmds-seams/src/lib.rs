@@ -40,3 +40,25 @@ seam_core::seam!(
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
+
+/* ---- CLUSTER finish-heap-swap helpers (backend-commands-cluster) --------- */
+
+seam_core::seam!(
+    /// `CheckTableNotInUse(rel, stmt)` (tablecmds.c).
+    pub fn check_table_not_in_use(rel: &types_rel::Relation<'_>, stmt: &str) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `RenameRelationInternal(myrelid, newrelname, is_internal, is_index)`
+    /// (tablecmds.c).
+    pub fn rename_relation_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        myrelid: Oid,
+        newrelname: &str,
+        is_internal: bool,
+        is_index: bool,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ResetRelRewrite(myrelid)` (tablecmds.c).
+    pub fn reset_rel_rewrite(myrelid: Oid) -> PgResult<()>
+);

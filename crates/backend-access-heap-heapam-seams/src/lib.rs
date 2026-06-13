@@ -42,3 +42,13 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
     ) -> PgResult<PgVec<'mcx, (Oid, FormData_pg_type)>>
 );
+
+seam_core::seam!(
+    /// `table_open(IndexRelationId, AccessShareLock)` +
+    /// `ScanKeyInit(indisclustered = true)` + `table_beginscan_catalog` +
+    /// `heap_getnext(ForwardScanDirection)` loop + `table_endscan` +
+    /// `relation_close`, batched (the genam `systable_scan` precedent): the
+    /// `(indrelid, indexrelid)` of every pg_index row with `indisclustered`.
+    /// Used by CLUSTER's `get_tables_to_cluster`.
+    pub fn scan_indisclustered<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, (Oid, Oid)>>
+);

@@ -61,3 +61,47 @@ seam_core::seam!(
         estate: &mut EStateData<'_>,
     ) -> PgResult<()>
 );
+
+// --- Index-only-scan-specialized entry points -----------------------------
+// Same `execScan.c` driver, specialized to the index-only scan node (its own
+// in-crate `IndexOnlyNext`/`IndexOnlyRecheck` access/recheck functions). When
+// execScan.c lands it installs one generic implementation; each per-node entry
+// point marshals to it.
+
+use types_nodes::nodeindexonlyscan::IndexOnlyScanState;
+
+/// `ExecScanAccessMtd`, specialized to an index-only scan node — returns
+/// `true` when a tuple sits in the node's scan slot, `false` at end-of-scan.
+pub type IndexOnlyScanAccessMtd =
+    for<'mcx> fn(&mut IndexOnlyScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd`, specialized to an index-only scan node.
+pub type IndexOnlyScanRecheckMtd =
+    for<'mcx> fn(&mut IndexOnlyScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — `ExecScanFetch` (interrupts + the EvalPlanQual
+    /// replacement-tuple decision tree), qual-filter, project — for an
+    /// index-only scan node. Returns `true` when a qualifying tuple is in the
+    /// node's result/scan slot, `false` at end of scan. `Err` carries the
+    /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
+    /// execScan.c; this node passes its `IndexOnlyNext`/`IndexOnlyRecheck`.
+    pub fn exec_scan_indexonly(
+        node: &mut IndexOnlyScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: IndexOnlyScanAccessMtd,
+        recheck: IndexOnlyScanRecheckMtd,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecScanReScan(&node->ss)` (execScan.c), over the generic scan-state
+    /// head: reset the common scan-node state for a rescan — clear the
+    /// scan/result tuple slots and reset the EPQ `relsubs_done` flags for the
+    /// node's scan relation. Fallible on the slot-clear `ereport(ERROR)` paths.
+    pub fn exec_scan_rescan_ss<'mcx>(
+        node: &mut types_nodes::execnodes::ScanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

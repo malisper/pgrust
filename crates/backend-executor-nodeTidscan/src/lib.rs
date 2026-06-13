@@ -308,8 +308,10 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             .ss_currentRelation
             .as_ref()
             .expect("TidListEval: scan relation not opened");
-        tidstate.ss_currentScanDesc =
-            Some(tableam::table_beginscan_tid(rel, estate.es_snapshot.clone())?);
+        tidstate.ss_currentScanDesc = Some(tableam::table_beginscan_tid(
+            rel,
+            estate.es_snapshot.as_ref().map(|s| (**s).clone()),
+        )?);
     }
 
     // We initialize the array with enough slots for the case that all quals are
@@ -478,9 +480,10 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
         //     return slot;
         let found = {
             let rel = node.ss.ss_currentRelation.as_ref().unwrap();
-            let snapshot = &estate.es_snapshot.clone();
+            let snapshot: types_tableam::tableam::Snapshot =
+                estate.es_snapshot.as_ref().map(|s| (**s).clone());
             let slot_id = slot.expect("TidNext: node has no scan tuple slot");
-            tableam::table_tuple_fetch_row_version(rel, &tid, snapshot, estate.slot_mut(slot_id))?
+            tableam::table_tuple_fetch_row_version(rel, &tid, &snapshot, estate.slot_mut(slot_id))?
         };
         if found {
             return Ok(slot);
@@ -541,7 +544,7 @@ fn ExecScanFetch<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'m
     // CHECK_FOR_INTERRUPTS();
     tcop_postgres::check_for_interrupts::call()?;
 
-    if estate.es_epq_active {
+    if estate.es_epq_active.is_some() {
         // We are inside an EvalPlanQual recheck.
         // Index scanrelid = ((Scan *) node->ps.plan)->scanrelid;
         let scanrelid = node_scanrelid(node);
@@ -586,13 +589,13 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
     // the overhead and return the raw scan tuple.
     if !has_qual && !has_proj_info {
         // ResetExprContext(econtext);
-        execUtils::reset_expr_context::call(econtext, estate)?;
+        execUtils::reset_expr_context::call(estate, econtext)?;
         return ExecScanFetch(node, estate);
     }
 
     // Reset per-tuple memory context to free expression-evaluation storage
     // allocated in the previous tuple cycle.
-    execUtils::reset_expr_context::call(econtext, estate)?;
+    execUtils::reset_expr_context::call(estate, econtext)?;
 
     // Get a tuple from the access method. Loop until we obtain a tuple that
     // passes the qualification.
@@ -640,7 +643,7 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
         }
 
         // Tuple fails qual, so free per-tuple memory and try again.
-        execUtils::reset_expr_context::call(econtext, estate)?;
+        execUtils::reset_expr_context::call(estate, econtext)?;
     }
 }
 
@@ -738,7 +741,9 @@ pub fn ExecInitTidScan<'mcx>(
     // open the scan relation
     // currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
     // tidstate->ss.ss_currentRelation = currentRelation;
-    execUtils::exec_open_scan_relation::call(estate, &mut tidstate.ss, node.scan.scanrelid, eflags)?;
+    let current_relation =
+        execUtils::exec_open_scan_relation::call(estate, node.scan.scanrelid, eflags)?;
+    tidstate.ss.ss_currentRelation = Some(current_relation);
     // tidstate->ss.ss_currentScanDesc = NULL;  /* no heap scan here */
     tidstate.ss_currentScanDesc = None;
 
