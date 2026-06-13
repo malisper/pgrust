@@ -1525,10 +1525,23 @@ fn release_held_by_addr(addr: usize) -> PgResult<()> {
 // Seam installation.
 // ---------------------------------------------------------------------------
 
+/// `lwlock_acquire` seam shape: acquire, then hand back the guard wrapping
+/// the still-borrowed lock (Drop = release, the C `LWLockReleaseAll`
+/// error-recovery backstop).
+fn lwlock_acquire_guard<'l>(
+    lock: &'l mut types_storage::LWLock,
+    mode: types_storage::LWLockMode,
+) -> types_error::PgResult<backend_storage_lmgr_lwlock_seams::LWLockGuard<'l>> {
+    let was_free = LWLockAcquire(lock, mode)?;
+    Ok(backend_storage_lmgr_lwlock_seams::LWLockGuard::new(
+        lock, was_free,
+    ))
+}
+
 /// Install every seam declared in `backend-storage-lmgr-lwlock-seams`.
 pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_initialize::set(LWLockInitialize);
-    backend_storage_lmgr_lwlock_seams::lwlock_acquire::set(LWLockAcquire);
+    backend_storage_lmgr_lwlock_seams::lwlock_acquire::set(lwlock_acquire_guard);
     backend_storage_lmgr_lwlock_seams::lwlock_release::set(LWLockRelease);
 }
 

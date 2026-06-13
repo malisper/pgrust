@@ -6,7 +6,7 @@ use super::*;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mcx::{PgString, PgVec};
-use types_tuple::access::ENR_NAMED_TUPLESTORE;
+use types_nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
 use types_tuple::heaptuple::TupleDescData;
 
 fn make_enr<'mcx>(mcx: Mcx<'mcx>, name: &str) -> EphemeralNamedRelationData<'mcx> {

@@ -334,8 +334,9 @@ pub fn heap_compute_data_size(
             // we want to flatten the expanded value so that the constructed
             // tuple doesn't depend on it
             data_length = att_nominal_alignby(data_length, atti.attalignby);
-            data_length +=
-                backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val.as_ref_bytes())?;
+            data_length += backend_utils_adt_misc2_seams::eoh_get_flat_size::call(
+                types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val.as_ref_bytes()),
+            )?;
         } else {
             // att_datum_alignby(data_length, attalignby, attlen, val)
             data_length = att_datum_alignby(data_length, atti.attalignby, atti.attlen, val);
@@ -454,9 +455,10 @@ fn fill_val(
             if varatt_is_external_expanded(val) {
                 // flatten the expanded value so the tuple doesn't depend on it
                 off = att_nominal_alignby(off, att.attalignby);
-                data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val)?;
+                let eoh = types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val);
+                data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(eoh)?;
                 backend_utils_adt_misc2_seams::eoh_flatten_into::call(
-                    val,
+                    eoh,
                     &mut data[off..off + data_length],
                 )?;
             } else {

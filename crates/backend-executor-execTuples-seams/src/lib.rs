@@ -34,6 +34,11 @@ seam_core::seam!(
     /// copy allocates in `mcx`, the destination slot's memory context (C:
     /// `slot->tts_mcxt`; the trimmed slot carries no payload yet, so the
     /// owned model passes the context explicitly). Fallible on OOM.
+    ///
+    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
+    /// (no descriptor/values payload), so this contract cannot yet be
+    /// implemented as promised. It must be re-signed when the first real
+    /// tuple flow (the slot payload model) lands.
     pub fn exec_copy_slot<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         dstslot: &mut types_nodes::TupleTableSlot,

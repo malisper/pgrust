@@ -11,12 +11,19 @@ seam_core::seam!(
     /// `format_procedure(procedure_oid)` (regproc.c): the function's printable
     /// name (possibly qualified) for diagnostics. Never NULL in C; `Err`
     /// carries the (shouldn't-happen) catalog-lookup `elog(ERROR)`.
+    ///
+    /// Owned-`String` sanction: error-message-only — every consumer feeds the
+    /// result straight into a `PgError` message (already global-allocator
+    /// `String` territory). A non-diagnostic consumer must re-sign this with
+    /// `Mcx<'mcx>`/`PgString<'mcx>` per AGENTS.md "Allocating seams take Mcx".
     pub fn format_procedure(procedure_oid: Oid) -> PgResult<String>
 );
 
 seam_core::seam!(
     /// `format_operator(operator_oid)` (regproc.c): the operator's printable
     /// name for diagnostics.
+    ///
+    /// Owned-`String` sanction: error-message-only, as [`format_procedure`].
     pub fn format_operator(operator_oid: Oid) -> PgResult<String>
 );
 

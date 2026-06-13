@@ -13,20 +13,18 @@ use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
     pgstat_end_changecount_write,
 };
-use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize, lwlock_release};
+use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use backend_utils_activity_pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_bgwriter, with_snapshot_bgwriter,
 };
 use backend_utils_activity_stat_seams::pgstat_flush_io;
 use types_core::TimestampTz;
 use types_error::PgResult;
+use types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
-
-/// `PGSTAT_KIND_BGWRITER` (`utils/pgstat_kind.h`).
-pub const PGSTAT_KIND_BGWRITER: u32 = 8;
 
 /// `PgStat_BgWriterStats PendingBgWriterStats = {0};`
 static mut PENDING_BGWRITER_STATS: PgStat_BgWriterStats = PgStat_BgWriterStats {
@@ -113,7 +111,7 @@ pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
         res = (|| {
             // see explanation above PgStatShared_BgWriter for the reset protocol
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            let guard = lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -127,7 +125,7 @@ pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
                 pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
             }
             stats_shmem.stats.stat_reset_timestamp = ts;
-            lwlock_release::call(&mut stats_shmem.lock)
+            guard.release()
         })();
     });
     res
@@ -150,10 +148,10 @@ pub fn pgstat_bgwriter_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            let guard = lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
-            lwlock_release::call(&mut stats_shmem.lock)?;
+            guard.release()?;
 
             Ok(reset)
         })();

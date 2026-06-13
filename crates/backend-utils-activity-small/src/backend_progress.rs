@@ -9,8 +9,8 @@
 //! message helpers are reached through their owners' seam crates.
 
 use backend_access_transam_parallel_seams::is_parallel_worker;
-use backend_libpq_pqformat_seams::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
-use mcx::Mcx;
+use backend_libpq_pqcomm_seams::pq_putmessage;
+use mcx::{vec_with_capacity_in, Mcx};
 use backend_utils_activity_status_seams::{
     begin_write_activity, end_write_activity, incr_progress_param, my_be_entry_present,
     progress_command, set_progress_command, set_progress_command_target, set_progress_param,
@@ -77,18 +77,24 @@ pub fn pgstat_progress_incr_param(index: i32, incr: int64) {
 /// `pgstat_progress_parallel_incr_param()` —
 ///
 /// A variant of [`pgstat_progress_incr_param`] to allow a worker to poke at
-/// a leader to do an incremental progress update. `Err` carries the libpq
-/// message-build `ereport(ERROR)`s (StringInfo growth). The message buffer
-/// is allocated in `mcx` (C: `initStringInfo` in `CurrentMemoryContext`).
+/// a leader to do an incremental progress update. `Err` carries the message
+/// buffer's allocation OOM. The message body is built caller-side in `mcx`
+/// (C: `initStringInfo` in `CurrentMemoryContext` +
+/// `pq_beginmessage`/`pq_sendint32`/`pq_sendint64`) and the whole message
+/// crosses to pqcomm once, via its `pq_putmessage` seam (C: `pq_endmessage`).
 pub fn pgstat_progress_parallel_incr_param(mcx: Mcx<'_>, index: i32, incr: int64) -> PgResult<()> {
     // Parallel workers notify a leader through a PqMsg_Progress message to
     // update progress, passing the progress index and incremented value.
     // Leaders can just call pgstat_progress_incr_param directly.
     if is_parallel_worker::call() {
-        let mut msgbuf = pq_beginmessage::call(mcx, PQ_MSG_PROGRESS)?;
-        pq_sendint32::call(&mut msgbuf, index as u32)?;
-        pq_sendint64::call(&mut msgbuf, incr as u64)?;
-        pq_endmessage::call(msgbuf);
+        // pq_sendint32(&progress_message, index);
+        // pq_sendint64(&progress_message, incr);
+        let mut body = vec_with_capacity_in(mcx, 12)?;
+        body.extend_from_slice(&(index as u32).to_be_bytes());
+        body.extend_from_slice(&(incr as u64).to_be_bytes());
+        // pq_endmessage(&progress_message): C ignores pq_putmessage's result
+        // (a send failure is ereport(COMMERROR) inside pqcomm, below ERROR).
+        let _ = pq_putmessage::call(PQ_MSG_PROGRESS, &body);
     } else {
         pgstat_progress_incr_param(index, incr);
     }

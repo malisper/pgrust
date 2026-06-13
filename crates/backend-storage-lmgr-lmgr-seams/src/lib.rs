@@ -11,7 +11,7 @@ seam_core::seam!(
     /// lookup).
     pub fn check_relation_locked_by_me(
         relation: types_core::primitive::Oid,
-        lockmode: types_tuple::access::LOCKMODE,
+        lockmode: types_storage::lock::LOCKMODE,
         orstronger: bool,
     ) -> bool
 );

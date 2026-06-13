@@ -108,7 +108,7 @@ fn install_seams() {
     });
 }
 
-const REL: PgStat_Kind = 2; // PGSTAT_KIND_RELATION
+const REL: PgStat_Kind = types_pgstat::activity_pgstat::PGSTAT_KIND_RELATION;
 
 fn drops_for(is_commit: bool) -> Vec<u64> {
     let ctx = MemoryContext::new("test");
@@ -263,8 +263,8 @@ fn execute_transactional_drops_drops_all() {
     install_seams();
 
     let items = vec![
-        XlXactStatsItem { kind: REL as i32, dboid: 5, objid: 1 },
-        XlXactStatsItem { kind: REL as i32, dboid: 5, objid: 2 },
+        XlXactStatsItem { kind: REL.0 as i32, dboid: 5, objid: 1 },
+        XlXactStatsItem { kind: REL.0 as i32, dboid: 5, objid: 2 },
     ];
     pgstat_execute_transactional_drops(&items, true).unwrap();
 

@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard, Once};
 use types_core::{Oid, TimestampTz};
 use types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStatShared_Checkpointer, PgStat_ArchiverStats,
-    PgStat_CheckpointerStats,
+    PgStat_CheckpointerStats, PgStat_Kind,
 };
 use types_pgstat::backend_progress::ProgressCommandType;
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
@@ -31,10 +31,8 @@ pub(crate) struct Env {
     pub target: Cell<Oid>,
     pub params: [Cell<i64>; PGSTAT_NUM_PROGRESS_PARAM],
     pub changecount: Cell<u64>,
-    // libpq message reassembly for the parallel-worker branch.
+    // libpq message capture for the parallel-worker branch.
     pub sent: Cell<Option<(i32, i64)>>,
-    pub pending_index: Cell<Option<i32>>,
-    pub pending_incr: Cell<Option<i64>>,
     // pgStatLocal mirrors.
     pub archiver_shmem: RefCell<PgStatShared_Archiver>,
     pub archiver_snapshot: RefCell<PgStat_ArchiverStats>,
@@ -44,7 +42,7 @@ pub(crate) struct Env {
     pub checkpointer_snapshot: RefCell<PgStat_CheckpointerStats>,
     pub is_shutdown: Cell<bool>,
     pub assert_is_up_calls: Cell<u32>,
-    pub snapshot_fixed_kinds: RefCell<Vec<u32>>,
+    pub snapshot_fixed_kinds: RefCell<Vec<PgStat_Kind>>,
     // GetCurrentTimestamp fixture.
     pub now: Cell<TimestampTz>,
     // pgstat_flush_io bookkeeping.
@@ -66,8 +64,6 @@ impl Env {
             params: Default::default(),
             changecount: Cell::new(0),
             sent: Cell::new(None),
-            pending_index: Cell::new(None),
-            pending_incr: Cell::new(None),
             archiver_shmem: RefCell::new(Default::default()),
             archiver_snapshot: RefCell::new(Default::default()),
             bgwriter_shmem: RefCell::new(Default::default()),
@@ -96,8 +92,6 @@ impl Env {
         }
         self.changecount.set(0);
         self.sent.set(None);
-        self.pending_index.set(None);
-        self.pending_incr.set(None);
         *self.archiver_shmem.borrow_mut() = Default::default();
         *self.archiver_snapshot.borrow_mut() = Default::default();
         *self.bgwriter_shmem.borrow_mut() = Default::default();
@@ -169,7 +163,7 @@ pub(crate) fn with_fixture<R>(f: impl FnOnce(&Env) -> R) -> R {
 
 fn install_seams() {
     use backend_access_transam_parallel_seams as parallel;
-    use backend_libpq_pqformat_seams as pqformat;
+    use backend_libpq_pqcomm_seams as pqcomm;
     use backend_storage_lmgr_lwlock_seams as lwlock;
     use backend_utils_activity_pgstat_seams as pgstat;
     use backend_utils_activity_stat_seams as stat;
@@ -202,27 +196,13 @@ fn install_seams() {
 
     parallel::is_parallel_worker::set(|| env().parallel.get());
 
-    pqformat::pq_beginmessage::set(|mcx, msgtype| {
-        let e = env();
-        e.pending_index.set(None);
-        e.pending_incr.set(None);
-        let mut buf = types_stringinfo::StringInfo::new_in(mcx);
-        buf.cursor = msgtype as usize;
-        Ok(buf)
-    });
-    pqformat::pq_sendint32::set(|_buf, v| {
-        env().pending_index.set(Some(v as i32));
-        Ok(())
-    });
-    pqformat::pq_sendint64::set(|_buf, v| {
-        env().pending_incr.set(Some(v as i64));
-        Ok(())
-    });
-    pqformat::pq_endmessage::set(|_buf| {
-        let e = env();
-        let idx = e.pending_index.get().unwrap();
-        let incr = e.pending_incr.get().unwrap();
-        e.sent.set(Some((idx, incr)));
+    pqcomm::pq_putmessage::set(|msgtype, body| {
+        assert_eq!(msgtype, crate::backend_progress::PQ_MSG_PROGRESS);
+        assert_eq!(body.len(), 12, "PqMsg_Progress body is int32 + int64");
+        let idx = i32::from_be_bytes(body[..4].try_into().unwrap());
+        let incr = i64::from_be_bytes(body[4..].try_into().unwrap());
+        env().sent.set(Some((idx, incr)));
+        Ok(0)
     });
 
     // Callback shmem seams run the body against the per-thread fixture's
@@ -250,9 +230,9 @@ fn install_seams() {
         let e = env();
         e.lwlock_inits.set(e.lwlock_inits.get() + 1);
     });
-    lwlock::lwlock_acquire::set(|_lock, mode| {
+    lwlock::lwlock_acquire::set(|lock, mode| {
         env().lwlock_acquires.borrow_mut().push(mode);
-        Ok(true)
+        Ok(lwlock::LWLockGuard::new(lock, true))
     });
     lwlock::lwlock_release::set(|_lock| {
         let e = env();

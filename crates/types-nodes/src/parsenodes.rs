@@ -2,7 +2,7 @@
 
 use mcx::PgBox;
 use types_core::primitive::{Index, Oid};
-use types_tuple::access::LOCKMODE;
+use types_storage::lock::LOCKMODE;
 
 use crate::bitmapset::Bitmapset;
 

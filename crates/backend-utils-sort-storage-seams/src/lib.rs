@@ -60,6 +60,10 @@ seam_core::seam!(
     /// `tuplestore_gettupleslot(state, forward, copy, slot)` (tuplestore.c):
     /// fetch the next tuple into the given slot; returns `true` when a tuple
     /// was fetched.
+    ///
+    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
+    /// (no payload), so this contract cannot yet move tuple data; re-sign it
+    /// when the slot payload model lands.
     pub fn tuplestore_gettupleslot(
         state: &mut types_nodes::Tuplestorestate,
         forward: bool,
@@ -71,6 +75,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `tuplestore_puttupleslot(state, slot)` (tuplestore.c): append a copy of
     /// the slot's tuple to the store.
+    ///
+    /// PROVISIONAL: see `tuplestore_gettupleslot` — re-sign when the slot
+    /// payload model lands.
     pub fn tuplestore_puttupleslot(
         state: &mut types_nodes::Tuplestorestate,
         slot: &types_nodes::TupleTableSlot,
