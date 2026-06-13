@@ -1,0 +1,34 @@
+[package]
+name = "backend-commands-portalcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_portalcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-dest = { path = "../types-dest" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-portal = { path = "../types-portal" }
+types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }
+
+backend-commands-portalcmds-seams = { path = "../backend-commands-portalcmds-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-tstorereceiver-seams = { path = "../backend-executor-tstorereceiver-seams" }
+backend-nodes-queryjumble-seams = { path = "../backend-nodes-queryjumble-seams" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-tcop-pquery-seams = { path = "../backend-tcop-pquery-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
+backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

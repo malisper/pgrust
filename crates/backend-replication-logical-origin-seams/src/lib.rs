@@ -76,3 +76,10 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `max_active_replication_origins` (origin.c GUC): the number of
+    /// replication-origin slots configured. Zero means replication origins are
+    /// disabled, which the launcher checks before starting apply workers.
+    pub fn max_active_replication_origins() -> i32
+);
