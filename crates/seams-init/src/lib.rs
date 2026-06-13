@@ -70,6 +70,7 @@ pub fn init_all() {
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
+    backend_utils_misc_timeout::init_seams();
     backend_utils_misc_sampling::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_time_combocid::init_seams();

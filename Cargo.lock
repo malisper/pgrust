@@ -7345,6 +7345,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-timeout"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-latch-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-timeout-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-error",
+ "types-signal",
+ "types-timeout",
+]
+
+[[package]]
 name = "backend-utils-misc-timeout-seams"
 version = "0.0.0"
 dependencies = [
@@ -7916,6 +7932,7 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
