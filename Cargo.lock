@@ -6096,6 +6096,7 @@ dependencies = [
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeHash",
+ "backend-executor-nodeHashjoin",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",

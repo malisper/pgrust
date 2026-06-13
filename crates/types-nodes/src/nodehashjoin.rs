@@ -15,9 +15,11 @@ use crate::nodeindexscan::Plan;
 use crate::nodes::Node;
 
 /// `T_HashJoin` (nodes/nodetags.h) — the plan-node tag for a HashJoin.
-pub const T_HashJoin: crate::nodes::NodeTag = crate::nodes::NodeTag(371);
-/// `T_HashJoinState` (nodes/nodetags.h) — the executor-state node tag.
-pub const T_HashJoinState: crate::nodes::NodeTag = crate::nodes::NodeTag(437);
+pub const T_HashJoin: crate::nodes::NodeTag = crate::nodes::NodeTag(359);
+/// `T_HashJoinState` (nodes/nodetags.h) — the executor-state node tag. This is
+/// the single canonical value from `execstate_tags` (423); re-exported here so
+/// the hash-join vocabulary reads as one module.
+pub use crate::execstate_tags::T_HashJoinState;
 
 // `JoinType`, the `Join` plan-node base and the `JoinState` head are the
 // canonical shapes from the `jointype` module (main's single source of truth,

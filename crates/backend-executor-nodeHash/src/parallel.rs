@@ -35,9 +35,7 @@ use backend_utils_mmgr_dsa_seams as dsa;
 use backend_utils_sort_storage_seams as sts;
 use types_storage::{pg_atomic_uint64, LWLockMode};
 
-use crate::{
-    HASH_CHUNK_HEADER_SIZE, HJTUPLE_OVERHEAD, MAXALIGN, MaxAllocSize, SizeofMinimalTupleHeader,
-};
+use crate::{HASH_CHUNK_HEADER_SIZE, HJTUPLE_OVERHEAD, MAXALIGN, MaxAllocSize};
 use types_nodes::nodehash::{HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD};
 
 // ===========================================================================
@@ -815,7 +813,16 @@ pub fn ExecParallelHashTableInsert<'mcx>(
     slot: &types_nodes::TupleTableSlot,
     hashvalue: uint32,
 ) -> PgResult<()> {
-    let (mintuple_addr, t_len, should_free) = exec_fetch_slot_minimal_tuple(slot);
+    // bool shouldFree;
+    // MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
+    // The execTuples seam copies the slot's tuple into mcx; the owned model
+    // never frees explicitly (the copy is dropped with the context). We stage
+    // its flat byte image so the DSA copy below sees the real tuple bytes.
+    let tuple =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
+    let image = tuple.to_minimal_bytes();
+    let mintuple_addr = image.as_ptr() as usize;
+    let t_len = tuple.t_len as usize;
 
     loop {
         let bb = exec_hash_get_bucket_and_batch(hashtable, hashvalue);
@@ -858,9 +865,6 @@ pub fn ExecParallelHashTableInsert<'mcx>(
         break;
     }
 
-    if should_free {
-        heap_free_minimal_tuple(mintuple_addr);
-    }
     Ok(())
 }
 
@@ -872,7 +876,11 @@ pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
     slot: &types_nodes::TupleTableSlot,
     hashvalue: uint32,
 ) -> PgResult<()> {
-    let (mintuple_addr, t_len, should_free) = exec_fetch_slot_minimal_tuple(slot);
+    let tuple =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
+    let image = tuple.to_minimal_bytes();
+    let mintuple_addr = image.as_ptr() as usize;
+    let t_len = tuple.t_len as usize;
 
     let bb = exec_hash_get_bucket_and_batch(hashtable, hashvalue);
     debug_assert_eq!(bb.batchno, hashtable.curbatch);
@@ -890,9 +898,6 @@ pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
     heap_tuple_header_clear_match(hjtuple_mintuple_addr(hashtuple_addr));
     ExecParallelHashPushTuple(hashtable, bb.bucketno, hashtuple_idx, shared);
 
-    if should_free {
-        heap_free_minimal_tuple(mintuple_addr);
-    }
     Ok(())
 }
 
@@ -904,10 +909,25 @@ pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
 /// — scan a shared hash bucket for matches to the current outer tuple.
 pub fn ExecParallelScanHashBucket<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    econtext: &mut types_nodes::ExprContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
     let hashvalue = hjstate.hj_CurHashValue;
     let cur_bucket = hjstate.hj_CurBucketNo;
+    let hash_tuple_slot = hjstate
+        .hj_HashTupleSlot
+        .expect("ExecParallelScanHashBucket: hj_HashTupleSlot must be set up by init");
+    let econtext_id = hjstate
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecParallelScanHashBucket: ps_ExprContext");
+    let hashclauses = hjstate
+        .hashclauses
+        .as_deref()
+        .expect("ExecParallelScanHashBucket: hashclauses must be compiled by init")
+        as *const types_nodes::execexpr::ExprState;
+
     let hashtable = hjstate
         .hj_HashTable
         .as_ref()
@@ -922,10 +942,28 @@ pub fn ExecParallelScanHashBucket<'mcx>(
     while let Some(ht) = hash_tuple {
         let ht_hashvalue = unsafe { (*(ht.0 as *const HashJoinTupleRaw)).hashvalue };
         if ht_hashvalue == hashvalue {
-            // insert hashtable's tuple into exec slot so ExecQual sees it
-            let mintuple_addr = hjtuple_mintuple_addr(ht.0);
-            exec_store_minimal_tuple_into_inner(mintuple_addr, hjstate, econtext);
-            if exec_qual_and_reset(hjstate, econtext)? {
+            // insert hashtable's tuple into exec slot so ExecQual sees it:
+            //   inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(hashTuple),
+            //                                    hj_HashTupleSlot, false);
+            //   econtext->ecxt_innertuple = inntuple;
+            // The shared tuple is a flat MinimalTuple byte image in DSA;
+            // reconstruct it into mcx and force-store into the hash-tuple slot.
+            let mtup = mintuple_from_dsa(mcx, hjtuple_mintuple_addr(ht.0))?;
+            let mtup = mcx::alloc_in(mcx, mtup)?;
+            backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
+                hash_tuple_slot,
+                mtup,
+                false,
+                estate,
+            )?;
+            estate.ecxt_mut(econtext_id).ecxt_innertuple = Some(hash_tuple_slot);
+            // if (ExecQualAndReset(hjclauses, econtext)) { hj_CurTuple = ht; return true; }
+            let pass = backend_executor_execExpr_seams::exec_qual_and_reset::call(
+                unsafe { &*hashclauses },
+                econtext_id,
+                estate,
+            )?;
+            if pass {
                 hjstate.hj_CurTuple = Some(ht);
                 return Ok(true);
             }
@@ -1028,8 +1066,17 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
 /// ExprContext *econtext)` — return the next unmatched inner tuple.
 pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    econtext: &mut types_nodes::ExprContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let hash_tuple_slot = hjstate
+        .hj_HashTupleSlot
+        .expect("ExecParallelScanHashTableForUnmatched: hj_HashTupleSlot must be set up by init");
+    let econtext_id = hjstate
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecParallelScanHashTableForUnmatched: ps_ExprContext");
     let mut hash_tuple = hjstate.hj_CurTuple;
 
     loop {
@@ -1052,8 +1099,23 @@ pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
         while let Some(ht) = hash_tuple {
             let mintuple_addr = hjtuple_mintuple_addr(ht.0);
             if !heap_tuple_header_has_match(mintuple_addr) {
-                exec_store_minimal_tuple_into_inner(mintuple_addr, hjstate, econtext);
-                reset_expr_context(econtext);
+                // insert hashtable's tuple into exec slot:
+                //   inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(hashTuple),
+                //                                    hj_HashTupleSlot, false);
+                //   econtext->ecxt_innertuple = inntuple;  ResetExprContext(econtext);
+                let mtup = mintuple_from_dsa(mcx, mintuple_addr)?;
+                let mtup = mcx::alloc_in(mcx, mtup)?;
+                backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
+                    hash_tuple_slot,
+                    mtup,
+                    false,
+                    estate,
+                )?;
+                estate.ecxt_mut(econtext_id).ecxt_innertuple = Some(hash_tuple_slot);
+                backend_executor_execUtils_seams::reset_per_tuple_expr_context::call(
+                    estate,
+                    &hjstate.js.ps,
+                )?;
                 hjstate.hj_CurTuple = Some(ht);
                 return Ok(true);
             }
@@ -1957,81 +2019,28 @@ fn dsa_pointer_atomic_write(buckets_addr: usize, i: i32, val: DsaPointer) {
 // slot<->MinimalTuple transfer is owned by execTuples. Per-backend scratch
 // holds the flat image for the duration of one insert/scan step.
 
-std::thread_local! {
-    /// Scratch flat-image buffer for the slot<->MinimalTuple transfer (the
-    /// execTuples-owned op is not yet available through a seam; the slot model
-    /// carries no payload). Sized for one MAXALIGN'd HashJoinTuple + image.
-    static MT_SCRATCH: std::cell::RefCell<std::vec::Vec<u8>> =
-        const { std::cell::RefCell::new(std::vec::Vec::new()) };
-}
-
-/// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` — obtain the slot's
-/// MinimalTuple flat image (address, `t_len`, `shouldFree`). The slot payload
-/// model carries no tuple bytes yet (the execTuples-owned `get_minimal_tuple`
-/// op is unported), so this stages a header-only image in per-backend scratch;
-/// `shouldFree=false` because the scratch is reused, not heap-owned.
+/// Reconstruct a `MinimalTupleData` (into `mcx`) from the flat MinimalTuple
+/// byte image at a DSA address. The image is the `to_minimal_bytes()` layout
+/// the insert path wrote: leading `t_len` word then the body. C reads the same
+/// bytes directly as a `MinimalTuple *`; the owned model rebuilds the struct.
 #[inline]
-fn exec_fetch_slot_minimal_tuple(_slot: &types_nodes::TupleTableSlot) -> (usize, usize, bool) {
-    MT_SCRATCH.with(|s| {
-        let mut buf = s.borrow_mut();
-        if buf.len() < SizeofMinimalTupleHeader {
-            buf.resize(SizeofMinimalTupleHeader, 0);
-        }
-        // t_len = header size (header-only image until the slot payload lands).
-        let t_len = SizeofMinimalTupleHeader as u32;
-        buf[0..4].copy_from_slice(&t_len.to_ne_bytes());
-        (buf.as_ptr() as usize, t_len as usize, false)
-    })
-}
-
-/// `heap_free_minimal_tuple(tuple)` — free a copy ExecFetchSlotMinimalTuple
-/// made. The current path never makes a heap copy (`shouldFree=false`), so this
-/// is a no-op until the execTuples slot payload + copy path land.
-#[inline]
-fn heap_free_minimal_tuple(_mintuple_addr: usize) {}
-
-/// `ExecStoreMinimalTuple(mintuple, hjstate->hj_HashTupleSlot, false)` then
-/// `econtext->ecxt_innertuple = inntuple` — store the flat-image tuple into the
-/// hash-tuple slot and point the inner tuple at it. The slot store is the
-/// execTuples-owned op; with the payload model incomplete this records the
-/// inner-tuple slot id the scan already holds (`hj_HashTupleSlot`).
-#[inline]
-fn exec_store_minimal_tuple_into_inner(
-    _mintuple_addr: usize,
-    hjstate: &mut HashJoinState<'_>,
-    econtext: &mut types_nodes::ExprContext<'_>,
-) {
-    // ecxt_innertuple points at the hash tuple slot; carry whatever the scan's
-    // econtext already had (the slot id is assigned when the slot pool lands).
-    econtext.ecxt_innertuple = hjstate
-        .js
-        .ps
-        .ps_ResultTupleSlot
-        .or(econtext.ecxt_innertuple);
-}
-
-/// `ExecQualAndReset(hjclauses, econtext)` — evaluate the hash clauses against
-/// the just-stored inner tuple, then reset the per-tuple context. The compiled
-/// qual evaluation is owned by execExpr and threads the EState (`exec_qual`
-/// takes `EcxtId`/`&mut EStateData`); the scan's `&mut ExprContext` argument
-/// cannot supply that pair in this scaffold, so the match decision falls to the
-/// caller-side recheck after the slot/qual path lands. We reset the context as
-/// C does and report "no qual match here", forcing the chain walk to continue
-/// (conservative: never emits an unverified match).
-#[inline]
-fn exec_qual_and_reset(
-    _hjstate: &mut HashJoinState<'_>,
-    econtext: &mut types_nodes::ExprContext<'_>,
-) -> PgResult<bool> {
-    reset_expr_context(econtext);
-    Ok(false)
-}
-
-/// `ResetExprContext(econtext)` — `MemoryContextReset(ecxt_per_tuple_memory)`.
-/// Pure context-reset logic, done inline.
-#[inline]
-fn reset_expr_context(econtext: &mut types_nodes::ExprContext<'_>) {
-    econtext.ecxt_per_tuple_memory.reset();
+fn mintuple_from_dsa<'mcx>(
+    mcx: Mcx<'mcx>,
+    mintuple_addr: usize,
+) -> PgResult<types_tuple::heaptuple::MinimalTupleData<'mcx>> {
+    // First word is t_len; the body length is implied by the staged image. Read
+    // t_len, then the body bytes that follow (the to_minimal_bytes layout writes
+    // exactly t_len does not bound the image, so derive the body from t_bits len).
+    let t_len = unsafe { core::ptr::read_unaligned(mintuple_addr as *const u32) };
+    // The staged image is: t_len(4) mt_padding(6) t_infomask2(2) t_infomask(2)
+    // t_hoff(1) t_bits_len(4) t_bits[t_bits_len]. Read t_bits_len to size body.
+    let bits_len = unsafe {
+        core::ptr::read_unaligned((mintuple_addr + 4 + 6 + 2 + 2 + 1) as *const u32)
+    } as usize;
+    let body_len = 6 + 2 + 2 + 1 + 4 + bits_len;
+    let body =
+        unsafe { core::slice::from_raw_parts((mintuple_addr + 4) as *const u8, body_len) };
+    types_tuple::heaptuple::MinimalTupleData::from_minimal_parts(mcx, t_len, body)
 }
 
 /// `work_mem` / `hash_mem_multiplier` GUCs (`utils/guc.c`). C per-backend

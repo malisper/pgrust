@@ -110,7 +110,7 @@ mod _seam_deps {
 mod adapters {
     use mcx::PgBox;
     use types_error::{PgError, PgResult};
-    use types_nodes::execnodes::{EStateData, ExprContext, SlotId};
+    use types_nodes::execnodes::{EStateData, SlotId};
     use types_nodes::execexpr::ExprState;
     use types_nodes::planstate::PlanStateNode;
     use types_nodes::nodehash::{
@@ -364,26 +364,14 @@ mod adapters {
         node: &mut HashJoinState<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool> {
-        let id = node
-            .js
-            .ps
-            .ps_ExprContext
-            .expect("exec_parallel_scan_hash_bucket: ps_ExprContext");
-        let econtext: *mut ExprContext = estate.ecxt_mut(id);
-        parallel::ExecParallelScanHashBucket(node, unsafe { &mut *econtext })
+        parallel::ExecParallelScanHashBucket(node, estate)
     }
 
     pub fn exec_parallel_scan_hash_table_for_unmatched<'mcx>(
         node: &mut HashJoinState<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool> {
-        let id = node
-            .js
-            .ps
-            .ps_ExprContext
-            .expect("exec_parallel_scan_hash_table_for_unmatched: ps_ExprContext");
-        let econtext: *mut ExprContext = estate.ecxt_mut(id);
-        parallel::ExecParallelScanHashTableForUnmatched(node, unsafe { &mut *econtext })
+        parallel::ExecParallelScanHashTableForUnmatched(node, estate)
     }
 
     pub fn exec_parallel_prep_hash_table_for_unmatched<'mcx>(
