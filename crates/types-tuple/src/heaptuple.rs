@@ -93,6 +93,34 @@ pub const TYPSTORAGE_MAIN: i8 = b'm' as i8;
 pub const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 pub const InvalidCompressionMethod: i8 = 0;
 
+/// `DEFAULT_COLLATION_OID` (`pg_collation.dat` oid 100) — the database default
+/// collation.
+pub const DEFAULT_COLLATION_OID: Oid = 100;
+
+// `CompactAttribute.attnullability` values (`access/tupdesc.h`).
+/// `ATTNULLABLE_UNRESTRICTED` — no not-null constraint exists (`'f'`).
+pub const ATTNULLABLE_UNRESTRICTED: i8 = b'f' as i8;
+/// `ATTNULLABLE_UNKNOWN` — a not-null constraint exists but its validity is
+/// unknown (`'u'`).
+pub const ATTNULLABLE_UNKNOWN: i8 = b'u' as i8;
+/// `ATTNULLABLE_VALID` — a valid not-null constraint exists (`'v'`).
+pub const ATTNULLABLE_VALID: i8 = b'v' as i8;
+/// `ATTNULLABLE_INVALID` — a not-null constraint exists but is marked invalid
+/// (`'i'`).
+pub const ATTNULLABLE_INVALID: i8 = b'i' as i8;
+
+/// `PG_INT16_MAX` (`c.h`).
+pub const PG_INT16_MAX: i32 = i16::MAX as i32;
+
+// `pg_config.h` alignment macros for the standard 64-bit build target;
+// `populate_compact_attribute_internal` maps `pg_type.typalign` chars to these.
+/// `pg_config.h`: `ALIGNOF_SHORT`.
+pub const ALIGNOF_SHORT: u8 = 2;
+/// `pg_config.h`: `ALIGNOF_INT`.
+pub const ALIGNOF_INT: u8 = 4;
+/// `pg_config.h`: `ALIGNOF_DOUBLE`.
+pub const ALIGNOF_DOUBLE: u8 = 8;
+
 pub const MaxTupleAttributeNumber: i32 = 1664;
 pub const MaxHeapAttributeNumber: i32 = 1600;
 
