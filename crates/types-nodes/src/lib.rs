@@ -23,6 +23,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod list;
 pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
