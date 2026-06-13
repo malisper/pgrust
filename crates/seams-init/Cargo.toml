@@ -27,6 +27,7 @@ backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }

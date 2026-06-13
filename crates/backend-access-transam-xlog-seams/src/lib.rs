@@ -12,3 +12,16 @@ seam_core::seam!(
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
     pub fn xlog_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RecoveryInProgress()` (xlog.c): true while the server is in archive
+    /// recovery / standby mode. Shared-state read; infallible.
+    pub fn RecoveryInProgress() -> bool
+);
+
+seam_core::seam!(
+    /// `GetActiveWalLevelOnStandby()` (xlog.c): the effective `wal_level` on a
+    /// standby, read from the control file's last checkpoint. Shared-state
+    /// read; infallible.
+    pub fn GetActiveWalLevelOnStandby() -> types_logical::WalLevel
+);

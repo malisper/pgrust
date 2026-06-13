@@ -35,3 +35,11 @@ seam_core::seam!(
     /// callback or the catchup machinery.
     pub fn accept_invalidation_messages() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `InvalidateSystemCaches()` (inval.c): blow away all cached catalog
+    /// state — logical decoding calls it to clear non-timetravel entries
+    /// around its fast-forward WAL read loops. `Err` carries any error raised
+    /// by an invalidation callback.
+    pub fn invalidate_system_caches() -> PgResult<()>
+);
