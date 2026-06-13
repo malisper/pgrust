@@ -86,6 +86,8 @@ pub struct FormData_pg_index {
     /// INCLUDE columns; `IndexRelationGetNumberOfKeyAttributes`). `0` for a
     /// non-index relation's absent `rd_index`.
     pub indnkeyatts: i16,
+    /// `bool indisunique` — is this a unique index?
+    pub indisunique: bool,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
     /// `Oid indrelid` — the table this index is for.

@@ -18,6 +18,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelFileLocatorSkippingWAL(rlocator)` (storage.c): true if the relation
+    /// is in the `pendingDeletes`/`pendingSyncs` set such that WAL is being
+    /// skipped for its current relfilenode this transaction
+    /// (`wal_skip_threshold`). Pure in-memory hash lookup; cannot `ereport`.
+    pub fn rel_file_locator_skipping_wal(rlocator: RelFileLocator) -> bool
+);
+
+seam_core::seam!(
     /// `smgrDoPendingSyncs(isCommit, isParallelWorker)` — fsync files created
     /// and not WAL-logged in this transaction.
     pub fn smgr_do_pending_syncs(is_commit: bool, is_parallel_worker: bool) -> PgResult<()>
