@@ -56,6 +56,27 @@ fn ascii_safe_strlcpy_replaces_high_bit_and_nul_terminates() {
 }
 
 #[test]
+fn ascii_safe_strlcpy_drops_control_chars_keeps_whitespace() {
+    // ascii.c: keep 32..=127 and \n/\r/\t; every other byte (incl. low control
+    // bytes 0x01-0x08, 0x0b, 0x0c, 0x0e-0x1f) becomes '?'.
+    let mut src = [0u8; 8];
+    src[0] = 0x01; // SOH -> '?'
+    src[1] = b'\t'; // kept
+    src[2] = 0x1f; // US -> '?'
+    src[3] = b'\n'; // kept
+    src[4] = b' '; // 32 -> kept
+    src[5] = 0x7f; // DEL (127) -> kept
+    let out = ascii_safe_strlcpy(&src, 8);
+    assert_eq!(out[0], b'?');
+    assert_eq!(out[1], b'\t');
+    assert_eq!(out[2], b'?');
+    assert_eq!(out[3], b'\n');
+    assert_eq!(out[4], b' ');
+    assert_eq!(out[5], 0x7f);
+    assert_eq!(out[7], 0);
+}
+
+#[test]
 fn internal_bgworker_names_in_declaration_order() {
     assert_eq!(INTERNAL_BGWORKER_NAMES.len(), 5);
     assert_eq!(INTERNAL_BGWORKER_NAMES[0], "ParallelWorkerMain");

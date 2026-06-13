@@ -24,16 +24,6 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
-/// `WAIT_EVENT_BGWORKER_SHUTDOWN` — "Waiting for background worker to shut
-/// down." 6th entry (0-based 5) of the IPC section, so `PG_WAIT_IPC | 5`
-/// (= 134217733, matching c2rust).
-pub const WAIT_EVENT_BGWORKER_SHUTDOWN: u32 = PG_WAIT_IPC | 5;
-
-/// `WAIT_EVENT_BGWORKER_STARTUP` — "Waiting for background worker to start
-/// up." 7th entry (0-based 6) of the IPC section, so `PG_WAIT_IPC | 6`
-/// (= 134217734, matching c2rust).
-pub const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC | 6;
-
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).

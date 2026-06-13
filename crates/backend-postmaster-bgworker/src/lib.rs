@@ -347,10 +347,28 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
             continue;
         }
 
-        // Copy the registration data into the registered workers list. The C
-        // `MemoryContextAllocExtended(PostmasterContext, …, MCXT_ALLOC_NO_OOM
-        // | MCXT_ALLOC_ZERO)` OOM branch (LOG "out of memory", return) has no
-        // counterpart in the owned model and is unreachable.
+        // Copy the registration data into the registered workers list.
+        //
+        // C: rw = MemoryContextAllocExtended(PostmasterContext,
+        //         sizeof(RegisteredBgWorker), MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
+        //     if (rw == NULL) { ereport(LOG, OUT_OF_MEMORY, "out of memory"); return; }
+        //
+        // The no-OOM allocator is deliberate: this runs in the postmaster, which
+        // must survive OOM rather than crash. We reserve the list node's space
+        // fallibly (try_reserve) and, on failure, LOG and return without
+        // aborting — preserving the postmaster's survive-OOM contract.
+        if let Err(_e) =
+            BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().try_reserve(1))
+        {
+            ereport::call(
+                PgError::new(LOG, "out of memory".to_string())
+                    .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+                    .with_message_id("out of memory")
+                    .with_error_location(loc(356, "BackgroundWorkerStateChange")),
+            )?;
+            return Ok(());
+        }
+
         let slot_worker = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
             data.as_ref().unwrap().slot[slotno as usize].worker
@@ -1028,8 +1046,24 @@ pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) -> PgResult<()> {
         return Ok(());
     }
 
-    // Copy the registration data into the postmaster's private memory. (The C
-    // MCXT_ALLOC_NO_OOM OOM branch has no counterpart in the owned model.)
+    // Copy the registration data into the registered workers list.
+    //
+    // C: rw = MemoryContextAllocExtended(PostmasterContext,
+    //         sizeof(RegisteredBgWorker), MCXT_ALLOC_NO_OOM);
+    //     if (rw == NULL) { ereport(LOG, OUT_OF_MEMORY, "out of memory"); return; }
+    //
+    // No-OOM is deliberate (this runs in the postmaster). Reserve the node's
+    // space fallibly; on failure LOG and return without aborting.
+    if let Err(_e) = BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().try_reserve(1)) {
+        ereport::call(
+            PgError::new(LOG, "out of memory".to_string())
+                .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+                .with_message_id("out of memory")
+                .with_error_location(loc(1021, "RegisterBackgroundWorker")),
+        )?;
+        return Ok(());
+    }
+
     let rw = RegisteredBgWorker {
         rw_worker: worker,
         rw_pid: 0,
@@ -1068,7 +1102,9 @@ pub fn RegisterDynamicBackgroundWorker(
 
     let parallel = (worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0;
 
-    backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+    // LWLockAcquire(BackgroundWorkerLock, LW_EXCLUSIVE) — held across the
+    // unused-slot search; the guard's Drop is C's LWLockReleaseAll abort path.
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
         types_storage::LWLockMode::LW_EXCLUSIVE,
     )?;
@@ -1089,9 +1125,7 @@ pub fn RegisterDynamicBackgroundWorker(
                     <= types_bgworker::MAX_PARALLEL_WORKER_LIMIT as uint32
             );
             drop(data);
-            backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(
-                BACKGROUND_WORKER_LWLOCK_OFFSET,
-            )?;
+            guard.release()?;
             return Ok(None);
         }
 
@@ -1118,7 +1152,7 @@ pub fn RegisterDynamicBackgroundWorker(
         }
     }
 
-    backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(BACKGROUND_WORKER_LWLOCK_OFFSET)?;
+    guard.release()?;
 
     // If we found a slot, tell the postmaster to notice the change.
     if success {
@@ -1151,15 +1185,14 @@ pub fn GetBackgroundWorkerPid(handle: &BackgroundWorkerHandle) -> (BgwHandleStat
     let slotno = handle.slot;
 
     // Keep it simple and grab the lock (contention is unlikely).
-    if backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+    // GetBackgroundWorkerPid is infallible in C; the shared-lock acquire
+    // cannot fail there. The guard is held across the slot read; its Drop is
+    // C's LWLockReleaseAll abort path.
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
         types_storage::LWLockMode::LW_SHARED,
     )
-    .is_err()
-    {
-        // GetBackgroundWorkerPid is infallible in C; an error acquiring the
-        // shared lock cannot occur there. Mirror the C control flow.
-    }
+    .expect("BackgroundWorkerLock shared acquire cannot fail");
 
     let pid = {
         let data = BACKGROUND_WORKER_DATA.lock().unwrap();
@@ -1173,9 +1206,8 @@ pub fn GetBackgroundWorkerPid(handle: &BackgroundWorkerHandle) -> (BgwHandleStat
         }
     };
 
-    let _ = backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(
-        BACKGROUND_WORKER_LWLOCK_OFFSET,
-    );
+    // LWLockRelease(BackgroundWorkerLock).
+    let _ = guard.release();
 
     if pid == 0 {
         (BgwHandleStatus::Stopped, 0)
@@ -1275,7 +1307,9 @@ pub fn TerminateBackgroundWorker(handle: &BackgroundWorkerHandle) -> PgResult<()
     let slotno = handle.slot;
     let mut signal_postmaster = false;
 
-    backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+    // LWLockAcquire(BackgroundWorkerLock, LW_EXCLUSIVE) — held across the
+    // generation check / terminate store; Drop is C's LWLockReleaseAll path.
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
         types_storage::LWLockMode::LW_EXCLUSIVE,
     )?;
@@ -1290,7 +1324,7 @@ pub fn TerminateBackgroundWorker(handle: &BackgroundWorkerHandle) -> PgResult<()
         }
     }
 
-    backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(BACKGROUND_WORKER_LWLOCK_OFFSET)?;
+    guard.release()?;
 
     if signal_postmaster {
         backend_storage_ipc_pmsignal_seams::send_postmaster_signal_bgworker_change::call();
@@ -1341,10 +1375,13 @@ fn LookupBackgroundWorkerFunction(libraryname: &[u8], funcname: &[u8]) -> PgResu
 pub fn GetBackgroundWorkerTypeByPid(pid: pid_t) -> Option<String> {
     let mut result: Option<String> = None;
 
-    let _ = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+    // LWLockAcquire(BackgroundWorkerLock, LW_SHARED) — infallible in C; the
+    // guard is held across the slot scan; Drop is C's LWLockReleaseAll path.
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
         types_storage::LWLockMode::LW_SHARED,
-    );
+    )
+    .expect("BackgroundWorkerLock shared acquire cannot fail");
 
     {
         let data = BACKGROUND_WORKER_DATA.lock().unwrap();
@@ -1360,9 +1397,8 @@ pub fn GetBackgroundWorkerTypeByPid(pid: pid_t) -> Option<String> {
         }
     }
 
-    let _ = backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(
-        BACKGROUND_WORKER_LWLOCK_OFFSET,
-    );
+    // LWLockRelease(BackgroundWorkerLock).
+    let _ = guard.release();
 
     result
 }
@@ -1402,19 +1438,30 @@ fn strcpy<const N: usize>(dst: &mut [u8; N], src: &[u8; N]) {
     }
 }
 
-/// `ascii_safe_strlcpy(dst, src, destsiz)` (`common/string.c`): copy at most
-/// `destsiz - 1` bytes of NUL-terminated `src` into a fresh `[u8; N]`,
-/// replacing any non-7-bit-ASCII byte with `'?'`, and NUL-terminate.
+/// `ascii_safe_strlcpy(dst, src, destsiz)` (`utils/adt/ascii.c:174`): copy at
+/// most `destsiz - 1` bytes of NUL-terminated `src` into a fresh `[u8; N]`,
+/// keeping printable ASCII (`32 <= ch <= 127`) and the whitespace bytes
+/// `'\n'`/`'\r'`/`'\t'`, replacing every other byte with `'?'`, then
+/// NUL-terminate. Must never `ereport(ERROR)` — it runs in the postmaster.
 fn ascii_safe_strlcpy<const N: usize>(src: &[u8; N], destsiz: usize) -> [u8; N] {
     let mut dst = [0u8; N];
     let limit = destsiz.saturating_sub(1).min(N - 1);
     let mut i = 0;
     while i < limit {
-        let c = src[i];
-        if c == 0 {
+        let ch = src[i];
+        if ch == 0 {
             break;
         }
-        dst[i] = if c.is_ascii() { c } else { b'?' };
+        dst[i] = if (32..=127).contains(&ch) {
+            // Keep printable ASCII characters.
+            ch
+        } else if ch == b'\n' || ch == b'\r' || ch == b'\t' {
+            // White-space is also OK.
+            ch
+        } else {
+            // Everything else is replaced with '?'.
+            b'?'
+        };
         i += 1;
     }
     dst[i] = 0;

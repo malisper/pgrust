@@ -95,6 +95,18 @@ impl BackgroundWorker {
     }
 }
 
+/// `snprintf(dst, N, "%s", src)` into a fixed-size NUL-terminated C-string
+/// field: copy at most `N - 1` bytes of `src` and NUL-terminate. The tail is
+/// left as already-zeroed bytes (callers pass a zeroed buffer). Mirrors the
+/// `snprintf(bgw.bgw_*, BGW_MAXLEN/MAXPGPATH, ...)` fills in the bgworker
+/// launch paths.
+pub fn snprintf_cstr<const N: usize>(dst: &mut [u8; N], src: &str) {
+    let bytes = src.as_bytes();
+    let n = core::cmp::min(bytes.len(), N - 1);
+    dst[..n].copy_from_slice(&bytes[..n]);
+    dst[n] = 0;
+}
+
 /// `RegisteredBgWorker` (`bgworker_internals.h`) — the postmaster's private
 /// registration record. The C `dlist_node rw_lnode` link is unused here (the
 /// owning `Vec` is the list).
@@ -140,58 +152,4 @@ pub struct BackgroundWorkerHandle {
     pub slot: i32,
     /// `uint64 generation` — guards against slot reuse.
     pub generation: u64,
-}
-
-// --- Background-worker registration vocabulary (launcher / dynamic workers) ---
-
-/// `BGWORKER_SHMEM_ACCESS` (bgworker.h).
-pub const BGWORKER_SHMEM_ACCESS: i32 = 0x0001;
-/// `BGWORKER_BACKEND_DATABASE_CONNECTION` (bgworker.h).
-pub const BGWORKER_BACKEND_DATABASE_CONNECTION: i32 = 0x0002;
-/// `BGWORKER_CLASS_PARALLEL` (bgworker.h).
-pub const BGWORKER_CLASS_PARALLEL: i32 = 0x0010;
-/// `BGW_NEVER_RESTART` (bgworker.h).
-pub const BGW_NEVER_RESTART: i32 = -1;
-/// `BGW_MAXLEN` (bgworker.h).
-pub const BGW_MAXLEN: usize = 96;
-/// `BGW_EXTRALEN` (bgworker.h).
-pub const BGW_EXTRALEN: usize = 128;
-
-/// `BgWorkerStartTime` (bgworker.h). Default 0-based C enum discriminants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum BgWorkerStartTime {
-    /// `BgWorkerStart_PostmasterStart`
-    PostmasterStart = 0,
-    /// `BgWorkerStart_ConsistentState`
-    ConsistentState = 1,
-    /// `BgWorkerStart_RecoveryFinished`
-    RecoveryFinished = 2,
-}
-
-/// `BackgroundWorker` (postmaster/bgworker.h) — the registration request.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BackgroundWorker {
-    /// `bgw_name` (`char[BGW_MAXLEN]`).
-    pub bgw_name: String,
-    /// `bgw_type` (`char[BGW_MAXLEN]`).
-    pub bgw_type: String,
-    /// `bgw_flags`.
-    pub bgw_flags: i32,
-    /// `bgw_start_time`.
-    pub bgw_start_time: i32,
-    /// `bgw_restart_time` (seconds, or `BGW_NEVER_RESTART`).
-    pub bgw_restart_time: i32,
-    /// `bgw_library_name` (`char[MAXPGPATH]`).
-    pub bgw_library_name: String,
-    /// `bgw_function_name` (`char[BGW_MAXLEN]`).
-    pub bgw_function_name: String,
-    /// `bgw_main_arg` (`Datum`; for dynamic logrep workers, the slot index via
-    /// `Int32GetDatum(slot)`).
-    pub bgw_main_arg: i32,
-    /// `memcpy(bgw.bgw_extra, &subworker_dsm, sizeof(dsm_handle))` payload used
-    /// by the parallel-apply launch path; `None` when no payload is stuffed.
-    pub bgw_extra_dsm: Option<u32>,
-    /// `bgw_notify_pid`.
-    pub bgw_notify_pid: i32,
 }
