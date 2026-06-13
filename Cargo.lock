@@ -170,6 +170,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-scankey"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-fmgr-fmgr-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-scan",
+]
+
+[[package]]
 name = "backend-access-common-session-seams"
 version = "0.0.0"
 dependencies = [
@@ -196,7 +207,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
- "types-scan",
+ "types-rel",
+ "types-snapshot",
  "types-storage",
  "types-tuple",
 ]
@@ -311,6 +323,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-common-toast-internals-seams",
  "backend-access-heap-heaptoast-seams",
  "backend-access-index-genam-seams",
@@ -363,12 +376,12 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-cache",
  "types-core",
  "types-datum",
  "types-error",
  "types-rel",
  "types-scan",
+ "types-snapshot",
  "types-tuple",
 ]
 
@@ -1427,6 +1440,8 @@ dependencies = [
 name = "backend-catalog-pg-depend"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-catalog-catalog-seams",
@@ -1440,7 +1455,6 @@ dependencies = [
  "backend-utils-cache-syscache-seams",
  "backend-utils-init-miscinit-seams",
  "mcx",
- "types-cache",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -1485,6 +1499,8 @@ dependencies = [
 name = "backend-catalog-pg-shdepend"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-access-transam-xact-seams",
@@ -1510,7 +1526,6 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "mcx",
- "types-cache",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -4689,14 +4704,18 @@ dependencies = [
 name = "backend-utils-cache-relfilenumbermap"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-index-genam-seams",
+ "backend-access-table-table",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-relmapper-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
- "types-cache",
  "types-core",
  "types-datum",
  "types-error",
+ "types-scan",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -4801,7 +4820,11 @@ dependencies = [
 name = "backend-utils-cache-ts-cache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table",
  "backend-access-transam-xact-seams",
  "backend-catalog-namespace-seams",
  "backend-commands-tsearchcmds-seams",
@@ -4820,6 +4843,8 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-guc",
+ "types-scan",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -5656,6 +5681,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-scan",
 ]
 
 [[package]]
@@ -5960,6 +5986,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+ "types-snapshot",
  "types-tuple",
 ]
 
