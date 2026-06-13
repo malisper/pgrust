@@ -31,8 +31,7 @@
 //! Seam-and-panic for genuinely-unported owners (named at each call site):
 //! `lookup_type_cache` / `assign_record_type_identifier` /
 //! `assign_record_type_typmod` (typcache, not yet ported — task #58),
-//! `domain_check` (the sibling `domains` family, still `todo!()` on its own
-//! branch), `detoast_external_attr` / `toast_flatten_tuple` (toast internals,
+//! `detoast_external_attr` / `toast_flatten_tuple` (toast internals,
 //! task #76), `datumCopy` (utils/adt/datum.c), `SystemAttributeByName`
 //! (catalog/heap.c) and `format_type_be` (utils/adt/format_type.c). The
 //! confirmed-available adt-infra is reused via real owners:
@@ -262,10 +261,12 @@ fn assign_record_type_typmod(_tupdesc: &mut TupleDescData<'_>) -> i32 {
 }
 
 /// `domain_check(value, isnull, domainType, extra, mcxt)` (utils/adt/domains.c).
-/// The sibling `domains` family is still `todo!()` on its own branch; reached
-/// here through a seam-and-panic until it lands.
-fn domain_check(_value: Datum, _isnull: bool, _domain_type: Oid) -> PgResult<()> {
-    panic!("expandedrecord: domain_check: unported owner (domains family, this unit)")
+/// The sibling `domains` family lives in this same unit; its `domain_check` is a
+/// thin `(void) domain_check_internal(..., escontext = NULL)` that re-runs the
+/// typcache-resident `domain_check_input` engine. We route through that same
+/// engine seam directly (the owned model carries no `extra` memoization handle).
+fn domain_check(value: Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
+    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
 /// `detoast_external_attr(attr)` (access/common/detoast.c). Owner not yet ported
