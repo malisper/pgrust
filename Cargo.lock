@@ -8707,6 +8707,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-wchar"
+version = "0.0.0"
+dependencies = [
+ "types-wchar",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
