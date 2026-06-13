@@ -274,7 +274,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `read_stream_begin_relation(flags, bstrategy, rel, fork, cb, cb_arg,
     /// per_buffer_size)`. The owned model passes a `ScanCallback` tag (and the
-    /// TID-store iter handle for the reap stream) instead of a fn ptr.
+    /// TID-store iter handle for the reap stream) instead of a fn ptr; the
+    /// callback bodies themselves run in-crate (see
+    /// `scan_block::heap_vac_scan_next_block` and
+    /// `scan_block::vacuum_reap_lp_read_stream_next`), so the buffer is read
+    /// through `read_buffer_extended`.
     pub fn read_stream_begin_relation(
         flags: i32,
         bstrategy: StrategyHandle,
@@ -283,13 +287,6 @@ seam_core::seam!(
         callback: ScanCallback,
         reap_iter: TidStoreIterHandle,
     ) -> PgResult<ReadStreamHandle>
-);
-seam_core::seam!(
-    /// `read_stream_next_buffer(stream, &per_buffer_data)` for the phase-III
-    /// reap stream — returns the next buffer plus the block's reaped offsets.
-    pub fn read_stream_next_buffer_reap(
-        stream: ReadStreamHandle,
-    ) -> PgResult<(Buffer, ReapBlockInfo)>
 );
 seam_core::seam!(
     /// `read_stream_end(stream)`.

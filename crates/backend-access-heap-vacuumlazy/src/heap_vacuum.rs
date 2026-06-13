@@ -9,8 +9,9 @@
 //!
 //! The on-page substrate (bufpage accessors, item-id flag reads / set-unused,
 //! WAL logging, VM, `HeapTupleSatisfiesVacuum`, `heap_tuple_needs_eventual_freeze`)
-//! is reached through [`seams_ub_heaprest::vacuumlazy`]; the reap loop +
-//! all-visible recheck control flow is ported 1:1 in-crate.
+//! is reached through the seam crate; the reap loop, the TID-store iteration
+//! callback ([`crate::scan_block::vacuum_reap_lp_read_stream_next`]) and the
+//! all-visible recheck control flow are ported 1:1 in-crate.
 
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, DEBUG2, ERROR};
@@ -29,6 +30,7 @@ use crate::consts::{
 };
 use crate::core::{LVRelState, LVSavedErrInfo, VacErrPhase};
 use crate::errcb::{restore_vacuum_error_info, update_vacuum_error_info};
+use crate::scan_block::{vacuum_reap_lp_read_stream_next, ReapNextBlock};
 
 use backend_access_heap_vacuumlazy_seams as vl;
 
@@ -65,7 +67,20 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
 
     let iter = vl::tidstore_begin_iterate::call(vacrel.dead_items)?;
 
-    /* Set up the read stream for the second pass (batchmode is safe). */
+    /*
+     * Set up the read stream for vacuum's second pass through the heap.
+     *
+     * It is safe to use batchmode, as vacuum_reap_lp_read_stream_next() does
+     * not need to wait for IO and does not perform locking. Once we support
+     * parallelism it should still be fine, as presumably the holder of locks
+     * would never be blocked by IO while holding the lock.
+     *
+     * In the owned model the C read-stream callback runs in-crate: the
+     * `vacuum_reap_lp_read_stream_next` state machine pulls the next block
+     * (and its `TidStoreIterResult`) from the TID store, then the chosen
+     * block's buffer is read through the buffer-manager seam — symmetric with
+     * the phase-I scan in `lazy_scan_heap`.
+     */
     let stream = vl::read_stream_begin_relation::call(
         READ_STREAM_MAINTENANCE | READ_STREAM_USE_BATCHING,
         vacrel.bstrategy,
@@ -78,12 +93,16 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState) -> PgResult<()> {
     loop {
         vl::vacuum_delay_point::call(false)?;
 
-        let (buf, reap) = vl::read_stream_next_buffer_reap::call(stream)?;
+        /* Pull the next block to reap from the TID store (in-crate callback). */
+        let reap = match vacuum_reap_lp_read_stream_next(iter)? {
+            /* The relation is exhausted. */
+            ReapNextBlock::Exhausted => break,
+            ReapNextBlock::Block { reap } => reap,
+        };
 
-        /* The relation is exhausted. */
-        if !buffer_is_valid(buf) {
-            break;
-        }
+        /* Read (and pin) the chosen block's buffer. */
+        let buf =
+            vl::read_buffer_extended::call(vacrel.rel, MAIN_FORKNUM, reap.blkno, vacrel.bstrategy)?;
 
         let blkno = vl::buffer_get_block_number::call(buf)?;
         vacrel.blkno = blkno;

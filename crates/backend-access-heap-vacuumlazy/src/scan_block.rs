@@ -1,4 +1,4 @@
-//! Phase I — block-selection state machine (`vacuumlazy.c`).
+//! Read-stream block-selection callbacks (`vacuumlazy.c`).
 //!
 //!   * [`heap_vac_scan_next_block`] (vacuumlazy.c:1571) — decide which heap block
 //!     the phase-I scan processes next (or "exhausted"), driving the three-state
@@ -6,14 +6,18 @@
 //!   * [`find_next_unskippable_block`] (vacuumlazy.c:1676) — walk the VM forward
 //!     to the next block that cannot be skipped, managing eager-scan region
 //!     boundaries and the unskippable rules.
+//!   * [`vacuum_reap_lp_read_stream_next`] (vacuumlazy.c:2682) — phase-III
+//!     (second-pass) callback: pull the next block to reap from the TID store.
 //!
-//! In the owned model the C read-stream callback (which carried the `vacrel` as a
-//! `void *` and ran inside the stream) becomes a plain `&mut LVRelState` function
-//! the in-crate scan loop calls directly; the chosen block's buffer is then read
-//! through the buffer-manager seam. This keeps the *entire* skip/eager-scan
-//! decision logic in-crate (1:1 with C) and seams only the buffer read.
+//! In the owned model the C read-stream callbacks (which carried the `vacrel` /
+//! `TidStoreIter *` as a `void *` and ran inside the stream) become plain
+//! functions the in-crate scan/reap loops call directly; the chosen block's
+//! buffer is then read through the buffer-manager seam. This keeps the *entire*
+//! skip/eager-scan and TID-store iteration decision logic in-crate (1:1 with C)
+//! and seams only the buffer read.
 
 use types_error::PgResult;
+use types_vacuum::vacuumlazy::{ReapBlockInfo, TidStoreIterHandle};
 
 use crate::consts::{
     buffer_is_valid, InvalidBlockNumber, InvalidBuffer, VISIBILITYMAP_ALL_FROZEN,
@@ -200,4 +204,42 @@ pub fn find_next_unskippable_block(
     vacrel.next_unskippable_vmbuffer = next_unskippable_vmbuffer;
 
     Ok(())
+}
+
+/// What [`vacuum_reap_lp_read_stream_next`] yields: the next block to reap and
+/// the block's `TidStoreIterResult` payload (saved for offset extraction), or
+/// `Exhausted` when the TID store is fully iterated.
+pub enum ReapNextBlock {
+    /// Reap `reap.blkno`; `reap` carries the block's dead offsets.
+    Block { reap: ReapBlockInfo },
+    /// The TID store is exhausted (`TidStoreIterateNext` returned `NULL` →
+    /// `InvalidBlockNumber`).
+    Exhausted,
+}
+
+/// `vacuum_reap_lp_read_stream_next()` (vacuumlazy.c:2682) — read-stream callback
+/// for vacuum's third phase (second pass over the heap). Gets the next block from
+/// the TID store and returns it, or [`ReapNextBlock::Exhausted`]
+/// (`InvalidBlockNumber`) if there are no further blocks to vacuum.
+///
+/// In the owned model the C read-stream callback (which carried the
+/// `TidStoreIter *` as a `void *callback_private_data` and copied the
+/// `TidStoreIterResult` into `per_buffer_data` so the caller could later extract
+/// the offsets) becomes a plain function the in-crate reap loop calls directly:
+/// it iterates the TID store through the `tidstore_iterate_next` seam and returns
+/// the carried [`ReapBlockInfo`] (the C `memcpy` of the result). The chosen
+/// block's buffer is then read through the buffer-manager seam, symmetric with
+/// the phase-I [`heap_vac_scan_next_block`] callback.
+///
+/// NB: Assumed to be safe to use with `READ_STREAM_USE_BATCHING`.
+pub fn vacuum_reap_lp_read_stream_next(iter: TidStoreIterHandle) -> PgResult<ReapNextBlock> {
+    match vl::tidstore_iterate_next::call(iter)? {
+        /* The relation is exhausted. */
+        None => Ok(ReapNextBlock::Exhausted),
+        /*
+         * Save the TidStoreIterResult for later, so we can extract the offsets.
+         * It is safe to copy the result, according to TidStoreIterateNext().
+         */
+        Some(reap) => Ok(ReapNextBlock::Block { reap }),
+    }
 }
