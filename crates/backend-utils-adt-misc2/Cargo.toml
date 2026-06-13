@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-stringinfo = { path = "../types-stringinfo" }
 types-storage = { path = "../types-storage" }
+types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
 
 # Real owners the expandedrecord family reuses (the adt-infra confirmed
@@ -55,3 +56,16 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+
+# Outward seams the `admin` family consumes (real owners; genuinely-unported
+# owners panic until they land).
+backend-common-path-seams = { path = "../backend-common-path-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
+backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }

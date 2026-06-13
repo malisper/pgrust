@@ -27,6 +27,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid))`: whether a
+    /// `pg_class` row exists for `relid`.
+    pub fn reloid_exists(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(TABLESPACEOID, ObjectIdGetDatum(tblspc))`:
+    /// whether a `pg_tablespace` row exists for `tblspc`.
+    pub fn tablespace_exists(tblspc: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the
     /// `Form_pg_opclass` fields the hash validator reads, copied into `mcx`.
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).

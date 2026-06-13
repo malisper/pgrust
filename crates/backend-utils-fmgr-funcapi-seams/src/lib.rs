@@ -50,3 +50,33 @@ seam_core::seam!(
         func_oid: Oid,
     ) -> PgResult<FuncArgInfo<'mcx>>
 );
+
+seam_core::seam!(
+    /// Build an anonymous record `Datum` from a row of `values`/`nulls` whose
+    /// columns have the given type OIDs (`coltypes[i]` is column `i+1`): the C
+    /// `CreateTemplateTupleDesc(n)` + per-column `TupleDescInitEntry(..., typ,
+    /// -1, 0)` + `BlessTupleDesc` + `heap_form_tuple` + `HeapTupleGetDatum`
+    /// idiom used by record-returning builtins (e.g. `pg_stat_file`). The
+    /// tupledesc / tuple machinery is funcapi/heaptuple/tupdesc-owned; the
+    /// result is allocated in `mcx`. `Err` carries OOM from forming the tuple.
+    pub fn record_from_values<'mcx>(
+        mcx: Mcx<'mcx>,
+        coltypes: &[Oid],
+        values: &[types_datum::Datum],
+        nulls: &[bool],
+    ) -> PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// The value-per-call set-returning-function machinery
+    /// (`SRF_IS_FIRSTCALL`/`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/
+    /// `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` over a `FuncCallContext` with a
+    /// `multi_call_memory_ctx` and `user_fctx`) is funcapi-owned and not yet
+    /// modeled (only the materialize-mode tuplestore path is). The
+    /// `pg_partition_tree` / `pg_partition_ancestors` / `pg_lock_status`
+    /// value-SRFs cross here until that owner lands: the seam runs the whole
+    /// function for the caller given a closure producing its full row set.
+    /// Declared genuinely-unported so the call panics loudly rather than
+    /// silently degrading the SRF protocol.
+    pub fn value_srf_unported() -> ()
+);
