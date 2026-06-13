@@ -68,6 +68,7 @@ backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }

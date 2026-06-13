@@ -3663,6 +3663,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeCustom"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeCustom-seams",
+ "backend-nodes-extensible-seams",
+ "backend-storage-ipc-shm-toc-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-nodeCustom-seams"
 version = "0.0.0"
 dependencies = [
@@ -4647,9 +4664,11 @@ dependencies = [
 name = "backend-nodes-extensible-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-extensible",
+ "types-nodes",
 ]
 
 [[package]]
@@ -9871,6 +9890,7 @@ dependencies = [
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
+ "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
