@@ -108,3 +108,20 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `bool has_rolreplication(Oid roleid)` (`utils/adt/acl.c`) — whether the
+    /// role has the REPLICATION attribute.
+    pub fn has_rolreplication(roleid: types_core::Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `BackendType MyBackendType` (globals.c) — this process's backend type.
+    pub fn my_backend_type() -> types_core::init::BackendType
+);
+
+seam_core::seam!(
+    /// `bool IsBinaryUpgrade` (globals.c) — running a `pg_upgrade` binary
+    /// upgrade.
+    pub fn is_binary_upgrade() -> bool
+);
