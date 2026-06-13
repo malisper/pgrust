@@ -37,6 +37,7 @@ pub fn init_all() {
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_startup::init_seams();
+    backend_regex_core::init_seams();
     backend_replication_logical_logical::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_replication_logical_conflict::init_seams();

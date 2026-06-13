@@ -4626,6 +4626,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-regex-core"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-regex",
+]
+
+[[package]]
 name = "backend-regex-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -8203,6 +8215,7 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-regex-core",
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
