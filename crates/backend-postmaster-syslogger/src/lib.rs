@@ -343,7 +343,7 @@ pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
     // Reset whereToSendOutput, as the postmaster will do (but hasn't yet, at
     // the point where we forked), to prevent duplicate output of messages
     // from syslogger itself.
-    elog_config::set_where_to_send_output(types_dest::DestNone);
+    elog_config::set_where_to_send_output(types_dest::CommandDest::None);
 
     // Set up a reusable WaitEventSet for our latch and the pipe's read end.
     //

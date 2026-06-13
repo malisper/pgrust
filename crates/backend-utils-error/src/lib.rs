@@ -59,10 +59,17 @@
 //! 9. **`ERRORDATA_STACK_SIZE` stack and `CHECK_STACK_DEPTH`** port
 //!    faithfully; "no error in flight" surfaces as
 //!    `Err("errstart was not called")` rather than a recursive ereport.
+//! 10. **`error_context_stack` is retired** (docs/query-lifecycle-raii.md):
+//!     error context attaches on propagation —
+//!     `result.map_err(|e| e.add_context("while ..."))` at the boundaries
+//!     where C pushed `ErrorContextCallback`s. There is no ambient callback
+//!     chain, so errfinish's callback walk, `GetErrorContextStack`, and the
+//!     recursion-trouble `error_context_stack = NULL` reset have no
+//!     counterpart here (`errcontext_msg` still appends to the in-flight
+//!     frame, as C's `errcontext()` does).
 
 mod builder;
 pub mod config;
-mod context_chain;
 pub mod errno;
 mod policy;
 mod report;
@@ -75,10 +82,6 @@ pub use config::{
     assign_backtrace_functions, assign_log_destination, assign_syslog_facility,
     assign_syslog_ident, check_backtrace_functions, check_log_destination,
     matches_backtrace_functions, BacktraceFunctionList,
-};
-pub use context_chain::{
-    append_error_context, error_context_depth, error_context_push, error_context_stack_clear,
-    error_context_stack_pop_innermost, ErrorContextGuard,
 };
 pub use policy::{
     is_log_level_output, message_level_is_interesting, should_output_to_client,
@@ -103,8 +106,7 @@ pub use stack::{
     errstart_cold, emit_error_report_for, err_generic_string, geterrcode, geterrposition,
     getinternalerrposition, in_error_recursion_trouble, internalerrposition, internalerrquery,
     pg_re_throw, reset_statement_suppressed, set_errcontext_domain, CopyErrorData, EmitErrorReport,
-    FlushErrorState, FreeErrorData, GetErrorContextStack, ReThrowError, ThrowErrorData,
-    ERRORDATA_STACK_SIZE,
+    FlushErrorState, FreeErrorData, ReThrowError, ThrowErrorData, ERRORDATA_STACK_SIZE,
 };
 pub use syslog::write_syslog;
 pub use types_error::{ErrorLevel, PgError, PgResult, SoftErrorContext, SqlState};

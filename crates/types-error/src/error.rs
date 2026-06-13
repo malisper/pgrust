@@ -411,10 +411,18 @@ pub const PG_DIAG_SOURCE_FILE: ErrorField = ErrorField(b'F' as i32);
 pub const PG_DIAG_SOURCE_LINE: ErrorField = ErrorField(b'L' as i32);
 pub const PG_DIAG_SOURCE_FUNCTION: ErrorField = ErrorField(b'R' as i32);
 
-/// `Log_error_verbosity` values (`elog.h` `PGErrorVerbosity`).
-pub const PGERROR_TERSE: i32 = 0;
-pub const PGERROR_DEFAULT: i32 = 1;
-pub const PGERROR_VERBOSE: i32 = 2;
+/// `Log_error_verbosity` values (`elog.h` `typedef enum PGErrorVerbosity`).
+/// Discriminants match the C enum ordering; `Ord` gives the C `>=` tests.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(i32)]
+pub enum PGErrorVerbosity {
+    /// `PGERROR_TERSE` — single-line error messages.
+    Terse = 0,
+    /// `PGERROR_DEFAULT` — recommended style.
+    Default = 1,
+    /// `PGERROR_VERBOSE` — all the facts, ma'am.
+    Verbose = 2,
+}
 
 /// `Log_destination` bitmask values (`elog.h`).
 pub const LOG_DESTINATION_STDERR: i32 = 1;

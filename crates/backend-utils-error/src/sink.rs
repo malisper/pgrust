@@ -5,11 +5,13 @@
 //! `application_name`, `debug_query_string`, `GetTopTransactionIdIfAny()`,
 //! `pgstat_get_my_query_id()`, `get_ps_display()`). In this port those live
 //! behind the [`BackendLogContext`] trait: the owning units install a provider
-//! via [`set_backend_log_context`] when they land. With no provider installed
-//! every default mirrors the C boot state (no client port, no PGPROC, pid =
-//! `getpid()`), so the logging path never panics.
+//! via [`set_backend_log_context`] when they land. Those globals are
+//! per-backend state, so the provider slot is `thread_local!` (AGENTS.md
+//! "Backend-global state") and installation is part of per-backend init. With
+//! no provider installed every default mirrors the C boot state (no client
+//! port, no PGPROC, pid = `getpid()`), so the logging path never panics.
 
-use std::sync::Mutex;
+use std::cell::Cell;
 
 use types_error::PgError;
 
@@ -100,23 +102,19 @@ pub trait BackendLogContext: Sync {
     }
 }
 
-static BACKEND_LOG_CONTEXT: Mutex<Option<&'static dyn BackendLogContext>> = Mutex::new(None);
+thread_local! {
+    static BACKEND_LOG_CONTEXT: Cell<Option<&'static dyn BackendLogContext>> =
+        const { Cell::new(None) };
+}
 
 pub fn set_backend_log_context(
     context: Option<&'static dyn BackendLogContext>,
 ) -> Option<&'static dyn BackendLogContext> {
-    let mut slot = BACKEND_LOG_CONTEXT
-        .lock()
-        .expect("backend log context poisoned");
-    let previous = *slot;
-    *slot = context;
-    previous
+    BACKEND_LOG_CONTEXT.with(|slot| slot.replace(context))
 }
 
 pub fn backend_log_context() -> Option<&'static dyn BackendLogContext> {
-    *BACKEND_LOG_CONTEXT
-        .lock()
-        .expect("backend log context poisoned")
+    BACKEND_LOG_CONTEXT.with(Cell::get)
 }
 
 /// `emit_log_hook` (elog.c): called before a report is sent to the server
@@ -125,18 +123,17 @@ pub fn backend_log_context() -> Option<&'static dyn BackendLogContext> {
 /// the error is passed by shared reference.
 pub type EmitLogHook = fn(&PgError, output_to_server: &mut bool);
 
-static EMIT_LOG_HOOK: Mutex<Option<EmitLogHook>> = Mutex::new(None);
+// `emit_log_hook` is a per-process C global (each backend gets its own copy
+// at fork); per backend == per thread here, so the slot is thread_local and
+// is installed during per-backend init.
+thread_local! { static EMIT_LOG_HOOK: Cell<Option<EmitLogHook>> = const { Cell::new(None) }; }
 
 pub fn set_emit_log_hook(hook: Option<EmitLogHook>) -> Option<EmitLogHook> {
-    let mut slot = EMIT_LOG_HOOK.lock().expect("emit_log_hook poisoned");
-    let previous = *slot;
-    *slot = hook;
-    previous
+    EMIT_LOG_HOOK.with(|slot| slot.replace(hook))
 }
 
 pub(crate) fn call_emit_log_hook(error: &PgError, output_to_server: &mut bool) {
-    let hook = *EMIT_LOG_HOOK.lock().expect("emit_log_hook poisoned");
-    if let Some(hook) = hook {
+    if let Some(hook) = EMIT_LOG_HOOK.with(Cell::get) {
         hook(error, output_to_server);
     }
 }

@@ -3,16 +3,16 @@
 
 #![allow(non_snake_case)]
 
+use std::cell::RefCell;
 use std::io::Write;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use types_dest::DestDebug;
+use types_dest::CommandDest;
 use types_error::{
-    unpack_sqlstate, ErrorLevel, PgError, PgResult, SqlState, DEBUG1, DEBUG2, DEBUG3, DEBUG4,
-    DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
-    LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY, NOTICE, PANIC,
-    PGERROR_DEFAULT, PGERROR_VERBOSE, WARNING, WARNING_CLIENT_ONLY,
+    unpack_sqlstate, ErrorLevel, PGErrorVerbosity, PgError, PgResult, SqlState, DEBUG1, DEBUG2,
+    DEBUG3, DEBUG4, DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,
+    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY,
+    NOTICE, PANIC, WARNING, WARNING_CLIENT_ONLY,
 };
 
 use crate::{config, errno, policy, sink, stack, syslog};
@@ -20,6 +20,13 @@ use crate::{config, errno, policy, sink, stack, syslog};
 const FORMATTED_TS_LEN: usize = 128;
 const _: () = assert!(FORMATTED_TS_LEN > 0); // keep the C constant on record
 
+/// elog.c's per-backend file statics (`saved_timeval`, `formatted_log_time`,
+/// `formatted_start_time`, `log_line_number`, `save_format_errnumber`,
+/// `save_format_domain`). Per AGENTS.md "Backend-global state" these are
+/// `thread_local!`. C's `log_my_pid` pid-change reset existed only because
+/// the statics were fork-inherited from the postmaster; a thread_local starts
+/// fresh per backend thread, so it has no counterpart.
+#[derive(Default)]
 struct LogState {
     /// `saved_timeval` + `saved_timeval_set`: (seconds, microseconds).
     saved_timeval: Option<(i64, u32)>,
@@ -29,33 +36,26 @@ struct LogState {
     formatted_start_time: Option<String>,
     /// `log_line_number` (static in log_status_format).
     log_line_number: i64,
-    /// `log_my_pid`.
-    log_my_pid: u32,
     /// `save_format_errnumber` / `save_format_domain` (format_elog_string).
     save_format_errnumber: i32,
     save_format_domain: Option<String>,
 }
 
-static LOG_STATE: Mutex<LogState> = Mutex::new(LogState {
-    saved_timeval: None,
-    formatted_log_time: None,
-    formatted_start_time: None,
-    log_line_number: 0,
-    log_my_pid: 0,
-    save_format_errnumber: 0,
-    save_format_domain: None,
-});
+thread_local! {
+    static LOG_STATE: RefCell<LogState> = RefCell::new(LogState::default());
+}
 
-fn log_state() -> std::sync::MutexGuard<'static, LogState> {
-    LOG_STATE.lock().expect("log state poisoned")
+fn with_log_state<R>(f: impl FnOnce(&mut LogState) -> R) -> R {
+    LOG_STATE.with(|state| f(&mut state.borrow_mut()))
 }
 
 /// EmitErrorReport's reset of the formatted timestamp fields
 /// (`saved_timeval_set = false; formatted_log_time[0] = '\0'`).
 pub(crate) fn reset_formatted_log_time() {
-    let mut state = log_state();
-    state.saved_timeval = None;
-    state.formatted_log_time = None;
+    with_log_state(|state| {
+        state.saved_timeval = None;
+        state.formatted_log_time = None;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -121,38 +121,40 @@ fn format_timestamp_millis(secs: i64, micros: u32) -> String {
 /// `get_formatted_log_time` — compute (once per report) and return the log
 /// timestamp, millisecond precision, consistent across all destinations.
 pub fn get_formatted_log_time() -> String {
-    let mut state = log_state();
-    if let Some(formatted) = &state.formatted_log_time {
-        return formatted.clone();
-    }
-    let (secs, micros) = match state.saved_timeval {
-        Some(tv) => tv,
-        None => {
-            let tv = now_timeval();
-            state.saved_timeval = Some(tv);
-            tv
+    with_log_state(|state| {
+        if let Some(formatted) = &state.formatted_log_time {
+            return formatted.clone();
         }
-    };
-    let formatted = format_timestamp_millis(secs, micros);
-    state.formatted_log_time = Some(formatted.clone());
-    formatted
+        let (secs, micros) = match state.saved_timeval {
+            Some(tv) => tv,
+            None => {
+                let tv = now_timeval();
+                state.saved_timeval = Some(tv);
+                tv
+            }
+        };
+        let formatted = format_timestamp_millis(secs, micros);
+        state.formatted_log_time = Some(formatted.clone());
+        formatted
+    })
 }
 
 /// `reset_formatted_start_time`.
 pub fn reset_formatted_start_time() {
-    log_state().formatted_start_time = None;
+    with_log_state(|state| state.formatted_start_time = None);
 }
 
 /// `get_formatted_start_time` — `MyStartTime` formatted, cached.
 pub fn get_formatted_start_time() -> String {
     let start = sink::backend_log_context().map_or(0, |c| c.session_start_time());
-    let mut state = log_state();
-    if let Some(formatted) = &state.formatted_start_time {
-        return formatted.clone();
-    }
-    let formatted = format_timestamp_seconds(start);
-    state.formatted_start_time = Some(formatted.clone());
-    formatted
+    with_log_state(|state| {
+        if let Some(formatted) = &state.formatted_start_time {
+            return formatted.clone();
+        }
+        let formatted = format_timestamp_seconds(start);
+        state.formatted_start_time = Some(formatted.clone());
+        formatted
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -240,15 +242,16 @@ pub fn set_backtrace(edata: &mut PgError, _num_skip: i32) {
 /// `pre_format_elog_string` — save errno and text domain before the argument
 /// expressions of `format_elog_string` can change them.
 pub fn pre_format_elog_string(errnumber: i32, domain: Option<&str>) {
-    let mut state = log_state();
-    state.save_format_errnumber = errnumber;
-    state.save_format_domain = domain.map(str::to_owned);
+    with_log_state(|state| {
+        state.save_format_errnumber = errnumber;
+        state.save_format_domain = domain.map(str::to_owned);
+    });
 }
 
 /// `format_elog_string` — format a message (caller pre-formats everything but
 /// `%m`) against the saved errno/domain.
 pub fn format_elog_string(fmt: &str) -> String {
-    let errnumber = log_state().save_format_errnumber;
+    let errnumber = with_log_state(|state| state.save_format_errnumber);
     errno::replace_percent_m(fmt, errnumber)
 }
 
@@ -328,18 +331,10 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
     let my_pid = context.map_or_else(std::process::id, |c| c.process_id());
     let has_port = context.is_some_and(|c| c.has_client_port());
 
-    {
-        // Reset the line counter (and the formatted start timestamp) when the
-        // pid changes: these statics should not be inherited from the
-        // postmaster.
-        let mut state = log_state();
-        if state.log_my_pid != my_pid {
-            state.log_line_number = 0;
-            state.log_my_pid = my_pid;
-            state.formatted_start_time = None;
-        }
-        state.log_line_number += 1;
-    }
+    // (C resets log_line_number/formatted_start_time when log_my_pid changes,
+    // because its statics are fork-inherited from the postmaster; the
+    // thread_local state starts fresh per backend thread.)
+    with_log_state(|state| state.log_line_number += 1);
 
     let Some(format) = format else {
         return; // in case guc hasn't run yet
@@ -432,12 +427,12 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                 }
             }
             'l' => {
-                let n = log_state().log_line_number;
+                let n = with_log_state(|state| state.log_line_number);
                 append_padded(buf, &n.to_string(), padding);
             }
             'm' => {
                 // force a log timestamp reset
-                log_state().formatted_log_time = None;
+                with_log_state(|state| state.formatted_log_time = None);
                 let ts = get_formatted_log_time();
                 append_padded(buf, &ts, padding);
             }
@@ -447,17 +442,14 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                 append_padded(buf, &ts, padding);
             }
             'n' => {
-                let (secs, micros) = {
-                    let mut state = log_state();
-                    match state.saved_timeval {
-                        Some(tv) => tv,
-                        None => {
-                            let tv = now_timeval();
-                            state.saved_timeval = Some(tv);
-                            tv
-                        }
+                let (secs, micros) = with_log_state(|state| match state.saved_timeval {
+                    Some(tv) => tv,
+                    None => {
+                        let tv = now_timeval();
+                        state.saved_timeval = Some(tv);
+                        tv
                     }
-                };
+                });
                 let value = format!("{}.{:03}", secs, micros / 1_000);
                 append_padded(buf, &value, padding);
             }
@@ -563,7 +555,7 @@ pub fn send_message_to_server_log(edata: &PgError) {
     buf.push_str(error_severity(edata.level));
     buf.push_str(":  ");
 
-    if config::log_error_verbosity() >= PGERROR_VERBOSE {
+    if config::log_error_verbosity() >= PGErrorVerbosity::Verbose {
         buf.push_str(&unpack_sql_state(edata.sqlstate));
         buf.push_str(": ");
     }
@@ -582,7 +574,7 @@ pub fn send_message_to_server_log(edata: &PgError) {
 
     buf.push('\n');
 
-    if config::log_error_verbosity() >= PGERROR_DEFAULT {
+    if config::log_error_verbosity() >= PGErrorVerbosity::Default {
         if let Some(detail_log) = &edata.detail_log {
             log_line_prefix(&mut buf, edata);
             buf.push_str("DETAIL:  ");
@@ -614,7 +606,7 @@ pub fn send_message_to_server_log(edata: &PgError) {
                 buf.push('\n');
             }
         }
-        if config::log_error_verbosity() >= PGERROR_VERBOSE {
+        if config::log_error_verbosity() >= PGErrorVerbosity::Verbose {
             // assume no newlines in funcname or filename...
             let location = edata.location.as_ref();
             let funcname = location.and_then(|l| l.funcname.as_deref());
@@ -682,7 +674,7 @@ pub fn send_message_to_server_log(edata: &PgError) {
 
     // Write to stderr, if enabled or required by a previous limitation.
     if config::log_destination() & LOG_DESTINATION_STDERR != 0
-        || config::where_to_send_output() == DestDebug
+        || config::where_to_send_output() == CommandDest::Debug
         || fallback_to_stderr
     {
         // Use the chunking protocol if the syslogger should be catching

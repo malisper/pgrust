@@ -1229,6 +1229,7 @@ dependencies = [
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "libc",
+ "types-core",
  "types-dest",
  "types-error",
 ]

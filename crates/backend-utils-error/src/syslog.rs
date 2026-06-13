@@ -1,5 +1,14 @@
 //! `write_syslog` and the syslog connection state (HAVE_SYSLOG branch of
 //! elog.c).
+//!
+//! Sanctioned divergence from the per-backend thread_local rule: libc's
+//! openlog/syslog connection is genuinely process-global (one connection, one
+//! retained ident pointer per process), so [`SYSLOG_STATE`] — including the
+//! `syslog_ident`/`syslog_facility` values bound into that connection and the
+//! message sequence number — is one shared, Mutex-guarded static. Under a
+//! threaded server a backend's SET of those GUCs reopens the shared
+//! connection for every thread; that is libc's constraint, not a porting
+//! shortcut.
 
 use std::ffi::CString;
 use std::sync::Mutex;

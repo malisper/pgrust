@@ -204,13 +204,11 @@ impl ErrorBuilder {
         Ok(self)
     }
 
-    /// Materialize the built error as an owned value (running the
-    /// error-context callbacks, as errfinish would). For code that returns
+    /// Materialize the built error as an owned value, for code that returns
     /// `Err(...)` directly instead of calling [`ErrorBuilder::finish`].
+    /// Context attaches on propagation (`PgError::add_context`), not here.
     pub fn into_error(self) -> PgError {
-        let mut error = self.error;
-        crate::context_chain::run_error_context_callbacks(&mut error);
-        error
+        self.error
     }
 
     /// `errfinish` for the builder: drive the full report cycle.
