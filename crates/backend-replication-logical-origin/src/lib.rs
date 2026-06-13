@@ -1292,9 +1292,42 @@ fn already_started_guard() {
 // seam installation
 // ===========================================================================
 
+/// `replorigin_by_oid` seam adapter: this crate's `replorigin_by_oid` returns a
+/// plain `String`; the seam contract (consumed by conflict.c's apply-error
+/// detail) wants the name copied into the caller's memory context (C:
+/// `text_to_cstring` palloc'd in the calling context). Marshal the `String`
+/// into a `PgString` allocated in `mcx`; an OOM during the copy is `Err`.
+fn replorigin_by_oid_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    roident: RepOriginId,
+    missing_ok: bool,
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    match replorigin_by_oid(roident, missing_ok)? {
+        Some(name) => Ok(Some(mcx::PgString::from_str_in(&name, mcx)?)),
+        None => Ok(None),
+    }
+}
+
+/// `set_replorigin_session_timestamp` seam (twophase.c's
+/// `RecordTransactionCommitPrepared` write-back) is the same global write as
+/// `set_replorigin_session_origin_timestamp` (xact.c's commit path); both set
+/// the `replorigin_session_origin_timestamp` external global.
+fn set_replorigin_session_timestamp_seam(ts: TimestampTz) {
+    set_replorigin_session_origin_timestamp(ts);
+}
+
 /// Install every seam this crate owns. Called once from `seams-init`.
 pub fn init_seams() {
-    backend_replication_logical_origin_seams::replorigin_redo::set(replorigin_redo);
+    use backend_replication_logical_origin_seams as s;
+    s::replorigin_redo::set(replorigin_redo);
+    s::replorigin_session_origin::set(replorigin_session_origin);
+    s::replorigin_session_origin_lsn::set(replorigin_session_origin_lsn);
+    s::replorigin_session_origin_timestamp::set(replorigin_session_origin_timestamp);
+    s::set_replorigin_session_origin_timestamp::set(set_replorigin_session_origin_timestamp);
+    s::set_replorigin_session_timestamp::set(set_replorigin_session_timestamp_seam);
+    s::replorigin_session_advance::set(replorigin_session_advance);
+    s::replorigin_advance::set(replorigin_advance);
+    s::replorigin_by_oid::set(replorigin_by_oid_seam);
 }
 
 #[cfg(test)]

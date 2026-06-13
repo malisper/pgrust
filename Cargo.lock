@@ -2131,6 +2131,7 @@ dependencies = [
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-lwlock",
  "backend-utils-init-small-seams",
+ "mcx",
  "seam-core",
  "types-condvar",
  "types-core",
