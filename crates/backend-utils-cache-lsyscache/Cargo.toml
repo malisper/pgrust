@@ -19,3 +19,6 @@ types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Owner seam for the `SearchSysCache1(RELOID/INDEXRELID)` / `GetSysCacheOid2`
+# reads these lookups bottom out in (loud panic until `syscache` lands).
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
