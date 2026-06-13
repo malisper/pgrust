@@ -101,6 +101,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_newlocale_from_collation(collid)->collate_is_c` (pg_locale.c): whether
+    /// the collation's `LC_COLLATE` is the C/POSIX locale. The C `varstr_cmp`
+    /// reads this off the resolved `pg_locale_t`; the comparison family has no
+    /// `Mcx` to materialize the full [`PgLocale`] handle, so this seam exposes the
+    /// single flag keyed by OID against pg_locale.c's permanent cache. `Err`
+    /// carries the catalog-read / `ereport(ERROR)` surface of resolving the
+    /// collation (e.g. a dropped collation).
+    pub fn collation_is_c(collid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pg_newlocale_from_collation(collid)->deterministic` (pg_locale.c): whether
+    /// the collation is deterministic (no equal-but-distinct byte sequences).
+    /// Read off the resolved `pg_locale_t` by `texteq`/`textne`/`text_starts_with`
+    /// /`btvarstrequalimage`; exposed as the single flag keyed by OID for the same
+    /// reason as [`collation_is_c`]. `Err` carries the resolve failure surface.
+    pub fn collation_is_deterministic(collid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pg_strncoll(arg1, len1, arg2, len2, locale)` (pg_locale.c): collation-aware
+    /// 3-way comparison of two byte runs under the (non-C) collation `collid`,
+    /// returning the libc/ICU `strcoll`-style sign. The lengths are implicit in the
+    /// slice lengths. C resolves `locale` from `collid` via the permanent cache;
+    /// this seam takes the OID and lets pg_locale.c reach its own cache. `Err`
+    /// carries the provider's `ereport(ERROR)` surface (e.g. encoding conversion
+    /// failure) plus the collation-resolve surface.
+    pub fn pg_strncoll(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `pg_wc_is*` (regc_pg_locale.c): evaluate one ctype predicate of the
     /// `class` family for wide character `c` under the active non-C-locale
     /// regex `collation`. The regex engine owns the strategy selection and the
