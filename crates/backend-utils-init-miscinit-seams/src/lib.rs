@@ -82,6 +82,21 @@ seam_core::seam!(
     pub fn get_user_id() -> Oid
 );
 
+seam_core::seam!(
+    /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
+    /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
+    /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
+    /// rather than `SetDatabasePath`, which is one-shot for normal backends.
+    pub fn set_database_path(path: &str)
+);
+
+seam_core::seam!(
+    /// Clear the `DatabasePath` global back to NULL (pairs with
+    /// [`set_database_path`] in the recovery hack of
+    /// `ProcessCommittedInvalidationMessages`).
+    pub fn clear_database_path()
+);
+
 // ---- critical-section / interrupt brackets + superuser check (miscadmin.h) ----
 
 seam_core::seam!(

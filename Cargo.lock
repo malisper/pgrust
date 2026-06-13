@@ -1009,8 +1009,10 @@ dependencies = [
 name = "backend-catalog-catalog-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
  "types-rel",
 ]
 
@@ -3155,6 +3157,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
  "backend-catalog-catalog-seams",
  "backend-storage-ipc-sinval-seams",
  "backend-storage-smgr-seams",
@@ -3175,6 +3178,7 @@ dependencies = [
  "types-storage",
  "types-syscache",
  "types-tuple",
+ "types-wal",
 ]
 
 [[package]]

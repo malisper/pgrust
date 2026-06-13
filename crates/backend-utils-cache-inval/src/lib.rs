@@ -202,12 +202,36 @@ pub fn init_seams() {
     seams::post_prepare_inval::set(|| at_eoxact::PostPrepare_Inval().expect("PostPrepare_Inval"));
     seams::log_logical_invalidations::set(at_eoxact::LogLogicalInvalidations);
     seams::invalidate_system_caches::set(local_list::InvalidateSystemCaches);
-    // Seams whose installed signature differs from this crate's native shape
-    // (raw-bytes/`mcx` marshalling) are wired in the owning family module's
-    // scaffold once the bodies land.
+
+    // These two seams' installed signatures differ from at_eoxact's native
+    // shape (the seam folds C's `nmsgs` out-param into the slice / returns a
+    // `mcx`-charged `PgVec`), so they're wired through small adapters.
+    seams::process_committed_invalidation_messages::set(
+        |msgs, relcache_init_file_inval, dbid, tsid| {
+            at_eoxact::ProcessCommittedInvalidationMessages(
+                msgs,
+                msgs.len() as i32,
+                relcache_init_file_inval,
+                dbid,
+                tsid,
+            )
+        },
+    );
+    seams::xact_get_committed_invalidation_messages::set(|mcx| {
+        let (msgs, relcache_init_file_inval) =
+            at_eoxact::xactGetCommittedInvalidationMessages()?;
+        // C allocates the array in CurTransactionContext; here we copy the
+        // collected messages into the caller's `mcx`.
+        let mut out = PgVec::new_in(mcx);
+        out.try_reserve(msgs.len())
+            .map_err(|_| types_error::PgError::error("out of memory"))?;
+        out.extend_from_slice(&msgs);
+        Ok((out, relcache_init_file_inval))
+    });
+
+    // Seams installed by other owners (relcache.c, sinval.c) — referenced here
+    // only so the cross-cycle linkage is documented; not this unit's to wire.
     let _ = (
-        seams::process_committed_invalidation_messages::is_installed(),
-        seams::xact_get_committed_invalidation_messages::is_installed(),
         seams::relcache_init_file_pre_invalidate::is_installed(),
         seams::relcache_init_file_post_invalidate::is_installed(),
         seams::send_shared_invalid_messages::is_installed(),

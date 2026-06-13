@@ -18,6 +18,7 @@ types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 types-syscache = { path = "../types-syscache" }
 types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }
 # Inward seam crate (this unit's own public API, called by siblings).
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 # Outward seams to other owners.
@@ -33,3 +34,4 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
