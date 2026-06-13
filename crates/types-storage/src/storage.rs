@@ -188,6 +188,23 @@ pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 /// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
 pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 
+/// `ShmemIndexLock` (`lwlocklist.h`): offset of the shmem-index lock in
+/// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
+pub const SHMEM_INDEX_LOCK: usize = 1;
+
+/// Possible values for `huge_pages` and `huge_pages_status`
+/// (`storage/pg_shmem.h`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HugePagesStatus {
+    HUGE_PAGES_OFF = 0,
+    HUGE_PAGES_ON = 1,
+    /// Only for `huge_pages`.
+    HUGE_PAGES_TRY = 2,
+    /// Only for `huge_pages_status`.
+    HUGE_PAGES_UNKNOWN = 3,
+}
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
 pub type dsm_handle = uint32;

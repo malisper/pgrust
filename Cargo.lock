@@ -1179,6 +1179,13 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-port-sysv-shmem-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-postmaster-interrupt"
 version = "0.0.0"
 dependencies = [
@@ -1405,6 +1412,31 @@ dependencies = [
  "seam-core",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-shmem"
+version = "0.0.0"
+dependencies = [
+ "backend-port-sysv-shmem-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "port-pg-numa-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-storage",
 ]
 
 [[package]]
@@ -1950,6 +1982,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-hash-dynahash-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-hash",
+]
+
+[[package]]
 name = "backend-utils-init-miscinit-seams"
 version = "0.0.0"
 dependencies = [
@@ -2173,6 +2214,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-numa-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep-seams"
 version = "0.0.0"
 dependencies = [
@@ -2248,6 +2296,7 @@ dependencies = [
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-shmem",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
