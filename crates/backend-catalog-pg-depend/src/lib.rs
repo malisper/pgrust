@@ -10,7 +10,8 @@
 //! * `sequenceIsOwned`'s `bool` + `*tableId`/`*colId` out-params are
 //!   `Option<(Oid, i32)>` (`None` == the C `false`).
 //! * `getIdentitySequence`'s open `Relation rel` crosses as `&RelationData`;
-//!   the `relispartition` field read goes through the relcache owner's seam.
+//!   the `relispartition` field is read directly off `rd_rel` (the decided
+//!   `RelationData` carrier holds the `rd_rel` Form).
 //! * The catalog `deptype` byte is the `i8` of
 //!   [`FormData_pg_depend::deptype`] / [`DependencyType::as_char`].
 //! * `table_open`..`table_close` spans are `OpenRelation` guard scopes: the
@@ -59,7 +60,6 @@ use backend_catalog_objectaddress_seams as objectaddress_seams;
 use backend_catalog_partition_seams as partition_seams;
 use backend_commands_extension_seams as extension_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
-use backend_utils_cache_relcache_seams as relcache_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_init_miscinit_seams as miscinit_seams;
 
@@ -983,8 +983,8 @@ pub fn getOwnedSequences<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'mc
 
 /// Get owned identity sequence, error if not exactly one.
 ///
-/// `rel` is the caller's open relation; the `relispartition` field read goes
-/// through the relcache owner's seam.
+/// `rel` is the caller's open relation; the `relispartition` field is read
+/// directly off `rd_rel`.
 pub fn getIdentitySequence(
     mcx: Mcx<'_>,
     rel: &RelationData<'_>,
