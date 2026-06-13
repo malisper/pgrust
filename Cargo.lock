@@ -1666,6 +1666,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeResult"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeSeqscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -3789,6 +3806,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeResult",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

@@ -10,6 +10,7 @@ use crate::nodes::NodeTag;
 use crate::execnodes::PlanStateData;
 use crate::execnodes::T_MaterialState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::noderesult::T_ResultState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -21,6 +22,8 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_ResultState`.
+    Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -29,6 +32,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::Result(_) => T_ResultState,
         }
     }
 
@@ -38,6 +42,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::Result(r) => &r.ps,
         }
     }
 
@@ -46,6 +51,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::Result(r) => &mut r.ps,
         }
     }
 }

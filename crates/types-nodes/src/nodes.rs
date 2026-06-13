@@ -78,6 +78,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Result`.
+    Result(crate::noderesult::Result<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -86,6 +88,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Result(_) => T_Result,
         }
     }
 
@@ -94,6 +97,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Result(r) => &r.plan,
         }
     }
 
@@ -108,6 +112,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
         }
     }
 }
