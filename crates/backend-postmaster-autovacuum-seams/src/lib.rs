@@ -13,3 +13,21 @@ seam_core::seam!(
     /// entry point invoked by `postmaster_child_launch`; never returns.
     pub fn auto_vac_worker_main(startup_data: &types_startup::StartupData) -> !
 );
+
+// --- backend-utils-init-postinit consumers (autovacuum.c) ---
+
+seam_core::seam!(
+    /// `AmAutoVacuumLauncherProcess()` (autovacuum.c / miscadmin.h): is this the
+    /// autovacuum launcher?
+    pub fn am_autovacuum_launcher_process() -> bool
+);
+
+seam_core::seam!(
+    /// `AmAutoVacuumWorkerProcess()`: is this an autovacuum worker?
+    pub fn am_autovacuum_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `autovacuum_worker_slots` (autovacuum.c GUC).
+    pub fn autovacuum_worker_slots() -> i32
+);

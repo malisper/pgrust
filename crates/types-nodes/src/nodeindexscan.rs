@@ -43,6 +43,9 @@ pub struct Plan<'mcx> {
     /// `int plan_node_id` — unique across the entire final plan tree; used as
     /// the DSM TOC key for a node's parallel state.
     pub plan_node_id: i32,
+    /// `int plan_width` — average row width in bytes. Consumed alongside
+    /// `plan_rows` when sizing the hash table.
+    pub plan_width: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -87,6 +90,7 @@ impl Plan<'_> {
             qual,
             plan_rows: self.plan_rows,
             parallel_aware: self.parallel_aware,
+            plan_width: self.plan_width,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,

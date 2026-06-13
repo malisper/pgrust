@@ -7,6 +7,7 @@
 //! The owning unit (`backend-utils-misc-guc`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+
 seam_core::seam!(
     /// `parse_int(value, &result, 0, NULL)` (guc.c): parse an integer GUC
     /// value (with optional unit suffix). `None` is the C `false` return.
@@ -17,6 +18,16 @@ seam_core::seam!(
     /// `parse_real(value, &result, 0, NULL)` (guc.c): parse a floating-point
     /// GUC value (with optional unit suffix). `None` is the C `false` return.
     pub fn parse_real(value: String) -> Option<f64>
+);
+
+seam_core::seam!(
+    /// `SetConfigOption(name, value, PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)`
+    /// (guc.c) — used by `SetOuterUserId` to keep the `is_superuser` GUC in
+    /// sync. Can `ereport(ERROR)` on an invalid value.
+    pub fn set_config_option_internal_dynamic_default(
+        name: &str,
+        value: &str,
+    ) -> types_error::PgResult<()>
 );
 
 // ---- bootstrap-mode GUC entry points (guc.c) ----
@@ -36,6 +47,16 @@ seam_core::seam!(
         value: &str,
         context: types_guc::guc::GucContext,
         source: types_guc::guc::GucSource,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetConfigOption(name, value, PGC_BACKEND, PGC_S_OVERRIDE)` (guc.c) —
+    /// used by `InitializeSessionUserId` to set `session_authorization`. Can
+    /// `ereport(ERROR)`.
+    pub fn set_config_option_backend_override(
+        name: &str,
+        value: &str,
     ) -> types_error::PgResult<()>
 );
 
@@ -86,4 +107,23 @@ seam_core::seam!(
     /// `maintenance_work_mem` (guc.c global, KB): the value `ri_triggers.c`
     /// installs as `work_mem` for its validation query.
     pub fn maintenance_work_mem() -> i32
+);
+
+seam_core::seam!(
+    /// `ProcessConfigFile(PGC_SIGHUP)` (guc.c): re-read postgresql.conf on a
+    /// SIGHUP. `Err` carries a parse/apply `ereport(ERROR)`.
+    pub fn process_config_file_sighup() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `set_config_option("search_path", "", PGC_SUSET, PGC_S_OVERRIDE, ...)`
+    /// (slotsync.c): force an empty search_path for the worker's catalog
+    /// access. `Err` carries the option-set `ereport(ERROR)`.
+    pub fn set_config_option_search_path_empty() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `cluster_name` (guc_tables.c GUC string): the configured cluster name,
+    /// `""` when unset. Backend-local GUC state.
+    pub fn cluster_name() -> String
 );

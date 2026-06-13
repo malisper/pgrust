@@ -410,7 +410,8 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     } else {
         "walreceiver".to_string()
     };
-    let conn = match libpqwalrcv::walrcv_connect::call(conninfo, appname.clone()) {
+    let conn = match libpqwalrcv::walrcv_connect::call(conninfo, true, false, false, appname.clone())
+    {
         Ok(c) => c,
         Err(err) => {
             return Err(ereport(ERROR)
@@ -852,8 +853,14 @@ fn WalRcvFetchTimeLineHistoryFiles(first: TimeLineID, last: TimeLineID) -> PgRes
 
     let mut tli = first;
     while tli <= last {
+        /*
+         * `existsTimeLineHistory`/`writeTimeLineHistoryFile` read the
+         * `ArchiveRecoveryRequested` global (false in the walreceiver process)
+         * and palloc in `CurrentMemoryContext`; provide both explicitly.
+         */
+        let scratch = mcx::MemoryContext::new("walrcv_fetch_tli_history");
         /* there's no history file for timeline 1 */
-        if tli != 1 && !timeline::exists_timeline_history::call(tli) {
+        if tli != 1 && !timeline::exists_timeline_history::call(scratch.mcx(), tli, false)? {
             emit(ereport(LOG).errmsg(format!(
                 "fetching timeline history file for timeline {tli} from primary server"
             )));
@@ -876,7 +883,7 @@ fn WalRcvFetchTimeLineHistoryFiles(first: TimeLineID, last: TimeLineID) -> PgRes
             }
 
             /* Write the file to pg_wal. */
-            timeline::write_timeline_history_file::call(tli, content)?;
+            timeline::write_timeline_history_file::call(tli, &content)?;
 
             /*
              * Mark the streamed history file as ready for archiving if

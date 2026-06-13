@@ -46,6 +46,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `on_exit_reset()` (`storage/ipc/ipc.c`) — clear the on_proc_exit /
+    /// before_shmem_exit / on_shmem_exit callback arrays inherited from the
+    /// postmaster (a forked child must not run the parent's handlers).
+    pub fn on_exit_reset()
+);
+
+seam_core::seam!(
     /// `check_on_shmem_exit_lists_are_empty()` (`storage/ipc/ipc.c`) — assert
     /// that no `on_shmem_exit` handlers have been registered yet (the
     /// startup-packet safety check). `ereport(FATAL)` on violation, which

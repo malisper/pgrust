@@ -42,7 +42,7 @@ use types_error::{
 };
 use types_error::ErrorLocation;
 use types_replication_slot::{
-    slot_is_logical, slot_is_physical, ReplicationSlotInvalidationCause,
+    slot_is_logical, slot_is_physical, ReplicationSlotHandle, ReplicationSlotInvalidationCause,
     ReplicationSlotOnDisk, ReplicationSlotPersistency, ReplicationSlotPersistentData,
     SlotInvalidationCauseMap, PG_REPLSLOT_DIR, RS_INVAL_MAX_CAUSES,
 };
@@ -1432,8 +1432,8 @@ pub fn CheckSlotRequirements(wal_level: i32) -> PgResult<()> {
 }
 
 /// `void CheckSlotPermissions(void)` (slot.c:1546). `user_id` is `GetUserId()`.
-pub fn CheckSlotPermissions(user_id: Oid) -> PgResult<()> {
-    if !miscinit::has_rolreplication::call(user_id) {
+pub fn CheckSlotPermissions(mcx: mcx::Mcx<'_>, user_id: Oid) -> PgResult<()> {
+    if !miscinit::has_rolreplication::call(mcx, user_id)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("permission denied to use replication slots")
@@ -2809,6 +2809,9 @@ fn seam_slot_confirmed_flush() -> XLogRecPtr {
 fn seam_slot_two_phase() -> bool {
     my_slot_ref().data.two_phase
 }
+fn seam_slot_failover() -> bool {
+    my_slot_ref().data.failover
+}
 fn seam_slot_two_phase_at() -> XLogRecPtr {
     my_slot_ref().data.two_phase_at
 }
@@ -2882,6 +2885,86 @@ fn seam_pgstat_report_replslot(stats: types_logical::ReorderBufferStats) {
     pgstat_replslot::pgstat_report_replslot::call(idx as i32, stats);
 }
 
+// `MyReplicationSlot` field mutators/accessors additionally needed by the
+// slotsync consumer.
+fn seam_slot_persistency() -> ReplicationSlotPersistency {
+    my_slot_ref().data.persistency
+}
+fn seam_slot_set_invalidated(cause: ReplicationSlotInvalidationCause) {
+    my_slot_mut().data.invalidated = cause;
+}
+fn seam_slot_set_database(dbid: Oid) {
+    my_slot_mut().data.database = dbid;
+}
+fn seam_slot_set_failover(value: bool) {
+    my_slot_mut().data.failover = value;
+}
+
+// ---------------------------------------------------------------------------
+// By-`ReplicationSlotHandle` accessors — slot.c owns the shared
+// `ReplicationSlotCtl->replication_slots[]` array; the slotsync array scan
+// reaches non-`MyReplicationSlot` slots through these. The handle is the array
+// index (`ReplicationSlotIndex`). Callers hold `ReplicationSlotControlLock`
+// (shared) and/or the per-slot spinlock per slot.c's locking model.
+// ---------------------------------------------------------------------------
+
+/// Borrow `&replication_slots[handle]`. SAFETY: per slot.c's locking model
+/// (caller holds ControlLock and/or the slot's mutex).
+fn handle_ref(handle: ReplicationSlotHandle) -> &'static ReplicationSlot {
+    unsafe { slot_ref(handle.0 as usize) }
+}
+#[allow(clippy::mut_from_ref)]
+fn handle_mut(handle: ReplicationSlotHandle) -> &'static mut ReplicationSlot {
+    unsafe { slot_mut(handle.0 as usize) }
+}
+
+fn seam_replication_slot(i: i32) -> ReplicationSlotHandle {
+    ReplicationSlotHandle(i)
+}
+fn seam_search_named_replication_slot(
+    name: &str,
+    need_lock: bool,
+) -> PgResult<ReplicationSlotHandle> {
+    Ok(match SearchNamedReplicationSlot(name, need_lock)? {
+        Some(i) => ReplicationSlotHandle(i as i32),
+        None => ReplicationSlotHandle::NONE,
+    })
+}
+fn seam_replication_slot_set_inactive_since(
+    handle: ReplicationSlotHandle,
+    now: TimestampTz,
+    acquire_lock: bool,
+) {
+    ReplicationSlotSetInactiveSince(handle_mut(handle), now, acquire_lock);
+}
+fn seam_handle_spin_acquire(handle: ReplicationSlotHandle) {
+    spin_acquire(handle_ref(handle));
+}
+fn seam_handle_spin_release(handle: ReplicationSlotHandle) {
+    spin_release(handle_ref(handle));
+}
+fn seam_slot_in_use(handle: ReplicationSlotHandle) -> bool {
+    handle_ref(handle).in_use
+}
+fn seam_slot_is_logical(handle: ReplicationSlotHandle) -> bool {
+    SlotIsLogical(handle_ref(handle))
+}
+fn seam_slot_data_synced(handle: ReplicationSlotHandle) -> bool {
+    handle_ref(handle).data.synced != 0
+}
+fn seam_slot_data_name(handle: ReplicationSlotHandle) -> String {
+    name_str_string(&handle_ref(handle).data.name)
+}
+fn seam_slot_data_database(handle: ReplicationSlotHandle) -> Oid {
+    handle_ref(handle).data.database
+}
+fn seam_slot_active_pid(handle: ReplicationSlotHandle) -> i32 {
+    handle_ref(handle).active_pid
+}
+fn seam_slot_data_invalidated(handle: ReplicationSlotHandle) -> ReplicationSlotInvalidationCause {
+    handle_ref(handle).data.invalidated
+}
+
 /// Install every seam in `backend-replication-slot-seams`.
 pub fn init_seams() {
     use backend_replication_slot_seams as s;
@@ -2928,6 +3011,7 @@ pub fn init_seams() {
     s::slot_restart_lsn::set(seam_slot_restart_lsn);
     s::slot_confirmed_flush::set(seam_slot_confirmed_flush);
     s::slot_two_phase::set(seam_slot_two_phase);
+    s::slot_failover::set(seam_slot_failover);
     s::slot_two_phase_at::set(seam_slot_two_phase_at);
     s::slot_catalog_xmin::set(seam_slot_catalog_xmin);
     s::slot_candidate_xmin_lsn::set(seam_slot_candidate_xmin_lsn);
@@ -2955,4 +3039,25 @@ pub fn init_seams() {
     // USE_INJECTION_POINTS is not compiled in: no-op.
     s::maybe_injection_point_slot_advance_segment::set(|_old, _new| {});
     s::pgstat_report_replslot::set(seam_pgstat_report_replslot);
+
+    // MyReplicationSlot field accessors/mutators for the slotsync consumer.
+    s::slot_persistency::set(seam_slot_persistency);
+    s::slot_set_invalidated::set(seam_slot_set_invalidated);
+    s::slot_set_database::set(seam_slot_set_database);
+    s::slot_set_failover::set(seam_slot_set_failover);
+
+    // By-ReplicationSlotHandle array surface for the slotsync consumer.
+    s::max_replication_slots::set(max_replication_slots);
+    s::replication_slot::set(seam_replication_slot);
+    s::search_named_replication_slot::set(seam_search_named_replication_slot);
+    s::replication_slot_set_inactive_since::set(seam_replication_slot_set_inactive_since);
+    s::slot_spin_acquire::set(seam_handle_spin_acquire);
+    s::slot_spin_release::set(seam_handle_spin_release);
+    s::slot_in_use::set(seam_slot_in_use);
+    s::slot_is_logical::set(seam_slot_is_logical);
+    s::slot_data_synced::set(seam_slot_data_synced);
+    s::slot_data_name::set(seam_slot_data_name);
+    s::slot_data_database::set(seam_slot_data_database);
+    s::slot_active_pid::set(seam_slot_active_pid);
+    s::slot_data_invalidated::set(seam_slot_data_invalidated);
 }

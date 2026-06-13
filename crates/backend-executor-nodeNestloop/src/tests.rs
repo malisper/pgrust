@@ -25,6 +25,7 @@ fn tup_is_null_empty_slot_is_null() {
         tts_flags: TTS_FLAG_EMPTY,
         tts_ops: TupleSlotKind::Virtual,
         tts_tid: Default::default(),
+        tts_tableOid: 0,
     };
     let id = estate.make_slot(empty).unwrap();
     assert!(tup_is_null(Some(id), &estate));
@@ -38,6 +39,7 @@ fn tup_is_null_nonempty_slot_is_not_null() {
         tts_flags: 0,
         tts_ops: TupleSlotKind::Virtual,
         tts_tid: Default::default(),
+        tts_tableOid: 0,
     };
     let id = estate.make_slot(full).unwrap();
     assert!(!tup_is_null(Some(id), &estate));

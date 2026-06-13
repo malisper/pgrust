@@ -41,6 +41,8 @@ seam_core::seam!(
     pub fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>>
 );
 
+// (quote_identifier is already declared above; postinit reuses it.)
+
 seam_core::seam!(
     /// `generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
     /// rightoptype)` (ruleutils.c): the schema-qualified, casted

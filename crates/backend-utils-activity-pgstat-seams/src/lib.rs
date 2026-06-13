@@ -120,3 +120,22 @@ seam_core::seam!(
     /// the soonest time another flush could be useful (0 if idle).
     pub fn pgstat_report_stat(force: bool) -> types_error::PgResult<i64>
 );
+
+// --- backend-utils-init-postinit consumers (pgstat.c) ---
+
+seam_core::seam!(
+    /// `pgstat_initialize()` (pgstat.c): initialize this backend's cumulative
+    /// statistics state and register the pgstat shutdown callback. `Err`
+    /// carries its `ereport` surface.
+    pub fn pgstat_initialize() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_before_server_shutdown(code, arg)` (pgstat.c): the
+    /// before_shmem_exit callback that flushes pending statistics. `Err`
+    /// carries its `ereport` surface.
+    pub fn pgstat_before_server_shutdown(
+        code: i32,
+        arg: types_datum::Datum,
+    ) -> types_error::PgResult<()>
+);

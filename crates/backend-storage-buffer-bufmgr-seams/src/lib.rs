@@ -8,6 +8,7 @@
 //! deliberately have no getter seams: per the no-ambient-global-seams rule,
 //! consumers take the values as explicit parameters.
 
+
 seam_core::seam!(
     /// `RelationGetNumberOfBlocksInFork(relation, forkNum)` (bufmgr.c): the
     /// current number of blocks in the relation fork (`smgrnblocks` under
@@ -122,6 +123,15 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         blkno: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
+// --- backend-utils-init-postinit consumer (bufmgr.c) ---
+
+seam_core::seam!(
+    /// `InitBufferManagerAccess()` (bufmgr.c): initialize this backend's local
+    /// buffer-manager structures and register its cleanup callback. `Err`
+    /// carries its `ereport` surface.
+    pub fn init_buffer_manager_access() -> types_error::PgResult<()>
 );
 
 // ---------------------------------------------------------------------------

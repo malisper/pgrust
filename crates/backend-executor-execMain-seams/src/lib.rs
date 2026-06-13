@@ -6,77 +6,28 @@
 
 #![allow(non_snake_case)]
 
-seam_core::seam!(
-    /// `epqstate->relsubs_done[scanrelid - 1]` (execMain.c / EvalPlanQual):
-    /// whether the EPQ test tuple for this scan relation has already been
-    /// returned. Pure read of the EPQ state.
-    pub fn epq_relsubs_done(
-        epqstate: types_nodes::EPQStateHandle,
-        scanrelid_minus_1: u32,
-    ) -> bool
-);
+// NOTE: the former `epq_relsubs_done` / `epq_relsubs_slot_present` /
+// `epq_relsubs_rowmark_present` / `epq_set_relsubs_done` / `epq_load_relsubs_slot`
+// / `eval_plan_qual_fetch_row_mark` / `epq_param_is_member_of_ext_param` seams
+// took an opaque `EPQStateHandle`. With the real owned `EPQState` now living in
+// `EStateData::es_epq_active`, those pure reads/writes are direct field accesses
+// on the owned struct (see nodeIndexonlyscan / nodeForeignscan), and the EPQ
+// fetch helpers land with the EvalPlanQual (execMain.c) port itself. They are
+// removed here per docs/types.md rule 3 (lands with first consumer).
 
 seam_core::seam!(
-    /// `epqstate->relsubs_slot[scanrelid - 1] != NULL` — is there a
-    /// replacement-slot EPQ source for this scan relation?
-    pub fn epq_relsubs_slot_present(
-        epqstate: types_nodes::EPQStateHandle,
-        scanrelid_minus_1: u32,
-    ) -> bool
-);
-
-seam_core::seam!(
-    /// `epqstate->relsubs_rowmark[scanrelid - 1] != NULL` — is there a
-    /// non-locking-rowmark EPQ source for this scan relation?
-    pub fn epq_relsubs_rowmark_present(
-        epqstate: types_nodes::EPQStateHandle,
-        scanrelid_minus_1: u32,
-    ) -> bool
-);
-
-seam_core::seam!(
-    /// `epqstate->relsubs_done[scanrelid - 1] = value` (execMain.c): mark
-    /// whether the EPQ test tuple has been returned.
-    pub fn epq_set_relsubs_done(
-        epqstate: types_nodes::EPQStateHandle,
-        scanrelid_minus_1: u32,
-        value: bool,
-    )
-);
-
-seam_core::seam!(
-    /// Load the EPQ replacement slot (`epqstate->relsubs_slot[scanrelid - 1]`)
-    /// into the scan node's scan slot (`ExecCopySlot`-shape), returning whether
-    /// a (non-empty) tuple was loaded. Fallible on OOM.
-    pub fn epq_load_relsubs_slot<'mcx>(
-        epqstate: types_nodes::EPQStateHandle,
-        estate: &mut types_nodes::EStateData<'mcx>,
-        scanrelid_minus_1: u32,
-        dest_slot: types_nodes::SlotId,
-    ) -> types_error::PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `EvalPlanQualFetchRowMark(epqstate, scanrelid, slot)` (execMain.c):
-    /// fetch the EPQ replacement tuple for a non-locking rowmark into the scan
-    /// slot, returning whether a tuple was produced. Fallible on
+    /// `EvalPlanQualFetchRowMark(epqstate, rti, slot)` (execMain.c): fetch the
+    /// replacement tuple for the non-locking rowmark of relation `rti` (the
+    /// scan node's `scanrelid`) into `slot` (the node's scan slot id),
+    /// returning `false` when the row no longer exists (the C `return false`).
+    /// Reads the active `EPQState` from `estate.es_epq_active`. Owner:
+    /// `backend-executor-execMain` (the EvalPlanQual machinery); fallible on
     /// `ereport(ERROR)`.
     pub fn eval_plan_qual_fetch_row_mark<'mcx>(
-        epqstate: types_nodes::EPQStateHandle,
         estate: &mut types_nodes::EStateData<'mcx>,
-        scanrelid: u32,
-        dest_slot: types_nodes::SlotId,
+        rti: types_core::primitive::Index,
+        slot: types_nodes::SlotId,
     ) -> types_error::PgResult<bool>
-);
-
-seam_core::seam!(
-    /// For a `scanrelid == 0` Foreign/Custom scan that pushed a join down,
-    /// whether the node's `extParam` set overlaps the EPQ relation set — the
-    /// `bms_overlap` test in `ExecScanFetch`'s `scanrelid == 0` branch.
-    pub fn epq_param_is_member_of_ext_param(
-        epqstate: types_nodes::EPQStateHandle,
-        node_ext_param: Option<&types_nodes::Bitmapset<'_>>,
-    ) -> bool
 );
 
 seam_core::seam!(
@@ -328,4 +279,192 @@ seam_core::seam!(
         rels: &[(types_core::Oid, u8, &[i16])],
         ereport_on_violation: bool,
     ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `resultRelInfo->ri_FdwRoutine->ExecForeignUpdate(estate, resultRelInfo,
+    /// slot, planSlot)` (fdwapi): dispatch an UPDATE to the foreign-table FDW
+    /// via the per-relation `FdwRoutine` vtable carried on the pooled
+    /// `ResultRelInfo`. Returns the (possibly replaced) result slot, or
+    /// `Ok(None)` for the FDW "do nothing". Resolved when the fdwapi type
+    /// lands; owner-coverage placeholder until then.
+    pub fn exec_foreign_update<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        plan_slot: Option<types_nodes::SlotId>,
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecPartitionCheckEmitError(resultRelInfo, slot, estate)` (execMain.c):
+    /// build and raise the partition-constraint-violation error for `slot`.
+    /// Always `ereport(ERROR)`s (only called when the constraint is known to
+    /// have failed).
+    pub fn exec_partition_check_emit_error<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecConstraints(resultRelInfo, slot, estate)` (execMain.c): check the
+    /// not-null and CHECK constraints of the target relation against `slot`,
+    /// `ereport(ERROR)`ing on the first violation.
+    pub fn exec_constraints<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecWithCheckOptions(kind, resultRelInfo, slot, estate)` (execMain.c):
+    /// evaluate the WITH CHECK OPTION / RLS policies of the given `kind`
+    /// (`WCOKind` enum value) on `slot`, `ereport(ERROR)`ing on a violation.
+    /// Skips WCOs of other kinds.
+    pub fn exec_with_check_options<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        kind: i32,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecGetReturningSlot(estate, relInfo)` (execMain.c): get (lazily
+    /// creating) the per-relation slot used to hold a tuple for RETURNING.
+    pub fn exec_get_returning_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecGetChildToRootMap(resultRelInfo)` (execMain.c): compute lazily the
+    /// tuple-conversion map from the child partition rowtype to the root's.
+    /// `Ok(true)` means a conversion is needed and the map now lives on the
+    /// pooled `ResultRelInfo` (`ri_ChildToRootMap`); `Ok(false)` is the C
+    /// `NULL` map (rowtypes already match).
+    pub fn exec_get_child_to_root_map<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecGetAncestorResultRels(estate, resultRelInfo)` (execMain.c): return
+    /// the chain of ancestor `ResultRelInfo`s (root-ward, inclusive of the
+    /// root) for a partition's `ResultRelInfo`, lazily opening them.
+    pub fn exec_get_ancestor_result_rels<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::RriId>>
+);
+
+seam_core::seam!(
+    /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): determine the
+    /// row-lock mode needed for an UPDATE of `relinfo`, based on which columns
+    /// the update touches vs. the relation's key columns.
+    pub fn exec_update_lock_mode<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_tableam::tableam::LockTupleMode>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQual(epqstate, relation, rti, inputslot)` (execMain.c): run the
+    /// EvalPlanQual recheck for a concurrently-updated tuple, returning the
+    /// re-projected slot that still passes the quals, or `Ok(None)` when the
+    /// row no longer qualifies. The EPQ state lives on the owning
+    /// `ModifyTableState`; the owner reads `es_snapshot` etc. off the estate.
+    pub fn eval_plan_qual<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+        inputslot: types_nodes::SlotId,
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualSlot(epqstate, relation, rti)` (execMain.c): get (lazily
+    /// creating) the EPQ test slot for the given range-table relation.
+    pub fn eval_plan_qual_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecInitResultRelation(estate, resultRelInfo, rti)` (execMain.c): open
+    /// the `rti`'th range-table relation (via `ExecGetRangeTableRelation`) and
+    /// fill the pooled `ResultRelInfo` for it (`InitResultRelInfo`), recording it
+    /// in `es_result_relations[rti-1]` and prepending it to
+    /// `es_opened_result_relations`. The `ResultRelInfo` is addressed by its
+    /// EState-pool id. Reads `es_relations`/`es_range_table` and the relcache;
+    /// fallible on `ereport(ERROR)` and OOM.
+    pub fn exec_init_result_relation<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualInit(epqstate, parentestate, subplan, auxrowmarks, epqParam,
+    /// resultRelations)` (execMain.c): initialize the canonical `EPQState` with
+    /// dummy subplan data, recording `epqParam` and the `resultRelations` integer
+    /// list. The owned model passes the canonical `EPQState` by mutable
+    /// reference. Allocates EPQ bookkeeping in the per-query context; fallible
+    /// on OOM.
+    pub fn eval_plan_qual_init<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epq_param: i32,
+        result_relations: &[types_core::primitive::Index],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualSetPlan(epqstate, subplan, auxrowmarks)` (execMain.c): record
+    /// the recheck plan tree and the aux-rowmark list on the canonical
+    /// `EPQState`. The owned model passes the (shared, read-only) subplan node by
+    /// borrow and the canonical `EPQState` by mutable reference; the aux-rowmark
+    /// list is currently always NIL at the nodeModifyTable call site. Fallible on
+    /// OOM.
+    pub fn eval_plan_qual_set_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The `arowmarks` build loop of `ExecInitModifyTable` (execMain.c):
+    /// `foreach(l, node->rowMarks) { PlanRowMark *rc = ...; if (rc->isParent)
+    /// continue; rte = exec_rt_fetch(rc->rti, estate); if (rte->rtekind ==
+    /// RTE_RELATION && !bms_is_member(rc->rti, es_unpruned_relids)) continue;
+    /// erm = ExecFindRowMark(estate, rc->rti, false); aerm =
+    /// ExecBuildAuxRowMark(erm, subplan->targetlist); arowmarks =
+    /// lappend(arowmarks, aerm); }`. The `PlanRowMark` plan-node type, the
+    /// `ExecFindRowMark`/`ExecBuildAuxRowMark` constructors, and the
+    /// `ExecAuxRowMark` list are all execMain's; the owner reads the rowMarks
+    /// off the plan node and records the resulting aux-rowmark list directly on
+    /// the canonical `EPQState` (the C passes `arowmarks` into
+    /// `EvalPlanQualSetPlan`). A no-op when the plan carries no (non-parent,
+    /// unpruned) rowMarks. Reads the range table; fallible on `ereport(ERROR)`
+    /// and OOM.
+    pub fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        row_marks: &[mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>],
+        subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
 );

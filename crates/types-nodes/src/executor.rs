@@ -43,6 +43,9 @@ pub struct TupleTableSlot {
     /// `const TupleTableSlotOps *const tts_ops` — slot implementation
     /// identity (the owned token for the `&TTSOps*` singleton pointer).
     pub tts_ops: TupleSlotKind,
+    /// `Oid tts_tableOid` — table OID this row came from (the value reported
+    /// by the `tableoid` system column). `InvalidOid` when unset.
+    pub tts_tableOid: types_core::primitive::Oid,
 }
 
 impl Default for TupleTableSlot {
@@ -53,6 +56,7 @@ impl Default for TupleTableSlot {
             tts_flags: TTS_FLAG_EMPTY,
             tts_tid: types_tuple::heaptuple::ItemPointerData::default(),
             tts_ops: TupleSlotKind::Virtual,
+            tts_tableOid: 0,
         }
     }
 }

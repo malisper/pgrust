@@ -28,6 +28,7 @@ impl core::fmt::Display for NodeTag {
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
 pub const T_Result: NodeTag = NodeTag(331);
+pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
 pub const T_MergeAppend: NodeTag = NodeTag(335);
 pub const T_IndexScan: NodeTag = NodeTag(341);
@@ -37,6 +38,7 @@ pub const T_TableFuncScan: NodeTag = NodeTag(350);
 pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_ForeignScan: NodeTag = NodeTag(354);
 pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
@@ -134,6 +136,10 @@ pub enum Node<'mcx> {
     Hash(crate::nodehashjoin::Hash<'mcx>),
     /// `T_TidRangeScan`.
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
+    /// `T_SeqScan`.
+    SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
+    /// `T_ForeignScan`.
+    ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -153,6 +159,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
+            Node::SeqScan(_) => T_SeqScan,
+            Node::ForeignScan(_) => T_ForeignScan,
         }
     }
 
@@ -172,6 +180,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
+            Node::SeqScan(s) => &s.scan.plan,
+            Node::ForeignScan(f) => &f.scan.plan,
         }
     }
 
@@ -197,6 +207,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
+            Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
+            Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
         }
     }
 }

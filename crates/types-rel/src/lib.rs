@@ -60,6 +60,9 @@ pub struct FormData_pg_class<'mcx> {
     /// `bool relisshared` — is the relation shared across all databases in
     /// the cluster?
     pub relisshared: bool,
+    /// `bool relhasindex` — relation has (or had) any indexes; gates whether
+    /// the executor opens the result relation's indexes for maintenance.
+    pub relhasindex: bool,
     /// `bool relhassubclass` — has (or once had) inheritance children.
     pub relhassubclass: bool,
     /// `char relpersistence` — `RELPERSISTENCE_*`.

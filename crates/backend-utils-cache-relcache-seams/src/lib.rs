@@ -7,6 +7,7 @@
 //! plain field reads need no seam; only `rd_tableam` — whose vtable type
 //! lives above `types-rel` — is resolved through the owner.
 
+
 seam_core::seam!(
     /// `relation->rd_tableam` — the relation's table-access-method vtable
     /// (`None` for relations without one: views, foreign tables,
@@ -236,6 +237,27 @@ seam_core::seam!(
         typrelid: types_core::Oid,
         type_id: types_core::Oid,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+
+// --- backend-utils-init-postinit consumers (relcache.c) ---
+
+seam_core::seam!(
+    /// `RelationCacheInitialize()` (relcache.c): set up the relcache hashtable
+    /// (no catalog access). `Err` carries its OOM surface.
+    pub fn relation_cache_initialize() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitializePhase2()` (relcache.c): load relcache entries
+    /// for the shared system catalogs. `Err` carries its `ereport` surface.
+    pub fn relation_cache_initialize_phase2() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitializePhase3()` (relcache.c): load the nailed-in
+    /// system-catalog relcache entries (real catalog access). `Err` carries its
+    /// `ereport` surface.
+    pub fn relation_cache_initialize_phase3() -> types_error::PgResult<()>
 );
 
 /* ---- CLUSTER rd_rel / rd_index / rd_indam field reads and transient sets --

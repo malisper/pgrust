@@ -18,11 +18,11 @@
 //! * `Drop` — the abort path: an error unwinding past the guard releases the
 //!   lock, which is what C's transaction-abort resowner sweep would do.
 
-extern crate alloc;
-
-use types_core::{Oid, TransactionId};
+use types_core::{Oid, TransactionId, VirtualTransactionId};
 use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
+
+extern crate alloc;
 
 seam_core::seam!(
     /// `CheckRelationLockedByMe(relation, lockmode, orstronger)` (lmgr.c):
@@ -95,6 +95,42 @@ seam_core::seam!(
         classid: Oid,
         objid: Oid,
         objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockApplyTransactionForSession(suboid, xid, objid, lockmode)` (lmgr.c):
+    /// take a *session-level* lock on a transaction being applied on a logical
+    /// replication subscriber (the parallel-apply deadlock-detection STREAM and
+    /// XACT locks). `MyDatabaseId` is read internally by the owner.
+    ///
+    /// These are deliberately session-scoped and held across the streaming
+    /// protocol's state machine — the leader holds the stream lock for the
+    /// whole streamed transaction while parallel-apply workers block on it, and
+    /// the matching `Unlock*` is an explicit call later in the protocol, never
+    /// a function-scoped `Drop`. They are therefore explicit lock/unlock seams
+    /// mirroring the C control flow, not [`LockGuard`]s; release on
+    /// proc/session exit is the lmgr owner's responsibility. Can
+    /// `ereport(ERROR)` (deadlock, cancel), carried on `Err`.
+    pub fn lock_apply_transaction_for_session(
+        suboid: Oid,
+        xid: types_core::TransactionId,
+        objid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockApplyTransactionForSession(suboid, xid, objid, lockmode)`
+    /// (lmgr.c): release the matching session-level apply-transaction lock.
+    /// `MyDatabaseId` is read internally by the owner. Explicit counterpart to
+    /// [`lock_apply_transaction_for_session`]; can `elog(WARNING/ERROR)` on a
+    /// lock-table inconsistency, carried on `Err`.
+    pub fn unlock_apply_transaction_for_session(
+        suboid: Oid,
+        xid: types_core::TransactionId,
+        objid: u16,
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
@@ -239,4 +275,27 @@ seam_core::seam!(
         lockmode: LOCKMODE,
         orstronger: bool,
     ) -> bool
+);
+
+seam_core::seam!(
+    /// `LockTuple(relation, tid, lockmode)` (lmgr.c): acquire a heavyweight
+    /// tuple-tag lock (used for the in-place-update tuple lock during UPDATE
+    /// of a relation that needs it). This lock is held until transaction end
+    /// and released by the transaction's resource owner, so it is taken
+    /// imperatively rather than as a scope guard (mirroring the C).
+    pub fn lock_tuple(
+        relid: Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockTuple(relation, tid, lockmode)` (lmgr.c): release the
+    /// heavyweight tuple-tag lock taken by [`lock_tuple`].
+    pub fn unlock_tuple(
+        relid: Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
 );

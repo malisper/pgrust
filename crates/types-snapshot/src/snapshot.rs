@@ -78,6 +78,32 @@ pub struct SnapshotData {
     pub snapXactCompletionCount: u64,
 }
 
+impl SnapshotData {
+    /// A static, type-only sentinel snapshot — the C
+    /// `SnapshotData SnapshotAnyData = {SNAPSHOT_ANY}` / `SnapshotSelfData` /
+    /// `SnapshotDirtyData` form, where only `snapshot_type` is meaningful and
+    /// every other field is C zero-initialized. Used where the executor passes
+    /// one of the static snapshot identities (e.g. `SnapshotAny`).
+    pub const fn sentinel(snapshot_type: SnapshotType) -> Self {
+        SnapshotData {
+            snapshot_type,
+            xmin: 0,
+            xmax: 0,
+            xip: Vec::new(),
+            xcnt: 0,
+            subxip: Vec::new(),
+            subxcnt: 0,
+            suboverflowed: false,
+            takenDuringRecovery: false,
+            copied: false,
+            curcid: 0,
+            active_count: 0,
+            regd_count: 0,
+            snapXactCompletionCount: 0,
+        }
+    }
+}
+
 /// `IsMVCCSnapshot(snapshot)` (`utils/snapmgr.h`).
 #[inline]
 pub fn IsMVCCSnapshot(snapshot: &SnapshotData) -> bool {
