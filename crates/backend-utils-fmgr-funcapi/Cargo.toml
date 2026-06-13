@@ -19,3 +19,9 @@ types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 # Inward seam crate this unit OWNS and installs from init_seams().
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# Outward per-owner seams the proc_info family routes through (unported
+# neighbors): pg_proc syscache projection, array deconstruct/header projection,
+# and the TupleDesc constructors.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-access-common-toastdesc-seams = { path = "../backend-access-common-toastdesc-seams" }

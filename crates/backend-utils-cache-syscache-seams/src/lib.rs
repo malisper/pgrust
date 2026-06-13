@@ -16,7 +16,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
-use types_namespace::{CatalogObjectName, OperRow, ProcRow};
+use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
 use types_partition::PartrelTupleData;
 
@@ -379,6 +379,21 @@ seam_core::seam!(
     /// `SearchSysCache1(OPEROID, oprid)` projected to the [`OperRow`]
     /// fields; `Ok(None)` on cache miss (`OperatorIsVisibleExt`).
     pub fn oper_row_by_oid<'mcx>(mcx: Mcx<'mcx>, oprid: Oid) -> PgResult<Option<OperRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, funcid)` projected to the [`FuncProcAttrs`]
+    /// (`Form_pg_proc` `GETSTRUCT` scalars + the `SysCacheGetAttr` array
+    /// columns `proallargtypes` / `proargmodes` / `proargnames` /
+    /// `protrftypes`, each detoasted and deconstructed). `Ok(None)` on a cache
+    /// miss (`!HeapTupleIsValid`); the funcapi caller raises its own
+    /// `cache lookup failed for function %u` `elog(ERROR)`, as in C. The
+    /// shape-validity checks (and the `elog`s for malformed arrays) stay on
+    /// the funcapi consumer; the seam only projects.
+    pub fn proc_arg_attrs<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<FuncProcAttrs<'mcx>>>
 );
 
 seam_core::seam!(

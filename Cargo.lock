@@ -6576,6 +6576,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-tuple",
 ]
@@ -7527,6 +7528,9 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-toastdesc-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-funcapi-seams",
  "mcx",
