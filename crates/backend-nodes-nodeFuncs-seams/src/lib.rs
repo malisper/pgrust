@@ -24,6 +24,27 @@ pub struct ExprTypeInfo {
 use types_fmgr::ExternalFnExpr;
 
 seam_core::seam!(
+    /// `CallStmtResultDesc(stmt)` (functioncmds.c:2383) — the polymorphic
+    /// output-argument tuple descriptor for a CALL. Re-homed here from
+    /// `backend-commands-functioncmds-seams`: the function is keyed entirely by
+    /// the unported planner expression node `stmt->funcexpr` (`FuncExpr.funcid`,
+    /// which functioncmds carries opaquely — the layered node tree does not yet
+    /// model `FuncExpr`), runs `build_function_result_tupdesc_t` over the
+    /// `PROCOID` tuple, and re-types each output column from `stmt->outargs[i]`
+    /// via `exprType` (the nodeFuncs expression-node inspection). Both the
+    /// `funcid` read and the `exprType` fixup are nodeFuncs/nodes-core
+    /// expression-tree territory, so the whole body lands with that owner.
+    /// Allocating seam: takes `Mcx<'mcx>`, returns the descriptor in the
+    /// caller's context (empty/NULL when the procedure has no out-args,
+    /// mirroring the C NULL tupdesc). Fallible on the cache-lookup
+    /// `ereport(ERROR)`.
+    pub fn call_stmt_result_desc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: types_parsenodes::CallStmt,
+    ) -> types_error::PgResult<types_tuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `exprType(expr)` / `exprTypmod(expr)` / `exprCollation(expr)`
     /// (nodeFuncs.c): the result type OID, type modifier, and collation of an
     /// expression node, read together. The three C functions are pure node

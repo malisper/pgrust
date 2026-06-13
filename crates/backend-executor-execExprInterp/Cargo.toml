@@ -16,8 +16,17 @@ types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
 
+# Own seam crate: the interpreter installs the dispatch entry points
+# (ExecReadyInterpretedExpr / ExecEvalExprSwitchContext) that execExpr + the
+# executor nodes reach through these seams.
+backend-executor-execExprInterp-seams = { path = "../backend-executor-execExprInterp-seams" }
+
 # Seams into unported owners the interpreter calls.
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
