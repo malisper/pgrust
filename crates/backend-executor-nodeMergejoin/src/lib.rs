@@ -677,6 +677,23 @@ pub fn ExecMergeJoin<'mcx>(
                 // Set the next state machine state.
                 node.mj_JoinState = EXEC_MJ_NEXTINNER;
 
+                // We don't bother with a ResetExprContext here, on the
+                // assumption that we just did one while checking the merge
+                // qual. We do have to set up the econtext links to the tuples
+                // for ExecQual/ExecProject to use.
+                //   econtext->ecxt_outertuple = node->mj_OuterTupleSlot;
+                //   econtext->ecxt_innertuple = node->mj_InnerTupleSlot;
+                {
+                    let econtext = node
+                        .js
+                        .ps
+                        .ps_ExprContext
+                        .expect("EXEC_MJ_JOINTUPLES: ps_ExprContext not created");
+                    let ec = estate.ecxt_mut(econtext);
+                    ec.ecxt_outertuple = node.mj_OuterTupleSlot;
+                    ec.ecxt_innertuple = node.mj_InnerTupleSlot;
+                }
+
                 // Check the extra qual conditions. We must distinguish the
                 // additional joinquals (which must pass to consider the tuples
                 // "matched") from the otherquals (which must pass before
@@ -1082,9 +1099,10 @@ fn exec_restr_pos_inner<'mcx>(
     execAmi::exec_restr_pos::call(inner, estate)
 }
 
-/// `ExecQual(node->js.joinqual, econtext)` over the node's regular econtext,
-/// after linking the current outer/inner slots. The caller short-circuits a
-/// NULL joinqual.
+/// `ExecQual(node->js.joinqual, econtext)` over the node's regular econtext.
+/// The econtext slot links (`ecxt_outertuple`/`ecxt_innertuple`) are set by the
+/// caller (the EXEC_MJ_JOINTUPLES arm) before this runs, matching the C order.
+/// The caller short-circuits a NULL joinqual.
 fn exec_joinqual<'mcx>(
     node: &mut MergeJoinStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1094,11 +1112,6 @@ fn exec_joinqual<'mcx>(
         .ps
         .ps_ExprContext
         .expect("exec_joinqual: ps_ExprContext not created");
-    {
-        let ec = estate.ecxt_mut(econtext);
-        ec.ecxt_outertuple = node.mj_OuterTupleSlot;
-        ec.ecxt_innertuple = node.mj_InnerTupleSlot;
-    }
     let joinqual = node
         .js
         .joinqual
