@@ -47,6 +47,19 @@ pub struct VacuumParams {
     pub nworkers: i32,
 }
 
+/* flag bits for VacuumParams->options (commands/vacuum.h) */
+pub const VACOPT_VACUUM: bits32 = 0x01;
+pub const VACOPT_ANALYZE: bits32 = 0x02;
+pub const VACOPT_VERBOSE: bits32 = 0x04;
+pub const VACOPT_FREEZE: bits32 = 0x08;
+pub const VACOPT_FULL: bits32 = 0x10;
+pub const VACOPT_SKIP_LOCKED: bits32 = 0x20;
+pub const VACOPT_PROCESS_MAIN: bits32 = 0x40;
+pub const VACOPT_PROCESS_TOAST: bits32 = 0x80;
+pub const VACOPT_DISABLE_PAGE_SKIPPING: bits32 = 0x100;
+pub const VACOPT_SKIP_DATABASE_STATS: bits32 = 0x200;
+pub const VACOPT_ONLY_DATABASE_STATS: bits32 = 0x400;
+
 /// `struct VacuumCutoffs` (`access/heapam.h`) — the freeze/removal cutoffs
 /// computed by `vacuum_get_cutoffs`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

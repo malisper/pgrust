@@ -20,7 +20,7 @@
 
 extern crate alloc;
 
-use types_core::{Oid, TransactionId, VirtualTransactionId};
+use types_core::{Oid, TransactionId};
 use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
 
@@ -259,12 +259,6 @@ seam_core::seam!(
 seam_core::seam!(
     /// `XactLockTableDelete(xid)` — release the subtransaction XID lock.
     pub fn xact_lock_table_delete(xid: TransactionId) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `VirtualXactLockTableInsert(vxid)` — lock our virtual transaction id
-    /// before advertising it in the proc array.
-    pub fn virtual_xact_lock_table_insert(vxid: VirtualTransactionId) -> PgResult<()>
 );
 
 seam_core::seam!(

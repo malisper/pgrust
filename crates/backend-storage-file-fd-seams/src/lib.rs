@@ -4,8 +4,30 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use types_core::SubTransactionId;
 use types_error::PgResult;
+
+seam_core::seam!(
+    /// `AllocateFile(path, PG_BINARY_W)` + `fwrite` + `FreeFile` (fd.c) — write
+    /// all of `bytes` to a freshly created file. The caller (snapmgr) chooses
+    /// the path and owns the `.tmp`+`rename` ordering; this only performs the
+    /// fd.c-tracked open/write/close. Open/write failures surface as
+    /// `ereport(ERROR, errcode_for_file_access)` on `Err`.
+    pub fn allocate_file_write(path: &str, bytes: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AllocateFile(path, PG_BINARY_R)` + `fstat` + `fread` + `FreeFile`
+    /// (fd.c) — read the whole file into a byte buffer. Returns `Ok(None)` when
+    /// the file does not exist (`errno == ENOENT`, which snapmgr maps to its
+    /// own "snapshot does not exist" error); other open/read failures surface
+    /// as `ereport(ERROR)` on `Err`.
+    pub fn allocate_file_read(path: &str) -> PgResult<Option<Vec<u8>>>
+);
 
 /// An open `FILE *` registered with the virtual-file-descriptor machinery
 /// (`AllocateFile`/`OpenPipeStream`). C's `FILE *` is a genuinely opaque
@@ -234,6 +256,15 @@ seam_core::seam!(
     /// names in `dirname` (excluding `.`/`..`). Can `ereport(ERROR)` if the
     /// directory cannot be opened (C `AllocateDir`/`ReadDir`), carried on `Err`.
     pub fn read_dir_names(dirname: &str) -> types_error::PgResult<Vec<String>>
+);
+
+seam_core::seam!(
+    /// `AllocateDir(dir)` + `ReadDirExtended(.., LOG)` + `FreeDir` (fd.c) —
+    /// list a directory's entries (excluding `.`/`..`) at LOG severity. Read
+    /// problems (including a failed `AllocateDir`) are logged at LOG by fd.c and
+    /// skipped, so this returns the names it could read; cannot `ereport` at
+    /// ERROR. (snapmgr's `DeleteAllExportedSnapshotFiles` uses the LOG variant.)
+    pub fn read_dir_names_logged(dir: &str) -> Vec<String>
 );
 
 seam_core::seam!(

@@ -66,6 +66,13 @@ pub struct EcxtId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
 
+/// Opaque token for a live `EPQState *` (`nodes/execnodes.h`), owned by the
+/// EvalPlanQual machinery (execMain). Scan nodes hold it only to test for
+/// presence and to index its `relsubs_*` arrays through the owner's seams;
+/// the full struct lands when EvalPlanQual is ported.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EPQStateHandle(pub usize);
+
 /// An opaque handle to a genuinely AM/extension-opaque object the executor
 /// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
 /// itself leaves opaque). The owning unit downcasts with a loud panic on
@@ -235,6 +242,10 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_ReturningSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_AllNullSlot` — all-NULL slot for RETURNING.
     pub ri_AllNullSlot: Option<SlotId>,
+    /// `TupleTableSlot *ri_PartitionTupleSlot` — non-NULL if the relation is a
+    /// partition whose rowtype differs from the root partitioned table's; used
+    /// to convert tuples for the partition's own layout. `None` is the C NULL.
+    pub ri_PartitionTupleSlot: Option<SlotId>,
     /// `Bitmapset *ri_extraUpdatedCols` — generated columns updated.
     pub ri_extraUpdatedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `bool ri_extraUpdatedCols_valid`.
@@ -321,8 +332,32 @@ pub struct ScanStateData<'mcx> {
     /// or `None` (C `NULL`, e.g. a ForeignScan/CustomScan with no
     /// currentRelation). Aliases the executor-owned open (no release authority).
     pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
+    /// `struct TableScanDescData *ss_currentScanDesc` — the table scan
+    /// descriptor (`NULL` for index-only scans, which carry no heap scan). The
+    /// table-AM scan-descriptor type lives above this crate's layer, so the
+    /// owned handle rides opaquely; consumers that need it resolve it through
+    /// the table-AM owner.
+    pub ss_currentScanDesc: Option<Opaque>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
+}
+
+/// `ModifyTableState` (execnodes.h), trimmed to the fields the partition
+/// tuple-routing port consumes. Owned by `nodeModifyTable.c`; the rest of its
+/// fields land with that port.
+#[derive(Debug)]
+pub struct ModifyTableState<'mcx> {
+    /// `PlanState ps` — its first field is `NodeTag`; `ps.plan` is the
+    /// `ModifyTable` plan node, `ps.state` the EState (threaded explicitly in
+    /// the owned model), `ps.ps_ResultTupleSlot`/`ps.ps_ExprContext` reused for
+    /// per-partition projections.
+    pub ps: PlanStateData<'mcx>,
+    /// `ResultRelInfo *resultRelInfo` — per-subplan result rels (ids into the
+    /// EState pool); `resultRelInfo[0]` is the "first" relation execPartition
+    /// maps attnos against.
+    pub resultRelInfo: PgVec<'mcx, RriId>,
+    /// `ResultRelInfo *rootResultRelInfo` — the partitioned-table root target.
+    pub rootResultRelInfo: Option<RriId>,
 }
 
 /// The resolved outcome of `fetch_cursor_param_value`'s live-state core:
@@ -453,6 +488,17 @@ impl Default for RowMarkType {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
+    /// `Snapshot es_snapshot` — time qual to use. The C `Snapshot` is a shared
+    /// pointer, modeled as the shared `Rc<SnapshotData>` the active-snapshot
+    /// stack/owner alias; `None` is the C `NULL`. Lands with its first consumer
+    /// (the index/heap scan ports), per docs/types.md rule 3.
+    pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
+    /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
+    /// recheck state this EState belongs to. The full `EPQState` is owned by
+    /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle
+    /// here; scan nodes read its `relsubs_*` arrays through the EvalPlanQual
+    /// owner's seams.
+    pub es_epq_active: Option<EPQStateHandle>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
@@ -471,6 +517,19 @@ pub struct EStateData<'mcx> {
     pub es_plannedstmt: Option<PgBox<'mcx, PlannedStmt<'mcx>>>,
     /// `List *es_part_prune_infos` — `PlannedStmt.partPruneInfos`.
     pub es_part_prune_infos: PgVec<'mcx, Opaque>,
+    /// `List *es_part_prune_states` — the `PartitionPruneState`s built by
+    /// `ExecDoInitialPruning`, parallel to `es_part_prune_infos`. Each is a
+    /// `PgBox` because the consuming plan node (e.g. `MergeAppendState`) takes
+    /// ownership of its entry (C aliases the same object the list holds; the
+    /// owned model moves it out of the pool with `.take()`, leaving a `None`
+    /// tombstone so the parallel indexing with `es_part_prune_infos` /
+    /// `es_part_prune_results` stays stable).
+    pub es_part_prune_states:
+        PgVec<'mcx, Option<PgBox<'mcx, crate::partition::PartitionPruneState<'mcx>>>>,
+    /// `List *es_part_prune_results` — per-pruneinfo bitmapset of subplans that
+    /// survived initial pruning (a `None` element is the C `NULL`), parallel to
+    /// `es_part_prune_infos`.
+    pub es_part_prune_results: PgVec<'mcx, Option<PgBox<'mcx, Bitmapset<'mcx>>>>,
     /// `CommandId es_output_cid` — the inserted/updated tuples' cmin/cmax.
     pub es_output_cid: CommandId,
     /// `ResultRelInfo **es_result_relations` — per-RTE result-rel info (ids
@@ -535,6 +594,11 @@ pub struct EStateData<'mcx> {
     /// EState (C: caller-owned nodes aliased from the lists above), addressed
     /// by [`RriId`].
     pub es_result_rel_pool: PgVec<'mcx, ResultRelInfo<'mcx>>,
+    /// `struct dsa_area *es_query_dsa` — the per-query DSA area for parallel
+    /// execution, a live [`DsaAreaHandle`] into the DSA subsystem; `None` is
+    /// the C `NULL` (no parallel workers). Consumed first by
+    /// `nodeBitmapHeapscan`'s parallel-scan DSM setup.
+    pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -546,6 +610,9 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
+            // es_snapshot = InvalidSnapshot; es_epq_active = NULL;
+            es_snapshot: None,
+            es_epq_active: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
@@ -558,6 +625,9 @@ impl<'mcx> EStateData<'mcx> {
             es_plannedstmt: None,
             // es_part_prune_infos = NIL;
             es_part_prune_infos: PgVec::new_in(mcx),
+            // es_part_prune_states = NIL; es_part_prune_results = NIL;
+            es_part_prune_states: PgVec::new_in(mcx),
+            es_part_prune_results: PgVec::new_in(mcx),
             // es_output_cid = (CommandId) 0;
             es_output_cid: 0,
             // es_result_relations = NULL; the relation lists = NIL;
@@ -601,6 +671,8 @@ impl<'mcx> EStateData<'mcx> {
             es_unpruned_relids: None,
             es_partition_directory: Opaque(None),
             es_result_rel_pool: PgVec::new_in(mcx),
+            // es_query_dsa = NULL;
+            es_query_dsa: None,
         }
     }
 

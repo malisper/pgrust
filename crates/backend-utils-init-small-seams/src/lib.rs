@@ -36,6 +36,48 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MaxConnections` (globals.c): the `max_connections` GUC — number of
+    /// regular-backend slots.
+    pub fn max_connections() -> i32
+);
+
+seam_core::seam!(
+    /// `max_worker_processes` (globals.c): the GUC capping the number of
+    /// background-worker slots.
+    pub fn max_worker_processes() -> i32
+);
+
+seam_core::seam!(
+    /// `max_prepared_xacts` (globals.c): the GUC bounding the number of
+    /// concurrently-prepared transactions (dummy PGPROC slots).
+    pub fn max_prepared_xacts() -> i32
+);
+
+seam_core::seam!(
+    /// `autovacuum_worker_slots` (globals.c): the GUC bounding the number of
+    /// autovacuum-worker slots.
+    pub fn autovacuum_worker_slots() -> i32
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend` (globals.c): the number of fast-path
+    /// lock groups per backend, computed at startup from `max_locks_per_xact`.
+    pub fn fast_path_lock_groups_per_backend() -> i32
+);
+
+seam_core::seam!(
+    /// `max_parallel_workers` (globals.c): the GUC capping concurrently
+    /// active parallel workers.
+    pub fn max_parallel_workers() -> i32
+);
+
+seam_core::seam!(
+    /// `PostAuthDelay` (globals.c): seconds to sleep after authentication, to
+    /// allow attaching a debugger. Read by `BackgroundWorkerMain`.
+    pub fn post_auth_delay() -> i32
+);
+
+seam_core::seam!(
     /// `MyProcPort` (globals.c): run `f` with mutable access to this
     /// backend's connection `Port`, or `None` when there is no client
     /// connection (`MyProcPort == NULL`). Callback shape per the seam rules:

@@ -2,10 +2,10 @@
 //! (`executor/execPartition.c`): the run-time partition-pruning entry points
 //! that `Append`/`MergeAppend` nodes consult.
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly. The C `PlanState.state` back-pointer is the
-//! owned-tree's explicit `estate`; allocation in the per-query context makes the
-//! constructors fallible.
+//! The owning unit installs these from its `init_seams()`. The C
+//! `PlanState.state` back-pointer is the owned-tree's explicit `estate` param
+//! (the owned model threads `EState` rather than carrying the back-pointer);
+//! allocation in the per-query context makes the constructors fallible.
 
 #![allow(non_snake_case)]
 
@@ -20,6 +20,7 @@ seam_core::seam!(
     pub fn exec_init_partition_exec_pruning<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
         n_total_subplans: i32,
         part_prune_index: i32,
         relids: Option<&types_nodes::Bitmapset<'_>>,
@@ -38,6 +39,7 @@ seam_core::seam!(
     pub fn exec_find_matching_subplans<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         prunestate: &mut types_nodes::PartitionPruneState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
         initial_prune: bool,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );

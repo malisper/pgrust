@@ -27,6 +27,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogArchiveLibrary` (xlog.c GUC string): the configured archive
+    /// library name, "" when unset. Returns an owned copy of the current
+    /// value (the C bare read is a `char *` global; pgarch copies it via
+    /// `pstrdup` before reload). Infallible.
+    pub fn xlog_archive_library() -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `XLogArchiveCommand` (xlog.c GUC string): the configured archive shell
+    /// command, "" when unset. Returns an owned copy of the current value.
+    /// Infallible.
+    pub fn xlog_archive_command() -> alloc::string::String
+);
+
+seam_core::seam!(
     /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
 );
@@ -143,6 +158,12 @@ seam_core::seam!(
     /// standby, read from the control file's last checkpoint. Shared-state
     /// read; infallible.
     pub fn GetActiveWalLevelOnStandby() -> types_logical::WalLevel
+);
+
+seam_core::seam!(
+    /// `log_recovery_conflict_waits` (the GUC, owned by xlog.c) — whether the
+    /// startup process should log long recovery-conflict waits.
+    pub fn log_recovery_conflict_waits() -> bool
 );
 
 seam_core::seam!(

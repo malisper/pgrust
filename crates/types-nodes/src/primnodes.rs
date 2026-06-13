@@ -7,6 +7,70 @@ use types_core::primitive::{AttrNumber, Index, Oid};
 use types_datum::Datum;
 use types_error::PgResult;
 
+/// `SubLinkType` (nodes/primnodes.h) — the kind of sub-select. Values match the
+/// C enumerator order exactly (`#[repr(i32)]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum SubLinkType {
+    /// `EXISTS_SUBLINK`.
+    Exists = 0,
+    /// `ALL_SUBLINK`.
+    All = 1,
+    /// `ANY_SUBLINK`.
+    Any = 2,
+    /// `ROWCOMPARE_SUBLINK`.
+    RowCompare = 3,
+    /// `EXPR_SUBLINK`.
+    Expr = 4,
+    /// `MULTIEXPR_SUBLINK`.
+    MultiExpr = 5,
+    /// `ARRAY_SUBLINK`.
+    Array = 6,
+    /// `CTE_SUBLINK` (for SubPlans only).
+    Cte = 7,
+}
+
+/// `SubPlan` (nodes/primnodes.h) — an executable sub-select expression node.
+/// Trimmed to the fields the executor (`nodeSubplan.c`) consumes; the cost
+/// fields and planner metadata are carried because the C struct is a plain data
+/// node the executor reads.
+#[derive(Debug)]
+pub struct SubPlan<'mcx> {
+    /// `SubLinkType subLinkType`.
+    pub subLinkType: SubLinkType,
+    /// `Node *testexpr` — OpExpr or RowCompareExpr expression tree.
+    pub testexpr: Option<PgBox<'mcx, Expr>>,
+    /// `List *paramIds` — IDs of Params embedded in `testexpr`.
+    pub paramIds: PgVec<'mcx, i32>,
+    /// `int plan_id` — index (from 1) in `PlannedStmt.subplans`.
+    pub plan_id: i32,
+    /// `char *plan_name` — a name assigned during planning.
+    pub plan_name: Option<PgString<'mcx>>,
+    /// `Oid firstColType` — type of first column of subplan result.
+    pub firstColType: Oid,
+    /// `int32 firstColTypmod` — typmod of first column of subplan result.
+    pub firstColTypmod: i32,
+    /// `Oid firstColCollation` — collation of first column of subplan result.
+    pub firstColCollation: Oid,
+    /// `bool useHashTable` — store subselect output in a hash table.
+    pub useHashTable: bool,
+    /// `bool unknownEqFalse` — okay to return FALSE when spec result is
+    /// UNKNOWN.
+    pub unknownEqFalse: bool,
+    /// `bool parallel_safe`.
+    pub parallel_safe: bool,
+    /// `List *setParam` — param IDs the initplan/MULTIEXPR subqueries set.
+    pub setParam: PgVec<'mcx, i32>,
+    /// `List *parParam` — indices of input Params from the parent plan.
+    pub parParam: PgVec<'mcx, i32>,
+    /// `List *args` — exprs to pass as parParam values.
+    pub args: PgVec<'mcx, PgBox<'mcx, Expr>>,
+    /// `Cost startup_cost` — one-time setup cost.
+    pub startup_cost: f64,
+    /// `Cost per_call_cost` — cost for each subplan evaluation.
+    pub per_call_cost: f64,
+}
+
 /// `OnCommitAction` (nodes/primnodes.h) — what to do at transaction commit
 /// for a temporary table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +290,19 @@ pub struct OpExpr {
     pub args: Vec<Expr>,
 }
 
+/// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
+/// trimmed to the fields ports consume (the TID-scan node reads only `args`,
+/// via `linitial`/`lsecond`).
+#[derive(Clone, Debug)]
+pub struct ScalarArrayOpExpr {
+    /// `Oid opno` — PG_OPERATOR OID of the operator.
+    pub opno: Oid,
+    /// `bool useOr` — true for ANY, false for ALL.
+    pub useOr: bool,
+    /// `List *args` — the scalar and array operands.
+    pub args: Vec<Expr>,
+}
+
 /// `CurrentOfExpr` (nodes/primnodes.h) — the `WHERE CURRENT OF cursor`
 /// expression. Either `cursor_name` (a literal cursor name) or `cursor_param`
 /// (a refcursor parameter number, > 0) identifies the cursor.
@@ -251,6 +328,10 @@ pub enum Expr {
     Const(Const),
     /// `T_OpExpr`.
     OpExpr(OpExpr),
+    /// `T_ScalarArrayOpExpr`.
+    ScalarArrayOpExpr(ScalarArrayOpExpr),
+    /// `T_CurrentOfExpr`.
+    CurrentOfExpr(CurrentOfExpr),
 }
 
 /// `TargetEntry` (nodes/primnodes.h), trimmed.
