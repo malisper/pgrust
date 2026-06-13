@@ -215,6 +215,7 @@ fn ctid_geq_qual() -> Expr {
             }),
             Expr::Const(types_nodes::primnodes::Const::default()),
         ],
+        ..Default::default()
     })
 }
 

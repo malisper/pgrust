@@ -2832,6 +2832,7 @@ dependencies = [
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-utils-cache-lsyscache-seams",
  "mcx",
  "seam-core",
  "types-core",

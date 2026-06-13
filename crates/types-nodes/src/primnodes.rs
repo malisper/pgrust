@@ -298,14 +298,25 @@ pub struct Const {
     pub constisnull: bool,
 }
 
-/// `OpExpr` (nodes/primnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Debug)]
+/// `OpExpr` (nodes/primnodes.h) — expression node for an operator invocation.
+#[derive(Clone, Debug, Default)]
 pub struct OpExpr {
     /// `Oid opno` — PG_OPERATOR OID of the operator.
     pub opno: Oid,
-    /// `List *args` — arguments to the operator (two, for a mergeclause
-    /// `leftexpr = rightexpr`).
+    /// `Oid opfuncid` — PG_PROC OID of underlying function.
+    pub opfuncid: Oid,
+    /// `Oid opresulttype` — PG_TYPE OID of result value.
+    pub opresulttype: Oid,
+    /// `bool opretset` — true if operator returns set.
+    pub opretset: bool,
+    /// `Oid opcollid` — OID of collation of result.
+    pub opcollid: Oid,
+    /// `Oid inputcollid` — OID of collation that operator should use.
+    pub inputcollid: Oid,
+    /// `List *args` — arguments to the operator (1 or 2).
     pub args: Vec<Expr>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: i32,
 }
 
 /// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
