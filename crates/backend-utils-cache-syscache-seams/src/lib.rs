@@ -125,6 +125,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(oidtypeid))` +
+    /// `GETSTRUCT(Form_pg_type)` projected to the type-dependent attribute
+    /// fields `TupleDescInitEntry` (`access/common/tupdesc.c`) stamps onto a
+    /// `Form_pg_attribute` (`typlen`/`typbyval`/`typalign`/`typstorage`/
+    /// `typcollation`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`), so the
+    /// caller raises the exact `elog(ERROR, "cache lookup failed for type %u")`.
+    /// The fields are `Copy`, so no `mcx` is needed; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn search_type_attr_info(
+        oidtypeid: Oid,
+    ) -> PgResult<Option<types_tuple::backend_access_common_tupdesc::PgTypeInfo>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(NAMESPACENAME, Anum_pg_namespace_oid, nspname)`.
     pub fn get_namespace_oid_cached(nspname: &str) -> PgResult<Oid>
 );
@@ -515,6 +529,16 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         index_oid: Oid,
     ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>>
+);
+seam_core::seam!(
+    /// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` (syscache.c):
+    /// look up a column of `relid` by name, returning its
+    /// `(attnum, atttypid)`; `None` when no such (non-dropped) column exists
+    /// (the C `!HeapTupleIsValid(atttuple)`).
+    pub fn search_syscache_attname(
+        relid: Oid,
+        attname: &str,
+    ) -> PgResult<Option<(types_core::primitive::AttrNumber, Oid)>>
 );
 seam_core::seam!(
     /// `SearchSysCache1 + SysCacheGetAttr(Anum_pg_class_reloptions) +

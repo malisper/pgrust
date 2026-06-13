@@ -1,0 +1,16 @@
+[package]
+name = "common-ip"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_ip"
+path = "src/lib.rs"
+
+[dependencies]
+common-ip-seams = { path = "../common-ip-seams" }
+types-net = { path = "../types-net" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

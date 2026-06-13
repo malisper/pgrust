@@ -88,6 +88,12 @@ pub struct FormData_pg_index {
     pub indnkeyatts: i16,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
+    /// `Oid indrelid` — the table this index is for.
+    pub indrelid: Oid,
+    /// `int2vector indkey.values[0]` — the table column number of the index's
+    /// first key column (`InvalidAttrNumber` for an expression key). `pg_nextoid`
+    /// reads only this first entry.
+    pub indkey0: types_core::primitive::AttrNumber,
 }
 
 /// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
