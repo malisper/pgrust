@@ -4,7 +4,14 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use types_error::{ErrorLevel, PgResult};
+
+seam_core::seam!(
+    /// `data_sync_elevel(elevel)` (`storage/file/fd.c`) — returns `elevel`
+    /// unchanged when the `data_sync_retry` GUC is set; otherwise escalates a
+    /// data-file fsync failure to `PANIC`. Pure decision, infallible.
+    pub fn data_sync_elevel(elevel: ErrorLevel) -> ErrorLevel
+);
 
 seam_core::seam!(
     /// The `AllocateDir(dirname)` / `ReadDir(dir, dirname)` / `FreeDir(dir)`

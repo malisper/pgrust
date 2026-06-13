@@ -60,3 +60,19 @@ seam_core::seam!(
     /// `PostPrepare_MultiXact(xid)` — transfer the entry to the dummy proc.
     pub fn post_prepare_multixact(xid: types_core::primitive::TransactionId)
 );
+
+seam_core::seam!(
+    /// `multixactoffsetssyncfiletag(const FileTag *ftag, char *path)`
+    /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_OFFSET]` sync callback)
+    /// — fsync the `pg_multixact/offsets` SLRU segment the tag names, returning
+    /// the `0`/`<0` code, resolved path, and saved `errno`.
+    pub fn multixactoffsetssyncfiletag(ftag: types_sync::FileTag) -> types_error::PgResult<types_sync::FileTagOpResult>
+);
+
+seam_core::seam!(
+    /// `multixactmemberssyncfiletag(const FileTag *ftag, char *path)`
+    /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_MEMBER]` sync callback)
+    /// — fsync the `pg_multixact/members` SLRU segment the tag names, returning
+    /// the `0`/`<0` code, resolved path, and saved `errno`.
+    pub fn multixactmemberssyncfiletag(ftag: types_sync::FileTag) -> types_error::PgResult<types_sync::FileTagOpResult>
+);

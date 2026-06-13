@@ -596,6 +596,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-sync",
  "types-wal",
 ]
 
@@ -606,6 +607,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-sync",
  "types-wal",
 ]
 
@@ -626,6 +628,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-sync",
  "types-wal",
 ]
 
@@ -1866,7 +1869,9 @@ name = "backend-postmaster-checkpointer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-startup",
+ "types-sync",
 ]
 
 [[package]]
@@ -2639,6 +2644,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-smgr-md-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-sync",
+]
+
+[[package]]
 name = "backend-storage-smgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -2646,6 +2660,35 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-sync"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-postmaster-checkpointer-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-smgr-md-seams",
+ "backend-storage-sync-seams",
+ "backend-utils-error",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-sync",
+]
+
+[[package]]
+name = "backend-storage-sync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-sync",
 ]
 
 [[package]]
@@ -3569,6 +3612,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-storage-sync",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-utils-activity-small",
@@ -3832,6 +3876,14 @@ name = "types-stringinfo"
 version = "0.0.0"
 dependencies = [
  "mcx",
+]
+
+[[package]]
+name = "types-sync"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]

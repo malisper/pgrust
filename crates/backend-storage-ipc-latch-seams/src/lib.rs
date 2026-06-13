@@ -43,6 +43,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `WaitLatch(NULL, WL_EXIT_ON_PM_DEATH | WL_TIMEOUT, 10,
+    /// WAIT_EVENT_REGISTER_SYNC_REQUEST)` (`storage/ipc/latch.c`): the no-latch
+    /// ~10 ms sleep `RegisterSyncRequest` performs before retrying a full
+    /// checkpointer request queue. C passes `NULL` for the latch (waiting only
+    /// on the timeout / postmaster death), so there is no `LatchHandle` to pass;
+    /// the fixed flags, timeout, and wait-event are baked into the call. The
+    /// underlying `WaitEventSetWait` can `elog(ERROR)`, hence `PgResult`.
+    pub fn wait_latch_register_sync_request() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ResetLatch(MyLatch)`: clear this backend's own process latch; the
     /// latch crate resolves `MyLatch` (globals.c) when installing, like
     /// [`set_latch_my_latch`]. Infallible in C.
