@@ -156,25 +156,40 @@ pub fn RelationCacheInitializePhase2() -> PgResult<()> {
     // C: switch to CacheMemoryContext; if the shared init file did not load,
     // hand-build the nailed shared catalogs with formrdesc.
     if !load_relcache_init_file(true)? {
-        crate::build::formrdesc("pg_database", DatabaseRelation_Rowtype_Id, true, Natts_pg_database)?;
-        crate::build::formrdesc("pg_authid", AuthIdRelation_Rowtype_Id, true, Natts_pg_authid)?;
+        crate::build::formrdesc(
+            "pg_database",
+            DatabaseRelation_Rowtype_Id,
+            true,
+            Natts_pg_database,
+            &xunit::catalog_schema_attrs(DatabaseRelation_Rowtype_Id),
+        )?;
+        crate::build::formrdesc(
+            "pg_authid",
+            AuthIdRelation_Rowtype_Id,
+            true,
+            Natts_pg_authid,
+            &xunit::catalog_schema_attrs(AuthIdRelation_Rowtype_Id),
+        )?;
         crate::build::formrdesc(
             "pg_auth_members",
             AuthMemRelation_Rowtype_Id,
             true,
             Natts_pg_auth_members,
+            &xunit::catalog_schema_attrs(AuthMemRelation_Rowtype_Id),
         )?;
         crate::build::formrdesc(
             "pg_shseclabel",
             SharedSecLabelRelation_Rowtype_Id,
             true,
             Natts_pg_shseclabel,
+            &xunit::catalog_schema_attrs(SharedSecLabelRelation_Rowtype_Id),
         )?;
         crate::build::formrdesc(
             "pg_subscription",
             SubscriptionRelation_Rowtype_Id,
             true,
             Natts_pg_subscription,
+            &xunit::catalog_schema_attrs(SubscriptionRelation_Rowtype_Id),
         )?;
     }
     Ok(())
@@ -197,15 +212,34 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
     //        build the nailed local catalogs with formrdesc.
     if xunit::IsBootstrapProcessingMode() || !load_relcache_init_file(false)? {
         need_new_cache_file = true;
-        crate::build::formrdesc("pg_class", RelationRelation_Rowtype_Id, false, Natts_pg_class)?;
+        crate::build::formrdesc(
+            "pg_class",
+            RelationRelation_Rowtype_Id,
+            false,
+            Natts_pg_class,
+            &xunit::catalog_schema_attrs(RelationRelation_Rowtype_Id),
+        )?;
         crate::build::formrdesc(
             "pg_attribute",
             AttributeRelation_Rowtype_Id,
             false,
             Natts_pg_attribute,
+            &xunit::catalog_schema_attrs(AttributeRelation_Rowtype_Id),
         )?;
-        crate::build::formrdesc("pg_proc", ProcedureRelation_Rowtype_Id, false, Natts_pg_proc)?;
-        crate::build::formrdesc("pg_type", TypeRelation_Rowtype_Id, false, Natts_pg_type)?;
+        crate::build::formrdesc(
+            "pg_proc",
+            ProcedureRelation_Rowtype_Id,
+            false,
+            Natts_pg_proc,
+            &xunit::catalog_schema_attrs(ProcedureRelation_Rowtype_Id),
+        )?;
+        crate::build::formrdesc(
+            "pg_type",
+            TypeRelation_Rowtype_Id,
+            false,
+            Natts_pg_type,
+            &xunit::catalog_schema_attrs(TypeRelation_Rowtype_Id),
+        )?;
     }
 
     // C: if (IsBootstrapProcessingMode()) return;
@@ -283,7 +317,7 @@ fn finish_relcache_entries() -> PgResult<()> {
                 // RelationParseRelOptions; the syscache read is the owner seam.
                 let relp = xunit::SearchSysCacheRelOid(oid)?;
                 r.rd_rel = relp;
-                crate::build::RelationParseRelOptions(rd)?;
+                crate::build::RelationParseRelOptions(r)?;
                 if r.rd_rel.relowner == InvalidOid {
                     crate::core_entry_store::RelationDecrementReferenceCount(rd)?;
                     return Err(ereport(ERROR)
@@ -1344,6 +1378,14 @@ mod xunit {
 
     pub(super) fn RelationMapInitialize() {
         todo!("relcache-initfile xunit: RelationMapInitialize (relmapper owner seam)")
+    }
+    /// The hardcoded `Schema_pg_<name>[]` `FormData_pg_attribute` rows the C
+    /// `formrdesc` is handed for a nailed catalog. This is genbki-generated
+    /// catalog-header bootstrap data (`pg_attribute.h` / `schemapg.h`), owned by
+    /// the catalog-data layer; it crosses into relcache as a pure value array.
+    /// Panics until that owner lands — "Mirror PG and panic".
+    pub(super) fn catalog_schema_attrs(_relid: Oid) -> Vec<OwnedAttr> {
+        todo!("relcache-initfile xunit: Schema_pg_* bootstrap attr rows (catalog-data owner seam)")
     }
     pub(super) fn RelationMapInitializePhase2() {
         todo!("relcache-initfile xunit: RelationMapInitializePhase2 (relmapper owner seam)")

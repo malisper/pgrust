@@ -39,6 +39,70 @@ const PERSIST_PERMANENT: i8 = RELPERSISTENCE_PERMANENT as i8;
 const PERSIST_UNLOGGED: i8 = RELPERSISTENCE_UNLOGGED as i8;
 const PERSIST_TEMP: i8 = RELPERSISTENCE_TEMP as i8;
 
+/// `lookup_rowtype_tupdesc_internal(type_id, typmod=-1)` (typcache.c) relcache
+/// half: open the composite type's relation by `typrelid` via
+/// [`crate::core_entry_store::RelationIdGetRelation`], materialize a copy of its
+/// `rd_att` tuple descriptor into `mcx`, and close the relation. **Own logic**
+/// over the entry store + the `CreateTupleDesc` tupdesc utility; the caller
+/// (typcache) holds the refcount discipline.
+#[allow(unsafe_code)]
+pub fn relation_get_composite_tupdesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    typrelid: Oid,
+    type_id: Oid,
+) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+    // relation_open(typrelid, AccessShareLock) — the relcache pin.
+    let rd = crate::core_entry_store::RelationIdGetRelation(typrelid)?;
+    if rd.is_null() {
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!("could not open relation with OID {typrelid}"))
+            .into_error());
+    }
+    // SAFETY: live, pinned cache-owned descriptor.
+    let r = unsafe { &*rd };
+    // CreateTupleDescCopyConstr(RelationGetDescr(rel)) — materialize a standalone
+    // copy of the entry's tuple descriptor, tagged with the composite type.
+    let attrs = build_form_attrs(&r.rd_att, r.rd_id);
+    let mut td = CreateTupleDesc(mcx, &attrs)?;
+    td.tdtypeid = type_id;
+    td.tdtypmod = -1;
+    td.tdrefcount = 1;
+    let boxed = mcx::alloc_in(mcx, td)?;
+    // relation_close(rel, AccessShareLock) — release the pin we took.
+    crate::core_entry_store::RelationClose(rd)?;
+    Ok(boxed)
+}
+
+/// `CreateFakeRelcacheEntry(rlocator)` (xlogutils.c): build a throwaway
+/// relcache entry for a relation we only know the [`RelFileLocator`] of (WAL
+/// replay / page-level operations). The C `palloc0`s a `FakeRelCacheEntryData`,
+/// sets the physical-storage fields, marks it permanent, and `smgropen`s a
+/// non-pinned handle. **Own substrate**: we build the cross-unit value-slice
+/// (the trimmed `rd_rel`, an empty `rd_att`, `rd_locator`/`rd_backend`); the
+/// non-pinned `SMgrRelation` is opened lazily by the storage owner and is not
+/// part of the value-slice.
+pub fn create_fake_relcache_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    rlocator: types_storage::RelFileLocator,
+) -> PgResult<types_rel::RelationData<'mcx>> {
+    // palloc0(FakeRelCacheEntryData) + the hand-filled pg_class fields.
+    let mut entry = RelationData::new_blank();
+    entry.rd_locator = rlocator;
+    entry.rd_backend = INVALID_PROC_NUMBER;
+    // C: "We will never be working with temp rels during recovery." — the fake
+    // entry is always treated as a permanent relation.
+    entry.rd_rel.relpersistence = PERSIST_PERMANENT;
+    project_entry(mcx, &entry)
+}
+
+/// `FreeFakeRelcacheEntry(fakerel)` (xlogutils.c): drop the throwaway entry.
+/// The C `smgrclose`s the non-pinned handle then `pfree`s; here the value-slice
+/// is `mcx`-allocated, so taking ownership and dropping it is the reclaim (the
+/// smgr handle, when opened by the storage owner, is closed on its side).
+pub fn free_fake_relcache_entry(fakerel: types_rel::RelationData<'_>) {
+    drop(fakerel);
+}
+
 /// Project the owned relcache entry into the cross-unit
 /// [`types_rel::RelationData`] value-slice, copied into `mcx` (the C "copy the
 /// consumed slice of the entry into the caller's memory context"). This is the
@@ -308,7 +372,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
             break Box::into_raw(relation);
         }
         // Invalidated: destroy this descriptor (invalidate family) and retry.
-        crate::invalidate::RelationClearRelation(Box::into_raw(relation), false)?;
+        crate::invalidate::RelationClearRelation(Box::into_raw(relation))?;
     };
 
     // Pop our in_progress entry.
@@ -327,7 +391,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
             let old_ref = unsafe { &*old };
             if old_ref.rd_refcnt == 0 {
                 // Free the displaced unreferenced descriptor (invalidate family).
-                crate::invalidate::RelationClearRelation(old, false)?;
+                crate::invalidate::RelationClearRelation(old)?;
             } else {
                 // Still-referenced: C ereport(WARNING) about a leak (outside
                 // bootstrap). We keep the warning faithful.

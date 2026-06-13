@@ -124,14 +124,37 @@ fn relation_rd_tableam(
     }
 }
 
+#[allow(unsafe_code)]
 fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {
-    // RelationNeedsWAL evaluates the whole macro (rd_createSubid/wal_level).
-    // Own logic over the entry — lands with the invalidate/build families.
-    todo!("relcache seam: relation_needs_wal (own macro over entry)")
+    // RelationNeedsWAL(relation) (utils/rel.h): permanent && (XLogIsNeeded() ||
+    // (rd_createSubid == Invalid && rd_firstRelfilelocatorSubid == Invalid)).
+    // rd_createSubid/rd_firstRelfilelocatorSubid are owned-store fields not in
+    // the cross-unit value-slice, so resolve the entry; XLogIsNeeded() is
+    // `wal_level >= WAL_LEVEL_REPLICA` (the xlog GUC owner seam).
+    use types_core::xact::InvalidSubTransactionId;
+    use types_wal::xlog_consts::WAL_LEVEL_REPLICA;
+    const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
+    let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
+        Some(rd) => unsafe { &*rd },
+        None => return false,
+    };
+    let wal = backend_access_transam_xlog_seams::wal_level::call();
+    rd.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+        && (wal >= WAL_LEVEL_REPLICA
+            || (rd.rd_createSubid == InvalidSubTransactionId
+                && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId))
 }
 
+#[allow(unsafe_code)]
 fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool {
-    todo!("relcache seam: relation_is_local (own macro over entry)")
+    // RELATION_IS_LOCAL(relation) (utils/rel.h): rd_islocaltemp ||
+    // rd_createSubid != InvalidSubTransactionId. Both are owned-store fields.
+    use types_core::xact::InvalidSubTransactionId;
+    let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
+        Some(rd) => unsafe { &*rd },
+        None => return false,
+    };
+    rd.rd_islocaltemp || rd.rd_createSubid != InvalidSubTransactionId
 }
 
 #[allow(unsafe_code)]
@@ -202,11 +225,11 @@ fn create_fake_relcache_entry<'mcx>(
     mcx: Mcx<'mcx>,
     rlocator: types_storage::RelFileLocator,
 ) -> PgResult<types_rel::RelationData<'mcx>> {
-    todo!("relcache seam: create_fake_relcache_entry (core-entry-store)")
+    crate::build::create_fake_relcache_entry(mcx, rlocator)
 }
 
 fn free_fake_relcache_entry(fakerel: types_rel::RelationData<'_>) {
-    todo!("relcache seam: free_fake_relcache_entry (core-entry-store)")
+    crate::build::free_fake_relcache_entry(fakerel)
 }
 
 /* ==========================================================================
@@ -311,7 +334,7 @@ fn relation_get_composite_tupdesc<'mcx>(
     typrelid: Oid,
     type_id: Oid,
 ) -> PgResult<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
-    todo!("relcache seam: relation_get_composite_tupdesc (build family)")
+    crate::build::relation_get_composite_tupdesc(mcx, typrelid, type_id)
 }
 
 /* ==========================================================================
@@ -423,11 +446,43 @@ fn relation_has_storage(relkind: i8) -> bool {
 fn relation_get_number_of_blocks(rel: &types_rel::Relation<'_>) -> PgResult<u32> {
     todo!("relcache seam: relation_get_number_of_blocks (smgr seam, index family)")
 }
+#[allow(unsafe_code)]
 fn set_rd_toastoid(new_heap: &types_rel::Relation<'_>, value: Oid) -> PgResult<()> {
-    todo!("relcache seam: set_rd_toastoid (core-entry-store transient set)")
+    // `NewHeap->rd_toastoid = value` — a transient set honored on the owned
+    // entry while NewHeap stays open during the cluster copy.
+    let rd = crate::core_entry_store::cache_lookup(new_heap.rd_id)
+        .ok_or_else(|| missing_entry(new_heap.rd_id))?;
+    // SAFETY: live cache-owned descriptor; mutating an inline scalar.
+    unsafe { (*rd).rd_toastoid = value };
+    Ok(())
 }
+
+/// `RelationAssumeNewRelfilelocator(relation)` (relcache.c): record that the
+/// relation took a new relfilenumber this (sub)transaction, and flag it for
+/// eoxact cleanup. Own logic over the entry; the current subxid is the xact
+/// owner seam.
+#[allow(unsafe_code)]
+fn assume_new_relfilelocator(relid: Oid) -> PgResult<()> {
+    use types_core::xact::InvalidSubTransactionId;
+    let rd = crate::core_entry_store::cache_lookup(relid).ok_or_else(|| missing_entry(relid))?;
+    let subid = backend_access_transam_xact_seams::get_current_sub_transaction_id::call();
+    // SAFETY: live cache-owned descriptor.
+    let r = unsafe { &mut *rd };
+    r.rd_newRelfilelocatorSubid = subid;
+    if r.rd_firstRelfilelocatorSubid == InvalidSubTransactionId {
+        r.rd_firstRelfilelocatorSubid = subid;
+    }
+    // EOXactListAdd(relation): flag for end-of-xact cleanup.
+    crate::core_entry_store::with_state(|st| crate::core_entry_store::eoxact_list_add(st, relid));
+    Ok(())
+}
+
 fn swap_relfilelocator_subids(r1: Oid, r2: Oid) -> PgResult<()> {
-    todo!("relcache seam: swap_relfilelocator_subids (initfile family)")
+    // `swap_relation_files` (cluster.c) tells the relcache both relations took
+    // new relfilelocators this transaction.
+    assume_new_relfilelocator(r1)?;
+    assume_new_relfilelocator(r2)?;
+    Ok(())
 }
 
 /* ==========================================================================

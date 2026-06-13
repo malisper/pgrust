@@ -615,7 +615,7 @@ pub fn RelationReloadIndexInfo(relation: *mut RelationData) -> PgResult<()> {
     rd.rd_rel = pg_class;
     // Reload reloptions in case they changed (RelationParseRelOptions is build
     // family own logic).
-    crate::build::RelationParseRelOptions(relation)?;
+    crate::build::RelationParseRelOptions(rd)?;
     // We must recalculate physical address in case it changed.
     RelationInitPhysicalAddr(relation)?;
 
