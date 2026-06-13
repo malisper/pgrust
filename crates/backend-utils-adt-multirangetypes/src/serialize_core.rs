@@ -124,6 +124,14 @@ pub fn multirange_get_bounds(
     todo!("port multirange_get_bounds (multirangetypes.c:745)")
 }
 
+/// `MultirangeGetFlagsPtr(mr)[i]` (multirangetypes.h): the serialized flags
+/// byte of the `i`th member range. The flags array follows the per-range item
+/// array (`rangeCount` `uint32` words) after the [`MultirangeType`] header.
+pub(crate) fn multirange_get_flags(multirange: MultirangeTypeP<'_>, i: u32) -> u8 {
+    let _ = (multirange, i);
+    todo!("port MultirangeGetFlagsPtr (multirangetypes.h)")
+}
+
 /// `multirange_get_union_range(rangetyp, mr)` (multirangetypes.c:803): a range
 /// spanning the lowest lower bound to the highest upper bound of the multirange.
 pub fn multirange_get_union_range<'mcx>(

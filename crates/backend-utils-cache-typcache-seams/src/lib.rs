@@ -19,6 +19,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange-ADT
+    /// view: same as [`lookup_type_cache`] but hands back the
+    /// `types_cache::TypeCacheEntry` shape the range/multirange ports use
+    /// (with the `hash_proc_finfo` / `hash_extended_proc_finfo` support
+    /// fields). `hash_multirange` calls this to resolve the subtype's hash
+    /// support function when it was not already cached. `Err` carries the
+    /// catalog-lookup `ereport(ERROR)` surface.
+    pub fn lookup_type_cache_entry(
+        type_id: types_core::primitive::Oid,
+        flags: i32,
+    ) -> types_error::PgResult<types_cache::TypeCacheEntry>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe
