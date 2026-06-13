@@ -7052,6 +7052,7 @@ dependencies = [
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
+ "backend-utils-init-miscinit-seams",
  "common-hashfn-seams",
  "mcx",
  "seam-core",
