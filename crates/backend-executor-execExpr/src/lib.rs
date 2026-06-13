@@ -4,10 +4,14 @@
 // trips `clippy::result_large_err`. The un-boxed return is the project's error
 // contract, so accept the lint crate-wide.
 #![allow(clippy::result_large_err)]
-// SCAFFOLD STAGE: the family bodies are `todo!()` until the spine + the
-// ExprEvalStep emission / interpreter compilation land; the signatures and the
-// seam installation are wired now so the crate compiles and the seam surface is
-// owned.
+// The family bodies are filled against the keystone F0 ExprEvalStep model (all
+// 33 execExpr.c functions present; the agg/hash/grouping/param-set builders emit
+// per-column logic on the F0 arg-cell cells). The remaining `panic!`s are
+// mirror-PG-and-panic on unported owners / not-yet-expanded shared-model structs
+// (ScalarArrayOp/MinMax/ArrayExpr primnodes; nodeAgg ds_fcinfo; execTuples slot
+// model #113; typcache #58; JsonExprState; nodeSubplan/subscripting) — no
+// `todo!()` in own logic. dead_code/unused_variables allowed for the threaded
+// args those still-blocked arms hold.
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
