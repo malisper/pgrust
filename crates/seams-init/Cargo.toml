@@ -69,5 +69,6 @@ backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
+backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }

@@ -90,3 +90,24 @@ seam_core::seam!(
     /// forbids PREPARE.
     pub fn xact_has_exported_snapshots() -> bool
 );
+
+seam_core::seam!(
+    /// `UnregisterSnapshotFromOwner(snapshot, owner)` — drop the portal's
+    /// hold-snapshot registration against its resource owner. portalmem holds
+    /// the `Snapshot` / `ResourceOwner` only as long-lived identity tokens
+    /// (they outlive any `Mcx` borrow), so they cross as handles.
+    pub fn unregister_snapshot_from_owner(
+        snapshot: types_portal::SnapshotHandle,
+        owner: types_portal::ResourceOwnerHandle,
+    )
+);
+
+seam_core::seam!(
+    /// `ActiveSnapshotSet()` — true if the active-snapshot stack is non-empty.
+    pub fn active_snapshot_set() -> bool
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` — pop one entry off the active-snapshot stack.
+    pub fn pop_active_snapshot()
+);

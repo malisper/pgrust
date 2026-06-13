@@ -130,3 +130,10 @@ seam_core::seam!(
     /// `replorigin_session_advance`. Pure read of backend-local state.
     pub fn xact_last_rec_end() -> types_core::XLogRecPtr
 );
+
+seam_core::seam!(
+    /// `GetCurrentStatementStartTimestamp()` (xact.c): the `stmtStartTimestamp`
+    /// of the current transaction state — stamped into `portal->creation_time`.
+    /// Pure read of xact's owned state.
+    pub fn get_current_statement_start_timestamp() -> types_core::TimestampTz
+);

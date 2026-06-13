@@ -1234,6 +1234,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-portalcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-datum",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-commands-sequence-seams"
 version = "0.0.0"
 dependencies = [
@@ -2957,6 +2967,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-plancache-portal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -3331,12 +3349,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mmgr-portalmem"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-commands-portalcmds-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-utils-cache-plancache-portal-seams",
+ "backend-utils-error",
+ "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-resowner-seams",
+ "backend-utils-sort-tuplestore-hold-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-utils-mmgr-portalmem-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-resowner-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-portal",
 ]
 
 [[package]]
@@ -3361,6 +3407,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-tuplestore-hold-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-utils-time-combocid"
 version = "0.0.0"
 dependencies = [
@@ -3378,6 +3432,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-portal",
  "types-snapshot",
 ]
 
@@ -3588,6 +3643,7 @@ dependencies = [
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
+ "backend-utils-mmgr-portalmem",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
 ]
@@ -3756,6 +3812,10 @@ version = "0.0.0"
 dependencies = [
  "types-core",
 ]
+
+[[package]]
+name = "types-portal"
+version = "0.0.0"
 
 [[package]]
 name = "types-regex"
