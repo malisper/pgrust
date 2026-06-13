@@ -18,3 +18,5 @@ types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 types-storage = { path = "../types-storage" }
+types-condvar = { path = "../types-condvar" }
+types-execparallel = { path = "../types-execparallel" }

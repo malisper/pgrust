@@ -1540,6 +1540,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeHash"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
+ "backend-executor-nodeHash-pq-seams",
+ "backend-executor-nodeHashjoin-seams",
+ "backend-storage-file-buffile-seams",
+ "backend-storage-ipc-barrier-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeHash-pq-seams"
 version = "0.0.0"
 dependencies = [
@@ -1555,6 +1586,19 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeHashjoin-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2272,6 +2316,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-buffile-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
 name = "backend-storage-file-fd-seams"
 version = "0.0.0"
 dependencies = [
@@ -2284,6 +2337,16 @@ name = "backend-storage-file-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-barrier-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-condvar",
+ "types-core",
  "types-error",
 ]
 
@@ -3356,8 +3419,12 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
+ "types-execparallel",
  "types-nodes",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3547,6 +3614,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeHash",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
@@ -3732,9 +3800,11 @@ name = "types-nodes"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-condvar",
  "types-core",
  "types-datum",
  "types-error",
+ "types-execparallel",
  "types-rel",
  "types-scan",
  "types-sortsupport",

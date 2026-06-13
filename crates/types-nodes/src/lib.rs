@@ -23,6 +23,7 @@ pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
+pub mod nodehash;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
@@ -43,6 +44,13 @@ pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,
+};
+pub use nodehash::{
+    AttStatsSlot, BucketAndBatch, Hash, HashChunkIdx, HashInstrumentation, HashJoinBuckets,
+    HashJoinState, HashJoinTableData, HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
+    HashMemoryChunkLink, HashSkewBucket, HashState, HashTupleIdx, ParallelHashGrowth,
+    ParallelHashJoinBatch, ParallelHashJoinBatchAccessor, ParallelHashJoinState, SharedHashInfo,
+    INVALID_SKEW_BUCKET_NO,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;
