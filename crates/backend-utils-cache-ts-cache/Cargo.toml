@@ -9,6 +9,7 @@ name = "backend_utils_cache_ts_cache"
 path = "src/lib.rs"
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 mcx = { path = "../mcx" }
 types-cache = { path = "../types-cache" }
 types-core = { path = "../types-core" }
@@ -27,3 +28,4 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

@@ -35,6 +35,11 @@ pub const DEFAULT_CPU_INDEX_TUPLE_COST: f64 = 0.005;
 pub const DEFAULT_CPU_OPERATOR_COST: f64 = 0.0025;
 pub const DEFAULT_CPU_TUPLE_COST: f64 = 0.01;
 pub const DEFAULT_CURSOR_TUPLE_FRACTION: f64 = 0.1;
+/// = `backend_storage_ipc_dsm_core::dsm_impl::DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE`
+/// (`DSM_IMPL_POSIX`, `storage/dsm_impl.h`). Transcribed rather than
+/// referenced because the dependency edge runs the other way: dsm-core
+/// installs into this crate's `vars`/`option_sets` slots (see
+/// DESIGN_DEBT.md "guc-tables consts.rs transcribed constants").
 pub const DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE: i32 = 1;
 pub const DEFAULT_EFFECTIVE_CACHE_SIZE: i32 = 524288;
 pub const DEFAULT_EFFECTIVE_IO_CONCURRENCY: i32 = 16;

@@ -33,6 +33,7 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_syscache as syscache;
 use backend_utils_error_seams as error_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
+use backend_utils_init_small_seams as init_small_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
 use types_cache::{BTEqualStrategyNumber, ScanKeyInit, SysCacheKey, F_OIDEQ};
 use types_core::{InvalidOid, Oid, OidIsValid};
@@ -928,5 +929,29 @@ pub fn assign_default_text_search_config(newval: Option<&str>) {
     });
 }
 
-/// This crate declares no inward seams (callers depend on it directly).
-pub fn init_seams() {}
+/// Install this crate's GUC storage variable and hooks into the GUC tables'
+/// typed slots (it declares no inward seams of its own).
+pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+
+    fn check_hook(
+        newval: &mut Option<String>,
+        _extra: &mut Option<GucHookExtra>,
+        source: GucSource,
+    ) -> PgResult<bool> {
+        // default_text_search_config boots to "pg_catalog.simple" (never
+        // NULL), so a NULL candidate cannot reach this hook.
+        let Some(value) = newval.as_mut() else {
+            return Ok(true);
+        };
+        check_default_text_search_config(value, init_small_seams::my_database_id::call(), source)
+    }
+
+    hooks::check_default_text_search_config.install(check_hook);
+    hooks::assign_default_text_search_config
+        .install(|newval, _extra| assign_default_text_search_config(newval));
+    vars::TSCurrentConfig.install(GucVarAccessors {
+        get: || with_state(|st| st.ts_current_config.clone()),
+        set: |v| with_state(|st| st.ts_current_config = v),
+    });
+}
