@@ -7,6 +7,30 @@
 use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
+use types_selfuncs::{AttStatsSlot, StatsTuple};
+
+seam_core::seam!(
+    /// `get_commutator(opno)` (lsyscache.c): the commutator operator of `opno`,
+    /// or `InvalidOid` (0) if none. `Err` carries catcache-path
+    /// `ereport(ERROR)`s.
+    pub fn get_commutator(opno: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_attstatsslot(&sslot, statstuple, reqkind, reqop, flags)`
+    /// (lsyscache.c): extract the first `pg_statistic` slot of the given kind
+    /// (and optional operator), detoasting the requested `values` / `numbers`
+    /// arrays into `mcx`. Returns `None` when no such slot exists (C: `false`);
+    /// the C `free_attstatsslot` is the returned slot's `Drop`. `Err` carries
+    /// the syscache / detoast `ereport(ERROR)`s and OOM.
+    pub fn get_attstatsslot<'mcx>(
+        mcx: Mcx<'mcx>,
+        stats_tuple: StatsTuple,
+        reqkind: i32,
+        reqop: Oid,
+        flags: i32,
+    ) -> PgResult<Option<AttStatsSlot<'mcx>>>
+);
 
 seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
@@ -121,4 +145,18 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_op_hash_functions(opno, &lhs_procno, &rhs_procno)` (lsyscache.c):
+    /// resolve the LHS and RHS hash support functions of a hashable equality
+    /// operator. Returns `Some((lhs, rhs))` when found (the C `true`), `None`
+    /// when not (the C `false`). `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn get_op_hash_functions(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `op_strict(opno)` (lsyscache.c): whether the operator's underlying
+    /// function is strict. `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn op_strict(opno: Oid) -> PgResult<bool>
 );
