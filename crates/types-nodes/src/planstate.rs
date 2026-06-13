@@ -33,6 +33,8 @@ pub enum PlanStateNode<'mcx> {
     Append(PgBox<'mcx, AppendStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
+    /// `T_GatherMergeState`.
+    GatherMerge(PgBox<'mcx, crate::nodegathermerge::GatherMergeStateData<'mcx>>),
     /// `T_MergeAppendState`.
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
@@ -69,6 +71,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
+            PlanStateNode::GatherMerge(_) => crate::nodegathermerge::T_GatherMergeState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::Result(_) => T_ResultState,
@@ -92,6 +95,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
+            PlanStateNode::GatherMerge(g) => &g.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::Result(r) => &r.ps,
@@ -114,6 +118,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
+            PlanStateNode::GatherMerge(g) => &mut g.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::Result(r) => &mut r.ps,

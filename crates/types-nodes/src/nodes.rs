@@ -129,6 +129,8 @@ pub enum Node<'mcx> {
     Append(crate::nodeappend::Append<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
+    /// `T_GatherMerge`.
+    GatherMerge(crate::nodegathermerge::GatherMerge<'mcx>),
     /// `T_MergeAppend`.
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
@@ -179,6 +181,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
+            Node::GatherMerge(_) => crate::nodegathermerge::T_GatherMerge,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Result(_) => T_Result,
@@ -203,6 +206,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
+            Node::GatherMerge(g) => &g.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Result(r) => &r.plan,
@@ -237,6 +241,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
+            Node::GatherMerge(g) => Ok(Node::GatherMerge(g.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),

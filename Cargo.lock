@@ -3704,6 +3704,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeGatherMerge"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execParallel-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-tqueue-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
@@ -4309,9 +4336,11 @@ dependencies = [
 name = "backend-executor-tqueue-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-execparallel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9872,6 +9901,7 @@ dependencies = [
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGatherMerge",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",

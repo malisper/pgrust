@@ -28,6 +28,7 @@ pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
+pub mod nodegathermerge;
 pub mod nodehash;
 pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
@@ -75,6 +76,10 @@ pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
+};
+pub use nodegathermerge::{
+    GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE, T_GatherMerge,
+    T_GatherMergeState,
 };
 pub use nodemergeappend::{
     BinaryHeap, MergeAppend, MergeAppendStateData, T_MergeAppend,
