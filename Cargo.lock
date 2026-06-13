@@ -3652,6 +3652,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-dshash"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-dshash-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-lib-dshash-seams"
 version = "0.0.0"
 dependencies = [
@@ -7652,6 +7668,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "common-ip-seams"
 version = "0.0.0"
 dependencies = [
@@ -7875,6 +7899,7 @@ dependencies = [
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeSeqscan",
+ "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
