@@ -17,3 +17,13 @@ seam_core::seam!(
         type_oid: Oid,
     ) -> PgResult<mcx::PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `format_type_be(type_oid)` (format_type.c) for transient error-message
+    /// use by callers that thread no `Mcx` (e.g. lsyscache.c's `get_cast_oid`,
+    /// whose C signature takes no context and renders the type names only into
+    /// the `ereport(ERROR)` text). The owner formats in a scratch context and
+    /// returns an owned `String`. `Err` carries the invalid-type cache-lookup
+    /// `elog(ERROR)` and OOM.
+    pub fn format_type_be_str(type_oid: Oid) -> PgResult<String>
+);

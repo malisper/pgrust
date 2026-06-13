@@ -712,3 +712,77 @@ seam_core::seam!(
     /// `ReleaseSysCache`.
     pub fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>>
 );
+
+/* ---- lsyscache.c collation / constraint / language / cast / transform reads */
+
+seam_core::seam!(
+    /// `SearchSysCache1(COLLOID, ObjectIdGetDatum(colloid))` +
+    /// `GETSTRUCT(Form_pg_collation)->collisdeterministic` + `ReleaseSysCache`
+    /// (`get_collation_isdeterministic`, lsyscache.c). `Ok(None)` on a cache
+    /// miss so the caller raises the exact `elog(ERROR, "cache lookup failed
+    /// for collation %u")`.
+    pub fn collation_isdeterministic(colloid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(COLLOID, ObjectIdGetDatum(colloid))` +
+    /// `NameStr(Form_pg_collation->collname)` copied into `mcx` (C: `pstrdup`)
+    /// + `ReleaseSysCache` (`get_collation_name`, lsyscache.c). `Ok(None)` on a
+    /// cache miss (the C NULL return). `Err` carries OOM from the copy.
+    pub fn collation_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        colloid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` +
+    /// `NameStr(Form_pg_constraint->conname)` copied into `mcx` (C: `pstrdup`)
+    /// + `ReleaseSysCache` (`get_constraint_name`, lsyscache.c). `Ok(None)` on
+    /// a cache miss (the C NULL return). `Err` carries OOM from the copy.
+    pub fn constraint_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` +
+    /// `ReleaseSysCache` projected to `Form_pg_constraint`'s
+    /// `(contype, conindid)` (`get_constraint_index` / `get_constraint_type`,
+    /// lsyscache.c). `contype` is the raw `pg_constraint.contype` char; the
+    /// caller applies the CONSTRAINT_{UNIQUE,PRIMARY,EXCLUSION} test and its
+    /// own `cache lookup failed for constraint %u` error. `Ok(None)` on a cache
+    /// miss.
+    pub fn constraint_type_index(conoid: Oid) -> PgResult<Option<(u8, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(LANGOID, ObjectIdGetDatum(langoid))` +
+    /// `NameStr(Form_pg_language->lanname)` copied into `mcx` (C: `pstrdup`) +
+    /// `ReleaseSysCache` (`get_language_name`, lsyscache.c). `Ok(None)` on a
+    /// cache miss; the caller raises `cache lookup failed for language %u` only
+    /// when `!missing_ok`. `Err` carries OOM from the copy.
+    pub fn language_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        langoid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid2(CASTSOURCETARGET, Anum_pg_cast_oid,
+    /// ObjectIdGetDatum(sourcetypeid), ObjectIdGetDatum(targettypeid))`
+    /// (`get_cast_oid`, lsyscache.c): the `pg_cast.oid` of the cast between the
+    /// two types, or `InvalidOid` (0) when there is none. `Err` carries the
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(TRFTYPELANG, ObjectIdGetDatum(typid),
+    /// ObjectIdGetDatum(langid))` + `ReleaseSysCache` projected to
+    /// `Form_pg_transform`'s `(trffromsql, trftosql)`
+    /// (`get_transform_fromsql` / `get_transform_tosql`, lsyscache.c).
+    /// `Ok(None)` on a cache miss (the C `InvalidOid` return).
+    pub fn transform_funcs(typid: Oid, langid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
