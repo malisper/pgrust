@@ -1793,12 +1793,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-joinpath"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-joinpath-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-plancat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-optimizer-util-relnode-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -3552,6 +3584,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-optimizer-path-joinpath",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
@@ -3740,6 +3773,14 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-pathnodes"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-nodes",
 ]
 
 [[package]]
