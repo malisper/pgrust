@@ -9,15 +9,22 @@ use types_error::PgResult;
 
 seam_core::seam!(
     /// `format_procedure(procedure_oid)` (regproc.c): the function's printable
-    /// name (possibly qualified) for diagnostics. Never NULL in C; `Err`
-    /// carries the (shouldn't-happen) catalog-lookup `elog(ERROR)`.
-    pub fn format_procedure(procedure_oid: Oid) -> PgResult<String>
+    /// name (possibly qualified) for diagnostics, palloc'd in the caller's
+    /// current context (`mcx`). Never NULL in C; `Err` carries the
+    /// (shouldn't-happen) catalog-lookup `elog(ERROR)` and OOM.
+    pub fn format_procedure<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        procedure_oid: Oid,
+    ) -> PgResult<mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(
     /// `format_operator(operator_oid)` (regproc.c): the operator's printable
-    /// name for diagnostics.
-    pub fn format_operator(operator_oid: Oid) -> PgResult<String>
+    /// name for diagnostics, palloc'd in the caller's current context (`mcx`).
+    pub fn format_operator<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        operator_oid: Oid,
+    ) -> PgResult<mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(

@@ -65,7 +65,9 @@ seam_core::seam!(
     /// the `ereport(ERROR)`s reachable through `pgstat_build_snapshot`
     /// (palloc / dsa out-of-memory) and the per-kind `snapshot_cb`s'
     /// `LWLockAcquire` (`too many LWLocks taken`).
-    pub fn snapshot_fixed(kind: u32) -> types_error::PgResult<()>
+    pub fn snapshot_fixed(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

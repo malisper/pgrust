@@ -3,28 +3,46 @@
 //!
 //! Each entry point operates on PostgreSQL's own backend status entry
 //! (`MyBEEntry`, owned by `backend_status.c`) through the
-//! `backend-utils-activity-status-seams` slots; the write *order* between the
-//! `PGSTAT_BEGIN_WRITE_ACTIVITY` / `PGSTAT_END_WRITE_ACTIVITY` bracketing —
-//! the logic this file owns — stays here. `IsParallelWorker()` and the libpq
-//! message helpers are reached through their owners' seam crates.
+//! `backend-utils-activity-status-seams` `with_my_beentry` slot; the
+//! `PGSTAT_BEGIN_WRITE_ACTIVITY` / `PGSTAT_END_WRITE_ACTIVITY` bracketing and
+//! the field writes — the logic this file owns — stay here. `IsParallelWorker()`
+//! and the libpq message helpers are reached through their owners' seam crates.
+
+use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 use backend_access_transam_parallel_seams::is_parallel_worker;
 use backend_libpq_pqformat_seams::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
+use backend_utils_activity_status_seams::{my_be_entry_present, track_activities, with_my_beentry};
 use mcx::Mcx;
-use backend_utils_activity_status_seams::{
-    begin_write_activity, end_write_activity, incr_progress_param, my_be_entry_present,
-    progress_command, set_progress_command, set_progress_command_target, set_progress_param,
-    track_activities, zero_progress_param,
-};
 use types_core::{int64, InvalidOid, Oid};
 use types_error::PgResult;
 use types_pgstat::backend_progress::ProgressCommandType;
+use types_pgstat::backend_status::PgBackendStatus;
 
-/// `#define PGSTAT_NUM_PROGRESS_PARAM 20` (`utils/backend_progress.h`).
-pub const PGSTAT_NUM_PROGRESS_PARAM: usize = 20;
+pub use types_pgstat::backend_progress::PGSTAT_NUM_PROGRESS_PARAM;
 
 /// `PqMsg_Progress` — `'P'` (`libpq/protocol.h`).
 pub const PQ_MSG_PROGRESS: u8 = b'P';
+
+/// `PGSTAT_BEGIN_WRITE_ACTIVITY(beentry)` (`utils/backend_status.h`):
+/// `START_CRIT_SECTION(); st_changecount++; pg_write_barrier();`
+///
+/// Same barrier mapping (and the same critical-section elision) as the pgstat
+/// changecount protocol — see `changecount.rs`.
+fn pgstat_begin_write_activity(cc: &AtomicU32) {
+    let before = cc.load(Ordering::Relaxed);
+    cc.store(before.wrapping_add(1), Ordering::Relaxed);
+    fence(Ordering::Release);
+}
+
+/// `PGSTAT_END_WRITE_ACTIVITY(beentry)` (`utils/backend_status.h`):
+/// `pg_write_barrier(); st_changecount++;
+/// Assert((st_changecount & 1) == 0); END_CRIT_SECTION();`
+fn pgstat_end_write_activity(cc: &AtomicU32) {
+    let before = cc.load(Ordering::Relaxed);
+    cc.store(before.wrapping_add(1), Ordering::Release);
+    debug_assert!((cc.load(Ordering::Relaxed) & 1) == 0);
+}
 
 /// `pgstat_progress_start_command()` —
 ///
@@ -36,12 +54,14 @@ pub fn pgstat_progress_start_command(cmdtype: ProgressCommandType, relid: Oid) {
         return;
     }
 
-    begin_write_activity::call();
-    set_progress_command::call(cmdtype);
-    set_progress_command_target::call(relid);
-    // MemSet(&beentry->st_progress_param, 0, sizeof(beentry->st_progress_param));
-    zero_progress_param::call();
-    end_write_activity::call();
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        pgstat_begin_write_activity(&beentry.st_changecount);
+        beentry.st_progress_command = cmdtype;
+        beentry.st_progress_command_target = relid;
+        // MemSet(&beentry->st_progress_param, 0, sizeof(beentry->st_progress_param));
+        beentry.st_progress_param = [0; PGSTAT_NUM_PROGRESS_PARAM];
+        pgstat_end_write_activity(&beentry.st_changecount);
+    });
 }
 
 /// `pgstat_progress_update_param()` —
@@ -54,9 +74,11 @@ pub fn pgstat_progress_update_param(index: i32, val: int64) {
         return;
     }
 
-    begin_write_activity::call();
-    set_progress_param::call(index, val);
-    end_write_activity::call();
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        pgstat_begin_write_activity(&beentry.st_changecount);
+        beentry.st_progress_param[index as usize] = val;
+        pgstat_end_write_activity(&beentry.st_changecount);
+    });
 }
 
 /// `pgstat_progress_incr_param()` —
@@ -69,9 +91,11 @@ pub fn pgstat_progress_incr_param(index: i32, incr: int64) {
         return;
     }
 
-    begin_write_activity::call();
-    incr_progress_param::call(index, incr);
-    end_write_activity::call();
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        pgstat_begin_write_activity(&beentry.st_changecount);
+        beentry.st_progress_param[index as usize] += incr;
+        pgstat_end_write_activity(&beentry.st_changecount);
+    });
 }
 
 /// `pgstat_progress_parallel_incr_param()` —
@@ -109,16 +133,18 @@ pub fn pgstat_progress_update_multi_param(index: &[i32], val: &[int64]) {
         return;
     }
 
-    begin_write_activity::call();
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        pgstat_begin_write_activity(&beentry.st_changecount);
 
-    for i in 0..nparam {
-        debug_assert!(index[i] >= 0 && (index[i] as usize) < PGSTAT_NUM_PROGRESS_PARAM);
+        for i in 0..nparam {
+            debug_assert!(index[i] >= 0 && (index[i] as usize) < PGSTAT_NUM_PROGRESS_PARAM);
 
-        // beentry->st_progress_param[index[i]] = val[i];
-        set_progress_param::call(index[i], val[i]);
-    }
+            // beentry->st_progress_param[index[i]] = val[i];
+            beentry.st_progress_param[index[i] as usize] = val[i];
+        }
 
-    end_write_activity::call();
+        pgstat_end_write_activity(&beentry.st_changecount);
+    });
 }
 
 /// `pgstat_progress_end_command()` —
@@ -130,20 +156,27 @@ pub fn pgstat_progress_end_command() {
         return;
     }
 
-    if progress_command::call() == ProgressCommandType::Invalid {
-        return;
-    }
+    with_my_beentry::call(&mut |beentry: &mut PgBackendStatus| {
+        if beentry.st_progress_command == ProgressCommandType::Invalid {
+            return;
+        }
 
-    begin_write_activity::call();
-    set_progress_command::call(ProgressCommandType::Invalid);
-    set_progress_command_target::call(InvalidOid);
-    end_write_activity::call();
+        pgstat_begin_write_activity(&beentry.st_changecount);
+        beentry.st_progress_command = ProgressCommandType::Invalid;
+        beentry.st_progress_command_target = InvalidOid;
+        pgstat_end_write_activity(&beentry.st_changecount);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_seams::{with_fixture, with_flags};
+    use core::sync::atomic::Ordering;
+
+    fn changecount(e: &crate::test_seams::Env) -> u32 {
+        e.beentry.borrow().st_changecount.load(Ordering::Relaxed)
+    }
 
     #[test]
     fn start_command_noop_without_entry() {
@@ -151,8 +184,11 @@ mod tests {
         with_flags(false, true, false, || {
             pgstat_progress_start_command(ProgressCommandType::Vacuum, 1);
             with_fixture(|e| {
-                assert_eq!(e.command.get(), ProgressCommandType::Invalid);
-                assert_eq!(e.changecount.get(), 0);
+                assert_eq!(
+                    e.beentry.borrow().st_progress_command,
+                    ProgressCommandType::Invalid
+                );
+                assert_eq!(changecount(e), 0);
             });
         });
     }
@@ -162,8 +198,11 @@ mod tests {
         with_flags(true, false, false, || {
             pgstat_progress_start_command(ProgressCommandType::Vacuum, 1);
             with_fixture(|e| {
-                assert_eq!(e.command.get(), ProgressCommandType::Invalid);
-                assert_eq!(e.changecount.get(), 0);
+                assert_eq!(
+                    e.beentry.borrow().st_progress_command,
+                    ProgressCommandType::Invalid
+                );
+                assert_eq!(changecount(e), 0);
             });
         });
     }
@@ -173,27 +212,31 @@ mod tests {
         with_flags(true, true, false, || {
             pgstat_progress_start_command(ProgressCommandType::Vacuum, 1234);
             with_fixture(|e| {
-                assert_eq!(e.command.get(), ProgressCommandType::Vacuum);
-                assert_eq!(e.target.get(), 1234);
-                assert_eq!(e.changecount.get(), 2);
+                let b = e.beentry.borrow();
+                assert_eq!(b.st_progress_command, ProgressCommandType::Vacuum);
+                assert_eq!(b.st_progress_command_target, 1234);
+                drop(b);
+                assert_eq!(changecount(e), 2);
             });
 
             pgstat_progress_update_param(3, 7);
-            with_fixture(|e| assert_eq!(e.params[3].get(), 7));
+            with_fixture(|e| assert_eq!(e.beentry.borrow().st_progress_param[3], 7));
 
             pgstat_progress_incr_param(3, 5);
-            with_fixture(|e| assert_eq!(e.params[3].get(), 12));
+            with_fixture(|e| assert_eq!(e.beentry.borrow().st_progress_param[3], 12));
 
             pgstat_progress_update_multi_param(&[1, 2], &[10, 20]);
             with_fixture(|e| {
-                assert_eq!(e.params[1].get(), 10);
-                assert_eq!(e.params[2].get(), 20);
+                let b = e.beentry.borrow();
+                assert_eq!(b.st_progress_param[1], 10);
+                assert_eq!(b.st_progress_param[2], 20);
             });
 
             pgstat_progress_end_command();
             with_fixture(|e| {
-                assert_eq!(e.command.get(), ProgressCommandType::Invalid);
-                assert_eq!(e.target.get(), InvalidOid);
+                let b = e.beentry.borrow();
+                assert_eq!(b.st_progress_command, ProgressCommandType::Invalid);
+                assert_eq!(b.st_progress_command_target, InvalidOid);
             });
         });
     }
@@ -203,7 +246,7 @@ mod tests {
         // command starts Invalid; end_command must return before any write.
         with_flags(true, true, false, || {
             pgstat_progress_end_command();
-            with_fixture(|e| assert_eq!(e.changecount.get(), 0));
+            with_fixture(|e| assert_eq!(changecount(e), 0));
         });
     }
 
@@ -215,8 +258,8 @@ mod tests {
             with_fixture(|e| {
                 assert_eq!(e.sent.get(), Some((2, 99)));
                 // The leader's progress_param must NOT have been touched.
-                assert_eq!(e.params[2].get(), 0);
-                assert_eq!(e.changecount.get(), 0);
+                assert_eq!(e.beentry.borrow().st_progress_param[2], 0);
+                assert_eq!(changecount(e), 0);
             });
         });
     }
@@ -227,8 +270,8 @@ mod tests {
             let ctx = mcx::MemoryContext::new("test");
             pgstat_progress_parallel_incr_param(ctx.mcx(), 2, 99).unwrap();
             with_fixture(|e| {
-                assert_eq!(e.params[2].get(), 99);
-                assert_eq!(e.changecount.get(), 2);
+                assert_eq!(e.beentry.borrow().st_progress_param[2], 99);
+                assert_eq!(changecount(e), 2);
                 assert_eq!(e.sent.get(), None);
             });
         });
@@ -239,7 +282,7 @@ mod tests {
         // nparam == 0 => return without write activity.
         with_flags(true, true, false, || {
             pgstat_progress_update_multi_param(&[], &[]);
-            with_fixture(|e| assert_eq!(e.changecount.get(), 0));
+            with_fixture(|e| assert_eq!(changecount(e), 0));
         });
     }
 }

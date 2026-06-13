@@ -5,9 +5,11 @@
 //! and the details about individual types of statistics.
 //!
 //! `PendingBgWriterStats` is the file-owned backend-local pending buffer (a
-//! process global in C, mutated directly by `storage/buffer/bufmgr.c`'s
-//! `BgBufferSync`); it is kept as a file-local `static mut` reached through
-//! [`pending_bgwriter_stats`].
+//! per-backend C global, mutated directly by `storage/buffer/bufmgr.c`'s
+//! `BgBufferSync`); it is a `thread_local!` reached through
+//! [`with_pending_bgwriter_stats`].
+
+use core::cell::RefCell;
 
 use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
@@ -25,26 +27,26 @@ use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
 };
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-/// `PGSTAT_KIND_BGWRITER` (`utils/pgstat_kind.h`).
-pub const PGSTAT_KIND_BGWRITER: u32 = 8;
+pub use types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
 
-/// `PgStat_BgWriterStats PendingBgWriterStats = {0};`
-static mut PENDING_BGWRITER_STATS: PgStat_BgWriterStats = PgStat_BgWriterStats {
-    buf_written_clean: 0,
-    maxwritten_clean: 0,
-    buf_alloc: 0,
-    stat_reset_timestamp: 0,
-};
+thread_local! {
+    /// `PgStat_BgWriterStats PendingBgWriterStats = {0};` — backend-local
+    /// state, so per-thread (one backend == one thread).
+    static PENDING_BGWRITER_STATS: RefCell<PgStat_BgWriterStats> = const {
+        RefCell::new(PgStat_BgWriterStats {
+            buf_written_clean: 0,
+            maxwritten_clean: 0,
+            buf_alloc: 0,
+            stat_reset_timestamp: 0,
+        })
+    };
+}
 
-/// Borrow the file-owned backend-local `PendingBgWriterStats` buffer. In C
-/// the global is `PGDLLIMPORT` and other files (`storage/buffer/bufmgr.c`)
-/// bump its fields directly; this accessor is that access path.
-///
-/// SAFETY: backend-local process global, mirroring C's single-threaded
-/// per-backend access. Callers take one live borrow at a time within a tight
-/// scope, like C's pointer to the global.
-pub fn pending_bgwriter_stats() -> &'static mut PgStat_BgWriterStats {
-    unsafe { &mut *core::ptr::addr_of_mut!(PENDING_BGWRITER_STATS) }
+/// Run `f` on this backend's `PendingBgWriterStats` buffer. In C the global
+/// is `PGDLLIMPORT` and other files (`storage/buffer/bufmgr.c`) bump its
+/// fields directly; this accessor is that access path.
+pub fn with_pending_bgwriter_stats<R>(f: impl FnOnce(&mut PgStat_BgWriterStats) -> R) -> R {
+    PENDING_BGWRITER_STATS.with(|p| f(&mut p.borrow_mut()))
 }
 
 /// Report bgwriter and IO statistics.
@@ -62,26 +64,26 @@ pub fn pgstat_report_bgwriter() -> PgResult<()> {
     // if (pg_memory_is_all_zeros(&PendingBgWriterStats,
     //                            sizeof(struct PgStat_BgWriterStats)))
     //     return;
-    let pending = *pending_bgwriter_stats();
+    let pending = with_pending_bgwriter_stats(|p| *p);
     if pending.is_all_zeros() {
         return Ok(());
     }
 
     // PgStatShared_BgWriter *stats_shmem = &pgStatLocal.shmem->bgwriter;
     with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
-        pgstat_begin_changecount_write(&mut stats_shmem.changecount);
+        pgstat_begin_changecount_write(&stats_shmem.changecount);
 
         // #define BGWRITER_ACC(fld) stats_shmem->stats.fld += PendingBgWriterStats.fld
         stats_shmem.stats.buf_written_clean += pending.buf_written_clean;
         stats_shmem.stats.maxwritten_clean += pending.maxwritten_clean;
         stats_shmem.stats.buf_alloc += pending.buf_alloc;
 
-        pgstat_end_changecount_write(&mut stats_shmem.changecount);
+        pgstat_end_changecount_write(&stats_shmem.changecount);
     });
 
     // Clear out the statistics buffer, so it can be re-used.
     // MemSet(&PendingBgWriterStats, 0, sizeof(PendingBgWriterStats));
-    *pending_bgwriter_stats() = PgStat_BgWriterStats::default();
+    with_pending_bgwriter_stats(|p| *p = PgStat_BgWriterStats::default());
 
     // Report IO statistics
     pgstat_flush_io::call(false)?;
@@ -113,7 +115,7 @@ pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
         res = (|| {
             // see explanation above PgStatShared_BgWriter for the reset protocol
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -127,7 +129,7 @@ pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
                 pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
             }
             stats_shmem.stats.stat_reset_timestamp = ts;
-            lwlock_release::call(&mut stats_shmem.lock)
+            lwlock_release::call(&stats_shmem.lock)
         })();
     });
     res
@@ -150,10 +152,10 @@ pub fn pgstat_bgwriter_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
-            lwlock_release::call(&mut stats_shmem.lock)?;
+            lwlock_release::call(&stats_shmem.lock)?;
 
             Ok(reset)
         })();
@@ -181,19 +183,18 @@ mod tests {
 
         pgstat_report_bgwriter().unwrap();
 
-        assert_eq!(env.bgwriter_shmem.borrow().changecount, 0);
+        assert_eq!(env.bgwriter_shmem.borrow().changecount.load(core::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(env.flush_io_calls.get(), 0);
     }
 
     #[test]
     fn report_accumulates_and_clears_pending() {
         let env = setup();
-        {
-            let p = pending_bgwriter_stats();
+        with_pending_bgwriter_stats(|p| {
             p.buf_written_clean = 4;
             p.maxwritten_clean = 1;
             p.buf_alloc = 9;
-        }
+        });
         env.bgwriter_shmem.borrow_mut().stats.buf_alloc = 100;
 
         pgstat_report_bgwriter().unwrap();
@@ -203,9 +204,9 @@ mod tests {
             assert_eq!(shmem.stats.buf_written_clean, 4);
             assert_eq!(shmem.stats.maxwritten_clean, 1);
             assert_eq!(shmem.stats.buf_alloc, 109);
-            assert_eq!(shmem.changecount, 2);
+            assert_eq!(shmem.changecount.load(core::sync::atomic::Ordering::Relaxed), 2);
         }
-        assert!(pending_bgwriter_stats().is_all_zeros());
+        assert!(with_pending_bgwriter_stats(|p| p.is_all_zeros()));
         assert_eq!(env.flush_io_calls.get(), 1);
     }
 

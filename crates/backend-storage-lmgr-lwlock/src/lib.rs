@@ -1017,7 +1017,7 @@ fn wait_until_awakened(my_proc_number: ProcNumber) -> i32 {
 /// lock was available immediately, `false` if we had to sleep.
 ///
 /// Side effect: cancel/die interrupts are held off until lock release.
-pub fn LWLockAcquire(lock: &mut LWLock, mode: LWLockMode) -> PgResult<bool> {
+pub fn LWLockAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
     let mut result = true;
     let mut extra_waits = 0_i32;
 
@@ -1089,7 +1089,7 @@ pub fn LWLockAcquire(lock: &mut LWLock, mode: LWLockMode) -> PgResult<bool> {
 /// `LWLockConditionalAcquire` (lwlock.c:1361) — acquire if available, else
 /// return `false` with no side-effects. If successful, cancel/die interrupts
 /// are held off until lock release.
-pub fn LWLockConditionalAcquire(lock: &mut LWLock, mode: LWLockMode) -> PgResult<bool> {
+pub fn LWLockConditionalAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
     debug_assert!(mode == LW_SHARED || mode == LW_EXCLUSIVE);
 
     // Ensure we will have room to remember the lock.
@@ -1120,7 +1120,7 @@ pub fn LWLockConditionalAcquire(lock: &mut LWLock, mode: LWLockMode) -> PgResult
 /// acquiring it. Used for WALWriteLock: a backend flushing WAL flushes many
 /// other backends' commit records as a side effect, so those backends only
 /// need to wait for the flush to finish, not acquire the lock.
-pub fn LWLockAcquireOrWait(lock: &mut LWLock, mode: LWLockMode) -> PgResult<bool> {
+pub fn LWLockAcquireOrWait(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
     let mut extra_waits = 0_i32;
 
     debug_assert!(mode == LW_SHARED || mode == LW_EXCLUSIVE);
@@ -1216,7 +1216,7 @@ fn LWLockConflictsWithVar(
 /// holders. Note: `LWLockConflictsWithVar` has no memory barrier; callers may
 /// need an explicit one.
 pub fn LWLockWaitForVar(
-    lock: &mut LWLock,
+    lock: &LWLock,
     valptr: &pg_atomic_uint64,
     oldval: u64,
     newval: &mut u64,
@@ -1283,7 +1283,7 @@ pub fn LWLockWaitForVar(
 /// updated before waking waiters, so any `LWLockWaitForVar` on the same lock
 /// is guaranteed to see the new value). The caller must hold the lock in
 /// exclusive mode.
-pub fn LWLockUpdateVar(lock: &mut LWLock, valptr: &pg_atomic_uint64, val: u64) {
+pub fn LWLockUpdateVar(lock: &LWLock, valptr: &pg_atomic_uint64, val: u64) {
     // pg_atomic_exchange_u64 is a full barrier, so the variable is updated
     // before waking up waiters.
     atomic_var(valptr).swap(val, Ordering::SeqCst);
@@ -1382,14 +1382,14 @@ fn LWLockReleaseInternal(lock: &LWLock, mode: LWLockMode) {
 /// `LWLockDisown` (lwlock.c:1899) — stop treating the lock as held by the
 /// current backend without releasing it; the caller must ensure it is later
 /// released via [`LWLockReleaseDisowned`], even on error.
-pub fn LWLockDisown(lock: &mut LWLock) -> PgResult<()> {
+pub fn LWLockDisown(lock: &LWLock) -> PgResult<()> {
     LWLockDisownInternal(lock)?;
     globals::resume_interrupts::call();
     Ok(())
 }
 
 /// `LWLockRelease` (lwlock.c:1910) — release a previously acquired lock.
-pub fn LWLockRelease(lock: &mut LWLock) -> PgResult<()> {
+pub fn LWLockRelease(lock: &LWLock) -> PgResult<()> {
     let mode = LWLockDisownInternal(lock)?;
     LWLockReleaseInternal(lock, mode);
     // Now okay to allow cancel/die interrupts.
@@ -1399,14 +1399,14 @@ pub fn LWLockRelease(lock: &mut LWLock) -> PgResult<()> {
 
 /// `LWLockReleaseDisowned` (lwlock.c:1930) — release a lock previously
 /// disowned with [`LWLockDisown`].
-pub fn LWLockReleaseDisowned(lock: &mut LWLock, mode: LWLockMode) {
+pub fn LWLockReleaseDisowned(lock: &LWLock, mode: LWLockMode) {
     LWLockReleaseInternal(lock, mode);
 }
 
 /// `LWLockReleaseClearVar` (lwlock.c:1939) — release a previously acquired
 /// lock, resetting the variable first.
 pub fn LWLockReleaseClearVar(
-    lock: &mut LWLock,
+    lock: &LWLock,
     valptr: &pg_atomic_uint64,
     val: u64,
 ) -> PgResult<()> {

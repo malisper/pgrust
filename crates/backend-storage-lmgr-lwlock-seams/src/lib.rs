@@ -16,13 +16,13 @@ seam_core::seam!(
     /// `LWLockAcquire(LWLock *lock, LWLockMode mode)` — returns true if the
     /// lock was free, false if it had to wait. `Err` carries the C
     /// `elog(ERROR, "too many LWLocks taken")`.
-    pub fn lwlock_acquire(lock: &mut LWLock, mode: LWLockMode) -> PgResult<bool>
+    pub fn lwlock_acquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `LWLockRelease(LWLock *lock)`. `Err` carries the C
     /// `elog(ERROR, "lock %s is not held")`.
-    pub fn lwlock_release(lock: &mut LWLock) -> PgResult<()>
+    pub fn lwlock_release(lock: &LWLock) -> PgResult<()>
 );
 
 seam_core::seam!(

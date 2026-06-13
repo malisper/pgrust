@@ -20,42 +20,35 @@ use types_pgstat::activity_pgstat::{
 };
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-/// `PGSTAT_KIND_ARCHIVER` (`utils/pgstat_kind.h`).
-pub const PGSTAT_KIND_ARCHIVER: u32 = 7;
+pub use types_pgstat::activity_pgstat::PGSTAT_KIND_ARCHIVER;
 
 /// Report archiver statistics.
 ///
 /// Port of `pgstat_report_archiver(const char *xlog, bool failed)`.
 ///
-/// `xlog` must be at least [`WAL_NAME_LEN`] bytes long; C copies exactly
-/// `sizeof(last_*_wal)` (= `WAL_NAME_LEN`) bytes from `xlog` with `memcpy`.
-pub fn pgstat_report_archiver(xlog: &[u8], failed: bool) {
+/// C copies exactly `sizeof(last_*_wal)` (= `WAL_NAME_LEN`) bytes from `xlog`
+/// with `memcpy`; the fixed-size array makes that contract compile-time.
+pub fn pgstat_report_archiver(xlog: &[u8; WAL_NAME_LEN], failed: bool) {
     // TimestampTz now = GetCurrentTimestamp();
     let now: TimestampTz = get_current_timestamp::call();
 
     // PgStatShared_Archiver *stats_shmem = &pgStatLocal.shmem->archiver;
     with_shmem_archiver::call(&mut |stats_shmem: &mut PgStatShared_Archiver| {
-        pgstat_begin_changecount_write(&mut stats_shmem.changecount);
+        pgstat_begin_changecount_write(&stats_shmem.changecount);
 
         if failed {
             stats_shmem.stats.failed_count += 1;
             // memcpy(&stats_shmem->stats.last_failed_wal, xlog, sizeof(...));
-            stats_shmem
-                .stats
-                .last_failed_wal
-                .copy_from_slice(&xlog[..WAL_NAME_LEN]);
+            stats_shmem.stats.last_failed_wal = *xlog;
             stats_shmem.stats.last_failed_timestamp = now;
         } else {
             stats_shmem.stats.archived_count += 1;
             // memcpy(&stats_shmem->stats.last_archived_wal, xlog, sizeof(...));
-            stats_shmem
-                .stats
-                .last_archived_wal
-                .copy_from_slice(&xlog[..WAL_NAME_LEN]);
+            stats_shmem.stats.last_archived_wal = *xlog;
             stats_shmem.stats.last_archived_timestamp = now;
         }
 
-        pgstat_end_changecount_write(&mut stats_shmem.changecount);
+        pgstat_end_changecount_write(&stats_shmem.changecount);
     });
 }
 
@@ -84,7 +77,7 @@ pub fn pgstat_archiver_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_archiver::call(&mut |stats_shmem: &mut PgStatShared_Archiver| {
         res = (|| {
             // see explanation above PgStatShared_Archiver for the reset protocol
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -98,7 +91,7 @@ pub fn pgstat_archiver_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
                 pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
             }
             stats_shmem.stats.stat_reset_timestamp = ts;
-            lwlock_release::call(&mut stats_shmem.lock)
+            lwlock_release::call(&stats_shmem.lock)
         })();
     });
     res
@@ -119,10 +112,10 @@ pub fn pgstat_archiver_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
-            lwlock_release::call(&mut stats_shmem.lock)?;
+            lwlock_release::call(&stats_shmem.lock)?;
 
             Ok(reset)
         })();
@@ -173,7 +166,7 @@ mod tests {
         assert_eq!(shmem.stats.last_archived_wal, xlog);
         assert_eq!(shmem.stats.last_archived_timestamp, 12345);
         // changecount incremented twice (begin + end) -> even again.
-        assert_eq!(shmem.changecount, 2);
+        assert_eq!(shmem.changecount.load(core::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -189,7 +182,7 @@ mod tests {
         assert_eq!(shmem.stats.archived_count, 0);
         assert_eq!(shmem.stats.last_failed_wal, xlog);
         assert_eq!(shmem.stats.last_failed_timestamp, 999);
-        assert_eq!(shmem.changecount, 2);
+        assert_eq!(shmem.changecount.load(core::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[test]

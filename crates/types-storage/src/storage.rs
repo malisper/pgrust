@@ -18,6 +18,13 @@ pub enum LWLockMode {
 
 pub use LWLockMode::*;
 
+impl Default for LWLockMode {
+    /// C's zero value (`LW_EXCLUSIVE`), for zero-initialized shmem images.
+    fn default() -> Self {
+        LW_EXCLUSIVE
+    }
+}
+
 /// `pg_atomic_uint32` (`port/atomics.h`) — a shmem-resident atomic word,
 /// concurrently read and CAS'd by every backend. A real atomic; like the C
 /// struct (whose copy would tear concurrent state) it is neither `Copy` nor
