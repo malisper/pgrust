@@ -478,6 +478,11 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::reset_latch_my_latch::set(reset_latch_my_latch);
     backend_storage_ipc_latch_seams::wait_latch_my_latch::set(wait_latch_my_latch);
     backend_storage_ipc_latch_seams::wait_latch::set(wait_latch_seam);
+    // `MyLatch` (globals.c): the seam returns a non-optional `LatchHandle`
+    // (the few C callers that need the handle deref a non-NULL `MyLatch`); a
+    // NULL `MyLatch` would crash the C, so surface it loudly, matching the
+    // `set_latch_my_latch`/`reset_latch_my_latch` convention above.
+    backend_storage_ipc_latch_seams::my_latch::set(|| my_latch().expect("MyLatch is not set"));
 }
 
 #[cfg(test)]
