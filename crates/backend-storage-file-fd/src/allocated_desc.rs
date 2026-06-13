@@ -793,3 +793,79 @@ pub fn seam_close_transient_file(fd: i32) -> i32 {
         Err(_) => 0,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stream/file helpers for the AllocateFile + OpenPipeStream seam adapters.
+//
+// `AllocateFile`/`OpenPipeStream` return a *table index*; the stdio `FILE *`
+// lives inside `allocatedDescs[index]`. These helpers reach the underlying
+// owned handle by index to perform the `fwrite`/`fread` the C callers issue
+// directly on the `FILE *`.
+// ---------------------------------------------------------------------------
+
+/// `fwrite(buf, 1, len, file)` against the buffered stream at table `index`.
+/// Returns `None` on a full successful write, or `Some(errno)` on a short /
+/// failed write (`fwrite(...) != 1 || ferror(...)` in C). Pipe streams write to
+/// the child's stdin.
+pub(crate) fn stream_write(index: i32, buf: &[u8]) -> Option<i32> {
+    use std::io::Write;
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Some(libc::EBADF);
+        }
+        match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::File(file) => match file.write_all(buf) {
+                Ok(()) => None,
+                Err(e) => Some(e.raw_os_error().unwrap_or(libc::EIO)),
+            },
+            AllocatedHandle::Pipe(pipe) => match pipe.stdin.as_mut() {
+                Some(stdin) => match stdin.write_all(buf) {
+                    Ok(()) => None,
+                    Err(e) => Some(e.raw_os_error().unwrap_or(libc::EPIPE)),
+                },
+                None => Some(libc::EPIPE),
+            },
+            _ => Some(libc::EBADF),
+        }
+    })
+}
+
+/// `fstat(fileno(file), &st)` against the stream at table `index` (copyto's
+/// directory check). Returns the file metadata or the failing errno.
+pub(crate) fn AllocatedFileMetadata(index: i32) -> Result<std::fs::Metadata, i32> {
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Err(libc::EBADF);
+        }
+        match &fd.allocated_descs[i].desc {
+            AllocatedHandle::File(file) => {
+                file.metadata().map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+            }
+            _ => Err(libc::EBADF),
+        }
+    })
+}
+
+/// Read the entire stream at table `index` into a byte buffer (the
+/// `fstat`+`fread` pattern snapmgr's `ImportSnapshot` uses). Returns the failing
+/// errno on a read error.
+pub(crate) fn stream_read_all(index: i32) -> Result<Vec<u8>, i32> {
+    use std::io::Read;
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Err(libc::EBADF);
+        }
+        match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::File(file) => {
+                let mut out = Vec::new();
+                file.read_to_end(&mut out)
+                    .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))?;
+                Ok(out)
+            }
+            _ => Err(libc::EBADF),
+        }
+    })
+}

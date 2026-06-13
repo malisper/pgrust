@@ -799,3 +799,39 @@ pub fn FileGetRawMode(file: File) -> u32 {
     let file = file.0;
     vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].file_mode)
 }
+
+// ---------------------------------------------------------------------------
+// Seam adapters installed by `init_seams` — the VFD temp-file API consumed by
+// `buffile.c`. `FileReadV`/`FileWriteV` are the vectored primitives; buffile
+// reads/writes a single buffer, so these wrap the single-iovec case (which is
+// exactly the C `FileRead`/`FileWrite` single-buffer convenience wrappers).
+// ---------------------------------------------------------------------------
+
+/// Seam adapter for `file_read` — single-buffer `FileRead(file, buf, offset, ...)`.
+pub fn seam_file_read(
+    file: File,
+    buf: &mut [u8],
+    offset: i64,
+    wait_event_info: u32,
+) -> PgResult<isize> {
+    let mut iov = [std::io::IoSliceMut::new(buf)];
+    FileReadV(file, &mut iov, offset, wait_event_info)
+}
+
+/// Seam adapter for `file_write` — single-buffer `FileWrite(file, buf, offset, ...)`.
+pub fn seam_file_write(
+    file: File,
+    buf: &[u8],
+    offset: i64,
+    wait_event_info: u32,
+) -> PgResult<isize> {
+    let iov = [std::io::IoSlice::new(buf)];
+    FileWriteV(file, &iov, offset, wait_event_info)
+}
+
+/// Seam adapter for `file_close` — `FileClose` is infallible at the ereport
+/// level (its only failures are logged at LOG inside fd.c), so the seam's
+/// `()` return discards the (LOG-level) `Err`.
+pub fn seam_file_close(file: File) {
+    let _ = FileClose(file);
+}

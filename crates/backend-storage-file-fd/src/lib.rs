@@ -46,6 +46,7 @@
 //!    transaction-end cleanup.
 
 pub mod allocated_desc;
+pub mod seams;
 pub mod sync_cleanup;
 pub mod temp_files;
 pub mod vfd_core;
@@ -54,22 +55,18 @@ pub mod vfd_io;
 /// Install every seam this unit owns.
 ///
 /// The unit owns two seam crates (by C-source coverage of `fd.c`):
-/// `backend-storage-file-seams` and `backend-storage-file-fd-seams`. The
-/// fd.c-direct inward adapters are installed here, exactly once. NOTE: a number
-/// of inward decls in `backend-storage-file-fd-seams` that wrap consumer-side
-/// I/O loops (the `relmap_*`, `allocate_file_*`, `open_copy_to_file`/
-/// `copy_write_file` families, `access_f_ok`, `read_dir_names*`, `rename_file`/
-/// `unlink_file`) are not yet installed — those adapters still need to be
-/// authored as thin marshal+delegate wrappers. See `audits/backend-storage-file-fd.md`.
+/// `backend-storage-file-seams` and `backend-storage-file-fd-seams`. Every decl
+/// in both is installed here, exactly once, as a thin marshal+delegate over the
+/// already-ported fd.c logic in the family modules (and [`seams`] for the
+/// cross-family adapters).
 pub fn init_seams() {
     use backend_storage_file_fd_seams as fd_seams;
     use backend_storage_file_seams as file_seams;
 
-    // backend-storage-file-fd-seams — the fd.c-direct inward adapters this unit
-    // owns and backs with real fd.c logic.
+    // -- backend-storage-file-fd-seams --------------------------------------
+
+    // GUC / init / errno glue.
     fd_seams::make_pg_directory::set(vfd_core::seam_make_pg_directory);
-    fd_seams::at_eoxact_files::set(sync_cleanup::AtEOXact_Files);
-    fd_seams::at_eosubxact_files::set(sync_cleanup::AtEOSubXact_Files);
     fd_seams::init_file_access::set(vfd_core::seam_init_file_access);
     fd_seams::init_temporary_file_access::set(vfd_core::InitTemporaryFileAccess);
     fd_seams::set_max_safe_fds::set(vfd_core::set_max_safe_fds);
@@ -78,10 +75,65 @@ pub fn init_seams() {
     fd_seams::unlink_file::set(vfd_core::seam_unlink_file);
     fd_seams::rename_file::set(vfd_core::seam_rename_file);
 
-    // backend-storage-file-seams
+    // Transaction-end cleanup.
+    fd_seams::at_eoxact_files::set(sync_cleanup::AtEOXact_Files);
+    fd_seams::at_eosubxact_files::set(sync_cleanup::AtEOSubXact_Files);
+
+    // sync / rename / existence primitives.
+    fd_seams::pg_fsync::set(seams::seam_pg_fsync);
+    fd_seams::fsync_fname::set(seams::seam_fsync_fname);
+    fd_seams::pg_file_exists::set(seams::seam_pg_file_exists);
+    fd_seams::basic_open_file::set(seams::basic_open_file);
+
+    // Transient-fd API (i32 contract).
+    fd_seams::open_transient_file::set(seams::open_transient_file_i32);
+    fd_seams::close_transient_file::set(seams::close_transient_file_i32);
+    fd_seams::transient_read::set(seams::transient_read);
+    fd_seams::transient_write::set(seams::transient_write);
+
+    // Directory / tree helpers (decls owned here; logic in `seams`).
+    fd_seams::rmtree::set(seams::rmtree);
+    fd_seams::path_is_dir::set(seams::path_is_dir);
+    fd_seams::read_dir_names::set(seams::read_dir_names);
+    fd_seams::read_dir_names_logged::set(seams::read_dir_names_logged);
+    fd_seams::get_dirent_type::set(seams::get_dirent_type);
+
+    // AllocateFile-based reads/writes (snapmgr, timeline).
+    fd_seams::allocate_file_write::set(seams::allocate_file_write);
+    fd_seams::allocate_file_read::set(seams::allocate_file_read);
+    fd_seams::read_file_or_absent::set(seams::read_file_or_absent);
+    fd_seams::file_exists::set(seams::file_exists);
+
+    // relmapper load/store steps.
+    fd_seams::relmap_read_file::set(seams::relmap_read_file);
+    fd_seams::relmap_write_temp::set(seams::relmap_write_temp);
+    fd_seams::relmap_durable_rename::set(seams::relmap_durable_rename);
+
+    // COPY TO stream family.
+    fd_seams::open_copy_to_file::set(seams::open_copy_to_file);
+    fd_seams::open_pipe_stream_write::set(seams::open_pipe_stream_write);
+    fd_seams::copy_write_file::set(seams::copy_write_file);
+    fd_seams::free_file::set(seams::free_file);
+    fd_seams::close_pipe_to_program::set(seams::close_pipe_to_program);
+    fd_seams::stdout_stream::set(seams::stdout_stream);
+
+    // VFD temp-file API consumed by buffile.c.
+    fd_seams::open_temporary_file::set(temp_files::OpenTemporaryFile);
+    fd_seams::file_close::set(vfd_io::seam_file_close);
+    fd_seams::file_read::set(vfd_io::seam_file_read);
+    fd_seams::file_write::set(vfd_io::seam_file_write);
+    fd_seams::file_size::set(vfd_io::FileSize);
+    fd_seams::file_truncate::set(vfd_io::FileTruncate);
+    fd_seams::file_path_name::set(vfd_io::FilePathName);
+
+    // -- backend-storage-file-seams -----------------------------------------
     file_seams::with_allocated_dir::set(allocated_desc::with_allocated_dir);
     file_seams::open_transient_file::set(allocated_desc::seam_open_transient_file);
     file_seams::close_transient_file::set(allocated_desc::seam_close_transient_file);
     file_seams::reserve_external_fd::set(vfd_core::ReserveExternalFD);
     file_seams::release_external_fd::set(vfd_core::ReleaseExternalFD);
+    file_seams::pg_fsync::set(seams::seam_pg_fsync);
+    file_seams::fsync_fname::set(seams::seam_fsync_fname);
+    file_seams::data_sync_elevel::set(seams::seam_data_sync_elevel);
+    file_seams::durable_rename::set(seams::seam_durable_rename);
 }
