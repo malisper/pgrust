@@ -428,3 +428,24 @@ seam_core::seam!(
     /// by the relcache/xact layer.
     pub fn assert_could_get_relation()
 );
+
+seam_core::seam!(
+    /// `relation->rd_fdwroutine` (relcache.c): the cached FDW callback-presence
+    /// table for the relcache entry `relation_id`, or `None` (the C `NULL`)
+    /// before `GetFdwRoutineForRelation` has populated it. The `rd_fdwroutine`
+    /// slot lives on the relcache entry the owner keeps, so the read is seamed.
+    pub fn relation_fdwroutine(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_nodes::FdwRoutine>>
+);
+
+seam_core::seam!(
+    /// `cfdwroutine = MemoryContextAlloc(CacheMemoryContext, sizeof(FdwRoutine));
+    /// memcpy(...); relation->rd_fdwroutine = cfdwroutine`
+    /// (`GetFdwRoutineForRelation`, foreign.c): cache the resolved FDW
+    /// callback-presence table on the relcache entry `relation_id` for reuse.
+    pub fn set_relation_fdwroutine(
+        relation_id: types_core::primitive::Oid,
+        fdwroutine: types_nodes::FdwRoutine,
+    ) -> types_error::PgResult<()>
+);

@@ -18,6 +18,7 @@ use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassFo
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
+use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(
@@ -1349,4 +1350,52 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         typid: Oid,
     ) -> PgResult<Option<PgTypeDefault>>
+);
+
+/* ---------------------------------------------------------------------------
+ * pg_foreign_* catalog reads (foreign/foreign.c accessors). A cache miss is
+ * `Ok(None)`; the caller (`foreign.c`) raises its own `cache lookup failed`
+ * / `does not exist` error, exactly as the C `!HeapTupleIsValid` branches do.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid))`
+    /// projected to `Form_pg_foreign_data_wrapper`'s
+    /// `(fdwname, fdwowner, fdwhandler, fdwvalidator)`. `Ok(None)` on a cache
+    /// miss. The name is copied into `mcx`; `Err` carries OOM/catcache errors.
+    pub fn foreign_data_wrapper_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+    ) -> PgResult<Option<ForeignDataWrapperFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid))`
+    /// projected to `Form_pg_foreign_server`'s `(srvname, srvowner, srvfdw)`.
+    /// `Ok(None)` on a cache miss.
+    pub fn foreign_server_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+    ) -> PgResult<Option<ForeignServerFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNDATAWRAPPERNAME,
+    /// Anum_pg_foreign_data_wrapper_oid, CStringGetDatum(fdwname))`: the FDW's
+    /// OID, or `InvalidOid` when no row matches.
+    pub fn foreign_data_wrapper_oid_by_name(fdwname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNSERVERNAME, Anum_pg_foreign_server_oid,
+    /// CStringGetDatum(servername))`: the server's OID, or `InvalidOid` when no
+    /// row matches.
+    pub fn foreign_server_oid_by_name(servername: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver`. `Ok(None)` on a cache miss (the
+    /// caller raises `cache lookup failed for foreign table %u`).
+    pub fn foreign_table_server_by_relid(relid: Oid) -> PgResult<Option<Oid>>
 );

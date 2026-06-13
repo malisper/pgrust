@@ -125,6 +125,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PG_GETARG_ARRAYTYPE_P(n)` / generic detoasted varlena fetch (fmgr.h):
+    /// decode argument `n` as a (possibly detoasted) varlena — the on-disk
+    /// image of an array / `text[]` / `bytea` argument — returning the full
+    /// varlena bytes (header included) allocated in the call's current context.
+    /// `untransformRelOptions` (`pg_options_to_table`,
+    /// `postgresql_fdw_validator`) consumes the `text[]` image this returns.
+    /// `Err` carries detoast OOM / `ereport(ERROR)`.
+    pub fn pg_getarg_varlena_pp<'mcx>(
+        fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> PgResult<Bytea<'mcx>>
+);
+
+seam_core::seam!(
     /// `PG_RETURN_BOOL(b)` (fmgr.h): clear `fcinfo->isnull` and return the
     /// boolean as a `Datum`.
     pub fn pg_return_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, b: bool) -> Datum

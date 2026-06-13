@@ -4057,6 +4057,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-foreign-fdwapi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-foreign-foreign"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions",
+ "backend-foreign-fdwapi-seams",
+ "backend-foreign-foreign-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-tables-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-foreigncmds",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-foreign-foreign-seams"
 version = "0.0.0"
 dependencies = [
@@ -9462,6 +9497,7 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
+ "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
