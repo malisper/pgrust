@@ -18,3 +18,4 @@ mcx = { path = "../mcx" }
 types-tuple = { path = "../types-tuple" }
 types-bgworker = { path = "../types-bgworker" }
 types-ri-triggers = { path = "../types-ri-triggers" }
+types-nodes = { path = "../types-nodes" }

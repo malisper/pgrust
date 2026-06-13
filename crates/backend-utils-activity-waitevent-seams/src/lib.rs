@@ -18,3 +18,17 @@ seam_core::seam!(
     /// waiting.
     pub fn pgstat_report_wait_end()
 );
+
+seam_core::seam!(
+    /// `WaitEventCustomShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn wait_event_custom_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `WaitEventCustomShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn wait_event_custom_shmem_init() -> types_error::PgResult<()>
+);

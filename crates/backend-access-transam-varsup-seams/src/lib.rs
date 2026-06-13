@@ -39,6 +39,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `VarsupShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewObjectId()` (varsup.c): allocate the next system-wide OID,
     /// skipping the pinned range on wraparound. Takes `OidGenLock`; can
     /// `ereport(ERROR)` if pinned-object generation has been stopped.

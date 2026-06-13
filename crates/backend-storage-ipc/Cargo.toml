@@ -1,0 +1,75 @@
+[package]
+name = "backend-storage-ipc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_ipc"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
+types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+# shmem index sizing type/constant (no cycle: shmem.c does not call ipci.c)
+backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
+# IsUnderPostmaster (globals.c) — the !IsUnderPostmaster InitProcGlobal gate
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# this unit's own inward seam declarations (ipci.c), installed by init_seams()
+backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
+
+# ipci-core boundary owners
+backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
+backend-port-pg-sema-seams = { path = "../backend-port-pg-sema-seams" }
+backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-storage-ipc-dsm-registry-seams = { path = "../backend-storage-ipc-dsm-registry-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+
+# ipci-seams-storage-access owners
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+backend-access-common-syncscan-seams = { path = "../backend-access-common-syncscan-seams" }
+backend-access-nbtree-seams = { path = "../backend-access-nbtree-seams" }
+
+# ipci-seams-xlog-clog owners
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xlogprefetcher-seams = { path = "../backend-access-transam-xlogprefetcher-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
+backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
+backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
+
+# ipci-seams-bgworker-repl-stats owners
+backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
+backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
+backend-postmaster-walsummarizer-seams = { path = "../backend-postmaster-walsummarizer-seams" }
+backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
+backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
+backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
+backend-commands-async-seams = { path = "../backend-commands-async-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-injection-point-seams" }

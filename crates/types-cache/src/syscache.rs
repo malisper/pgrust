@@ -60,3 +60,19 @@ pub struct AuthIdRow<'mcx> {
     /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
     pub rolconnlimit: i32,
 }
+
+/// Projection of one `pg_auth_members` row (`catalog/pg_auth_members.h`)
+/// as read by `roles_is_member_of` (`utils/adt/acl.c`) off the
+/// `SearchSysCacheList1(AUTHMEMMEMROLE, member)` catlist member tuples.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthMembersRow {
+    /// `roleid` (`Form_pg_auth_members->roleid`) — the role the member
+    /// belongs to.
+    pub roleid: types_core::Oid,
+    /// `admin_option` — the grant carries WITH ADMIN OPTION.
+    pub admin_option: bool,
+    /// `inherit_option` — the grant is inherited (`WITH INHERIT TRUE`).
+    pub inherit_option: bool,
+    /// `set_option` — the grant permits `SET ROLE` (`WITH SET TRUE`).
+    pub set_option: bool,
+}

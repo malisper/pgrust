@@ -305,3 +305,17 @@ seam_core::seam!(
     /// `info_lck` spinlock by the owner.
     pub fn xlog_get_replication_slot_minimum_lsn() -> XLogRecPtr
 );
+
+seam_core::seam!(
+    /// `XLOGShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `XLOGShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_shmem_init() -> types_error::PgResult<()>
+);

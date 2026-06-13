@@ -26,6 +26,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_tablespace_oid(tablespacename, missing_ok)` (tablespace.c): the
+    /// tablespace's OID. With `missing_ok = false` a missing tablespace raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
+    /// `Ok(InvalidOid)`.
+    pub fn get_tablespace_oid(
+        tablespacename: &str,
+        missing_ok: bool,
+    ) -> types_error::PgResult<types_core::Oid>
+);
+
+seam_core::seam!(
     /// `PrepareTempTablespaces(void)` (tablespace.c) — set up the per-session
     /// list of temp tablespaces so `OpenTemporaryFile` can spread temp files
     /// across them. Idempotent; `BufFileCreateTemp` calls it defensively.
