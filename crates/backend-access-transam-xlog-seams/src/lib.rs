@@ -59,12 +59,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `EnableHotStandby` (xlog.c GUC) — whether `hot_standby` is on. Pure
-    /// read of backend-local GUC state.
-    pub fn enable_hot_standby() -> bool
-);
-
-seam_core::seam!(
     /// `XLogLogicalInfoActive()` (`access/xlog.h`): `wal_level >= logical`.
     /// The `wal_level` global is owned by xlog.c.
     pub fn xlog_logical_info_active() -> bool
