@@ -1,0 +1,35 @@
+[package]
+name = "backend-access-transam-clog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_transam_clog"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+libc = "0.2"
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-wal = { path = "../types-wal" }
+types-pgstat = { path = "../types-pgstat" }
+types-guc = { path = "../types-guc" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-access-transam-slru = { path = "../backend-access-transam-slru" }
+backend-access-transam-transam = { path = "../backend-access-transam-transam" }
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+
+backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }

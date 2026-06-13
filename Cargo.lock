@@ -994,12 +994,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-clog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-clog-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-commit-ts"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-guc",
  "types-storage",
  "types-wal",
 ]
@@ -1190,6 +1243,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-subtrans"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-slru",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-pc-seams",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-transam-subtrans-seams"
 version = "0.0.0"
 dependencies = [
@@ -1315,6 +1388,32 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-varsup"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -3326,6 +3425,7 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execAsync-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
@@ -6171,6 +6271,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-sinval"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-sinval-seams"
 version = "0.0.0"
 dependencies = [
@@ -6403,18 +6526,30 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils-seams",
+ "backend-port-pg-sema-seams",
+ "backend-postmaster-autovacuum-ext-seams",
+ "backend-replication-syncrep-seams",
+ "backend-replication-walsender-seams",
  "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-deadlock-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-timeout-seams",
+ "libc",
  "mcx",
  "seam-core",
  "types-core",
@@ -9242,6 +9377,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "no-todo-guard"
+version = "0.0.0"
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9408,11 +9547,15 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-clog",
+ "backend-access-transam-commit-ts",
  "backend-access-transam-generic-xlog",
  "backend-access-transam-parallel",
+ "backend-access-transam-subtrans",
  "backend-access-transam-timeline",
  "backend-access-transam-transam",
  "backend-access-transam-twophase",
+ "backend-access-transam-varsup",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
@@ -9494,6 +9637,7 @@ dependencies = [
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-shmem",
+ "backend-storage-ipc-sinval",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",

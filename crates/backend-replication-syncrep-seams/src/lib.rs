@@ -10,3 +10,9 @@ seam_core::seam!(
     /// Interrupt paths emit WARNINGs; cancellation can `ereport(ERROR)`.
     pub fn sync_rep_wait_for_lsn(lsn: XLogRecPtr, commit: bool) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SyncRepCleanupAtProcExit()` (syncrep.c) — remove this backend from the
+    /// sync-rep wait queue during proc teardown (`ProcKill`). Infallible.
+    pub fn sync_rep_cleanup_at_proc_exit()
+);
