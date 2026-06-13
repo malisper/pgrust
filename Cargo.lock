@@ -7200,6 +7200,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-conffiles-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-file"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-conffiles-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-file-seams"
 version = "0.0.0"
 dependencies = [
@@ -7913,6 +7934,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-guc-file",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
