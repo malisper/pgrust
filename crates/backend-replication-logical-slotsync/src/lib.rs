@@ -1396,19 +1396,31 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
 // ===========================================================================
 
 pub fn SlotSyncWorkerCanRestart() -> PgResult<bool> {
-    // C uses time(NULL) (seconds). The host's get_current_timestamp seam
-    // returns a TimestampTz; carried as-is and compared in the same units C
-    // does (the only consumer is this seconds-granularity restart throttle).
-    let curtime = timestamp::get_current_timestamp::call();
+    // C: time_t curtime = time(NULL); — whole-second wall clock, not the
+    // microsecond TimestampTz. The throttle compares the delta against
+    // SLOTSYNC_RESTART_INTERVAL_SEC (10 seconds), so the unit must be seconds.
+    let curtime: i64 = time_seconds();
     let last = ctx().last_start_time;
 
-    if ((curtime.wrapping_sub(last)) as u32) < SLOTSYNC_RESTART_INTERVAL_SEC {
+    // C: if ((unsigned int) (curtime - last) < (unsigned int) INTERVAL)
+    if (curtime.wrapping_sub(last) as u32) < SLOTSYNC_RESTART_INTERVAL_SEC {
         return Ok(false);
     }
 
     ctx_mut().last_start_time = curtime;
 
     Ok(true)
+}
+
+/// `time(NULL)` — current wall-clock time in whole seconds since the Unix
+/// epoch (a `time_t`). Read directly off the OS clock, matching the repo's
+/// existing direct OS-time usage (pg_rusage, error-report timestamping).
+fn time_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    }
 }
 
 // ===========================================================================
