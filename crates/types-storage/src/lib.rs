@@ -13,6 +13,7 @@ pub mod lock;
 pub mod relfilelocator;
 pub mod sinval;
 pub mod storage;
+pub mod sync;
 pub mod waiteventset;
 
 pub use lock::*;
