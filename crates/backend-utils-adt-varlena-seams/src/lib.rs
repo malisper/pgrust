@@ -20,6 +20,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Wrap raw bytes into a `bytea`/`text` varlena `Datum` — the genfile.c
+    /// `read_binary_file` idiom of `palloc(len + VARHDRSZ)` + memcpy +
+    /// `SET_VARSIZE(buf, len + VARHDRSZ)`. The bytes are copied into `mcx`. For
+    /// `text` results the caller has already run `pg_verifymbstr`; the
+    /// representation is identical. OOM `ereport(ERROR)` carried on `Err`.
+    pub fn bytes_to_varlena<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
     /// `SplitIdentifierString(rawstring, ',', &namelist)` (varlena.c) for the
     /// comma separator: parse a comma-separated list of identifiers,
     /// downcasing and dequoting per identifier rules. `Ok(None)` is the C

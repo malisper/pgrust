@@ -12,9 +12,30 @@ path = "src/lib.rs"
 # Carrier types.
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
+types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 
 # Inward seam crate this unit owns (expandeddatum EOH surface consumed by
 # backend-access-common-heaptuple). The keystone installs these from
 # init_seams().
 backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+
+# Outward seams the `admin` family consumes (real owners; genuinely-unported
+# owners panic until they land).
+backend-common-path-seams = { path = "../backend-common-path-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
+backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }

@@ -85,6 +85,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_rel_relispartition(relid)` (lsyscache.c): the relation's
+    /// `relispartition` flag, or `false` when there is no such pg_class row.
+    /// `Err` carries the syscache machinery's `ereport(ERROR)`s.
+    pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_attname(relid, attnum, missing_ok)` (lsyscache.c): the
     /// attribute's name, copied out of the syscache into `mcx` (C: `pstrdup`
     /// in the current context). With `missing_ok = false` a missing attribute

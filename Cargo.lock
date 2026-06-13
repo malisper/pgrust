@@ -1006,6 +1006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-binary-upgrade-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-catalog-seams"
 version = "0.0.0"
 dependencies = [
@@ -1132,6 +1141,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -1301,6 +1311,16 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cache",
+ "types-error",
+]
+
+[[package]]
+name = "backend-common-path-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -1743,6 +1763,16 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-net",
+]
+
+[[package]]
+name = "backend-libpq-hba-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2349,8 +2379,10 @@ dependencies = [
 name = "backend-storage-file-fd-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2934,10 +2966,28 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-binary-upgrade-seams",
+ "backend-catalog-partition-seams",
+ "backend-common-path-seams",
+ "backend-libpq-hba-seams",
+ "backend-replication-slot-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small",
+ "backend-utils-mb-mbutils-seams",
  "mcx",
+ "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

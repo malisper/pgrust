@@ -109,6 +109,15 @@ impl LockGuard {
         self.held = false;
         lock_release_impl::call(&self.tag, self.mode, self.session_lock)
     }
+
+    /// Return with the lock held (the C default for the `pg_advisory_lock*`
+    /// acquisitions: `(void) LockAcquire(...)` and return — the lock stays
+    /// held until xact end or an explicit `pg_advisory_unlock*` /
+    /// `pg_advisory_unlock_all`). Disarms the `Drop` release. Interim shape
+    /// until a `TxnResources` owner exists to move the guard into.
+    pub fn keep_held(mut self) {
+        self.held = false;
+    }
 }
 
 impl Drop for LockGuard {
@@ -161,6 +170,59 @@ seam_core::seam!(
         lockmode: types_storage::LOCKMODE,
         session_lock: bool,
     ) -> bool
+);
+
+seam_core::seam!(
+    /// `LockReleaseSession(lockmethodid)` (lock.c) — release all session locks
+    /// of the given lock method (used by `pg_advisory_unlock_all` with
+    /// `USER_LOCKMETHOD`). The C is infallible (no `ereport`).
+    pub fn lock_release_session(lockmethodid: types_core::primitive::uint8)
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the static lock-mode
+    /// name string for the `pg_locks.mode` column. Infallible (constant table
+    /// entry). The string is copied into `mcx`.
+    pub fn get_lockmode_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        lockmethodid: types_core::primitive::uint8,
+        mode: types_storage::LOCKMODE,
+    ) -> mcx::PgString<'mcx>
+);
+
+seam_core::seam!(
+    /// `GetLockStatusData()` (lock.c) — a snapshot of every PROCLOCK as
+    /// `LockInstanceData`, for `pg_lock_status`. The C returns a `LockData`
+    /// (count + palloc'd array); the seam folds the count into the vector
+    /// length and allocates it in `mcx` (the SRF multi-call context). `Err`
+    /// carries OOM.
+    pub fn get_lock_status_data<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::lock::LockInstanceData>>
+);
+
+seam_core::seam!(
+    /// `pg_blocking_pids(blocked_pid)` lock-table traversal (lockfuncs.c +
+    /// lock.c): the leader PIDs blocking `blocked_pid`, computed from
+    /// `GetBlockerStatusData` plus the lock-method conflict tables — all
+    /// lock.c-internal state. The seam yields the PID list (duplicates kept,
+    /// as in C) in `mcx`; the caller wraps it into the int4[] result. `Err`
+    /// carries OOM.
+    pub fn blocking_pids<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        blocked_pid: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, i32>>
+);
+
+seam_core::seam!(
+    /// `GetSafeSnapshotBlockingPids(blocked_pid, output, output_size)`
+    /// (predicate.c, surfaced through lock.c's view function): the PIDs whose
+    /// transactions block `blocked_pid` from getting a safe snapshot. The seam
+    /// yields the list in `mcx`; the caller wraps it into the int4[] result.
+    pub fn safe_snapshot_blocking_pids<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        blocked_pid: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, i32>>
 );
 
 seam_core::seam!(
