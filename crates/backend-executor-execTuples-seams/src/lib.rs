@@ -125,3 +125,37 @@ seam_core::seam!(
         slot: types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecInitNullTupleSlot(estate, tupledesc, tts_ops)` (execTuples.c):
+    /// create a slot in the EState slot pool and store an all-NULL virtual
+    /// tuple of the given descriptor in it (the null-padding slot for outer
+    /// joins), returning its pool id. The descriptor is moved in (the owned
+    /// model passes an already-`'mcx` copy where C shares the child's
+    /// `TupleDesc *`). The slot allocates in the pool's context, fallible on OOM.
+    pub fn exec_init_null_tuple_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        tupledesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecGetResultType(planstate)` (execUtils.c/executor.h): the node's
+    /// result tuple descriptor (`planstate->ps_ResultTupleSlot`'s descriptor),
+    /// returned as a shared borrow of the planstate. `None` is the C `NULL`
+    /// (descriptor not yet set).
+    pub fn exec_get_result_type<'a, 'mcx>(
+        planstate: &'a types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> Option<&'a types_tuple::heaptuple::TupleDescData<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecGetResultSlotOps(planstate, &isfixed)` (execUtils.c): the slot-ops
+    /// class of the node's result slot (`planstate->resultops`). Returns the
+    /// owned `TupleSlotKind` token; the `isfixed` out-flag is not consumed by
+    /// the merge-join caller (it passes `NULL`).
+    pub fn exec_get_result_slot_ops<'mcx>(
+        planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_nodes::TupleSlotKind
+);

@@ -22,6 +22,7 @@ backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
+backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }

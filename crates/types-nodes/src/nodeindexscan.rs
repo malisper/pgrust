@@ -27,6 +27,8 @@ pub struct Plan<'mcx> {
     /// `List *targetlist` — target list to be computed at this node
     /// (`None` = the C `NIL`).
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    /// `List *qual` — implicitly-ANDed qual conditions (`None` = the C `NIL`).
+    pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
@@ -54,8 +56,19 @@ impl Plan<'_> {
             }
             None => None,
         };
+        let qual = match &self.qual {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(Plan {
             targetlist,
+            qual,
             parallel_aware: self.parallel_aware,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),

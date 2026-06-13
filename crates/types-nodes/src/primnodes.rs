@@ -1,7 +1,10 @@
 //! Primitive expression-node vocabulary (nodes/primnodes.h), trimmed.
 
+use alloc::vec::Vec;
+
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::{AttrNumber, Index, Oid};
+use types_datum::Datum;
 use types_error::PgResult;
 
 /// `Var` (nodes/primnodes.h), trimmed to the fields ports consume.
@@ -19,6 +22,27 @@ pub struct Var {
     pub varlevelsup: Index,
 }
 
+/// `Const` (nodes/primnodes.h), trimmed to the fields ports consume.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Const {
+    /// `Oid consttype` — pg_type OID of the constant's type.
+    pub consttype: Oid,
+    /// `Datum constvalue` — the constant's value (undefined if `constisnull`).
+    pub constvalue: Datum,
+    /// `bool constisnull` — whether the constant is null.
+    pub constisnull: bool,
+}
+
+/// `OpExpr` (nodes/primnodes.h), trimmed to the fields ports consume.
+#[derive(Clone, Debug)]
+pub struct OpExpr {
+    /// `Oid opno` — PG_OPERATOR OID of the operator.
+    pub opno: Oid,
+    /// `List *args` — arguments to the operator (two, for a mergeclause
+    /// `leftexpr = rightexpr`).
+    pub args: Vec<Expr>,
+}
+
 /// Expression-tree node (`Expr *` in C). The `NodeTag` is the enum
 /// discriminant (`IsA(node, Var)` is a match on the variant). Variants are
 /// added as units consuming them are ported.
@@ -27,6 +51,10 @@ pub struct Var {
 pub enum Expr {
     /// `T_Var`.
     Var(Var),
+    /// `T_Const`.
+    Const(Const),
+    /// `T_OpExpr`.
+    OpExpr(OpExpr),
 }
 
 /// `TargetEntry` (nodes/primnodes.h), trimmed.
