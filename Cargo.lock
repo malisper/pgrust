@@ -7537,6 +7537,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-hash-dynahash"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-hash-dynahash-seams"
 version = "0.0.0"
 dependencies = [
@@ -8578,6 +8593,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-hash-dynahash",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",

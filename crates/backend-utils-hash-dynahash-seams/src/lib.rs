@@ -1,10 +1,11 @@
 //! Seam declarations for the `backend-utils-hash-dynahash` unit
 //! (`utils/hash/dynahash.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands;
-//! until then a call panics loudly. Entry pointers are raw (`*mut u8` for the
-//! C `void *` user entry, `*mut HTAB` for the opaque per-backend table
-//! handle) because shared hash tables live in genuinely shared memory.
+//! The owning unit (`backend-utils-hash-dynahash`) installs these from its
+//! `init_seams()`. Entry pointers are raw (`*mut u8` for the C `void *` user
+//! entry, `*mut HTAB` for the per-backend table handle) because shared hash
+//! tables live in genuinely shared memory; the `HTAB`/`HASHHDR` bodies are
+//! defined in `types_hash::hsearch` (owned by that crate).
 
 #![allow(non_snake_case)]
 
