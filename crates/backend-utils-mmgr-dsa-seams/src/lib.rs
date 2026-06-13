@@ -69,3 +69,35 @@ seam_core::seam!(
     /// another backend that will `dsa_attach`.
     pub fn dsa_get_handle(area: *mut DsaArea) -> dsa_handle
 );
+
+// --- `dsa_area *`-keyed allocation/addressing (consumer: backend-lib-dshash) ---
+//
+// dshash holds the `dsa_area *` the registry-path `dsa_create`/`dsa_attach`
+// (above) returns, and reaches the DSA substrate through it directly — the C
+// `dsa_allocate(area, ...)` / `dsa_free(area, dp)` / `dsa_get_address(area, dp)`
+// it calls with that pointer. `dsa_get_address` returns the backend-local
+// address (`void *`), carried as the `u64` the resolved address is (the same
+// blessed `*mut`/`*const` shared-memory substrate exception dsa.c itself
+// takes). The owner installs these alongside the registry-path seams.
+
+seam_core::seam!(
+    /// `dsa_allocate_extended(dsa_area *area, size_t size, int flags)` — allocate
+    /// `size` bytes in the area, returning the pseudo-pointer (or
+    /// `InvalidDsaPointer` when `DSA_ALLOC_NO_OOM` is set and the request fails).
+    /// `Err` carries the C `ereport(ERROR)` for an out-of-memory failure when
+    /// `DSA_ALLOC_NO_OOM` is not set.
+    pub fn dsa_allocate_extended(area: *mut DsaArea, size: Size, flags: i32) -> PgResult<DsaPointer>
+);
+
+seam_core::seam!(
+    /// `dsa_free(dsa_area *area, dsa_pointer dp)` — free a prior allocation.
+    pub fn dsa_free_ptr(area: *mut DsaArea, dp: DsaPointer) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `dsa_get_address(dsa_area *area, dsa_pointer dp)` — the backend-local
+    /// address for `dp` (the C `void *`), carried as the `u64` it resolves to;
+    /// `0` for `InvalidDsaPointer` (C `NULL`). `Err` carries the C
+    /// `ereport(ERROR)` for a reference to a freed segment.
+    pub fn dsa_get_address_ptr(area: *mut DsaArea, dp: DsaPointer) -> PgResult<u64>
+);
