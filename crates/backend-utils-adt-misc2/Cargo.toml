@@ -10,11 +10,28 @@ path = "src/lib.rs"
 
 [dependencies]
 # Carrier types.
+types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
 mcx = { path = "../mcx" }
 
 # Inward seam crate this unit owns (expandeddatum EOH surface consumed by
 # backend-access-common-heaptuple). The keystone installs these from
 # init_seams().
 backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+
+# Outward seams the regproc family reaches its (genuinely-unported or
+# cross-unit-cycle) catalog / type / role owners through.
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-adt-oid-seams = { path = "../backend-utils-adt-oid-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }

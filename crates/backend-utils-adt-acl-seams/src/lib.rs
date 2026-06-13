@@ -14,3 +14,11 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn member_can_set_role(member: Oid, role: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `get_role_oid(rolname, missing_ok)` (acl.c): the OID of the role with
+    /// the given name. With `missing_ok = false` a missing role raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
+    /// `Ok(InvalidOid)`.
+    pub fn get_role_oid(rolname: &str, missing_ok: bool) -> PgResult<Oid>
+);

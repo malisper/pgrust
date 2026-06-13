@@ -1099,6 +1099,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-storage",
  "types-tuple",
@@ -1827,6 +1828,15 @@ dependencies = [
 
 [[package]]
 name = "backend-optimizer-util-plancat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-parser-parse-type-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -2934,10 +2944,24 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-namespace-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-oid-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mb-mbutils-seams",
  "mcx",
+ "port-pgstrcasecmp",
+ "types-core",
  "types-datum",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -2966,6 +2990,15 @@ dependencies = [
 name = "backend-utils-adt-numutils"
 version = "0.0.0"
 dependencies = [
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-oid-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
