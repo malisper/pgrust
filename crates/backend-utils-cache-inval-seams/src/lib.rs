@@ -149,3 +149,12 @@ seam_core::seam!(
         form: &types_cluster::PgClassForm,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CacheInvalidateRelcache(relation)` (inval.c): register an invalidation
+    /// of the relcache entry for the given relation, keyed by its OID. Used by
+    /// `RelationSetNewRelfilenumber`'s mapped-index branch, which doesn't touch
+    /// pg_class and so must trigger the relcache inval manually. `Err` carries
+    /// its `ereport(ERROR)`s.
+    pub fn cache_invalidate_relcache(relid: Oid) -> PgResult<()>
+);

@@ -14,8 +14,7 @@
 //! [`crate::core_entry_store`] entry store. Sibling-family routines
 //! (`formrdesc`, `RelationParseRelOptions`, `RelationInitPhysicalAddr`,
 //! `RelationInitTableAccessMethod`, `RelationBuildDesc`, ...) are called as
-//! their real in-crate functions; they `todo!()` until their families land —
-//! the correct cross-family seam-and-panic boundary ("Mirror PG and panic").
+//! their real in-crate functions.
 //!
 //! GENUINE cross-unit primitives whose owner units are not yet dependencies
 //! of this crate (the relation map `RelationMapInitialize*`/`UpdateMap`, the
@@ -29,11 +28,11 @@
 
 use backend_utils_error::{ereport, PgResult};
 use types_error::{ERROR, LOG, WARNING};
-use types_error::error::ERRCODE_DATA_CORRUPTED;
+use types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_core::catalog::{
     BOOTSTRAP_SUPERUSERID, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_core::primitive::{Oid, ProcNumber, RegProcedure};
+use types_core::primitive::{InvalidRelFileNumber, Oid, ProcNumber, RegProcedure};
 use types_core::xact::InvalidSubTransactionId;
 use types_core::{InvalidOid, INVALID_PROC_NUMBER};
 use types_tuple::access::{
@@ -385,7 +384,8 @@ fn finish_relcache_entries() -> PgResult<()> {
 
 /// `load_critical_index(indexoid, heapoid)` (relcache.c): nail one critical
 /// system-catalog index into the cache during phase 3. **Own logic**; the lock
-/// manager and `RelationGetIndexAttOptions` are owner seams.
+/// manager is an owner seam and `RelationGetIndexAttOptions` is the real
+/// in-crate derived-family routine.
 #[allow(unsafe_code)]
 pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
     // C: LockRelationOid(heapoid, AccessShareLock); LockRelationOid(indexoid,
@@ -410,8 +410,11 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
     // C: UnlockRelationOid(indexoid/heapoid, AccessShareLock); — owner seam.
     xunit::UnlockRelationOid(indexoid)?;
     xunit::UnlockRelationOid(heapoid)?;
-    // C: RelationGetIndexAttOptions(ird, false); — index/opclass owner seam.
-    xunit::RelationGetIndexAttOptions(ird)?;
+    // C: RelationGetIndexAttOptions(ird, false); — relcache-OWN fetch/parse of
+    // per-column opclass index options (the leaf `get_attoptions` /
+    // `index_opclass_options` primitives are the only cross-unit calls, reached
+    // via real seams inside the derived-family implementation).
+    crate::derived::RelationGetIndexAttOptions(ird, false)?;
     Ok(())
 }
 
@@ -602,22 +605,163 @@ pub fn RelationBuildLocalRelation(
  * `RelationSetNewRelfilenumber` / `RelationAssumeNewRelfilelocator`.
  * ======================================================================== */
 
+/// `RELKIND_HAS_STORAGE(relkind)` (`pg_class.h`) — relation kinds that have a
+/// physical relfilenode.
+fn relkind_has_storage(relkind: i8) -> bool {
+    relkind == RELKIND_RELATION as i8
+        || relkind == RELKIND_INDEX as i8
+        || relkind == RELKIND_SEQUENCE as i8
+        || relkind == RELKIND_TOASTVALUE as i8
+        || relkind == RELKIND_MATVIEW as i8
+}
+
+/// `RELKIND_HAS_TABLE_AM(relkind)` (`pg_class.h`) — relation kinds whose storage
+/// is managed through a table access method (`rd_tableam`); excludes sequences.
+fn relkind_has_table_am(relkind: i8) -> bool {
+    relkind == RELKIND_RELATION as i8
+        || relkind == RELKIND_TOASTVALUE as i8
+        || relkind == RELKIND_MATVIEW as i8
+}
+
 /// `RelationSetNewRelfilenumber(relation, persistence)` (relcache.c): assign a
-/// new relfilenumber/storage to an existing relation. The body is dominated by
-/// cross-unit primitives — `GetNewRelFileNumber`, `table_open`/`table_close`,
-/// `SearchSysCacheLockedCopy1`, the smgr/storage layer, `RelationMapUpdateMap`,
-/// `CacheInvalidateRelcache`, `CatalogTupleUpdate`, `CommandCounterIncrement` —
-/// all owner seams; only the trailing `RelationAssumeNewRelfilelocator` is this
-/// family's own logic. The whole cross-unit storage transaction is routed
-/// through the [`xunit`] seam (panic until those owners land); the own tail
-/// runs against the real entry.
+/// new relfilenumber (and possibly persistence) to an existing relation, doing
+/// the full rewrite-with-transactional-safety dance. **The relfilenumber
+/// selection (incl. the binary-upgrade variants), the `RELKIND` storage
+/// dispatch, and the `RelationIsMapped` branch are this function's OWN control
+/// flow.** The genuinely cross-unit leaf operations — `GetNewRelFileNumber`
+/// (catalog.c), the binary-upgrade global consume (binary_upgrade.h), the
+/// smgr/storage drop+create (storage.c), `table_relation_set_new_filelocator`
+/// (tableam), `RelationMapUpdateMap` (relmapper), the pg_class tuple update
+/// (catalog), `CacheInvalidateRelcache` (inval), `GetCurrentTransactionId` /
+/// `CommandCounterIncrement` (xact) — are owner seams (panic until each owner
+/// lands). The trailing `RelationAssumeNewRelfilelocator` is own logic.
 #[allow(unsafe_code)]
 pub fn RelationSetNewRelfilenumber(relation: *mut RelationData, persistence: i8) -> PgResult<()> {
     // SAFETY: live cache-owned descriptor.
-    let relid = unsafe { (*relation).rd_id };
-    // C: the full GetNewRelFileNumber + storage swap + pg_class/relmap update
-    // transaction (owner seams: catalog/smgr/relmapper/inval).
-    xunit::set_new_relfilenumber_storage(relid, persistence)?;
+    let rd = unsafe { &*relation };
+    let relid = rd.rd_id;
+    let relkind = rd.rd_rel.relkind;
+    let reltablespace = rd.rd_rel.reltablespace;
+    let relisshared = rd.rd_rel.relisshared;
+    let rd_locator = rd.rd_locator;
+    let rd_backend = rd.rd_backend;
+
+    let is_binary_upgrade = backend_catalog_binary_upgrade_seams::is_binary_upgrade::call();
+
+    // --- Relfilenumber selection (OWN: the IsBinaryUpgrade / RELKIND chain) ---
+    let newrelfilenumber: Oid = if !is_binary_upgrade {
+        // C: GetNewRelFileNumber(relation->rd_rel->reltablespace, NULL, persistence)
+        backend_catalog_catalog_seams::get_new_relfilenumber::call(reltablespace, persistence)?
+    } else if relkind == RELKIND_INDEX as i8 {
+        // C: binary_upgrade_next_index_pg_class_relfilenumber (consume).
+        let n = backend_catalog_binary_upgrade_seams::consume_next_relfilenumber::call(true);
+        if n == InvalidOid {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("index relfilenumber value not set when in binary upgrade mode")
+                .into_error());
+        }
+        n
+    } else if relkind == RELKIND_RELATION as i8 {
+        // C: binary_upgrade_next_heap_pg_class_relfilenumber (consume).
+        let n = backend_catalog_binary_upgrade_seams::consume_next_relfilenumber::call(false);
+        if n == InvalidOid {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("heap relfilenumber value not set when in binary upgrade mode")
+                .into_error());
+        }
+        n
+    } else {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("unexpected request for new relfilenumber in binary upgrade mode")
+            .into_error());
+    };
+
+    // --- Schedule unlinking of the old storage (OWN: the IsBinaryUpgrade
+    // branch); the leaf smgr/storage ops are owner seams. ---
+    if is_binary_upgrade {
+        // C: srel = smgropen(rd_locator, rd_backend);
+        //    smgrdounlinkall(&srel, 1, false); smgrclose(srel);
+        backend_catalog_storage_seams::smgr_unlink_relation_now::call(rd_locator, rd_backend)?;
+    } else {
+        // C: RelationDropStorage(relation);
+        backend_catalog_storage_seams::relation_drop_storage::call(rd_locator, rd_backend)?;
+    }
+
+    // C: newrlocator = relation->rd_locator; newrlocator.relNumber = newrelfilenumber;
+    let mut newrlocator = rd_locator;
+    newrlocator.relNumber = newrelfilenumber;
+
+    // --- RELKIND storage dispatch (OWN). The AM/storage create are owner
+    // seams; the table-AM leg also hands back the new freeze/minmxid. ---
+    let mut freeze_xid: u32 = types_core::xact::InvalidTransactionId;
+    let mut minmulti: u32 = 0; // InvalidMultiXactId
+    if relkind_has_table_am(relkind) {
+        // C: table_relation_set_new_filelocator(relation, &newrlocator,
+        //    persistence, &freezeXid, &minmulti);
+        let (fx, mm) = backend_access_table_tableam_seams::table_relation_set_new_filelocator::call(
+            relid,
+            newrlocator,
+            persistence,
+        )?;
+        freeze_xid = fx;
+        minmulti = mm;
+    } else if relkind_has_storage(relkind) {
+        // C: srel = RelationCreateStorage(newrlocator, persistence, true);
+        //    smgrclose(srel);
+        backend_catalog_storage_seams::relation_create_storage_main_fork::call(
+            newrlocator,
+            persistence,
+        )?;
+    } else {
+        // C: elog(ERROR, "relation \"%s\" does not have storage", ...).
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!("relation {relid} does not have storage"))
+            .into_error());
+    }
+
+    // --- Mapped vs. pg_class-update branch (OWN). ---
+    // C: RelationIsMapped(relation) == RELKIND_HAS_STORAGE && relfilenode ==
+    //    InvalidRelFileNumber.
+    let is_mapped =
+        relkind_has_storage(relkind) && rd.rd_rel.relfilenode == InvalidRelFileNumber;
+    if is_mapped {
+        // C: in some paths the would-be tuple update is the only thing that
+        // assigns an XID, but we must have one to delete files — force one.
+        backend_access_transam_xact_seams::get_current_transaction_id::call()?;
+
+        // C: RelationMapUpdateMap(RelationGetRelid(relation), newrelfilenumber,
+        //    relation->rd_rel->relisshared, false);
+        backend_utils_cache_relmapper_seams::relation_map_update_map::call(
+            relid,
+            newrelfilenumber,
+            relisshared,
+            false,
+        )?;
+
+        // C: not updating pg_class, so trigger relcache inval manually —
+        // CacheInvalidateRelcache(relation).
+        backend_utils_cache_inval_seams::cache_invalidate_relcache::call(relid)?;
+    } else {
+        // C: normal case — update the pg_class entry (relfilenode, reset
+        // relpages/etc. for non-sequence relkinds, freeze/minmxid/persistence)
+        // and CatalogTupleUpdate. The whole pg_class tuple lifecycle is the
+        // catalog owner's.
+        backend_catalog_storage_seams::update_pg_class_relfilenumber::call(
+            relid,
+            newrelfilenumber,
+            persistence,
+            relkind,
+            freeze_xid,
+            minmulti,
+        )?;
+    }
+
+    // C: CommandCounterIncrement() — make the pg_class/relmap change visible.
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+
     // C: RelationAssumeNewRelfilelocator(relation).
     RelationAssumeNewRelfilelocator(relation)
 }
@@ -1377,12 +1521,12 @@ const TypeRelationId: Oid = 1247;
  * InitCatalogCachePhase2, xact GetCurrentSubTransactionId, the proc-number
  * pair, lmgr LockRelationOid, the RelCacheInitLock LWLock, the fd file API, and
  * AcceptInvalidationMessages) — panicking with "seam not installed" only until
- * that owner's `init_seams()` runs. The remaining few (`catalog_schema_attrs`,
- * `RelationBuildTriggers`, `RelationBuildRowSecurity`,
- * `RelationGetIndexAttOptions`, `set_new_relfilenumber_storage`) cross as this
- * crate's OWN entry types into units that are not yet ported, so they stay
- * seam-and-panic ("Mirror PG and panic"). None are own-logic stubs: the
- * relcache orchestration that calls them is fully implemented above.
+ * that owner's `init_seams()` runs. The remaining three
+ * (`catalog_schema_attrs`, `RelationBuildTriggers`, `RelationBuildRowSecurity`)
+ * cross as this crate's OWN entry types into units that are not yet ported
+ * (genbki catalog-data, trigger.c, policy.c), so they stay seam-and-panic
+ * ("Mirror PG and panic"). None are own-logic stubs: the relcache
+ * orchestration that calls them is fully implemented above.
  * ======================================================================== */
 mod xunit {
     use super::*;
@@ -1671,23 +1815,5 @@ mod xunit {
     /// not yet ported. Panics until it lands.
     pub(super) fn RelationBuildRowSecurity(_rel: *mut RelationData) -> PgResult<()> {
         panic!("relcache-initfile: RelationBuildRowSecurity (backend-commands-policy not yet ported)")
-    }
-    /// `RelationGetIndexAttOptions(relation, copy)` (relcache.c via opclass):
-    /// fetch per-column `pg_attribute.attoptions`/opclass options into
-    /// `rd_opcoptions`. Mutates the relcache entry; the opclass index-options
-    /// primitives (`index_opclass_options`/`get_attoptions`) are not yet ported.
-    /// Panics until they land.
-    pub(super) fn RelationGetIndexAttOptions(_ird: *mut RelationData) -> PgResult<()> {
-        panic!("relcache-initfile: RelationGetIndexAttOptions (opclass index-options owner not yet ported)")
-    }
-    /// `RelationSetNewRelfilenumber`'s storage leg: `GetNewRelFileNumber` +
-    /// `RelationCreateStorage`/storage swap + `pg_class` update + relmap update.
-    /// A composite of smgr/storage/relmapper/inval owners (smgr not yet ported).
-    /// Panics until they land.
-    pub(super) fn set_new_relfilenumber_storage(_relid: Oid, _persistence: i8) -> PgResult<()> {
-        panic!(
-            "relcache-initfile: GetNewRelFileNumber + storage swap + pg_class/relmap update \
-             (smgr/storage composite owner not yet ported)"
-        )
     }
 }

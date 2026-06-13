@@ -48,6 +48,22 @@ seam_core::seam!(
     pub fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool
 );
 
+seam_core::seam!(
+    /// `table_relation_set_new_filelocator(rel, newrnode, persistence,
+    /// &freezeXid, &minmulti)` (access/tableam.h, static inline):
+    /// `rel->rd_tableam->relation_set_new_filelocator(...)` — create storage for
+    /// the new relfilelocator of a table-AM relation (also its init fork if
+    /// unlogged), and hand back the AM-chosen `relfrozenxid`/`relminmxid` to
+    /// store in pg_class. Dispatch is keyed by the relation OID (the relcache
+    /// entry owns the `rd_tableam` vtable, which can't cross this boundary).
+    /// Returns `(freeze_xid, minmulti)`. `Err` carries its `ereport(ERROR)`s.
+    pub fn table_relation_set_new_filelocator(
+        relid: Oid,
+        newrlocator: types_storage::RelFileLocator,
+        relpersistence: i8,
+    ) -> PgResult<(u32, u32)>
+);
+
 /// An open `TableScanDesc` (the AM-owned scan state). C's pointer is opaque to
 /// the COPY driver, which only threads it back into `getnextslot`/`endscan`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

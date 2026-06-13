@@ -421,7 +421,7 @@ fn relation_is_mapped(rd: &RelationData) -> bool {
     let relkind = rd.rd_rel.relkind;
     let has_storage = relkind == RELKIND_RELATION
         || relkind == RELKIND_INDEX
-        || relkind == (b's' as i8) // RELKIND_SEQUENCE
+        || relkind == (b'S' as i8) // RELKIND_SEQUENCE
         || relkind == (b't' as i8) // RELKIND_TOASTVALUE
         || relkind == (b'm' as i8); // RELKIND_MATVIEW
     has_storage && rd.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber

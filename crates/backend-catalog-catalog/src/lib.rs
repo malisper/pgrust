@@ -772,6 +772,17 @@ pub fn init_seams() {
     backend_catalog_catalog_seams::is_catalog_namespace::set(IsCatalogNamespace);
     backend_catalog_catalog_seams::is_system_relation::set(is_system_relation_seam);
     backend_catalog_catalog_seams::is_system_class::set(is_system_class_seam);
+    backend_catalog_catalog_seams::get_new_relfilenumber::set(get_new_relfilenumber_seam);
+}
+
+/// Seam adapter for `GetNewRelFileNumber`: the relcache caller
+/// (`RelationSetNewRelfilenumber`) passes only the tablespace and persistence
+/// (it calls C's `GetNewRelFileNumber(reltablespace, NULL, persistence)`), so
+/// `pg_class` is `None`. The transient `relpath` allocation is done in a
+/// short-lived context that is dropped before returning the scalar result.
+fn get_new_relfilenumber_seam(reltablespace: Oid, relpersistence: i8) -> PgResult<RelFileNumber> {
+    let cx = mcx::MemoryContext::new("GetNewRelFileNumber");
+    GetNewRelFileNumber(cx.mcx(), reltablespace, None, relpersistence as u8)
 }
 
 /// Seam adapter: the cross-crate `is_system_relation` carrier hands a
