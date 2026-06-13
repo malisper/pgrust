@@ -895,13 +895,13 @@ pub fn ExecInitSubPlan<'mcx>(
             // fmgr_info_set_expr((Node *) opexpr, &sstate->cur_eq_funcs[i-1]);
             // (the trimmed FmgrInfo carries only fn_oid; the expr back-link is
             // not represented, so fmgr_info_set_expr is a no-op here.)
-            cur_eq_funcs.push(FmgrInfo { fn_oid: info.opfuncid });
+            cur_eq_funcs.push(FmgrInfo { fn_oid: info.opfuncid, ..Default::default() });
             // sstate->tab_eq_funcoids[i-1] = get_opcode(rhs_eq_oper);
             tab_eq_funcoids.push(info.rhs_eq_funcoid);
             // fmgr_info(left_hashfn,  &lhs_hash_funcs[i-1]);
             // fmgr_info(right_hashfn, &sstate->tab_hash_funcs[i-1]);
-            lhs_hash_funcs.push(FmgrInfo { fn_oid: info.left_hashfn });
-            tab_hash_funcs.push(FmgrInfo { fn_oid: info.right_hashfn });
+            lhs_hash_funcs.push(FmgrInfo { fn_oid: info.left_hashfn, ..Default::default() });
+            tab_hash_funcs.push(FmgrInfo { fn_oid: info.right_hashfn, ..Default::default() });
             // sstate->tab_collations[i-1] = opexpr->inputcollid;
             tab_collations.push(info.inputcollid);
             // keyColIdx is just column numbers 1..n

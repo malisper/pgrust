@@ -282,7 +282,7 @@ fn copy_to_text_like_out_func(atttypid: Oid) -> PgResult<FmgrInfo> {
     let (func_oid, _is_varlena) = lsyscache_s::get_type_output_info::call(atttypid)?;
     // fmgr_info(func_oid, finfo);
     fmgr_s::fmgr_info_check::call(func_oid)?;
-    Ok(FmgrInfo { fn_oid: func_oid })
+    Ok(FmgrInfo { fn_oid: func_oid, ..Default::default() })
 }
 
 /// `CopyToBinaryOutFunc(cstate, atttypid, finfo)` (copyto.c:333).
@@ -291,7 +291,7 @@ fn copy_to_binary_out_func(atttypid: Oid) -> PgResult<FmgrInfo> {
     let (func_oid, _is_varlena) = lsyscache_s::get_type_binary_output_info::call(atttypid)?;
     // fmgr_info(func_oid, finfo);
     fmgr_s::fmgr_info_check::call(func_oid)?;
-    Ok(FmgrInfo { fn_oid: func_oid })
+    Ok(FmgrInfo { fn_oid: func_oid, ..Default::default() })
 }
 
 /// `CopyToTextLikeOneRow(cstate, slot, is_csv)` (copyto.c:264). `cols` is the

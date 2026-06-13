@@ -62,20 +62,59 @@ impl PgAbiValues {
     }
 }
 
-/// `FmgrInfo` (`fmgr.h`), trimmed to the lookup key. C's struct caches the
-/// resolved function pointer and call metadata; consumers here (e.g.
-/// `ScanKeyInit`) only stamp `fn_oid` and defer the real fmgr lookup to the
-/// code that invokes the function.
+/// `FmgrInfo` (`fmgr.h`) — function-call lookup data filled in by `fmgr_info()`
+/// and read by every fmgr caller.
+///
+/// C's struct also caches the resolved call address (`fn_addr`), the owning
+/// memory context (`fn_mcxt`), handler scratch space (`fn_extra`), and the
+/// parse tree (`fn_expr`). The fields modelled here are the ones the executor's
+/// expression compiler reads *after* `fmgr_info()` to pick an opcode and stamp
+/// a step payload:
+///
+/// * `fn_strict` / `fn_stats` — `ExecInitFunc` (execExpr.c:2788-2805) selects
+///   the `EEOP_FUNCEXPR{,_STRICT,_FUSAGE}` variant from these; the agg trans
+///   (3901), agg deserialize (3797), and hash (4084-4097) builders likewise
+///   pick the strict vs non-strict opcode from `flinfo->fn_strict`.
+/// * `fn_addr` — stamped onto the `func`/`hashdatum`/`scalararrayop`/
+///   `rowcompare`/`minmax` step payloads as the actual call address.
+/// * `fn_nargs` / `fn_retset` — argument count and set-returning flag the
+///   builders read when laying down fcinfo.
+///
+/// `fn_addr` is held as an opaque address ([`usize`]) rather than a typed
+/// function pointer: the `PGFunction` shape lives in the nodes layer
+/// (`types-nodes`) and the call-site step payloads carry their own typed
+/// `fn_addr`, so types-core (which must not depend on types-nodes) keeps only
+/// the raw address `fmgr_info()` resolved. `0` means unresolved.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FmgrInfo {
+    /// `PGFunction fn_addr` — resolved call address, as an opaque pointer value
+    /// (`0` = unresolved). The typed callable is re-derived at the step payload
+    /// layer that owns the `PGFunction` type.
+    pub fn_addr: usize,
     /// OID of the function (`pg_proc` OID).
     pub fn_oid: crate::primitive::Oid,
+    /// `short fn_nargs` — number of input args (0..`FUNC_MAX_ARGS`).
+    pub fn_nargs: i16,
+    /// `bool fn_strict` — function is "strict" (NULL in => NULL out). Drives the
+    /// strict-opcode selection in the executor's expression compiler.
+    pub fn_strict: bool,
+    /// `bool fn_retset` — function returns a set.
+    pub fn_retset: bool,
+    /// `unsigned char fn_stats` — collect stats if `track_functions > this`.
+    pub fn_stats: u8,
 }
 
 impl FmgrInfo {
-    /// An unresolved `FmgrInfo` (`fn_oid = InvalidOid`).
+    /// An unresolved `FmgrInfo` (`fn_oid = InvalidOid`, no address, not strict).
     pub const fn empty() -> Self {
-        Self { fn_oid: 0 }
+        Self {
+            fn_addr: 0,
+            fn_oid: 0,
+            fn_nargs: 0,
+            fn_strict: false,
+            fn_retset: false,
+            fn_stats: 0,
+        }
     }
 }
 

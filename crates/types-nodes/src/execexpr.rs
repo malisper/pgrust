@@ -679,6 +679,14 @@ pub enum ExprEvalStepData<'mcx> {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         fn_addr: Option<PGFunction>,
+        /// The hash-key result cell: the `&fcinfo->args[0].value` /
+        /// `&fcinfo->args[0].isnull` aliasing target the hash-key sub-expression
+        /// evaluates into (execExpr.c sets `scratch.resvalue =
+        /// &fcinfo->args[0].value` on the FIRST step, and the NEXT32 builders
+        /// recurse into `&fcinfo->args[0]`). In the owned model the interpreter
+        /// gathers this arena cell into `fcinfo->args[0]` immediately before the
+        /// hash function call. Always present (a hash step has exactly one arg).
+        arg_cell: ResultCellId,
         /// jump here on null
         jumpdone: i32,
         /// `NullableDatum *iresult` — intermediate hash result.
@@ -710,6 +718,17 @@ pub enum ExprEvalStepData<'mcx> {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         fn_addr: Option<PGFunction>,
+        /// The scalar-arg cell: `&fcinfo->args[0].value` /
+        /// `&fcinfo->args[0].isnull` — the aliasing target the scalar
+        /// sub-expression evaluates into (execExpr.c: scalar recurses into
+        /// `&fcinfo->args[0]`). Gathered into `fcinfo->args[0]` per array
+        /// element before each comparison.
+        scalar_cell: ResultCellId,
+        /// The array-arg cell: `&fcinfo->args[1].value` /
+        /// `&fcinfo->args[1].isnull` — the aliasing target the array
+        /// sub-expression evaluates into; the step deconstructs that array and
+        /// loads each element into `fcinfo->args[1]`.
+        array_cell: ResultCellId,
     },
     /// `hashedscalararrayop` — for EEOP_HASHED_SCALARARRAYOP.
     HashedScalarArrayOp {
@@ -723,6 +742,12 @@ pub enum ExprEvalStepData<'mcx> {
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         /// `ScalarArrayOpExpr *saop` — original node.
         saop: Option<PgBox<'mcx, ScalarArrayOpExpr>>,
+        /// The scalar-arg cell: `&fcinfo->args[0].value` /
+        /// `&fcinfo->args[0].isnull` — execExpr.c (hashed path) recurses the
+        /// scalar directly into `&fcinfo->args[0]`; the array side is
+        /// precomputed into the `elements_tab` hash table at first execution,
+        /// so only the scalar arg is gathered per row.
+        scalar_cell: ResultCellId,
     },
     /// `xmlexpr` — for EEOP_XMLEXPR.
     XmlExpr {
@@ -763,15 +788,33 @@ pub enum ExprEvalStepData<'mcx> {
     /// `agg_deserialize` — for EEOP_AGG_*DESERIALIZE.
     AggDeserialize {
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+        /// The deserialize input cell: the `&ds_fcinfo->args[0].value` /
+        /// `&ds_fcinfo->args[0].isnull` aliasing target the serialized-state
+        /// sub-expression evaluates into (execExpr.c:3785-3787). The
+        /// interpreter gathers this arena cell into `fcinfo->args[0]` before
+        /// calling the deserialization function. Always present (the
+        /// deserialfn takes one real argument; args[1] is the dummy).
+        arg_cell: ResultCellId,
         jumpnull: i32,
     },
     /// `agg_strict_input_check` — for
     /// EEOP_AGG_STRICT_INPUT_CHECK_NULLS / STRICT_INPUT_CHECK_ARGS.
     AggStrictInputCheck {
-        /// `NullableDatum *args` — for the ARGS variant.
+        /// `NullableDatum *args` — for the ARGS variant. C points this at
+        /// `trans_fcinfo->args + 1` (the transfn's real argument cells); the
+        /// step scans `args[i].isnull`. In the owned model the per-arg cells
+        /// are named by [`Self::AggStrictInputCheck::arg_cells`]; this is kept
+        /// as the owned copy/workspace.
         args: Option<PgVec<'mcx, NullableDatum>>,
-        /// `bool *nulls` — for the NULLS variant.
+        /// `bool *nulls` — for the NULLS variant (points at
+        /// `pertrans->sortslot->tts_isnull`).
         nulls: Option<PgVec<'mcx, bool>>,
+        /// Per-argument result cells the transfn-argument sub-expressions
+        /// evaluate into — the `&trans_fcinfo->args[i]` aliasing targets the
+        /// ARGS variant scans for NULLs (execExpr.c:3763/3901). The interpreter
+        /// reads `is_null` of each cell to decide the strict-NULL bailout.
+        /// Empty for the NULLS variant (which reads `nulls` directly).
+        arg_cells: Option<PgVec<'mcx, ResultCellId>>,
         nargs: i32,
         jumpnull: i32,
     },

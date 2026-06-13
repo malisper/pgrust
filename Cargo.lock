@@ -2851,6 +2851,7 @@ dependencies = [
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "seam-core",
  "types-core",

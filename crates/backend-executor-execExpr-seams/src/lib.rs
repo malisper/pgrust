@@ -451,7 +451,7 @@ seam_core::seam!(
     pub fn exec_init_merge_when_qual<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-        qual: Option<&types_nodes::nodes::Node<'mcx>>,
+        qual: Option<&[types_nodes::primnodes::Expr]>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
 );
 
@@ -506,7 +506,7 @@ seam_core::seam!(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
-        join_condition: Option<&types_nodes::nodes::Node<'mcx>>,
+        join_condition: Option<&[types_nodes::primnodes::Expr]>,
     ) -> types_error::PgResult<()>
 );
 
@@ -608,7 +608,7 @@ seam_core::seam!(
         first_varno: types_core::primitive::Index,
         on_conflict_set: &[types_nodes::primnodes::TargetEntry<'mcx>],
         on_conflict_cols: &[i32],
-        on_conflict_where: Option<&types_nodes::nodes::Node<'mcx>>,
+        on_conflict_where: Option<&[types_nodes::primnodes::Expr]>,
     ) -> types_error::PgResult<()>
 );
 
@@ -636,7 +636,7 @@ seam_core::seam!(
         first_result_rel: types_nodes::RriId,
         first_varno: types_core::primitive::Index,
         econtext: types_nodes::EcxtId,
-        ref_join_condition: Option<&types_nodes::nodes::Node<'mcx>>,
+        ref_join_condition: Option<&[types_nodes::primnodes::Expr]>,
         ref_merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
     ) -> types_error::PgResult<()>
 );
@@ -774,7 +774,7 @@ seam_core::seam!(
     pub fn exec_init_on_conflict_where<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-        on_conflict_where: Option<&types_nodes::nodes::Node<'mcx>>,
+        on_conflict_where: Option<&[types_nodes::primnodes::Expr]>,
     ) -> types_error::PgResult<Option<types_nodes::execexpr::ExprState<'mcx>>>
 );
 

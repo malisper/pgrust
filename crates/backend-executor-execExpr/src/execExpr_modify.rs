@@ -21,18 +21,18 @@
 //!
 //! The `execExpr_core` compiler primitives these wrappers drive are now landed
 //! (the explicit-target-list `exec_build_projection_info_impl` /
-//! `exec_build_update_projection_impl` and `exec_project_info`), so every
-//! wrapper whose inputs are already in `Expr` / `TargetEntry` form — the four
-//! RETURNING / SET / MERGE-INSERT/UPDATE *projection* builders plus
-//! `exec_project_returning` — is fully wired to the core builder here.
+//! `exec_build_update_projection_impl`, `exec_project_info`, and `exec_init_qual`),
+//! so every wrapper whose inputs are already in `Expr` / `TargetEntry` form is
+//! fully wired to the core builder here: the four RETURNING / SET /
+//! MERGE-INSERT/UPDATE *projection* builders, `exec_project_returning`, and the
+//! standalone *qual* wrappers — MERGE WHEN qual (`exec_init_merge_when_qual`),
+//! MERGE join condition (`exec_init_merge_join_condition`), and ON CONFLICT
+//! WHERE (`exec_init_on_conflict_where`). Their qual is now modeled as the
+//! implicit-AND `List` of `Expr` the C cast `(List *) node->qual` produces, so
+//! it feeds `execExpr_core::exec_init_qual` directly.
 //!
 //! The remaining wrappers still loud-panic, but on a *genuine unported owner*,
 //! not on the core compiler (which is ready):
-//!   * the *qual* wrappers (MERGE WHEN qual / join condition, WITH CHECK OPTION,
-//!     ON CONFLICT WHERE) take a plan-only `Node` and the C casts it
-//!     `(List *) node->qual` to a list of `Expr`s — the `types-nodes` `Node`
-//!     enum carries no `Expr`/`List` path, so the cast cannot be expressed to
-//!     feed `execExpr_core::exec_init_qual`;
 //!   * `exec_project_new_tuple` needs the `ResultRelInfo.ri_projectNew` field,
 //!     not yet modeled in `types-nodes` (only its `ri_projectNewInfoValid` flag
 //!     is);
@@ -51,7 +51,7 @@ use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo};
 use types_nodes::modifytable::MergeAction;
 use types_nodes::nodes::Node;
-use types_nodes::primnodes::TargetEntry;
+use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::{EStateData, EcxtId, ModifyTableState, RriId, SlotId};
 
 use crate::execExpr_core;
@@ -59,23 +59,16 @@ use crate::execExpr_core;
 /// `mas_whenqual = ExecInitQual((List *) action->qual, &mtstate->ps)`.
 ///
 /// Compile one MERGE action's WHEN [NOT MATCHED] AND conditions into an
-/// `ExprState` via the in-unit `execExpr_core::exec_init_qual`
-/// (`ExecInitQual`), which is landed and ready. The C casts the `Node *` qual to
-/// a `List *` of `Expr`s (`(List *) action->qual`); the trimmed `types-nodes`
-/// `Node` enum carries plan nodes only and has no `Expr`/`List` path, so the
-/// cast that produces the `&[Expr]` `exec_init_qual` needs cannot be expressed.
-/// Blocked on that `types-nodes` `Node`→`Expr`-qual-list modeling.
+/// `ExprState` via the in-unit `execExpr_core::exec_init_qual` (`ExecInitQual`).
+/// The `MergeAction.qual` is now modeled as the implicit-AND `List` of `Expr`
+/// the C cast `(List *) action->qual` produces, so it feeds `exec_init_qual`
+/// directly. A `None` qual (the C `NIL`) yields `None`.
 pub fn exec_init_merge_when_qual<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _qual: Option<&Node<'mcx>>,
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    qual: Option<&[Expr]>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
-    panic!(
-        "execExpr-modify::exec_init_merge_when_qual: ExecInitQual((List *) action->qual) \
-         is blocked on the not-yet-modeled Node->Expr qual-list view in types-nodes \
-         (MergeAction.qual is a plan-only Node enum with no Expr-list path; the C cast \
-         (List *) action->qual cannot be expressed to feed execExpr_core::exec_init_qual)"
-    )
+    execExpr_core::exec_init_qual(qual, &mut mtstate.ps, estate)
 }
 
 /// `ExecBuildProjectionInfo(action->targetList, ..., tgtdesc)` for a MERGE
@@ -157,21 +150,20 @@ pub fn exec_build_merge_update_projection<'mcx>(
 ///
 /// Compile the MERGE join condition for `result_rel_info` and store the
 /// compiled `ExprState` on the pooled `ResultRelInfo.ri_MergeJoinCondition`. The
-/// in-unit `ExecInitQual` is landed; what is missing is the `Node`→`Expr`-
-/// qual-list cast feeding it (`(List *) joinCondition`), which the trimmed
-/// `types-nodes` `Node` enum cannot express. Blocked on that modeling.
+/// `joinCondition` is now modeled as the implicit-AND `List` of `Expr` the C
+/// cast `(List *) joinCondition` produces, so it feeds the in-unit
+/// `execExpr_core::exec_init_qual` (`ExecInitQual`) directly.
 pub fn exec_init_merge_join_condition<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _join_condition: Option<&Node<'mcx>>,
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    join_condition: Option<&[Expr]>,
 ) -> PgResult<()> {
-    panic!(
-        "execExpr-modify::exec_init_merge_join_condition: \
-         ri_MergeJoinCondition = ExecInitQual((List *) joinCondition) is blocked on the \
-         not-yet-modeled Node->Expr qual-list view in types-nodes (joinCondition is a \
-         plan-only Node with no Expr-list path to feed execExpr_core::exec_init_qual)"
-    )
+    // resultRelInfo->ri_MergeJoinCondition =
+    //     ExecInitQual((List *) joinCondition, &mtstate->ps);
+    let compiled = execExpr_core::exec_init_qual(join_condition, &mut mtstate.ps, estate)?;
+    estate.result_rel_mut(result_rel_info).ri_MergeJoinCondition = compiled;
+    Ok(())
 }
 
 /// The inherited-root WCO / RETURNING setup of `ExecInitMerge`
@@ -281,7 +273,7 @@ pub fn partition_init_on_conflict_update<'mcx>(
     _first_varno: Index,
     _on_conflict_set: &[TargetEntry<'mcx>],
     _on_conflict_cols: &[i32],
-    _on_conflict_where: Option<&Node<'mcx>>,
+    _on_conflict_where: Option<&[Expr]>,
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::partition_init_on_conflict_update: OnConflictSetState build routes to \
@@ -314,7 +306,7 @@ pub fn partition_init_merge_actions<'mcx>(
     _first_result_rel: RriId,
     _first_varno: Index,
     _econtext: EcxtId,
-    _ref_join_condition: Option<&Node<'mcx>>,
+    _ref_join_condition: Option<&[Expr]>,
     _ref_merge_action_list: &[MergeAction<'mcx>],
 ) -> PgResult<()> {
     panic!(
@@ -365,10 +357,10 @@ pub fn exec_init_with_check_options<'mcx>(
     _wco_list: &[Node<'mcx>],
 ) -> PgResult<()> {
     panic!(
-        "execExpr-modify::exec_init_with_check_options: per-WCO ExecInitQual((List *) wco->qual) \
-         is blocked on the not-yet-modeled WithCheckOption.qual Expr-list view in types-nodes \
-         (wco->qual is a plan-only Node with no Expr-list path to feed \
-         execExpr_core::exec_init_qual)"
+        "execExpr-modify::exec_init_with_check_options: per-WCO ExecInitQual(wco->qual) is \
+         blocked on the not-yet-modeled WithCheckOption node in types-nodes (the per-rel WCO \
+         list is a List of WithCheckOption nodes; without that node the individual wco->qual \
+         Expr-lists cannot be extracted to feed execExpr_core::exec_init_qual)"
     )
 }
 
@@ -459,21 +451,17 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
 /// (nodeModifyTable.c `ExecInitModifyTable`).
 ///
 /// Compile the ON CONFLICT DO UPDATE WHERE clause into an `ExprState`; a `None`
-/// clause yields `None`. The in-unit `ExecInitQual` is landed; what is missing
-/// is the `Node`→`Expr`-qual-list cast (`(List *) node->onConflictWhere`), which
-/// the trimmed `types-nodes` `Node` enum cannot express. Blocked on that
-/// modeling.
+/// clause yields `None`. The `onConflictWhere` is now modeled as the
+/// implicit-AND `List` of `Expr` the C cast `(List *) node->onConflictWhere`
+/// produces, so it feeds the in-unit `execExpr_core::exec_init_qual`
+/// (`ExecInitQual`) directly.
 pub fn exec_init_on_conflict_where<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _on_conflict_where: Option<&Node<'mcx>>,
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    on_conflict_where: Option<&[Expr]>,
 ) -> PgResult<Option<ExprState<'mcx>>> {
-    panic!(
-        "execExpr-modify::exec_init_on_conflict_where: \
-         ExecInitQual((List *) node->onConflictWhere) is blocked on the not-yet-modeled \
-         Node->Expr qual-list view in types-nodes (onConflictWhere is a plan-only Node with \
-         no Expr-list path to feed execExpr_core::exec_init_qual)"
-    )
+    let compiled = execExpr_core::exec_init_qual(on_conflict_where, &mut mtstate.ps, estate)?;
+    Ok(compiled.map(PgBox::into_inner))
 }
 
 /// `ExecProject(resultRelInfo->ri_projectReturning)`

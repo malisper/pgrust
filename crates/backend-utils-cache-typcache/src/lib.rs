@@ -1118,7 +1118,7 @@ fn fmgr_finfo_if_needed(
 /// store.
 fn fmgr_info_cxt(func_oid: Oid) -> PgResult<FmgrInfo> {
     fmgr_seams::fmgr_info_check::call(func_oid)?;
-    Ok(FmgrInfo { fn_oid: func_oid })
+    Ok(FmgrInfo { fn_oid: func_oid, ..Default::default() })
 }
 
 /* ==========================================================================

@@ -45,6 +45,6 @@ pub fn ScanKeyInit(
     // cross the seam (it embeds the C function pointer); the lookup half runs
     // behind the seam and the carrier records the resolved function's OID.
     fmgr_seams::fmgr_info_check::call(procedure)?;
-    entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: procedure };
+    entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: procedure, ..Default::default() };
     Ok(())
 }

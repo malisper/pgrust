@@ -208,12 +208,13 @@ pub fn TupleDescGetAttInMetadata<'mcx>(
                 backend_utils_cache_lsyscache_seams::get_type_input_info::call(att.atttypid)?;
             // fmgr_info(attinfuncid, &attinfuncinfo[i]) — the owned `FmgrInfo`
             // carries only the OID; resolution is deferred to call time.
-            attinfuncs.push(types_core::fmgr::FmgrInfo { fn_oid: attinfuncid });
+            attinfuncs.push(types_core::fmgr::FmgrInfo { fn_oid: attinfuncid, ..Default::default() });
             attioparams.push(ioparam);
             atttypmods.push(att.atttypmod);
         } else {
             attinfuncs.push(types_core::fmgr::FmgrInfo {
                 fn_oid: types_core::primitive::InvalidOid,
+                ..Default::default()
             });
             attioparams.push(types_core::primitive::InvalidOid);
             atttypmods.push(0);

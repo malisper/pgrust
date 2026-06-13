@@ -91,7 +91,7 @@ fn InitializeRelfilenumberMap() -> PgResult<()> {
     let mut skey = [ScanKeyData::empty(), ScanKeyData::empty()];
     for entry in &mut skey {
         fmgr_seams::fmgr_info_check::call(F_OIDEQ)?;
-        entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: F_OIDEQ };
+        entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: F_OIDEQ, ..Default::default() };
         entry.sk_strategy = BTEqualStrategyNumber;
         entry.sk_subtype = InvalidOid;
         entry.sk_collation = InvalidOid;

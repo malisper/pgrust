@@ -153,7 +153,7 @@ pub fn get_multirange_io_data(
     // The owned `FmgrInfo` carries only the resolved proc OID (the lookup key);
     // the I/O wrappers re-resolve / dispatch by OID through the range owner's
     // I/O seams.
-    let typioproc = FmgrInfo { fn_oid: io.func };
+    let typioproc = FmgrInfo { fn_oid: io.func, ..Default::default() };
 
     Ok(MultirangeIOData {
         typcache,

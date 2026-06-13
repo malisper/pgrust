@@ -30,6 +30,10 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 # get_opcode / get_op_hash_functions) the hashed-subplan combining-op
 # resolution routes through.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# fmgr_info(funcid) -> FmgrInfo (fn_strict/fn_stats/fn_addr) for the Func / agg /
+# hash / IOcoerce / rowcompare / minmax / scalararrayop opcode selection and
+# fn_addr stamp (ExecInitFunc and friends read flinfo->fn_strict after lookup).
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 # nodeFuncs owns exprType()/exprTypmod()/exprCollation() — pure node-type
 # inspections ExecBuildProjectionInfo / ExecBuildUpdateProjection read to pick
 # the ASSIGN_TMP[_MAKE_RO] opcode and to run the ExecCheckPlanOutput-equivalent

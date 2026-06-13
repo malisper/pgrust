@@ -292,7 +292,7 @@ pub fn ExecInitTableFuncScan<'mcx>(
         // owned FmgrInfo carries the OID; fmgr_info_check preserves the eager
         // lookup-failure surface.
         fmgr::fmgr_info_check::call(in_funcid)?;
-        in_functions.push(FmgrInfo { fn_oid: in_funcid });
+        in_functions.push(FmgrInfo { fn_oid: in_funcid, ..Default::default() });
     }
     scanstate.in_functions = in_functions;
     scanstate.typioparams = typioparams;
