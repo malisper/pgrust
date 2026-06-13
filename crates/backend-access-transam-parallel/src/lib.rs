@@ -36,6 +36,7 @@
 use std::cell::RefCell;
 
 use backend_utils_error::{elog, ereport, PgResult};
+use mcx::Mcx;
 use types_core::{pid_t, Size, SubTransactionId, XLogRecPtr};
 use types_datum::Datum;
 use types_error::{
@@ -225,20 +226,34 @@ impl ParallelGlobals {
     }
 
     /// `dlist_push_head(&pcxt_list, &pcxt->node)` after `palloc0`.
-    fn push_head(&mut self, pcxt: ParallelContext) -> ParallelContextHandle {
+    /// Stand-in for C's `palloc0(sizeof(ParallelContext))` +
+    /// `dlist_push_head`. Fallible: a failed slab/list grow converts to the
+    /// caller-context OOM error (`mcx.oom`), mirroring the `ereport(ERROR,
+    /// ERRCODE_OUT_OF_MEMORY)` every `palloc` can raise.
+    fn push_head(
+        &mut self,
+        mcx: Mcx<'_>,
+        pcxt: ParallelContext,
+    ) -> PgResult<ParallelContextHandle> {
         let slot = match self.slots.iter().position(Option::is_none) {
             Some(i) => {
                 self.slots[i] = Some(pcxt);
                 i
             }
             None => {
+                self.slots
+                    .try_reserve(1)
+                    .map_err(|_| mcx.oom(core::mem::size_of::<ParallelContext>()))?;
                 self.slots.push(Some(pcxt));
                 self.slots.len() - 1
             }
         };
         let h = ParallelContextHandle(slot);
+        self.list
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<ParallelContextHandle>()))?;
         self.list.insert(0, h);
-        h
+        Ok(h)
     }
 
     fn list_is_empty(&self) -> bool {
@@ -645,13 +660,20 @@ pub fn handle_parallel_message_interrupt() {
 
 /// Establish a new parallel context, returning its handle (C's `palloc0`'d
 /// `ParallelContext *`). Linked into `pcxt_list`.
-pub fn create_parallel_context(
+pub fn create_parallel_context<'mcx>(
+    mcx: Mcx<'mcx>,
     library_name: String,
     function_name: String,
     nworkers: i32,
 ) -> PgResult<ParallelContextHandle> {
     // It is unsafe to create a parallel context if not in parallel mode.
     debug_assert!(nworkers >= 0);
+
+    // C: pcxt = palloc0(sizeof(ParallelContext)), in TopTransactionContext.
+    // Account the allocation against the caller's context so OOM carries
+    // ERRCODE_OUT_OF_MEMORY and the context name (mcx.oom), like every other
+    // allocating function (AGENTS "Memory allocation").
+    mcx::check_alloc_size(core::mem::size_of::<ParallelContext>())?;
 
     // We might be running in a short-lived memory context.
     let oldcontext = rt::switch_to_top_transaction_context::call()?;
@@ -674,7 +696,7 @@ pub fn create_parallel_context(
         known_attached_workers: Vec::new(),
     };
 
-    let h = with_globals(|g| g.push_head(pcxt));
+    let h = with_globals(|g| g.push_head(mcx, pcxt))?;
 
     // Restore previous memory context.
     rt::memory_context_switch_back::call(oldcontext)?;
@@ -686,9 +708,25 @@ pub fn create_parallel_context(
 // InitializeParallelDSM (parallel.c:210-501).
 // ===========================================================================
 
+/// Fallibly allocate the zeroed `segsize`-byte buffer that backs the TOC.
+///
+/// This stands in for the segment storage (`dsm_create` on the worker path,
+/// `MemoryContextAlloc(TopMemoryContext, segsize)` on the no-worker fallback)
+/// until a real cross-process DSM layout lands. `segsize` is caller-controlled
+/// (the estimator total), so the allocation must be fallible: OOM converts to
+/// the context's `mcx.oom(segsize)` (`ERRCODE_OUT_OF_MEMORY` + context name)
+/// rather than aborting the process via `vec![0u8; segsize]`.
+fn alloc_zeroed_buffer(mcx: Mcx<'_>, segsize: usize) -> PgResult<Vec<u8>> {
+    mcx::check_alloc_size(segsize)?;
+    let mut buffer: Vec<u8> = Vec::new();
+    buffer.try_reserve_exact(segsize).map_err(|_| mcx.oom(segsize))?;
+    buffer.resize(segsize, 0);
+    Ok(buffer)
+}
+
 /// Establish the dynamic shared memory segment for a parallel context and copy
 /// state needed by parallel workers into it.
-pub fn initialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
+pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle) -> PgResult<()> {
     let mut library_len: Size = 0;
     let mut guc_len: Size = 0;
     let mut combocidlen: Size = 0;
@@ -780,18 +818,23 @@ pub fn initialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
     }
     if !with_globals(|g| g.get(pcxt).seg).is_null() {
         // The TOC lives in the DSM segment; back it with a context buffer.
+        // C: dsm_create(segsize). Fallible alloc: OOM on the caller-controlled
+        // segsize must carry ERRCODE_OUT_OF_MEMORY (mcx.oom), not abort.
+        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
         with_globals(|g| {
             let c = g.get_mut(pcxt);
-            c.buffer = vec![0u8; segsize];
+            c.buffer = buffer;
             c.toc = ShmToc::default();
         });
     } else {
         let pm = rt::top_memory_context_alloc::call(segsize)?;
+        // C: MemoryContextAlloc(TopMemoryContext, segsize). Same fallible rule.
+        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
         with_globals(|g| {
             let c = g.get_mut(pcxt);
             c.nworkers = 0;
             c.private_memory = pm;
-            c.buffer = vec![0u8; segsize];
+            c.buffer = buffer;
             c.toc = ShmToc::default();
         });
     }
@@ -871,15 +914,18 @@ pub fn initialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
         rt::serialize_client_connection_info::call(clientconninfolen, cursor_parts(clientconninfospace).1)?;
         shm_toc_insert(toc, PARALLEL_KEY_CLIENTCONNINFO, clientconninfospace);
 
-        // Allocate space for worker information (palloc0).
+        // Allocate space for worker information (palloc0). Fallible: OOM goes
+        // through the context's mcx.oom (ERRCODE_OUT_OF_MEMORY + context name),
+        // not a hand-rolled "out of memory" ereport that drops the SQLSTATE.
         let nworkers = pcxt_nworkers(pcxt);
         let seg = with_globals(|g| g.get(pcxt).seg);
+        let request = (nworkers as usize)
+            .saturating_mul(core::mem::size_of::<ParallelWorkerInfo>());
+        mcx::check_alloc_size(request)?;
         let mut workers: Vec<ParallelWorkerInfo> = Vec::new();
-        workers.try_reserve(nworkers as usize).map_err(|_| {
-            ereport(ERROR)
-                .errmsg("out of memory allocating parallel worker array")
-                .into_error()
-        })?;
+        workers
+            .try_reserve(nworkers as usize)
+            .map_err(|_| mcx.oom(request))?;
         for _ in 0..nworkers {
             workers.push(ParallelWorkerInfo::new());
         }
