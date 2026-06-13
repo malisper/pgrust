@@ -6745,6 +6745,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-arrayutils"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayutils-seams",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-arrayutils-seams"
 version = "0.0.0"
 dependencies = [
@@ -9049,6 +9064,7 @@ dependencies = [
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayutils",
  "backend-utils-adt-format-type",
  "backend-utils-adt-json",
  "backend-utils-adt-multirangetypes",
