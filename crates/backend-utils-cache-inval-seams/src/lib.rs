@@ -59,6 +59,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CacheInvalidateRelmap(databaseId)` (inval.c): register a relmap
+    /// invalidation to be sent to other backends after a relation-map file
+    /// rewrite (`databaseId == InvalidOid` for the shared map). Sent inside a
+    /// critical section by relmapper; a failure forces a database-wide PANIC.
+    pub fn cache_invalidate_relmap(database_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtEOXact_Inval(isCommit)` — process/discard pending invalidations at
     /// top-level transaction end.
     pub fn at_eoxact_inval(is_commit: bool) -> PgResult<()>
@@ -107,4 +115,12 @@ seam_core::seam!(
     /// is the raw on-disk `SharedInvalidationMessage[]` slice from the 2PC
     /// buffer (the owner decodes it). Can `ereport(ERROR)`, carried on `Err`.
     pub fn send_shared_invalid_messages(msgs: &[u8], nmsgs: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InvalidateSystemCaches()` (inval.c): blow away all cached catalog
+    /// state — logical decoding calls it to clear non-timetravel entries
+    /// around its fast-forward WAL read loops. `Err` carries any error raised
+    /// by an invalidation callback.
+    pub fn invalidate_system_caches() -> PgResult<()>
 );

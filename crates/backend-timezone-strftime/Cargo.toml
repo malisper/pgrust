@@ -9,4 +9,5 @@ name = "backend_timezone_strftime"
 path = "src/lib.rs"
 
 [dependencies]
+backend-timezone-strftime-seams = { path = "../backend-timezone-strftime-seams" }
 types-pgtime = { path = "../types-pgtime" }

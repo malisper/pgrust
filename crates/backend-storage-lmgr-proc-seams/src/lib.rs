@@ -206,3 +206,10 @@ seam_core::seam!(
     /// prepare/commit WAL insert. Plain shared-memory field write.
     pub fn set_delay_chkpt_start(on: bool)
 );
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c): initialize the per-backend `PGPROC` entry,
+    /// claiming a slot from the shared `ProcGlobal` free list. `ereport(FATAL)`
+    /// when no slot is available ("sorry, too many clients already").
+    pub fn init_process() -> types_error::PgResult<()>
+);
