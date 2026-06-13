@@ -7315,10 +7315,12 @@ dependencies = [
 name = "backend-utils-cache-relcache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-hash-dynahash",
  "mcx",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-hash",
