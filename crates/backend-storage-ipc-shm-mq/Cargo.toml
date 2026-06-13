@@ -1,0 +1,26 @@
+[package]
+name = "backend-storage-ipc-shm-mq"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_ipc_shm_mq"
+path = "src/lib.rs"
+
+[dependencies]
+backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
+backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+mcx = { path = "../mcx" }
+types-bgworker = { path = "../types-bgworker" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-pgstat = { path = "../types-pgstat" }
+types-storage = { path = "../types-storage" }

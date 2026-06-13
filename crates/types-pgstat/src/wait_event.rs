@@ -24,6 +24,19 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+/// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
+/// attached to a shared message queue." 34th entry (0-based 33) of the IPC
+/// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).
+pub const WAIT_EVENT_MESSAGE_QUEUE_INTERNAL: u32 = PG_WAIT_IPC | 33;
+
+/// `WAIT_EVENT_MESSAGE_QUEUE_RECEIVE` — "Waiting to receive bytes from a
+/// shared message queue." `PG_WAIT_IPC | 35` (= 134217763, matching c2rust).
+pub const WAIT_EVENT_MESSAGE_QUEUE_RECEIVE: u32 = PG_WAIT_IPC | 35;
+
+/// `WAIT_EVENT_MESSAGE_QUEUE_SEND` — "Waiting to send bytes to a shared
+/// message queue." `PG_WAIT_IPC | 36` (= 134217764, matching c2rust).
+pub const WAIT_EVENT_MESSAGE_QUEUE_SEND: u32 = PG_WAIT_IPC | 36;
+
 /// `WAIT_EVENT_SPIN_DELAY` — "Waiting while acquiring a contended spinlock."
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).

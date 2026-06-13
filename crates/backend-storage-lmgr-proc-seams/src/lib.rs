@@ -117,3 +117,10 @@ seam_core::seam!(
     /// (the commit critical section's checkpoint interlock).
     pub fn my_proc_set_delay_chkpt_start(on: bool)
 );
+
+seam_core::seam!(
+    /// `&GetPGProcByNumber(procno)->procLatch` — the process latch embedded
+    /// in a backend's PGPROC entry, as a handle usable with the latch seams
+    /// (`set_latch` to wake that backend). Pure array lookup; infallible.
+    pub fn proc_latch(procno: ProcNumber) -> types_storage::latch::LatchHandle
+);

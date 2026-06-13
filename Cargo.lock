@@ -1474,6 +1474,7 @@ name = "backend-postmaster-bgworker-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-bgworker",
  "types-startup",
 ]
 
@@ -1893,6 +1894,7 @@ name = "backend-storage-ipc-latch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -1956,6 +1958,27 @@ dependencies = [
  "seam-core",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-shm-mq"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-bgworker-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-bgworker",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -2960,6 +2983,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-lwlock",
@@ -3021,6 +3045,10 @@ version = "0.0.0"
 dependencies = [
  "types-core",
 ]
+
+[[package]]
+name = "types-bgworker"
+version = "0.0.0"
 
 [[package]]
 name = "types-cache"
