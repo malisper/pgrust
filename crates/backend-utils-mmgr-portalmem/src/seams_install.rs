@@ -42,6 +42,9 @@ pub fn init_seams() {
         crate::memory_context_delete_children(portal)
     });
     seams::with_portal_globals::set(|portal, f| crate::with_portal_globals(portal, f));
+
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    seams::enable_portal_manager::set(crate::EnablePortalManager);
 }
 
 /// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`

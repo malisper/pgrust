@@ -1494,4 +1494,6 @@ pub fn init_seams() {
     s::at_eoxact_apply_launcher::set(|is_commit| {
         AtEOXact_ApplyLauncher(is_commit).expect("AtEOXact_ApplyLauncher is infallible")
     });
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    s::apply_launcher_shmem_init::set(ApplyLauncherShmemInit);
 }

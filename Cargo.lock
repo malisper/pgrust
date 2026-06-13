@@ -1442,6 +1442,7 @@ dependencies = [
 name = "backend-access-transam-xlogprefetcher"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlogprefetcher-seams",
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-smgr-seams",
@@ -7456,6 +7457,7 @@ dependencies = [
  "backend-tcop-pquery-pc-seams",
  "backend-tcop-utility-pc-seams",
  "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-plancache-seams",
  "backend-utils-cache-syscache-pc-seams",
  "backend-utils-misc-backendstate-pc-seams",
  "backend-utils-mmgr-mcxt-pc-seams",
@@ -9068,6 +9070,7 @@ dependencies = [
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-plancache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",

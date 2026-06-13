@@ -1127,6 +1127,8 @@ pub fn init_seams() {
     seams::at_cci_relation_map::set(AtCCI_RelationMap);
     seams::at_eoxact_relation_map::set(AtEOXact_RelationMap);
     seams::at_prepare_relation_map::set(AtPrepare_RelationMap);
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    seams::relation_map_finish_bootstrap::set(RelationMapFinishBootstrap);
 }
 
 #[cfg(test)]

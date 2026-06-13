@@ -42,6 +42,16 @@ pub fn init_seams() {
     backend_utils_init_small_seams::exit_on_any_error::set(globals::ExitOnAnyError);
     backend_utils_init_small_seams::set_exit_on_any_error::set(globals::SetExitOnAnyError);
     backend_utils_init_small_seams::my_backend_type::set(globals::MyBackendType);
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner globals match.
+    backend_utils_init_small_seams::max_connections::set(globals::MaxConnections);
+    backend_utils_init_small_seams::set_max_backends::set(globals::SetMaxBackends);
+    backend_utils_init_small_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
+    backend_utils_init_small_seams::set_my_database_id::set(globals::SetMyDatabaseId);
+    backend_utils_init_small_seams::set_my_database_table_space::set(globals::SetMyDatabaseTableSpace);
+    backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(
+        globals::SetMyDatabaseHasLoginEventTriggers,
+    );
+    backend_utils_init_small_seams::has_my_proc_port::set(globals::MyProcPortIsSet);
 }
 
 #[cfg(test)]
