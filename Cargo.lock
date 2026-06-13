@@ -7045,6 +7045,7 @@ name = "backend-utils-cache-catcache"
 version = "0.0.0"
 dependencies = [
  "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
  "common-hashfn-seams",
  "mcx",
