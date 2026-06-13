@@ -38,6 +38,7 @@ pub const T_Result: NodeTag = NodeTag(331);
 pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
 pub const T_MergeAppend: NodeTag = NodeTag(335);
+pub const T_BitmapAnd: NodeTag = NodeTag(337);
 pub const T_IndexScan: NodeTag = NodeTag(341);
 pub const T_IndexOnlyScan: NodeTag = NodeTag(342);
 pub const T_FunctionScan: NodeTag = NodeTag(348);
@@ -131,6 +132,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeAppend`.
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
+    /// `T_BitmapAnd`.
+    BitmapAnd(crate::nodebitmapand::BitmapAnd<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Result`.
@@ -180,6 +183,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
+            Node::BitmapAnd(_) => T_BitmapAnd,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Result(_) => T_Result,
             Node::SetOp(_) => T_SetOp,
@@ -204,6 +208,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
+            Node::BitmapAnd(b) => &b.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Result(r) => &r.plan,
             Node::SetOp(s) => &s.plan,
@@ -238,6 +243,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
+            Node::BitmapAnd(b) => Ok(Node::BitmapAnd(b.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
             Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),

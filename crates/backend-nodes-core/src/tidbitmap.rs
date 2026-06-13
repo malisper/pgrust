@@ -1880,6 +1880,8 @@ pub fn init_seams() {
     backend_nodes_core_tidbitmap_seams::tbm_end_iterate::set(provide_tbm_end_iterate);
     backend_nodes_core_tidbitmap_seams::tbm_free::set(provide_tbm_free);
     backend_nodes_core_tidbitmap_seams::tbm_free_shared_area::set(provide_tbm_free_shared_area);
+    backend_nodes_core_tidbitmap_seams::tbm_intersect::set(tbm_intersect);
+    backend_nodes_core_tidbitmap_seams::tbm_is_empty::set(tbm_is_empty);
 }
 
 #[cfg(test)]
