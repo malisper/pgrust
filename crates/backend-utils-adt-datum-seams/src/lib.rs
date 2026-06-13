@@ -12,6 +12,16 @@ use types_core::primitive::Size;
 use types_datum::Datum;
 
 seam_core::seam!(
+    /// `datumCopy(value, typByVal, typLen)` (datum.c) — make a self-contained
+    /// copy of one non-NULL datum: by-value datums are returned verbatim,
+    /// by-reference datums are deep-copied (`palloc` in the current context).
+    /// The raw-`Datum` form (vs. the byte-model `TupleValue` copy in
+    /// `backend-utils-adt-scalar-seams`) used by callers that hold a bare
+    /// `Datum` and its `(typByVal, typLen)`, e.g. `copyParamList` (params.c).
+    pub fn datum_copy(value: Datum, typ_byval: bool, typ_len: i32) -> Datum
+);
+
+seam_core::seam!(
     /// `datumEstimateSpace(value, isnull, typByVal, typLen)` — bytes needed to
     /// serialize one datum (`sizeof(int)` header plus the payload).
     pub fn datum_estimate_space(value: Datum, isnull: bool, typ_byval: bool, typ_len: i32) -> Size

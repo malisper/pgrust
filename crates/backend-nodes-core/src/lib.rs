@@ -30,6 +30,10 @@
 //! phase so the crate compiles and those consumers get a real implementation.
 //! The remaining families are module skeletons (fixed C-faithful signatures +
 //! `todo!()` bodies) filled in follow-up passes.
+//!
+//! The **params** family ([`params`]) is filled: the full `nodes/params.c`
+//! machinery over a handle-keyed `ParamListInfoData` store, with the owned
+//! `make_param_list` seam installed.
 
 pub mod bitmapset;
 pub mod list;
@@ -53,14 +57,18 @@ pub mod value_core;
 ///
 /// The **tidbitmap** family is also filled: `tbm_add_tuple` (in the same seams
 /// crate) and the `backend-nodes-core-tidbitmap-seams` surface are installed via
-/// [`tidbitmap::init_seams`]. Every seam in `-params-seams` / `-read-seams` /
-/// `-nodeFuncs-seams` stays UNINSTALLED (they panic on call) until their
-/// families are filled — `mirror-pg-and-panic`.
+/// [`tidbitmap::init_seams`]. The **params** family (`nodes/params.c`) is filled,
+/// so its `backend-nodes-params-seams::make_param_list` seam is installed here.
+/// Every seam in `-read-seams` / `-nodeFuncs-seams` stays UNINSTALLED (they panic
+/// on call) until their families are filled — `mirror-pg-and-panic`.
 pub fn init_seams() {
     use backend_nodes_core_seams as seams;
 
     // tidbitmap family: tbm_add_tuple + the tidbitmap-seams surface.
     tidbitmap::init_seams();
+
+    // params family (nodes/params.c): the canonical `make_param_list` seam.
+    backend_nodes_params_seams::make_param_list::set(params::makeParamList);
 
     seams::bms_is_member::set(bitmapset::bms_is_member);
     seams::bms_add_member::set(bitmapset::bms_add_member);
