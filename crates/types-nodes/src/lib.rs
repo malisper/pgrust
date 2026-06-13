@@ -36,6 +36,7 @@ pub mod nodelimit;
 pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
+pub mod nodenamedtuplestorescan;
 pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;

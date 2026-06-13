@@ -78,6 +78,7 @@ backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
 backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
 backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }

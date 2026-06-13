@@ -4038,6 +4038,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeNamedtuplestorescan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-utils-misc-queryenvironment",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeNestloop"
 version = "0.0.0"
 dependencies = [
@@ -9880,6 +9896,7 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
+ "backend-executor-nodeNamedtuplestorescan",
  "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",

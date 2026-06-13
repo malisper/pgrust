@@ -147,6 +147,8 @@ pub enum Node<'mcx> {
     Sort(crate::nodesort::Sort<'mcx>),
     /// `T_TableFuncScan`.
     TableFuncScan(crate::nodetablefuncscan::TableFuncScan<'mcx>),
+    /// `T_NamedTuplestoreScan`.
+    NamedTuplestoreScan(crate::nodenamedtuplestorescan::NamedTuplestoreScan<'mcx>),
     /// `T_NestLoop`.
     NestLoop(crate::nodenestloop::NestLoop<'mcx>),
     /// `T_HashJoin`.
@@ -188,6 +190,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(_) => T_Limit,
             Node::Sort(_) => T_Sort,
             Node::TableFuncScan(_) => T_TableFuncScan,
+            Node::NamedTuplestoreScan(_) => T_NamedTuplestoreScan,
             Node::NestLoop(_) => crate::nodenestloop::T_NestLoop,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
@@ -212,6 +215,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
+            Node::NamedTuplestoreScan(n) => &n.scan.plan,
             Node::NestLoop(m) => &m.join.plan,
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
@@ -246,6 +250,7 @@ impl<'mcx> Node<'mcx> {
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
+            Node::NamedTuplestoreScan(n) => Ok(Node::NamedTuplestoreScan(n.clone_in(mcx)?)),
             Node::NestLoop(m) => Ok(Node::NestLoop(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),

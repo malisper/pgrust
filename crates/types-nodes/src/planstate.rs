@@ -51,6 +51,10 @@ pub enum PlanStateNode<'mcx> {
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
+    /// `T_NamedTuplestoreScanState`.
+    NamedTuplestoreScan(
+        PgBox<'mcx, crate::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
+    ),
     /// `T_NestLoopState`.
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
@@ -78,6 +82,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
+            PlanStateNode::NamedTuplestoreScan(_) => {
+                crate::nodenamedtuplestorescan::T_NamedTuplestoreScanState
+            }
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
@@ -101,6 +108,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &n.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
@@ -123,6 +131,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &mut n.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
@@ -142,6 +151,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
+            // `NamedTuplestoreScanState` begins with a `ScanState`.
+            PlanStateNode::NamedTuplestoreScan(n) => Some(&n.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.
