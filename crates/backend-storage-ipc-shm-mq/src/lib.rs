@@ -616,6 +616,10 @@ pub unsafe fn shm_mq_sendv(
     }
 
     // Write the actual data bytes into the buffer.
+    //
+    // The C loop is a do/while whose `continue`s jump to the
+    // `mqh_partial_bytes < nbytes` controlling expression, so every branch
+    // (the iov-advance, tmpbuf, and chunk paths) is followed by that check.
     debug_assert!(mqh.mqh_partial_bytes <= nbytes);
     let mut offset = mqh.mqh_partial_bytes;
     loop {
@@ -626,16 +630,14 @@ pub unsafe fn shm_mq_sendv(
             if which_iov >= iovcnt {
                 break;
             }
-            continue;
-        }
-
-        // We want to avoid copying the data if at all possible, but every
-        // chunk of bytes we write into the queue has to be MAXALIGN'd, except
-        // the last. Thus, if a chunk other than the last one ends on a
-        // non-MAXALIGN'd boundary, combine the tail end of its data with data
-        // from one or more following chunks until we either reach the last
-        // chunk or accumulate a MAXALIGN'd number of bytes.
-        if which_iov + 1 < iovcnt && offset + MAXIMUM_ALIGNOF > iov[which_iov].len() {
+        } else if which_iov + 1 < iovcnt && offset + MAXIMUM_ALIGNOF > iov[which_iov].len() {
+            // We want to avoid copying the data if at all possible, but every
+            // chunk of bytes we write into the queue has to be MAXALIGN'd,
+            // except the last. Thus, if a chunk other than the last one ends
+            // on a non-MAXALIGN'd boundary, combine the tail end of its data
+            // with data from one or more following chunks until we either
+            // reach the last chunk or accumulate a MAXALIGN'd number of
+            // bytes.
             let mut tmpbuf = [0u8; MAXIMUM_ALIGNOF];
             let mut j = 0usize;
 
@@ -669,32 +671,32 @@ pub unsafe fn shm_mq_sendv(
             if res != SHM_MQ_SUCCESS {
                 return Ok(res);
             }
-            continue;
+        } else {
+            // If this is the last chunk, we can write all the data, even if
+            // it isn't a multiple of MAXIMUM_ALIGNOF. Otherwise,
+            // MAXALIGN_DOWN the write size.
+            let mut chunksize = iov[which_iov].len() - offset;
+            if which_iov + 1 < iovcnt {
+                chunksize = MAXALIGN_DOWN(chunksize);
+            }
+            let (res, bytes_written) =
+                shm_mq_send_bytes(mqh, chunksize, &iov[which_iov].data[offset..], nowait)?;
+
+            if res == SHM_MQ_DETACHED {
+                // Reset state in case caller tries to send another message.
+                mqh.mqh_length_word_complete = false;
+                mqh.mqh_partial_bytes = 0;
+                return Ok(res);
+            }
+
+            mqh.mqh_partial_bytes += bytes_written;
+            offset += bytes_written;
+            if res != SHM_MQ_SUCCESS {
+                return Ok(res);
+            }
         }
 
-        // If this is the last chunk, we can write all the data, even if it
-        // isn't a multiple of MAXIMUM_ALIGNOF. Otherwise, MAXALIGN_DOWN the
-        // write size.
-        let mut chunksize = iov[which_iov].len() - offset;
-        if which_iov + 1 < iovcnt {
-            chunksize = MAXALIGN_DOWN(chunksize);
-        }
-        let (res, bytes_written) =
-            shm_mq_send_bytes(mqh, chunksize, &iov[which_iov].data[offset..], nowait)?;
-
-        if res == SHM_MQ_DETACHED {
-            // Reset state in case caller tries to send another message.
-            mqh.mqh_length_word_complete = false;
-            mqh.mqh_partial_bytes = 0;
-            return Ok(res);
-        }
-
-        mqh.mqh_partial_bytes += bytes_written;
-        offset += bytes_written;
-        if res != SHM_MQ_SUCCESS {
-            return Ok(res);
-        }
-
+        // The do/while controlling expression.
         if mqh.mqh_partial_bytes >= nbytes {
             break;
         }

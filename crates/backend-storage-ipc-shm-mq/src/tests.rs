@@ -157,6 +157,32 @@ fn send_via_iovec_concatenates_chunks() {
 }
 
 #[test]
+fn sendv_with_trailing_zero_length_iovec() {
+    // Regression: a non-MAXALIGN'd chunk followed by a zero-length iovec
+    // drives the tmpbuf path's inner loop to exhaust the iovec array
+    // (which_iov == iovcnt). The C do/while then re-checks
+    // `mqh_partial_bytes < nbytes` and exits; the port must do the same
+    // rather than re-indexing iov[which_iov].
+    install_seams();
+    let seg = make_segment(1024);
+    unsafe {
+        let mq = shm_mq_create(seg, 1024);
+        set_self_both(mq);
+
+        let mut sh = attach(mq);
+        let mut rh = attach(mq);
+
+        let iov = [shm_mq_iovec::new(b"abcd"), shm_mq_iovec::new(b"")];
+        let res = shm_mq_sendv(&mut sh, &iov, false, true).unwrap();
+        assert_eq!(res, SHM_MQ_SUCCESS);
+
+        let (rres, payload) = shm_mq_receive(&mut rh, false).unwrap();
+        assert_eq!(rres, SHM_MQ_SUCCESS);
+        assert_eq!(payload, b"abcd");
+    }
+}
+
+#[test]
 fn receive_nowait_on_empty_queue_would_block() {
     install_seams();
     let seg = make_segment(1024);
