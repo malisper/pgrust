@@ -81,3 +81,30 @@ seam_core::seam!(
     /// global read (asserts validity in C); cannot `ereport`.
     pub fn get_user_id() -> Oid
 );
+
+// ---- critical-section / interrupt brackets + superuser check (miscadmin.h) ----
+
+seam_core::seam!(
+    /// `START_CRIT_SECTION()` — bump `CritSectionCount`; an `ereport(ERROR)`
+    /// inside a critical section is promoted to PANIC. Pure backend-local
+    /// counter write.
+    pub fn start_crit_section()
+);
+seam_core::seam!(
+    /// `END_CRIT_SECTION()` — decrement `CritSectionCount`.
+    pub fn end_crit_section()
+);
+seam_core::seam!(
+    /// `HOLD_INTERRUPTS()` — increment `InterruptHoldoffCount`.
+    pub fn hold_interrupts()
+);
+seam_core::seam!(
+    /// `RESUME_INTERRUPTS()` — decrement `InterruptHoldoffCount`.
+    pub fn resume_interrupts()
+);
+seam_core::seam!(
+    /// `superuser_arg(roleid)` (superuser.c, reached via miscinit) — true if
+    /// `roleid` has superuser privilege. Reads the catalog cache; pure for the
+    /// twophase caller's purposes.
+    pub fn superuser_arg(roleid: types_core::Oid) -> bool
+);

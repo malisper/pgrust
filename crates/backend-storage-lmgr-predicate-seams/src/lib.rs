@@ -38,3 +38,13 @@ seam_core::seam!(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `PredicateLockTwoPhaseFinish(xid, isCommit)` (predicate.c) — release the
+    /// SIREAD predicate locks held by a finishing prepared transaction. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn predicate_lock_twophase_finish(
+        xid: types_core::primitive::TransactionId,
+        is_commit: bool,
+    ) -> types_error::PgResult<()>
+);

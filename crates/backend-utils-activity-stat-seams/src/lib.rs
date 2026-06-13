@@ -99,3 +99,16 @@ seam_core::seam!(
         xact_state: &mut types_pgstat::activity_pgstat::PgStat_SubXactStatus,
     )
 );
+
+seam_core::seam!(
+    /// `pgstat_execute_transactional_drops(ndrops, items, is_commit)`
+    /// (`utils/activity/pgstat.c`) — drop the cumulative-stats entries a
+    /// finishing prepared transaction recorded. `items` is the raw on-disk
+    /// `xl_xact_stats_item[]` slice from the 2PC buffer (the owner decodes it).
+    pub fn pgstat_execute_transactional_drops(items: &[u8], nitems: i32) -> types_error::PgResult<()>
+);
+seam_core::seam!(
+    /// `AtEOXact_PgStat(isCommit, parallel=false)` (`pgstat.c`) — end-of-xact
+    /// cumulative-stats cleanup for a finished prepared transaction.
+    pub fn at_eoxact_pgstat(is_commit: bool) -> types_error::PgResult<()>
+);

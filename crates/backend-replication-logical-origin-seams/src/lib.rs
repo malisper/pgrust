@@ -47,6 +47,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `replorigin_session_origin_timestamp = ts` (origin.c global): write-back
+    /// of the derived commit timestamp. Pure write of backend-local state.
+    pub fn set_replorigin_session_timestamp(ts: types_core::TimestampTz)
+);
+
+seam_core::seam!(
     /// `replorigin_advance(node, remote_commit, local_commit, go_backward,
     /// wal_log)` — redo-side origin progress update.
     pub fn replorigin_advance(

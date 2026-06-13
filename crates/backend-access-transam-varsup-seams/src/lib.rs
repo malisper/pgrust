@@ -28,3 +28,12 @@ seam_core::seam!(
     /// nextXid beyond any XID mentioned in WAL.
     pub fn advance_next_full_transaction_id_past_xid(xid: TransactionId)
 );
+
+seam_core::seam!(
+    /// `AdvanceNextFullTransactionIdPastXid(xid)` (varsup.c): bump
+    /// `TransamVariables->nextXid` past `xid` if it is not already, so a
+    /// recovered prepared transaction's subxids don't collide with future
+    /// assignments. Takes `XidGenLock`; the SLRU extension it triggers can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn advance_next_full_xid_past_xid(xid: TransactionId) -> PgResult<()>
+);

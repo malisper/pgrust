@@ -16,9 +16,11 @@ pub mod rmgr;
 pub mod rmgrdesc;
 pub mod wal;
 pub mod xact;
+pub mod xact_records;
 pub mod xlogutils;
 
 pub use rmgrdesc::*;
 pub use wal::*;
 pub use xact::*;
+pub use xact_records::*;
 pub use xlogutils::*;

@@ -52,3 +52,10 @@ seam_core::seam!(
     /// `PostPrepare_smgr()` — forget pending deletes (2PC takes over).
     pub fn post_prepare_smgr()
 );
+
+seam_core::seam!(
+    /// `DropRelationFiles(delrels, ndelrels, isRedo=false)` (storage.c) — drop
+    /// the physical files a finished prepared transaction was supposed to
+    /// delete. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn drop_relation_files(rels: &[types_wal::RelFileLocator]) -> types_error::PgResult<()>
+);
