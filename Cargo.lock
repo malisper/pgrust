@@ -7524,6 +7524,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-fmgr-funcapi"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-fmgr-funcapi-seams"
 version = "0.0.0"
 dependencies = [
@@ -8578,6 +8593,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-fmgr-funcapi",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
