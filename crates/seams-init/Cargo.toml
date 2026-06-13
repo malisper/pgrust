@@ -14,7 +14,9 @@ backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
@@ -45,7 +47,9 @@ backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
+backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
@@ -65,6 +69,7 @@ backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
+backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
@@ -103,9 +108,11 @@ backend-replication-logical-proto = { path = "../backend-replication-logical-pro
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
+backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
+backend-storage-freespace = { path = "../backend-storage-freespace" }
 backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
@@ -143,6 +150,7 @@ backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
+backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }

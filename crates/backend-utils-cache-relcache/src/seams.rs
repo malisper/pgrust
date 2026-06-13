@@ -3,10 +3,10 @@
 //! [`init_seams`] installs every seam declared there (the inward wiring). The
 //! adapter functions below match each seam's declared `Signature` exactly and
 //! bridge the cross-unit value-slice (`types_rel::RelationData`/`Relation`,
-//! `Oid`) to this crate's owned entry store + family logic. Where a family's
-//! logic has not yet landed the adapter delegates into that family's `todo!()`
-//! body (the documented seam-and-panic boundary); the substrate (core entry
-//! store) is real and its adapters resolve against it.
+//! `Oid`) to this crate's owned entry store + family logic. Where a genuine
+//! cross-unit owner is not yet ported the adapter calls that owner's real
+//! `seam!()` (panics until the owner installs it — `mirror-pg-and-panic`); the
+//! substrate (core entry store) is real and its adapters resolve against it.
 
 #![allow(unused_variables)]
 
@@ -204,6 +204,7 @@ fn missing_entry(relid: Oid) -> PgError {
         .into_error()
 }
 
+#[allow(unsafe_code)]
 fn index_getprocinfo(
     index_oid: Oid,
     attnum: AttrNumber,
@@ -211,14 +212,78 @@ fn index_getprocinfo(
     optsproc: u16,
     procindex: i32,
 ) -> PgResult<types_core::fmgr::FmgrInfo> {
-    todo!("relcache seam: index_getprocinfo (index family)")
+    // `index_getprocinfo` (indexam.c) lazy-init half, over the cache-owned
+    // `rd_supportinfo[procindex]` `FmgrInfo` array. The caller computed
+    // `procindex = nproc*(attnum-1) + (procnum-1)` and passed `optsproc =
+    // rd_indam->amoptsprocnum`.
+    let rd = crate::core_entry_store::cache_lookup(index_oid)
+        .ok_or_else(|| missing_entry(index_oid))?;
+    // SAFETY: live cache-owned descriptor.
+    let rd = unsafe { &mut *rd };
+    let pi = procindex as usize;
+    // Assert(locinfo != NULL) — the array was sized in RelationInitIndexAccessInfo.
+    debug_assert!(pi < rd.rd_supportinfo.len());
+
+    // Initialize the lookup info if first time through.
+    if rd.rd_supportinfo[pi].fn_oid == 0 {
+        // RegProcedure procId = irel->rd_support[procindex];
+        let proc_id = rd.rd_support[pi];
+        // Complain if the function was not found during IndexSupportInitialize.
+        if proc_id == 0 {
+            return Err(backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal(format!(
+                    "missing support function {procnum} for attribute {attnum} of index \"{}\"",
+                    rd.rd_rel.relname
+                ))
+                .into_error());
+        }
+        // fmgr_info_cxt(procId, locinfo, irel->rd_indexcxt): resolve into the
+        // cache-owned support-info slot. The owned `FmgrInfo` re-resolves at
+        // call time (no handle), so this just records the lookup metadata; the
+        // resolution's transient handler state is allocated in a scratch
+        // context dropped here (the entry stores the owned `FmgrInfo` by value).
+        let scratch = mcx::MemoryContext::new("index_getprocinfo");
+        let finfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(scratch.mcx(), proc_id)?;
+        rd.rd_supportinfo[pi] = finfo;
+
+        // if (procnum != optsproc) set_fn_opclass_options(locinfo,
+        // attoptions[attnum-1]): this only writes `locinfo->fn_expr` with the
+        // opclass-options Const. The owned `FmgrInfo` model intentionally drops
+        // `fn_expr` (types-core carries no node vocabulary; the executor reads
+        // only fn_addr/fn_oid/strict/...), so the assignment is a no-op here —
+        // behaviour-preserving. The opclass-option caching side effect already
+        // happens in RelationInitIndexAccessInfo's RelationGetIndexAttOptions.
+        let _ = (procnum, optsproc);
+    }
+
+    Ok(rd.rd_supportinfo[pi])
 }
 
 fn index_opclass_missing_options_error(
     index_oid: Oid,
     attnum: AttrNumber,
 ) -> PgResult<PgError> {
-    todo!("relcache seam: index_opclass_missing_options_error (index family)")
+    // C: opclass = indclass->values[attnum-1] read off rd_indextuple via
+    // SysCacheGetAttrNotNull(INDEXRELID, ..., Anum_pg_index_indclass), then
+    // ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE, "operator class %s has
+    // no options", generate_opclass_name(opclass)). The raw indclass read is
+    // the syscache owner's; the name is the ruleutils owner's.
+    let scratch = mcx::MemoryContext::new("opclass missing options");
+    let mcx = scratch.mcx();
+    let (_indnatts, _indnkeyatts, indclass) =
+        backend_utils_cache_syscache_seams::pg_index_indclass::call(mcx, index_oid)?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(types_error::ERROR)
+                    .errmsg_internal(format!("cache lookup failed for index {index_oid}"))
+                    .into_error()
+            })?;
+    let opclass = indclass[(attnum - 1) as usize];
+    let opclass_name =
+        backend_utils_adt_ruleutils_seams::generate_opclass_name::call(mcx, opclass)?;
+    Ok(backend_utils_error::ereport(types_error::ERROR)
+        .errcode(types_error::error::ERRCODE_INVALID_PARAMETER_VALUE)
+        .errmsg(format!("operator class {opclass_name} has no options"))
+        .into_error())
 }
 
 fn create_fake_relcache_entry<'mcx>(
@@ -270,12 +335,20 @@ fn relation_get_identity_key_bitmap<'mcx>(
         Some(rd) => rd,
         None => return Ok(None),
     };
-    let _members = crate::derived::RelationGetIdentityKeyBitmap(rd)?;
-    // Encoding the offset members into a node `Bitmapset` (the `bms_add_member`
-    // word layout) is node vocabulary owned by `nodes/bitmapset.c`; that encode
-    // lands with the bitmapset owner (seam-and-panic boundary).
-    let _ = mcx;
-    todo!("relcache seam: relation_get_identity_key_bitmap node-encode (bitmapset owner)")
+    let members = crate::derived::RelationGetIdentityKeyBitmap(rd)?;
+    // C NULL (no replica identity / no indexes) — derived returns `None`.
+    let Some(members) = members else {
+        return Ok(None);
+    };
+    // Encode the offset members into a node `Bitmapset` via the bitmapset
+    // owner's `bms_add_member` (the C `idindexattrs = bms_add_member(...,
+    // attrnum - FirstLowInvalidHeapAttributeNumber)` already applied the offset
+    // in the derived build). A run that adds no members yields the C NULL set.
+    let mut bms: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+    for x in members {
+        bms = Some(backend_nodes_core_seams::bms_add_member::call(mcx, bms, x)?);
+    }
+    Ok(bms)
 }
 
 fn relation_get_index_list<'mcx>(
@@ -305,28 +378,35 @@ fn relation_get_partkey<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
 ) -> PgResult<Option<types_partition::PartitionKeyData<'mcx>>> {
-    todo!("relcache seam: relation_get_partkey (index/partition cache)")
+    // `relation->rd_partkey` read: re-project the cache-owned slot into `mcx`.
+    crate::core_entry_store::get_partkey(mcx, relid)
 }
 
 fn relation_set_partkey<'mcx>(
     relid: Oid,
     key: types_partition::PartitionKeyData<'mcx>,
 ) -> PgResult<()> {
-    todo!("relcache seam: relation_set_partkey (index/partition cache)")
+    // `relation->rd_partkey = key` — copy the partcache-built key into the
+    // cache-owned long-lived store (C: `rd_partkeycxt`).
+    crate::core_entry_store::set_partkey(relid, &key)
 }
 
 fn relation_get_partcheck<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
 ) -> PgResult<(bool, PgVec<'mcx, types_nodes::nodes::Node<'mcx>>)> {
-    todo!("relcache seam: relation_get_partcheck (index/partition cache)")
+    // `(rd_partcheckvalid, copyObject(rd_partcheck))` — re-project the
+    // cache-owned qual list into `mcx`.
+    crate::core_entry_store::get_partcheck(mcx, relid)
 }
 
 fn relation_set_partcheck<'mcx>(
     relid: Oid,
     partcheck: PgVec<'mcx, types_nodes::nodes::Node<'mcx>>,
 ) -> PgResult<()> {
-    todo!("relcache seam: relation_set_partcheck (index/partition cache)")
+    // `rd_partcheck = copyObject(result); rd_partcheckvalid = true` — copy the
+    // partcache-built qual list into the cache-owned long-lived store.
+    crate::core_entry_store::set_partcheck(relid, &partcheck)
 }
 
 fn relation_get_composite_tupdesc<'mcx>(
@@ -411,19 +491,22 @@ fn rd_index_indisvalid(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     })
 }
 fn rd_index_has_indpred(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    // `relation->rd_indpred != NIL`: the index-predicate list lives in the
-    // derived family (the node tree is seam vocabulary). The entry does not
-    // carry it yet; the derived family resolves it when it lands.
-    let _ = index;
-    todo!("relcache seam: rd_index_has_indpred (derived family builds rd_indpred)")
+    // `RelationGetIndexPredicate(index) != NIL`, i.e.
+    // `!heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`. The raw
+    // `indpred` attribute is read off the index's pg_index tuple — the
+    // syscache owner's read (the materialized node tree, which the derived
+    // family builds, is not needed for the NIL test). `None` (cache miss) maps
+    // to "no predicate".
+    Ok(backend_utils_cache_syscache_seams::pg_index_has_predicate::call(index.rd_id)?
+        .unwrap_or(false))
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    // `index->rd_indam->amclusterable`: the trimmed `IndexAmRoutine` vtable
-    // does not carry this scalar flag (it is read only by CLUSTER), so it is
-    // the amapi owner's scalar projection. Seam-and-panic until that projection
-    // lands (per "mirror PG and panic"; not invented onto the trimmed vtable).
-    let _ = index;
-    todo!("relcache seam: rd_indam_amclusterable (amapi scalar projection)")
+    // `index->rd_indam->amclusterable`: the trimmed in-cache `IndexAmRoutine`
+    // vtable does not carry this CLUSTER-only scalar flag, so the amapi owner
+    // projects it off the AM's untrimmed routine, keyed by the index's AM OID
+    // (`rd_rel->relam`).
+    let relam = with_entry(index.rd_id, |rd| rd.rd_rel.relam)?;
+    backend_access_index_amapi_seams::index_am_clusterable::call(relam)
 }
 fn relation_is_mapped(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
     // `RelationIsMapped(relation)` (utils/rel.h): a relation is mapped iff it
@@ -443,8 +526,22 @@ fn relation_has_storage(relkind: i8) -> bool {
         || relkind == b't' as i8
         || relkind == b'm' as i8
 }
+#[allow(unsafe_code)]
 fn relation_get_number_of_blocks(rel: &types_rel::Relation<'_>) -> PgResult<u32> {
-    todo!("relcache seam: relation_get_number_of_blocks (smgr seam, index family)")
+    // `RelationGetNumberOfBlocks(rel)` = `RelationGetNumberOfBlocksInFork(rel,
+    // MAIN_FORKNUM)` = `smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM)`. The
+    // smgr owner opens the relation's smgr by its locator + backend; it panics
+    // until smgr lands (mirror-pg-and-panic). The locator/backend come off the
+    // owned entry.
+    let rd = crate::core_entry_store::cache_lookup(rel.rd_id)
+        .ok_or_else(|| missing_entry(rel.rd_id))?;
+    // SAFETY: live cache-owned descriptor.
+    let (locator, backend) = unsafe { ((*rd).rd_locator, (*rd).rd_backend) };
+    backend_storage_smgr_seams::smgrnblocks::call(
+        locator,
+        backend,
+        types_core::primitive::MAIN_FORKNUM,
+    )
 }
 #[allow(unsafe_code)]
 fn set_rd_toastoid(new_heap: &types_rel::Relation<'_>, value: Oid) -> PgResult<()> {
@@ -498,9 +595,10 @@ fn rd_opcintype(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<
     with_entry(index.rd_id, |rd| rd.rd_opcintype[attno as usize])
 }
 fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    // `index->rd_indam->amcanorder`: not carried on the trimmed
-    // `IndexAmRoutine` vtable; the amapi owner projects this scalar (cf.
-    // `index_am_canbackward`). Seam-and-panic until that projection lands.
-    let _ = index;
-    todo!("relcache seam: rd_indam_amcanorder (amapi scalar projection)")
+    // `index->rd_indam->amcanorder`: not carried on the trimmed in-cache
+    // `IndexAmRoutine` vtable; the amapi owner projects this scalar off the
+    // AM's untrimmed routine (cf. `index_am_canbackward`), keyed by the index's
+    // AM OID (`rd_rel->relam`).
+    let relam = with_entry(index.rd_id, |rd| rd.rd_rel.relam)?;
+    backend_access_index_amapi_seams::index_am_canorder::call(relam)
 }

@@ -78,3 +78,24 @@ seam_core::seam!(
     /// `RelationMapRemoveMapping(relationId)` (relmapper.c).
     pub fn relation_map_remove_mapping(relation_id: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationMapInitialize()` (relmapper.c): zero out the local and shared
+    /// relation-map descriptors at backend startup (`RelationCacheInitialize`).
+    /// Pure in-memory init in C; infallible.
+    pub fn relation_map_initialize()
+);
+
+seam_core::seam!(
+    /// `RelationMapInitializePhase2()` (relmapper.c): load the shared
+    /// relation-map file (`RelationCacheInitializePhase2`). Reads the on-disk
+    /// file, so can `ereport(FATAL/ERROR)`, carried on `Err`.
+    pub fn relation_map_initialize_phase2() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationMapInitializePhase3()` (relmapper.c): load this database's local
+    /// relation-map file (`RelationCacheInitializePhase3`). Reads the on-disk
+    /// file, so can `ereport(FATAL/ERROR)`, carried on `Err`.
+    pub fn relation_map_initialize_phase3() -> PgResult<()>
+);

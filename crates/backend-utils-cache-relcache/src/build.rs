@@ -815,11 +815,22 @@ pub fn CheckNNConstraintFetch(relation: &mut RelationData) -> PgResult<()> {
 /// pg_attrdef, the genam scan, and the `adbin` text detoast are genuine
 /// cross-unit primitives (genam owner + heap deform). Seam-and-panic until the
 /// owner lands; the [`AttrDefaultFetch`] accounting around it is own logic.
-fn scan_pg_attrdef_seam(_relid: Oid) -> PgResult<Vec<ScannedAttrDefault>> {
-    todo!(
-        "relcache-build: pg_attrdef scan + adbin TextDatumGetCString for \
-         AttrDefaultFetch (genam owner + heap deform seam)"
-    )
+fn scan_pg_attrdef_seam(relid: Oid) -> PgResult<Vec<ScannedAttrDefault>> {
+    use backend_access_index_genam_seams as genam_seam;
+
+    // The `table_open(AttrDefaultRelationId)`, the
+    // `systable_beginscan(adrelid = relid)`, the per-row
+    // `GETSTRUCT(Form_pg_attrdef)` deform, and the `adbin`
+    // `TextDatumGetCString` detoast are the genam owner's primitive; it returns
+    // the deformed rows. Marshal each into the crate-local accounting carrier.
+    let rows = genam_seam::scan_pg_attrdef::call(relid)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ScannedAttrDefault {
+            adnum: r.adnum,
+            adbin: r.adbin,
+        })
+        .collect())
 }
 
 /// `systable_beginscan(pg_constraint, conrelid = relid)` + per-row GETSTRUCT
@@ -829,12 +840,29 @@ fn scan_pg_attrdef_seam(_relid: Oid) -> PgResult<Vec<ScannedAttrDefault>> {
 /// `conbin` text detoast are genuine cross-unit primitives. Seam-and-panic
 /// until the owner lands; the [`CheckNNConstraintFetch`] accounting around it
 /// is own logic.
-fn scan_pg_constraint_nncheck_seam(_relid: Oid) -> PgResult<Vec<ScannedConstraint>> {
-    todo!(
-        "relcache-build: pg_constraint scan + extractNotNullColumn + conbin \
-         TextDatumGetCString for CheckNNConstraintFetch (genam owner + heap \
-         deform seam)"
-    )
+fn scan_pg_constraint_nncheck_seam(relid: Oid) -> PgResult<Vec<ScannedConstraint>> {
+    use backend_access_index_genam_seams as genam_seam;
+
+    // The `table_open(ConstraintRelationId)`, the
+    // `systable_beginscan(conrelid = relid)`, the per-row
+    // `GETSTRUCT(Form_pg_constraint)` deform, `extractNotNullColumn(htup)` for
+    // NOT NULL rows, and the `conbin` `TextDatumGetCString` detoast for CHECK
+    // rows are the genam owner's primitive; it returns the deformed rows.
+    // Marshal each into the crate-local accounting carrier.
+    let rows = genam_seam::scan_pg_constraint_nncheck::call(relid)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ScannedConstraint {
+            contype: r.contype,
+            notnull_invalid: r.notnull_invalid,
+            notnull_attnum: r.notnull_attnum,
+            ccenforced: r.ccenforced,
+            ccvalid: r.ccvalid,
+            ccnoinherit: r.ccnoinherit,
+            ccname: r.ccname,
+            ccbin: r.ccbin,
+        })
+        .collect())
 }
 
 /// `RelationInitLockInfo(relation)` (relcache.c): fill `rd_lockInfo.lockRelId`

@@ -35,6 +35,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationGetSmgr(rel)->smgr_cached_nblocks[forknum]` (smgr.h) — peek the
+    /// cached block count for the fork WITHOUT forcing a kernel `lseek`.
+    /// Returns `InvalidBlockNumber` when the count is not cached yet. Used by
+    /// `fsm_does_block_exist` to avoid an `lseek` when the cached MAIN-fork
+    /// size already proves the block exists. Pure read of smgr-owned state.
+    pub fn smgr_cached_nblocks(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+    ) -> types_core::primitive::BlockNumber
+);
+
+seam_core::seam!(
     /// `AtEOXact_SMgr()` — close transient SMgrRelation objects.
     pub fn at_eoxact_smgr()
 );
@@ -61,6 +74,25 @@ seam_core::seam!(
     /// `smgrdestroyall()` (smgr.c) — close and destroy all open
     /// `SMgrRelation` objects. Used by `XLogDropDatabase` during replay.
     pub fn smgrdestroyall() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `smgrreleaseall()` (smgr.c) — release the OS resources (open file
+    /// handles) used by *all* open `SMgrRelation` objects without destroying
+    /// the objects themselves (pointers to them stay in active use). The
+    /// relcache SI-overflow reset (`RelationCacheInvalidate`) calls this to
+    /// close every relation's FDs. `void` in C; the file-layer close path does
+    /// not `ereport(ERROR)` (failures are FATAL/LOG), so this is void here too.
+    pub fn smgrreleaseall()
+);
+
+seam_core::seam!(
+    /// `RelationCloseSmgr(relation)` (rel.h inline) — close the relation's smgr
+    /// handle (`smgrunpin` + `smgrclose`, clearing `rd_smgr`). The owned
+    /// relcache mirror carries no `rd_smgr` field, so the relcache caller
+    /// routes the relation's `RelFileLocatorBackend` to its smgr owner. `void`
+    /// in C (`smgrclose` is void).
+    pub fn relation_close_smgr(rlocator: RelFileLocatorBackend)
 );
 
 // --- backend-utils-init-postinit consumer (smgr.c) ---

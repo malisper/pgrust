@@ -735,9 +735,11 @@ pub enum ExprEvalStepData<'mcx> {
         has_nulls: bool,
         /// true for IN and false for NOT IN
         inclause: bool,
-        /// `struct ScalarArrayOpExprHashTable *elements_tab` — opaque hash
-        /// table built by the interpreter (carried as an address).
-        elements_tab: usize,
+        /// `struct ScalarArrayOpExprHashTable *elements_tab` — the hash table
+        /// the interpreter builds on first evaluation and reuses across rows.
+        /// `None` is the C `NULL` (not yet built); per the "opacity inherited"
+        /// rule this is the real typed table, not an address word.
+        elements_tab: Option<alloc::boxed::Box<crate::saophash::ScalarArrayOpExprHashTable>>,
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         /// `ScalarArrayOpExpr *saop` — original node.

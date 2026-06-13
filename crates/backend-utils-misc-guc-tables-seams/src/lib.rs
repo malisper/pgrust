@@ -8,3 +8,13 @@ seam_core::seam!(
     /// value `""`); the seam returns an owned copy.
     pub fn cluster_name() -> String
 );
+
+seam_core::seam!(
+    /// `restrict_nonsystem_relation_kind` (`tcop/tcopprot.h`) — the parsed
+    /// bitmask of the `restrict_nonsystem_relation_kind` GUC (the int the
+    /// `assign_restrict_nonsystem_relation_kind` hook stores from the string
+    /// list; boot value `0`). Read by `GetFdwRoutine` (`foreign/foreign.c`) for
+    /// its `& RESTRICT_RELKIND_FOREIGN_TABLE` test. Per-process global, so a
+    /// plain `i32` read with no allocation.
+    pub fn restrict_nonsystem_relation_kind() -> i32
+);

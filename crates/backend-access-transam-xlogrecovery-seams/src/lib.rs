@@ -24,6 +24,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TimestampTz GetCurrentChunkReplayStartTime(void)` (xlogrecovery.c) —
+    /// the timestamp of the WAL chunk currently being replayed, or 0 when
+    /// unavailable. Consumed by `GetReplicationApplyDelay`.
+    pub fn get_current_chunk_replay_start_time() -> TimestampTz
+);
+
+seam_core::seam!(
     /// Read the `PrimaryConnInfo` GUC string (xlogrecovery.c), copied into
     /// `mcx` (the C call sites `pstrdup` it in the current context; never
     /// NULL in C, the boot value is `""`). `Err` is the copy's OOM.

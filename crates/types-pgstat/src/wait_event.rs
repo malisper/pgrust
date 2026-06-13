@@ -173,6 +173,11 @@ pub const WAIT_EVENT_REPLICATION_SLOT_READ: u32 = PG_WAIT_IO + 46;
 /// `wait_event_names.txt` (after SYSLOGGER_MAIN at 13).
 pub const WAIT_EVENT_WAL_RECEIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 14;
 
+/// `WAIT_EVENT_WAL_RECEIVER_EXIT` — "Waiting for the WAL receiver to exit."
+/// Index 53 of the IPC section of `wait_event_names.txt`: it sorts immediately
+/// before `WAL_RECEIVER_WAIT_START` (54).
+pub const WAIT_EVENT_WAL_RECEIVER_EXIT: u32 = PG_WAIT_IPC + 53;
+
 /// `WAIT_EVENT_WAL_RECEIVER_WAIT_START` — index 54 of the IPC section of
 /// `wait_event_names.txt`.
 pub const WAIT_EVENT_WAL_RECEIVER_WAIT_START: u32 = PG_WAIT_IPC + 54;

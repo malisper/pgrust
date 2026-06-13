@@ -10,7 +10,9 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
+    backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
+    backend_access_gin_core_probe::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
@@ -41,7 +43,9 @@ pub fn init_all() {
     backend_catalog_objectaccess::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
+    backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
@@ -61,6 +65,7 @@ pub fn init_all() {
     backend_executor_nodeAppend::init_seams();
     backend_executor_nodeBitmapHeapscan::init_seams();
     backend_executor_nodeForeignscan::init_seams();
+    backend_foreign_foreign::init_seams();
     backend_executor_nodeHash::init_seams();
     backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeIndexonlyscan::init_seams();
@@ -99,9 +104,11 @@ pub fn init_all() {
     backend_replication_logical_slotsync::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
+    backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
+    backend_storage_freespace::init_seams();
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_latch::init_seams();
@@ -142,6 +149,7 @@ pub fn init_all() {
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_varlena::init_seams();
+    backend_utils_adt_version::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_catcache::init_seams();
@@ -467,6 +475,7 @@ mod recurrence_guard {
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
         ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
+        ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
         ("backend_access_transam_parallel", "initializing_parallel_worker"),
         ("backend_access_transam_xact", "define_savepoint"),
         ("backend_access_transam_xact", "set_xact_iso_level_read_committed"),

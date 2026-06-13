@@ -22,6 +22,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `generate_opclass_name(opclass)` (ruleutils.c): the schema-qualified,
+    /// quoted operator-class name (e.g. `pg_catalog.int4_ops`) for an opclass
+    /// OID, allocated in `mcx`. Reads `pg_opclass`/`pg_namespace`, so it can
+    /// `ereport(ERROR)` (cache lookup failure); `Err` also carries OOM.
+    pub fn generate_opclass_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        opclass: Oid,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `quote_qualified_identifier(qualifier, ident)` (ruleutils.c): each
     /// part quoted with `quote_identifier` if needed, joined with a dot,
     /// allocated in `mcx` (C: palloc in the current context). `Err` is OOM.

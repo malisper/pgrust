@@ -322,6 +322,34 @@ pub struct ForeignServer<'mcx> {
     pub servername: PgString<'mcx>,
 }
 
+/// `ForeignTable` (foreign/foreign.h) — the per-relation foreign-table
+/// descriptor `GetForeignTable` returns. `options` is the `ftoptions` column
+/// decoded by `untransformRelOptions` into `(name, value)` pairs (the C
+/// `List *` of `DefElem`).
+#[derive(Debug)]
+pub struct ForeignTable {
+    /// `relid` — relation OID.
+    pub relid: Oid,
+    /// `serverid` — server OID.
+    pub serverid: Oid,
+    /// `options` — `ftoptions` as `(name, value)` pairs.
+    pub options: Vec<(String, Option<String>)>,
+}
+
+/// `UserMapping` (foreign/foreign.h) — the descriptor `GetUserMapping` returns.
+/// `options` is the `umoptions` column decoded by `untransformRelOptions`.
+#[derive(Debug)]
+pub struct UserMapping {
+    /// `umid` — OID of the user mapping.
+    pub umid: Oid,
+    /// `userid` — local user OID (the requested user, not the matched row's).
+    pub userid: Oid,
+    /// `serverid` — server OID.
+    pub serverid: Oid,
+    /// `options` — `umoptions` as `(name, value)` pairs.
+    pub options: Vec<(String, Option<String>)>,
+}
+
 /* ---------------------------------------------------------------------------
  * Syscache row carriers — the `(...)` columns read out of the catalog tuple
  * the owner-change / alter paths fetch via `SearchSysCacheCopy1`.

@@ -18,6 +18,7 @@ use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassFo
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
+use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(
@@ -96,6 +97,14 @@ seam_core::seam!(
     /// Used to confirm a role wasn't concurrently dropped. `Err` carries the
     /// catcache lookup's own error surface.
     pub fn auth_oid_exists(roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(NAMESPACENAME, PointerGetDatum(nspName))`
+    /// (utils/cache/syscache.c): does a `pg_namespace` row with this name
+    /// exist? pg_namespace.c's `NamespaceCreate` uses it for the duplicate-name
+    /// check. `Err` carries the catcache lookup's own error surface.
+    pub fn namespace_name_exists(nsp_name: &str) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -616,6 +625,29 @@ seam_core::seam!(
     /// the caller raises `cache lookup failed for access method %u`.
     pub fn search_am_handler(amoid: Oid) -> PgResult<Option<Oid>>
 );
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(AMNAME, Anum_pg_am_oid, CStringGetDatum(amname))`
+    /// (syscache.c): the OID of the `pg_am` row named `amname`, or
+    /// `InvalidOid` when no such access method exists. amcmds.c's
+    /// `CreateAccessMethod` uses this for its "already exists" duplicate-name
+    /// check.
+    pub fn get_am_oid_by_name(amname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AMNAME, CStringGetDatum(amname))` +
+    /// `GETSTRUCT(Form_pg_am)` (syscache.c) projected to the
+    /// `(oid, amtype, amname)` fields amcmds.c's `get_am_type_oid` reads.
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises its
+    /// own "access method does not exist" error. The name copy lands in the
+    /// caller's `Mcx`; the installer owns the `ReleaseSysCache`.
+    pub fn search_am_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        amname: &str,
+    ) -> PgResult<Option<types_namespace::backend_catalog_namespace::PgAmInfo<'mcx>>>
+);
+
 seam_core::seam!(
     /// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` (syscache.c):
     /// look up a column of `relid` by name, returning its
@@ -1178,6 +1210,75 @@ seam_core::seam!(
     pub fn pg_class_extra(relid: Oid) -> PgResult<Option<PgClassExtra>>
 );
 
+/// The complete fixed-width `Form_pg_class` columns
+/// (`CLASS_TUPLE_SIZE` worth) — the `memcpy(rd_rel, GETSTRUCT(htup), ...)`
+/// payload relcache's `RelationCacheInitializePhase3` copies back into a
+/// faked-up nailed entry. Field-for-field with `pg_class.h`'s
+/// `FormData_pg_class`.
+#[derive(Debug)]
+pub struct PgClassFullForm<'mcx> {
+    /// `NameData relname` (mcx-allocated copy of the catcache entry's name).
+    pub relname: PgString<'mcx>,
+    pub relnamespace: Oid,
+    pub reltype: Oid,
+    pub reloftype: Oid,
+    pub relowner: Oid,
+    pub relam: Oid,
+    pub relfilenode: Oid,
+    pub reltablespace: Oid,
+    pub relpages: i32,
+    pub reltuples: f32,
+    pub relallvisible: i32,
+    pub reltoastrelid: Oid,
+    pub relhasindex: bool,
+    pub relisshared: bool,
+    pub relpersistence: i8,
+    pub relkind: i8,
+    pub relnatts: i16,
+    pub relchecks: i16,
+    pub relhasrules: bool,
+    pub relhastriggers: bool,
+    pub relhassubclass: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
+    pub relispopulated: bool,
+    pub relreplident: i8,
+    pub relispartition: bool,
+    pub relrewrite: Oid,
+    pub relfrozenxid: u32,
+    pub relminmxid: u32,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` + `GETSTRUCT` of the
+    /// full `Form_pg_class` tuple (`relcache.c` Phase3 nailed-entry refill:
+    /// `memcpy(relation->rd_rel, relp, CLASS_TUPLE_SIZE)`). `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`) so the caller raises its own
+    /// `cache lookup failed for relation %u` `ereport(FATAL)`; the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn search_pg_class_full_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<PgClassFullForm<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RelationSupportsSysCache(relid)` (syscache.c): whether any system cache
+    /// is keyed on the given catalog relation OID
+    /// (`RelationHasSysCache`/`RelationSupportsSysCache`). Pure lookup over the
+    /// static cache-info table, so infallible.
+    pub fn relation_supports_syscache(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `InitCatalogCachePhase2()` (syscache.c): complete second-phase init of
+    /// all system caches (`InitCatCachePhase2(SysCache[cacheId], true)` for
+    /// every `cacheId`), loading each cache's index relcache entry. Done while
+    /// building the relcache init file. Can `ereport(ERROR)` (relcache open),
+    /// carried on `Err`.
+    pub fn init_catalog_cache_phase2() -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass))` projected to
     /// `(opcfamily, opcintype, opcmethod)` (`get_opclass_opfamily_and_input_type`
@@ -1238,6 +1339,16 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         index_oid: Oid,
     ) -> PgResult<Option<(i16, i16, PgVec<'mcx, Oid>)>>
+);
+
+seam_core::seam!(
+    /// `!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)` —
+    /// `SearchSysCache1(INDEXRELID, index_oid)` then whether the `indpred`
+    /// attribute is non-null, i.e. the index has a partial-index predicate
+    /// (`RelationGetIndexPredicate(index) != NIL` without materializing the node
+    /// tree). `Ok(None)` on a cache miss. `Err` carries the catcache error
+    /// surface.
+    pub fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>>
 );
 
 seam_core::seam!(
@@ -1349,4 +1460,96 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         typid: Oid,
     ) -> PgResult<Option<PgTypeDefault>>
+);
+
+/* ---------------------------------------------------------------------------
+ * pg_foreign_* catalog reads (foreign/foreign.c accessors). A cache miss is
+ * `Ok(None)`; the caller (`foreign.c`) raises its own `cache lookup failed`
+ * / `does not exist` error, exactly as the C `!HeapTupleIsValid` branches do.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid))`
+    /// projected to `Form_pg_foreign_data_wrapper`'s
+    /// `(fdwname, fdwowner, fdwhandler, fdwvalidator)`. `Ok(None)` on a cache
+    /// miss. The name is copied into `mcx`; `Err` carries OOM/catcache errors.
+    pub fn foreign_data_wrapper_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+    ) -> PgResult<Option<ForeignDataWrapperFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid))`
+    /// projected to `Form_pg_foreign_server`'s `(srvname, srvowner, srvfdw)`.
+    /// `Ok(None)` on a cache miss.
+    pub fn foreign_server_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+    ) -> PgResult<Option<ForeignServerFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNDATAWRAPPERNAME,
+    /// Anum_pg_foreign_data_wrapper_oid, CStringGetDatum(fdwname))`: the FDW's
+    /// OID, or `InvalidOid` when no row matches.
+    pub fn foreign_data_wrapper_oid_by_name(fdwname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNSERVERNAME, Anum_pg_foreign_server_oid,
+    /// CStringGetDatum(servername))`: the server's OID, or `InvalidOid` when no
+    /// row matches.
+    pub fn foreign_server_oid_by_name(servername: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver`. `Ok(None)` on a cache miss (the
+    /// caller raises `cache lookup failed for foreign table %u`).
+    pub fn foreign_table_server_by_relid(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver` plus the raw `ftoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_foreign_table_ftoptions)`): `(ftserver,
+    /// Some(bytes))` with the detoasted option array, or `(ftserver, None)`
+    /// when `ftoptions` is SQL NULL. `Ok(None)` on a cache miss (the caller
+    /// raises `cache lookup failed for foreign table %u`). The caller runs
+    /// `untransformRelOptions` on the bytes.
+    pub fn foreign_table_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(USERMAPPINGUSERSERVER, ObjectIdGetDatum(userid),
+    /// ObjectIdGetDatum(serverid))` projected to the mapping OID
+    /// (`Form_pg_user_mapping.oid`) plus the raw `umoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_user_mapping_umoptions)`): `(umid,
+    /// Some(bytes))` or `(umid, None)` when `umoptions` is SQL NULL. `Ok(None)`
+    /// on a cache miss — the caller (`GetUserMapping`) retries with
+    /// `userid = InvalidOid` (PUBLIC) and, if still absent, raises
+    /// `user mapping not found ...`. The caller runs `untransformRelOptions`.
+    pub fn user_mapping_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        userid: Oid,
+        serverid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// then `SysCacheGetAttr(Anum_pg_attribute_attfdwoptions)`: the raw
+    /// `attfdwoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+    /// `Ok(None)` on a cache miss (the caller raises
+    /// `cache lookup failed for attribute %d of relation %u`). The caller runs
+    /// `untransformRelOptions`.
+    pub fn attribute_fdwoptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
 );

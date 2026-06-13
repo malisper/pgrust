@@ -347,6 +347,16 @@ pub struct ScalarArrayOpExpr {
     /// Set by `set_sa_opfuncid`/`fix_opfuncids` (nodeFuncs.c). Added
     /// field-for-field vs primnodes.h; `Default` keeps construction additive.
     pub opfuncid: Oid,
+    /// `Oid hashfuncid` — PG_PROC OID of hash func, or `InvalidOid`. Set by the
+    /// planner (`convert_saop_to_hashed_saop`) when the SAOP is evaluated via a
+    /// hash table; the executor builds/probes the table with this hash function
+    /// (`EEOP_HASHED_SCALARARRAYOP`). Added field-for-field vs primnodes.h.
+    pub hashfuncid: Oid,
+    /// `Oid negfuncid` — PG_PROC OID of the negator of `opfuncid`, or
+    /// `InvalidOid`. For hashed NOT IN this is the equality function the hash
+    /// table builds/probes with (`opno`/`opfuncid` stay the `<>` operator and
+    /// are unused at execution). Added field-for-field vs primnodes.h.
+    pub negfuncid: Oid,
     /// `bool useOr` — true for ANY, false for ALL.
     pub useOr: bool,
     /// `Oid inputcollid` — OID of collation that operator should use.

@@ -65,6 +65,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read-and-reset one of the `binary_upgrade_next_*_pg_class_relfilenumber`
+    /// globals (`catalog/binary_upgrade.h`) the way
+    /// `RelationSetNewRelfilenumber` (relcache.c) consumes it during a
+    /// `pg_upgrade` restore: it returns the global's current value and clears it
+    /// to `InvalidOid`. `is_index` selects the index vs. heap global. Returns
+    /// `InvalidOid` when the global was not set (the relcache caller raises the
+    /// "relfilenumber value not set" error). A plain global read/store —
+    /// infallible.
+    pub fn consume_next_relfilenumber(is_index: bool) -> Oid
+);
+
+seam_core::seam!(
     /// `binary_upgrade_record_init_privs = record_init_privs` — the
     /// init-privs recording flag (`catalog/binary_upgrade.h`).
     pub fn set_record_init_privs(record_init_privs: bool)

@@ -1,13 +1,16 @@
 //! EXPLAIN output-state vocabulary (`commands/explain_state.h`), trimmed to the
-//! fields the formatter consumes.
+//! fields the formatter consumes plus the extension-state slots owned by
+//! `explain_state.c`.
 //!
 //! The owner of this state is `explain_state.c` (`NewExplainState`,
-//! `ParseExplainOptionList`, the extension registry); this crate holds only the
+//! `ParseExplainOptionList`, the extension registry); this crate holds the
 //! type. The node-tree fields of the C `ExplainState` (`pstmt`, `rtable`,
-//! `deparse_cxt`, `printed_subplans`, `workers_state`, `extension_state`) are
-//! intentionally not yet present — they reference the plan-node knot and the
-//! per-worker formatting state, which their owning ports will add when they land
-//! (extend, never restructure).
+//! `deparse_cxt`, `printed_subplans`, `workers_state`) are intentionally not yet
+//! present — they reference the plan-node knot and the per-worker formatting
+//! state, which their owning ports will add when they land (extend, never
+//! restructure). The `extension_state`/`extension_state_allocated` slots ARE
+//! present: `explain_state.c` owns them (`GetExplainExtensionState` /
+//! `SetExplainExtensionState`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -34,6 +37,14 @@ pub enum ExplainSerializeOption {
     EXPLAIN_SERIALIZE_TEXT,
     EXPLAIN_SERIALIZE_BINARY,
 }
+
+/// One slot of the C `void **extension_state` array — an extension's opaque
+/// private state pointer (`SetExplainExtensionState` stores it,
+/// `GetExplainExtensionState` returns it). `void *` is genuinely opaque (an
+/// extension's own struct), so this is an opaque handle, not an invented type;
+/// `None` is the C `NULL` slot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct ExtensionStateHandle(pub u64);
 
 /// `typedef struct ExplainState` (commands/explain_state.h) — the EXPLAIN output
 /// state. Trimmed to the output buffer, option flags, format, and grouping state
@@ -81,6 +92,12 @@ pub struct ExplainState<'mcx> {
     pub hide_workers: bool,
     /// `int rtable_size` — length of rtable excluding the RTE_GROUP entry.
     pub rtable_size: i32,
+    /* extensions */
+    /// `void **extension_state` — per-extension opaque state slots, indexed by
+    /// the id `GetExplainExtensionId` hands out. A `None` slot is the C `NULL`.
+    pub extension_state: PgVec<'mcx, Option<ExtensionStateHandle>>,
+    /// `int extension_state_allocated` — allocated length of `extension_state`.
+    pub extension_state_allocated: i32,
 }
 
 impl<'mcx> ExplainState<'mcx> {
@@ -106,6 +123,8 @@ impl<'mcx> ExplainState<'mcx> {
             grouping_stack: PgVec::new_in(mcx),
             hide_workers: false,
             rtable_size: 0,
+            extension_state: PgVec::new_in(mcx),
+            extension_state_allocated: 0,
         }
     }
 }

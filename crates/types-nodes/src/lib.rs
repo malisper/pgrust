@@ -53,6 +53,7 @@ pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
 pub mod queryenvironment;
+pub mod saophash;
 pub mod tuptable;
 
 pub use bitmapset::Bitmapset;

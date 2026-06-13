@@ -8,6 +8,9 @@
 
 #![allow(non_snake_case)]
 
+extern crate alloc;
+use alloc::string::String;
+
 use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
@@ -113,6 +116,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read the `DatabasePath` global (globals.c, owned via miscinit). Returns
+    /// `None` when it is still NULL (no database selected yet — the C
+    /// `DatabasePath != NULL` test relcache's init-file paths gate on),
+    /// otherwise the owned path string.
+    pub fn get_database_path() -> Option<String>
+);
+
+seam_core::seam!(
     /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
     /// process-type description string for `backendType` (a static table
     /// lookup; the C returns a `const char *` into static text). Infallible.
@@ -129,6 +140,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `END_CRIT_SECTION()` (miscadmin.h) — `CritSectionCount--`.
     pub fn end_crit_section()
+);
+
+seam_core::seam!(
+    /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h) — service any pending interrupt
+    /// (query cancel, termination, recovery conflict). `Err` carries the
+    /// `ProcessInterrupts` `ereport(ERROR/FATAL)`.
+    pub fn check_for_interrupts() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

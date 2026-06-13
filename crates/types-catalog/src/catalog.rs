@@ -53,6 +53,8 @@ pub const AUTH_MEM_RELATION_ID: Oid = 1261;
 pub const TABLE_SPACE_RELATION_ID: Oid = 1213;
 /// `NamespaceRelationId` — `pg_namespace` (`pg_namespace_d.h`).
 pub const NAMESPACE_RELATION_ID: Oid = 2615;
+/// `NamespaceOidIndexId` — `pg_namespace_oid_index` (`pg_namespace_d.h`).
+pub const NAMESPACE_OID_INDEX_ID: Oid = 2685;
 /// `DefaultAclRelationId` — `pg_default_acl` (`pg_default_acl_d.h`).
 pub const DEFAULT_ACL_RELATION_ID: Oid = 826;
 /// `UserMappingRelationId` — `pg_user_mapping` (`pg_user_mapping_d.h`).
