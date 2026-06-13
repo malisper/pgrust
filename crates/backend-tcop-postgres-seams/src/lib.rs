@@ -13,6 +13,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `check_stack_depth()` (tcop/postgres.c): raise
+    /// `ERRCODE_STATEMENT_TOO_COMPLEX` (the C `ereport(ERROR)`) when the stack
+    /// is too deep. The recursive tsearch engines call this at every recursion
+    /// entry.
+    pub fn check_stack_depth() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `debug_query_string = NULL` (tcop/postgres.c): reset the
     /// currently-executing query string before exit-time cleanup clobbers it
     /// (`proc_exit_prepare`).
