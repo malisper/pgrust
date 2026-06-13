@@ -1129,6 +1129,11 @@ pub fn init_seams() {
     seams::at_prepare_relation_map::set(AtPrepare_RelationMap);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     seams::relation_map_finish_bootstrap::set(RelationMapFinishBootstrap);
+    // Backend bring-up + local-relation map update (relcache initfile consumer).
+    seams::relation_map_initialize::set(RelationMapInitialize);
+    seams::relation_map_initialize_phase2::set(RelationMapInitializePhase2);
+    seams::relation_map_initialize_phase3::set(RelationMapInitializePhase3);
+    seams::relation_map_update_map::set(RelationMapUpdateMap);
 }
 
 #[cfg(test)]

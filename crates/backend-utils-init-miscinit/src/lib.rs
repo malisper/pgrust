@@ -862,6 +862,11 @@ pub fn init_seams() {
         backend_utils_init_small::globals::SetDatabasePath(Some(path.to_owned()))
     });
     s::clear_database_path::set(|| backend_utils_init_small::globals::SetDatabasePath(None));
+    // DatabasePath getter (relcache init-file path construction reads the
+    // globals.c-owned DatabasePath; None mirrors the C `DatabasePath == NULL`).
+    s::get_database_path::set(|| backend_utils_init_small::globals::DatabasePath());
+    // MyProcPid getter (relcache's per-backend init-file temp name).
+    s::my_proc_pid::set(|| backend_utils_init_small::globals::MyProcPid());
 
     // WAL summarizer backend-type set/test (MyBackendType lives in globals.c;
     // miscinit owns the accessor the C macros use).
