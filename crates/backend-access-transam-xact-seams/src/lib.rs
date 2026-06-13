@@ -130,3 +130,26 @@ seam_core::seam!(
     /// `replorigin_session_advance`. Pure read of backend-local state.
     pub fn xact_last_rec_end() -> types_core::XLogRecPtr
 );
+
+seam_core::seam!(
+    /// `IsTransactionOrTransactionBlock()` (xact.c): true when in a
+    /// transaction or transaction block. Pure read of backend-local state.
+    pub fn is_transaction_or_transaction_block() -> bool
+);
+
+seam_core::seam!(
+    /// `GetTopTransactionIdIfAny()` (xact.c): the top transaction's xid, or
+    /// `InvalidTransactionId` if none assigned. Pure read of backend-local
+    /// state.
+    pub fn get_top_transaction_id_if_any() -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// Set the `CheckXidAlive` global (xact.c) — `ResetLogicalStreamingState`.
+    pub fn set_check_xid_alive(xid: types_core::TransactionId)
+);
+
+seam_core::seam!(
+    /// Set the `bsysscan` global (xact.c) — `ResetLogicalStreamingState`.
+    pub fn set_bsysscan(value: bool)
+);
