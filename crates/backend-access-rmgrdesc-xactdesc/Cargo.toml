@@ -1,0 +1,26 @@
+[package]
+name = "backend-access-rmgrdesc-xactdesc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_rmgrdesc_xactdesc"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-wal = { path = "../types-wal" }
+# standby_desc_invalidations is owned by standbydesc.c's describer (lives in
+# backend-rmgrdesc-next); xactdesc.c calls it directly, no cycle.
+backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
+# This crate's own inward seam (xact_desc / xact_identify rm_desc slots).
+backend-access-rmgrdesc-xactdesc-seams = { path = "../backend-access-rmgrdesc-xactdesc-seams" }
+# relpathperm == relpathbackend(rlocator, INVALID_PROC_NUMBER, forknum); owner
+# common/relpath.c unported, so through its per-owner seam (panics until it lands).
+common-relpath-seams = { path = "../common-relpath-seams" }
+# timestamptz_to_str; owner utils/adt/timestamp.c unported, through its seam.
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }

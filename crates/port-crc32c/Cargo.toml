@@ -1,0 +1,13 @@
+[package]
+name = "port-crc32c"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "port_crc32c"
+path = "src/lib.rs"
+
+[dependencies]
+port-crc32c-seams = { path = "../port-crc32c-seams" }
+port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
