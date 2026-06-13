@@ -1204,6 +1204,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-dshash-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-be-secure-seams"
 version = "0.0.0"
 dependencies = [
@@ -1703,6 +1712,22 @@ name = "backend-storage-ipc-dsm-core-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-dsm-registry"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-dshash-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-error",
+ "backend-utils-mmgr-dsa-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -2513,6 +2538,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-timeout",
+]
+
+[[package]]
+name = "backend-utils-mmgr-dsa-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
