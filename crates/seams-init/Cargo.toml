@@ -56,6 +56,7 @@ backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }

@@ -2960,6 +2960,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-pg-locale-icu"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-pg-locale-icu-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-locale",
+]
+
+[[package]]
+name = "backend-utils-adt-pg-locale-icu-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-locale",
+]
+
+[[package]]
 name = "backend-utils-adt-range-selfuncs"
 version = "0.0.0"
 dependencies = [
@@ -3815,6 +3837,7 @@ dependencies = [
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-numutils",
+ "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
@@ -3951,6 +3974,13 @@ dependencies = [
  "mcx",
  "types-amvalidate",
  "types-core",
+]
+
+[[package]]
+name = "types-locale"
+version = "0.0.0"
+dependencies = [
+ "mcx",
 ]
 
 [[package]]
