@@ -1645,4 +1645,7 @@ pub fn init_seams() {
     backend_postmaster_walsummarizer_seams::wal_summarizer_main::set(wal_summarizer_main_entry);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     backend_postmaster_walsummarizer_seams::wal_summarizer_shmem_init::set(WalSummarizerShmemInit);
+    // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
+    // is now the infallible `-> Size` shape, matching the C `Size` return.
+    backend_postmaster_walsummarizer_seams::wal_summarizer_shmem_size::set(WalSummarizerShmemSize);
 }

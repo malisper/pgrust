@@ -5726,7 +5726,7 @@ dependencies = [
  "backend-replication-logical-origin-seams",
  "backend-replication-logical-slotsync-seams",
  "backend-replication-slot-seams",
- "backend-replication-walreceiver-seams",
+ "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
  "backend-storage-aio-seams",
  "backend-storage-buffer-bufmgr-seams",
@@ -6338,6 +6338,7 @@ dependencies = [
 name = "backend-storage-lmgr-proc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-deadlock",

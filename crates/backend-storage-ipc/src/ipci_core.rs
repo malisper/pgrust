@@ -137,7 +137,7 @@ pub fn calculate_shmem_size() -> PgResult<(Size, i32)> {
     size = shmem::add_size::call(size, xc::commit_ts_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::sub_trans_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::two_phase_shmem_size())?;
-    size = shmem::add_size::call(size, bg::background_worker_shmem_size()?)?;
+    size = shmem::add_size::call(size, bg::background_worker_shmem_size())?;
     size = shmem::add_size::call(size, xc::multi_xact_shmem_size()?)?;
     size = shmem::add_size::call(size, lwlock::lwlock_shmem_size::call()?)?;
     size = shmem::add_size::call(size, sa::proc_array_shmem_size()?)?;
@@ -146,14 +146,14 @@ pub fn calculate_shmem_size() -> PgResult<(Size, i32)> {
     size = shmem::add_size::call(size, sa::pm_signal_shmem_size()?)?;
     size = shmem::add_size::call(size, sa::proc_signal_shmem_size()?)?;
     size = shmem::add_size::call(size, bg::checkpointer_shmem_size()?)?;
-    size = shmem::add_size::call(size, bg::auto_vacuum_shmem_size()?)?;
+    size = shmem::add_size::call(size, bg::auto_vacuum_shmem_size())?;
     size = shmem::add_size::call(size, bg::replication_slots_shmem_size()?)?;
-    size = shmem::add_size::call(size, bg::replication_origin_shmem_size()?)?;
+    size = shmem::add_size::call(size, bg::replication_origin_shmem_size())?;
     size = shmem::add_size::call(size, bg::wal_snd_shmem_size()?)?;
     size = shmem::add_size::call(size, bg::wal_rcv_shmem_size()?)?;
-    size = shmem::add_size::call(size, bg::wal_summarizer_shmem_size()?)?;
-    size = shmem::add_size::call(size, bg::pg_arch_shmem_size()?)?;
-    size = shmem::add_size::call(size, bg::apply_launcher_shmem_size()?)?;
+    size = shmem::add_size::call(size, bg::wal_summarizer_shmem_size())?;
+    size = shmem::add_size::call(size, bg::pg_arch_shmem_size())?;
+    size = shmem::add_size::call(size, bg::apply_launcher_shmem_size())?;
     size = shmem::add_size::call(size, sa::btree_shmem_size()?)?;
     size = shmem::add_size::call(size, sa::sync_scan_shmem_size()?)?;
     size = shmem::add_size::call(size, bg::async_shmem_size()?)?;
@@ -324,7 +324,7 @@ pub fn create_or_attach_shmem_structs() -> PgResult<()> {
     bg::wal_snd_shmem_init()?;
     bg::wal_rcv_shmem_init()?;
     bg::wal_summarizer_shmem_init()?;
-    bg::pg_arch_shmem_init()?;
+    bg::pg_arch_shmem_init();
     bg::apply_launcher_shmem_init()?;
     bg::slot_sync_shmem_init()?;
 
