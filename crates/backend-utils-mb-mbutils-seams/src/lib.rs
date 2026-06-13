@@ -118,6 +118,20 @@ seam_core::seam!(
     pub fn is_encoding_supported_by_icu(encoding: i32) -> bool
 );
 
+// --- backend-utils-init-postinit consumers (mbutils.c) ---
+
+seam_core::seam!(
+    /// `SetDatabaseEncoding(encoding)` (mbutils.c): set the server (database)
+    /// encoding. `Err` carries its `ereport` surface.
+    pub fn set_database_encoding(encoding: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeClientEncoding()` (mbutils.c): finalize the client_encoding
+    /// conversion setup. `Err` carries its `ereport` surface.
+    pub fn initialize_client_encoding() -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `pg_server_to_any(s, len, encoding)` (mbutils.c): convert from the
     /// server encoding to an arbitrary `encoding`. As with the client/server

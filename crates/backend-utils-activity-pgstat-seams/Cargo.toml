@@ -9,6 +9,7 @@ name = "backend_utils_activity_pgstat_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-datum = { path = "../types-datum" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

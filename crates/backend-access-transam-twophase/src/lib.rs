@@ -840,7 +840,7 @@ pub fn lock_gxact(
                     )));
             }
 
-            if user != owner && !miscinit::superuser_arg::call(user) {
+            if user != owner && !miscinit::superuser_arg::call(user)? {
                 return raise(ereport(ERROR)
                     .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg("permission denied to finish prepared transaction")

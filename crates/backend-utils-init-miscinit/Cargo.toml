@@ -1,0 +1,45 @@
+[package]
+name = "backend-utils-init-miscinit"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_init_miscinit"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
+
+# Inward seams (this crate installs them).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+
+# Outward seams into owners that would cycle or are not yet ported.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }
+backend-storage-file-fileperm-seams = { path = "../backend-storage-file-fileperm-seams" }
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-port-path-seams = { path = "../backend-port-path-seams" }
+backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
+backend-postmaster-interrupt-seams = { path = "../backend-postmaster-interrupt-seams" }
+backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
+backend-common-exec-seams = { path = "../backend-common-exec-seams" }

@@ -2313,6 +2313,16 @@ pub fn init_seams() {
     backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::set(
         dispatch_reorderbuffer_callback_seam,
     );
+    backend_replication_logical_logical_seams::logical_slot_advance_and_check_snap_state::set(
+        |moveto, found_consistent_snapshot, wal_segment_size, my_database_id| {
+            LogicalSlotAdvanceAndCheckSnapState(
+                moveto,
+                found_consistent_snapshot,
+                wal_segment_size,
+                my_database_id,
+            )
+        },
+    );
 }
 
 /// Seam thunk: the inward seam carries only the callback; the reorderbuffer

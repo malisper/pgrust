@@ -9,7 +9,15 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
+use types_execparallel::BufFileHandle;
 use types_nodes::nodehashjoin::BufFile;
+
+seam_core::seam!(
+    /// `BufFileClose(file)` (buffile.c): flush and close a buffered temp file,
+    /// deleting its backing segments. Consumes the handle. Flushing can fail
+    /// with an I/O `ereport(ERROR)`, so the call is fallible.
+    pub fn BufFileClose(file: BufFileHandle) -> types_error::PgResult<()>
+);
 
 seam_core::seam!(
     /// `BufFileCreateTemp(interXact)` (buffile.c): create a new temporary

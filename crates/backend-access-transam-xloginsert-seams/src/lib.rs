@@ -66,3 +66,11 @@ seam_core::seam!(
     /// path).
     pub fn xlog_reset_insertion()
 );
+
+// --- backend-utils-init-postinit consumer (xloginsert.c) ---
+
+seam_core::seam!(
+    /// `InitXLogInsert()` (xloginsert.c): allocate the backend-local WAL record
+    /// construction buffers. `Err` carries its OOM surface.
+    pub fn init_xlog_insert() -> types_error::PgResult<()>
+);

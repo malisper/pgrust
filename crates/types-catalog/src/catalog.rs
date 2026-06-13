@@ -11,6 +11,23 @@ pub const TYPE_RELATION_ID: Oid = 1247;
 pub const CONSTRAINT_RELATION_ID: Oid = 2606;
 /// `ExtensionRelationId` — `pg_extension` (`pg_extension_d.h`).
 pub const EXTENSION_RELATION_ID: Oid = 3079;
+/// `DatabaseRelationId` — `pg_database` (`pg_database_d.h`).
+pub const DATABASE_RELATION_ID: Oid = 1262;
+/// `AuthIdRelationId` — `pg_authid` (`pg_authid_d.h`).
+pub const AUTH_ID_RELATION_ID: Oid = 1260;
+/// `DbRoleSettingRelationId` — `pg_db_role_setting` (`pg_db_role_setting_d.h`).
+pub const DB_ROLE_SETTING_RELATION_ID: Oid = 2964;
+/// `DatabaseNameIndexId` — `pg_database_datname_index` (`pg_database_d.h`).
+pub const DATABASE_NAME_INDEX_ID: Oid = 2671;
+/// `DatabaseOidIndexId` — `pg_database_oid_index` (`pg_database_d.h`).
+pub const DATABASE_OID_INDEX_ID: Oid = 2672;
+
+/// `Template1DbOid` — the `template1` database (`pg_database_d.h`).
+pub const TEMPLATE1_DB_OID: Oid = 1;
+/// `DEFAULTTABLESPACE_OID` — the `pg_default` tablespace (`pg_tablespace_d.h`).
+pub const DEFAULTTABLESPACE_OID: Oid = 1663;
+/// `ROLE_PG_USE_RESERVED_CONNECTIONS` (`pg_authid_d.h`).
+pub const ROLE_PG_USE_RESERVED_CONNECTIONS: Oid = 4550;
 
 /// `AccessMethodRelationId` — `pg_am` (`pg_am_d.h`).
 pub const ACCESS_METHOD_RELATION_ID: Oid = 2601;
@@ -30,14 +47,10 @@ pub const RELKIND_SEQUENCE: u8 = b'S';
 /* Catalog relation OIDs consumed by the pg_shdepend port
  * (`catalog/pg_*_d.h`). */
 
-/// `AuthIdRelationId` — `pg_authid` (`pg_authid_d.h`).
-pub const AUTH_ID_RELATION_ID: Oid = 1260;
 /// `AuthMemRelationId` — `pg_auth_members` (`pg_auth_members_d.h`).
 pub const AUTH_MEM_RELATION_ID: Oid = 1261;
 /// `TableSpaceRelationId` — `pg_tablespace` (`pg_tablespace_d.h`).
 pub const TABLE_SPACE_RELATION_ID: Oid = 1213;
-/// `DatabaseRelationId` — `pg_database` (`pg_database_d.h`).
-pub const DATABASE_RELATION_ID: Oid = 1262;
 /// `NamespaceRelationId` — `pg_namespace` (`pg_namespace_d.h`).
 pub const NAMESPACE_RELATION_ID: Oid = 2615;
 /// `DefaultAclRelationId` — `pg_default_acl` (`pg_default_acl_d.h`).
@@ -77,7 +90,3 @@ pub const STATISTIC_EXT_RELATION_ID: Oid = 3381;
 pub const TS_CONFIG_RELATION_ID: Oid = 3602;
 /// `TSDictionaryRelationId` — `pg_ts_dict` (`pg_ts_dict_d.h`).
 pub const TS_DICTIONARY_RELATION_ID: Oid = 3600;
-
-/// `DEFAULTTABLESPACE_OID` — the `pg_default` tablespace
-/// (`pg_tablespace.dat`).
-pub const DEFAULTTABLESPACE_OID: Oid = 1663;

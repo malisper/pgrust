@@ -205,6 +205,24 @@ handle!(
     /// Live `Snapshot` (`utils/snapshot.h`) — the active snapshot, threaded by
     /// identity. `None` models C's `InvalidSnapshot`/NULL.
     SnapshotHandle);
+handle!(
+    /// Live `BufFile *` (`storage/buffile.h`) — a buffered virtual temp file,
+    /// owned by `storage/file/buffile.c`. The hash table holds one per batch
+    /// in its `innerBatchFile`/`outerBatchFile` arrays.
+    BufFileHandle);
+handle!(
+    /// Live `SharedTuplestoreAccessor *` (`utils/sharedtuplestore.h`) — a
+    /// backend's accessor onto a shared tuplestore, owned by
+    /// `utils/sort/sharedtuplestore.c`.
+    SharedTuplestoreAccessorHandle);
+handle!(
+    /// In-DSM `SharedTuplestore` (`utils/sharedtuplestore.h`) — the shared
+    /// state object, placed in shmem following a `ParallelHashJoinBatch`.
+    SharedTuplestoreHandle);
+handle!(
+    /// In-DSM `SharedFileSet *` (`storage/sharedfileset.h`) — names a group of
+    /// shared temp files, owned by `storage/file/sharedfileset.c`.
+    SharedFileSetHandle);
 
 /// Cursor over a serialized buffer in DSA/DSM storage that the
 /// (de)serialization helpers advance as they read/write

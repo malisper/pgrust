@@ -1063,7 +1063,7 @@ fn fmgr_security_definer_body(
     if has_config {
         for (name, value) in fcache.config_names.iter().zip(fcache.config_values.iter()) {
             // C: GucContext context = superuser() ? PGC_SUSET : PGC_USERSET;
-            let context = if backend_utils_init_miscinit_seams::superuser::call() {
+            let context = if backend_utils_init_miscinit_seams::superuser::call(mcx)? {
                 GucContext::PGC_SUSET
             } else {
                 GucContext::PGC_USERSET

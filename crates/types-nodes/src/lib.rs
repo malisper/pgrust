@@ -26,6 +26,7 @@ pub mod jointype;
 pub mod modifytable;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
+pub mod nodehash;
 pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
@@ -72,6 +73,13 @@ pub use nodemergeappend::{
 };
 pub use nodelimit::{
     Limit, LimitOption, LimitStateCond, LimitStateData, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
+};
+pub use nodehash::{
+    AttStatsSlot, BucketAndBatch, Hash, HashChunkIdx, HashInstrumentation, HashJoinBuckets,
+    HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
+    HashMemoryChunkLink, HashSkewBucket, HashState, HashTupleIdx, ParallelHashGrowth,
+    ParallelHashJoinBatch, ParallelHashJoinBatchAccessor, ParallelHashJoinState, SharedHashInfo,
+    INVALID_SKEW_BUCKET_NO,
 };
 pub use nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,

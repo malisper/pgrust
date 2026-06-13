@@ -39,3 +39,24 @@ impl From<Datum> for SysCacheKey<'static> {
         SysCacheKey::Value(d)
     }
 }
+
+/// Projection of the `pg_authid` row fields that role-identity consumers
+/// (`miscinit.c` `has_rolreplication`/`InitializeSessionUserId`,
+/// `superuser.c`) read off `SearchSysCache1(AUTHOID/AUTHNAME)` ->
+/// `Form_pg_authid` (`catalog/pg_authid.h`). The role name is copied into the
+/// caller's `mcx` (`pstrdup`/`NameStr`), so it carries `'mcx`.
+#[derive(Debug)]
+pub struct AuthIdRow<'mcx> {
+    /// `oid` — the role's OID (`rform->oid`).
+    pub oid: types_core::Oid,
+    /// `rolname` (`NameStr(rform->rolname)`).
+    pub rolname: mcx::PgString<'mcx>,
+    /// `rolsuper` — has superuser privilege.
+    pub rolsuper: bool,
+    /// `rolcanlogin` — role can log in.
+    pub rolcanlogin: bool,
+    /// `rolreplication` — role has explicit REPLICATION privilege.
+    pub rolreplication: bool,
+    /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
+    pub rolconnlimit: i32,
+}

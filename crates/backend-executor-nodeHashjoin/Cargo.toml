@@ -15,6 +15,7 @@ backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }
+backend-executor-nodeHashjoin-seams = { path = "../backend-executor-nodeHashjoin-seams" }
 backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

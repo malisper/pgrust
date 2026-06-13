@@ -23,3 +23,11 @@ seam_core::seam!(
         no_error: bool,
     ) -> types_error::PgResult<types_acl::CheckEnableRlsResult>
 );
+
+// --- backend-utils-init-postinit consumer (ps_status.c) ---
+
+seam_core::seam!(
+    /// `set_ps_display(activity)` (ps_status.c): set the process-title activity
+    /// string.
+    pub fn set_ps_display(activity: &str)
+);

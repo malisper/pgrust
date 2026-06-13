@@ -42,6 +42,34 @@ seam_core::seam!(
     pub fn secure_close(port: &mut types_net::Port)
 );
 
+// --- backend-utils-init-postinit consumer (be-secure.c TLS accessors) ---
+
+seam_core::seam!(
+    /// `const char *be_tls_get_version(Port *port)` (`libpq/be-secure.c`) — the
+    /// negotiated TLS protocol version string for the connection, used by
+    /// `PerformAuthentication`'s `" SSL enabled (protocol=%s, ...)"` log line.
+    /// Reads SSL state postinit does not own.
+    pub fn be_tls_get_version<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `const char *be_tls_get_cipher(Port *port)` (`libpq/be-secure.c`) — the
+    /// negotiated TLS cipher name string for the connection.
+    pub fn be_tls_get_cipher<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `int be_tls_get_cipher_bits(Port *port)` (`libpq/be-secure.c`) — the
+    /// number of effective bits in the negotiated TLS cipher.
+    pub fn be_tls_get_cipher_bits(port: &mut types_net::Port) -> i32
+);
+
 // ---------------------------------------------------------------------------
 //  Negotiation guards + handshake openers (backend_startup.c crossings).
 // ---------------------------------------------------------------------------

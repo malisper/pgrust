@@ -1,6 +1,7 @@
 //! Seam declarations for the `backend-storage-lmgr-lock` unit
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
+
 extern crate alloc;
 
 seam_core::seam!(
@@ -128,10 +129,15 @@ impl Drop for LockGuard {
 /// available (`LOCKACQUIRE_NOT_AVAIL`), the returned guard holds nothing —
 /// check [`LockGuard::result`].
 pub fn lock_acquire(
+
     locktag: &types_storage::lock::LOCKTAG,
+
     lockmode: types_storage::lock::LOCKMODE,
+
     session_lock: bool,
+
     dont_wait: bool,
+
 ) -> types_error::PgResult<LockGuard> {
     let result = lock_acquire_impl::call(locktag, lockmode, session_lock, dont_wait)?;
     Ok(LockGuard {
@@ -481,4 +487,24 @@ seam_core::seam!(
         space: &types_deadlock::LockSpace,
         lock: types_deadlock::LockId,
     ) -> types_deadlock::LockMethodData
+);
+
+// --- backend-utils-init-postinit consumers (lock.c) ---
+
+seam_core::seam!(
+    /// `InitLockManagerAccess()` (lock.c): initialize the backend-local lock
+    /// manager structures (LOCALLOCK hashtable). `Err` carries its OOM surface.
+    pub fn init_lock_manager_access() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(USER_LOCKMETHOD, true)` (lock.c): release all
+    /// user (advisory) locks held by this backend. `Err` carries its `ereport`
+    /// surface.
+    pub fn lock_release_all_user() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `max_locks_per_xact` (lock.c GUC `max_locks_per_transaction`).
+    pub fn max_locks_per_xact() -> i32
 );
