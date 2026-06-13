@@ -3,8 +3,8 @@
 //! analysis that decides which outer-plan columns are needed, and the
 //! per-trans build that reads the catalog for each aggregate).
 
-use mcx::{alloc_in, Mcx, PgBox};
-use types_core::primitive::Oid;
+use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use types_core::primitive::{Oid, OidIsValid};
 use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
@@ -12,6 +12,7 @@ use types_nodes::nodeagg::{
 };
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, SlotId};
+use types_tuple::heaptuple::TupleDescData;
 
 use crate::FindColsContext;
 
@@ -312,33 +313,410 @@ pub fn build_pertrans_for_aggref<'mcx>(
     num_arguments: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (
-        pertrans,
-        aggstate,
-        estate,
-        aggref,
-        transfn_oid,
-        aggtranstype,
-        aggserialfn,
-        aggdeserialfn,
-        init_value,
-        init_value_is_null,
-        input_types,
-        num_arguments,
-        mcx,
-    );
-    // build_pertrans_for_aggref drives fmgr_info / build_aggregate_*_expr /
-    // InitFunctionCallInfoData / get_typlenbyval / get_sortgroupclause_tle /
-    // exprCollation / get_opcode / execTuplesMatchPrepare, plus ExecTypeFromTL
-    // and ExecInitExtraTupleSlot. Several of these (build_aggregate_*_expr in
-    // parse_agg.c, fmgr_info in fmgr.c's still-unported surface,
-    // get_sortgroupclause_tle/exprCollation in nodeFuncs.c) are not exposed by
-    // any seam crate this unit depends on, and the SortGroupClause→TargetEntry
-    // resolution needs the expression-node vocabulary that has not landed.
+    // int numGroupingSets = Max(aggstate->maxsets, 1);
+    let num_grouping_sets = core::cmp::max(aggstate.maxsets, 1);
+
+    // Begin filling in the pertrans data
+    //   pertrans->aggref = aggref;
+    //   pertrans->aggshared = false;
+    //   pertrans->aggCollation = aggref->inputcollid;
+    //   pertrans->transfn_oid = transfn_oid;
+    //   pertrans->serialfn_oid = aggserialfn;
+    //   pertrans->deserialfn_oid = aggdeserialfn;
+    //   pertrans->initValue = initValue;
+    //   pertrans->initValueIsNull = initValueIsNull;
+    pertrans.aggref = Some(clone_aggref_into(mcx, aggref)?);
+    pertrans.aggshared = false;
+    pertrans.agg_collation = aggref.inputcollid;
+    pertrans.transfn_oid = transfn_oid;
+    pertrans.serialfn_oid = aggserialfn;
+    pertrans.deserialfn_oid = aggdeserialfn;
+    pertrans.init_value = init_value;
+    pertrans.init_value_is_null = init_value_is_null;
+
+    // Count the "direct" arguments, if any
+    //   numDirectArgs = list_length(aggref->aggdirectargs);
+    let num_direct_args = list_len(&aggref.aggdirectargs);
+
+    // Count the number of aggregated input columns
+    //   pertrans->numInputs = numInputs = list_length(aggref->args);
+    let num_inputs = list_len(&aggref.args) as i32;
+    pertrans.num_inputs = num_inputs;
+
+    // pertrans->aggtranstype = aggtranstype;
+    pertrans.aggtranstype = aggtranstype;
+
+    // account for the current transition state
+    //   numTransArgs = pertrans->numTransInputs + 1;
+    let num_trans_args = pertrans.num_trans_inputs + 1;
+    let _ = num_trans_args;
+
+    // Set up infrastructure for calling the transfn.  Note that invtransfn is
+    // not needed here.
+    //   build_aggregate_transfn_expr(inputTypes, numArguments, numDirectArgs,
+    //                                aggref->aggvariadic, aggtranstype,
+    //                                aggref->inputcollid, transfn_oid, InvalidOid,
+    //                                &transfnexpr, NULL);
+    //   fmgr_info(transfn_oid, &pertrans->transfn);
+    //   fmgr_info_set_expr((Node *) transfnexpr, &pertrans->transfn);
+    //   pertrans->transfn_fcinfo =
+    //       (FunctionCallInfo) palloc(SizeForFunctionCallInfo(numTransArgs));
+    //   InitFunctionCallInfoData(*pertrans->transfn_fcinfo, &pertrans->transfn,
+    //                            numTransArgs, pertrans->aggCollation,
+    //                            (Node *) aggstate, NULL);
+    //
+    // build_aggregate_transfn_expr (parse_agg.c), fmgr_info / fmgr_info_set_expr
+    // / InitFunctionCallInfoData (fmgr.c) and the fmgr call-frame allocation are
+    // owned by the not-yet-ported parse-agg / fmgr units; no seam is declared
+    // for them. Panic loudly here (mirror-PG-and-panic). The remaining owned
+    // arithmetic below is kept verbatim (unreachable) so it lands once those
+    // owners do.
     panic!(
-        "backend-parser-parse-agg / backend-nodes-nodeFuncs: build_pertrans_for_aggref needs \
-         build_aggregate_*_expr, fmgr_info, get_sortgroupclause_tle and exprCollation, none of \
-         which are exposed by this unit's seam dependencies yet"
+        "backend-parser-parse-agg / backend-utils-fmgr: build_pertrans_for_aggref needs \
+         build_aggregate_transfn_expr + fmgr_info/fmgr_info_set_expr + \
+         InitFunctionCallInfoData (transfn call frame), none exposed by this unit's seams yet \
+         (numTransArgs={num_trans_args}, numDirectArgs={num_direct_args})"
+    );
+
+    #[allow(unreachable_code)]
+    {
+        // get info about the state value's datatype
+        //   get_typlenbyval(aggtranstype, &pertrans->transtypeLen,
+        //                   &pertrans->transtypeByVal);
+        let (transtype_len, transtype_by_val) = get_typlenbyval_owned(aggtranstype)?;
+        pertrans.transtype_len = transtype_len;
+        pertrans.transtype_by_val = transtype_by_val;
+
+        // if (OidIsValid(aggserialfn)) { build_aggregate_serialfn_expr; fmgr_info;
+        //   fmgr_info_set_expr; serialfn_fcinfo = palloc(SizeForFunctionCallInfo(1));
+        //   InitFunctionCallInfoData(..., 1, InvalidOid, (Node *) aggstate, NULL); }
+        if OidIsValid(aggserialfn) {
+            build_serialfn_call_frame_owned(pertrans, aggstate, aggserialfn)?;
+        }
+
+        // if (OidIsValid(aggdeserialfn)) { build_aggregate_deserialfn_expr; fmgr_info;
+        //   fmgr_info_set_expr; deserialfn_fcinfo = palloc(SizeForFunctionCallInfo(2));
+        //   InitFunctionCallInfoData(..., 2, InvalidOid, (Node *) aggstate, NULL); }
+        if OidIsValid(aggdeserialfn) {
+            build_deserialfn_call_frame_owned(pertrans, aggstate, aggdeserialfn)?;
+        }
+
+        // If we're doing either DISTINCT or ORDER BY for a plain agg, then we have
+        // a list of SortGroupClause nodes; fish out the data in them and stick them
+        // into arrays. We ignore ORDER BY for an ordered-set agg, however; the
+        // agg's transfn and finalfn are responsible for that.
+        //
+        // When the planner has set the aggpresorted flag, the input to the
+        // aggregate is already correctly sorted. For ORDER BY aggregates we can
+        // simply treat these as normal aggregates. For presorted DISTINCT
+        // aggregates an extra step must be added to remove duplicate consecutive
+        // inputs.
+        //
+        // Note that by construction, if there is a DISTINCT clause then the ORDER
+        // BY clause is a prefix of it (see transformDistinctClause).
+        let sortlist: Option<&[types_nodes::nodeagg::SortGroupClauseAgg]>;
+        let num_sort_cols: i32;
+        let num_distinct_cols: i32;
+        if aggkind_is_ordered_set_lc(aggref.aggkind) {
+            sortlist = None;
+            num_sort_cols = 0;
+            num_distinct_cols = 0;
+            pertrans.aggsortrequired = false;
+        } else if aggref.aggpresorted && aggref.aggdistinct.is_none() {
+            sortlist = None;
+            num_sort_cols = 0;
+            num_distinct_cols = 0;
+            pertrans.aggsortrequired = false;
+        } else if aggref.aggdistinct.is_some() {
+            let dl = aggref.aggdistinct.as_deref();
+            sortlist = dl;
+            num_sort_cols = dl.map_or(0, |s| s.len()) as i32;
+            num_distinct_cols = num_sort_cols;
+            // Assert(numSortCols >= list_length(aggref->aggorder));
+            debug_assert!(num_sort_cols >= list_len(&aggref.aggorder) as i32);
+            pertrans.aggsortrequired = !aggref.aggpresorted;
+        } else {
+            let ol = aggref.aggorder.as_deref();
+            sortlist = ol;
+            num_sort_cols = ol.map_or(0, |s| s.len()) as i32;
+            num_distinct_cols = 0;
+            pertrans.aggsortrequired = num_sort_cols > 0;
+        }
+
+        // pertrans->numSortCols = numSortCols;
+        // pertrans->numDistinctCols = numDistinctCols;
+        pertrans.num_sort_cols = num_sort_cols;
+        pertrans.num_distinct_cols = num_distinct_cols;
+
+        // If we have either sorting or filtering to do, create a tupledesc and
+        // slot corresponding to the aggregated inputs (including sort
+        // expressions) of the agg.
+        //   if (numSortCols > 0 || aggref->aggfilter) {
+        //       pertrans->sortdesc = ExecTypeFromTL(aggref->args);
+        //       pertrans->sortslot = ExecInitExtraTupleSlot(estate, pertrans->sortdesc,
+        //                                                   &TTSOpsMinimalTuple);
+        //   }
+        if num_sort_cols > 0 || aggref.aggfilter.is_some() {
+            let sortdesc = exec_type_from_tl_owned(aggref)?;
+            let sortslot = exec_init_extra_tuple_slot_minimal(estate, &sortdesc)?;
+            pertrans.sortdesc = Some(sortdesc);
+            pertrans.sortslot = Some(sortslot);
+        }
+
+        if num_sort_cols > 0 {
+            // We don't implement DISTINCT or ORDER BY aggs in the HASHED case (yet)
+            debug_assert!(
+                aggstate.aggstrategy != AGG_HASHED && aggstate.aggstrategy != AGG_MIXED
+            );
+
+            // ORDER BY aggregates are not supported with partial aggregation
+            debug_assert!(!types_nodes::nodeagg::do_aggsplit_combine(aggstate.aggsplit));
+
+            // If we have only one input, we need its len/byval info.
+            //   if (numInputs == 1)
+            //       get_typlenbyval(inputTypes[numDirectArgs], &inputtypeLen, &inputtypeByVal);
+            //   else if (numDistinctCols > 0)
+            //       pertrans->uniqslot = ExecInitExtraTupleSlot(estate, sortdesc, MinimalTuple);
+            if num_inputs == 1 {
+                let (in_len, in_byval) =
+                    get_typlenbyval_owned(input_types[num_direct_args as usize])?;
+                pertrans.inputtype_len = in_len;
+                pertrans.inputtype_by_val = in_byval;
+            } else if num_distinct_cols > 0 {
+                // we will need an extra slot to store prior values
+                let sortdesc = pertrans
+                    .sortdesc
+                    .as_ref()
+                    .expect("build_pertrans_for_aggref: sortdesc built above");
+                let uniqslot = exec_init_extra_tuple_slot_minimal(estate, sortdesc)?;
+                pertrans.uniqslot = Some(uniqslot);
+            }
+
+            // Extract the sort information for use later
+            //   pertrans->sortColIdx     = palloc(numSortCols * sizeof(AttrNumber));
+            //   pertrans->sortOperators  = palloc(numSortCols * sizeof(Oid));
+            //   pertrans->sortCollations = palloc(numSortCols * sizeof(Oid));
+            //   pertrans->sortNullsFirst = palloc(numSortCols * sizeof(bool));
+            let mut sort_col_idx =
+                vec_with_capacity_in(mcx, num_sort_cols as usize)?;
+            let mut sort_operators =
+                vec_with_capacity_in(mcx, num_sort_cols as usize)?;
+            let mut sort_collations =
+                vec_with_capacity_in(mcx, num_sort_cols as usize)?;
+            let mut sort_nulls_first =
+                vec_with_capacity_in(mcx, num_sort_cols as usize)?;
+
+            // i = 0;
+            // foreach(lc, sortlist) {
+            //     SortGroupClause *sortcl = lfirst(lc);
+            //     TargetEntry *tle = get_sortgroupclause_tle(sortcl, aggref->args);
+            //     Assert(OidIsValid(sortcl->sortop));
+            //     pertrans->sortColIdx[i]     = tle->resno;
+            //     pertrans->sortOperators[i]  = sortcl->sortop;
+            //     pertrans->sortCollations[i] = exprCollation((Node *) tle->expr);
+            //     pertrans->sortNullsFirst[i] = sortcl->nulls_first;
+            //     i++;
+            // }
+            // Assert(i == numSortCols);
+            let mut i = 0i32;
+            for sortcl in sortlist.unwrap_or(&[]).iter() {
+                // TargetEntry *tle = get_sortgroupclause_tle(sortcl, aggref->args);
+                // pertrans->sortColIdx[i]     = tle->resno;
+                // pertrans->sortCollations[i] = exprCollation((Node *) tle->expr);
+                //
+                // tle->resno and exprCollation read fields of the planner-owned
+                // TargetEntry / expression node that the trimmed shared
+                // vocabulary does not yet carry; resolve both through the
+                // nodeFuncs owner.
+                let (resno, collation) = sortgroupclause_tle_resno_and_collation(sortcl, aggref)?;
+                // the parser should have made sure of this
+                debug_assert!(OidIsValid(sortcl.sortop));
+                sort_col_idx.push(resno);
+                sort_operators.push(sortcl.sortop);
+                sort_collations.push(collation);
+                sort_nulls_first.push(sortcl.nulls_first);
+                i += 1;
+            }
+            debug_assert!(i == num_sort_cols);
+
+            pertrans.sort_col_idx = Some(sort_col_idx);
+            pertrans.sort_operators = Some(sort_operators);
+            pertrans.sort_collations = Some(sort_collations);
+            pertrans.sort_nulls_first = Some(sort_nulls_first);
+        }
+
+        if aggref.aggdistinct.is_some() {
+            // Assert(numArguments > 0);
+            // Assert(list_length(aggref->aggdistinct) == numDistinctCols);
+            debug_assert!(num_arguments > 0);
+            debug_assert!(list_len(&aggref.aggdistinct) as i32 == num_distinct_cols);
+
+            // ops = palloc(numDistinctCols * sizeof(Oid));
+            // i = 0; foreach(lc, aggref->aggdistinct) ops[i++] = ((SortGroupClause *) lfirst(lc))->eqop;
+            let mut ops: PgVec<'mcx, Oid> =
+                vec_with_capacity_in(mcx, num_distinct_cols as usize)?;
+            for sortcl in aggref.aggdistinct.as_deref().unwrap_or(&[]).iter() {
+                ops.push(sortcl.eqop);
+            }
+
+            // lookup / build the necessary comparators
+            //   if (numDistinctCols == 1)
+            //       fmgr_info(get_opcode(ops[0]), &pertrans->equalfnOne);
+            //   else
+            //       pertrans->equalfnMulti = execTuplesMatchPrepare(sortdesc, numDistinctCols,
+            //                                   sortColIdx, ops, sortCollations, &aggstate->ss.ps);
+            if num_distinct_cols == 1 {
+                fmgr_info_get_opcode_into_equalfn_one(pertrans, ops[0])?;
+            } else {
+                exec_tuples_match_prepare_owned(pertrans, aggstate, &ops, num_distinct_cols)?;
+            }
+            // pfree(ops);  (PgVec drops with the context)
+            let _ = ops;
+        }
+
+        // pertrans->sortstates = palloc0(sizeof(Tuplesortstate *) * numGroupingSets);
+        let mut sortstates = vec_with_capacity_in(mcx, num_grouping_sets as usize)?;
+        for _ in 0..num_grouping_sets {
+            sortstates.push(None);
+        }
+        pertrans.sortstates = Some(sortstates);
+
+        Ok(())
+    }
+}
+
+/// `AGGKIND_IS_ORDERED_SET(kind)` (catalog/pg_aggregate.h): true unless the
+/// aggregate is a normal (`'n'`) aggregate.
+fn aggkind_is_ordered_set_lc(aggkind: i8) -> bool {
+    aggkind != b'n' as i8
+}
+
+/// `list_length(list)` — element count of an optional `PgVec`-backed List.
+fn list_len<T>(list: &Option<PgVec<'_, T>>) -> usize {
+    list.as_ref().map_or(0, |l| l.len())
+}
+
+/// Deep-copy an `Aggref` into `mcx` for `pertrans->aggref` (C aliases the
+/// planner-owned node directly; the owned model stores a copy).
+fn clone_aggref_into<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggref: &Aggref<'mcx>,
+) -> PgResult<PgBox<'mcx, Aggref<'mcx>>> {
+    // The Aggref carries only POD/Oid scalars plus expression-node Lists owned
+    // by the unported nodes vocabulary; storing the back-reference faithfully
+    // needs that owner's copyObject. Until it lands the copy panics loudly
+    // rather than fabricate a partial node.
+    let _ = (mcx, aggref);
+    panic!(
+        "backend-nodes-copyfuncs: pertrans->aggref back-reference needs copyObject over the \
+         Aggref expression-node lists (unported nodes vocabulary)"
+    )
+}
+
+/// `get_typlenbyval(typid, &typlen, &typbyval)` (lsyscache.c) — typcache read.
+fn get_typlenbyval_owned(typid: Oid) -> PgResult<(i16, bool)> {
+    let _ = typid;
+    panic!(
+        "backend-utils-cache-lsyscache: get_typlenbyval (typcache read) not exposed by this \
+         unit's seams yet"
+    )
+}
+
+/// `build_aggregate_serialfn_expr` + `fmgr_info`/`fmgr_info_set_expr` +
+/// `InitFunctionCallInfoData` for the 1-arg serialfn call frame.
+fn build_serialfn_call_frame_owned<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    aggserialfn: Oid,
+) -> PgResult<()> {
+    let _ = (pertrans, aggstate, aggserialfn);
+    panic!(
+        "backend-parser-parse-agg / backend-utils-fmgr: build_aggregate_serialfn_expr + \
+         fmgr_info + InitFunctionCallInfoData (serialfn call frame) not exposed by this unit's \
+         seams yet"
+    )
+}
+
+/// `build_aggregate_deserialfn_expr` + `fmgr_info`/`fmgr_info_set_expr` +
+/// `InitFunctionCallInfoData` for the 2-arg deserialfn call frame.
+fn build_deserialfn_call_frame_owned<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    aggdeserialfn: Oid,
+) -> PgResult<()> {
+    let _ = (pertrans, aggstate, aggdeserialfn);
+    panic!(
+        "backend-parser-parse-agg / backend-utils-fmgr: build_aggregate_deserialfn_expr + \
+         fmgr_info + InitFunctionCallInfoData (deserialfn call frame) not exposed by this \
+         unit's seams yet"
+    )
+}
+
+/// `ExecTypeFromTL(aggref->args)` (execTuples.c) — build the sort tupledesc.
+fn exec_type_from_tl_owned<'mcx>(
+    aggref: &Aggref<'mcx>,
+) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
+    let _ = aggref;
+    panic!(
+        "backend-executor-execTuples: ExecTypeFromTL over aggref->args (expression-node \
+         TargetEntry list) not exposed by this unit's seams yet"
+    )
+}
+
+/// `ExecInitExtraTupleSlot(estate, desc, &TTSOpsMinimalTuple)` — owned by
+/// execTuples; the unit already declares `exec_init_extra_tuple_slot`.
+fn exec_init_extra_tuple_slot_minimal<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    desc: &PgBox<'mcx, TupleDescData<'mcx>>,
+) -> PgResult<SlotId> {
+    let _ = (estate, desc);
+    panic!(
+        "backend-executor-execTuples: ExecInitExtraTupleSlot(TTSOpsMinimalTuple) reached \
+         through the execTuples seam once build_pertrans_for_aggref's transfn frame lands"
+    )
+}
+
+/// `tle = get_sortgroupclause_tle(sortcl, aggref->args)` then `tle->resno` and
+/// `exprCollation((Node *) tle->expr)` (nodes/nodeFuncs.c). Both reads need the
+/// planner-owned TargetEntry/expression-node vocabulary (the trimmed shared
+/// `TargetEntry` carries neither `resno` nor the typed expr collation), so the
+/// resolution belongs to the unported nodeFuncs owner.
+fn sortgroupclause_tle_resno_and_collation<'mcx>(
+    sortcl: &types_nodes::nodeagg::SortGroupClauseAgg,
+    aggref: &Aggref<'mcx>,
+) -> PgResult<(types_core::primitive::AttrNumber, Oid)> {
+    let _ = (sortcl, aggref);
+    panic!(
+        "backend-nodes-nodeFuncs: get_sortgroupclause_tle + tle->resno + exprCollation over \
+         aggref->args (expression-node TargetEntry list) not exposed by this unit's seams yet"
+    )
+}
+
+/// `fmgr_info(get_opcode(eqop), &pertrans->equalfnOne)` — single-column
+/// distinct comparator (lsyscache get_opcode + fmgr_info).
+fn fmgr_info_get_opcode_into_equalfn_one<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    eqop: Oid,
+) -> PgResult<()> {
+    let _ = (pertrans, eqop);
+    panic!(
+        "backend-utils-cache-lsyscache / backend-utils-fmgr: get_opcode + fmgr_info for the \
+         single-column DISTINCT comparator not exposed by this unit's seams yet"
+    )
+}
+
+/// `execTuplesMatchPrepare(...)` (execGrouping.c) — multi-column distinct
+/// comparator ExprState.
+fn exec_tuples_match_prepare_owned<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    aggstate: &mut AggStateData<'mcx>,
+    ops: &PgVec<'mcx, Oid>,
+    num_distinct_cols: i32,
+) -> PgResult<()> {
+    let _ = (pertrans, aggstate, ops, num_distinct_cols);
+    panic!(
+        "backend-executor-execGrouping: execTuplesMatchPrepare (multi-column DISTINCT \
+         comparator) not exposed by this unit's seams yet"
     )
 }
 
