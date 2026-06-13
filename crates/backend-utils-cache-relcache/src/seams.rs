@@ -134,12 +134,16 @@ fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool {
     todo!("relcache seam: relation_is_local (own macro over entry)")
 }
 
+#[allow(unsafe_code)]
 fn relation_rd_indam(index_oid: Oid) -> Option<types_tableam::amapi::IndexAmRoutine> {
-    // Resolving the index-AM vtable for `index_oid` is index-family logic
-    // (`RelationInitIndexAccessInfo`/`InitIndexAmRoutine`); the `IndexAmRoutine`
-    // vtable is not copyable out of the cache, so this returns the freshly
-    // resolved routine when that family lands.
-    todo!("relcache seam: relation_rd_indam (index family resolves the vtable)")
+    // The `IndexAmRoutine` vtable is not copyable out of the cache; re-resolve
+    // it from the cached entry's `rd_amhandler` (the C cache holds a `memcpy`
+    // of exactly the routine the handler returns). Returns the freshly
+    // resolved routine, matching `relation->rd_indam`.
+    let rd = crate::core_entry_store::cache_lookup(index_oid)?;
+    // SAFETY: live cache-owned descriptor.
+    let amhandler = unsafe { (*rd).rd_amhandler };
+    backend_access_index_amapi_seams::get_index_am_routine::call(amhandler).ok()
 }
 
 fn relation_increment_reference_count(index_oid: Oid) -> PgResult<()> {
@@ -156,8 +160,25 @@ fn relation_decrement_reference_count(index_oid: Oid) -> PgResult<()> {
     }
 }
 
+#[allow(unsafe_code)]
 fn rd_support_at(index_oid: Oid, procindex: i32) -> PgResult<RegProcedure> {
-    todo!("relcache seam: rd_support_at (index family)")
+    // `relation->rd_support[procindex]` off the cached index entry (the
+    // support-proc OID array filled by `RelationInitIndexAccessInfo`).
+    let rd = crate::core_entry_store::cache_lookup(index_oid)
+        .ok_or_else(|| missing_entry(index_oid))?;
+    // SAFETY: live cache-owned descriptor.
+    let rd = unsafe { &*rd };
+    Ok(rd.rd_support[procindex as usize])
+}
+
+/// Shared `elog(ERROR)` for a seam called on an OID that has no live relcache
+/// entry (the caller should hold the relation open).
+fn missing_entry(relid: Oid) -> PgError {
+    use backend_utils_error::ereport;
+    use types_error::ERROR;
+    ereport(ERROR)
+        .errmsg_internal(format!("relation {relid} is not open in the relcache"))
+        .into_error()
 }
 
 fn index_getprocinfo(
@@ -303,44 +324,78 @@ fn relation_cache_initialize_phase3() -> PgResult<()> {
  * `Relation` value-slice's OID; resolve the owned entry) + transient sets.
  * ======================================================================== */
 
+/// Read off the cached entry, applying `f` to the live `RelationData`.
+#[allow(unsafe_code)]
+fn with_entry<R>(relid: Oid, f: impl FnOnce(&crate::RelationData) -> R) -> PgResult<R> {
+    let rd = crate::core_entry_store::cache_lookup(relid).ok_or_else(|| missing_entry(relid))?;
+    // SAFETY: live cache-owned descriptor.
+    Ok(f(unsafe { &*rd }))
+}
+
 fn rd_rel_relam(rel: &types_rel::Relation<'_>) -> PgResult<Oid> {
-    todo!("relcache seam: rd_rel_relam (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relam)
 }
 fn rd_rel_reltablespace(rel: &types_rel::Relation<'_>) -> PgResult<Oid> {
-    todo!("relcache seam: rd_rel_reltablespace (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.reltablespace)
 }
 fn rd_rel_relowner(rel: &types_rel::Relation<'_>) -> PgResult<Oid> {
-    todo!("relcache seam: rd_rel_relowner (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relowner)
 }
 fn rd_rel_relisshared(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_rel_relisshared (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relisshared)
 }
 fn rd_rel_relnamespace(rel: &types_rel::Relation<'_>) -> PgResult<Oid> {
-    todo!("relcache seam: rd_rel_relnamespace (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relnamespace)
 }
 fn rd_rel_relfrozenxid(rel: &types_rel::Relation<'_>) -> PgResult<TransactionId> {
-    todo!("relcache seam: rd_rel_relfrozenxid (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relfrozenxid)
 }
 fn rd_rel_relminmxid(rel: &types_rel::Relation<'_>) -> PgResult<MultiXactId> {
-    todo!("relcache seam: rd_rel_relminmxid (index family)")
+    with_entry(rel.rd_id, |rd| rd.rd_rel.relminmxid)
 }
 fn rd_islocaltemp(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_islocaltemp (core-entry-store)")
+    with_entry(rel.rd_id, |rd| rd.rd_islocaltemp)
 }
 fn rd_index_indrelid(index: &types_rel::Relation<'_>) -> PgResult<Option<Oid>> {
-    todo!("relcache seam: rd_index_indrelid (index family)")
+    with_entry(index.rd_id, |rd| rd.rd_index.as_ref().map(|i| i.indrelid))
 }
 fn rd_index_indisvalid(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_index_indisvalid (index family)")
+    with_entry(index.rd_id, |rd| {
+        rd.rd_index.as_ref().is_some_and(|i| i.indisvalid)
+    })
 }
 fn rd_index_has_indpred(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_index_has_indpred (index family)")
+    // `relation->rd_indpred != NIL`: the index-predicate list lives in the
+    // derived family (the node tree is seam vocabulary). The entry does not
+    // carry it yet; the derived family resolves it when it lands.
+    let _ = index;
+    todo!("relcache seam: rd_index_has_indpred (derived family builds rd_indpred)")
 }
 fn rd_indam_amclusterable(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_indam_amclusterable (index family)")
+    // `index->rd_indam->amclusterable`: the trimmed `IndexAmRoutine` vtable
+    // does not carry this scalar flag (it is read only by CLUSTER), so it is
+    // the amapi owner's scalar projection. Seam-and-panic until that projection
+    // lands (per "mirror PG and panic"; not invented onto the trimmed vtable).
+    let _ = index;
+    todo!("relcache seam: rd_indam_amclusterable (amapi scalar projection)")
 }
 fn relation_is_mapped(rel: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: relation_is_mapped (index family)")
+    // `RelationIsMapped(relation)` (utils/rel.h): a relation is mapped iff it
+    // has storage and `rd_rel->relfilenode == InvalidOid` (the relation map
+    // supplies its filenumber).
+    with_entry(rel.rd_id, |rd| {
+        relation_has_storage(rd.rd_rel.relkind) && rd.rd_rel.relfilenode == 0
+    })
+}
+
+/// `RELKIND_HAS_STORAGE(relkind)` (pg_class.h) — duplicated from the index
+/// family for the `relation_is_mapped` read.
+fn relation_has_storage(relkind: i8) -> bool {
+    relkind == b'r' as i8
+        || relkind == b'i' as i8
+        || relkind == b'S' as i8
+        || relkind == b't' as i8
+        || relkind == b'm' as i8
 }
 fn relation_get_number_of_blocks(rel: &types_rel::Relation<'_>) -> PgResult<u32> {
     todo!("relcache seam: relation_get_number_of_blocks (smgr seam, index family)")
@@ -357,11 +412,17 @@ fn swap_relfilelocator_subids(r1: Oid, r2: Oid) -> PgResult<()> {
  * ======================================================================== */
 
 fn rd_opfamily(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<Oid> {
-    todo!("relcache seam: rd_opfamily (index family)")
+    // `index->rd_opfamily[attno]` off the cached index entry.
+    with_entry(index.rd_id, |rd| rd.rd_opfamily[attno as usize])
 }
 fn rd_opcintype(index: &types_rel::Relation<'_>, attno: AttrNumber) -> PgResult<Oid> {
-    todo!("relcache seam: rd_opcintype (index family)")
+    // `index->rd_opcintype[attno]` off the cached index entry.
+    with_entry(index.rd_id, |rd| rd.rd_opcintype[attno as usize])
 }
 fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> PgResult<bool> {
-    todo!("relcache seam: rd_indam_amcanorder (index family)")
+    // `index->rd_indam->amcanorder`: not carried on the trimmed
+    // `IndexAmRoutine` vtable; the amapi owner projects this scalar (cf.
+    // `index_am_canbackward`). Seam-and-panic until that projection lands.
+    let _ = index;
+    todo!("relcache seam: rd_indam_amcanorder (amapi scalar projection)")
 }
