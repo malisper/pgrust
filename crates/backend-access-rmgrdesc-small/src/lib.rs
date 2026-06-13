@@ -51,9 +51,14 @@ pub use rmgrdesc_utils::{array_desc, offset_elem_desc, oid_elem_desc, redirect_e
 pub use seqdesc::{seq_desc, seq_identify, XLOG_SEQ_LOG};
 pub use tblspcdesc::{tblspc_desc, tblspc_identify, XLOG_TBLSPC_CREATE, XLOG_TBLSPC_DROP};
 
-/// No seams to install: every function here is a leaf consumers can depend on
-/// directly.
-pub fn init_seams() {}
+/// Install all seam slots owned by this crate.
+pub fn init_seams() {
+    use backend_rmgrdesc_small_seams as seams;
+    seams::array_desc::set(rmgrdesc_utils::array_desc_seam);
+    seams::offset_elem_desc::set(rmgrdesc_utils::offset_elem_desc_seam);
+    seams::redirect_elem_desc::set(rmgrdesc_utils::redirect_elem_desc_seam);
+    seams::oid_elem_desc::set(rmgrdesc_utils::oid_elem_desc_seam);
+}
 
 #[cfg(test)]
 mod tests;
