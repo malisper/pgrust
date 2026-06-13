@@ -424,3 +424,130 @@ seam_core::seam!(
     /// (`AttachSharedMemoryStructs`). Owner unported; scaffolded slot.
     pub fn initialize_fast_path_locks()
 );
+
+// --- clog group-commit PGPROC / ProcGlobal accessors (proc.h) ---------------
+//
+// The clog group-status-update optimization (`TransactionGroupUpdateXidStatus`
+// in clog.c, owned by the clog crate) reads/writes the clog-group fields of the
+// PGPROC array and the `ProcGlobal->clogGroupFirst` atomic queue head, all owned
+// by proc.c. These accessors expose exactly those fields; the body of the
+// optimization lives in the clog crate. Until `InitProcGlobal` / `InitProcess`
+// land, the installed bodies panic.
+
+seam_core::seam!(
+    /// `MyProc->xid` — this backend's top-level xid, compared against the xid
+    /// whose status we are about to set (clog group-update eligibility).
+    pub fn my_proc_xid() -> TransactionId
+);
+
+seam_core::seam!(
+    /// `(MyProc->subxidStatus.count, MyProc->subxids.xids[0..count])` — this
+    /// backend's cached subxids, compared (count + `memcmp`) against the subxids
+    /// being committed (clog group-update eligibility).
+    pub fn my_proc_subxids() -> (i32, Vec<TransactionId>)
+);
+
+seam_core::seam!(
+    /// `(GetPGProcByNumber(procno)->subxidStatus.count,
+    /// GetPGProcByNumber(procno)->subxids.xids[0..count])` — a group member's
+    /// cached subxids, applied by the leader during the group clog update.
+    pub fn proc_subxids(procno: ProcNumber) -> (i32, Vec<TransactionId>)
+);
+
+seam_core::seam!(
+    /// Prepare `MyProc`'s clog-group fields before enqueueing
+    /// (`proc->clogGroupMember = true; clogGroupMemberXid = xid;
+    /// clogGroupMemberXidStatus = status; clogGroupMemberPage = pageno;
+    /// clogGroupMemberLsn = lsn`).
+    pub fn set_my_proc_clog_group_member_data(
+        xid: TransactionId,
+        status: types_core::xact::XidStatus,
+        pageno: i64,
+        lsn: types_core::XLogRecPtr,
+    )
+);
+
+seam_core::seam!(
+    /// Read `MyProc->clogGroupMember`.
+    pub fn my_proc_clog_group_member() -> bool
+);
+
+seam_core::seam!(
+    /// Write `MyProc->clogGroupMember = value`.
+    pub fn set_my_proc_clog_group_member(value: bool)
+);
+
+seam_core::seam!(
+    /// Write `GetPGProcByNumber(procno)->clogGroupMember = value`.
+    pub fn set_proc_clog_group_member(procno: ProcNumber, value: bool)
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->clogGroupMemberPage`.
+    pub fn proc_clog_group_member_page(procno: ProcNumber) -> i64
+);
+
+seam_core::seam!(
+    /// `(GetPGProcByNumber(procno)->clogGroupMemberXid,
+    /// clogGroupMemberXidStatus, clogGroupMemberLsn)` — the status update a
+    /// group member is requesting, applied by the leader.
+    pub fn proc_clog_group_member_update(
+        procno: ProcNumber,
+    ) -> (TransactionId, types_core::xact::XidStatus, types_core::XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u32(&MyProc->clogGroupNext)`.
+    pub fn my_proc_clog_group_next() -> u32
+);
+
+seam_core::seam!(
+    /// `pg_atomic_write_u32(&MyProc->clogGroupNext, value)`.
+    pub fn set_my_proc_clog_group_next(value: u32)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u32(&GetPGProcByNumber(procno)->clogGroupNext)`.
+    pub fn proc_clog_group_next(procno: ProcNumber) -> u32
+);
+
+seam_core::seam!(
+    /// `pg_atomic_write_u32(&GetPGProcByNumber(procno)->clogGroupNext, value)`.
+    pub fn set_proc_clog_group_next(procno: ProcNumber, value: u32)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u32(&ProcGlobal->clogGroupFirst)`.
+    pub fn clog_group_first_read() -> u32
+);
+
+seam_core::seam!(
+    /// `pg_atomic_compare_exchange_u32(&ProcGlobal->clogGroupFirst, expected,
+    /// newval)` — returns `(succeeded, value_seen)` (the C updates `*expected`
+    /// in place to the value seen).
+    pub fn clog_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_exchange_u32(&ProcGlobal->clogGroupFirst, newval)` — store
+    /// `newval`, returning the previous value.
+    pub fn clog_group_first_exchange(newval: u32) -> u32
+);
+
+seam_core::seam!(
+    /// `GetNewTransactionId` top-xid publication (varsup.c): store a freshly
+    /// allocated top-level `xid` into `MyProc->xid` and
+    /// `ProcGlobal->xids[MyProc->pgxactoff]` while `XidGenLock` is held (its
+    /// release acts as the write barrier). proc.c owns the PGPROC/ProcGlobal
+    /// layout and the `Assert(subxidStatus.count == 0)` invariants.
+    pub fn store_top_xid_in_proc(xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `GetNewTransactionId` subxid publication (varsup.c): push a freshly
+    /// allocated subtransaction `xid` into `MyProc->subxids.xids[]` and bump
+    /// `subxidStatus.count` (with the `pg_write_barrier()`), or set the
+    /// `overflowed` flag when `PGPROC_MAX_CACHED_SUBXIDS` is exceeded. proc.c
+    /// owns the PGPROC/ProcGlobal subxid-cache layout.
+    pub fn store_subxid_in_proc(xid: TransactionId)
+);

@@ -439,6 +439,16 @@ fn main_lock(offset: usize) -> &'static LWLock {
         .expect("main LWLock offset out of range")
 }
 
+/// `&MainLWLockArray[offset].lock` — the built-in individual lock by its
+/// `lwlocklist.h` offset, for callers that mirror C's bare
+/// `LWLockAcquire(NamedLock, ...)` / `LWLockRelease(NamedLock)` protocol (the
+/// same release/re-acquire discipline the SLRU bank locks use; the
+/// `ereport(ERROR)` unwind releases via `LWLockReleaseAll`). Panics loudly if
+/// `CreateLWLocks` has not run.
+pub fn main_lock_ref(offset: usize) -> &'static LWLock {
+    main_lock(offset)
+}
+
 /// RAII hold on one of the built-in main-array locks, returned by
 /// [`LWLockAcquireMain`]. `Drop` is the error-path release (what C leaves to
 /// error recovery's `LWLockReleaseAll`); the success path calls
@@ -1747,6 +1757,7 @@ pub fn init_seams() {
     );
     backend_storage_lmgr_lwlock_seams::lwlock_shmem_size::set(LWLockShmemSize);
     backend_storage_lmgr_lwlock_seams::create_lwlocks::set(create_lwlocks_seam);
+    backend_storage_lmgr_lwlock_seams::init_lwlock_access::set(InitLWLockAccess);
 }
 
 #[cfg(test)]

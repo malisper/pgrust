@@ -9,6 +9,7 @@ name = "backend_storage_lmgr_proc"
 path = "src/lib.rs"
 
 [dependencies]
+libc = { version = "0.2", default-features = false }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
@@ -42,3 +43,15 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
+# Class-B owners reached by the lifecycle family (panic-through until each lands).
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autovacuum-ext-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-port-pg-sema-seams = { path = "../backend-port-pg-sema-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
