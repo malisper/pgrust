@@ -32,3 +32,5 @@ backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-nodes-readfuncs-seams = { path = "../backend-nodes-readfuncs-seams" }

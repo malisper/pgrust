@@ -4223,12 +4223,9 @@ dependencies = [
 name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-xact-seams",
  "backend-nodes-core-seams",
- "backend-nodes-params-seams",
- "backend-utils-adt-datum-seams",
- "backend-utils-cache-lsyscache-seams",
- "backend-utils-fmgr-fmgr-seams",
+ "backend-nodes-read-seams",
+ "backend-nodes-readfuncs-seams",
  "common-hashfn",
  "mcx",
  "seam-core",
@@ -4330,6 +4327,16 @@ dependencies = [
 
 [[package]]
 name = "backend-nodes-read-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-nodes-readfuncs-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",

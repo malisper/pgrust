@@ -59,8 +59,12 @@ pub mod value_core;
 /// crate) and the `backend-nodes-core-tidbitmap-seams` surface are installed via
 /// [`tidbitmap::init_seams`]. The **params** family (`nodes/params.c`) is filled,
 /// so its `backend-nodes-params-seams::make_param_list` seam is installed here.
-/// Every seam in `-read-seams` / `-nodeFuncs-seams` stays UNINSTALLED (they panic
-/// on call) until their families are filled — `mirror-pg-and-panic`.
+/// The **read** family is now filled, so its
+/// `backend-nodes-read-seams::string_to_node` is installed here; `string_to_node`
+/// of a node tree still routes the body through the unported
+/// `backend-nodes-readfuncs-seams::parse_node_string`, which panics until the
+/// readfuncs unit lands. Every seam in `-nodeFuncs-seams` stays UNINSTALLED (they
+/// panic on call) until their families are filled — `mirror-pg-and-panic`.
 pub fn init_seams() {
     use backend_nodes_core_seams as seams;
 
@@ -69,6 +73,9 @@ pub fn init_seams() {
 
     // params family (nodes/params.c): the canonical `make_param_list` seam.
     backend_nodes_params_seams::make_param_list::set(params::makeParamList);
+
+    // read family (nodes/read.c): string_to_node.
+    backend_nodes_read_seams::string_to_node::set(read::string_to_node);
 
     seams::bms_is_member::set(bitmapset::bms_is_member);
     seams::bms_add_member::set(bitmapset::bms_add_member);
