@@ -27,6 +27,13 @@ impl core::fmt::Display for NodeTag {
 
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
+
+// The four List flavours (nodes/pg_list.h).  T_List is the very first tag.
+pub const T_List: NodeTag = NodeTag(1);
+pub const T_IntList: NodeTag = NodeTag(471);
+pub const T_OidList: NodeTag = NodeTag(472);
+pub const T_XidList: NodeTag = NodeTag(473);
+
 pub const T_Result: NodeTag = NodeTag(331);
 pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
