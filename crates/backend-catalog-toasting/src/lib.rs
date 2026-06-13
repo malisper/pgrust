@@ -350,10 +350,44 @@ fn create_toast_table(
 
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
         // normal case, use a transactional update
-        indexing_seams::set_pg_class_reltoastrelid::call(&class_rel, relOid, toast_relid)?;
+        //
+        //   reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relOid));
+        //   if (!HeapTupleIsValid(reltup))
+        //       elog(ERROR, "cache lookup failed for relation %u", relOid);
+        //   ((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid;
+        //   CatalogTupleUpdate(class_rel, &reltup->t_self, reltup);
+        //   ... heap_freetuple(reltup);
+        //
+        // The seam performs the syscache copy, the GETSTRUCT field write, and
+        // the CatalogTupleUpdate, returning HeapTupleIsValid(reltup); the
+        // `cache lookup failed` elog(ERROR) for the !HeapTupleIsValid case stays
+        // here.
+        if !indexing_seams::set_pg_class_reltoastrelid::call(&class_rel, relOid, toast_relid)? {
+            // elog(ERROR, "cache lookup failed for relation %u", relOid);
+            return Err(PgError::error(format!(
+                "cache lookup failed for relation {relOid}"
+            )));
+        }
     } else {
         // While bootstrapping, we cannot UPDATE, so overwrite in-place
-        indexing_seams::set_pg_class_reltoastrelid_inplace::call(&class_rel, relOid, toast_relid)?;
+        //
+        //   systable_inplace_update_begin(class_rel, ClassOidIndexId, true,
+        //                                 NULL, 1, key, &reltup, &state);
+        //   if (!HeapTupleIsValid(reltup))
+        //       elog(ERROR, "cache lookup failed for relation %u", relOid);
+        //   ((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid;
+        //   systable_inplace_update_finish(state, reltup);
+        //
+        // The seam performs the inplace begin/finish and the GETSTRUCT field
+        // write, returning HeapTupleIsValid(reltup); the `cache lookup failed`
+        // elog(ERROR) for the !HeapTupleIsValid case stays here.
+        if !indexing_seams::set_pg_class_reltoastrelid_inplace::call(&class_rel, relOid, toast_relid)?
+        {
+            // elog(ERROR, "cache lookup failed for relation %u", relOid);
+            return Err(PgError::error(format!(
+                "cache lookup failed for relation {relOid}"
+            )));
+        }
     }
 
     table::table_close(class_rel, RowExclusiveLock)?;
