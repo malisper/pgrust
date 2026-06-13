@@ -55,3 +55,51 @@ seam_core::seam!(
         b: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `bms_del_member(a, x)` (bitmapset.c): remove `x` from the set,
+    /// recycling the input (the C clears the bit in place and returns `a`,
+    /// shrinking `nwords` if trailing words become zero; a `None` input is
+    /// the C NULL set, returned unchanged). No allocation, so infallible.
+    pub fn bms_del_member<'mcx>(
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        x: i32,
+    ) -> Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `bms_num_members(a)` (bitmapset.c): number of members in the set; 0 for
+    /// the C NULL set (`None`).
+    pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_next_member(a, prevbit)` (bitmapset.c): return the smallest member
+    /// strictly greater than `prevbit` (start with `prevbit = -1`), or -2 when
+    /// there are no more.
+    pub fn bms_next_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_copy(a)` (bitmapset.c): allocate a fresh copy of the set in `mcx`
+    /// (`None` in is the C NULL set, copied as `None`). Fallible on OOM.
+    pub fn bms_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_overlap(a, b)` (bitmapset.c): do the two sets have any common
+    /// member? `None` (NULL) sets never overlap. Infallible.
+    pub fn bms_overlap(
+        a: Option<&types_nodes::Bitmapset<'_>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_free(a)` (bitmapset.c): release the set's storage (the owned model
+    /// drops the box; declared for call-site parity — a `None` is a no-op).
+    pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
+);
