@@ -136,7 +136,7 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
     // Assert(startup_data_len == sizeof(BackendStartupData));
     let bsdata: BackendStartupData = match startup_data {
         StartupData::Backend(b) => *b,
-        StartupData::None => {
+        StartupData::None | StartupData::BgWorker(_) => {
             unreachable!("BackendMain requires a BackendStartupData payload (StartupData::Backend)")
         }
     };

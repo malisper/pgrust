@@ -231,3 +231,12 @@ seam_core::seam!(
     /// seam returns the rendered `String` (the detector appends it itself).
     pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> alloc::string::String
 );
+
+seam_core::seam!(
+    /// `CheckRelationOidLockedByMe(relid, lockmode, orstronger)` (lmgr.c).
+    pub fn check_relation_oid_locked_by_me(
+        relid: Oid,
+        lockmode: LOCKMODE,
+        orstronger: bool,
+    ) -> bool
+);

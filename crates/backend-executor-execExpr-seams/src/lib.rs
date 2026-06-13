@@ -6,6 +6,179 @@
 
 #![allow(non_snake_case)]
 
+use types_nodes::execexpr::SubPlanState;
+use types_nodes::EStateData;
+
+/// Which of a `SubPlanState`'s two projections an operation targets: `projLeft`
+/// (lefthand exprs) or `projRight` (subselect output). The compiled
+/// `ProjectionInfo`s and their result slots are owned by execExpr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionKind {
+    /// `node->projLeft`.
+    Left,
+    /// `node->projRight`.
+    Right,
+}
+
+/// One read of a projection-result-slot attribute: its `Datum` plus is-null.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotAttr {
+    pub value: types_datum::Datum,
+    pub isnull: bool,
+}
+
+/// Classification of `subplan->testexpr` for the hashed-subplan init path
+/// (`IsA(testexpr, OpExpr)` / `is_andclause(testexpr)` / else). The `ncols`
+/// in the and-clause arm is `list_length(BoolExpr.args)`.
+#[derive(Clone, Copy, Debug)]
+pub enum CombiningTestExpr {
+    /// `IsA(subplan->testexpr, OpExpr)` — one combining operator.
+    SingleOp,
+    /// `is_andclause(subplan->testexpr)` — `ncols` combining operators.
+    AndClause { ncols: i32 },
+    /// Anything else — `elog(ERROR, "unrecognized testexpr type: %d")`; the
+    /// owner carries the C `nodeTag(testexpr)`.
+    Unrecognized { node_tag: i32 },
+}
+
+/// Resolved per-column combining-operator info (one `oplist` entry), used to
+/// fill the hash control arrays in `ExecInitSubPlan`.
+#[derive(Clone, Copy, Debug)]
+pub struct CombiningOpInfo {
+    /// `opexpr->opfuncid` — the (potentially cross-type) equality function.
+    pub opfuncid: types_core::Oid,
+    /// `get_opcode(rhs_eq_oper)` — RHS-type equality function.
+    pub rhs_eq_funcoid: types_core::Oid,
+    /// `left_hashfn` from `get_op_hash_functions`.
+    pub left_hashfn: types_core::Oid,
+    /// `right_hashfn` from `get_op_hash_functions`.
+    pub right_hashfn: types_core::Oid,
+    /// `opexpr->inputcollid` — input collation.
+    pub inputcollid: types_core::Oid,
+}
+
+seam_core::seam!(
+    /// `sstate->testexpr = ExecInitExpr((Expr *) subplan->testexpr, parent)`
+    /// (nodeSubplan.c:833): compile the combining expression into the node's
+    /// `testexpr` `ExprState`. The owner reads `subplan->testexpr` and the
+    /// `parent` plan-state off `node` and the estate. Fallible.
+    pub fn sub_init_testexpr<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->projLeft->pi_exprContext = econtext` then
+    /// `ExecProject(node->projLeft)` / `ExecProject(node->projRight)`
+    /// (nodeSubplan.c): project the named side using the supplied expression
+    /// context (id into the EState pool) and store the result in that
+    /// projection's output slot. The `Right` projection uses `node`'s own
+    /// `innerecontext` (set at init), so `econtext` is ignored there. Fallible.
+    pub fn sub_exec_project<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        econtext: types_nodes::EcxtId,
+        which: ProjectionKind,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecClearTuple(node->proj*->pi_state.resultslot)` (executor.h): clear
+    /// the named projection's result slot. Infallible per the C (no allocation).
+    pub fn sub_clear_proj_result_slot<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        which: ProjectionKind,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `slot->tts_tupleDescriptor->natts` of the named projection's result
+    /// slot (`slotAllNulls`/`slotNoNulls`). Infallible.
+    pub fn proj_result_slot_natts(
+        node: &SubPlanState<'_>,
+        estate: &EStateData<'_>,
+        which: ProjectionKind,
+    ) -> i32
+);
+
+seam_core::seam!(
+    /// `slot_attisnull(slot, attnum)` over the named projection's result slot
+    /// (`slotAllNulls`/`slotNoNulls`). Fallible (`slot_getsomeattrs` ereport).
+    pub fn proj_result_slot_attisnull<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        which: ProjectionKind,
+        attnum: i32,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `slot_getattr(node->projLeft result slot, att, &isnull)` — read column
+    /// `att` of the lefthand projection slot (`execTuplesUnequal` `slot1`).
+    /// Fallible.
+    pub fn proj_left_slot_getattr<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        att: types_core::AttrNumber,
+    ) -> types_error::PgResult<SlotAttr>
+);
+
+seam_core::seam!(
+    /// `ExecEvalExprSwitchContext(node->testexpr, econtext, &rownull)`
+    /// (nodeSubplan.c:399): evaluate the combining expression over the econtext
+    /// (id into the EState pool), returning `(result, isNull)`. Fallible.
+    pub fn eval_testexpr_switch_context<'mcx>(
+        node: &SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        econtext: types_nodes::EcxtId,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `classify` `subplan->testexpr` for the hashed-init path: `IsA(OpExpr)` /
+    /// `is_andclause` / else (nodeSubplan.c:922-938). Infallible (pure node-tag
+    /// inspection; the error arm is reported by the caller).
+    pub fn classify_testexpr(node: &SubPlanState<'_>) -> CombiningTestExpr
+);
+
+seam_core::seam!(
+    /// Resolve combining-operator `idx` of the testexpr's `oplist`
+    /// (nodeSubplan.c:980-1001): look up `opfuncid`, the cross-type RHS equality
+    /// op (`get_compatible_hash_operators` + `get_opcode`), the hash functions
+    /// (`get_op_hash_functions`), and `inputcollid`. Fallible: the catalog
+    /// `elog(ERROR)` arms ("could not find compatible hash operator", "could not
+    /// find hash function") propagate.
+    pub fn resolve_combining_op(
+        node: &SubPlanState<'_>,
+        idx: usize,
+    ) -> types_error::PgResult<CombiningOpInfo>
+);
+
+seam_core::seam!(
+    /// Build the lefthand/righthand tlists from the combining `oplist` (one
+    /// `makeTargetEntry` over each `OpExpr`'s two args, reading the raw
+    /// `subplan->testexpr` Expr tree), create their tupdescs + virtual slots,
+    /// build `projLeft`/`projRight` projections, and build the `lhs_hash_expr` /
+    /// `cur_eq_comp` `ExprState`s (nodeSubplan.c:964-978, 1009-1053). All of this
+    /// is execExpr-owned machinery (`ExecTypeFromTL` / `ExecBuildProjectionInfo`
+    /// / `ExecBuildHash32FromAttrs` / `ExecBuildGroupingEqual`) over the raw
+    /// expression tree. The node's already-filled `numCols` / `keyColIdx` /
+    /// `tab_collations` control fields are read here; `descRight`, the
+    /// projections, and the expr states are written. The two transient fmgr
+    /// arrays the C keeps on the stack are lent by the caller:
+    /// `lhs_hash_funcs` (for `ExecBuildHash32FromAttrs`) and `cross_eq_funcoids`
+    /// (for `ExecBuildGroupingEqual`). All allocation is in the EState's
+    /// contexts; fallible.
+    pub fn build_hash_projections_and_exprs<'mcx>(
+        node: &mut SubPlanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        lhs_hash_funcs: &[types_core::fmgr::FmgrInfo],
+        cross_eq_funcoids: &[types_core::Oid],
+    ) -> types_error::PgResult<()>
+);
+
 seam_core::seam!(
     /// `ExecBuildProjectionInfo(targetList, econtext, slot, parent,
     /// inputDesc)` (execExpr.c), marshaled over the owned tree: the owner
@@ -67,6 +240,33 @@ seam_core::seam!(
     /// evaluation reads the econtext's linked tuples and runs in its per-tuple
     /// memory; fallible on `ereport(ERROR)` from the expression.
     pub fn exec_eval_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `(ItemPointer) DatumGetPointer(ExecEvalExprSwitchContext(state,
+    /// econtext, &isnull))` (executor.h): evaluate a compiled scalar
+    /// TID-yielding `ExprState` in the given expression context and dereference
+    /// the resulting `Datum` as an `ItemPointer`, returning the pointed-to
+    /// `ItemPointerData` and the is-null flag. (The owned model cannot
+    /// reinterpret a `Datum` pointer word itself, so the dereference happens in
+    /// the interpreter that produced it.) Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_tid_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_tuple::heaptuple::ItemPointerData, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` evaluating a
+    /// `tid[]`-yielding `ExprState` (executor.h): return the resulting array
+    /// `Datum` and is-null flag, for the caller to deconstruct via
+    /// `deconstruct_array_builtin`. Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_array_expr_switch_context<'mcx>(
         state: &types_nodes::execexpr::ExprState,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,

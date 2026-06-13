@@ -23,9 +23,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `SubTransGetTopmostTransaction(xid)` (subtrans.c): walk pg_subtrans
-    /// parent links up to the topmost transaction at or below
-    /// `TransactionXmin`. SLRU page reads can `ereport(ERROR)`, carried on
+    /// `SubTransGetTopmostTransaction(xid)` (subtrans.c): walk the
+    /// pg_subtrans parent chain to the top-level xid (bounded by
+    /// `TransactionXmin`). SLRU page reads can `ereport(ERROR)`, carried on
     /// `Err`.
     pub fn sub_trans_get_topmost_transaction(xid: TransactionId) -> PgResult<TransactionId>
 );
