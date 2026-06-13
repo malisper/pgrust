@@ -192,9 +192,15 @@ pub fn checkDataDir() -> PgResult<()> {
         .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
-    // Reset creation modes and mask based on the data directory mode, set the
-    // data_directory_mode GUC (file_perm.c owns the create-mode globals).
-    backend_storage_file_fileperm_seams::set_data_directory_create_perm::call(mode)?;
+    // Reset creation modes and mask based on the mode of the data directory.
+    // SetDataDirectoryCreatePerm only assigns the file_perm.c create-mode
+    // globals; the umask() syscall and the data_directory_mode GUC assignment
+    // (miscinit.c:427-428) are this function's own statements.
+    let (pg_mode_mask, pg_dir_create_mode) =
+        backend_storage_file_fileperm_seams::set_data_directory_create_perm::call(mode);
+
+    unsafe { libc::umask(pg_mode_mask as libc::mode_t) };
+    backend_utils_init_small::globals::set_data_directory_mode(pg_dir_create_mode as i32);
 
     // Check for PG_VERSION.
     ValidatePgVersion(&data_dir)

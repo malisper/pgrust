@@ -14,7 +14,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, FATAL};
 
 use crate::MISCINIT_C;
 
@@ -46,10 +46,14 @@ fn errno_of(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(0)
 }
 
-/// `errcode_for_file_access() + errmsg("...: %m")` analog: render an
-/// `io::Error` into a `PgError`, keeping the OS errno text in the `%m` tail.
+/// `ereport(FATAL, (errcode_for_file_access(), errmsg("...: %m")))` analog:
+/// render an `io::Error` into a FATAL `PgError`, with the file-access SQLSTATE
+/// derived from the errno and the OS errno text kept in the `%m` tail. Every
+/// `CreateLockFile` file-access exit in C is `ereport(FATAL)`, so this is FATAL.
 fn file_err(context: impl Into<String>, e: &std::io::Error) -> PgError {
-    PgError::error(format!("{}: {e}", context.into()))
+    let errno = errno_of(e);
+    PgError::new(FATAL, format!("{}: {e}", context.into()))
+        .with_sqlstate(backend_utils_error::errno::sqlstate_for_file_access(errno))
 }
 
 /// `DataDir` (globals.c).
@@ -197,11 +201,12 @@ pub fn create_lock_file(
         drop(existing);
 
         if buffer.is_empty() {
-            return Err(PgError::error(format!(
-                "lock file \"{filename}\" is empty. Either another server is starting, \
-                 or the lock file is the remnant of a previous server startup crash."
-            ))
-            .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS));
+            return Err(PgError::new(FATAL, format!("lock file \"{filename}\" is empty"))
+                .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                .with_hint(
+                    "Either another server is starting, or the lock file is the remnant \
+                     of a previous server startup crash.",
+                ));
         }
 
         // encoded_pid = atoi(buffer); if pid < 0, it's a postgres, not postmaster.
@@ -209,10 +214,14 @@ pub fn create_lock_file(
         let other_pid: i32 = encoded_pid.unsigned_abs() as i32;
 
         if other_pid <= 0 {
-            return Err(PgError::error(format!(
-                "bogus data in lock file \"{filename}\": \"{}\"",
-                buffer.trim_end_matches('\0')
-            )));
+            // C: elog(FATAL, ...) — FATAL severity, default internal-error SQLSTATE.
+            return Err(PgError::new(
+                FATAL,
+                format!(
+                    "bogus data in lock file \"{filename}\": \"{}\"",
+                    buffer.trim_end_matches('\0')
+                ),
+            ));
         }
 
         // Check to see if the other process still exists. my_pid/my_p_pid/
@@ -236,10 +245,11 @@ pub fn create_lock_file(
             } else {
                 format!("Is another postmaster (PID {other_pid}) using socket file \"{ref_name}\"?")
             };
-            return Err(PgError::error(format!(
-                "lock file \"{filename}\" already exists. {what}"
-            ))
-            .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS));
+            return Err(
+                PgError::new(FATAL, format!("lock file \"{filename}\" already exists"))
+                    .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                    .with_hint(what),
+            );
         }
 
         // No live creator. Check for an orphaned shmem segment. Because
@@ -248,11 +258,16 @@ pub fn create_lock_file(
         if is_dd_lock {
             if let Some((id1, id2)) = scan_shmem_key_line(&buffer) {
                 if backend_port_sysv_shmem_seams::pg_shared_memory_is_in_use::call(id1, id2)? {
-                    return Err(PgError::error(format!(
-                        "pre-existing shared memory block (key {id1}, ID {id2}) is still in use. \
-                         Terminate any old server processes associated with data directory \"{ref_name}\"."
-                    ))
-                    .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS));
+                    return Err(PgError::new(
+                        FATAL,
+                        format!(
+                            "pre-existing shared memory block (key {id1}, ID {id2}) is still in use"
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                    .with_hint(format!(
+                        "Terminate any old server processes associated with data directory \"{ref_name}\"."
+                    )));
                 }
             }
         }
@@ -260,12 +275,12 @@ pub fn create_lock_file(
         // Looks like nobody's home. Unlink the file and try again to create it.
         if let Err(e) = std::fs::remove_file(filename) {
             return Err(file_err(
-                format!(
-                    "could not remove old lock file \"{filename}\". The file seems \
-                     accidentally left over, but it could not be removed. Please remove \
-                     the file by hand and try again."
-                ),
+                format!("could not remove old lock file \"{filename}\""),
                 &e,
+            )
+            .with_hint(
+                "The file seems accidentally left over, but it could not be removed. \
+                 Please remove the file by hand and try again.",
             ));
         }
         ntries += 1;
