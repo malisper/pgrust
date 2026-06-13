@@ -55,6 +55,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `hash_get_num_entries(hashp)` (dynahash.c) — number of entries currently
+    /// in the table. Infallible.
+    pub fn hash_get_num_entries(hashp: *mut HTAB) -> i64
+);
+
+seam_core::seam!(
     /// `hash_seq_init(status, hashp)` (dynahash.c) — start a sequential scan.
     pub fn hash_seq_init(status: &mut HASH_SEQ_STATUS, hashp: *mut HTAB)
 );

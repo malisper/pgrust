@@ -114,6 +114,7 @@ pub fn init_all() {
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
+    backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();

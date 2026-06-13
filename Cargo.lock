@@ -6640,6 +6640,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-waitevent"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-activity-waitevent-seams"
 version = "0.0.0"
 dependencies = [
@@ -9109,6 +9128,7 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
  "backend-utils-activity-small",
+ "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
