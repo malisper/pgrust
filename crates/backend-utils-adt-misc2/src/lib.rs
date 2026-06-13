@@ -46,4 +46,59 @@ pub mod scalars;
 pub fn init_seams() {
     backend_utils_adt_misc2_seams::eoh_get_flat_size::set(expandeddatum::eoh_get_flat_size);
     backend_utils_adt_misc2_seams::eoh_flatten_into::set(expandeddatum::eoh_flatten_into);
+
+    // regproc.c printable-name / name-parsing helpers (owned seam crate
+    // `backend-utils-adt-regproc-seams`). `format_procedure`/`format_operator`
+    // match the owner signature exactly; the `reg*in` / name-list seams need a
+    // thin shim (scratch context + hard-error/soft folding) below.
+    backend_utils_adt_regproc_seams::format_procedure::set(regproc::format_procedure);
+    backend_utils_adt_regproc_seams::format_operator::set(regproc::format_operator);
+    backend_utils_adt_regproc_seams::regprocedurein::set(seam_regprocedurein);
+    backend_utils_adt_regproc_seams::regtypein::set(seam_regtypein);
+    backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(
+        seam_string_to_qualified_name_list,
+    );
+}
+
+/// Seam shim: the `regprocedurein(signature)` seam is the hard-error
+/// `DirectFunctionCall1` shape (no soft-error context), and folds the owner's
+/// `Ok(None)` "unmatched but valid signature" into `InvalidOid`. The owner
+/// allocates only transient lookup scratch, so a fresh context suffices.
+fn seam_regprocedurein(signature: &str) -> types_error::PgResult<types_core::Oid> {
+    let scratch = mcx::MemoryContext::new("regprocedurein seam");
+    Ok(regproc::regprocedurein(scratch.mcx(), signature, None)?.unwrap_or(types_core::InvalidOid))
+}
+
+/// Seam shim: `regtypein(typename)`, same hard-error / `Ok(None)`->`InvalidOid`
+/// folding as [`seam_regprocedurein`].
+fn seam_regtypein(typename: &str) -> types_error::PgResult<types_core::Oid> {
+    let scratch = mcx::MemoryContext::new("regtypein seam");
+    Ok(regproc::regtypein(scratch.mcx(), typename, None)?.unwrap_or(types_core::InvalidOid))
+}
+
+/// Seam shim: `stringToQualifiedNameList(string, escontext)`. `soft = true`
+/// supplies a soft-error context (C: an `ErrorSaveContext`, mapping bad syntax
+/// to `Ok(None)`); `soft = false` passes `None` (hard error). The owner's
+/// `Vec<String>` is copied into the caller's `mcx` as `PgVec<PgString>`.
+fn seam_string_to_qualified_name_list<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    string: &str,
+    soft: bool,
+) -> types_error::PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>> {
+    let mut escontext = if soft {
+        Some(types_error::SoftErrorContext::new(true))
+    } else {
+        None
+    };
+    let parts = regproc::stringToQualifiedNameList(mcx, string, escontext.as_mut())?;
+    match parts {
+        None => Ok(None),
+        Some(names) => {
+            let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+            for n in &names {
+                out.push(mcx::PgString::from_str_in(n, mcx)?);
+            }
+            Ok(Some(out))
+        }
+    }
 }

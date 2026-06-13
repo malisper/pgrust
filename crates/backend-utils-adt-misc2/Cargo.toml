@@ -34,10 +34,12 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
-# Inward seam crate this unit owns (expandeddatum EOH surface consumed by
-# backend-access-common-heaptuple). The keystone installs these from
+# Inward seam crates this unit owns. The expandeddatum EOH surface (consumed
+# by backend-access-common-heaptuple) and the regproc.c printable-name /
+# name-parsing helpers (consumed by funcapi etc.); both installed from
 # init_seams().
 backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
 
 # Outward seam crate for the per-type ExpandedObjectMethods table that the
 # keystone EOH_get_flat_size / EOH_flatten_into dispatch through. Owned by the

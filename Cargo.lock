@@ -7091,6 +7091,7 @@ dependencies = [
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc2-seams",
  "backend-utils-adt-oid-seams",
+ "backend-utils-adt-regproc-seams",
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
