@@ -274,6 +274,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, typid)` projected to the `Form_pg_type`
+    /// fields `format_type_extended` reads (`typelem`, `typsubscript`,
+    /// `typstorage`, `typmodout`, `typnamespace`, `typname`); `Ok(None)` on a
+    /// cache miss (the caller raises its own `cache lookup failed`, as in C).
+    pub fn type_form<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<types_format_type::TypeFormInfo<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(COLLOID, collid)` projected to
     /// `(collnamespace, collname)`; `Ok(None)` on cache miss.
     pub fn collation_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
