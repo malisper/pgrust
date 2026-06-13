@@ -37,6 +37,7 @@ pub const T_TableFuncScan: NodeTag = NodeTag(350);
 pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
 pub const T_Material: NodeTag = NodeTag(360);
@@ -82,6 +83,8 @@ pub enum Node<'mcx> {
     HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
     /// `T_Hash` — the inner child of a HashJoin.
     Hash(crate::nodehashjoin::Hash<'mcx>),
+    /// `T_TidRangeScan`.
+    TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -92,6 +95,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeJoin(_) => T_MergeJoin,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
+            Node::TidRangeScan(_) => T_TidRangeScan,
         }
     }
 
@@ -102,6 +106,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeJoin(m) => &m.join.plan,
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
+            Node::TidRangeScan(t) => &t.scan.plan,
         }
     }
 
@@ -118,6 +123,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
+            Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
         }
     }
 }

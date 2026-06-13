@@ -2172,6 +2172,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeTidrangescan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeTidrangescan-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tidrange",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeTidrangescan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tidrange",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
@@ -4831,6 +4859,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeTidrangescan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -5240,6 +5269,19 @@ dependencies = [
  "types-rel",
  "types-snapshot",
  "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "types-tidrange"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-tableam",
  "types-tuple",
 ]
 

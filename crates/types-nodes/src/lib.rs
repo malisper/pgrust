@@ -27,6 +27,7 @@ pub mod nodehashjoin;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
+pub mod nodetidrangescan;
 pub mod parsenodes;
 pub mod pathnodes;
 pub mod planstate;
