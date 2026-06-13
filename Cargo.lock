@@ -131,6 +131,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-relation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-relation-seams"
 version = "0.0.0"
 dependencies = [
@@ -7852,6 +7873,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
