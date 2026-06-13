@@ -436,7 +436,7 @@ fn build_ps_title() {
     });
 
     backend_utils_misc_more_seams::init_ps_display::call(Some(&ps_data));
-    backend_utils_misc_ps_status_seams::set_ps_display::call("initializing");
+    backend_utils_misc_ps_status_seams::set_ps_display::call("initializing".to_string());
 }
 
 // ===========================================================================

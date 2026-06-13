@@ -10,9 +10,9 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_core::XLogRecPtr;
+use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
-use types_wal::WalLevel;
+use types_wal::{ArchiveMode, WalLevel};
 
 seam_core::seam!(
     /// `xlog_redo(record)` (xlog.c) — WAL redo for this resource manager's
@@ -141,4 +141,35 @@ seam_core::seam!(
     /// standby, read from the control file's last checkpoint. Shared-state
     /// read; infallible.
     pub fn GetActiveWalLevelOnStandby() -> types_logical::WalLevel
+);
+
+seam_core::seam!(
+    /// `wal_segment_size` (xlog.c GUC) — bytes per WAL segment file.
+    pub fn wal_segment_size() -> i32
+);
+
+seam_core::seam!(
+    /// `GetSystemIdentifier()` (xlog.c) — the cluster's 64-bit system id.
+    pub fn get_system_identifier() -> u64
+);
+
+seam_core::seam!(
+    /// `XLogArchiveMode` (xlog.c GUC) — the `archive_mode` setting.
+    pub fn xlog_archive_mode() -> ArchiveMode
+);
+
+seam_core::seam!(
+    /// `XLogFileInit(segno, tli)` (xlog.c) — create/open the given WAL segment
+    /// file, returning the fd. `ereport(ERROR)` on failure.
+    pub fn xlog_file_init(segno: XLogSegNo, tli: TimeLineID) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `issue_xlog_fsync(fd, segno, tli)` (xlog.c) — fsync the WAL segment;
+    /// `ereport` on failure.
+    pub fn issue_xlog_fsync(
+        fd: i32,
+        segno: XLogSegNo,
+        tli: TimeLineID
+    ) -> types_error::PgResult<()>
 );

@@ -18,7 +18,7 @@ seam_core::seam!(
     /// `set_ps_display(activity)` (`ps_status.c`) — set the variable
     /// "activity" portion of the process title. The implementation copies the
     /// string. Infallible.
-    pub fn set_ps_display(activity: &str)
+    pub fn set_ps_display(activity: String)
 );
 
 seam_core::seam!(

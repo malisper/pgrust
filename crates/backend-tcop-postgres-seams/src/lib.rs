@@ -42,3 +42,10 @@ seam_core::seam!(
     /// `->user_name`, `None` mirroring a C NULL.
     pub fn postgres_main(dbname: Option<&str>, username: Option<&str>) -> !
 );
+
+seam_core::seam!(
+    /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the SIGTERM handler: set
+    /// `ShutdownRequestPending`/`InterruptPending` and the latch.
+    /// Async-signal-safe and infallible; installed as the SIGTERM handler.
+    pub fn die(postgres_signal_arg: i32)
+);

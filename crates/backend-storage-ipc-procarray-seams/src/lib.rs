@@ -166,3 +166,9 @@ seam_core::seam!(
     /// performed while holding `ProcArrayLock`.
     pub fn mark_proc_in_logical_decoding()
 );
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);
