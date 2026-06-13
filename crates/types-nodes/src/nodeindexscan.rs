@@ -90,6 +90,65 @@ impl Plan<'_> {
     }
 }
 
+/// `Scan` (nodes/plannodes.h) — the abstract base every scan plan node embeds:
+///
+/// ```c
+/// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
+/// ```
+#[derive(Debug, Default)]
+pub struct Scan<'mcx> {
+    /// `Plan plan` — the abstract plan-node base.
+    pub plan: Plan<'mcx>,
+    /// `Index scanrelid` — relid is index into the range table.
+    pub scanrelid: types_core::primitive::Index,
+}
+
+impl Scan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
+        Ok(Scan {
+            plan: self.plan.clone_in(mcx)?,
+            scanrelid: self.scanrelid,
+        })
+    }
+}
+
+/// `TidScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct TidScan { Scan scan; List *tidquals; } TidScan;
+/// ```
+#[derive(Debug, Default)]
+pub struct TidScan<'mcx> {
+    /// `Scan scan` — the abstract scan base.
+    pub scan: Scan<'mcx>,
+    /// `List *tidquals` — qual(s) involving CTID = something, or CTID = ANY
+    /// (...), or CURRENT OF cursor. `None` = the C `NIL`.
+    pub tidquals: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+}
+
+impl TidScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TidScan<'b>> {
+        let tidquals = match &self.tidquals {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(TidScan {
+            scan: self.scan.clone_in(mcx)?,
+            tidquals,
+        })
+    }
+}
+
 /// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlannedStmt<'mcx> {

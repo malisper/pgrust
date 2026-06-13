@@ -36,6 +36,10 @@ pub const TTS_FLAG_FIXED: u16 = 1 << 4;
 pub struct TupleTableSlot {
     /// `uint16 tts_flags` — `TTS_FLAG_*` boolean states of this slot.
     pub tts_flags: u16,
+    /// `ItemPointerData tts_tid` — TID of the tuple stored in the slot (the
+    /// row's `ctid`; valid only when the slot holds a physical tuple). The
+    /// TID-scan `TidRecheck` reads this to confirm a tuple's identity.
+    pub tts_tid: types_tuple::heaptuple::ItemPointerData,
     /// `const TupleTableSlotOps *const tts_ops` — slot implementation
     /// identity (the owned token for the `&TTSOps*` singleton pointer).
     pub tts_ops: TupleSlotKind,
@@ -47,6 +51,7 @@ impl Default for TupleTableSlot {
     fn default() -> Self {
         TupleTableSlot {
             tts_flags: TTS_FLAG_EMPTY,
+            tts_tid: types_tuple::heaptuple::ItemPointerData::default(),
             tts_ops: TupleSlotKind::Virtual,
         }
     }

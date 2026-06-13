@@ -268,6 +268,9 @@ pub struct PlanStateData<'mcx> {
 pub struct ScanStateData<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
+    /// `Relation ss_currentRelation` — the relation being scanned (an open
+    /// handle owned here; `None` until `ExecOpenScanRelation` opens it).
+    pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
@@ -281,6 +284,15 @@ pub struct ScanStateData<'mcx> {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
+    /// `Snapshot es_snapshot` — time qual to use (`None` = the C
+    /// `InvalidSnapshot`/`SnapshotAny`). Read by the scan nodes that start a
+    /// snapshot-bound scan (`table_beginscan_tid`,
+    /// `table_tuple_fetch_row_version`).
+    pub es_snapshot: Option<types_snapshot::SnapshotData>,
+    /// `struct EPQState *es_epq_active` — non-NULL while an EvalPlanQual
+    /// recheck is in progress. Modeled as a presence flag until the
+    /// EvalPlanQual owner (execMain.c) lands; `false` = the C `NULL`.
+    pub es_epq_active: bool,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
@@ -370,6 +382,10 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
+            // es_snapshot = InvalidSnapshot;
+            es_snapshot: None,
+            // es_epq_active = NULL;
+            es_epq_active: false,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,

@@ -147,6 +147,31 @@ pub struct TableAmRoutine {
         all_dead: Option<&mut bool>,
     ) -> PgResult<bool>,
 
+    /// `scan_end(scan)` — release resources and deallocate the scan
+    /// descriptor.
+    pub scan_end: fn(scan: TableScanDesc<'_>) -> PgResult<()>,
+
+    /// `scan_rescan(scan, key, set_params, allow_strat, allow_sync,
+    /// allow_pagemode)` — restart a relation scan, optionally with new params.
+    pub scan_rescan: fn(
+        scan: &mut TableScanDescData<'_>,
+        key: Option<&[ScanKeyData]>,
+        set_params: bool,
+        allow_strat: bool,
+        allow_sync: bool,
+        allow_pagemode: bool,
+    ) -> PgResult<()>,
+
+    /// `tuple_fetch_row_version(rel, tid, snapshot, slot)` — fetch the tuple at
+    /// `tid` into `slot`, after a visibility test against `snapshot`; returns
+    /// true if a visible tuple was found.
+    pub tuple_fetch_row_version: fn(
+        rel: &Relation<'_>,
+        tid: &ItemPointerData,
+        snapshot: &Snapshot,
+        slot: &mut TupleTableSlot,
+    ) -> PgResult<bool>,
+
     /// `tuple_tid_valid(scan, tid)` — is `tid` potentially valid (within the
     /// relation's current size)?
     pub tuple_tid_valid:

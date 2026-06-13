@@ -49,6 +49,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): initialize the node's
+    /// result tuple type (`ps_ResultTupleDesc`) from the plan node's target
+    /// list (without creating the result slot). Allocates the tuple descriptor
+    /// in the per-query context, so fallible on OOM.
+    pub fn exec_init_result_type_tl<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h): copy the source slot's
     /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). The
     /// copy allocates in `mcx`, the destination slot's memory context (C:

@@ -27,6 +27,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatumGetArrayTypeP(arraydatum)` then
+    /// `deconstruct_array_builtin(itemarray, TIDOID, &ipdatums, &ipnulls,
+    /// &ndatums)` (arrayfuncs.c): detoast the `tid[]` array `Datum` and split
+    /// it into its per-element `(ItemPointerData, isnull)` pairs, in order
+    /// (`ipdatums[i]` reinterpreted via `DatumGetPointer` as an
+    /// `ItemPointer`). The C result arrays are palloc'd in the current context
+    /// (and pfree'd by the caller); the owned model returns them in `mcx`.
+    /// Fallible on `ereport(ERROR)` (malformed array).
+    pub fn deconstruct_tid_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<PgVec<'mcx, (types_tuple::heaptuple::ItemPointerData, bool)>>
+);
+
+seam_core::seam!(
     /// `accumArrayResult`/`makeArrayResult` over `TEXTOID` (arrayfuncs.c):
     /// build a `text[]` array `Datum` from the given element strings. An empty
     /// input yields the C `(Datum) 0` (no array), represented as `Datum::null`.

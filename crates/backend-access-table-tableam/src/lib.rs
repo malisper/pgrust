@@ -35,7 +35,7 @@ use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
-    SO_TEMP_SNAPSHOT, SO_TYPE_SEQSCAN,
+    SO_TEMP_SNAPSHOT, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -402,6 +402,63 @@ pub fn table_tuple_get_latest_tid(
     }
 
     (tableam.tuple_get_latest_tid)(scan, tid)
+}
+
+// ===========================================================================
+// Table scan setup/teardown wrappers (tableam.h inline)
+// ===========================================================================
+
+/// `table_beginscan_tid(rel, snapshot)` (tableam.h inline) — alternative entry
+/// point for setting up a `TableScanDesc` for a TID scan.
+pub fn table_beginscan_tid<'mcx>(
+    rel: &Relation<'mcx>,
+    snapshot: Snapshot,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let flags = SO_TYPE_TIDSCAN;
+    (am(rel).scan_begin)(rel, snapshot, 0, Vec::new(), None, flags)
+}
+
+/// `table_endscan(scan)` (tableam.h inline) — end a relation scan.
+pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_end)(scan)
+}
+
+/// `table_rescan(scan, key)` (tableam.h inline) — restart a relation scan.
+pub fn table_rescan(scan: &mut TableScanDescData<'_>, key: Option<&[ScanKeyData]>) -> PgResult<()> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_rescan)(scan, key, false, false, false, false)
+}
+
+/// `table_tuple_tid_valid(scan, tid)` (tableam.h inline) — verify `tid` is a
+/// potentially valid tuple identifier.
+pub fn table_tuple_tid_valid(
+    scan: &mut TableScanDescData<'_>,
+    tid: &ItemPointerData,
+) -> PgResult<bool> {
+    let routine = am(&scan.rs_rd);
+    (routine.tuple_tid_valid)(scan, tid)
+}
+
+/// `table_tuple_fetch_row_version(rel, tid, snapshot, slot)` (tableam.h inline)
+/// — fetch the tuple at `tid` into `slot`, after a visibility test against
+/// `snapshot`.
+pub fn table_tuple_fetch_row_version(
+    rel: &Relation<'_>,
+    tid: &ItemPointerData,
+    snapshot: &Snapshot,
+    slot: &mut TupleTableSlot,
+) -> PgResult<bool> {
+    // We don't expect direct calls to table_tuple_fetch_row_version with valid
+    // CheckXidAlive for catalog or regular tables. See detailed comments in
+    // xact.c where these variables are declared.
+    if unexpected_during_logical_decoding() {
+        return Err(elog_error(
+            "unexpected table_tuple_fetch_row_version call during logical decoding",
+        ));
+    }
+
+    (am(rel).tuple_fetch_row_version)(rel, tid, snapshot, slot)
 }
 
 // ===========================================================================

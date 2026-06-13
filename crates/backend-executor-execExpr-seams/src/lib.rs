@@ -61,6 +61,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `(ItemPointer) DatumGetPointer(ExecEvalExprSwitchContext(state,
+    /// econtext, &isnull))` (executor.h): evaluate a compiled scalar
+    /// TID-yielding `ExprState` in the given expression context and dereference
+    /// the resulting `Datum` as an `ItemPointer`, returning the pointed-to
+    /// `ItemPointerData` and the is-null flag. (The owned model cannot
+    /// reinterpret a `Datum` pointer word itself, so the dereference happens in
+    /// the interpreter that produced it.) Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_tid_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_tuple::heaptuple::ItemPointerData, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` evaluating a
+    /// `tid[]`-yielding `ExprState` (executor.h): return the resulting array
+    /// `Datum` and is-null flag, for the caller to deconstruct via
+    /// `deconstruct_array_builtin`. Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_array_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
     /// `ExecQual(state, econtext)` (executor.h): evaluate a compiled boolean
     /// qual `ExprState` over the econtext (id into the EState pool), returning
     /// whether it passed (a `NULL` state is always-true, handled by the

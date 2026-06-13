@@ -15,6 +15,7 @@ types-scan = { path = "../types-scan" }
 types-datum = { path = "../types-datum" }
 types-sortsupport = { path = "../types-sortsupport" }
 types-rel = { path = "../types-rel" }
+types-snapshot = { path = "../types-snapshot" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 types-storage = { path = "../types-storage" }

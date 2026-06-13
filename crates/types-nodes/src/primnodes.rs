@@ -43,6 +43,30 @@ pub struct OpExpr {
     pub args: Vec<Expr>,
 }
 
+/// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
+/// trimmed to the fields ports consume (the TID-scan node reads only `args`,
+/// via `linitial`/`lsecond`).
+#[derive(Clone, Debug)]
+pub struct ScalarArrayOpExpr {
+    /// `Oid opno` — PG_OPERATOR OID of the operator.
+    pub opno: Oid,
+    /// `bool useOr` — true for ANY, false for ALL.
+    pub useOr: bool,
+    /// `List *args` — the scalar and array operands.
+    pub args: Vec<Expr>,
+}
+
+/// `CurrentOfExpr` (nodes/primnodes.h) — `WHERE CURRENT OF cursor`, trimmed.
+#[derive(Clone, Debug, Default)]
+pub struct CurrentOfExpr {
+    /// `Index cvarno` — RT index of target relation.
+    pub cvarno: Index,
+    /// `char *cursor_name` — name of referenced cursor, or `None` (C NULL).
+    pub cursor_name: Option<alloc::string::String>,
+    /// `int cursor_param` — refcursor parameter number, or 0.
+    pub cursor_param: i32,
+}
+
 /// Expression-tree node (`Expr *` in C). The `NodeTag` is the enum
 /// discriminant (`IsA(node, Var)` is a match on the variant). Variants are
 /// added as units consuming them are ported.
@@ -55,6 +79,10 @@ pub enum Expr {
     Const(Const),
     /// `T_OpExpr`.
     OpExpr(OpExpr),
+    /// `T_ScalarArrayOpExpr`.
+    ScalarArrayOpExpr(ScalarArrayOpExpr),
+    /// `T_CurrentOfExpr`.
+    CurrentOfExpr(CurrentOfExpr),
 }
 
 /// `TargetEntry` (nodes/primnodes.h), trimmed.

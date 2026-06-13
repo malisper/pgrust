@@ -24,6 +24,40 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+/// Outcome of the EvalPlanQual branch of `ExecScanFetch` (execScan.h).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpqScanFetch {
+    /// The EPQ branch did not apply for this rel (the `scanrelid == 0` /
+    /// not-a-pushed-join-descendant fall-through): run the node's access
+    /// method instead.
+    FallThrough,
+    /// The EPQ branch produced a result: return this slot (the node's scan
+    /// slot id), or `None` for the C `NULL` (empty result).
+    Result(Option<types_nodes::SlotId>),
+    /// The EPQ branch wants the caller to apply its access-method recheck to
+    /// the node's scan slot, then (if the recheck fails) clear the slot; the
+    /// `bool` mirrors the C "would not be returned by scan" clear flag. The
+    /// caller returns the scan slot id when recheck passes, else the cleared
+    /// slot per the embedded directive.
+    Recheck { clear_on_fail: bool },
+}
+
+seam_core::seam!(
+    /// The EvalPlanQual branch of `ExecScanFetch` (execScan.h): with an active
+    /// `EPQState` (`estate.es_epq_active`), decide what the scan should return
+    /// for this rel (`scanrelid`) — the replacement/test tuple, an empty slot,
+    /// or a fall-through to the access method — performing the
+    /// `relsubs_done`/`relsubs_slot`/`relsubs_rowmark` bookkeeping and any
+    /// rowmark fetch. Returns an [`EpqScanFetch`] directive; the access-method
+    /// recheck stays with the calling node (it owns `recheckMtd`). Fallible on
+    /// `ereport(ERROR)`.
+    pub fn exec_scan_fetch_epq<'mcx>(
+        scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        scanrelid: types_core::primitive::Index,
+    ) -> types_error::PgResult<EpqScanFetch>
+);
+
 seam_core::seam!(
     /// `ExecBuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
     /// maxfieldlen)` (execMain.c): build a "(col, ...) = (val, ...)"

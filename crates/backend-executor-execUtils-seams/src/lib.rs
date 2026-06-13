@@ -41,6 +41,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecOpenScanRelation(estate, scanrelid, eflags)` (execUtils.c): open
+    /// the relation named by the `scanrelid`-th range-table entry (via the
+    /// EState's already-opened `es_relations`), checking scannability, and
+    /// store the open handle in `scanstate.ss_currentRelation`. Fallible on
+    /// `ereport(ERROR)` (unscannable matview).
+    pub fn exec_open_scan_relation<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
+        scanrelid: types_core::primitive::Index,
+        eflags: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResetExprContext(econtext)` (executor.h): reset a node's per-tuple
+    /// expression-evaluation memory context (`MemoryContextReset` of the
+    /// econtext's per-tuple child), freeing the previous tuple cycle's
+    /// expression storage. `econtext` is an id into the EState pool.
+    pub fn reset_expr_context<'mcx>(
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecAssignProjectionInfo(planstate, inputDesc)` (execUtils.c): build
     /// the node's `ps_ProjInfo` from its result slot and target list (using the
     /// node's `ps_ResultTupleSlot`/`ps_ExprContext`). The owned model lends the

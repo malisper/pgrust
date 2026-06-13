@@ -1310,6 +1310,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execCurrent-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execExpr-seams"
 version = "0.0.0"
 dependencies = [
@@ -1411,6 +1422,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execScan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
@@ -1460,6 +1481,7 @@ name = "backend-executor-execUtils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -1667,6 +1689,29 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeTidscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-tableam",
+ "backend-executor-execCurrent-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2810,6 +2855,7 @@ dependencies = [
  "seam-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3549,6 +3595,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeTidscan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -3737,6 +3784,7 @@ dependencies = [
  "types-error",
  "types-rel",
  "types-scan",
+ "types-snapshot",
  "types-sortsupport",
  "types-storage",
  "types-tuple",
