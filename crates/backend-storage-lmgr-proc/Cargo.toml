@@ -19,3 +19,11 @@ types-stringinfo = { path = "../types-stringinfo" }
 
 # Inward seams this unit owns and installs from init_seams().
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+
+# Outward seams: neighbors this unit calls into (panic until each owner lands).
+# globals.c (MaxBackends/MaxConnections/max_prepared_xacts/...), shmem.c
+# (add_size/mul_size), and lwlock.c (LWLockInitialize for each PGPROC's
+# fpInfoLock).
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }

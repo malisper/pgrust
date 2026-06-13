@@ -889,3 +889,106 @@ pub struct PROC_HDR {
     /// process waits for pin on, or -1.
     pub startupBufferPinWaitBufId: i32,
 }
+
+impl PGPROC {
+    /// A fully zero-initialized `PGPROC`, mirroring the `MemSet(ptr, 0,
+    /// requestSize)` that `InitProcGlobal` performs over the freshly-carved
+    /// `PGPROC` array before it fills in individual fields. Every numeric
+    /// field is 0, every bool `false`, every owning pointer (`procgloballist`,
+    /// `sem`, `waitLock`, `waitProcLock`, `lockGroupLeader`) `NULL`/`None`, the
+    /// embedded atomics 0, and the embedded `proclist_node`/`dlist_node`/
+    /// `dlist_head` links zeroed (`next == prev == 0`, exactly as C leaves them
+    /// after the MemSet).
+    pub fn new_zeroed() -> Self {
+        Self {
+            links: dlist_node::new(),
+            procgloballist: None,
+            sem: None,
+            waitStatus: PROC_WAIT_STATUS_OK,
+            procLatch: Latch {
+                is_set: AtomicI32::new(0),
+                maybe_sleeping: AtomicI32::new(0),
+                is_shared: false,
+                owner_pid: 0,
+            },
+            xid: 0,
+            xmin: 0,
+            pid: 0,
+            pgxactoff: 0,
+            vxid: PGProcVxid {
+                procNumber: 0,
+                lxid: 0,
+            },
+            databaseId: 0,
+            roleId: 0,
+            tempNamespaceId: 0,
+            isRegularBackend: false,
+            recoveryConflictPending: false,
+            lwWaiting: 0,
+            lwWaitMode: 0,
+            lwWaitLink: proclist_node::default(),
+            cvWaitLink: proclist_node::default(),
+            waitLock: None,
+            waitProcLock: None,
+            waitLockMode: 0,
+            heldLocks: 0,
+            waitStart: pg_atomic_uint64::new(0),
+            delayChkptFlags: 0,
+            statusFlags: 0,
+            waitLSN: 0,
+            syncRepState: 0,
+            syncRepLinks: dlist_node::new(),
+            myProcLocks: core::array::from_fn(|_| dlist_head::new()),
+            subxidStatus: XidCacheStatus {
+                count: 0,
+                overflowed: false,
+            },
+            subxids: XidCache::default(),
+            procArrayGroupMember: false,
+            procArrayGroupNext: pg_atomic_uint32::new(0),
+            procArrayGroupMemberXid: 0,
+            wait_event_info: 0,
+            clogGroupMember: false,
+            clogGroupNext: pg_atomic_uint32::new(0),
+            clogGroupMemberXid: 0,
+            clogGroupMemberXidStatus: 0,
+            clogGroupMemberPage: 0,
+            clogGroupMemberLsn: 0,
+            fpInfoLock: LWLock::default(),
+            fpLockBits: Vec::new(),
+            fpRelId: Vec::new(),
+            fpVXIDLock: false,
+            fpLocalTransactionId: 0,
+            lockGroupLeader: None,
+            lockGroupMembers: dlist_head::new(),
+            lockGroupLink: dlist_node::new(),
+        }
+    }
+}
+
+impl PROC_HDR {
+    /// A freshly-allocated `PROC_HDR` with empty mirror arrays and freelists,
+    /// mirroring the `ShmemInitStruct("Proc Header", ...)` block that
+    /// `InitProcGlobal` zeroes and then fills in. `InitProcGlobal` is
+    /// responsible for populating `allProcs`/`xids`/... and threading each
+    /// `PGPROC` onto a freelist.
+    pub fn new_zeroed() -> Self {
+        Self {
+            allProcs: Vec::new(),
+            xids: Vec::new(),
+            subxidStates: Vec::new(),
+            statusFlags: Vec::new(),
+            allProcCount: 0,
+            freeProcs: dlist_head::new(),
+            autovacFreeProcs: dlist_head::new(),
+            bgworkerFreeProcs: dlist_head::new(),
+            walsenderFreeProcs: dlist_head::new(),
+            procArrayGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
+            clogGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
+            walwriterProc: INVALID_PROC_NUMBER,
+            checkpointerProc: INVALID_PROC_NUMBER,
+            spins_per_delay: 0,
+            startupBufferPinWaitBufId: -1,
+        }
+    }
+}
