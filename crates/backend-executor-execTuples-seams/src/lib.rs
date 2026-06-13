@@ -9,6 +9,21 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): the
+    /// slot's contents as a `MinimalTuple` (`slot->tts_ops->get_minimal_tuple`
+    /// or `copy_minimal_tuple`). The owned model always returns a copy into
+    /// `mcx`, so the C `shouldFree` / `heap_free_minimal_tuple` bookkeeping is
+    /// internal to the owner and does not cross the seam. The materialize /
+    /// copy path allocates, so the call is fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<
+        types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    >
+);
+
+seam_core::seam!(
     /// `slot_getallattrs(slot)` (tuptable.h, via execTuples.c's
     /// `slot_getsomeattrs`) plus the subsequent `slot->tts_values[i]` /
     /// `slot->tts_isnull[i]` reads: fully deconstruct the slot and return its
