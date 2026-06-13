@@ -8,6 +8,7 @@
 //! owner forms the heap tuple against the pg_depend descriptor.
 
 use types_catalog::catalog_dependency::FormData_pg_depend;
+use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_tuple::heaptuple::ItemPointerData;
@@ -43,5 +44,37 @@ seam_core::seam!(
     pub fn catalog_tuples_multi_insert_pg_depend(
         rel: &RelationData<'_>,
         forms: &[FormData_pg_depend],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// Set `pg_class[rel_oid].reltoastrelid = toast_relid` transactionally
+    /// (toasting.c `create_toast_table`, normal path):
+    /// `SearchSysCacheCopy1(RELOID, rel_oid)` → mutate the `Form_pg_class`
+    /// → `CatalogTupleUpdate(class_rel, &reltup->t_self, reltup)` →
+    /// `heap_freetuple`. The open pg_class relation (opened RowExclusiveLock
+    /// by the caller) crosses by reference. `Err` carries the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` and the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn set_pg_class_reltoastrelid(
+        class_rel: &RelationData<'_>,
+        rel_oid: Oid,
+        toast_relid: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// Set `pg_class[rel_oid].reltoastrelid = toast_relid` in place
+    /// (toasting.c `create_toast_table`, bootstrap path, where UPDATE is not
+    /// possible): `systable_inplace_update_begin(class_rel, ClassOidIndexId,
+    /// true, NULL, key[oid = rel_oid])` → mutate the `Form_pg_class` →
+    /// `systable_inplace_update_finish`. The open pg_class relation (opened
+    /// RowExclusiveLock by the caller) crosses by reference. `Err` carries the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` and the
+    /// heap-mutation `ereport(ERROR)`s.
+    pub fn set_pg_class_reltoastrelid_inplace(
+        class_rel: &RelationData<'_>,
+        rel_oid: Oid,
+        toast_relid: Oid,
     ) -> PgResult<()>
 );

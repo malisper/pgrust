@@ -284,6 +284,18 @@ scalar_global!(
     /// `bool IsBinaryUpgrade = false;`
     IS_BINARY_UPGRADE, IsBinaryUpgrade, SetIsBinaryUpgrade, bool, false
 );
+scalar_global!(
+    /// `Oid binary_upgrade_next_toast_pg_class_oid = InvalidOid;` (heap.c) —
+    /// the pg_upgrade-supplied OID for the next TOAST table's pg_class row.
+    /// Part of the pg_upgrade backend-global family (set by the
+    /// `binary_upgrade_set_next_toast_pg_class_oid` support function, consumed
+    /// by `heap_create_with_catalog` and `toasting.c`).
+    BINARY_UPGRADE_NEXT_TOAST_PG_CLASS_OID,
+    binary_upgrade_next_toast_pg_class_oid,
+    set_binary_upgrade_next_toast_pg_class_oid,
+    Oid,
+    InvalidOid
+);
 /// `bool ExitOnAnyError = false;` — single store in
 /// `backend_utils_error::config` (errstart promotes ERROR to FATAL on it).
 #[inline]

@@ -140,6 +140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-toastdesc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -581,6 +592,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-tableam-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-access-table-toast-helper-seams"
 version = "0.0.0"
 dependencies = [
@@ -1000,6 +1020,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-heap-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-index-seams"
 version = "0.0.0"
 dependencies = [
@@ -1193,6 +1225,33 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+]
+
+[[package]]
+name = "backend-catalog-toasting"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-toastdesc-seams",
+ "backend-access-table-table",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-heap-seams",
+ "backend-catalog-index-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-depend",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3543,6 +3602,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-catalog-toasting",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",

@@ -7,6 +7,21 @@ use types_core::primitive::{AttrNumber, Index, Oid};
 use types_datum::Datum;
 use types_error::PgResult;
 
+/// `OnCommitAction` (nodes/primnodes.h) — what to do at transaction commit
+/// for a temporary table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum OnCommitAction {
+    /// `ONCOMMIT_NOOP` — no ON COMMIT clause (do nothing).
+    ONCOMMIT_NOOP = 0,
+    /// `ONCOMMIT_PRESERVE_ROWS` — ON COMMIT PRESERVE ROWS (do nothing).
+    ONCOMMIT_PRESERVE_ROWS = 1,
+    /// `ONCOMMIT_DELETE_ROWS` — ON COMMIT DELETE ROWS.
+    ONCOMMIT_DELETE_ROWS = 2,
+    /// `ONCOMMIT_DROP` — ON COMMIT DROP.
+    ONCOMMIT_DROP = 3,
+}
+
 /// `Var` (nodes/primnodes.h), trimmed to the fields ports consume.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Var {
