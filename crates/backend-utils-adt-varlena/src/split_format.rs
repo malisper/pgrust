@@ -219,53 +219,14 @@ fn toast_chunk_id(_value: Datum) -> PgResult<Option<Oid>> {
 }
 
 // The text_position_* Boyer-Moore-Horspool state machine is owned by the
-// `position_ops` sibling family; its lower-level entry points are not yet
-// exposed, so `split_part`/`split_text` reach them through these shims (owner =
-// the position_ops family, unported). When position_ops lands, these become
-// direct sibling calls. The state itself is the keystone's `TextPositionState`.
-
-use crate::keystone::TextPositionState;
-
-/// C: `text_position_setup(t1, t2, collid, &state)` (varlena.c).
-fn text_position_setup<'a>(_t1: &'a [u8], _t2: &'a [u8], _collid: Oid) -> PgResult<TextPositionState<'a>> {
-    panic!(
-        "sibling not yet ported: position_ops::text_position_setup \
-         (split_part/split_text separator search) — fill the position_ops family"
-    )
-}
-
-/// C: `text_position_next(&state)` (varlena.c).
-fn text_position_next(_state: &mut TextPositionState<'_>) -> PgResult<bool> {
-    panic!(
-        "sibling not yet ported: position_ops::text_position_next — fill the \
-         position_ops family"
-    )
-}
-
-/// C: `text_position_get_match_ptr(&state)` → byte offset within the haystack
-/// of the current match (varlena.c).
-fn text_position_get_match_off(_state: &TextPositionState<'_>) -> usize {
-    panic!(
-        "sibling not yet ported: position_ops::text_position_get_match_ptr — \
-         fill the position_ops family"
-    )
-}
-
-/// C: `text_position_reset(&state)` (varlena.c) — rewind to the start.
-fn text_position_reset(_state: &mut TextPositionState<'_>) {
-    panic!(
-        "sibling not yet ported: position_ops::text_position_reset — fill the \
-         position_ops family"
-    )
-}
-
-/// C: `text_position_cleanup(&state)` (varlena.c).
-fn text_position_cleanup(_state: &mut TextPositionState<'_>) {
-    panic!(
-        "sibling not yet ported: position_ops::text_position_cleanup — fill the \
-         position_ops family"
-    )
-}
+// `position_ops` sibling family; `split_part`/`split_text` reach its lower-level
+// entry points directly. The state itself is the keystone's `TextPositionState`.
+// `text_position_get_match_off` adapts C's `text_position_get_match_ptr`
+// (returns a `char *`) to the byte-offset carrier used throughout this crate.
+use crate::position_ops::{
+    text_position_cleanup, text_position_get_match_ptr as text_position_get_match_off,
+    text_position_next, text_position_reset, text_position_setup,
+};
 
 use types_datum::Datum;
 
@@ -930,7 +891,7 @@ pub fn split_part<'mcx>(
     }
 
     // C:4663 find the first field separator.
-    let mut state = text_position_setup(inputstring, fldsep, collid)?;
+    let mut state = text_position_setup(mcx, inputstring, fldsep, collid)?;
 
     // C:4665 found = text_position_next(&state).
     let mut found = text_position_next(&mut state)?;
@@ -1098,7 +1059,7 @@ pub fn split_text<'mcx>(
         }
 
         // C:4901 text_position_setup.
-        let mut state = text_position_setup(input_bytes, fldsep_bytes, collation)?;
+        let mut state = text_position_setup(mcx, input_bytes, fldsep_bytes, collation)?;
 
         // C:4903 start_ptr = VARDATA_ANY(inputstring); (offset 0).
         let mut start_off: usize = 0;

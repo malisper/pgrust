@@ -367,7 +367,7 @@ pub fn text_position<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8], collid: Oid) ->
     // don't need greedy mode here
     state.greedy = false;
 
-    let result = if !text_position_next(&mut state, collid)? {
+    let result = if !text_position_next(&mut state)? {
         0
     } else {
         text_position_get_match_pos(&mut state)
@@ -379,7 +379,7 @@ pub fn text_position<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8], collid: Oid) ->
 /// C: `text_position_setup(text *t1, text *t2, Oid collid, TextPositionState
 /// *state)` — initialize the search state and the Boyer-Moore-Horspool skip
 /// table.
-fn text_position_setup<'a, 'mcx>(
+pub(crate) fn text_position_setup<'a, 'mcx>(
     mcx: Mcx<'mcx>,
     t1: &'a [u8],
     t2: &'a [u8],
@@ -422,6 +422,7 @@ fn text_position_setup<'a, 'mcx>(
         refpoint: 0,
         refpos: 0,
         locale,
+        collid,
     };
 
     // Prepare the BMH skip table. Skip it for empty/oversized needles, for
@@ -471,7 +472,7 @@ fn text_position_setup<'a, 'mcx>(
 /// C: `text_position_next(TextPositionState *state)` — advance to the next
 /// match, starting from the end of the previous match (or the start on first
 /// call). Returns true if a match is found. Refuses an empty needle.
-fn text_position_next(state: &mut TextPositionState, collid: Oid) -> PgResult<bool> {
+pub(crate) fn text_position_next(state: &mut TextPositionState) -> PgResult<bool> {
     let needle_len = state.len2;
 
     if needle_len <= 0 {
@@ -485,7 +486,7 @@ fn text_position_next(state: &mut TextPositionState, collid: Oid) -> PgResult<bo
     };
 
     loop {
-        let matchptr = text_position_next_internal(start_off, state, collid)?;
+        let matchptr = text_position_next_internal(start_off, state)?;
 
         let matchptr = match matchptr {
             None => return Ok(false),
@@ -531,8 +532,10 @@ fn text_position_next(state: &mut TextPositionState, collid: Oid) -> PgResult<bo
 fn text_position_next_internal(
     start_off: usize,
     state: &mut TextPositionState,
-    collid: Oid,
 ) -> PgResult<Option<usize>> {
+    // C dereferences `state->locale` directly; the layered locale seam re-keys
+    // by collation OID, which the state carries.
+    let collid = state.collid;
     let haystack_len = state.len1 as usize;
     let needle_len = state.len2 as usize;
     let skiptablemask = state.skiptablemask;
@@ -646,8 +649,26 @@ fn text_position_get_match_pos(state: &mut TextPositionState) -> i32 {
     state.refpos + 1
 }
 
+/// C: `text_position_get_match_ptr(TextPositionState *state)` — the byte offset
+/// within the haystack `str1` of the current match (C returns `state->last_match`,
+/// a `char *`; the lifetime-safe equivalent is the byte offset). Panics if no
+/// match has been recorded, mirroring the C contract that callers only call this
+/// after a successful `text_position_next`.
+pub(crate) fn text_position_get_match_ptr(state: &TextPositionState) -> usize {
+    state.last_match.expect("match must be set")
+}
+
+/// C: `text_position_reset(TextPositionState *state)` — reset to the initial
+/// state installed by `text_position_setup`; the next `text_position_next`
+/// searches from the start of the string.
+pub(crate) fn text_position_reset(state: &mut TextPositionState) {
+    state.last_match = None;
+    state.refpoint = 0;
+    state.refpos = 0;
+}
+
 /// C: `text_position_cleanup(TextPositionState *state)` — no cleanup needed.
-fn text_position_cleanup(_state: &mut TextPositionState) {
+pub(crate) fn text_position_cleanup(_state: &mut TextPositionState) {
     // no cleanup needed
 }
 
@@ -744,7 +765,7 @@ pub fn replace_text<'mcx>(
 
     let mut state = text_position_setup(mcx, src, from, collid)?;
 
-    let mut found = text_position_next(&mut state, collid)?;
+    let mut found = text_position_next(&mut state)?;
 
     // When from is not found, there is nothing to do.
     if !found {
@@ -770,7 +791,7 @@ pub fn replace_text<'mcx>(
 
         start_ptr = curr_ptr + state.last_match_len as usize;
 
-        found = text_position_next(&mut state, collid)?;
+        found = text_position_next(&mut state)?;
         if found {
             curr_ptr = state.last_match.expect("match set");
         }

@@ -99,6 +99,11 @@ pub struct TextPositionState<'a, 'mcx> {
     pub refpoint: usize,
     /// `refpos` — 0-based char offset of `refpoint`.
     pub refpos: i32,
+    /// Layering carrier (no C field): the collation OID the state was set up
+    /// with. C dereferences `state->locale` (the `pg_locale_t` pointer)
+    /// directly inside `text_position_next`; the layered locale seams re-key by
+    /// collation OID, so the state carries the OID for those re-resolutions.
+    pub collid: types_core::Oid,
 }
 
 /// C: `VarStringSortSupport` (varlena.c) — abbreviated-key sort state for
