@@ -150,6 +150,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output-function OID and varlena flag, with the C
+    /// `cache lookup failed for type %u` and "no output function" `ereport`s
+    /// carried on `Err`. Returns `(typoutput, typisvarlena)`.
+    pub fn get_type_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
     /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
     /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
@@ -304,4 +320,13 @@ seam_core::seam!(
     /// syscache hash value stored as `TypeCacheEntry.type_id_hash`. `Err`
     /// carries the catcache failure surface.
     pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
 );
