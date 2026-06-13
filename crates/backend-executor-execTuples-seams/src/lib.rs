@@ -198,6 +198,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot); memcpy(slot->tts_values, values); memcpy(
+    /// slot->tts_isnull, isnull); ExecStoreVirtualTuple(slot)` (tuptable.h):
+    /// fill a virtual slot's per-column `tts_values`/`tts_isnull` payload with
+    /// the given `values`/`isnull` (which must be `slot`'s descriptor's `natts`
+    /// long) and mark it as holding a valid virtual tuple. The N-column analogue
+    /// of `exec_store_single_datum_virtual`; used by Memoize's
+    /// `prepare_probe_slot` to materialize the probe slot before
+    /// `ExecCopySlotMinimalTuple`. Targets the slot by pool id. Fallible on OOM /
+    /// the slot-ops `ereport(ERROR)` paths.
+    pub fn store_virtual_values<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        values: &[types_datum::Datum],
+        isnull: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecTypeFromExprList(exprList)` (execTuples.c): build a `TupleDesc` (a
+    /// RECORD type, no column names) describing the result types of a bare list
+    /// of expressions. Used to derive a Memoize node's `hashkeydesc` from its
+    /// `param_exprs`. The descriptor is allocated in `mcx` (C: `palloc` in
+    /// `CurrentMemoryContext`); fallible on OOM / `ereport(ERROR)` from a type
+    /// lookup.
+    pub fn exec_type_from_expr_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr_list: &[types_nodes::primnodes::Expr],
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `slot_getsysattr(slot, attnum, &isnull)` (tuptable.h/execTuples.c):
     /// fetch a system attribute of the slot's current tuple as
     /// `(datum, isnull)` (`slot->tts_ops->getsysattr` dispatch). A slot class
