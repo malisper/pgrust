@@ -7063,6 +7063,7 @@ name = "backend-utils-adt-numeric"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-numeric-seams",
+ "common-hashfn",
  "mcx",
  "types-datum",
  "types-error",

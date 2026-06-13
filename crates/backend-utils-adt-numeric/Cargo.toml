@@ -15,5 +15,11 @@ mcx = { path = "../mcx" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 
-# Inward seams this crate OWNS and installs from init_seams().
+# Externals this crate REACHES OUT to (real, already-ported owners): the
+# Jenkins/lookup3 byte hashers (hashfn.c hash_any/hash_any_extended) used by
+# hash_numeric/hash_numeric_extended.
+common-hashfn = { path = "../common-hashfn" }
+
+# Inward seams this crate OWNS and installs from init_seams(); also carries the
+# outbound numeric_abbrev_add_sample seam reached from the sort-support abbrev.
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
