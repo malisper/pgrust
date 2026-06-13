@@ -47,6 +47,8 @@ pub type ForkNumber = i32;
 /// `Buffer` (`buf.h`) — shared/local buffer id, was C `int`.
 pub type Buffer = i32;
 pub type OffsetNumber = uint16;
+/// `RegProcedure` (`c.h`) — `typedef regproc RegProcedure`, a function `Oid`.
+pub type RegProcedure = Oid;
 
 pub const BLCKSZ: usize = 8192;
 pub const InvalidOid: Oid = 0;

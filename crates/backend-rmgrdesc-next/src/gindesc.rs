@@ -1,9 +1,14 @@
 //! `access/rmgrdesc/gindesc.c` — rmgr descriptor routines for GIN indexes.
 
-use crate::{appendf, block_id_at, bool_at, i32_at, u16_at, u8_at};
+use crate::{appendf, u16_at, u8_at};
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::ginxlog::{ginxlogDeleteListPages, ginxlogInsert,
+                                  ginxlogInsertDataInternal, ginxlogInsertEntry,
+                                  ginxlogRecompressDataLeaf, ginxlogSplit, GinPostingList,
+                                  shortalign, SIZEOF_GINXLOG_RECOMPRESS_DATA_LEAF,
+                                  SIZEOF_ITEM_POINTER_DATA};
 
 // access/ginxlog.h
 pub const XLOG_GIN_CREATE_PTREE: u8 = 0x10;
@@ -26,28 +31,10 @@ pub const GIN_INSERT_ISDATA: u16 = 0x01;
 pub const GIN_INSERT_ISLEAF: u16 = 0x02;
 pub const GIN_SPLIT_ROOT: u16 = 0x04;
 
-/// `sizeof(ginxlogInsert)` — `uint16 flags` only.
-const SIZEOF_GINXLOG_INSERT: usize = 2;
-/// `sizeof(BlockIdData)` — `{uint16 bi_hi; uint16 bi_lo;}`.
-const SIZEOF_BLOCK_ID_DATA: usize = 4;
-/// `sizeof(ginxlogRecompressDataLeaf)` — `uint16 nactions` only.
-const SIZEOF_GINXLOG_RECOMPRESS_DATA_LEAF: usize = 2;
-/// `sizeof(ItemPointerData)` (6 bytes, 2-aligned).
-const SIZEOF_ITEM_POINTER_DATA: usize = 6;
-/// `offsetof(GinPostingList, bytes)` — `first` (6) + `nbytes` u16 (2).
-const OFFSETOF_GIN_POSTING_LIST_BYTES: usize = 8;
-/// `sizeof(GinMetaPageData)` (gin_private.h; natural layout, 8-aligned).
-const SIZEOF_GIN_META_PAGE_DATA: usize = 56;
-
-/// `SHORTALIGN`.
-const fn shortalign(n: usize) -> usize {
-    (n + 1) & !1
-}
-
 /// `desc_recompress_leaf(StringInfo buf, ginxlogRecompressDataLeaf *insertData)`.
 /// `insert_data` starts at the `ginxlogRecompressDataLeaf` struct.
 fn desc_recompress_leaf(buf: &mut PgString<'_>, insert_data: &[u8]) -> PgResult<()> {
-    let nactions = u16_at(insert_data, 0);
+    let nactions = ginxlogRecompressDataLeaf::from_bytes(insert_data).nactions;
     let mut walbuf = &insert_data[SIZEOF_GINXLOG_RECOMPRESS_DATA_LEAF..];
 
     appendf!(buf, " {} segments:", nactions as i32);
@@ -60,8 +47,7 @@ fn desc_recompress_leaf(buf: &mut PgString<'_>, insert_data: &[u8]) -> PgResult<
 
         if a_action == GIN_SEGMENT_INSERT || a_action == GIN_SEGMENT_REPLACE {
             // SizeOfGinPostingList: offsetof(bytes) + SHORTALIGN(nbytes)
-            let nbytes = u16_at(walbuf, 6) as usize;
-            let newsegsize = OFFSETOF_GIN_POSTING_LIST_BYTES + shortalign(nbytes);
+            let newsegsize = GinPostingList::from_bytes(walbuf).size();
             walbuf = &walbuf[shortalign(newsegsize)..];
         }
 
@@ -86,25 +72,28 @@ fn desc_recompress_leaf(buf: &mut PgString<'_>, insert_data: &[u8]) -> PgResult<
 }
 
 /// `gin_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn gin_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn gin_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let info = record.info() & !XLR_INFO_MASK;
 
     match info {
         XLOG_GIN_CREATE_PTREE => { /* no further information */ }
         XLOG_GIN_INSERT => {
-            let flags = u16_at(rec, 0); // ginxlogInsert.flags
+            let xlrec = ginxlogInsert::from_bytes(rec);
             appendf!(
                 buf,
                 "isdata: {} isleaf: {}",
-                if flags & GIN_INSERT_ISDATA != 0 { 'T' } else { 'F' },
-                if flags & GIN_INSERT_ISLEAF != 0 { 'T' } else { 'F' }
+                if xlrec.flags & GIN_INSERT_ISDATA != 0 { 'T' } else { 'F' },
+                if xlrec.flags & GIN_INSERT_ISLEAF != 0 { 'T' } else { 'F' }
             );
-            if flags & GIN_INSERT_ISLEAF == 0 {
-                let payload = &rec[SIZEOF_GINXLOG_INSERT..];
-                let left_child_blkno = block_id_at(payload, 0);
-                let right_child_blkno = block_id_at(payload, SIZEOF_BLOCK_ID_DATA);
-                appendf!(buf, " children: {}/{}", left_child_blkno, right_child_blkno);
+            if xlrec.flags & GIN_INSERT_ISLEAF == 0 {
+                let (left_child, right_child) = ginxlogInsert::children(rec);
+                appendf!(
+                    buf,
+                    " children: {}/{}",
+                    left_child.block_number(),
+                    right_child.block_number()
+                );
             }
             if record.has_block_image(0) {
                 if record.block_image_apply(0) {
@@ -117,41 +106,35 @@ pub fn gin_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult
                     .block_data(0)
                     .expect("XLOG_GIN_INSERT without FPI carries block 0 data");
 
-                if flags & GIN_INSERT_ISDATA == 0 {
-                    // ginxlogInsertEntry.isDelete: bool @2
-                    appendf!(
-                        buf,
-                        " isdelete: {}",
-                        if bool_at(payload, 2) { 'T' } else { 'F' }
-                    );
-                } else if flags & GIN_INSERT_ISLEAF != 0 {
+                if xlrec.flags & GIN_INSERT_ISDATA == 0 {
+                    let entry = ginxlogInsertEntry::from_bytes(payload);
+                    appendf!(buf, " isdelete: {}", if entry.isDelete { 'T' } else { 'F' });
+                } else if xlrec.flags & GIN_INSERT_ISLEAF != 0 {
                     desc_recompress_leaf(buf, payload)?;
                 } else {
-                    // ginxlogInsertDataInternal: offset u16 @0, newitem PostingItem @2
-                    // PostingItem: child_blkno BlockIdData @+0, key ItemPointerData @+4
+                    let insert_data = ginxlogInsertDataInternal::from_bytes(payload);
                     appendf!(
                         buf,
                         " pitem: {}-{}/{}",
-                        block_id_at(payload, 2),
-                        block_id_at(payload, 6),
-                        u16_at(payload, 10)
+                        insert_data.newitem.child_blkno.block_number(),
+                        insert_data.newitem.key.ip_blkid.block_number(),
+                        insert_data.newitem.key.ip_posid
                     );
                 }
             }
         }
         XLOG_GIN_SPLIT => {
-            // ginxlogSplit.flags: u16 @24 (locator 12 + rrlink 4 + children 8)
-            let flags = u16_at(rec, 24);
+            let xlrec = ginxlogSplit::from_bytes(rec);
             appendf!(
                 buf,
                 "isrootsplit: {}",
-                if flags & GIN_SPLIT_ROOT != 0 { 'T' } else { 'F' }
+                if xlrec.flags & GIN_SPLIT_ROOT != 0 { 'T' } else { 'F' }
             );
             appendf!(
                 buf,
                 " isdata: {} isleaf: {}",
-                if flags & GIN_INSERT_ISDATA != 0 { 'T' } else { 'F' },
-                if flags & GIN_INSERT_ISLEAF != 0 { 'T' } else { 'F' }
+                if xlrec.flags & GIN_INSERT_ISDATA != 0 { 'T' } else { 'F' },
+                if xlrec.flags & GIN_INSERT_ISLEAF != 0 { 'T' } else { 'F' }
             );
         }
         XLOG_GIN_VACUUM_PAGE => { /* no further information */ }
@@ -174,8 +157,8 @@ pub fn gin_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult
         XLOG_GIN_UPDATE_META_PAGE => { /* no further information */ }
         XLOG_GIN_INSERT_LISTPAGE => { /* no further information */ }
         XLOG_GIN_DELETE_LISTPAGE => {
-            // ginxlogDeleteListPages.ndeleted: i32 after GinMetaPageData
-            appendf!(buf, "ndeleted: {}", i32_at(rec, SIZEOF_GIN_META_PAGE_DATA));
+            let xlrec = ginxlogDeleteListPages::from_bytes(rec);
+            appendf!(buf, "ndeleted: {}", xlrec.ndeleted);
         }
         _ => {}
     }
@@ -201,8 +184,9 @@ pub fn gin_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::record;
     use mcx::MemoryContext;
-    use types_wal::XLogRecordBlockView;
+    use types_wal::DecodedBkpBlock;
 
     #[test]
     fn insert_internal_with_children() {
@@ -219,8 +203,8 @@ mod tests {
         rec.extend_from_slice(&0u16.to_ne_bytes());
         rec.extend_from_slice(&3u16.to_ne_bytes());
 
-        let blocks = [XLogRecordBlockView::new(true, true, true, None)];
-        let record = XLogRecordView::new(XLOG_GIN_INSERT, &rec, &blocks);
+        let blocks = [DecodedBkpBlock::new(true, true, true, 0, None)];
+        let record = record(ctx.mcx(), XLOG_GIN_INSERT, &rec, &blocks);
         gin_desc(&mut buf, &record).unwrap();
         assert_eq!(
             buf.as_str(),
@@ -252,7 +236,7 @@ mod tests {
         let mut buf = PgString::new_in(ctx.mcx());
         let mut rec = vec![0u8; 60];
         rec[56..60].copy_from_slice(&13i32.to_ne_bytes());
-        let record = XLogRecordView::new(XLOG_GIN_DELETE_LISTPAGE, &rec, &[]);
+        let record = record(ctx.mcx(), XLOG_GIN_DELETE_LISTPAGE, &rec, &[]);
         gin_desc(&mut buf, &record).unwrap();
         assert_eq!(buf.as_str(), "ndeleted: 13");
     }

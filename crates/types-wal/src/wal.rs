@@ -63,20 +63,33 @@ impl XLogRecord {
 
 /// One decoded block reference of a WAL record (`DecodedBkpBlock`,
 /// access/xlogreader.h). Trimmed to the fields current ports read; the
-/// xlogreader port owns the full shape and will widen it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct DecodedBkpBlock {
+/// xlogreader port owns the full shape and will widen it. The block-data
+/// borrow points into the reader's decode buffer (C `char *data`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DecodedBkpBlock<'a> {
     in_use: bool,
     has_image: bool,
+    apply_image: bool,
     bimg_len: uint16,
+    /// `Some` iff the block carries block data (`has_data`); the slice is the
+    /// `XLogRecGetBlockData` payload.
+    data: Option<&'a [u8]>,
 }
 
-impl DecodedBkpBlock {
-    pub const fn new(in_use: bool, has_image: bool, bimg_len: uint16) -> Self {
+impl<'a> DecodedBkpBlock<'a> {
+    pub const fn new(
+        in_use: bool,
+        has_image: bool,
+        apply_image: bool,
+        bimg_len: uint16,
+        data: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             in_use,
             has_image,
+            apply_image,
             bimg_len,
+            data,
         }
     }
 
@@ -93,92 +106,53 @@ impl DecodedBkpBlock {
 }
 
 /// A decoded WAL record (`DecodedXLogRecord`, access/xlogreader.h). Trimmed to
-/// the header plus the block references `0..=max_block_id`. The block array
-/// is context-allocated (C pallocs the decode buffer in the reader's
-/// context), so the record carries its allocator lifetime.
+/// the header, the main data (`XLogRecGetData`), and the block references
+/// `0..=max_block_id`. The block array is context-allocated (C pallocs the
+/// decode buffer in the reader's context), so the record carries its
+/// allocator lifetime; `main_data` and the per-block data borrow the decode
+/// buffer with the same lifetime.
 #[derive(Debug)]
 pub struct DecodedXLogRecord<'mcx> {
     header: XLogRecord,
-    blocks: PgVec<'mcx, DecodedBkpBlock>,
+    /// `XLogRecGetData` — the record's main data.
+    main_data: &'mcx [u8],
+    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
     /// `blocks` must hold the block references `0..=max_block_id` (in-use or
     /// not), mirroring the C array indexed by block id.
-    pub const fn new(header: XLogRecord, blocks: PgVec<'mcx, DecodedBkpBlock>) -> Self {
-        Self { header, blocks }
+    pub const fn new(
+        header: XLogRecord,
+        main_data: &'mcx [u8],
+        blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
+    ) -> Self {
+        Self {
+            header,
+            main_data,
+            blocks,
+        }
     }
 
     pub const fn header(&self) -> &XLogRecord {
         &self.header
     }
 
-    pub fn blocks(&self) -> &[DecodedBkpBlock] {
+    pub fn blocks(&self) -> &[DecodedBkpBlock<'mcx>] {
         &self.blocks
-    }
-}
-
-/// `XLR_INFO_MASK` (access/xlogrecord.h) — the bits of `xl_info` reserved for
-/// the WAL machinery itself; the rmgr's record type lives in the high bits.
-pub const XLR_INFO_MASK: uint8 = 0x0F;
-
-/// One block reference of a record as the rm_desc routines see it: the
-/// `XLogRecHasBlockImage` / `XLogRecBlockImageApply` / `XLogRecHasBlockData` /
-/// `XLogRecGetBlockData` facet of `XLogReaderState`'s per-block decode state.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct XLogRecordBlockView<'a> {
-    in_use: bool,
-    has_image: bool,
-    apply_image: bool,
-    /// `Some` iff the block carries block data (`has_data`); the slice is the
-    /// `XLogRecGetBlockData` payload.
-    data: Option<&'a [u8]>,
-}
-
-impl<'a> XLogRecordBlockView<'a> {
-    pub const fn new(
-        in_use: bool,
-        has_image: bool,
-        apply_image: bool,
-        data: Option<&'a [u8]>,
-    ) -> Self {
-        Self { in_use, has_image, apply_image, data }
-    }
-}
-
-/// Borrowed view of a decoded WAL record, trimmed to the accessors the
-/// rm_desc/rm_identify routines consume: `XLogRecGetInfo`, `XLogRecGetData`,
-/// and the per-block-reference queries. The owning reader holds the decoded
-/// bytes; this view only borrows them.
-#[derive(Clone, Copy, Debug)]
-pub struct XLogRecordView<'a> {
-    info: uint8,
-    /// `XLogRecGetData` — the record's main data.
-    main_data: &'a [u8],
-    /// Block references indexed by block id (`0..=max_block_id`).
-    blocks: &'a [XLogRecordBlockView<'a>],
-}
-
-impl<'a> XLogRecordView<'a> {
-    pub const fn new(
-        info: uint8,
-        main_data: &'a [u8],
-        blocks: &'a [XLogRecordBlockView<'a>],
-    ) -> Self {
-        Self { info, main_data, blocks }
     }
 
     /// `XLogRecGetInfo(record)` — the raw `xl_info` byte.
     pub const fn info(&self) -> uint8 {
-        self.info
+        self.header.info()
     }
 
     /// `XLogRecGetData(record)`.
-    pub const fn data(&self) -> &'a [u8] {
+    pub const fn data(&self) -> &'mcx [u8] {
         self.main_data
     }
 
-    fn block(&self, block_id: usize) -> Option<&XLogRecordBlockView<'a>> {
+    fn block(&self, block_id: usize) -> Option<&DecodedBkpBlock<'mcx>> {
         self.blocks.get(block_id).filter(|b| b.in_use)
     }
 
@@ -189,7 +163,7 @@ impl<'a> XLogRecordView<'a> {
 
     /// `XLogRecGetBlockData(record, block_id, NULL)` — `None` where C returns
     /// a NULL pointer (block not in use, or no block data).
-    pub fn block_data(&self, block_id: usize) -> Option<&'a [u8]> {
+    pub fn block_data(&self, block_id: usize) -> Option<&'mcx [u8]> {
         self.block(block_id).and_then(|b| b.data)
     }
 
@@ -203,3 +177,7 @@ impl<'a> XLogRecordView<'a> {
         self.block(block_id).is_some_and(|b| b.apply_image)
     }
 }
+
+/// `XLR_INFO_MASK` (access/xlogrecord.h) — the bits of `xl_info` reserved for
+/// the WAL machinery itself; the rmgr's record type lives in the high bits.
+pub const XLR_INFO_MASK: uint8 = 0x0F;

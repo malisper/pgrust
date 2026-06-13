@@ -246,7 +246,10 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-storage",
+ "types-tuple",
  "types-wal",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -255,6 +258,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -759,6 +763,15 @@ name = "types-wchar"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-xlog-records"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

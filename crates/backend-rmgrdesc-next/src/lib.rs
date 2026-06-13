@@ -5,10 +5,10 @@
 //! Each `*_desc` mirrors `void X_desc(StringInfo buf, XLogReaderState *record)`:
 //! it appends the record description to the caller's buffer. The only failure
 //! is `appendStringInfo`'s palloc out-of-memory `ereport(ERROR)`, surfaced as
-//! `PgResult`. Record fields are read at the C struct offsets from the raw
-//! record bytes (`XLogRecGetData` / `XLogRecGetBlockData` payloads); a record
-//! shorter than the struct the C code casts it to panics (the C reads
-//! garbage / faults there).
+//! `PgResult`. Record bodies decode through the `xl_*` structs in
+//! `types-xlog-records` (shared with the future redo ports); a record shorter
+//! than the struct the C code casts it to panics (the C reads garbage /
+//! faults there).
 
 #![allow(non_upper_case_globals)]
 
@@ -70,61 +70,64 @@ pub(crate) use appendf;
 
 const SHORT_RECORD: &str = "WAL record data shorter than the C struct it must hold";
 
+/// Raw reads for the few genuinely byte-oriented walks (GIN segment actions,
+/// the multixact page numbers); record-body structs decode through
+/// `types-xlog-records` instead.
 pub(crate) fn u8_at(d: &[u8], off: usize) -> u8 {
     *d.get(off).expect(SHORT_RECORD)
-}
-
-pub(crate) fn i8_at(d: &[u8], off: usize) -> i8 {
-    u8_at(d, off) as i8
-}
-
-pub(crate) fn bool_at(d: &[u8], off: usize) -> bool {
-    u8_at(d, off) != 0
 }
 
 pub(crate) fn u16_at(d: &[u8], off: usize) -> u16 {
     u16::from_ne_bytes(d[off..off + 2].try_into().expect(SHORT_RECORD))
 }
 
-pub(crate) fn u32_at(d: &[u8], off: usize) -> u32 {
-    u32::from_ne_bytes(d[off..off + 4].try_into().expect(SHORT_RECORD))
-}
-
-pub(crate) fn i32_at(d: &[u8], off: usize) -> i32 {
-    i32::from_ne_bytes(d[off..off + 4].try_into().expect(SHORT_RECORD))
-}
-
-pub(crate) fn u64_at(d: &[u8], off: usize) -> u64 {
-    u64::from_ne_bytes(d[off..off + 8].try_into().expect(SHORT_RECORD))
-}
-
 pub(crate) fn i64_at(d: &[u8], off: usize) -> i64 {
     i64::from_ne_bytes(d[off..off + 8].try_into().expect(SHORT_RECORD))
 }
 
-pub(crate) fn f64_at(d: &[u8], off: usize) -> f64 {
-    f64::from_ne_bytes(d[off..off + 8].try_into().expect(SHORT_RECORD))
+/// A fixed-capacity stack buffer for intermediate number formatting — the C
+/// counterpart formats `%g` straight into the palloc'd StringInfo, so this
+/// path must not touch the global allocator.
+struct StackStr<const N: usize> {
+    buf: [u8; N],
+    len: usize,
 }
 
-/// `BlockIdGetBlockNumber` of a `BlockIdData {bi_hi, bi_lo}` at `off`.
-pub(crate) fn block_id_at(d: &[u8], off: usize) -> u32 {
-    let hi = u16_at(d, off) as u32;
-    let lo = u16_at(d, off + 2) as u32;
-    (hi << 16) | lo
+impl<const N: usize> StackStr<N> {
+    const fn new() -> Self {
+        Self { buf: [0; N], len: 0 }
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).expect("fmt output is UTF-8")
+    }
 }
 
-/// `EpochFromFullTransactionId` / `XidFromFullTransactionId`.
-pub(crate) fn full_xid_parts(v: u64) -> (u32, u32) {
-    ((v >> 32) as u32, v as u32)
+impl<const N: usize> core::fmt::Write for StackStr<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        if self.len + bytes.len() > N {
+            return Err(core::fmt::Error);
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
 }
 
 /// printf `%g` (default precision 6): shortest of `%e`/`%f` with trailing
 /// zeros removed, scientific form when the decimal exponent is `< -4` or
-/// `>= 6`.
+/// `>= 6`. Formats via fixed stack buffers (the widest intermediate is
+/// `-999999.999999999`, well under [`GFMT_BUF`] bytes).
 pub(crate) struct GFmt(pub f64);
+
+/// Stack-buffer capacity for [`GFmt`] intermediates.
+const GFMT_BUF: usize = 32;
 
 impl core::fmt::Display for GFmt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use core::fmt::Write;
+
         let x = self.0;
         if x.is_nan() {
             return f.write_str("nan");
@@ -136,22 +139,46 @@ impl core::fmt::Display for GFmt {
             return f.write_str(if x.is_sign_negative() { "-0" } else { "0" });
         }
         // 6 significant digits; take the exponent of the *rounded* value.
-        let sci = format!("{:.5e}", x);
-        let (mant, exp) = sci.split_once('e').expect("std e-format");
+        let mut sci = StackStr::<GFMT_BUF>::new();
+        write!(sci, "{:.5e}", x)?;
+        let (mant, exp) = sci.as_str().split_once('e').expect("std e-format");
         let exp: i32 = exp.parse().expect("std e-format exponent");
         if exp < -4 || exp >= 6 {
             let mant = mant.trim_end_matches('0').trim_end_matches('.');
             write!(f, "{}e{}{:02}", mant, if exp < 0 { '-' } else { '+' }, exp.abs())
         } else {
             let prec = (5 - exp).max(0) as usize;
-            let fixed = format!("{:.*}", prec, x);
-            let fixed = if fixed.contains('.') {
-                fixed.trim_end_matches('0').trim_end_matches('.')
+            let mut fixed = StackStr::<GFMT_BUF>::new();
+            write!(fixed, "{:.*}", prec, x)?;
+            let s = fixed.as_str();
+            let s = if s.contains('.') {
+                s.trim_end_matches('0').trim_end_matches('.')
             } else {
-                fixed.as_str()
+                s
             };
-            f.write_str(fixed)
+            f.write_str(s)
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use mcx::{slice_in, Mcx};
+    use types_wal::{DecodedBkpBlock, DecodedXLogRecord, XLogRecord};
+
+    /// Build a `DecodedXLogRecord` carrying just the pieces the desc
+    /// routines read: `xl_info`, the main data, and the block references.
+    pub(crate) fn record<'a>(
+        mcx: Mcx<'a>,
+        info: u8,
+        data: &'a [u8],
+        blocks: &[DecodedBkpBlock<'a>],
+    ) -> DecodedXLogRecord<'a> {
+        DecodedXLogRecord::new(
+            XLogRecord::new(0, 0, 0, info, 0, 0),
+            data,
+            slice_in(mcx, blocks).unwrap(),
+        )
     }
 }
 
@@ -171,5 +198,7 @@ mod tests {
         assert_eq!(format!("{}", GFmt(123456.0)), "123456");
         assert_eq!(format!("{}", GFmt(1234.5678)), "1234.57");
         assert_eq!(format!("{}", GFmt(-2.5)), "-2.5");
+        assert_eq!(format!("{}", GFmt(f64::MIN_POSITIVE / 4.0)), "5.56268e-309");
+        assert_eq!(format!("{}", GFmt(-f64::MAX)), "-1.79769e+308");
     }
 }

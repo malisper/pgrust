@@ -1,9 +1,15 @@
 //! `access/rmgrdesc/hashdesc.c` — rmgr descriptor routines for hash indexes.
 
-use crate::{appendf, bool_at, f64_at, u16_at, u32_at, GFmt};
+use crate::{appendf, GFmt};
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::hash_xlog::{xl_hash_add_ovfl_page, xl_hash_delete,
+                                    xl_hash_init_bitmap_page, xl_hash_init_meta_page,
+                                    xl_hash_insert, xl_hash_move_page_contents,
+                                    xl_hash_split_allocate_page, xl_hash_split_complete,
+                                    xl_hash_squeeze_page, xl_hash_update_meta_page,
+                                    xl_hash_vacuum_one_page};
 
 // access/hash_xlog.h
 pub const XLOG_HASH_INIT_META_PAGE: u8 = 0x00;
@@ -24,101 +30,97 @@ pub const XLH_SPLIT_META_UPDATE_MASKS: u8 = 1 << 0;
 pub const XLH_SPLIT_META_UPDATE_SPLITPOINT: u8 = 1 << 1;
 
 /// `hash_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn hash_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn hash_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let info = record.info() & !XLR_INFO_MASK;
 
     match info {
         XLOG_HASH_INIT_META_PAGE => {
-            // xl_hash_init_meta_page: num_tuples f64 @0, procid u32 @8, ffactor u16 @12
+            let xlrec = xl_hash_init_meta_page::from_bytes(rec);
             appendf!(
                 buf,
                 "num_tuples {}, fillfactor {}",
-                GFmt(f64_at(rec, 0)),
-                u16_at(rec, 12)
+                GFmt(xlrec.num_tuples),
+                xlrec.ffactor
             );
         }
         XLOG_HASH_INIT_BITMAP_PAGE => {
-            // xl_hash_init_bitmap_page: bmsize u16 @0
-            appendf!(buf, "bmsize {}", u16_at(rec, 0));
+            let xlrec = xl_hash_init_bitmap_page::from_bytes(rec);
+            appendf!(buf, "bmsize {}", xlrec.bmsize);
         }
         XLOG_HASH_INSERT => {
-            // xl_hash_insert: offnum u16 @0
-            appendf!(buf, "off {}", u16_at(rec, 0));
+            let xlrec = xl_hash_insert::from_bytes(rec);
+            appendf!(buf, "off {}", xlrec.offnum);
         }
         XLOG_HASH_ADD_OVFL_PAGE => {
-            // xl_hash_add_ovfl_page: bmsize u16 @0, bmpage_found bool @2
+            let xlrec = xl_hash_add_ovfl_page::from_bytes(rec);
             appendf!(
                 buf,
                 "bmsize {}, bmpage_found {}",
-                u16_at(rec, 0),
-                if bool_at(rec, 2) { 'T' } else { 'F' }
+                xlrec.bmsize,
+                if xlrec.bmpage_found { 'T' } else { 'F' }
             );
         }
         XLOG_HASH_SPLIT_ALLOCATE_PAGE => {
-            // xl_hash_split_allocate_page: new_bucket u32 @0, old_bucket_flag u16 @4,
-            // new_bucket_flag u16 @6, flags u8 @8
-            let flags = rec[8];
+            let xlrec = xl_hash_split_allocate_page::from_bytes(rec);
             appendf!(
                 buf,
                 "new_bucket {}, meta_page_masks_updated {}, issplitpoint_changed {}",
-                u32_at(rec, 0),
-                if flags & XLH_SPLIT_META_UPDATE_MASKS != 0 { 'T' } else { 'F' },
-                if flags & XLH_SPLIT_META_UPDATE_SPLITPOINT != 0 { 'T' } else { 'F' }
+                xlrec.new_bucket,
+                if xlrec.flags & XLH_SPLIT_META_UPDATE_MASKS != 0 { 'T' } else { 'F' },
+                if xlrec.flags & XLH_SPLIT_META_UPDATE_SPLITPOINT != 0 { 'T' } else { 'F' }
             );
         }
         XLOG_HASH_SPLIT_COMPLETE => {
-            // xl_hash_split_complete: old_bucket_flag u16 @0, new_bucket_flag u16 @2
+            let xlrec = xl_hash_split_complete::from_bytes(rec);
             appendf!(
                 buf,
                 "old_bucket_flag {}, new_bucket_flag {}",
-                u16_at(rec, 0),
-                u16_at(rec, 2)
+                xlrec.old_bucket_flag,
+                xlrec.new_bucket_flag
             );
         }
         XLOG_HASH_MOVE_PAGE_CONTENTS => {
-            // xl_hash_move_page_contents: ntups u16 @0, is_prim_bucket_same_wrt bool @2
+            let xlrec = xl_hash_move_page_contents::from_bytes(rec);
             appendf!(
                 buf,
                 "ntups {}, is_primary {}",
-                u16_at(rec, 0),
-                if bool_at(rec, 2) { 'T' } else { 'F' }
+                xlrec.ntups,
+                if xlrec.is_prim_bucket_same_wrt { 'T' } else { 'F' }
             );
         }
         XLOG_HASH_SQUEEZE_PAGE => {
-            // xl_hash_squeeze_page: prevblkno u32 @0, nextblkno u32 @4, ntups u16 @8,
-            // is_prim_bucket_same_wrt bool @10
+            let xlrec = xl_hash_squeeze_page::from_bytes(rec);
             appendf!(
                 buf,
                 "prevblkno {}, nextblkno {}, ntups {}, is_primary {}",
-                u32_at(rec, 0),
-                u32_at(rec, 4),
-                u16_at(rec, 8),
-                if bool_at(rec, 10) { 'T' } else { 'F' }
+                xlrec.prevblkno,
+                xlrec.nextblkno,
+                xlrec.ntups,
+                if xlrec.is_prim_bucket_same_wrt { 'T' } else { 'F' }
             );
         }
         XLOG_HASH_DELETE => {
-            // xl_hash_delete: clear_dead_marking bool @0, is_primary_bucket_page bool @1
+            let xlrec = xl_hash_delete::from_bytes(rec);
             appendf!(
                 buf,
                 "clear_dead_marking {}, is_primary {}",
-                if bool_at(rec, 0) { 'T' } else { 'F' },
-                if bool_at(rec, 1) { 'T' } else { 'F' }
+                if xlrec.clear_dead_marking { 'T' } else { 'F' },
+                if xlrec.is_primary_bucket_page { 'T' } else { 'F' }
             );
         }
         XLOG_HASH_UPDATE_META_PAGE => {
-            // xl_hash_update_meta_page: ntuples f64 @0
-            appendf!(buf, "ntuples {}", GFmt(f64_at(rec, 0)));
+            let xlrec = xl_hash_update_meta_page::from_bytes(rec);
+            appendf!(buf, "ntuples {}", GFmt(xlrec.ntuples));
         }
         XLOG_HASH_VACUUM_ONE_PAGE => {
-            // xl_hash_vacuum_one_page: snapshotConflictHorizon u32 @0, ntuples u16 @4,
-            // isCatalogRel bool @6
+            let xlrec = xl_hash_vacuum_one_page::from_bytes(rec);
             appendf!(
                 buf,
                 "ntuples {}, snapshotConflictHorizon {}, isCatalogRel {}",
-                u16_at(rec, 4),
-                u32_at(rec, 0),
-                if bool_at(rec, 6) { 'T' } else { 'F' }
+                xlrec.ntuples,
+                xlrec.snapshotConflictHorizon,
+                if xlrec.isCatalogRel { 'T' } else { 'F' }
             );
         }
         _ => {}
@@ -149,12 +151,13 @@ pub fn hash_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::record;
     use mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");
         let mut buf = PgString::new_in(ctx.mcx());
-        let record = XLogRecordView::new(info, data, &[]);
+        let record = record(ctx.mcx(), info, data, &[]);
         hash_desc(&mut buf, &record).unwrap();
         buf.as_str().to_string()
     }

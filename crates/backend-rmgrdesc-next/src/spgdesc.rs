@@ -1,9 +1,12 @@
 //! `access/rmgrdesc/spgdesc.c` — rmgr descriptor routines for SP-GiST indexes.
 
-use crate::{appendf, bool_at, i8_at, u16_at, u32_at};
+use crate::appendf;
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::spgxlog::{spgxlogAddLeaf, spgxlogAddNode, spgxlogMoveLeafs,
+                                  spgxlogPickSplit, spgxlogSplitTuple, spgxlogVacuumLeaf,
+                                  spgxlogVacuumRedirect, spgxlogVacuumRoot};
 
 // access/spgxlog.h
 pub const XLOG_SPGIST_ADD_LEAF: u8 = 0x10;
@@ -16,131 +19,122 @@ pub const XLOG_SPGIST_VACUUM_ROOT: u8 = 0x70;
 pub const XLOG_SPGIST_VACUUM_REDIRECT: u8 = 0x80;
 
 /// `spg_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn spg_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn spg_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let info = record.info() & !XLR_INFO_MASK;
 
     match info {
         XLOG_SPGIST_ADD_LEAF => {
-            // spgxlogAddLeaf: newPage bool @0, storesNulls bool @1, offnumLeaf u16 @2,
-            // offnumHeadLeaf u16 @4, offnumParent u16 @6, nodeI u16 @8
+            let xlrec = spgxlogAddLeaf::from_bytes(rec);
             appendf!(
                 buf,
                 "off: {}, headoff: {}, parentoff: {}, nodeI: {}",
-                u16_at(rec, 2),
-                u16_at(rec, 4),
-                u16_at(rec, 6),
-                u16_at(rec, 8)
+                xlrec.offnumLeaf,
+                xlrec.offnumHeadLeaf,
+                xlrec.offnumParent,
+                xlrec.nodeI
             );
-            if bool_at(rec, 0) {
+            if xlrec.newPage {
                 buf.try_push_str(" (newpage)")?;
             }
-            if bool_at(rec, 1) {
+            if xlrec.storesNulls {
                 buf.try_push_str(" (nulls)")?;
             }
         }
         XLOG_SPGIST_MOVE_LEAFS => {
-            // spgxlogMoveLeafs: nMoves u16 @0, newPage bool @2, replaceDead bool @3,
-            // storesNulls bool @4, offnumParent u16 @6, nodeI u16 @8
+            let xlrec = spgxlogMoveLeafs::from_bytes(rec);
             appendf!(
                 buf,
                 "nmoves: {}, parentoff: {}, nodeI: {}",
-                u16_at(rec, 0),
-                u16_at(rec, 6),
-                u16_at(rec, 8)
+                xlrec.nMoves,
+                xlrec.offnumParent,
+                xlrec.nodeI
             );
-            if bool_at(rec, 2) {
+            if xlrec.newPage {
                 buf.try_push_str(" (newpage)")?;
             }
-            if bool_at(rec, 3) {
+            if xlrec.replaceDead {
                 buf.try_push_str(" (replacedead)")?;
             }
-            if bool_at(rec, 4) {
+            if xlrec.storesNulls {
                 buf.try_push_str(" (nulls)")?;
             }
         }
         XLOG_SPGIST_ADD_NODE => {
-            // spgxlogAddNode: offnum u16 @0, offnumNew u16 @2, newPage bool @4,
-            // parentBlk int8 @5, offnumParent u16 @6, nodeI u16 @8
+            let xlrec = spgxlogAddNode::from_bytes(rec);
             appendf!(
                 buf,
                 "off: {}, newoff: {}, parentBlk: {}, parentoff: {}, nodeI: {}",
-                u16_at(rec, 0),
-                u16_at(rec, 2),
-                i8_at(rec, 5),
-                u16_at(rec, 6),
-                u16_at(rec, 8)
+                xlrec.offnum,
+                xlrec.offnumNew,
+                xlrec.parentBlk,
+                xlrec.offnumParent,
+                xlrec.nodeI
             );
-            if bool_at(rec, 4) {
+            if xlrec.newPage {
                 buf.try_push_str(" (newpage)")?;
             }
         }
         XLOG_SPGIST_SPLIT_TUPLE => {
-            // spgxlogSplitTuple: offnumPrefix u16 @0, offnumPostfix u16 @2,
-            // newPage bool @4, postfixBlkSame bool @5
+            let xlrec = spgxlogSplitTuple::from_bytes(rec);
             appendf!(
                 buf,
                 "prefixoff: {}, postfixoff: {}",
-                u16_at(rec, 0),
-                u16_at(rec, 2)
+                xlrec.offnumPrefix,
+                xlrec.offnumPostfix
             );
-            if bool_at(rec, 4) {
+            if xlrec.newPage {
                 buf.try_push_str(" (newpage)")?;
             }
-            if bool_at(rec, 5) {
+            if xlrec.postfixBlkSame {
                 buf.try_push_str(" (same)")?;
             }
         }
         XLOG_SPGIST_PICKSPLIT => {
-            // spgxlogPickSplit: isRootSplit bool @0, nDelete u16 @2, nInsert u16 @4,
-            // initSrc bool @6, initDest bool @7, offnumInner u16 @8, initInner bool @10,
-            // storesNulls bool @11, innerIsParent bool @12, offnumParent u16 @14,
-            // nodeI u16 @16
+            let xlrec = spgxlogPickSplit::from_bytes(rec);
             appendf!(
                 buf,
                 "ndelete: {}, ninsert: {}, inneroff: {}, parentoff: {}, nodeI: {}",
-                u16_at(rec, 2),
-                u16_at(rec, 4),
-                u16_at(rec, 8),
-                u16_at(rec, 14),
-                u16_at(rec, 16)
+                xlrec.nDelete,
+                xlrec.nInsert,
+                xlrec.offnumInner,
+                xlrec.offnumParent,
+                xlrec.nodeI
             );
-            if bool_at(rec, 12) {
+            if xlrec.innerIsParent {
                 buf.try_push_str(" (innerIsParent)")?;
             }
-            if bool_at(rec, 11) {
+            if xlrec.storesNulls {
                 buf.try_push_str(" (nulls)")?;
             }
-            if bool_at(rec, 0) {
+            if xlrec.isRootSplit {
                 buf.try_push_str(" (isRootSplit)")?;
             }
         }
         XLOG_SPGIST_VACUUM_LEAF => {
-            // spgxlogVacuumLeaf: nDead u16 @0, nPlaceholder u16 @2, nMove u16 @4,
-            // nChain u16 @6
+            let xlrec = spgxlogVacuumLeaf::from_bytes(rec);
             appendf!(
                 buf,
                 "ndead: {}, nplaceholder: {}, nmove: {}, nchain: {}",
-                u16_at(rec, 0),
-                u16_at(rec, 2),
-                u16_at(rec, 4),
-                u16_at(rec, 6)
+                xlrec.nDead,
+                xlrec.nPlaceholder,
+                xlrec.nMove,
+                xlrec.nChain
             );
         }
         XLOG_SPGIST_VACUUM_ROOT => {
-            // spgxlogVacuumRoot: nDelete u16 @0
-            appendf!(buf, "ndelete: {}", u16_at(rec, 0));
+            let xlrec = spgxlogVacuumRoot::from_bytes(rec);
+            appendf!(buf, "ndelete: {}", xlrec.nDelete);
         }
         XLOG_SPGIST_VACUUM_REDIRECT => {
-            // spgxlogVacuumRedirect: nToPlaceholder u16 @0, firstPlaceholder u16 @2,
-            // snapshotConflictHorizon u32 @4, isCatalogRel bool @8
+            let xlrec = spgxlogVacuumRedirect::from_bytes(rec);
             appendf!(
                 buf,
                 "ntoplaceholder: {}, firstplaceholder: {}, snapshotConflictHorizon: {}, isCatalogRel: {}",
-                u16_at(rec, 0),
-                u16_at(rec, 2),
-                u32_at(rec, 4),
-                if bool_at(rec, 8) { 'T' } else { 'F' }
+                xlrec.nToPlaceholder,
+                xlrec.firstPlaceholder,
+                xlrec.snapshotConflictHorizon,
+                if xlrec.isCatalogRel { 'T' } else { 'F' }
             );
         }
         _ => {}
@@ -166,12 +160,13 @@ pub fn spg_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::record;
     use mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");
         let mut buf = PgString::new_in(ctx.mcx());
-        let record = XLogRecordView::new(info, data, &[]);
+        let record = record(ctx.mcx(), info, data, &[]);
         spg_desc(&mut buf, &record).unwrap();
         buf.as_str().to_string()
     }

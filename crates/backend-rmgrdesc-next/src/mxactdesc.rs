@@ -1,9 +1,11 @@
 //! `access/rmgrdesc/mxactdesc.c` — rmgr descriptor routines for multixacts.
 
-use crate::{appendf, i32_at, i64_at, u32_at};
+use crate::{appendf, i64_at};
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::multixact::{MultiXactMember, MultiXactStatus, xl_multixact_create,
+                                    xl_multixact_truncate};
 
 // access/multixact.h
 pub const XLOG_MULTIXACT_ZERO_OFF_PAGE: u8 = 0x00;
@@ -11,36 +13,23 @@ pub const XLOG_MULTIXACT_ZERO_MEM_PAGE: u8 = 0x10;
 pub const XLOG_MULTIXACT_CREATE_ID: u8 = 0x20;
 pub const XLOG_MULTIXACT_TRUNCATE_ID: u8 = 0x30;
 
-// MultiXactStatus
-pub const MULTI_XACT_STATUS_FOR_KEY_SHARE: i32 = 0x00;
-pub const MULTI_XACT_STATUS_FOR_SHARE: i32 = 0x01;
-pub const MULTI_XACT_STATUS_FOR_NO_KEY_UPDATE: i32 = 0x02;
-pub const MULTI_XACT_STATUS_FOR_UPDATE: i32 = 0x03;
-pub const MULTI_XACT_STATUS_NO_KEY_UPDATE: i32 = 0x04;
-pub const MULTI_XACT_STATUS_UPDATE: i32 = 0x05;
-
-/// `sizeof(MultiXactMember)` — `{TransactionId xid; MultiXactStatus status;}`.
-const SIZEOF_MULTI_XACT_MEMBER: usize = 8;
-/// `SizeOfMultiXactCreate` — `offsetof(xl_multixact_create, members)`.
-const SIZEOF_MULTI_XACT_CREATE: usize = 12;
-
 /// `out_member(StringInfo buf, MultiXactMember *member)`.
-fn out_member(buf: &mut PgString<'_>, xid: u32, status: i32) -> PgResult<()> {
-    appendf!(buf, "{} ", xid);
-    match status {
-        MULTI_XACT_STATUS_FOR_KEY_SHARE => buf.try_push_str("(keysh) ")?,
-        MULTI_XACT_STATUS_FOR_SHARE => buf.try_push_str("(sh) ")?,
-        MULTI_XACT_STATUS_FOR_NO_KEY_UPDATE => buf.try_push_str("(fornokeyupd) ")?,
-        MULTI_XACT_STATUS_FOR_UPDATE => buf.try_push_str("(forupd) ")?,
-        MULTI_XACT_STATUS_NO_KEY_UPDATE => buf.try_push_str("(nokeyupd) ")?,
-        MULTI_XACT_STATUS_UPDATE => buf.try_push_str("(upd) ")?,
-        _ => buf.try_push_str("(unk) ")?,
+fn out_member(buf: &mut PgString<'_>, member: &MultiXactMember) -> PgResult<()> {
+    appendf!(buf, "{} ", member.xid);
+    match member.status {
+        Some(MultiXactStatus::ForKeyShare) => buf.try_push_str("(keysh) ")?,
+        Some(MultiXactStatus::ForShare) => buf.try_push_str("(sh) ")?,
+        Some(MultiXactStatus::ForNoKeyUpdate) => buf.try_push_str("(fornokeyupd) ")?,
+        Some(MultiXactStatus::ForUpdate) => buf.try_push_str("(forupd) ")?,
+        Some(MultiXactStatus::NoKeyUpdate) => buf.try_push_str("(nokeyupd) ")?,
+        Some(MultiXactStatus::Update) => buf.try_push_str("(upd) ")?,
+        None => buf.try_push_str("(unk) ")?,
     }
     Ok(())
 }
 
 /// `multixact_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn multixact_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn multixact_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let info = record.info() & !XLR_INFO_MASK;
 
@@ -48,29 +37,27 @@ pub fn multixact_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> Pg
         // int64 pageno, memcpy'd from the (possibly unaligned) record start
         appendf!(buf, "{}", i64_at(rec, 0));
     } else if info == XLOG_MULTIXACT_CREATE_ID {
-        // xl_multixact_create: mid u32 @0, moff u32 @4, nmembers i32 @8, members @12
-        let nmembers = i32_at(rec, 8);
+        let xlrec = xl_multixact_create::from_bytes(rec);
         appendf!(
             buf,
             "{} offset {} nmembers {}: ",
-            u32_at(rec, 0),
-            u32_at(rec, 4),
-            nmembers
+            xlrec.mid,
+            xlrec.moff,
+            xlrec.nmembers
         );
-        for i in 0..nmembers.max(0) as usize {
-            let off = SIZEOF_MULTI_XACT_CREATE + i * SIZEOF_MULTI_XACT_MEMBER;
-            out_member(buf, u32_at(rec, off), i32_at(rec, off + 4))?;
+        let members = xl_multixact_create::members(rec);
+        for i in 0..xlrec.nmembers.max(0) as usize {
+            out_member(buf, &members.get(i))?;
         }
     } else if info == XLOG_MULTIXACT_TRUNCATE_ID {
-        // xl_multixact_truncate: oldestMultiDB u32 @0, startTruncOff @4,
-        // endTruncOff @8, startTruncMemb @12, endTruncMemb @16
+        let xlrec = xl_multixact_truncate::from_bytes(rec);
         appendf!(
             buf,
             "offsets [{}, {}), members [{}, {})",
-            u32_at(rec, 4),
-            u32_at(rec, 8),
-            u32_at(rec, 12),
-            u32_at(rec, 16)
+            xlrec.startTruncOff,
+            xlrec.endTruncOff,
+            xlrec.startTruncMemb,
+            xlrec.endTruncMemb
         );
     }
     Ok(())
@@ -90,12 +77,13 @@ pub fn multixact_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::record;
     use mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");
         let mut buf = PgString::new_in(ctx.mcx());
-        let record = XLogRecordView::new(info, data, &[]);
+        let record = record(ctx.mcx(), info, data, &[]);
         multixact_desc(&mut buf, &record).unwrap();
         buf.as_str().to_string()
     }
@@ -109,9 +97,9 @@ mod tests {
         rec.extend_from_slice(&7u32.to_ne_bytes()); // moff
         rec.extend_from_slice(&2i32.to_ne_bytes()); // nmembers
         rec.extend_from_slice(&11u32.to_ne_bytes());
-        rec.extend_from_slice(&MULTI_XACT_STATUS_FOR_SHARE.to_ne_bytes());
+        rec.extend_from_slice(&(MultiXactStatus::ForShare as i32).to_ne_bytes());
         rec.extend_from_slice(&12u32.to_ne_bytes());
-        rec.extend_from_slice(&MULTI_XACT_STATUS_UPDATE.to_ne_bytes());
+        rec.extend_from_slice(&(MultiXactStatus::Update as i32).to_ne_bytes());
         assert_eq!(
             desc(XLOG_MULTIXACT_CREATE_ID, &rec),
             "100 offset 7 nmembers 2: 11 (sh) 12 (upd) "

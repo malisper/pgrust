@@ -4,10 +4,13 @@
 //! lands; until then a call panics loudly.
 //!
 //! The C signatures take `(StringInfo buf, void *elem, void *data)`; the
-//! element arrives as the raw record bytes of one array element. The unused
-//! `void *data` of the simple element descriptors (always passed as NULL in
-//! C) is elided; `array_desc`'s `data` cursor is folded into the `elem_desc`
-//! closure capture.
+//! `void *elem` of `array_desc`'s callback is genuinely generic (it walks any
+//! element type), so it stays raw bytes there, but each concrete element
+//! descriptor resolves its `void *` to the real C type (`OffsetNumber`,
+//! `OffsetNumber[2]`, `Oid`) — callers decode the element bytes in their
+//! `elem_desc` closures. The unused `void *data` of the simple element
+//! descriptors (always passed as NULL in C) is elided; `array_desc`'s `data`
+//! cursor is folded into the `elem_desc` closure capture.
 
 seam_core::seam!(
     /// `array_desc(buf, array, elem_size, count, elem_desc, data)` —
@@ -28,7 +31,7 @@ seam_core::seam!(
     /// `offset_elem_desc(buf, offset, NULL)` — `"%u"` of one `OffsetNumber`.
     pub fn offset_elem_desc(
         buf: &mut mcx::PgString<'_>,
-        elem: &[u8],
+        offset: types_core::OffsetNumber,
     ) -> types_error::PgResult<()>
 );
 
@@ -37,7 +40,8 @@ seam_core::seam!(
     /// `OffsetNumber[2]` pair.
     pub fn redirect_elem_desc(
         buf: &mut mcx::PgString<'_>,
-        elem: &[u8],
+        from: types_core::OffsetNumber,
+        to: types_core::OffsetNumber,
     ) -> types_error::PgResult<()>
 );
 
@@ -45,6 +49,6 @@ seam_core::seam!(
     /// `oid_elem_desc(buf, relid, NULL)` — `"%u"` of one `Oid`.
     pub fn oid_elem_desc(
         buf: &mut mcx::PgString<'_>,
-        elem: &[u8],
+        relid: types_core::Oid,
     ) -> types_error::PgResult<()>
 );

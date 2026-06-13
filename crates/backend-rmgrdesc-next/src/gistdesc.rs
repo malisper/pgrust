@@ -1,9 +1,11 @@
 //! `access/rmgrdesc/gistdesc.c` — rmgr descriptor routines for GiST indexes.
 
-use crate::{appendf, bool_at, full_xid_parts, u16_at, u32_at, u64_at};
+use crate::appendf;
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::gistxlog::{gistxlogDelete, gistxlogPageDelete, gistxlogPageReuse,
+                                   gistxlogPageSplit};
 
 // access/gistxlog.h
 pub const XLOG_GIST_PAGE_UPDATE: u8 = 0x00;
@@ -18,55 +20,58 @@ fn out_gistxlog_page_update(_buf: &mut PgString<'_>, _rec: &[u8]) -> PgResult<()
     Ok(())
 }
 
-/// `out_gistxlogPageReuse`. Layout: locator {spcOid,dbOid,relNumber} u32 @0/4/8,
-/// block u32 @12, snapshotConflictHorizon FullTransactionId u64 @16 (8-aligned),
-/// isCatalogRel bool @24.
+/// `out_gistxlogPageReuse`.
 fn out_gistxlog_page_reuse(buf: &mut PgString<'_>, rec: &[u8]) -> PgResult<()> {
-    let (epoch, xid) = full_xid_parts(u64_at(rec, 16));
+    let xlrec = gistxlogPageReuse::from_bytes(rec);
     appendf!(
         buf,
         "rel {}/{}/{}; blk {}; snapshotConflictHorizon {}:{}, isCatalogRel {}",
-        u32_at(rec, 0),
-        u32_at(rec, 4),
-        u32_at(rec, 8),
-        u32_at(rec, 12),
-        epoch,
-        xid,
-        if bool_at(rec, 24) { 'T' } else { 'F' }
+        xlrec.locator.spcOid,
+        xlrec.locator.dbOid,
+        xlrec.locator.relNumber,
+        xlrec.block,
+        xlrec.snapshotConflictHorizon.epoch(),
+        xlrec.snapshotConflictHorizon.xid(),
+        if xlrec.isCatalogRel { 'T' } else { 'F' }
     );
     Ok(())
 }
 
-/// `out_gistxlogDelete`. Layout: snapshotConflictHorizon u32 @0,
-/// ntodelete u16 @4, isCatalogRel bool @6.
+/// `out_gistxlogDelete`.
 fn out_gistxlog_delete(buf: &mut PgString<'_>, rec: &[u8]) -> PgResult<()> {
+    let xlrec = gistxlogDelete::from_bytes(rec);
     appendf!(
         buf,
         "delete: snapshotConflictHorizon {}, nitems: {}, isCatalogRel {}",
-        u32_at(rec, 0),
-        u16_at(rec, 4),
-        if bool_at(rec, 6) { 'T' } else { 'F' }
+        xlrec.snapshotConflictHorizon,
+        xlrec.ntodelete,
+        if xlrec.isCatalogRel { 'T' } else { 'F' }
     );
     Ok(())
 }
 
-/// `out_gistxlogPageSplit`. Layout: origrlink u32 @0, orignsn u64 @8
-/// (8-aligned), origleaf bool @16, npage u16 @18, markfollowright bool @20.
+/// `out_gistxlogPageSplit`.
 fn out_gistxlog_page_split(buf: &mut PgString<'_>, rec: &[u8]) -> PgResult<()> {
-    appendf!(buf, "page_split: splits to {} pages", u16_at(rec, 18));
+    let xlrec = gistxlogPageSplit::from_bytes(rec);
+    appendf!(buf, "page_split: splits to {} pages", xlrec.npage);
     Ok(())
 }
 
-/// `out_gistxlogPageDelete`. Layout: deleteXid FullTransactionId u64 @0,
-/// downlinkOffset u16 @8.
+/// `out_gistxlogPageDelete`.
 fn out_gistxlog_page_delete(buf: &mut PgString<'_>, rec: &[u8]) -> PgResult<()> {
-    let (epoch, xid) = full_xid_parts(u64_at(rec, 0));
-    appendf!(buf, "deleteXid {}:{}; downlink {}", epoch, xid, u16_at(rec, 8));
+    let xlrec = gistxlogPageDelete::from_bytes(rec);
+    appendf!(
+        buf,
+        "deleteXid {}:{}; downlink {}",
+        xlrec.deleteXid.epoch(),
+        xlrec.deleteXid.xid(),
+        xlrec.downlinkOffset
+    );
     Ok(())
 }
 
 /// `gist_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn gist_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn gist_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let info = record.info() & !XLR_INFO_MASK;
 
@@ -98,12 +103,13 @@ pub fn gist_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::record;
     use mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");
         let mut buf = PgString::new_in(ctx.mcx());
-        let record = XLogRecordView::new(info, data, &[]);
+        let record = record(ctx.mcx(), info, data, &[]);
         gist_desc(&mut buf, &record).unwrap();
         buf.as_str().to_string()
     }

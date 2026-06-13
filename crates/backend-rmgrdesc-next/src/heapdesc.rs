@@ -3,12 +3,20 @@
 //! and frontend pg_waldump).
 
 use crate::standbydesc::standby_desc_invalidations;
-use crate::{appendf, bool_at, i32_at, u16_at, u32_at, u8_at};
+use crate::appendf;
 use backend_rmgrdesc_small_seams::{array_desc, offset_elem_desc, oid_elem_desc,
                                    redirect_elem_desc};
 use mcx::PgString;
 use types_error::PgResult;
-use types_wal::{XLogRecordView, XLR_INFO_MASK};
+use types_wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use types_xlog_records::arrays::{OffsetNumberPairs, OffsetNumbers, Oids, SIZEOF_OFFSET_NUMBER,
+                                 SIZEOF_OID};
+use types_xlog_records::heapam_xlog::{FreezePlans, xl_heap_confirm, xl_heap_delete,
+                                      xl_heap_inplace, xl_heap_insert, xl_heap_lock,
+                                      xl_heap_lock_updated, xl_heap_multi_insert,
+                                      xl_heap_new_cid, xl_heap_prune, xl_heap_truncate,
+                                      xl_heap_update, xl_heap_visible, xlhp_freeze_plans,
+                                      xlhp_prune_items, SIZEOF_XLHP_FREEZE_PLAN};
 
 // access/heapam_xlog.h — RM_HEAP_ID opcodes
 pub const XLOG_HEAP_INSERT: u8 = 0x00;
@@ -51,20 +59,6 @@ pub const XLHL_XMAX_LOCK_ONLY: u8 = 0x02;
 pub const XLHL_XMAX_EXCL_LOCK: u8 = 0x04;
 pub const XLHL_XMAX_KEYSHR_LOCK: u8 = 0x08;
 pub const XLHL_KEYS_UPDATED: u8 = 0x10;
-
-/// `SizeOfHeapPrune` — `offsetof(xl_heap_prune, flags) + sizeof(uint8)`.
-pub const SIZEOF_HEAP_PRUNE: usize = 2;
-/// `sizeof(xlhp_freeze_plan)`: xmax u32, t_infomask2 u16, t_infomask u16,
-/// frzflags u8, ntuples u16 — 12 bytes, 4-aligned.
-const SIZEOF_XLHP_FREEZE_PLAN: usize = 12;
-/// `offsetof(xlhp_freeze_plans, plans)` — nplans u16 then 4-aligned array.
-const OFFSETOF_XLHP_FREEZE_PLANS_PLANS: usize = 4;
-/// `offsetof(xlhp_prune_items, data)` — ntargets u16 then u16 array.
-const OFFSETOF_XLHP_PRUNE_ITEMS_DATA: usize = 2;
-/// `sizeof(OffsetNumber)`.
-const SIZEOF_OFFSET_NUMBER: usize = 2;
-/// `sizeof(Oid)`.
-const SIZEOF_OID: usize = 4;
 
 /// NOTE: "keyname" argument cannot have trailing spaces or punctuation
 /// characters.
@@ -118,19 +112,21 @@ fn truncate_flags_desc(buf: &mut PgString<'_>, flags: u8) -> PgResult<()> {
 }
 
 /// The sub-records of an `XLOG_HEAP2_PRUNE_*` record's block 0 data, as the C
-/// out-parameters of `heap_xlog_deserialize_prune_and_freeze`. The slices
-/// borrow the block data; `plans`/`redirected`/`nowdead`/`nowunused` start at
-/// the respective arrays (empty when the corresponding flag is unset).
+/// out-parameters of `heap_xlog_deserialize_prune_and_freeze`. The typed array
+/// views borrow the block data; `plans`/`redirected`/`nowdead`/`nowunused`
+/// start at the respective arrays (empty when the corresponding flag is
+/// unset). `frz_offsets` is a cursor over the shared page-offset array that
+/// each plan's `ntuples` entries consume in turn.
 pub struct PruneFreezeSubRecords<'a> {
     pub nplans: i32,
-    pub plans: &'a [u8],
-    pub frz_offsets: &'a [u8],
+    pub plans: FreezePlans<'a>,
+    pub frz_offsets: OffsetNumbers<'a>,
     pub nredirected: i32,
-    pub redirected: &'a [u8],
+    pub redirected: OffsetNumberPairs<'a>,
     pub ndead: i32,
-    pub nowdead: &'a [u8],
+    pub nowdead: OffsetNumbers<'a>,
     pub nunused: i32,
-    pub nowunused: &'a [u8],
+    pub nowunused: OffsetNumbers<'a>,
 }
 
 /// `heap_xlog_deserialize_prune_and_freeze(char *cursor, uint8 flags, ...)`.
@@ -147,49 +143,57 @@ pub fn heap_xlog_deserialize_prune_and_freeze(
     let mut cur = cursor;
 
     let (nplans, plans) = if flags & XLHP_HAS_FREEZE_PLANS != 0 {
-        let nplans = u16_at(cur, 0) as i32;
+        let freeze_plans = xlhp_freeze_plans::from_bytes(cur);
+        let nplans = freeze_plans.nplans as i32;
         debug_assert!(nplans > 0);
-        let plans = &cur[OFFSETOF_XLHP_FREEZE_PLANS_PLANS..];
-        cur = &plans[SIZEOF_XLHP_FREEZE_PLAN * nplans as usize..];
+        let plans = xlhp_freeze_plans::plans(cur);
+        cur = &cur[xlhp_freeze_plans::OFFSETOF_PLANS
+            + SIZEOF_XLHP_FREEZE_PLAN * nplans as usize..];
         (nplans, plans)
     } else {
-        (0, &[][..])
+        (0, FreezePlans::from_bytes(&[]))
     };
 
     let (nredirected, redirected) = if flags & XLHP_HAS_REDIRECTIONS != 0 {
-        let ntargets = u16_at(cur, 0) as i32;
+        let items = xlhp_prune_items::from_bytes(cur);
+        let ntargets = items.ntargets as i32;
         debug_assert!(ntargets > 0);
-        let data = &cur[OFFSETOF_XLHP_PRUNE_ITEMS_DATA..];
-        cur = &data[2 * SIZEOF_OFFSET_NUMBER * ntargets as usize..];
+        let data = OffsetNumberPairs::from_bytes(&cur[xlhp_prune_items::OFFSETOF_DATA..]);
+        cur = &cur[xlhp_prune_items::OFFSETOF_DATA
+            + 2 * SIZEOF_OFFSET_NUMBER * ntargets as usize..];
         (ntargets, data)
     } else {
-        (0, &[][..])
+        (0, OffsetNumberPairs::from_bytes(&[]))
     };
 
     let (ndead, nowdead) = if flags & XLHP_HAS_DEAD_ITEMS != 0 {
-        let ntargets = u16_at(cur, 0) as i32;
+        let items = xlhp_prune_items::from_bytes(cur);
+        let ntargets = items.ntargets as i32;
         debug_assert!(ntargets > 0);
-        let data = &cur[OFFSETOF_XLHP_PRUNE_ITEMS_DATA..];
-        cur = &data[SIZEOF_OFFSET_NUMBER * ntargets as usize..];
+        let data = xlhp_prune_items::data(cur);
+        cur = &cur[xlhp_prune_items::OFFSETOF_DATA
+            + SIZEOF_OFFSET_NUMBER * ntargets as usize..];
         (ntargets, data)
     } else {
-        (0, &[][..])
+        (0, OffsetNumbers::from_bytes(&[]))
     };
 
     let (nunused, nowunused) = if flags & XLHP_HAS_NOW_UNUSED_ITEMS != 0 {
-        let ntargets = u16_at(cur, 0) as i32;
+        let items = xlhp_prune_items::from_bytes(cur);
+        let ntargets = items.ntargets as i32;
         debug_assert!(ntargets > 0);
-        let data = &cur[OFFSETOF_XLHP_PRUNE_ITEMS_DATA..];
-        cur = &data[SIZEOF_OFFSET_NUMBER * ntargets as usize..];
+        let data = xlhp_prune_items::data(cur);
+        cur = &cur[xlhp_prune_items::OFFSETOF_DATA
+            + SIZEOF_OFFSET_NUMBER * ntargets as usize..];
         (ntargets, data)
     } else {
-        (0, &[][..])
+        (0, OffsetNumbers::from_bytes(&[]))
     };
 
     PruneFreezeSubRecords {
         nplans,
         plans,
-        frz_offsets: cur,
+        frz_offsets: OffsetNumbers::from_bytes(cur),
         nredirected,
         redirected,
         ndead,
@@ -200,71 +204,67 @@ pub fn heap_xlog_deserialize_prune_and_freeze(
 }
 
 /// `heap_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn heap_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn heap_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let mut info = record.info() & !XLR_INFO_MASK;
 
     info &= XLOG_HEAP_OPMASK;
     if info == XLOG_HEAP_INSERT {
-        // xl_heap_insert: offnum u16 @0, flags u8 @2
-        appendf!(buf, "off: {}, flags: 0x{:02X}", u16_at(rec, 0), u8_at(rec, 2));
+        let xlrec = xl_heap_insert::from_bytes(rec);
+        appendf!(buf, "off: {}, flags: 0x{:02X}", xlrec.offnum, xlrec.flags);
     } else if info == XLOG_HEAP_DELETE {
-        // xl_heap_delete: xmax u32 @0, offnum u16 @4, infobits_set u8 @6, flags u8 @7
-        appendf!(buf, "xmax: {}, off: {}, ", u32_at(rec, 0), u16_at(rec, 4));
-        infobits_desc(buf, u8_at(rec, 6), "infobits")?;
-        appendf!(buf, ", flags: 0x{:02X}", u8_at(rec, 7));
+        let xlrec = xl_heap_delete::from_bytes(rec);
+        appendf!(buf, "xmax: {}, off: {}, ", xlrec.xmax, xlrec.offnum);
+        infobits_desc(buf, xlrec.infobits_set, "infobits")?;
+        appendf!(buf, ", flags: 0x{:02X}", xlrec.flags);
     } else if info == XLOG_HEAP_UPDATE || info == XLOG_HEAP_HOT_UPDATE {
-        // xl_heap_update: old_xmax u32 @0, old_offnum u16 @4, old_infobits_set u8 @6,
-        // flags u8 @7, new_xmax u32 @8, new_offnum u16 @12
-        appendf!(buf, "old_xmax: {}, old_off: {}, ", u32_at(rec, 0), u16_at(rec, 4));
-        infobits_desc(buf, u8_at(rec, 6), "old_infobits")?;
+        let xlrec = xl_heap_update::from_bytes(rec);
+        appendf!(buf, "old_xmax: {}, old_off: {}, ", xlrec.old_xmax, xlrec.old_offnum);
+        infobits_desc(buf, xlrec.old_infobits_set, "old_infobits")?;
         appendf!(
             buf,
             ", flags: 0x{:02X}, new_xmax: {}, new_off: {}",
-            u8_at(rec, 7),
-            u32_at(rec, 8),
-            u16_at(rec, 12)
+            xlrec.flags,
+            xlrec.new_xmax,
+            xlrec.new_offnum
         );
     } else if info == XLOG_HEAP_TRUNCATE {
-        // xl_heap_truncate: dbId u32 @0, nrelids u32 @4, flags u8 @8, relids @12
-        let nrelids = u32_at(rec, 4);
-        truncate_flags_desc(buf, u8_at(rec, 8))?;
-        appendf!(buf, ", nrelids: {}", nrelids);
+        let xlrec = xl_heap_truncate::from_bytes(rec);
+        truncate_flags_desc(buf, xlrec.flags)?;
+        appendf!(buf, ", nrelids: {}", xlrec.nrelids);
         buf.try_push_str(", relids:")?;
         array_desc::call(
             buf,
-            &rec[12..12 + nrelids as usize * SIZEOF_OID],
+            xl_heap_truncate::relids(rec).bytes_of(xlrec.nrelids as usize),
             SIZEOF_OID,
-            nrelids as i32,
-            &mut |buf, elem| oid_elem_desc::call(buf, elem),
+            xlrec.nrelids as i32,
+            &mut |buf, elem| oid_elem_desc::call(buf, Oids::from_bytes(elem).get(0)),
         )?;
     } else if info == XLOG_HEAP_CONFIRM {
-        // xl_heap_confirm: offnum u16 @0
-        appendf!(buf, "off: {}", u16_at(rec, 0));
+        let xlrec = xl_heap_confirm::from_bytes(rec);
+        appendf!(buf, "off: {}", xlrec.offnum);
     } else if info == XLOG_HEAP_LOCK {
-        // xl_heap_lock: xmax u32 @0, offnum u16 @4, infobits_set u8 @6, flags u8 @7
-        appendf!(buf, "xmax: {}, off: {}, ", u32_at(rec, 0), u16_at(rec, 4));
-        infobits_desc(buf, u8_at(rec, 6), "infobits")?;
-        appendf!(buf, ", flags: 0x{:02X}", u8_at(rec, 7));
+        let xlrec = xl_heap_lock::from_bytes(rec);
+        appendf!(buf, "xmax: {}, off: {}, ", xlrec.xmax, xlrec.offnum);
+        infobits_desc(buf, xlrec.infobits_set, "infobits")?;
+        appendf!(buf, ", flags: 0x{:02X}", xlrec.flags);
     } else if info == XLOG_HEAP_INPLACE {
-        // xl_heap_inplace: offnum u16 @0, dbId u32 @4, tsId u32 @8,
-        // relcacheInitFileInval bool @12, nmsgs i32 @16, msgs @20
-        appendf!(buf, "off: {}", u16_at(rec, 0));
-        let nmsgs = i32_at(rec, 16);
+        let xlrec = xl_heap_inplace::from_bytes(rec);
+        appendf!(buf, "off: {}", xlrec.offnum);
         standby_desc_invalidations(
             buf,
-            nmsgs,
-            &rec[20..],
-            u32_at(rec, 4),
-            u32_at(rec, 8),
-            bool_at(rec, 12),
+            xlrec.nmsgs,
+            xl_heap_inplace::msgs(rec),
+            xlrec.dbId,
+            xlrec.tsId,
+            xlrec.relcacheInitFileInval,
         )?;
     }
     Ok(())
 }
 
 /// `heap2_desc(StringInfo buf, XLogReaderState *record)`.
-pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResult<()> {
+pub fn heap2_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
     let rec = record.data();
     let mut info = record.info() & !XLR_INFO_MASK;
 
@@ -273,24 +273,23 @@ pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResu
         || info == XLOG_HEAP2_PRUNE_VACUUM_SCAN
         || info == XLOG_HEAP2_PRUNE_VACUUM_CLEANUP
     {
-        // xl_heap_prune: reason u8 @0, flags u8 @1
-        let flags = u8_at(rec, 1);
+        let xlrec = xl_heap_prune::from_bytes(rec);
 
-        if flags & XLHP_HAS_CONFLICT_HORIZON != 0 {
+        if xlrec.flags & XLHP_HAS_CONFLICT_HORIZON != 0 {
             // conflict horizon XID follows the struct, unaligned
-            let conflict_xid = u32_at(rec, SIZEOF_HEAP_PRUNE);
+            let conflict_xid = xl_heap_prune::conflict_horizon(rec);
             appendf!(buf, "snapshotConflictHorizon: {}", conflict_xid);
         }
 
         appendf!(
             buf,
             ", isCatalogRel: {}",
-            if flags & XLHP_IS_CATALOG_REL != 0 { 'T' } else { 'F' }
+            if xlrec.flags & XLHP_IS_CATALOG_REL != 0 { 'T' } else { 'F' }
         );
 
         if record.has_block_data(0) {
             let cursor = record.block_data(0).expect("checked has_block_data");
-            let pf = heap_xlog_deserialize_prune_and_freeze(cursor, flags);
+            let pf = heap_xlog_deserialize_prune_and_freeze(cursor, xlrec.flags);
 
             appendf!(
                 buf,
@@ -308,33 +307,33 @@ pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResu
                 let mut frz_offsets = pf.frz_offsets;
                 array_desc::call(
                     buf,
-                    &pf.plans[..pf.nplans as usize * SIZEOF_XLHP_FREEZE_PLAN],
+                    pf.plans.bytes_of(pf.nplans as usize),
                     SIZEOF_XLHP_FREEZE_PLAN,
                     pf.nplans,
-                    &mut |buf, plan| {
-                        // xlhp_freeze_plan: xmax u32 @0, t_infomask2 u16 @4,
-                        // t_infomask u16 @6, frzflags u8 @8, ntuples u16 @10
-                        let ntuples = u16_at(plan, 10);
+                    &mut |buf, plan_bytes| {
+                        let plan = FreezePlans::from_bytes(plan_bytes).get(0);
                         crate::append(
                             buf,
                             format_args!(
                                 "{{ xmax: {}, infomask: {}, infomask2: {}, ntuples: {}",
-                                u32_at(plan, 0),
-                                u16_at(plan, 6),
-                                u16_at(plan, 4),
-                                ntuples
+                                plan.xmax,
+                                plan.t_infomask,
+                                plan.t_infomask2,
+                                plan.ntuples
                             ),
                         )?;
 
                         buf.try_push_str(", offsets:")?;
                         array_desc::call(
                             buf,
-                            &frz_offsets[..ntuples as usize * SIZEOF_OFFSET_NUMBER],
+                            frz_offsets.bytes_of(plan.ntuples as usize),
                             SIZEOF_OFFSET_NUMBER,
-                            ntuples as i32,
-                            &mut |buf, elem| offset_elem_desc::call(buf, elem),
+                            plan.ntuples as i32,
+                            &mut |buf, elem| {
+                                offset_elem_desc::call(buf, OffsetNumbers::from_bytes(elem).get(0))
+                            },
                         )?;
-                        frz_offsets = &frz_offsets[ntuples as usize * SIZEOF_OFFSET_NUMBER..];
+                        frz_offsets = frz_offsets.skip(plan.ntuples as usize);
 
                         buf.try_push_str(" }")
                     },
@@ -345,10 +344,13 @@ pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResu
                 buf.try_push_str(", redirected:")?;
                 array_desc::call(
                     buf,
-                    &pf.redirected[..pf.nredirected as usize * 2 * SIZEOF_OFFSET_NUMBER],
+                    pf.redirected.bytes_of(pf.nredirected as usize),
                     SIZEOF_OFFSET_NUMBER * 2,
                     pf.nredirected,
-                    &mut |buf, elem| redirect_elem_desc::call(buf, elem),
+                    &mut |buf, elem| {
+                        let (from, to) = OffsetNumberPairs::from_bytes(elem).get(0);
+                        redirect_elem_desc::call(buf, from, to)
+                    },
                 )?;
             }
 
@@ -356,10 +358,12 @@ pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResu
                 buf.try_push_str(", dead:")?;
                 array_desc::call(
                     buf,
-                    &pf.nowdead[..pf.ndead as usize * SIZEOF_OFFSET_NUMBER],
+                    pf.nowdead.bytes_of(pf.ndead as usize),
                     SIZEOF_OFFSET_NUMBER,
                     pf.ndead,
-                    &mut |buf, elem| offset_elem_desc::call(buf, elem),
+                    &mut |buf, elem| {
+                        offset_elem_desc::call(buf, OffsetNumbers::from_bytes(elem).get(0))
+                    },
                 )?;
             }
 
@@ -367,63 +371,63 @@ pub fn heap2_desc(buf: &mut PgString<'_>, record: &XLogRecordView<'_>) -> PgResu
                 buf.try_push_str(", unused:")?;
                 array_desc::call(
                     buf,
-                    &pf.nowunused[..pf.nunused as usize * SIZEOF_OFFSET_NUMBER],
+                    pf.nowunused.bytes_of(pf.nunused as usize),
                     SIZEOF_OFFSET_NUMBER,
                     pf.nunused,
-                    &mut |buf, elem| offset_elem_desc::call(buf, elem),
+                    &mut |buf, elem| {
+                        offset_elem_desc::call(buf, OffsetNumbers::from_bytes(elem).get(0))
+                    },
                 )?;
             }
         }
     } else if info == XLOG_HEAP2_VISIBLE {
-        // xl_heap_visible: snapshotConflictHorizon u32 @0, flags u8 @4
+        let xlrec = xl_heap_visible::from_bytes(rec);
         appendf!(
             buf,
             "snapshotConflictHorizon: {}, flags: 0x{:02X}",
-            u32_at(rec, 0),
-            u8_at(rec, 4)
+            xlrec.snapshotConflictHorizon,
+            xlrec.flags
         );
     } else if info == XLOG_HEAP2_MULTI_INSERT {
-        // xl_heap_multi_insert: flags u8 @0, ntuples u16 @2, offsets @4
-        let ntuples = u16_at(rec, 2);
+        let xlrec = xl_heap_multi_insert::from_bytes(rec);
         let isinit = record.info() & XLOG_HEAP_INIT_PAGE != 0;
 
-        appendf!(buf, "ntuples: {}, flags: 0x{:02X}", ntuples, u8_at(rec, 0));
+        appendf!(buf, "ntuples: {}, flags: 0x{:02X}", xlrec.ntuples, xlrec.flags);
 
         if record.has_block_data(0) && !isinit {
             buf.try_push_str(", offsets:")?;
             array_desc::call(
                 buf,
-                &rec[4..4 + ntuples as usize * SIZEOF_OFFSET_NUMBER],
+                xl_heap_multi_insert::offsets(rec).bytes_of(xlrec.ntuples as usize),
                 SIZEOF_OFFSET_NUMBER,
-                ntuples as i32,
-                &mut |buf, elem| offset_elem_desc::call(buf, elem),
+                xlrec.ntuples as i32,
+                &mut |buf, elem| {
+                    offset_elem_desc::call(buf, OffsetNumbers::from_bytes(elem).get(0))
+                },
             )?;
         }
     } else if info == XLOG_HEAP2_LOCK_UPDATED {
-        // xl_heap_lock_updated: xmax u32 @0, offnum u16 @4, infobits_set u8 @6,
-        // flags u8 @7
-        appendf!(buf, "xmax: {}, off: {}, ", u32_at(rec, 0), u16_at(rec, 4));
-        infobits_desc(buf, u8_at(rec, 6), "infobits")?;
-        appendf!(buf, ", flags: 0x{:02X}", u8_at(rec, 7));
+        let xlrec = xl_heap_lock_updated::from_bytes(rec);
+        appendf!(buf, "xmax: {}, off: {}, ", xlrec.xmax, xlrec.offnum);
+        infobits_desc(buf, xlrec.infobits_set, "infobits")?;
+        appendf!(buf, ", flags: 0x{:02X}", xlrec.flags);
     } else if info == XLOG_HEAP2_NEW_CID {
-        // xl_heap_new_cid: top_xid u32 @0, cmin u32 @4, cmax u32 @8, combocid u32
-        // @12, target_locator u32x3 @16, target_tid @28 (blkid @28, posid @32)
-        let tid_block = ((u16_at(rec, 28) as u32) << 16) | u16_at(rec, 30) as u32;
+        let xlrec = xl_heap_new_cid::from_bytes(rec);
         appendf!(
             buf,
             "rel: {}/{}/{}, tid: {}/{}",
-            u32_at(rec, 16),
-            u32_at(rec, 20),
-            u32_at(rec, 24),
-            tid_block,
-            u16_at(rec, 32)
+            xlrec.target_locator.spcOid,
+            xlrec.target_locator.dbOid,
+            xlrec.target_locator.relNumber,
+            xlrec.target_tid.ip_blkid.block_number(),
+            xlrec.target_tid.ip_posid
         );
         appendf!(
             buf,
             ", cmin: {}, cmax: {}, combo: {}",
-            u32_at(rec, 4),
-            u32_at(rec, 8),
-            u32_at(rec, 12)
+            xlrec.cmin,
+            xlrec.cmax,
+            xlrec.combocid
         );
     }
     Ok(())
@@ -466,13 +470,14 @@ pub fn heap2_identify(info: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::standbydesc::SIZEOF_SHARED_INVALIDATION_MESSAGE;
+    use crate::test_support::record;
     use mcx::MemoryContext;
+    use types_storage::sinval::SIZEOF_SHARED_INVALIDATION_MESSAGE;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");
         let mut buf = PgString::new_in(ctx.mcx());
-        let record = XLogRecordView::new(info, data, &[]);
+        let record = record(ctx.mcx(), info, data, &[]);
         heap_desc(&mut buf, &record).unwrap();
         buf.as_str().to_string()
     }
@@ -534,7 +539,7 @@ mod tests {
         rec[28..30].copy_from_slice(&0u16.to_ne_bytes());
         rec[30..32].copy_from_slice(&9u16.to_ne_bytes());
         rec[32..34].copy_from_slice(&2u16.to_ne_bytes());
-        let record = XLogRecordView::new(XLOG_HEAP2_NEW_CID, &rec, &[]);
+        let record = record(ctx.mcx(), XLOG_HEAP2_NEW_CID, &rec, &[]);
         heap2_desc(&mut buf, &record).unwrap();
         assert_eq!(
             buf.as_str(),
@@ -574,13 +579,17 @@ mod tests {
         assert_eq!(pf.nredirected, 1);
         assert_eq!(pf.ndead, 1);
         assert_eq!(pf.nunused, 1);
-        assert_eq!(u16_at(pf.plans, 10), 2);
-        assert_eq!(u16_at(pf.redirected, 0), 3);
-        assert_eq!(u16_at(pf.redirected, 2), 4);
-        assert_eq!(u16_at(pf.nowdead, 0), 5);
-        assert_eq!(u16_at(pf.nowunused, 0), 6);
-        assert_eq!(u16_at(pf.frz_offsets, 0), 7);
-        assert_eq!(u16_at(pf.frz_offsets, 2), 8);
+        let plan = pf.plans.get(0);
+        assert_eq!(plan.xmax, 100);
+        assert_eq!(plan.t_infomask2, 7);
+        assert_eq!(plan.t_infomask, 8);
+        assert_eq!(plan.frzflags, 1);
+        assert_eq!(plan.ntuples, 2);
+        assert_eq!(pf.redirected.get(0), (3, 4));
+        assert_eq!(pf.nowdead.get(0), 5);
+        assert_eq!(pf.nowunused.get(0), 6);
+        assert_eq!(pf.frz_offsets.get(0), 7);
+        assert_eq!(pf.frz_offsets.get(1), 8);
     }
 
     #[test]
