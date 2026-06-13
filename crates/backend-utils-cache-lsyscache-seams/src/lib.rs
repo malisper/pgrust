@@ -90,6 +90,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output-function OID and varlena flag, with the C
+    /// `cache lookup failed for type %u` and "no output function" `ereport`s
+    /// carried on `Err`. Returns `(typoutput, typisvarlena)`.
+    pub fn get_type_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_op_opfamily_properties(opno, opfamily, missing_ok, &strategy,
     /// &lefttype, &righttype)` (lsyscache.c): look up the operator's membership
     /// in the opfamily, returning its `(strategy, op_lefttype, op_righttype)`.

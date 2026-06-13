@@ -90,3 +90,24 @@ seam_core::seam!(
     /// forbids PREPARE.
     pub fn xact_has_exported_snapshots() -> bool
 );
+
+seam_core::seam!(
+    /// `PushCopiedSnapshot(GetActiveSnapshot())` (copyto.c:830): push a copy of
+    /// the current active snapshot onto the active-snapshot stack, so a fresh
+    /// command id can be set without disturbing the caller's snapshot. `Err`
+    /// carries the `there is no active snapshot` `ereport`.
+    pub fn push_copied_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UpdateActiveSnapshotCommandId()` (copyto.c:831): bump the active
+    /// snapshot's command id so this query sees the results of previously
+    /// executed commands. `Err` carries snapmgr `ereport(ERROR)`s.
+    pub fn update_active_snapshot_command_id() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` (copyto.c:1013): pop the snapshot pushed by
+    /// [`push_copied_active_snapshot`].
+    pub fn pop_active_snapshot()
+);

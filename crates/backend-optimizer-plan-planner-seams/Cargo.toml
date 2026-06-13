@@ -1,14 +1,15 @@
 [package]
-name = "backend-storage-file-fd-seams"
+name = "backend-optimizer-plan-planner-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_file_fd_seams"
+name = "backend_optimizer_plan_planner_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-core = { path = "../types-core" }
+mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }

@@ -14,6 +14,7 @@ pub fn init_all() {
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_transam_twophase::init_seams();
+    backend_commands_copyto::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();

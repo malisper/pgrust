@@ -581,6 +581,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-tableam-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-access-table-toast-helper-seams"
 version = "0.0.0"
 dependencies = [
@@ -1204,6 +1214,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-copy-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-copy",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-copyto"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
+ "backend-commands-copy-seams",
+ "backend-commands-copyto-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execTuples-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-optimizer-plan-planner-seams",
+ "backend-parser-analyze-seams",
+ "backend-storage-file-fd-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-backend-progress-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "port-path-seams",
+ "types-copy",
+ "types-core",
+ "types-datum",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-pgstat",
+ "types-rel",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-copyto-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
@@ -1793,12 +1862,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-planner-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-plancat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-parser-analyze-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2277,6 +2366,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2697,6 +2787,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-pgtime",
+]
+
+[[package]]
+name = "backend-utils-activity-backend-progress-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -3474,6 +3573,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-path-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep-seams"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3649,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-copyto",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3659,6 +3766,14 @@ dependencies = [
 name = "types-control"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-copy"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "types-core",
 ]
 

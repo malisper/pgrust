@@ -96,4 +96,7 @@ pub struct PlannedStmt<'mcx> {
     /// `List *resultRelations` — integer list of RT indexes of the query's
     /// target relations (`None` = the C `NIL`).
     pub resultRelations: Option<PgVec<'mcx, i32>>,
+    /// `List *relationOids` — OIDs of relations the plan depends on, used by
+    /// COPY-(query)-TO's RLS double-check (`None` = the C `NIL`).
+    pub relationOids: Option<PgVec<'mcx, types_core::Oid>>,
 }
