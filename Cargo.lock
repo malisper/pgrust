@@ -6473,6 +6473,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-rangetypes"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-rangetypes-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-rangetypes",
+]
+
+[[package]]
 name = "backend-utils-adt-rangetypes-seams"
 version = "0.0.0"
 dependencies = [
@@ -8223,6 +8238,7 @@ dependencies = [
  "backend-utils-activity-xact",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
+ "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
