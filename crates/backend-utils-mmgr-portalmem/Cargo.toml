@@ -14,6 +14,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-portal = { path = "../types-portal" }
+types-nodes = { path = "../types-nodes" }
+types-snapshot = { path = "../types-snapshot" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 

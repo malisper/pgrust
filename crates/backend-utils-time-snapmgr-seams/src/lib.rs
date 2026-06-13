@@ -93,12 +93,13 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `UnregisterSnapshotFromOwner(snapshot, owner)` — drop the portal's
-    /// hold-snapshot registration against its resource owner. portalmem holds
-    /// the `Snapshot` / `ResourceOwner` only as long-lived identity tokens
-    /// (they outlive any `Mcx` borrow), so they cross as handles.
+    /// hold-snapshot registration against its resource owner. The snapshot
+    /// crosses as the shared `Rc<SnapshotData>` the stack/owner alias (the C
+    /// `Snapshot` is a shared pointer); the owner as the shared
+    /// `types_portal::ResourceOwner` handle.
     pub fn unregister_snapshot_from_owner(
-        snapshot: types_portal::SnapshotHandle,
-        owner: types_portal::ResourceOwnerHandle,
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+        owner: types_portal::ResourceOwner,
     )
 );
 
@@ -108,6 +109,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PopActiveSnapshot()` — pop one entry off the active-snapshot stack.
-    pub fn pop_active_snapshot()
+    /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
+    /// `None` (the C may return NULL when no snapshot is active). Snapshots
+    /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
+    /// pointer the snapshot stack and callers alias).
+    pub fn get_active_snapshot() -> PgResult<Option<std::rc::Rc<types_snapshot::SnapshotData>>>
+);
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(snap)` (snapmgr.c) — make `snap` the active
+    /// snapshot (copies it onto the active-snapshot stack). Allocates; can
+    /// `ereport(ERROR)`.
+    pub fn push_active_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
+    pub fn pop_active_snapshot() -> PgResult<()>
 );

@@ -5,33 +5,27 @@ use backend_access_transam_xact_seams as xact_seam;
 use backend_commands_portalcmds_seams as portalcmds_seam;
 use backend_utils_cache_plancache_portal_seams as plancache_seam;
 use backend_utils_resowner_seams as resowner_seam;
-use backend_utils_sort_tuplestore_hold_seams as tuplestore_seam;
 use backend_utils_time_snapmgr_seams as snapmgr_seam;
 
 /// Install a minimal runtime so the portal lifecycle can be exercised without a
-/// real backend. The cleanup hook is `NONE` so `PortalDrop` does not route into
-/// a missing portalcmds runtime.
+/// real backend. The `portal_cleanup` seam is a no-op so `PortalDrop` does not
+/// route into a missing portalcmds runtime.
 fn ensure_seams() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         xact_seam::get_current_sub_transaction_id::set(|| 1);
         xact_seam::get_current_transaction_nest_level::set(|| 1);
         xact_seam::get_current_statement_start_timestamp::set(|| 123);
-        resowner_seam::resource_owner_create_portal::set(|| ResourceOwnerHandle(0x5000));
+        resowner_seam::resource_owner_create_portal::set(types_portal::ResourceOwner::default);
         resowner_seam::resource_owner_release::set(|_o, _p, _c, _t| {});
         resowner_seam::resource_owner_delete::set(|_o| {});
         resowner_seam::resource_owner_new_parent::set(|_o, _n| {});
         snapmgr_seam::unregister_snapshot_from_owner::set(|_s, _o| {});
         snapmgr_seam::active_snapshot_set::set(|| false);
-        snapmgr_seam::pop_active_snapshot::set(|| {});
-        tuplestore_seam::tuplestore_begin_heap::set(|_ra| ExternHandle(0x6000));
-        tuplestore_seam::tuplestore_end::set(|_s| {});
+        snapmgr_seam::pop_active_snapshot::set(|| Ok(()));
         plancache_seam::release_cached_plan::set(|_p| {});
-        portalcmds_seam::portal_cleanup_hook::set(|| PortalCleanupHook::NONE);
-        portalcmds_seam::run_cleanup_hook::set(|_h, _p| Ok(()));
+        portalcmds_seam::portal_cleanup::set(|_p| Ok(()));
         portalcmds_seam::persist_holdable_portal::set(|_p| Ok(()));
-        portalcmds_seam::first_can_set_tag_stmt::set(|_p| ExternHandle::NONE);
-        portalcmds_seam::pg_cursor_srf::set(|_f, _rows| Ok(types_datum::Datum::null()));
     });
 }
 
@@ -45,9 +39,10 @@ fn portal_lifecycle() {
         EnablePortalManager().expect("enable");
 
         let p = CreatePortal("c1", false, false).expect("create c1");
-        assert_eq!(p, "c1");
-        assert_eq!(GetPortalByName(Some("c1")).as_deref(), Some("c1"));
-        with_portal("c1", |portal| {
+        assert_eq!(p.borrow().name, "c1");
+        assert!(GetPortalByName(Some("c1")).is_some());
+        {
+            let portal = p.borrow();
             assert_eq!(portal.status, PORTAL_NEW);
             assert_eq!(portal.strategy, PORTAL_MULTI_QUERY);
             assert_eq!(portal.cursorOptions, CURSOR_OPT_NO_SCROLL);
@@ -56,23 +51,24 @@ fn portal_lifecycle() {
             assert_eq!(portal.createLevel, 1);
             assert_eq!(portal.creation_time, 123);
             assert_eq!(portal.name, "c1");
-        })
-        .expect("portal exists");
+        }
 
         assert!(ThereAreNoReadyPortals().expect("ready scan"));
 
         // Duplicate without allowDup -> ERROR (ERRCODE_DUPLICATE_CURSOR).
-        let err = CreatePortal("c1", false, false).expect_err("dup errors");
-        assert!(err.message().contains("cursor \"c1\" already exists"));
+        match CreatePortal("c1", false, false) {
+            Ok(_) => panic!("dup should error"),
+            Err(err) => assert!(err.message().contains("cursor \"c1\" already exists")),
+        }
 
         // Duplicate with allowDup drops the old one and makes a new portal.
         let p2 = CreatePortal("c1", true, true).expect("recreate c1");
-        assert_eq!(GetPortalByName(Some("c1")).as_deref(), Some(p2.as_str()));
+        assert!(GetPortalByName(Some("c1")).is_some());
 
         assert!(GetPortalByName(None).is_none());
 
         let up = CreateNewPortal().expect("create new portal");
-        assert!(up.starts_with("<unnamed portal "));
+        assert!(up.borrow().name.starts_with("<unnamed portal "));
 
         PinPortal(&p2).expect("pin");
         assert!(PinPortal(&p2).is_err());
@@ -87,14 +83,27 @@ fn portal_lifecycle() {
             None,
             "SELECT 1".to_string(),
             CMDTAG_UNKNOWN,
-            ExternHandle::NONE,
+            None,
             types_portal::CachedPlanHandle::NULL,
         );
-        with_portal(&p2, |p| {
+        {
+            let p = p2.borrow();
             assert_eq!(p.status, PORTAL_DEFINED);
             assert_eq!(p.sourceText.as_deref(), Some("SELECT 1"));
-        })
-        .expect("portal exists");
+        }
+
+        // PortalGetPrimaryStmt walks the (real) stmt list in-crate.
+        assert_eq!(PortalGetPrimaryStmt(&p2), None);
+        {
+            use types_nodes::nodeindexscan::PlannedStmt;
+            let mut not_primary = PlannedStmt::default();
+            not_primary.canSetTag = false;
+            let mut primary = PlannedStmt::default();
+            primary.canSetTag = true;
+            p2.borrow_mut().stmts = Some(vec![not_primary, primary]);
+        }
+        assert_eq!(PortalGetPrimaryStmt(&p2), Some(1));
+        assert_eq!(portal_num_stmts(&p2), 2);
 
         assert_eq!(
             pg_cursor(FcinfoHandle(0)).expect("pg_cursor"),

@@ -1,66 +1,105 @@
-//! Portal vocabulary (`utils/portal.h`, `tcop/cmdtag.h`, `nodes/parsenodes.h`
-//! cursor-option bits) consumed by the `backend-utils-mmgr-portalmem` port,
-//! trimmed to the items that port uses. The `PortalData` record itself lives in
-//! the owning crate (it holds real owned `mcx::MemoryContext` arenas, above this
-//! layer); this crate carries the field-level enums, the command-tag/completion
-//! vocabulary, the external-object identity handles, and the resource-release
-//! phase constants.
+//! Portal / cursor vocabulary (`utils/portal.h`, `tcop/dest.h`,
+//! `executor/execdesc.h`, `tcop/cmdtag.h`, `nodes/parsenodes.h` cursor-option
+//! bits), trimmed to the fields the portal subsystem (`portalcmds.c` +
+//! `portalmem.c`) consumes.
+//!
+//! `Portal` is the open-handle alias for a `PortalData` owned by
+//! `utils/mmgr/portalmem.c` (its hash table). It is a shared, interior-mutable
+//! handle (C `struct PortalData *` is a raw pointer the whole subsystem aliases
+//! and mutates), mirroring the `types-rel` `Relation` alias precedent.
+//!
+//! Sub-objects that belong to not-yet-ported owners (`QueryDesc`,
+//! `Tuplestorestate`, `Snapshot`, `ResourceOwner`, portal memory contexts) are
+//! carried as the real owners' values where they exist on main, and as trimmed
+//! real handle types here where they do not yet — never opaque integer
+//! stand-ins.
 
-#![no_std]
 #![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
-/// `typedef enum PortalStrategy` (`utils/portal.h`). Values are the C
-/// enumerator order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum PortalStrategy {
-    OneSelect = 0,
-    OneReturning = 1,
-    OneModWith = 2,
-    UtilSelect = 3,
-    MultiQuery = 4,
-}
-pub use PortalStrategy::MultiQuery as PORTAL_MULTI_QUERY;
-pub use PortalStrategy::OneSelect as PORTAL_ONE_SELECT;
+use alloc::rc::Rc;
+use alloc::string::String;
+use core::cell::RefCell;
 
-/// `typedef enum PortalStatus` (`utils/portal.h`). Values are the C enumerator
-/// order; the lifecycle never backs up except ACTIVE→READY.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum PortalStatus {
-    New = 0,
-    Defined = 1,
-    Ready = 2,
-    Active = 3,
-    Done = 4,
-    Failed = 5,
-}
-pub use PortalStatus::Active as PORTAL_ACTIVE;
-pub use PortalStatus::Defined as PORTAL_DEFINED;
-pub use PortalStatus::Done as PORTAL_DONE;
-pub use PortalStatus::Failed as PORTAL_FAILED;
-pub use PortalStatus::New as PORTAL_NEW;
-pub use PortalStatus::Ready as PORTAL_READY;
+use mcx::MemoryContext;
+use types_core::primitive::TimestampTz;
+use types_core::xact::SubTransactionId;
+use types_nodes::funcapi::Tuplestorestate;
+use types_snapshot::SnapshotData;
+use types_tuple::heaptuple::TupleDescData;
 
-/// `typedef enum CommandTag` (`tcop/cmdtag.h`, generated from
-/// `cmdtaglist.h`). Trimmed to the one enumerator portalmem references; the
-/// real enum is recovered when a consumer needs more tags (newtype keeps the
-/// namespace, not a bare integer alias).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CommandTag(pub u32);
+/// `CommandTag` (`tcop/cmdtaglist.h`) — the 0-based position of the enumerator
+/// in `cmdtaglist.h`. Kept as the integer the C enum compiles to so command
+/// completion data round-trips exactly.
+pub type CommandTag = i32;
 
-/// `CMDTAG_UNKNOWN` — the first `cmdtaglist.h` entry (value 0).
-pub const CMDTAG_UNKNOWN: CommandTag = CommandTag(0);
+/// `CMDTAG_UNKNOWN` (cmdtaglist.h list position 0).
+pub const CMDTAG_UNKNOWN: CommandTag = 0;
+/// `CMDTAG_FETCH` (cmdtaglist.h list position 154).
+pub const CMDTAG_FETCH: CommandTag = 154;
+/// `CMDTAG_MOVE` (cmdtaglist.h list position 164).
+pub const CMDTAG_MOVE: CommandTag = 164;
+/// `CMDTAG_SELECT` (cmdtaglist.h list position 179).
+pub const CMDTAG_SELECT: CommandTag = 179;
 
-/// `struct QueryCompletion` (`tcop/cmdtag.h`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `QueryCompletion` (`tcop/cmdtag.h`) — command completion status data.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct QueryCompletion {
+    /// `CommandTag commandTag`.
     pub commandTag: CommandTag,
+    /// `uint64 nprocessed`.
     pub nprocessed: u64,
 }
+
+/// `FetchDirection` (`nodes/parsenodes.h`) — values verified against
+/// PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FetchDirection {
+    /// for these, howMany is how many rows to fetch; FETCH_ALL means ALL
+    FETCH_FORWARD = 0,
+    FETCH_BACKWARD = 1,
+    /// for these, howMany indicates a position; only one row is fetched
+    FETCH_ABSOLUTE = 2,
+    FETCH_RELATIVE = 3,
+}
+
+/// `PortalStrategy` (`utils/portal.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum PortalStrategy {
+    #[default]
+    PORTAL_ONE_SELECT = 0,
+    PORTAL_ONE_RETURNING,
+    PORTAL_ONE_MOD_WITH,
+    PORTAL_UTIL_SELECT,
+    PORTAL_MULTI_QUERY,
+}
+
+/// `PortalStatus` (`utils/portal.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum PortalStatus {
+    #[default]
+    PORTAL_NEW = 0,
+    PORTAL_DEFINED,
+    PORTAL_READY,
+    PORTAL_ACTIVE,
+    PORTAL_DONE,
+    PORTAL_FAILED,
+}
+
+pub use FetchDirection::{FETCH_ABSOLUTE, FETCH_BACKWARD, FETCH_FORWARD, FETCH_RELATIVE};
+pub use PortalStatus::{
+    PORTAL_ACTIVE, PORTAL_DEFINED, PORTAL_DONE, PORTAL_FAILED, PORTAL_NEW, PORTAL_READY,
+};
+pub use PortalStrategy::{
+    PORTAL_MULTI_QUERY, PORTAL_ONE_MOD_WITH, PORTAL_ONE_RETURNING, PORTAL_ONE_SELECT,
+    PORTAL_UTIL_SELECT,
+};
 
 // Cursor-option bits (`nodes/parsenodes.h`), values verified against the C
 // header.
@@ -90,10 +129,57 @@ pub use ResourceReleasePhase::AfterLocks as RESOURCE_RELEASE_AFTER_LOCKS;
 pub use ResourceReleasePhase::BeforeLocks as RESOURCE_RELEASE_BEFORE_LOCKS;
 pub use ResourceReleasePhase::Locks as RESOURCE_RELEASE_LOCKS;
 
-/// Identity token for an object owned by a subsystem portalmem does not own —
-/// the executor `QueryDesc`, the planned-statement `List`, the `ParamListInfo`,
-/// the `QueryEnvironment`, the held `Tuplestorestate`, the result `TupleDesc`.
-/// portalmem never inspects these; it only threads them back to their owner
+/// `ResourceOwner` (`utils/resowner.h`) — opaque handle to a resource owner
+/// owned by `utils/resowner/resowner.c` (not yet ported). The portal subsystem
+/// only reads `portal->resowner` and threads it back into
+/// `CurrentResourceOwner`, never dereferencing it; modeled as a shared handle
+/// to the owner's not-yet-defined payload. `None` is the C NULL.
+#[derive(Clone, Default)]
+pub struct ResourceOwner(pub Option<Rc<()>>);
+
+impl ResourceOwner {
+    pub fn is_null(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// `QueryDesc` (`executor/execdesc.h`), trimmed to the fields the portal
+/// subsystem reads or writes. The executor (`executor/execMain.c`) owns it;
+/// portalcmds reads `snapshot`, swaps `dest`, and hands the whole thing to the
+/// executor seams.
+pub struct QueryDesc {
+    /// `Snapshot snapshot` — snapshot to use for query (`None` = C NULL).
+    pub snapshot: Option<Rc<SnapshotData>>,
+    /// `DestReceiver *dest` — destination for tuple output (`None` = C NULL).
+    pub dest: Option<DestReceiver>,
+}
+
+/// `DestReceiver` (`tcop/dest.h`) — opaque output sink, owned by the receiver
+/// implementation (e.g. tstoreReceiver.c). portalcmds only stores it into the
+/// queryDesc and calls `rDestroy`; modeled as a handle to the receiver's
+/// not-yet-defined state plus its `mydest` tag.
+#[derive(Clone)]
+pub struct DestReceiver {
+    pub mydest: types_dest::CommandDest,
+    state: Rc<()>,
+}
+
+impl DestReceiver {
+    pub fn new(mydest: types_dest::CommandDest) -> Self {
+        DestReceiver {
+            mydest,
+            state: Rc::new(()),
+        }
+    }
+    fn _keep(&self) -> &Rc<()> {
+        &self.state
+    }
+}
+
+/// Identity token for an object owned by a subsystem the portal subsystem does
+/// not own — the executor `QueryDesc`, the `ParamListInfo`, the
+/// `QueryEnvironment`, the held `Tuplestorestate`, the result `TupleDesc`. The
+/// holder never inspects these; it only threads them back to their owner
 /// through that owner's seam. `NONE` models the C `NULL` pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ExternHandle(pub u64);
@@ -109,9 +195,8 @@ impl ExternHandle {
 }
 
 /// `Snapshot` identity token (`utils/snapshot.h` `Snapshot` = `SnapshotData *`).
-/// portalmem only stores it, clears it, and threads it through the snapshot
-/// manager's seams (register/unregister against a resource owner, pop the active
-/// stack); the snapshot manager owns the data. `NULL` models the C NULL.
+/// Stored/cleared and threaded through the snapshot manager's seams; the
+/// snapshot manager owns the data. `NULL` models the C NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SnapshotHandle(pub u64);
 
@@ -124,7 +209,8 @@ impl SnapshotHandle {
 
 /// `ResourceOwner` identity token (`utils/resowner.h`). Resource owners dissolve
 /// into RAII owner values (docs/query-lifecycle-raii.md); until the owner lands
-/// portalmem threads this token through the resowner seam. `NULL` models C NULL.
+/// the holder threads this token through the resowner seam. `NULL` models C
+/// NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct ResourceOwnerHandle(pub u64);
 
@@ -174,10 +260,131 @@ pub struct FcinfoHandle(pub u64);
 /// (`datatype/timestamp.h`) is an `int64`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PgCursorRow {
-    pub name: alloc::string::String,
-    pub statement: alloc::string::String,
+    pub name: String,
+    pub statement: String,
     pub is_holdable: bool,
     pub is_binary: bool,
     pub is_scrollable: bool,
     pub creation_time: i64,
+}
+
+/// `struct PortalData` (`utils/portal.h`), trimmed to the fields the portal
+/// subsystem (portalmem owns the record; portalcmds reads/writes a subset)
+/// reads or writes. Owned by `utils/mmgr/portalmem.c`'s hash table.
+pub struct PortalData {
+    /// `const char *name` — portal's name.
+    pub name: String,
+    /// `const char *prepStmtName` — source prepared statement (NULL if none).
+    pub prepStmtName: Option<String>,
+    /// `MemoryContext portalContext` — subsidiary memory for portal
+    /// (`None` = C NULL until `CreatePortal` assigns it).
+    pub portalContext: Option<MemoryContext>,
+    /// `ResourceOwner resowner` — resources owned by portal.
+    pub resowner: ResourceOwner,
+    /// `void (*cleanup)(Portal portal)` — cleanup hook.
+    pub cleanup: PortalCleanupHook,
+
+    /// `SubTransactionId createSubid` — the creating subxact.
+    pub createSubid: SubTransactionId,
+    /// `SubTransactionId activeSubid` — the last subxact with activity.
+    pub activeSubid: SubTransactionId,
+    /// `int createLevel` — creating subxact's nesting level.
+    pub createLevel: i32,
+
+    /// `const char *sourceText` — text of query (as of 8.4, never NULL).
+    pub sourceText: Option<String>,
+    /// `CommandTag commandTag` — command tag for original query.
+    pub commandTag: CommandTag,
+    /// `QueryCompletion qc` — command completion data for executed query.
+    pub qc: QueryCompletion,
+    /// `List *stmts` — list of PlannedStmts. Owned by the cached plan; the
+    /// real planned-statement nodes (the `canSetTag` walk reads `PlannedStmt`).
+    pub stmts: Option<alloc::vec::Vec<types_nodes::nodeindexscan::PlannedStmt<'static>>>,
+    /// `CachedPlan *cplan` — CachedPlan, if stmts are from one (`NULL` = none).
+    pub cplan: CachedPlanHandle,
+
+    /// `ParamListInfo portalParams` — params to pass to query.
+    pub portalParams: types_nodes::portalcmds::ParamListInfo,
+    /// `QueryEnvironment *queryEnv` — environment for query.
+    pub queryEnv: Option<Rc<()>>,
+
+    /// `PortalStrategy strategy`.
+    pub strategy: PortalStrategy,
+    /// `int cursorOptions` — DECLARE CURSOR option bits.
+    pub cursorOptions: i32,
+
+    /// `PortalStatus status`.
+    pub status: PortalStatus,
+    /// `bool portalPinned` — a pinned portal can't be dropped.
+    pub portalPinned: bool,
+    /// `bool autoHeld` — was automatically converted from pinned to held.
+    pub autoHeld: bool,
+
+    /// `QueryDesc *queryDesc` — info needed for executor invocation
+    /// (`None` = C NULL).
+    pub queryDesc: Option<QueryDesc>,
+
+    /// `TupleDesc tupDesc` — descriptor for result tuples (`None` = C NULL).
+    pub tupDesc: Option<TupleDescData<'static>>,
+    /// `int16 *formats` — format codes for result tuples.
+    pub formats: alloc::vec::Vec<i16>,
+
+    /// `struct SnapshotData *portalSnapshot` — active snapshot, if any
+    /// (`None` = C NULL).
+    pub portalSnapshot: Option<Rc<SnapshotData>>,
+
+    /// `Tuplestorestate *holdStore` — store for holdable cursors
+    /// (`None` = C NULL). The store outlives the transaction, so `'static`.
+    pub holdStore: Option<Tuplestorestate<'static>>,
+    /// `MemoryContext holdContext` — memory containing holdStore
+    /// (`None` = C NULL).
+    pub holdContext: Option<MemoryContext>,
+    /// `Snapshot holdSnapshot` — registered snapshot for held tuples
+    /// (`None` = C NULL).
+    pub holdSnapshot: Option<Rc<SnapshotData>>,
+
+    /// `bool atStart`.
+    pub atStart: bool,
+    /// `bool atEnd`.
+    pub atEnd: bool,
+    /// `uint64 portalPos`.
+    pub portalPos: u64,
+
+    /// `TimestampTz creation_time`.
+    pub creation_time: TimestampTz,
+    /// `bool visible` — include this portal in pg_cursors?
+    pub visible: bool,
+}
+
+/// `typedef struct PortalData *Portal` (`utils/portal.h`). Shared,
+/// interior-mutable open handle: the whole portal subsystem aliases the same
+/// `PortalData` through a raw pointer, so the Rust alias is
+/// `Rc<RefCell<PortalData>>` (cf. `types-rel`'s `Relation`).
+#[derive(Clone)]
+pub struct Portal(Rc<RefCell<PortalData>>);
+
+impl Portal {
+    pub fn new(data: PortalData) -> Self {
+        Portal(Rc::new(RefCell::new(data)))
+    }
+
+    /// Borrow the underlying `PortalData` immutably.
+    pub fn borrow(&self) -> core::cell::Ref<'_, PortalData> {
+        self.0.borrow()
+    }
+
+    /// Borrow the underlying `PortalData` mutably (C field assignment).
+    pub fn borrow_mut(&self) -> core::cell::RefMut<'_, PortalData> {
+        self.0.borrow_mut()
+    }
+
+    /// `PortalIsValid(p)` (`utils/portal.h`) — pointer non-NULL.
+    pub fn is_valid(&self) -> bool {
+        true
+    }
+
+    /// Pointer-identity comparison of two `Portal` handles (C `p1 == p2`).
+    pub fn ptr_eq(&self, other: &Portal) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
 }

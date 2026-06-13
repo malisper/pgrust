@@ -1,41 +1,52 @@
-//! Seam declarations for `commands/portalcmds.c` (and the `pg_cursor` SRF
-//! `Datum` body) that portalmem calls across the boundary. portalcmds owns the
-//! `PortalCleanup` hook + held-cursor persistence; portalmem identifies a portal
-//! by its (truncated) name string. Calls panic loudly until the owner lands.
+//! Seam declarations for the `backend-commands-portalcmds` unit
+//! (`commands/portalcmds.c`). Cyclic callers (the utility dispatcher
+//! `tcop/utility.c`, and `utils/mmgr/portalmem.c` which installs
+//! `PortalCleanup` as the cursor cleanup hook and calls `PersistHoldablePortal`
+//! at commit) reach these across the command↔portal cycle. The owning crate
+//! installs all of them from its `init_seams()`.
 
-use types_datum::Datum;
-use types_portal::{ExternHandle, FcinfoHandle, PgCursorRow, PortalCleanupHook};
+use types_error::PgResult;
+use types_nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
+use types_portal::{DestReceiver, Portal, QueryCompletion};
 
 seam_core::seam!(
-    /// The `PortalCleanup` function pointer `CreatePortal` installs as
-    /// `portal->cleanup`. portalcmds owns the hook; portalmem only stores and
-    /// later invokes it.
-    pub fn portal_cleanup_hook() -> PortalCleanupHook
+    /// `PerformCursorOpen(pstate, cstmt, params, isTopLevel)` — execute SQL
+    /// `DECLARE CURSOR`. `mcx` is the caller's working (message) context for
+    /// the planned statement. Runs user code (rewrite/plan/post-parse hook):
+    /// can `ereport(ERROR)`.
+    pub fn perform_cursor_open<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pstate: &ParseState,
+        cstmt: DeclareCursorStmt,
+        params: ParamListInfo,
+        is_top_level: bool,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// Invoke `portal->cleanup(portal)` — runs portalcmds' `PortalCleanup`,
-    /// which shuts the executor down. May run user code (can `ereport(ERROR)`).
-    pub fn run_cleanup_hook(hook: PortalCleanupHook, portal: &str) -> types_error::PgResult<()>
+    /// `PerformPortalFetch(stmt, dest, qc)` — execute SQL `FETCH`/`MOVE`.
+    pub fn perform_portal_fetch(
+        stmt: &FetchStmt,
+        dest: DestReceiver,
+        qc: Option<&mut QueryCompletion>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `PersistHoldablePortal(portal)` — drains the portal's query into its
-    /// hold store so later transactions can read it. Runs the executor.
-    pub fn persist_holdable_portal(portal: &str) -> types_error::PgResult<()>
+    /// `PerformPortalClose(name)` — close a cursor (`None` = `CLOSE ALL`).
+    pub fn perform_portal_close(name: Option<&str>) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `PortalGetPrimaryStmt(portal)`'s `stmt->canSetTag` walk — the
-    /// planned-statement list is owned by the cached plan, so the walk reads
-    /// across the boundary; returns the first canSetTag `PlannedStmt` handle
-    /// (`NONE` == none).
-    pub fn first_can_set_tag_stmt(portal: &str) -> ExternHandle
+    /// `PortalCleanup(portal)` — standard portal cleanup hook (installed by
+    /// portalmem as `portal->cleanup`). Shuts the executor down; can
+    /// `ereport(ERROR)`.
+    pub fn portal_cleanup(portal: Portal) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// The `pg_cursor()` SRF body: `InitMaterializedSRF` + per-row `Datum`
-    /// conversions + `tuplestore_putvalues` (the fmgr/`Datum` value layer).
-    /// Given the already-collected visible rows, returns the SRF result Datum.
-    pub fn pg_cursor_srf(fcinfo: FcinfoHandle, rows: &[PgCursorRow]) -> types_error::PgResult<Datum>
+    /// `PersistHoldablePortal(portal)` — materialize a holdable cursor into its
+    /// tuplestore so it survives transaction end. Runs the executor; can
+    /// `ereport(ERROR)`.
+    pub fn persist_holdable_portal(portal: Portal) -> PgResult<()>
 );
