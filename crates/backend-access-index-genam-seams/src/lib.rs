@@ -224,6 +224,77 @@ seam_core::seam!(
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
+/// One deformed `pg_attrdef` row, as produced by [`scan_pg_attrdef`]: the
+/// `adnum` plus the `adbin` default-expression node-tree text already run
+/// through `TextDatumGetCString` (`None` is the C `isnull`). The owner does
+/// the `table_open(AttrDefaultRelationId)`, the `systable_beginscan` on
+/// `adrelid = relid`, the per-row `GETSTRUCT(Form_pg_attrdef)` deform, and the
+/// `adbin` text detoast; this DTO carries exactly the two fields
+/// `AttrDefaultFetch` consumes.
+#[derive(Debug, Clone)]
+pub struct PgAttrdefRow {
+    /// `attrdef->adnum`.
+    pub adnum: types_core::primitive::AttrNumber,
+    /// `TextDatumGetCString(adbin)`, or `None` for the C `isnull`.
+    pub adbin: Option<String>,
+}
+
+/// One deformed `pg_constraint` row, as produced by
+/// [`scan_pg_constraint_nncheck`]: the `contype` plus the per-kind fields
+/// `CheckNNConstraintFetch` consumes. For a NOT NULL constraint,
+/// `!convalidated` and `extractNotNullColumn(htup)`; for a CHECK constraint,
+/// the enforced/valid/noinherit flags, the name, and the `conbin` node-tree
+/// text already run through `TextDatumGetCString` (`None` is the C `isnull`).
+/// The owner does the `table_open(ConstraintRelationId)`, the
+/// `systable_beginscan` on `conrelid = relid`, the per-row
+/// `GETSTRUCT(Form_pg_constraint)` deform, `extractNotNullColumn`, and the
+/// `conbin` text detoast.
+#[derive(Debug, Clone)]
+pub struct PgConstraintNnCheckRow {
+    /// `conform->contype` (`CONSTRAINT_NOTNULL`/`CONSTRAINT_CHECK`/other).
+    pub contype: i8,
+    /// NOT NULL only: `!conform->convalidated`.
+    pub notnull_invalid: bool,
+    /// NOT NULL only: `extractNotNullColumn(htup)`.
+    pub notnull_attnum: types_core::primitive::AttrNumber,
+    /// CHECK only: `conform->conenforced`.
+    pub ccenforced: bool,
+    /// CHECK only: `conform->convalidated`.
+    pub ccvalid: bool,
+    /// CHECK only: `conform->connoinherit`.
+    pub ccnoinherit: bool,
+    /// CHECK only: `NameStr(conform->conname)`.
+    pub ccname: String,
+    /// CHECK only: `TextDatumGetCString(conbin)`, or `None` for the C `isnull`.
+    pub ccbin: Option<String>,
+}
+
+seam_core::seam!(
+    /// `AttrDefaultFetch`'s `pg_attrdef` scan (relcache.c): `table_open`,
+    /// `systable_beginscan(AttrDefaultIndexId, adrelid = relid)`, then a
+    /// `systable_getnext` loop deforming `Form_pg_attrdef` and running
+    /// `TextDatumGetCString(adbin)`. Returns every matching row in scan order;
+    /// the caller does the per-attribute accounting/sort/install. `Err`
+    /// carries the scan-setup / index-or-heap fetch / detoast error surface.
+    pub fn scan_pg_attrdef(
+        relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Vec<PgAttrdefRow>>
+);
+
+seam_core::seam!(
+    /// `CheckNNConstraintFetch`'s `pg_constraint` scan (relcache.c):
+    /// `table_open`, `systable_beginscan(ConstraintRelidTypidNameIndexId,
+    /// conrelid = relid)`, then a `systable_getnext` loop deforming
+    /// `Form_pg_constraint`, calling `extractNotNullColumn(htup)` for NOT NULL
+    /// rows and `TextDatumGetCString(conbin)` for CHECK rows. Returns every
+    /// matching row in scan order; the caller does the per-kind
+    /// accounting/sort/install + not-null attnullability fixup. `Err` carries
+    /// the scan-setup / fetch / detoast error surface.
+    pub fn scan_pg_constraint_nncheck(
+        relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Vec<PgConstraintNnCheckRow>>
+);
+
 /// The live-scan token returned by [`systable_beginscan`] /
 /// [`systable_beginscan_ordered`]: owns the `SysScanDescData`. `Drop` ends
 /// the scan silently (the abort path); [`Self::end`] is the explicit

@@ -50,6 +50,7 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # routes through their owners (panic until each owner installs them).
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
@@ -84,6 +85,5 @@ backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-sea
 # (RelationGetIndexList/StatExtList/FKeyList/ExclusionInfo) and the raw
 # rd_indextuple node-tree transforms (index expressions/predicate/dummy-Consts,
 # attribute-bitmap index_open + pull_varattnos, publication/rule build,
-# opclass per-column index options).
-backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+# opclass per-column index options). genam-seams is already declared above.
 backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
