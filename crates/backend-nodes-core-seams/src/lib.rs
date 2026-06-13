@@ -67,16 +67,47 @@ seam_core::seam!(
     ) -> Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
 );
 
+// === tidbitmap (tidbitmap.c) ===============================================
+
+/// Opaque token standing in for C's `TIDBitmap *` while the executor owns the
+/// live bitmap (it outlives a single `btgetbitmap` call).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TbmHandle(pub u64);
+
 seam_core::seam!(
-    /// `bms_num_members(a)` (bitmapset.c): number of members in the set; 0 for
-    /// the C NULL set (`None`).
+    /// `tbm_add_tuples(tbm, &tid, 1, false)` (tidbitmap.c): add one heap TID
+    /// to the bitmap. `Err` carries OOM from growing the bitmap.
+    pub fn tbm_add_tuple(
+        tbm: TbmHandle,
+        tid: types_tuple::heaptuple::ItemPointerData,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `bms_num_members(a)` (bitmapset.c): count the members of `a`. A `None`
+    /// set is the C NULL (empty) set, yielding 0. Infallible.
     pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32
 );
 
 seam_core::seam!(
-    /// `bms_next_member(a, prevbit)` (bitmapset.c): return the smallest member
-    /// strictly greater than `prevbit` (start with `prevbit = -1`), or -2 when
-    /// there are no more.
+    /// `bms_add_range(a, lower, upper)` (bitmapset.c): add all integers in the
+    /// inclusive range `[lower, upper]` to the set, recycling the input (the C
+    /// extends `a` in place and returns it; a `None` input is the C NULL set,
+    /// and an empty range with `upper < lower` returns it unchanged). Growth
+    /// allocates in `mcx`, so the call is fallible on OOM.
+    pub fn bms_add_range<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        lower: i32,
+        upper: i32,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_next_member(a, prevbit)` (bitmapset.c): return the next member of
+    /// `a` strictly greater than `prevbit` (start the iteration with
+    /// `prevbit = -1`), or -2 when there are no more members. A `None` set is
+    /// the C NULL (empty) set. Infallible.
     pub fn bms_next_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
 );
 
@@ -90,8 +121,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `bms_overlap(a, b)` (bitmapset.c): do the two sets have any common
-    /// member? `None` (NULL) sets never overlap. Infallible.
+    /// `bms_overlap(a, b)` (bitmapset.c): do the two sets overlap (have any
+    /// member in common)? A `None` set is the C NULL (empty) set. Infallible.
     pub fn bms_overlap(
         a: Option<&types_nodes::Bitmapset<'_>>,
         b: Option<&types_nodes::Bitmapset<'_>>,

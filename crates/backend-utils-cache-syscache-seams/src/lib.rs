@@ -17,6 +17,25 @@ use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, OperRow, ProcRow};
+use types_partition::PartrelTupleData;
+
+seam_core::seam!(
+    /// `SearchSysCache1(PARTRELID, ObjectIdGetDatum(relid))` +
+    /// `GETSTRUCT(Form_pg_partitioned_table)` +
+    /// `SysCacheGetAttrNotNull(partclass/partcollation)` +
+    /// `SysCacheGetAttr(partexprs)`, with the `partexprs` `pg_node_tree`
+    /// de-stringized (`stringToNode`), const-simplified
+    /// (`eval_const_expressions`), opfuncid-fixed (`fix_opfuncids`), then
+    /// `copyObject` (partcache.c:94-166). The `int2vector`/`oidvector` columns
+    /// are decoded to value slices, all allocated in `mcx`. Returns `Ok(None)`
+    /// when `!HeapTupleIsValid(tuple)` so the caller raises the exact
+    /// `elog(ERROR, "cache lookup failed for partition key of relation %u")`.
+    /// The `ReleaseSysCache` is subsumed by returning the data by value.
+    pub fn open_partrel_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<PartrelTupleData<'mcx>>>
+);
 
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
@@ -24,6 +43,14 @@ seam_core::seam!(
     /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
     /// `ReleaseSysCache`.
     pub fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid))`
+    /// (utils/cache/syscache.c): does a pg_authid row for this role OID exist?
+    /// Used to confirm a role wasn't concurrently dropped. `Err` carries the
+    /// catcache lookup's own error surface.
+    pub fn auth_oid_exists(roleid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -303,4 +330,48 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         opername: &str,
     ) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+    /// `Form_pg_class.relrowsecurity`/`relforcerowsecurity` flags
+    /// (`utils/misc/rls.c`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+    /// the installer owns the `ReleaseSysCache`.
+    pub fn search_relation_rls_flags(relid: Oid) -> PgResult<Option<(bool, bool)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` projected to the
+    /// `Form_pg_authid.rolsuper` flag (`utils/misc/superuser.c`). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`), where `superuser_arg` treats the
+    /// role as a non-superuser; the installer owns the `ReleaseSysCache`.
+    pub fn search_authid_rolsuper(roleid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(functionId))` projected to the
+    /// catalog facts the function manager reads (`fmgr_info_cxt_security` /
+    /// `fmgr_symbol` / `fmgr_security_definer` / `CheckFunctionValidatorAccess`):
+    /// `pronargs`/`proisstrict`/`proretset`/`prolang`/`prosrc`/`probin`/
+    /// `prosecdef`/`proowner`/`proname` and the `TransformGUCArray`'d `proconfig`
+    /// names+values, plus the folded `prosecdef || proconfig-not-null` predicate.
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`) — the caller raises
+    /// `cache lookup failed for function %u`, as in C. The projected strings are
+    /// copied into the caller's `Mcx`; `Err` includes OOM from the copy.
+    pub fn lookup_proc<'mcx>(
+        mcx: Mcx<'mcx>,
+        function_id: Oid,
+    ) -> PgResult<Option<types_fmgr::ProcInfo<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(LANGOID, ObjectIdGetDatum(language))` projected to
+    /// `lanplcallfoid`/`lanvalidator`/`NameStr(lanname)`
+    /// (`fmgr_info_other_lang` / `CheckFunctionValidatorAccess`). `Ok(None)` on a
+    /// cache miss — the caller raises `cache lookup failed for language %u`. The
+    /// `lanname` copy is charged to the caller's `Mcx`.
+    pub fn lookup_language<'mcx>(
+        mcx: Mcx<'mcx>,
+        language_id: Oid,
+    ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
 );

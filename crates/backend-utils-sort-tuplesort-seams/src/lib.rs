@@ -1,106 +1,145 @@
 //! Seam declarations for the `backend-utils-sort-tuplesort` unit
-//! (`utils/sort/tuplesort.c` + `tuplesortvariants.c`): the sort-object surface
-//! the agg ORDER BY / DISTINCT paths drive.
+//! (`utils/sort/tuplesort.c` + `utils/sort/tuplesortvariants.c`): the
+//! `tuplesort_*` access method nodeSort drives.
 //!
-//! `Tuplesortstate *` crosses the seam as the opaque
-//! [`TuplesortstateHandle`] from `types_nodes::nodeagg` (the sort owner names
-//! the concrete state when it lands). The `SortCoordinate` parallel-sort
-//! coordinator argument is `None` here (agg uses non-parallel sorts).
-//! The owning unit installs these from its `init_seams()`; until then a call
-//! panics loudly.
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly. `Tuplesortstate` is type-erased
+//! ([`types_nodes::Tuplesortstate`]); only the tuplesort owner downcasts.
+//!
+//! nodeSort never passes a parallel `SortCoordinate` (it always supplies the C
+//! `NULL`), so the begin seams omit that parameter — the parallel-coordinated
+//! path is a separate concern when its callers land (narrowest capability).
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid};
+use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
 use types_error::PgResult;
-use types_nodes::nodeagg::TuplesortstateHandle;
+use types_nodes::{TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
 use types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
-    /// `tuplesort_begin_heap(...)` (tuplesort.c): create a heap-tuple sort.
-    /// `att_nums`/`sort_operators`/`sort_collations`/`nulls_first` are the
-    /// `nkeys`-long sort-key descriptors; `work_mem` is in kilobytes,
-    /// `sortopt` the `TUPLESORT_*` option bits. C pallocs the state in its
-    /// sort context, so creation is fallible on OOM.
+    /// `tuplesort_begin_heap(tupDesc, nkeys, attNums, sortOperators,
+    /// sortCollations, nullsFirstFlags, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a multi-column heap-tuple sort. Allocates
+    /// the sort state in `mcx` (C: palloc in `CurrentMemoryContext`), so
+    /// fallible on OOM.
     pub fn tuplesort_begin_heap<'mcx>(
-        mcx: Mcx<'mcx>,
-        tup_desc: &TupleDescData<'_>,
+        mcx: mcx::Mcx<'mcx>,
+        tup_desc: &TupleDescData<'mcx>,
         nkeys: i32,
         att_nums: &[AttrNumber],
         sort_operators: &[Oid],
         sort_collations: &[Oid],
-        nulls_first: &[bool],
+        nulls_first_flags: &[bool],
         work_mem: i32,
         sortopt: i32,
-    ) -> PgResult<TuplesortstateHandle>
+    ) -> PgResult<Tuplesortstate<'mcx>>
 );
 
 seam_core::seam!(
-    /// `tuplesort_begin_datum(...)` (tuplesort.c): create a single-Datum sort
-    /// (single-column DISTINCT/ORDER BY aggregates).
+    /// `tuplesort_begin_datum(datumType, sortOperator, sortCollation,
+    /// nullsFirstFlag, workMem, coordinate=NULL, sortopt)`
+    /// (tuplesortvariants.c): begin a single-column Datum sort. Allocates in
+    /// `mcx`, fallible on OOM.
     pub fn tuplesort_begin_datum<'mcx>(
-        mcx: Mcx<'mcx>,
+        mcx: mcx::Mcx<'mcx>,
         datum_type: Oid,
         sort_operator: Oid,
         sort_collation: Oid,
         nulls_first_flag: bool,
         work_mem: i32,
         sortopt: i32,
-    ) -> PgResult<TuplesortstateHandle>
+    ) -> PgResult<Tuplesortstate<'mcx>>
 );
 
 seam_core::seam!(
-    /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c): feed the
-    /// slot's current tuple into the sort. Spilling to tape can ereport.
-    pub fn tuplesort_puttupleslot(
-        state: TuplesortstateHandle,
-        slot: types_nodes::SlotId,
+    /// `tuplesort_set_bound(state, bound)` (tuplesort.c): set the bound for a
+    /// bounded (top-N) sort.
+    pub fn tuplesort_set_bound<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        bound: i64,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `tuplesort_putdatum(state, val, isNull)` (tuplesortvariants.c): feed a
-    /// single Datum into the sort.
-    pub fn tuplesort_putdatum(
-        state: TuplesortstateHandle,
+    /// `tuplesort_puttupleslot(state, slot)` (tuplesortvariants.c): copy the
+    /// slot's tuple into the sort. Allocates the stored tuple, fallible on OOM.
+    pub fn tuplesort_puttupleslot<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        slot: &TupleTableSlot,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putdatum(state, val, isNull)` (tuplesortvariants.c): feed one
+    /// Datum to a Datum sort. Allocates (copies pass-by-ref data), fallible.
+    pub fn tuplesort_putdatum<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
         val: Datum,
         is_null: bool,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `tuplesort_performsort(state)` (tuplesort.c): finish input and sort.
-    pub fn tuplesort_performsort(state: TuplesortstateHandle) -> PgResult<()>
+    /// `tuplesort_performsort(state)` (tuplesort.c): all tuples have been
+    /// supplied; complete the sort. May spill to disk / allocate, fallible.
+    pub fn tuplesort_performsort<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev)`
-    /// (tuplesortvariants.c): fetch the next sorted tuple into `slot`.
-    /// Returns false at end of sort; the optional abbreviated key is the
-    /// second tuple of the result.
-    pub fn tuplesort_gettupleslot(
-        state: TuplesortstateHandle,
+    /// `tuplesort_gettupleslot(state, forward, copy, slot, abbrev=NULL)`
+    /// (tuplesortvariants.c): fetch the next tuple into `slot`. Returns `false`
+    /// (and stores an empty slot) at end of sort. Can detoast/allocate,
+    /// fallible.
+    pub fn tuplesort_gettupleslot<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
         forward: bool,
         copy: bool,
-        slot: types_nodes::SlotId,
-    ) -> PgResult<(bool, Option<Datum>)>
+        slot: &mut TupleTableSlot,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
-    /// `tuplesort_getdatum(state, forward, copy, val, isNull, abbrev)`
-    /// (tuplesortvariants.c): fetch the next sorted Datum. Returns
-    /// `(found, val, isNull, abbrev)`; `found` is false at end of sort.
-    pub fn tuplesort_getdatum(
-        state: TuplesortstateHandle,
+    /// `tuplesort_getdatum(state, forward, copy, &val, &isNull, abbrev=NULL)`
+    /// (tuplesortvariants.c): fetch the next Datum. Returns `(found, val,
+    /// isNull)`; `found == false` means end of sort. Can allocate, fallible.
+    pub fn tuplesort_getdatum<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
         forward: bool,
         copy: bool,
-    ) -> PgResult<(bool, Datum, bool, Option<Datum>)>
+    ) -> PgResult<(bool, Datum, bool)>
 );
 
 seam_core::seam!(
-    /// `tuplesort_end(state)` (tuplesort.c): release the sort object and its
-    /// memory/tapes.
-    pub fn tuplesort_end(state: TuplesortstateHandle) -> PgResult<()>
+    /// `tuplesort_get_stats(state, stats)` (tuplesort.c): report sort
+    /// algorithm / space statistics into a `TuplesortInstrumentation`.
+    pub fn tuplesort_get_stats<'mcx>(
+        state: &Tuplesortstate<'mcx>,
+    ) -> TuplesortInstrumentation
+);
+
+seam_core::seam!(
+    /// `tuplesort_end(state)` (tuplesort.c): release all the sort's resources
+    /// (temp files, memory). Closing temp files can `elog(ERROR)`, carried on
+    /// `Err`.
+    pub fn tuplesort_end<'mcx>(state: mcx::PgBox<'mcx, Tuplesortstate<'mcx>>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_rescan(state)` (tuplesort.c): rewind a randomAccess sort to
+    /// the start so the output can be re-read.
+    pub fn tuplesort_rescan<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_markpos(state)` (tuplesort.c): save the current sort-output
+    /// position (randomAccess only).
+    pub fn tuplesort_markpos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_restorepos(state)` (tuplesort.c): restore the last saved
+    /// sort-output position (randomAccess only).
+    pub fn tuplesort_restorepos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()>
 );

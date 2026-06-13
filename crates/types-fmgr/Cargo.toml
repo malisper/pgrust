@@ -1,0 +1,15 @@
+[package]
+name = "types-fmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_fmgr"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }
