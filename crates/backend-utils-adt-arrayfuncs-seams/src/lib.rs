@@ -143,3 +143,35 @@ seam_core::seam!(
         elems: &[&str],
     ) -> PgResult<Datum>
 );
+
+seam_core::seam!(
+    /// `ARR_NDIM(DatumGetArrayTypeP(arraydatum))` (array.h): the number of
+    /// dimensions of the array carried by `arraydatum`, after detoast. Thin
+    /// accessor over the array header (used by the multirange constructor to
+    /// reject multidimensional arrays). Fallible only on the detoast surface.
+    pub fn array_get_ndim<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `ARR_ELEMTYPE(DatumGetArrayTypeP(arraydatum))` (array.h): the element
+    /// type OID of the array carried by `arraydatum`, after detoast. Thin
+    /// accessor over the array header. Fallible only on the detoast surface.
+    pub fn array_get_elemtype<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype, elmlen,
+    /// elmbyval, elmalign, &elemsp, &nullsp, &nelemsp)` (arrayfuncs.c): split a
+    /// detoasted array `Datum` into its per-element `(Datum, isnull)` pairs, in
+    /// order, given the element type's storage attributes. The C result arrays
+    /// are palloc'd in the current context; the owned model returns them in
+    /// `mcx`. Fallible on the `ereport(ERROR)` surface (malformed array).
+    pub fn deconstruct_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, (Datum, bool)>>
+);

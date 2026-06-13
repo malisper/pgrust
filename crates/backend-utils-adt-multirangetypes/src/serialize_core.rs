@@ -19,12 +19,13 @@ use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_rangetypes::{
     MultirangeType, MultirangeTypeP, RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC,
     RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INC, RANGE_UB_INF, RANGE_UB_NULL,
 };
 
+use backend_utils_adt_rangetypes_seams as range_seams;
 use backend_utils_adt_rangetypes_seams::{
     make_empty_range, make_range, range_adjacent_internal, range_before_internal, range_compare,
     range_union_internal,
@@ -417,6 +418,139 @@ pub fn make_empty_multirange<'mcx>(
     mltrngtypoid: Oid,
     rangetyp: &TypeCacheEntry,
 ) -> PgResult<MultirangeTypeP<'mcx>> {
+    make_multirange(mcx, mltrngtypoid, rangetyp, &[])
+}
+
+// ---------------------------------------------------------------------------
+// GENERIC FUNCTIONS — the SQL multirange constructors (multirangetypes.c).
+//
+// The fmgr prologue of each C entry point (`get_fn_expr_rettype(flinfo)` for the
+// return multirange type OID, and `multirange_get_typcache(fcinfo, ...)` for the
+// typcache) is resolved by the dispatch layer, so the ports take the already
+// resolved `mltrngtypoid` and `rangetyp` (= `typcache->rngtype`). The remaining
+// logic (the `PG_NARGS`/`PG_ARGISNULL` guards, dims/elemtype validation, and the
+// per-element NULL check + deconstruct loop) is the multirange unit's own.
+// ---------------------------------------------------------------------------
+
+/// `multirange_constructor2(PG_FUNCTION_ARGS)` (multirangetypes.c:942):
+/// construct a multirange from a variadic array of member ranges. `range_array`
+/// is the `Datum` of the (possibly toasted) `anyrange[]`; `nargs` is `PG_NARGS()`.
+pub fn multirange_constructor2<'mcx>(
+    mcx: Mcx<'mcx>,
+    mltrngtypoid: Oid,
+    rangetyp: &TypeCacheEntry,
+    nargs: i32,
+    range_array_isnull: bool,
+    range_array: Datum,
+) -> PgResult<MultirangeTypeP<'mcx>> {
+    use backend_utils_adt_arrayfuncs_seams as array_seams;
+
+    // A no-arg invocation should call multirange_constructor0 instead, but
+    // returning an empty range is what that does.
+    if nargs == 0 {
+        return make_multirange(mcx, mltrngtypoid, rangetyp, &[]);
+    }
+
+    // This check should be guaranteed by our signature, but let's do it just
+    // in case.
+    if range_array_isnull {
+        return Err(PgError::error(
+            "multirange values cannot contain null members".to_string(),
+        ));
+    }
+
+    let dims = array_seams::array_get_ndim::call(mcx, range_array)?;
+    if dims > 1 {
+        return Err(PgError::error(
+            "multiranges cannot be constructed from multidimensional arrays".to_string(),
+        )
+        .with_sqlstate(types_error::error::ERRCODE_CARDINALITY_VIOLATION));
+    }
+
+    let rngtypid = array_seams::array_get_elemtype::call(mcx, range_array)?;
+    if rngtypid != rangetyp.type_id {
+        return Err(PgError::error(format!(
+            "type {rngtypid} does not match constructor type"
+        )));
+    }
+
+    // Be careful: we can still be called with zero ranges, like this:
+    // `int4multirange(variadic '{}'::int4range[])`
+    let ranges: Vec<RangeTypeP<'mcx>> = if dims == 0 {
+        Vec::new()
+    } else {
+        let elements = array_seams::deconstruct_array::call(
+            mcx,
+            range_array,
+            rngtypid,
+            rangetyp.typlen,
+            rangetyp.typbyval,
+            rangetyp.typalign as core::ffi::c_char,
+        )?;
+
+        let mut ranges = Vec::with_capacity(elements.len());
+        for (elem, isnull) in elements.iter().copied() {
+            if isnull {
+                return Err(PgError::error(
+                    "multirange values cannot contain null members".to_string(),
+                )
+                .with_sqlstate(types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+            }
+            // make_multirange will do its own copy.
+            ranges.push(range_seams::datum_get_range_type_p::call(mcx, elem)?);
+        }
+        ranges
+    };
+
+    make_multirange(mcx, mltrngtypoid, rangetyp, &ranges)
+}
+
+/// `multirange_constructor1(PG_FUNCTION_ARGS)` (multirangetypes.c:1024):
+/// construct a multirange from a single member range. `range` is the `Datum` of
+/// the (possibly toasted) member range.
+pub fn multirange_constructor1<'mcx>(
+    mcx: Mcx<'mcx>,
+    mltrngtypoid: Oid,
+    rangetyp: &TypeCacheEntry,
+    range_isnull: bool,
+    range: Datum,
+) -> PgResult<MultirangeTypeP<'mcx>> {
+    // This check should be guaranteed by our signature, but let's do it just
+    // in case.
+    if range_isnull {
+        return Err(PgError::error(
+            "multirange values cannot contain null members".to_string(),
+        ));
+    }
+
+    let range = range_seams::datum_get_range_type_p::call(mcx, range)?;
+
+    // Make sure the range type matches.
+    let rngtypid = unsafe { (*range.ptr).rangetypid };
+    if rngtypid != rangetyp.type_id {
+        return Err(PgError::error(format!(
+            "type {rngtypid} does not match constructor type"
+        )));
+    }
+
+    make_multirange(mcx, mltrngtypoid, rangetyp, &[range])
+}
+
+/// `multirange_constructor0(PG_FUNCTION_ARGS)` (multirangetypes.c:1060): the
+/// niladic constructor — an empty multirange. `nargs` is `PG_NARGS()`.
+pub fn multirange_constructor0<'mcx>(
+    mcx: Mcx<'mcx>,
+    mltrngtypoid: Oid,
+    rangetyp: &TypeCacheEntry,
+    nargs: i32,
+) -> PgResult<MultirangeTypeP<'mcx>> {
+    // This should always be called without arguments.
+    if nargs != 0 {
+        return Err(PgError::error(
+            "niladic multirange constructor must not receive arguments".to_string(),
+        ));
+    }
+
     make_multirange(mcx, mltrngtypoid, rangetyp, &[])
 }
 
