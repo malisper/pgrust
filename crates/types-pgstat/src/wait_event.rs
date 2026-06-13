@@ -41,3 +41,20 @@ pub const WAIT_EVENT_MESSAGE_QUEUE_SEND: u32 = PG_WAIT_IPC | 36;
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
 pub const WAIT_EVENT_SPIN_DELAY: u32 = PG_WAIT_TIMEOUT | 6;
+
+/// `WAIT_EVENT_SLRU_FLUSH_SYNC` — "Waiting for SLRU data to reach durable
+/// storage during a checkpoint or database shutdown." IO-class event
+/// (value 167772210, matching c2rust).
+pub const WAIT_EVENT_SLRU_FLUSH_SYNC: u32 = PG_WAIT_IO + 50;
+
+/// `WAIT_EVENT_SLRU_READ` — "Waiting for a read of an SLRU page."
+/// (value 167772211, matching c2rust).
+pub const WAIT_EVENT_SLRU_READ: u32 = PG_WAIT_IO + 51;
+
+/// `WAIT_EVENT_SLRU_SYNC` — "Waiting for SLRU data to reach durable storage
+/// following a page write." (value 167772212, matching c2rust).
+pub const WAIT_EVENT_SLRU_SYNC: u32 = PG_WAIT_IO + 52;
+
+/// `WAIT_EVENT_SLRU_WRITE` — "Waiting for a write of an SLRU page."
+/// (value 167772213, matching c2rust).
+pub const WAIT_EVENT_SLRU_WRITE: u32 = PG_WAIT_IO + 53;

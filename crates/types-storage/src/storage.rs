@@ -4,7 +4,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, uint64, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -69,6 +69,11 @@ impl pg_atomic_uint64 {
     /// `pg_atomic_read_u64(ptr)`.
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
+    }
+
+    /// `pg_atomic_write_u64(ptr, val)`.
+    pub fn write(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::Relaxed);
     }
 }
 
@@ -297,12 +302,78 @@ pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 /// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
 pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 
+/// `DSMRegistryLock` (`lwlocklist.h`, `PG_LWLOCK(50, DSMRegistry)`): offset of
+/// the DSM-registry lock in `MainLWLockArray` (`&MainLWLockArray[50].lock`).
+pub const DSM_REGISTRY_LOCK: usize = 50;
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
 pub type dsm_handle = uint32;
 
 /// `DSM_HANDLE_INVALID` (`(dsm_handle) 0`).
 pub const DSM_HANDLE_INVALID: dsm_handle = 0;
+
+/// `dsa_handle` (`utils/dsa.h`, `typedef dsm_handle dsa_handle`) — a "name" for
+/// a DSA area that can be passed between cooperating backends.
+pub type dsa_handle = dsm_handle;
+
+/// `dsa_pointer` (`utils/dsa.h`) — a relative pointer within a DSA area
+/// (`uint64` on 64-bit pointer width).
+pub type dsa_pointer = uint64;
+
+/// `InvalidDsaPointer` (`utils/dsa.h`) — `((dsa_pointer) 0)`.
+pub const INVALID_DSA_POINTER: dsa_pointer = 0;
+
+/// `dshash_table_handle` (`lib/dshash.h`, `typedef dsa_pointer
+/// dshash_table_handle`) — a handle to a dshash table passed between backends.
+pub type dshash_table_handle = dsa_pointer;
+
+/// `dsa_area` (`utils/dsa.h`) — opaque backend-local handle to a DSA area. The
+/// area's internals are owned by the `dsa.c` substrate; consumers only hold
+/// and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DsaArea {
+    _private: [u8; 0],
+}
+
+/// `dshash_table` (`lib/dshash.h`) — opaque backend-local handle to a dshash
+/// table. The table's internals are owned by the `dshash.c` substrate;
+/// consumers only hold and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DshashTable {
+    _private: [u8; 0],
+}
+
+/// Which built-in key-handling helper set a [`DshashParameters`] selects. The C
+/// `dshash_parameters` carries raw `compare`/`hash`/`copy` function pointers,
+/// but "function pointers can't be shared between backends" (`dshash.h`), so
+/// every backend supplies the same set by value; the only set the DSM registry
+/// uses is the NUL-terminated-string helpers (`dshash_strcmp`/`dshash_strhash`/
+/// `dshash_strcpy`), which `dshash.c` owns. This selector names that set
+/// without crossing the seam with the foreign function pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DshashKeyKind {
+    /// `dshash_strcmp` / `dshash_strhash` / `dshash_strcpy` — fixed-width
+    /// NUL-terminated string keys occupying the first `key_size` bytes of the
+    /// entry.
+    String,
+}
+
+/// `dshash_parameters` (`lib/dshash.h`) — the parameters to create or attach a
+/// dshash table. `tranche_id` is only consulted on create. The compare/hash/
+/// copy function pointers are conveyed by [`DshashKeyKind`] (see its docs).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DshashParameters {
+    /// `key_size` — size of the key (initial bytes of the entry).
+    pub key_size: Size,
+    /// `entry_size` — total size of an entry.
+    pub entry_size: Size,
+    /// The built-in key-helper set (`compare_function`/`hash_function`/
+    /// `copy_function`).
+    pub key_kind: DshashKeyKind,
+    /// `tranche_id` — the LWLock tranche for the table's partition locks.
+    pub tranche_id: i32,
+}
 
 /// `PGShmemHeader` (`storage/pg_shmem.h`) — standard header for all Postgres
 /// shared memory segments, resident at the start of the main segment.
