@@ -166,6 +166,7 @@ pub fn init_all() {
     port_crc32c::init_seams();
     port_pgsleep::init_seams();
     port_pqsignal::init_seams();
+    probe_adt_scalar_bool::init_seams();
 }
 
 #[cfg(test)]

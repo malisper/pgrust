@@ -170,3 +170,4 @@ interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal
 port-crc32c = { path = "../port-crc32c" }
 port-pgsleep = { path = "../port-pgsleep" }
 port-pqsignal = { path = "../port-pqsignal" }
+probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }

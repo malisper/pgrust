@@ -8911,6 +8911,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-adt-scalar-bool"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-varlena-seams",
+ "common-hashfn",
+ "mcx",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9096,6 +9109,7 @@ dependencies = [
  "port-crc32c",
  "port-pgsleep",
  "port-pqsignal",
+ "probe-adt-scalar-bool",
 ]
 
 [[package]]
