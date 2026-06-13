@@ -354,4 +354,172 @@ mod recurrence_guard {
             );
         }
     }
+
+    /// Extract the names of every seam declared by a `*-seams` crate: each
+    /// `seam_core::seam!( ... pub fn NAME ... )` (or bare `seam!( ... )`)
+    /// invocation contributes exactly the `NAME` of the `pub fn` inside its
+    /// balanced parens. `pub fn`s that are NOT inside a `seam!(...)` (e.g.
+    /// inherent methods like `new`/`release` on a guard struct the seam crate
+    /// also defines) are deliberately ignored — only the macro-declared seam
+    /// surface is the contract the owner must install.
+    fn declared_seam_fns(src: &str) -> Vec<String> {
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        let needle = b"seam!";
+        while i + needle.len() <= bytes.len() {
+            if &bytes[i..i + needle.len()] != needle {
+                i += 1;
+                continue;
+            }
+            // Find the opening '(' after `seam!`.
+            let mut j = i + needle.len();
+            while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                j += 1;
+            }
+            if j >= bytes.len() || bytes[j] as char != '(' {
+                i += needle.len();
+                continue;
+            }
+            // Find the matching close paren.
+            let mut depth = 0i32;
+            let start = j;
+            let mut end = j;
+            while j < bytes.len() {
+                match bytes[j] as char {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let inner = &src[start + 1..end];
+            if let Some(name) = first_pub_fn_name(inner) {
+                out.push(name);
+            }
+            i = end + 1;
+        }
+        out
+    }
+
+    /// Given the body of a `seam!( ... )` invocation, return the identifier
+    /// following the first `pub fn`.
+    fn first_pub_fn_name(inner: &str) -> Option<String> {
+        let marker = "pub fn";
+        let pos = inner.find(marker)?;
+        let rest = &inner[pos + marker.len()..];
+        let rest = rest.trim_start();
+        // Identifier runs until '(' or '<' (generics) or whitespace.
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// Inverse of the wiring guard: for every `*-seams` crate whose OWNER
+    /// crate (the same directory name without the `-seams` suffix) exists
+    /// under `crates/`, every seam function it declares MUST be `::set(` by
+    /// the owner's `init_seams()`. Genuinely-unported owners (no owner crate
+    /// present) are exempt — the seam stays panic-on-call until ported.
+    ///
+    /// This is the dual of `every_seam_installing_crate_is_wired_into_init_all`:
+    /// that one catches a wired-up crate dropped from `init_all()`; this one
+    /// catches an owner that exists but forgot to install (or had a merge drop)
+    /// one of its declared seams, which would panic at runtime on first call.
+    #[test]
+    fn every_declared_seam_is_installed_by_its_owner() {
+        let crates = crates_dir();
+
+        // Offenders: (owner_lib, missing_seam_fn).
+        let mut missing: Vec<(String, String)> = Vec::new();
+
+        for entry in fs::read_dir(&crates).expect("read crates dir").flatten() {
+            let cpath = entry.path();
+            if !cpath.is_dir() {
+                continue;
+            }
+            let dir_name = match cpath.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let owner_dir_name = match dir_name.strip_suffix("-seams") {
+                Some(o) => o.to_string(),
+                None => continue, // not a seams crate
+            };
+
+            // OWNER must exist under crates/ — else genuinely unported, exempt.
+            let owner_path = crates.join(&owner_dir_name);
+            if !owner_path.join("src").is_dir() {
+                continue;
+            }
+
+            // Collect every seam fn the seams crate declares.
+            let mut seam_files = Vec::new();
+            rs_files(&cpath.join("src"), &mut seam_files);
+            let mut declared: Vec<String> = Vec::new();
+            for f in &seam_files {
+                let txt = fs::read_to_string(f).unwrap_or_default();
+                declared.extend(declared_seam_fns(&txt));
+            }
+            if declared.is_empty() {
+                continue;
+            }
+
+            // The owner must `<fn>::set(...)` every declared seam. The install
+            // may live directly in `init_seams()` or in a helper it delegates
+            // to (e.g. a `wire::install_*_seams()` fn in another module), so we
+            // scan the owner's ENTIRE src — but require `init_seams()` to exist
+            // and be non-empty (an owner with no init_seams() at all installs
+            // nothing, which IS a defect we want to surface).
+            let mut owner_files = Vec::new();
+            rs_files(&owner_path.join("src"), &mut owner_files);
+            let mut owner_src = String::new();
+            let mut has_init_seams = false;
+            for f in &owner_files {
+                let txt = fs::read_to_string(f).unwrap_or_default();
+                if init_seams_body(&txt).is_some() {
+                    has_init_seams = true;
+                }
+                owner_src.push('\n');
+                owner_src.push_str(&txt);
+            }
+
+            for fname in &declared {
+                let pat1 = format!("{}::set(", fname);
+                let pat2 = format!("{}::set (", fname);
+                if !has_init_seams
+                    || (!owner_src.contains(&pat1) && !owner_src.contains(&pat2))
+                {
+                    missing.push((owner_dir_name.replace('-', "_"), fname.clone()));
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            missing.sort();
+            let detail: String = missing
+                .iter()
+                .map(|(owner, f)| format!("\n  {}: {}::set(...) missing", owner, f))
+                .collect();
+            panic!(
+                "seam-install defect: {} declared seam(s) whose OWNER crate exists \
+                 are NOT installed via `<fn>::set(...)` in the owner's init_seams() \
+                 (would panic at runtime on first cross-cycle call). Install each \
+                 missing seam in the owner's init_seams():{}",
+                missing.len(),
+                detail
+            );
+        }
+    }
 }
