@@ -188,3 +188,97 @@ seam_core::seam!(
     /// NULL, a no-op). The owned model consumes the set; infallible.
     pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
 );
+
+/* ==========================================================================
+ * print.c consumed edges
+ *
+ * The `print` family (`nodes/print.c`) renders node trees for debugging. Its
+ * whole-tree serialization edge is owned by `outfuncs` (`nodes/outfuncs.c`,
+ * the separate `backend-nodes-outfuncs` catalog unit) which is NOT yet ported;
+ * `print`/`pprint`/`elog_node_display` drive it through the seam below. It
+ * stays UNINSTALLED (panics on call) until `outfuncs` lands — `mirror-pg-and-panic`.
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `nodeToStringWithLocations(obj)` (`nodes/outfuncs.c`): serialize an
+    /// arbitrary node tree to its textual `nodeToString` rendering (with parse
+    /// locations retained), allocated in `mcx` (C: palloc'd `char *`). The
+    /// owner is the unported `outfuncs` unit. `Err` carries OOM / any error the
+    /// serializer raises.
+    pub fn node_to_string_with_locations<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        obj: &types_nodes::nodes::Node<'_>,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+/* --------------------------------------------------------------------------
+ * print.c ad-hoc debug printers blocked on trimmed / unmodeled foreign carriers
+ *
+ * These four `print.c` routines reach into carrier fields that are deliberately
+ * trimmed out of foreign-owned carrier structs, or into an entirely-unmodeled
+ * foreign planner / execTuples model, so they cannot be expressed against the
+ * current vocabulary:
+ *
+ *   * `print_rt`   needs `RangeTblEntry.{eref->aliasname, inh, inFromCl}` —
+ *                  trimmed out of `types_nodes::parsenodes::RangeTblEntry`
+ *                  (eref/`Alias` not modeled at all);
+ *   * `print_expr` needs, in its `Var` arm, `rt_fetch(varno)->eref->aliasname`
+ *                  and `get_rte_attribute_name(rte, varattno)` (parser
+ *                  `parsetree`), again gated on the trimmed `eref`;
+ *   * `print_pathkeys` walks `pk_eclass->ec_members` chasing `ec_merged` —
+ *                  `EquivalenceMember`/`ec_members` are unmodeled in
+ *                  `types_pathnodes` and resolving the `EcId` handle needs the
+ *                  planner's `eq_classes` side-table;
+ *   * `print_tl`   needs `TargetEntry.{resno, ressortgroupref}` (trimmed out of
+ *                  `types_nodes::primnodes::TargetEntry`) and `print_expr`;
+ *   * `print_slot` drives `printtup::debugtup` over the `TupleTableSlot`
+ *                  execution runtime, which the execTuples slot model does not
+ *                  yet expose.
+ *
+ * The seams are owned by those genuine (unported / not-yet-expanded) owners and
+ * stay UNINSTALLED — a call panics — until they land. `mirror-pg-and-panic`.
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `print_rt(rtable)` (`nodes/print.c`): print the range table to stdout.
+    /// Owned by the parsetree/parsenodes surface that carries the full
+    /// `RangeTblEntry` (with `eref`/`inh`/`inFromCl`).
+    pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `print_expr(expr, rtable)` (`nodes/print.c`): print an expression to
+    /// stdout. Owned by the parsetree/lsyscache surface (needs
+    /// `rt_fetch->eref->aliasname` + `get_rte_attribute_name`).
+    pub fn print_expr(
+        expr: Option<&types_nodes::nodes::Node<'_>>,
+        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `print_pathkeys(pathkeys, rtable)` (`nodes/print.c`): print a `PathKey`
+    /// list to stdout. Owned by the planner pathkeys surface (needs the
+    /// `EquivalenceMember`/`ec_members` model + `eq_classes` side-table).
+    pub fn print_pathkeys(
+        pathkeys: &[types_pathnodes::PathKey],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `print_tl(tlist, rtable)` (`nodes/print.c`): print a targetlist to
+    /// stdout. Owned by the outfuncs/parsetree surface that carries the full
+    /// `TargetEntry` (with `resno`/`ressortgroupref`).
+    pub fn print_tl<'mcx>(
+        tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `print_slot(slot)` (`nodes/print.c`): print the tuple in the given
+    /// `TupleTableSlot` via `debugtup`. Owned by the execTuples/printtup
+    /// surface that exposes the live `TupleTableSlot` runtime.
+    pub fn print_slot(slot: &types_nodes::tuptable::SlotBase<'_>) -> types_error::PgResult<()>
+);
