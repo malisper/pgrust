@@ -36,10 +36,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_namespace_name(nspid)` (lsyscache.c): the namespace's name
-    /// (C: `pstrdup` copy), or `None` if there is no such namespace. `Err`
-    /// includes OOM from the copy.
-    pub fn get_namespace_name(nspid: Oid) -> PgResult<Option<String>>
+    /// `get_namespace_name(nspid)` (lsyscache.c): the namespace's name,
+    /// copied into `mcx` (C: `pstrdup` in the current context), or `None`
+    /// if there is no such namespace. `Err` includes OOM from the copy.
+    pub fn get_namespace_name<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult<Option<PgString<'mcx>>>
 );
 
 seam_core::seam!(

@@ -13,7 +13,9 @@ extern crate alloc;
 pub mod backend_catalog_namespace;
 pub mod namespace;
 
-pub use backend_catalog_namespace::{CatalogObjectName, FuncArgInfo, OperRow, ProcRow};
+pub use backend_catalog_namespace::{
+    CatalogObjectName, FuncArgInfo, OidArrayDatum, OperRow, ProcRow,
+};
 pub use namespace::{
     FuncCandidate, FuncCandidateList, SearchPathMatcher, TempNamespaceStatus, RVR_MISSING_OK,
     RVR_NOWAIT, RVR_SKIP_LOCKED,

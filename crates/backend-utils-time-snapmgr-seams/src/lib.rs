@@ -4,22 +4,21 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 //!
-//! Note: per `docs/query-lifecycle-raii.md` the ActiveSnapshot stack
-//! ultimately ports as an owned `SnapshotStack` facet. These two seams mirror
-//! the single C call pair in `RemoveTempRelationsCallback`
-//! (`PushActiveSnapshot(GetTransactionSnapshot())` / `PopActiveSnapshot()`)
-//! until the snapmgr port lands and the callback is restructured around the
-//! owned stack.
+//! Per `docs/query-lifecycle-raii.md` the ActiveSnapshot stack ports as an
+//! owned `SnapshotStack` facet, never as an ambient push/pop pair. The seam
+//! below is therefore scope-shaped: the owner brackets the callback with the
+//! snapshot push/pop on its own owned stack, so no ambient-stack signature
+//! is ever installed.
 
 use types_error::PgResult;
 
 seam_core::seam!(
-    /// `PushActiveSnapshot(GetTransactionSnapshot())` (snapmgr.c). Allocates
-    /// and can `ereport(ERROR)`, carried on `Err`.
-    pub fn push_active_snapshot_for_transaction() -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `PopActiveSnapshot()` (snapmgr.c).
-    pub fn pop_active_snapshot() -> PgResult<()>
+    /// Run `f` with a transaction snapshot active — the C
+    /// `PushActiveSnapshot(GetTransactionSnapshot()); ...; PopActiveSnapshot()`
+    /// bracket of `RemoveTempRelationsCallback`, owned by snapmgr as one
+    /// scope. Snapshot acquisition allocates and can `ereport(ERROR)`, and
+    /// `f`'s error propagates; both carried on `Err`.
+    pub fn with_transaction_snapshot(
+        f: &mut dyn FnMut() -> PgResult<()>,
+    ) -> PgResult<()>
 );

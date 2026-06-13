@@ -1,7 +1,6 @@
 //! `catalog/namespace.h` API vocabulary.
 
-use alloc::vec::Vec;
-
+use mcx::PgVec;
 use types_core::Oid;
 
 /// `RVR_MISSING_OK` (`catalog/namespace.h`).
@@ -14,12 +13,13 @@ pub const RVR_SKIP_LOCKED: u32 = 1 << 2;
 /// `struct _FuncCandidateList` (`catalog/namespace.h`).
 ///
 /// The C struct is a singly-linked list whose nodes end in a flexible
-/// `Oid args[FLEXIBLE_ARRAY_MEMBER]`. The owned model is a `Vec` of nodes
+/// `Oid args[FLEXIBLE_ARRAY_MEMBER]`, palloc'd in the caller's current
+/// context. The owned model is a `PgVec` of nodes in the caller's `Mcx`
 /// (the `next` pointer becomes the `Vec` ordering, kept in C list order:
 /// most-recently-prepended first) and the flexible `args` array an owned
-/// `Vec<Oid>`.
-#[derive(Clone, Debug, Default)]
-pub struct FuncCandidate {
+/// `PgVec<Oid>`.
+#[derive(Debug)]
+pub struct FuncCandidate<'mcx> {
     /// for internal use of namespace lookup function only.
     pub pathpos: i32,
     /// the function or operator OID (`InvalidOid` marks an ambiguous entry).
@@ -33,13 +33,14 @@ pub struct FuncCandidate {
     /// number of defaulted args.
     pub ndargs: i32,
     /// argnumbers[i] = which input arg goes at proc's arg i (empty => identity).
-    pub argnumbers: Vec<i32>,
+    pub argnumbers: PgVec<'mcx, i32>,
     /// arg types — length `nargs`.
-    pub args: Vec<Oid>,
+    pub args: PgVec<'mcx, Oid>,
 }
 
-/// `FuncCandidateList` — owned list of [`FuncCandidate`].
-pub type FuncCandidateList = Vec<FuncCandidate>;
+/// `FuncCandidateList` — owned list of [`FuncCandidate`], in the caller's
+/// `Mcx`.
+pub type FuncCandidateList<'mcx> = PgVec<'mcx, FuncCandidate<'mcx>>;
 
 /// `TempNamespaceStatus` (`catalog/namespace.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +59,13 @@ pub use TempNamespaceStatus::{
 };
 
 /// `SearchPathMatcher` (`catalog/namespace.h`) — a resolved `search_path`
-/// for quick re-validation against the active environment.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SearchPathMatcher {
+/// for quick re-validation against the active environment. Allocated in the
+/// context the caller passed to `GetSearchPathMatcher` (the C `context`
+/// argument).
+#[derive(Debug)]
+pub struct SearchPathMatcher<'mcx> {
     /// OIDs of explicitly named schemas (C: `List` of `Oid`).
-    pub schemas: Vec<Oid>,
+    pub schemas: PgVec<'mcx, Oid>,
     /// implicitly prepend `pg_catalog`?
     pub addCatalog: bool,
     /// implicitly prepend temp schema?

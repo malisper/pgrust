@@ -9,6 +9,7 @@ name = "backend_catalog_namespace"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
 
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }

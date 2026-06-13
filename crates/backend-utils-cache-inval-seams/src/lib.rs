@@ -4,6 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use types_datum::Datum;
 use types_error::PgResult;
 use types_syscache::SysCacheIdentifier;
 
@@ -15,13 +16,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `CacheRegisterSyscacheCallback(cacheid, func, (Datum) 0)` (inval.c):
-    /// register a syscache-invalidation callback. The C `Datum arg` is fixed
-    /// at 0 by every current caller and dropped here; the callback receives
-    /// `(cacheid, hashvalue)`. C `elog(FATAL)`s when the callback table is
-    /// full, carried on `Err`.
+    /// `CacheRegisterSyscacheCallback(cacheid, func, arg)` (inval.c):
+    /// register a syscache-invalidation callback; the callback receives
+    /// `(arg, cacheid, hashvalue)` as in C's `SyscacheCallbackFunction`.
+    /// C `elog(FATAL)`s when the callback table is full, carried on `Err`.
     pub fn cache_register_syscache_callback(
         cacheid: SysCacheIdentifier,
-        callback: fn(cacheid: i32, hashvalue: u32),
+        callback: fn(arg: Datum, cacheid: i32, hashvalue: u32),
+        arg: Datum,
     ) -> PgResult<()>
 );

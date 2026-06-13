@@ -3,6 +3,7 @@
 //! dependency cycle (catalog/commands layers above it). The owning crate
 //! installs every one of these from its `init_seams()`.
 
+use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::RangeVar;
@@ -18,8 +19,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `RangeVarGetRelid(relation, lockmode, missing_ok)` (namespace.h macro
     /// over `RangeVarGetRelidExtended` with no callback and `RVR_MISSING_OK`
-    /// per `missing_ok`).
+    /// per `missing_ok`). `mcx` is the C current context the lookup's
+    /// transient catalog copies are made in.
     pub fn range_var_get_relid(
+        mcx: Mcx<'_>,
         relation: &RangeVar,
         lockmode: LOCKMODE,
         missing_ok: bool,

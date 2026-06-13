@@ -188,6 +188,7 @@ dependencies = [
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-time-snapmgr-seams",
+ "mcx",
  "types-acl",
  "types-core",
  "types-datum",
@@ -202,6 +203,7 @@ dependencies = [
 name = "backend-catalog-namespace-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -248,6 +250,7 @@ dependencies = [
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -536,6 +539,7 @@ dependencies = [
 name = "backend-utils-adt-ruleutils-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
 ]
@@ -552,6 +556,7 @@ dependencies = [
 name = "backend-utils-adt-varlena-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
 ]
@@ -561,6 +566,7 @@ name = "backend-utils-cache-inval-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-datum",
  "types-error",
  "types-syscache",
 ]
@@ -633,6 +639,7 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -921,6 +928,7 @@ dependencies = [
 name = "types-namespace"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 

@@ -36,18 +36,26 @@
 //! Owned-model adaptations:
 //!   - a qualified-name `List *` of `String`/`A_Star` value nodes is
 //!     `&[Option<String>]` (`None` = `A_Star`);
-//!   - `_FuncCandidateList` is `Vec<FuncCandidate>` in C list order;
-//!   - out-parameters become return values.
+//!   - `_FuncCandidateList` is `PgVec<FuncCandidate>` in C list order;
+//!   - out-parameters become return values;
+//!   - functions that allocate in C's `CurrentMemoryContext` — results and
+//!     transient catalog-row copies alike — take an explicit `Mcx<'mcx>`
+//!     (`docs/mctx-design.md`). Error-message text is the one exception: it
+//!     travels in the `PgError` carrier (C: `ErrorContext`). The per-backend
+//!     `NamespaceState` (C: `TopMemoryContext` / `SearchPathCacheContext`
+//!     allocations) remains std-allocated; see DESIGN_DEBT.md.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use backend_utils_error::ereport;
+use mcx::{slice_in, vec_with_capacity_in, Mcx, PgString, PgVec};
 use types_acl::{AclResult, ACLCHECK_NOT_OWNER, ACL_CREATE, ACL_CREATE_TEMP, ACL_USAGE};
 use types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, OidIsValid, ProcNumber, SubTransactionId,
     BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, FUNC_MAX_ARGS, INVALID_PROC_NUMBER,
-    NAMESPACE_RELATION_ID, PG_CATALOG_NAMESPACE, PG_TOAST_NAMESPACE, RELATION_RELATION_ID,
+    NAMESPACE_RELATION_ID, OIDOID, PG_CATALOG_NAMESPACE, PG_TOAST_NAMESPACE,
+    RELATION_RELATION_ID,
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
 };
 use types_datum::Datum;
@@ -269,9 +277,10 @@ fn aclcheck_error_schema(aclresult: AclResult, name: Option<String>) -> PgResult
 /// shared by the three cross-database error sites. `get_database_name`
 /// returning NULL (no such database — cannot happen for `MyDatabaseId`)
 /// compares unequal.
-fn catalogname_differs_from_database(catalogname: &str) -> PgResult<bool> {
-    let dbname = dbcommands_seams::get_database_name::call(globals_seams::my_database_id::call())?;
-    Ok(dbname.as_deref() != Some(catalogname))
+fn catalogname_differs_from_database(mcx: Mcx<'_>, catalogname: &str) -> PgResult<bool> {
+    let dbname =
+        dbcommands_seams::get_database_name::call(mcx, globals_seams::my_database_id::call())?;
+    Ok(dbname.as_ref().map(|s| s.as_str()) != Some(catalogname))
 }
 
 /* ===========================================================================
@@ -360,14 +369,20 @@ fn spcache_insert(searchPath: &str, roleid: Oid) {
 
 /// `RangeVarGetRelid` (`catalog/namespace.h` macro): no callback, missing_ok
 /// per flag.
-pub fn RangeVarGetRelid(relation: &RangeVar, lockmode: LOCKMODE, missing_ok: bool) -> PgResult<Oid> {
+pub fn RangeVarGetRelid(
+    mcx: Mcx<'_>,
+    relation: &RangeVar,
+    lockmode: LOCKMODE,
+    missing_ok: bool,
+) -> PgResult<Oid> {
     let flags = if missing_ok { RVR_MISSING_OK } else { 0 };
-    RangeVarGetRelidExtended(relation, lockmode, flags, None)
+    RangeVarGetRelidExtended(mcx, relation, lockmode, flags, None)
 }
 
 /// `RangeVarGetRelidExtended` — given a `RangeVar` describing an existing
 /// relation, select the proper namespace and look up the relation OID.
 pub fn RangeVarGetRelidExtended(
+    mcx: Mcx<'_>,
     relation: &RangeVar,
     lockmode: LOCKMODE,
     flags: u32,
@@ -377,6 +392,9 @@ pub fn RangeVarGetRelidExtended(
     let mut relId: Oid;
     let mut oldRelId: Oid = InvalidOid;
     let mut retry = false;
+    /* The currently-held relation lock (C: an entry in the backend's lock
+     * table, released by transaction abort on error). */
+    let mut held_lock: Option<lmgr_seams::LockGuard> = None;
     let missing_ok = (flags & RVR_MISSING_OK) != 0;
 
     /* verify that flags do no conflict */
@@ -386,7 +404,7 @@ pub fn RangeVarGetRelidExtended(
      * We check the catalog name and then ignore it.
      */
     if let Some(catalogname) = relation.catalogname.as_deref() {
-        if catalogname_differs_from_database(catalogname)? {
+        if catalogname_differs_from_database(mcx, catalogname)? {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
@@ -461,7 +479,7 @@ pub fn RangeVarGetRelidExtended(
             }
         } else {
             /* search the namespace path */
-            relId = RelnameGetRelid(relation.relname.as_deref().unwrap_or_default())?;
+            relId = RelnameGetRelid(mcx, relation.relname.as_deref().unwrap_or_default())?;
         }
 
         /*
@@ -495,7 +513,9 @@ pub fn RangeVarGetRelidExtended(
                 break;
             }
             if OidIsValid(oldRelId) {
-                lmgr_seams::unlock_relation_oid::call(oldRelId, lockmode)?;
+                if let Some(guard) = held_lock.take() {
+                    guard.release()?;
+                }
             }
         }
 
@@ -508,8 +528,12 @@ pub fn RangeVarGetRelidExtended(
         if !OidIsValid(relId) {
             inval_seams::accept_invalidation_messages::call()?;
         } else if (flags & (RVR_NOWAIT | RVR_SKIP_LOCKED)) == 0 {
-            lmgr_seams::lock_relation_oid::call(relId, lockmode)?;
-        } else if !lmgr_seams::conditional_lock_relation_oid::call(relId, lockmode)? {
+            held_lock = Some(lmgr_seams::lock_relation_oid::call(relId, lockmode)?);
+        } else if let Some(guard) =
+            lmgr_seams::conditional_lock_relation_oid::call(relId, lockmode)?
+        {
+            held_lock = Some(guard);
+        } else {
             let elevel = if (flags & RVR_SKIP_LOCKED) != 0 {
                 DEBUG1
             } else {
@@ -575,6 +599,11 @@ pub fn RangeVarGetRelidExtended(
                 .finish(here("RangeVarGetRelidExtended"))?;
         }
     }
+    /* C returns with the lock held until transaction end; the guard moves to
+     * the (future) transaction owner. */
+    if let Some(guard) = held_lock {
+        guard.keep();
+    }
     Ok(relId)
 }
 
@@ -584,14 +613,14 @@ pub fn RangeVarGetRelidExtended(
 
 /// `RangeVarGetCreationNamespace` — given a `RangeVar` describing a
 /// to-be-created relation, choose which namespace to create it in.
-pub fn RangeVarGetCreationNamespace(newRelation: &RangeVar) -> PgResult<Oid> {
+pub fn RangeVarGetCreationNamespace(mcx: Mcx<'_>, newRelation: &RangeVar) -> PgResult<Oid> {
     let namespaceId: Oid;
 
     /*
      * We check the catalog name and then ignore it.
      */
     if let Some(catalogname) = newRelation.catalogname.as_deref() {
-        if catalogname_differs_from_database(catalogname)? {
+        if catalogname_differs_from_database(mcx, catalogname)? {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
@@ -609,7 +638,7 @@ pub fn RangeVarGetCreationNamespace(newRelation: &RangeVar) -> PgResult<Oid> {
         /* check for pg_temp alias */
         if schemaname == "pg_temp" {
             /* Initialize temp namespace */
-            AccessTempTableNamespace(false)?;
+            AccessTempTableNamespace(mcx, false)?;
             return Ok(my_temp_namespace());
         }
         /* use exact schema given */
@@ -617,14 +646,14 @@ pub fn RangeVarGetCreationNamespace(newRelation: &RangeVar) -> PgResult<Oid> {
         /* we do not check for USAGE rights here! */
     } else if newRelation.relpersistence == RELPERSISTENCE_TEMP {
         /* Initialize temp namespace */
-        AccessTempTableNamespace(false)?;
+        AccessTempTableNamespace(mcx, false)?;
         return Ok(my_temp_namespace());
     } else {
         /* use the default creation namespace */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         if STATE.with(|s| s.borrow().active_temp_creation_pending) {
             /* Need to initialize temp namespace */
-            AccessTempTableNamespace(true)?;
+            AccessTempTableNamespace(mcx, true)?;
             return Ok(my_temp_namespace());
         }
         namespaceId = STATE.with(|s| s.borrow().active_creation_namespace);
@@ -650,6 +679,7 @@ pub fn RangeVarGetCreationNamespace(newRelation: &RangeVar) -> PgResult<Oid> {
 /// in, after a CREATE-rights check and (optionally) locking the existing
 /// relation of the same name.
 pub fn RangeVarGetAndCheckCreationNamespace(
+    mcx: Mcx<'_>,
     relation: &mut RangeVar,
     lockmode: LOCKMODE,
     existing_relation_id: Option<&mut Oid>,
@@ -661,12 +691,14 @@ pub fn RangeVarGetAndCheckCreationNamespace(
     let mut oldnspid: Oid = InvalidOid;
     let mut retry = false;
     let want_existing = existing_relation_id.is_some();
+    let mut held_nsp_lock: Option<lmgr_seams::LockGuard> = None;
+    let mut held_rel_lock: Option<lmgr_seams::LockGuard> = None;
 
     /*
      * We check the catalog name and then ignore it.
      */
     if let Some(catalogname) = relation.catalogname.as_deref() {
-        if catalogname_differs_from_database(catalogname)? {
+        if catalogname_differs_from_database(mcx, catalogname)? {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
@@ -689,7 +721,7 @@ pub fn RangeVarGetAndCheckCreationNamespace(
         inval_count = sinval_seams::shared_invalid_message_counter::call();
 
         /* Look up creation namespace and check for existing relation. */
-        nspid = RangeVarGetCreationNamespace(relation)?;
+        nspid = RangeVarGetCreationNamespace(mcx, relation)?;
         debug_assert!(OidIsValid(nspid));
         if want_existing {
             relid = lsyscache_seams::get_relname_relid::call(
@@ -713,7 +745,11 @@ pub fn RangeVarGetAndCheckCreationNamespace(
         let aclresult =
             namespace_aclcheck(nspid, miscinit_seams::get_user_id::call(), ACL_CREATE)?;
         if aclresult != AclResult::AclcheckOk {
-            aclcheck_error_schema(aclresult, lsyscache_seams::get_namespace_name::call(nspid)?)?;
+            aclcheck_error_schema(
+                aclresult,
+                lsyscache_seams::get_namespace_name::call(mcx, nspid)?
+                    .map(|s| s.as_str().to_string()),
+            )?;
         }
 
         if retry {
@@ -723,27 +759,26 @@ pub fn RangeVarGetAndCheckCreationNamespace(
             }
             /* If creation namespace has changed, give up old lock. */
             if nspid != oldnspid {
-                lmgr_seams::unlock_database_object::call(
-                    NAMESPACE_RELATION_ID,
-                    oldnspid,
-                    0,
-                    AccessShareLock,
-                )?;
+                if let Some(guard) = held_nsp_lock.take() {
+                    guard.release()?;
+                }
             }
             /* If name points to something different, give up old lock. */
             if relid != oldrelid && OidIsValid(oldrelid) && lockmode != NoLock {
-                lmgr_seams::unlock_relation_oid::call(oldrelid, lockmode)?;
+                if let Some(guard) = held_rel_lock.take() {
+                    guard.release()?;
+                }
             }
         }
 
         /* Lock namespace. */
         if nspid != oldnspid {
-            lmgr_seams::lock_database_object::call(
+            held_nsp_lock = Some(lmgr_seams::lock_database_object::call(
                 NAMESPACE_RELATION_ID,
                 nspid,
                 0,
                 AccessShareLock,
-            )?;
+            )?);
         }
 
         /* Lock relation, if required if and we have permission. */
@@ -762,7 +797,7 @@ pub fn RangeVarGetAndCheckCreationNamespace(
                 )?;
             }
             if relid != oldrelid {
-                lmgr_seams::lock_relation_oid::call(relid, lockmode)?;
+                held_rel_lock = Some(lmgr_seams::lock_relation_oid::call(relid, lockmode)?);
             }
         }
 
@@ -777,9 +812,17 @@ pub fn RangeVarGetAndCheckCreationNamespace(
         oldnspid = nspid;
     }
 
-    RangeVarAdjustRelationPersistence(relation, nspid)?;
+    RangeVarAdjustRelationPersistence(mcx, relation, nspid)?;
     if let Some(out) = existing_relation_id {
         *out = relid;
+    }
+    /* C returns with the locks held until transaction end; the guards move
+     * to the (future) transaction owner. */
+    if let Some(guard) = held_nsp_lock {
+        guard.keep();
+    }
+    if let Some(guard) = held_rel_lock {
+        guard.keep();
     }
     Ok(nspid)
 }
@@ -791,11 +834,15 @@ pub fn RangeVarGetAndCheckCreationNamespace(
 /// `RangeVarAdjustRelationPersistence` — adjust the relpersistence of an
 /// about-to-be-created relation based on the creation namespace, and throw
 /// an error for invalid combinations.
-pub fn RangeVarAdjustRelationPersistence(newRelation: &mut RangeVar, nspid: Oid) -> PgResult<()> {
+pub fn RangeVarAdjustRelationPersistence(
+    mcx: Mcx<'_>,
+    newRelation: &mut RangeVar,
+    nspid: Oid,
+) -> PgResult<()> {
     match newRelation.relpersistence {
         RELPERSISTENCE_TEMP => {
             if !isTempOrTempToastNamespace(nspid)? {
-                if isAnyTempNamespace(nspid)? {
+                if isAnyTempNamespace(mcx, nspid)? {
                     return ereport(ERROR)
                         .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
                         .errmsg("cannot create relations in temporary schemas of other sessions")
@@ -811,7 +858,7 @@ pub fn RangeVarAdjustRelationPersistence(newRelation: &mut RangeVar, nspid: Oid)
         RELPERSISTENCE_PERMANENT => {
             if isTempOrTempToastNamespace(nspid)? {
                 newRelation.relpersistence = RELPERSISTENCE_TEMP;
-            } else if isAnyTempNamespace(nspid)? {
+            } else if isAnyTempNamespace(mcx, nspid)? {
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
                     .errmsg("cannot create relations in temporary schemas of other sessions")
@@ -819,7 +866,7 @@ pub fn RangeVarAdjustRelationPersistence(newRelation: &mut RangeVar, nspid: Oid)
             }
         }
         _ => {
-            if isAnyTempNamespace(nspid)? {
+            if isAnyTempNamespace(mcx, nspid)? {
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
                     .errmsg("only temporary relations may be created in temporary schemas")
@@ -836,8 +883,8 @@ pub fn RangeVarAdjustRelationPersistence(newRelation: &mut RangeVar, nspid: Oid)
 
 /// `RelnameGetRelid` — try to resolve an unqualified relation name.
 /// Returns OID if relation found in search path, else InvalidOid.
-pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn RelnameGetRelid(mcx: Mcx<'_>, relname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         let relid = lsyscache_seams::get_relname_relid::call(relname, namespaceId)?;
@@ -855,16 +902,16 @@ pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
  * ======================================================================== */
 
 /// `RelationIsVisible` — whether a relation is visible in the search path.
-pub fn RelationIsVisible(relid: Oid) -> PgResult<bool> {
-    RelationIsVisibleExt(relid, None)
+pub fn RelationIsVisible(mcx: Mcx<'_>, relid: Oid) -> PgResult<bool> {
+    RelationIsVisibleExt(mcx, relid, None)
 }
 
 /// `RelationIsVisibleExt` — as above, but if `is_missing` is given, a lookup
 /// failure sets `*is_missing` instead of raising.
-fn RelationIsVisibleExt(relid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn RelationIsVisibleExt(mcx: Mcx<'_>, relid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let reltup = match syscache_seams::relation_namespace_and_name::call(relid)? {
+    let reltup = match syscache_seams::relation_namespace_and_name::call(mcx, relid)? {
         Some(t) => t,
         None => {
             if let Some(m) = is_missing {
@@ -875,7 +922,7 @@ fn RelationIsVisibleExt(relid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     /*
      * Quick check: if it ain't in the path at all, it ain't visible. Items in
@@ -892,7 +939,7 @@ fn RelationIsVisibleExt(relid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
          * hidden by another relation of the same name earlier in the path. So
          * we must do a slow check for conflicting relations.
          */
-        let relname = &reltup.name;
+        let relname = reltup.name.as_str();
         let mut found = false;
         for namespaceId in &path {
             let namespaceId = *namespaceId;
@@ -917,14 +964,14 @@ fn RelationIsVisibleExt(relid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
  * ======================================================================== */
 
 /// `TypenameGetTypid` — wrapper for binary compatibility.
-pub fn TypenameGetTypid(typname: &str) -> PgResult<Oid> {
-    TypenameGetTypidExtended(typname, true)
+pub fn TypenameGetTypid(mcx: Mcx<'_>, typname: &str) -> PgResult<Oid> {
+    TypenameGetTypidExtended(mcx, typname, true)
 }
 
 /// `TypenameGetTypidExtended` — try to resolve an unqualified datatype name.
 /// Returns OID if type found in search path, else InvalidOid.
-pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn TypenameGetTypidExtended(mcx: Mcx<'_>, typname: &str, temp_ok: bool) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if !temp_ok && namespaceId == my_temp_namespace() {
@@ -946,15 +993,15 @@ pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
  * ======================================================================== */
 
 /// `TypeIsVisible` — whether a type is visible in the search path.
-pub fn TypeIsVisible(typid: Oid) -> PgResult<bool> {
-    TypeIsVisibleExt(typid, None)
+pub fn TypeIsVisible(mcx: Mcx<'_>, typid: Oid) -> PgResult<bool> {
+    TypeIsVisibleExt(mcx, typid, None)
 }
 
 /// `TypeIsVisibleExt`.
-fn TypeIsVisibleExt(typid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn TypeIsVisibleExt(mcx: Mcx<'_>, typid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let typtup = match syscache_seams::type_namespace_and_name::call(typid)? {
+    let typtup = match syscache_seams::type_namespace_and_name::call(mcx, typid)? {
         Some(t) => t,
         None => {
             if let Some(m) = is_missing {
@@ -965,7 +1012,7 @@ fn TypeIsVisibleExt(typid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool>
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let typnamespace = typtup.namespace;
     let path = active_search_path();
@@ -976,7 +1023,7 @@ fn TypeIsVisibleExt(typid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool>
          * If it is in the path, it might still not be visible; it could be
          * hidden by another type of the same name earlier in the path.
          */
-        let typname = &typtup.name;
+        let typname = typtup.name.as_str();
         let mut found = false;
         for namespaceId in &path {
             let namespaceId = *namespaceId;
@@ -1002,7 +1049,8 @@ fn TypeIsVisibleExt(typid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool>
 
 /// `FuncnameGetCandidates` — given a possibly-qualified function name and
 /// argument count, retrieve a list of the possible matches.
-pub fn FuncnameGetCandidates(
+pub fn FuncnameGetCandidates<'mcx>(
+    mcx: Mcx<'mcx>,
     names: NameList,
     nargs: i32,
     argnames: &[String],
@@ -1010,8 +1058,8 @@ pub fn FuncnameGetCandidates(
     expand_defaults: bool,
     include_out_arguments: bool,
     missing_ok: bool,
-) -> PgResult<FuncCandidateList> {
-    let mut resultList: FuncCandidateList = Vec::new();
+) -> PgResult<FuncCandidateList<'mcx>> {
+    let mut resultList: FuncCandidateList<'mcx> = PgVec::new_in(mcx);
     let mut any_special = false;
     let namespaceId: Oid;
 
@@ -1019,34 +1067,36 @@ pub fn FuncnameGetCandidates(
     debug_assert!(nargs >= 0 || !(expand_variadic | expand_defaults));
 
     /* deconstruct the name list */
-    let (schemaname, funcname) = DeconstructQualifiedName(names)?;
+    let (schemaname, funcname) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if !OidIsValid(namespaceId) {
-            return Ok(Vec::new());
+            return Ok(PgVec::new_in(mcx));
         }
     } else {
         /* flag to indicate we need namespace search */
         namespaceId = InvalidOid;
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
     }
 
     /* Search syscache by name only */
-    let (catlist, catlist_ordered) = syscache_seams::proc_catlist::call(&funcname)?;
+    let (catlist, catlist_ordered) = syscache_seams::proc_catlist::call(mcx, funcname)?;
     let path = active_search_path();
 
     for i in 0..catlist.len() {
         let procform = &catlist[i];
-        let mut proargtypes: Vec<Oid> = procform.proargtypes.clone();
+        /* C: a pointer swap between proargtypes.values and the
+         * proallargtypes array data — a borrowed slice here. */
+        let mut proargtypes: &[Oid] = &procform.proargtypes;
         let mut pronargs = procform.pronargs;
         let effective_nargs: i32;
         let mut pathpos = 0;
         let variadic;
         let use_defaults;
         let va_elem_type;
-        let mut argnumbers: Vec<i32> = Vec::new();
+        let mut argnumbers: PgVec<'mcx, i32> = PgVec::new_in(mcx);
 
         if OidIsValid(namespaceId) {
             /* Consider only procs in specified namespace */
@@ -1079,13 +1129,14 @@ pub fn FuncnameGetCandidates(
          */
         if include_out_arguments {
             if let Some(arr) = &procform.proallargtypes {
-                /* (the 1-D / no-nulls / OIDOID array checks — C's
-                 * elog(ERROR, "proallargtypes is not a 1-D Oid array or it
-                 * contains nulls") — are performed by the seam installer when
-                 * it materializes `proallargtypes`) */
-                pronargs = arr.len() as i32;
+                pronargs = arr.dim0;
+                if arr.ndim != 1 || pronargs < 0 || arr.hasnull || arr.elemtype != OIDOID {
+                    return elog_error(
+                        "proallargtypes is not a 1-D Oid array or it contains nulls".to_string(),
+                    );
+                }
                 debug_assert!(pronargs >= procform.pronargs);
-                proargtypes = arr.clone();
+                proargtypes = &arr.values;
             }
         }
 
@@ -1125,6 +1176,7 @@ pub fn FuncnameGetCandidates(
 
             /* Check for argument name match, generate positional mapping */
             if !MatchNamedCall(
+                mcx,
                 procform,
                 nargs,
                 argnames,
@@ -1179,6 +1231,10 @@ pub fn FuncnameGetCandidates(
          * compare it to earlier results.
          */
         effective_nargs = pronargs.max(nargs);
+        let args_len = effective_nargs.max(0) as usize;
+        let mut args: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, args_len)?;
+        args.resize(args_len, InvalidOid);
+        /* C moves the palloc'd argnumbers pointer into the candidate. */
         let mut newResult = FuncCandidate {
             pathpos,
             oid: procform.oid,
@@ -1186,13 +1242,13 @@ pub fn FuncnameGetCandidates(
             nargs: effective_nargs,
             nvargs: 0,
             ndargs: 0,
-            argnumbers: argnumbers.clone(),
-            args: vec![InvalidOid; effective_nargs.max(0) as usize],
+            argnumbers,
+            args,
         };
-        if !argnumbers.is_empty() {
+        if !newResult.argnumbers.is_empty() {
             /* Re-order the argument types into call's logical order */
             for j in 0..pronargs as usize {
-                let an = argnumbers[j] as usize;
+                let an = newResult.argnumbers[j] as usize;
                 newResult.args[j] = proargtypes[an];
             }
         } else {
@@ -1307,6 +1363,9 @@ pub fn FuncnameGetCandidates(
         /*
          * Okay to add it to result list
          */
+        resultList
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncCandidate>()))?;
         resultList.insert(0, newResult);
     }
 
@@ -1327,13 +1386,14 @@ fn oid_args_equal(a: &[Oid], b: &[Oid], n: usize) -> bool {
 /// `argnumbers` with the mapping from call argument positions to actual
 /// function argument numbers (defaulted arguments included, after the last
 /// supplied argument).
-fn MatchNamedCall(
-    procform: &ProcRow,
+fn MatchNamedCall<'mcx>(
+    mcx: Mcx<'mcx>,
+    procform: &ProcRow<'_>,
     nargs: i32,
     argnames: &[String],
     include_out_arguments: bool,
     pronargs: i32,
-    argnumbers: &mut Vec<i32>,
+    argnumbers: &mut PgVec<'mcx, i32>,
 ) -> PgResult<bool> {
     let numposargs = nargs - argnames.len() as i32;
     let pronallargs: i32;
@@ -1347,12 +1407,12 @@ fn MatchNamedCall(
     debug_assert!(nargs <= pronargs);
 
     /* Ignore this function if its proargnames is null */
-    let info = match funcapi_seams::func_arg_info::call(procform.oid)? {
-        Some(info) => info,
-        None => return Ok(false),
-    };
+    if syscache_seams::proc_proargnames_isnull::call(procform.oid)? {
+        return Ok(false);
+    }
 
     /* OK, let's extract the argument names and types */
+    let info = funcapi_seams::get_func_arg_info::call(mcx, procform.oid)?;
     let FuncArgInfo {
         argtypes: p_argtypes,
         argnames: p_argnames,
@@ -1368,7 +1428,12 @@ fn MatchNamedCall(
     });
 
     /* initialize state for matching */
-    *argnumbers = vec![0; pronargs.max(0) as usize];
+    *argnumbers = {
+        let n = pronargs.max(0) as usize;
+        let mut v = vec_with_capacity_in(mcx, n)?;
+        v.resize(n, 0);
+        v
+    };
     for slot in arggiven.iter_mut().take(pronargs as usize) {
         *slot = false;
     }
@@ -1398,7 +1463,7 @@ fn MatchNamedCall(
                 continue;
             }
             if let Some(n) = &p_argnames[i] {
-                if n == argname {
+                if n.as_str() == argname {
                     /* fail if argname matches a positional argument */
                     if arggiven[pp as usize] {
                         return Ok(false);
@@ -1451,15 +1516,15 @@ fn MatchNamedCall(
  * ======================================================================== */
 
 /// `FunctionIsVisible` — whether a function is visible in the search path.
-pub fn FunctionIsVisible(funcid: Oid) -> PgResult<bool> {
-    FunctionIsVisibleExt(funcid, None)
+pub fn FunctionIsVisible(mcx: Mcx<'_>, funcid: Oid) -> PgResult<bool> {
+    FunctionIsVisibleExt(mcx, funcid, None)
 }
 
 /// `FunctionIsVisibleExt`.
-fn FunctionIsVisibleExt(funcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn FunctionIsVisibleExt(mcx: Mcx<'_>, funcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let procform = match syscache_seams::proc_row_by_oid::call(funcid)? {
+    let procform = match syscache_seams::proc_row_by_oid::call(mcx, funcid)? {
         Some(p) => p,
         None => {
             if let Some(m) = is_missing {
@@ -1470,7 +1535,7 @@ fn FunctionIsVisibleExt(funcid: Oid, is_missing: Option<&mut bool>) -> PgResult<
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let pronamespace = procform.pronamespace;
     let path = active_search_path();
@@ -1483,12 +1548,14 @@ fn FunctionIsVisibleExt(funcid: Oid, is_missing: Option<&mut bool>) -> PgResult<
          * the path. So we must do a slow check to see if this is the same
          * proc that would be found by FuncnameGetCandidates.
          */
-        let proname = &procform.proname;
+        let proname = procform.proname.as_str();
         let nargs = procform.pronargs;
         let mut found = false;
 
-        let names_list = [Some(proname.clone())];
-        let clist = FuncnameGetCandidates(&names_list, nargs, &[], false, false, false, false)?;
+        /* C: list_make1(makeString(proname)) in the current context. */
+        let names_list = [Some(proname.to_string())];
+        let clist =
+            FuncnameGetCandidates(mcx, &names_list, nargs, &[], false, false, false, false)?;
 
         for cand in &clist {
             if oid_args_equal(&cand.args, &procform.proargtypes, nargs as usize) {
@@ -1509,15 +1576,20 @@ fn FunctionIsVisibleExt(funcid: Oid, is_missing: Option<&mut bool>) -> PgResult<
 
 /// `OpernameGetOprid` — given a possibly-qualified operator name and exact
 /// input datatypes, look up the operator. Returns InvalidOid if not found.
-pub fn OpernameGetOprid(names: NameList, oprleft: Oid, oprright: Oid) -> PgResult<Oid> {
+pub fn OpernameGetOprid(
+    mcx: Mcx<'_>,
+    names: NameList,
+    oprleft: Oid,
+    oprright: Oid,
+) -> PgResult<Oid> {
     /* deconstruct the name list */
-    let (schemaname, opername) = DeconstructQualifiedName(names)?;
+    let (schemaname, opername) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* search only in exact schema given */
         let namespaceId = LookupExplicitNamespace(schemaname, true)?;
         if OidIsValid(namespaceId) {
-            let result = syscache_seams::oper_exact::call(&opername, oprleft, oprright, namespaceId)?;
+            let result = syscache_seams::oper_exact::call(opername, oprleft, oprright, namespaceId)?;
             if OidIsValid(result) {
                 return Ok(result);
             }
@@ -1527,7 +1599,7 @@ pub fn OpernameGetOprid(names: NameList, oprleft: Oid, oprright: Oid) -> PgResul
     }
 
     /* Search syscache by name and argument types */
-    let (catlist, _ordered) = syscache_seams::oper_catlist3::call(&opername, oprleft, oprright)?;
+    let (catlist, _ordered) = syscache_seams::oper_catlist3::call(mcx, opername, oprleft, oprright)?;
 
     if catlist.is_empty() {
         /* no hope, fall out early */
@@ -1539,7 +1611,7 @@ pub fn OpernameGetOprid(names: NameList, oprleft: Oid, oprright: Oid) -> PgResul
      * there's more than one. This doubly-nested loop looks ugly, but in
      * practice there should usually be few catlist members.
      */
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -1562,31 +1634,32 @@ pub fn OpernameGetOprid(names: NameList, oprleft: Oid, oprright: Oid) -> PgResul
 
 /// `OpernameGetCandidates` — given a possibly-qualified operator name and
 /// operator kind, retrieve a list of the possible matches.
-pub fn OpernameGetCandidates(
+pub fn OpernameGetCandidates<'mcx>(
+    mcx: Mcx<'mcx>,
     names: NameList,
     oprkind: u8,
     missing_schema_ok: bool,
-) -> PgResult<FuncCandidateList> {
-    let mut resultList: FuncCandidateList = Vec::new();
+) -> PgResult<FuncCandidateList<'mcx>> {
+    let mut resultList: FuncCandidateList<'mcx> = PgVec::new_in(mcx);
     let namespaceId: Oid;
 
     /* deconstruct the name list */
-    let (schemaname, opername) = DeconstructQualifiedName(names)?;
+    let (schemaname, opername) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_schema_ok)?;
         if missing_schema_ok && !OidIsValid(namespaceId) {
-            return Ok(Vec::new());
+            return Ok(PgVec::new_in(mcx));
         }
     } else {
         /* flag to indicate we need namespace search */
         namespaceId = InvalidOid;
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
     }
 
     /* Search syscache by name only */
-    let (catlist, catlist_ordered) = syscache_seams::oper_catlist1::call(&opername)?;
+    let (catlist, catlist_ordered) = syscache_seams::oper_catlist1::call(mcx, opername)?;
     let path = active_search_path();
 
     for operform in &catlist {
@@ -1669,6 +1742,9 @@ pub fn OpernameGetCandidates(
         /*
          * Okay to add it to result list
          */
+        let mut args: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, 2)?;
+        args.push(operform.oprleft);
+        args.push(operform.oprright);
         let newResult = FuncCandidate {
             pathpos,
             oid: operform.oid,
@@ -1676,9 +1752,12 @@ pub fn OpernameGetCandidates(
             nargs: 2,
             nvargs: 0,
             ndargs: 0,
-            argnumbers: Vec::new(),
-            args: vec![operform.oprleft, operform.oprright],
+            argnumbers: PgVec::new_in(mcx),
+            args,
         };
+        resultList
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncCandidate>()))?;
         resultList.insert(0, newResult);
     }
 
@@ -1690,15 +1769,15 @@ pub fn OpernameGetCandidates(
  * ======================================================================== */
 
 /// `OperatorIsVisible` — whether an operator is visible in the search path.
-pub fn OperatorIsVisible(oprid: Oid) -> PgResult<bool> {
-    OperatorIsVisibleExt(oprid, None)
+pub fn OperatorIsVisible(mcx: Mcx<'_>, oprid: Oid) -> PgResult<bool> {
+    OperatorIsVisibleExt(mcx, oprid, None)
 }
 
 /// `OperatorIsVisibleExt`.
-fn OperatorIsVisibleExt(oprid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn OperatorIsVisibleExt(mcx: Mcx<'_>, oprid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let oprform = match syscache_seams::oper_row_by_oid::call(oprid)? {
+    let oprform = match syscache_seams::oper_row_by_oid::call(mcx, oprid)? {
         Some(o) => o,
         None => {
             if let Some(m) = is_missing {
@@ -1709,7 +1788,7 @@ fn OperatorIsVisibleExt(oprid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let oprnamespace = oprform.oprnamespace;
     let path = active_search_path();
@@ -1722,9 +1801,9 @@ fn OperatorIsVisibleExt(oprid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
          * in the path. So we must do a slow check to see if this is the same
          * operator that would be found by OpernameGetOprid.
          */
-        let oprname = &oprform.oprname;
-        let names = [Some(oprname.clone())];
-        visible = OpernameGetOprid(&names, oprform.oprleft, oprform.oprright)? == oprid;
+        /* C: list_make1(makeString(oprname)) in the current context. */
+        let names = [Some(oprform.oprname.as_str().to_string())];
+        visible = OpernameGetOprid(mcx, &names, oprform.oprleft, oprform.oprright)? == oprid;
     }
 
     Ok(visible)
@@ -1736,8 +1815,8 @@ fn OperatorIsVisibleExt(oprid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
 
 /// `OpclassnameGetOpcid` — try to resolve an unqualified index opclass name.
 /// Returns OID if opclass found in search path, else InvalidOid.
-pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn OpclassnameGetOpcid(mcx: Mcx<'_>, amid: Oid, opcname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -1755,16 +1834,16 @@ pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
 }
 
 /// `OpclassIsVisible` — whether an opclass is visible in the search path.
-pub fn OpclassIsVisible(opcid: Oid) -> PgResult<bool> {
-    OpclassIsVisibleExt(opcid, None)
+pub fn OpclassIsVisible(mcx: Mcx<'_>, opcid: Oid) -> PgResult<bool> {
+    OpclassIsVisibleExt(mcx, opcid, None)
 }
 
 /// `OpclassIsVisibleExt`.
-fn OpclassIsVisibleExt(opcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn OpclassIsVisibleExt(mcx: Mcx<'_>, opcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
     let (opcnamespace, opcmethod, opcname) =
-        match syscache_seams::opclass_namespace_method_name::call(opcid)? {
+        match syscache_seams::opclass_namespace_method_name::call(mcx, opcid)? {
             Some(t) => t,
             None => {
                 if let Some(m) = is_missing {
@@ -1775,7 +1854,7 @@ fn OpclassIsVisibleExt(opcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bo
             }
         };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let path = active_search_path();
     if opcnamespace != PG_CATALOG_NAMESPACE && !list_member_oid(&path, opcnamespace) {
@@ -1788,7 +1867,7 @@ fn OpclassIsVisibleExt(opcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bo
          * we must do a slow check to see if this opclass would be found by
          * OpclassnameGetOpcid.
          */
-        visible = OpclassnameGetOpcid(opcmethod, &opcname)? == opcid;
+        visible = OpclassnameGetOpcid(mcx, opcmethod, opcname.as_str())? == opcid;
     }
 
     Ok(visible)
@@ -1799,8 +1878,8 @@ fn OpclassIsVisibleExt(opcid: Oid, is_missing: Option<&mut bool>) -> PgResult<bo
  * ======================================================================== */
 
 /// `OpfamilynameGetOpfid` — try to resolve an unqualified index opfamily name.
-pub fn OpfamilynameGetOpfid(amid: Oid, opfname: &str) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn OpfamilynameGetOpfid(mcx: Mcx<'_>, amid: Oid, opfname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -1818,16 +1897,16 @@ pub fn OpfamilynameGetOpfid(amid: Oid, opfname: &str) -> PgResult<Oid> {
 }
 
 /// `OpfamilyIsVisible` — whether an opfamily is visible in the search path.
-pub fn OpfamilyIsVisible(opfid: Oid) -> PgResult<bool> {
-    OpfamilyIsVisibleExt(opfid, None)
+pub fn OpfamilyIsVisible(mcx: Mcx<'_>, opfid: Oid) -> PgResult<bool> {
+    OpfamilyIsVisibleExt(mcx, opfid, None)
 }
 
 /// `OpfamilyIsVisibleExt`.
-fn OpfamilyIsVisibleExt(opfid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn OpfamilyIsVisibleExt(mcx: Mcx<'_>, opfid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
     let (opfnamespace, opfmethod, opfname) =
-        match syscache_seams::opfamily_namespace_method_name::call(opfid)? {
+        match syscache_seams::opfamily_namespace_method_name::call(mcx, opfid)? {
             Some(t) => t,
             None => {
                 if let Some(m) = is_missing {
@@ -1838,13 +1917,13 @@ fn OpfamilyIsVisibleExt(opfid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
             }
         };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let path = active_search_path();
     if opfnamespace != PG_CATALOG_NAMESPACE && !list_member_oid(&path, opfnamespace) {
         visible = false;
     } else {
-        visible = OpfamilynameGetOpfid(opfmethod, &opfname)? == opfid;
+        visible = OpfamilynameGetOpfid(mcx, opfmethod, opfname.as_str())? == opfid;
     }
 
     Ok(visible)
@@ -1896,10 +1975,10 @@ fn lookup_collation(collname: &str, collnamespace: Oid, encoding: i32) -> PgResu
 ///
 /// Note that this will only find collations that work with the current
 /// database's encoding.
-pub fn CollationGetCollid(collname: &str) -> PgResult<Oid> {
+pub fn CollationGetCollid(mcx: Mcx<'_>, collname: &str) -> PgResult<Oid> {
     let dbencoding = mbutils_seams::get_database_encoding::call();
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -1917,15 +1996,15 @@ pub fn CollationGetCollid(collname: &str) -> PgResult<Oid> {
 }
 
 /// `CollationIsVisible` — whether a collation is visible in the search path.
-pub fn CollationIsVisible(collid: Oid) -> PgResult<bool> {
-    CollationIsVisibleExt(collid, None)
+pub fn CollationIsVisible(mcx: Mcx<'_>, collid: Oid) -> PgResult<bool> {
+    CollationIsVisibleExt(mcx, collid, None)
 }
 
 /// `CollationIsVisibleExt`.
-fn CollationIsVisibleExt(collid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn CollationIsVisibleExt(mcx: Mcx<'_>, collid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let collform = match syscache_seams::collation_namespace_and_name::call(collid)? {
+    let collform = match syscache_seams::collation_namespace_and_name::call(mcx, collid)? {
         Some(c) => c,
         None => {
             if let Some(m) = is_missing {
@@ -1936,7 +2015,7 @@ fn CollationIsVisibleExt(collid: Oid, is_missing: Option<&mut bool>) -> PgResult
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let collnamespace = collform.namespace;
     let path = active_search_path();
@@ -1949,7 +2028,7 @@ fn CollationIsVisibleExt(collid: Oid, is_missing: Option<&mut bool>) -> PgResult
          * or it might not work with the database encoding. So we must do a
          * slow check.
          */
-        visible = CollationGetCollid(&collform.name)? == collid;
+        visible = CollationGetCollid(mcx, collform.name.as_str())? == collid;
     }
 
     Ok(visible)
@@ -1960,8 +2039,8 @@ fn CollationIsVisibleExt(collid: Oid, is_missing: Option<&mut bool>) -> PgResult
  * ======================================================================== */
 
 /// `ConversionGetConid` — try to resolve an unqualified conversion name.
-pub fn ConversionGetConid(conname: &str) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn ConversionGetConid(mcx: Mcx<'_>, conname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -1979,15 +2058,15 @@ pub fn ConversionGetConid(conname: &str) -> PgResult<Oid> {
 }
 
 /// `ConversionIsVisible` — whether a conversion is visible in the search path.
-pub fn ConversionIsVisible(conid: Oid) -> PgResult<bool> {
-    ConversionIsVisibleExt(conid, None)
+pub fn ConversionIsVisible(mcx: Mcx<'_>, conid: Oid) -> PgResult<bool> {
+    ConversionIsVisibleExt(mcx, conid, None)
 }
 
 /// `ConversionIsVisibleExt`.
-fn ConversionIsVisibleExt(conid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn ConversionIsVisibleExt(mcx: Mcx<'_>, conid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let conform = match syscache_seams::conversion_namespace_and_name::call(conid)? {
+    let conform = match syscache_seams::conversion_namespace_and_name::call(mcx, conid)? {
         Some(c) => c,
         None => {
             if let Some(m) = is_missing {
@@ -1998,14 +2077,14 @@ fn ConversionIsVisibleExt(conid: Oid, is_missing: Option<&mut bool>) -> PgResult
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let connamespace = conform.namespace;
     let path = active_search_path();
     if connamespace != PG_CATALOG_NAMESPACE && !list_member_oid(&path, connamespace) {
         visible = false;
     } else {
-        visible = ConversionGetConid(&conform.name)? == conid;
+        visible = ConversionGetConid(mcx, conform.name.as_str())? == conid;
     }
 
     Ok(visible)
@@ -2017,30 +2096,30 @@ fn ConversionIsVisibleExt(conid: Oid, is_missing: Option<&mut bool>) -> PgResult
 
 /// `get_statistics_object_oid` — find a statistics object by possibly
 /// qualified name.
-pub fn get_statistics_object_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_statistics_object_oid(mcx: Mcx<'_>, names: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut stats_oid: Oid = InvalidOid;
 
     /* deconstruct the name list */
-    let (schemaname, stats_name) = DeconstructQualifiedName(names)?;
+    let (schemaname, stats_name) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             stats_oid = InvalidOid;
         } else {
-            stats_oid = syscache_seams::get_statext_oid::call(&stats_name, namespaceId)?;
+            stats_oid = syscache_seams::get_statext_oid::call(stats_name, namespaceId)?;
         }
     } else {
         /* search for it in search path */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
 
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
-            stats_oid = syscache_seams::get_statext_oid::call(&stats_name, ns)?;
+            stats_oid = syscache_seams::get_statext_oid::call(stats_name, ns)?;
             if OidIsValid(stats_oid) {
                 break;
             }
@@ -2052,7 +2131,7 @@ pub fn get_statistics_object_oid(names: NameList, missing_ok: bool) -> PgResult<
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "statistics object \"{}\" does not exist",
-                NameListToString(names)?
+                name_list_to_string(names)
             ))
             .finish(here("get_statistics_object_oid"))
             .map(|()| InvalidOid);
@@ -2062,15 +2141,15 @@ pub fn get_statistics_object_oid(names: NameList, missing_ok: bool) -> PgResult<
 }
 
 /// `StatisticsObjIsVisible` — whether a statistics object is visible.
-pub fn StatisticsObjIsVisible(stxid: Oid) -> PgResult<bool> {
-    StatisticsObjIsVisibleExt(stxid, None)
+pub fn StatisticsObjIsVisible(mcx: Mcx<'_>, stxid: Oid) -> PgResult<bool> {
+    StatisticsObjIsVisibleExt(mcx, stxid, None)
 }
 
 /// `StatisticsObjIsVisibleExt`.
-fn StatisticsObjIsVisibleExt(stxid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn StatisticsObjIsVisibleExt(mcx: Mcx<'_>, stxid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let stxform = match syscache_seams::statext_namespace_and_name::call(stxid)? {
+    let stxform = match syscache_seams::statext_namespace_and_name::call(mcx, stxid)? {
         Some(s) => s,
         None => {
             if let Some(m) = is_missing {
@@ -2081,7 +2160,7 @@ fn StatisticsObjIsVisibleExt(stxid: Oid, is_missing: Option<&mut bool>) -> PgRes
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let stxnamespace = stxform.namespace;
     let path = active_search_path();
@@ -2093,7 +2172,7 @@ fn StatisticsObjIsVisibleExt(stxid: Oid, is_missing: Option<&mut bool>) -> PgRes
          * hidden by another statistics object of the same name earlier in the
          * path.
          */
-        let stxname = &stxform.name;
+        let stxname = stxform.name.as_str();
         let mut found = false;
         for namespaceId in &path {
             let namespaceId = *namespaceId;
@@ -2121,28 +2200,28 @@ fn StatisticsObjIsVisibleExt(stxid: Oid, is_missing: Option<&mut bool>) -> PgRes
  * ======================================================================== */
 
 /// `get_ts_parser_oid` — find a TS parser by possibly qualified name.
-pub fn get_ts_parser_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_ts_parser_oid(mcx: Mcx<'_>, names: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut prsoid: Oid = InvalidOid;
 
-    let (schemaname, parser_name) = DeconstructQualifiedName(names)?;
+    let (schemaname, parser_name) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             prsoid = InvalidOid;
         } else {
-            prsoid = syscache_seams::get_ts_parser_oid_cached::call(&parser_name, namespaceId)?;
+            prsoid = syscache_seams::get_ts_parser_oid_cached::call(parser_name, namespaceId)?;
         }
     } else {
         /* search for it in search path */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
-            prsoid = syscache_seams::get_ts_parser_oid_cached::call(&parser_name, ns)?;
+            prsoid = syscache_seams::get_ts_parser_oid_cached::call(parser_name, ns)?;
             if OidIsValid(prsoid) {
                 break;
             }
@@ -2154,7 +2233,7 @@ pub fn get_ts_parser_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "text search parser \"{}\" does not exist",
-                NameListToString(names)?
+                name_list_to_string(names)
             ))
             .finish(here("get_ts_parser_oid"))
             .map(|()| InvalidOid);
@@ -2164,15 +2243,15 @@ pub fn get_ts_parser_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
 }
 
 /// `TSParserIsVisible` — whether a TS parser is visible in the search path.
-pub fn TSParserIsVisible(prsId: Oid) -> PgResult<bool> {
-    TSParserIsVisibleExt(prsId, None)
+pub fn TSParserIsVisible(mcx: Mcx<'_>, prsId: Oid) -> PgResult<bool> {
+    TSParserIsVisibleExt(mcx, prsId, None)
 }
 
 /// `TSParserIsVisibleExt`.
-fn TSParserIsVisibleExt(prsId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn TSParserIsVisibleExt(mcx: Mcx<'_>, prsId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let form = match syscache_seams::ts_parser_namespace_and_name::call(prsId)? {
+    let form = match syscache_seams::ts_parser_namespace_and_name::call(mcx, prsId)? {
         Some(f) => f,
         None => {
             if let Some(m) = is_missing {
@@ -2183,7 +2262,7 @@ fn TSParserIsVisibleExt(prsId: Oid, is_missing: Option<&mut bool>) -> PgResult<b
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let namespace = form.namespace;
     let path = active_search_path();
@@ -2216,26 +2295,26 @@ fn TSParserIsVisibleExt(prsId: Oid, is_missing: Option<&mut bool>) -> PgResult<b
  * ======================================================================== */
 
 /// `get_ts_dict_oid` — find a TS dictionary by possibly qualified name.
-pub fn get_ts_dict_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_ts_dict_oid(mcx: Mcx<'_>, names: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut dictoid: Oid = InvalidOid;
 
-    let (schemaname, dict_name) = DeconstructQualifiedName(names)?;
+    let (schemaname, dict_name) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             dictoid = InvalidOid;
         } else {
-            dictoid = syscache_seams::get_ts_dict_oid_cached::call(&dict_name, namespaceId)?;
+            dictoid = syscache_seams::get_ts_dict_oid_cached::call(dict_name, namespaceId)?;
         }
     } else {
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
-            dictoid = syscache_seams::get_ts_dict_oid_cached::call(&dict_name, ns)?;
+            dictoid = syscache_seams::get_ts_dict_oid_cached::call(dict_name, ns)?;
             if OidIsValid(dictoid) {
                 break;
             }
@@ -2247,7 +2326,7 @@ pub fn get_ts_dict_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "text search dictionary \"{}\" does not exist",
-                NameListToString(names)?
+                name_list_to_string(names)
             ))
             .finish(here("get_ts_dict_oid"))
             .map(|()| InvalidOid);
@@ -2257,15 +2336,15 @@ pub fn get_ts_dict_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
 }
 
 /// `TSDictionaryIsVisible` — whether a TS dictionary is visible.
-pub fn TSDictionaryIsVisible(dictId: Oid) -> PgResult<bool> {
-    TSDictionaryIsVisibleExt(dictId, None)
+pub fn TSDictionaryIsVisible(mcx: Mcx<'_>, dictId: Oid) -> PgResult<bool> {
+    TSDictionaryIsVisibleExt(mcx, dictId, None)
 }
 
 /// `TSDictionaryIsVisibleExt`.
-fn TSDictionaryIsVisibleExt(dictId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn TSDictionaryIsVisibleExt(mcx: Mcx<'_>, dictId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let form = match syscache_seams::ts_dict_namespace_and_name::call(dictId)? {
+    let form = match syscache_seams::ts_dict_namespace_and_name::call(mcx, dictId)? {
         Some(f) => f,
         None => {
             if let Some(m) = is_missing {
@@ -2278,7 +2357,7 @@ fn TSDictionaryIsVisibleExt(dictId: Oid, is_missing: Option<&mut bool>) -> PgRes
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let namespace = form.namespace;
     let path = active_search_path();
@@ -2311,26 +2390,26 @@ fn TSDictionaryIsVisibleExt(dictId: Oid, is_missing: Option<&mut bool>) -> PgRes
  * ======================================================================== */
 
 /// `get_ts_template_oid` — find a TS template by possibly qualified name.
-pub fn get_ts_template_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_ts_template_oid(mcx: Mcx<'_>, names: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut tmploid: Oid = InvalidOid;
 
-    let (schemaname, template_name) = DeconstructQualifiedName(names)?;
+    let (schemaname, template_name) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             tmploid = InvalidOid;
         } else {
-            tmploid = syscache_seams::get_ts_template_oid_cached::call(&template_name, namespaceId)?;
+            tmploid = syscache_seams::get_ts_template_oid_cached::call(template_name, namespaceId)?;
         }
     } else {
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
-            tmploid = syscache_seams::get_ts_template_oid_cached::call(&template_name, ns)?;
+            tmploid = syscache_seams::get_ts_template_oid_cached::call(template_name, ns)?;
             if OidIsValid(tmploid) {
                 break;
             }
@@ -2342,7 +2421,7 @@ pub fn get_ts_template_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "text search template \"{}\" does not exist",
-                NameListToString(names)?
+                name_list_to_string(names)
             ))
             .finish(here("get_ts_template_oid"))
             .map(|()| InvalidOid);
@@ -2352,15 +2431,15 @@ pub fn get_ts_template_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
 }
 
 /// `TSTemplateIsVisible` — whether a TS template is visible.
-pub fn TSTemplateIsVisible(tmplId: Oid) -> PgResult<bool> {
-    TSTemplateIsVisibleExt(tmplId, None)
+pub fn TSTemplateIsVisible(mcx: Mcx<'_>, tmplId: Oid) -> PgResult<bool> {
+    TSTemplateIsVisibleExt(mcx, tmplId, None)
 }
 
 /// `TSTemplateIsVisibleExt`.
-fn TSTemplateIsVisibleExt(tmplId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn TSTemplateIsVisibleExt(mcx: Mcx<'_>, tmplId: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let form = match syscache_seams::ts_template_namespace_and_name::call(tmplId)? {
+    let form = match syscache_seams::ts_template_namespace_and_name::call(mcx, tmplId)? {
         Some(f) => f,
         None => {
             if let Some(m) = is_missing {
@@ -2373,7 +2452,7 @@ fn TSTemplateIsVisibleExt(tmplId: Oid, is_missing: Option<&mut bool>) -> PgResul
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let namespace = form.namespace;
     let path = active_search_path();
@@ -2406,26 +2485,26 @@ fn TSTemplateIsVisibleExt(tmplId: Oid, is_missing: Option<&mut bool>) -> PgResul
  * ======================================================================== */
 
 /// `get_ts_config_oid` — find a TS config by possibly qualified name.
-pub fn get_ts_config_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_ts_config_oid(mcx: Mcx<'_>, names: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut cfgoid: Oid = InvalidOid;
 
-    let (schemaname, config_name) = DeconstructQualifiedName(names)?;
+    let (schemaname, config_name) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             cfgoid = InvalidOid;
         } else {
-            cfgoid = syscache_seams::get_ts_config_oid_cached::call(&config_name, namespaceId)?;
+            cfgoid = syscache_seams::get_ts_config_oid_cached::call(config_name, namespaceId)?;
         }
     } else {
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
-            cfgoid = syscache_seams::get_ts_config_oid_cached::call(&config_name, ns)?;
+            cfgoid = syscache_seams::get_ts_config_oid_cached::call(config_name, ns)?;
             if OidIsValid(cfgoid) {
                 break;
             }
@@ -2437,7 +2516,7 @@ pub fn get_ts_config_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "text search configuration \"{}\" does not exist",
-                NameListToString(names)?
+                name_list_to_string(names)
             ))
             .finish(here("get_ts_config_oid"))
             .map(|()| InvalidOid);
@@ -2447,15 +2526,15 @@ pub fn get_ts_config_oid(names: NameList, missing_ok: bool) -> PgResult<Oid> {
 }
 
 /// `TSConfigIsVisible` — whether a TS configuration is visible.
-pub fn TSConfigIsVisible(cfgid: Oid) -> PgResult<bool> {
-    TSConfigIsVisibleExt(cfgid, None)
+pub fn TSConfigIsVisible(mcx: Mcx<'_>, cfgid: Oid) -> PgResult<bool> {
+    TSConfigIsVisibleExt(mcx, cfgid, None)
 }
 
 /// `TSConfigIsVisibleExt`.
-fn TSConfigIsVisibleExt(cfgid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
+fn TSConfigIsVisibleExt(mcx: Mcx<'_>, cfgid: Oid, is_missing: Option<&mut bool>) -> PgResult<bool> {
     let visible: bool;
 
-    let form = match syscache_seams::ts_config_namespace_and_name::call(cfgid)? {
+    let form = match syscache_seams::ts_config_namespace_and_name::call(mcx, cfgid)? {
         Some(f) => f,
         None => {
             if let Some(m) = is_missing {
@@ -2468,7 +2547,7 @@ fn TSConfigIsVisibleExt(cfgid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
         }
     };
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     let namespace = form.namespace;
     let path = active_search_path();
@@ -2504,39 +2583,40 @@ fn TSConfigIsVisibleExt(cfgid: Oid, is_missing: Option<&mut bool>) -> PgResult<b
 /// a list of String nodes, extract the schema name and object name. Returns
 /// `(schemaname, objname)`; `schemaname` is `None` if there is no explicit
 /// schema name.
-pub fn DeconstructQualifiedName(names: NameList) -> PgResult<(Option<String>, String)> {
-    let catalogname: String;
-    let schemaname: Option<String>;
-    let objname: String;
+pub fn DeconstructQualifiedName<'a>(
+    mcx: Mcx<'_>,
+    names: NameList<'a>,
+) -> PgResult<(Option<&'a str>, &'a str)> {
+    let catalogname: &str;
+    let schemaname: Option<&'a str>;
+    let objname: &'a str;
 
-    let parts = namelist_to_strings_required(names)?;
-
-    match parts.len() {
+    match names.len() {
         1 => {
             schemaname = None;
-            objname = parts[0].clone();
+            objname = strVal(&names[0])?;
         }
         2 => {
-            schemaname = Some(parts[0].clone());
-            objname = parts[1].clone();
+            schemaname = Some(strVal(&names[0])?);
+            objname = strVal(&names[1])?;
         }
         3 => {
-            catalogname = parts[0].clone();
-            schemaname = Some(parts[1].clone());
-            objname = parts[2].clone();
+            catalogname = strVal(&names[0])?;
+            schemaname = Some(strVal(&names[1])?);
+            objname = strVal(&names[2])?;
 
             /*
              * We check the catalog name and then ignore it.
              */
-            if catalogname_differs_from_database(&catalogname)? {
+            if catalogname_differs_from_database(mcx, catalogname)? {
                 return ereport(ERROR)
                     .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!(
                         "cross-database references are not implemented: {}",
-                        NameListToString(names)?
+                        name_list_to_string(names)
                     ))
                     .finish(here("DeconstructQualifiedName"))
-                    .map(|()| (None, String::new()));
+                    .map(|()| (None, ""));
             }
         }
         _ => {
@@ -2544,27 +2624,23 @@ pub fn DeconstructQualifiedName(names: NameList) -> PgResult<(Option<String>, St
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!(
                     "improper qualified name (too many dotted names): {}",
-                    NameListToString(names)?
+                    name_list_to_string(names)
                 ))
                 .finish(here("DeconstructQualifiedName"))
-                .map(|()| (None, String::new()));
+                .map(|()| (None, ""));
         }
     }
 
     Ok((schemaname, objname))
 }
 
-/// Read a name list of String nodes into required `String`s (the C `strVal`
-/// reads: a non-String element is a programming error in these callers).
-fn namelist_to_strings_required(names: NameList) -> PgResult<Vec<String>> {
-    let mut out = Vec::with_capacity(names.len());
-    for e in names {
-        match e {
-            Some(s) => out.push(s.clone()),
-            None => return elog_error("unexpected non-String node in name list".to_string()),
-        }
+/// The C `strVal()` read of one name-list element (a non-String element is a
+/// programming error in these callers).
+fn strVal(e: &Option<String>) -> PgResult<&str> {
+    match e {
+        Some(s) => Ok(s.as_str()),
+        None => elog_error("unexpected non-String node in name list".to_string()),
     }
-    Ok(out)
 }
 
 /* ===========================================================================
@@ -2636,13 +2712,13 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
 
 /// `LookupCreationNamespace` — look up the schema and verify we have CREATE
 /// rights on it.
-pub fn LookupCreationNamespace(nspname: &str) -> PgResult<Oid> {
+pub fn LookupCreationNamespace(mcx: Mcx<'_>, nspname: &str) -> PgResult<Oid> {
     let namespaceId: Oid;
 
     /* check for pg_temp alias */
     if nspname == "pg_temp" {
         /* Initialize temp namespace */
-        AccessTempTableNamespace(false)?;
+        AccessTempTableNamespace(mcx, false)?;
         return Ok(my_temp_namespace());
     }
 
@@ -2661,9 +2737,9 @@ pub fn LookupCreationNamespace(nspname: &str) -> PgResult<Oid> {
  * ======================================================================== */
 
 /// `CheckSetNamespace` — common checks on switching namespaces.
-pub fn CheckSetNamespace(oldNspOid: Oid, nspOid: Oid) -> PgResult<()> {
+pub fn CheckSetNamespace(mcx: Mcx<'_>, oldNspOid: Oid, nspOid: Oid) -> PgResult<()> {
     /* disallow renaming into or out of temp schemas */
-    if isAnyTempNamespace(nspOid)? || isAnyTempNamespace(oldNspOid)? {
+    if isAnyTempNamespace(mcx, nspOid)? || isAnyTempNamespace(mcx, oldNspOid)? {
         return ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("cannot move objects into or out of temporary schemas")
@@ -2688,17 +2764,20 @@ pub fn CheckSetNamespace(oldNspOid: Oid, nspOid: Oid) -> PgResult<()> {
 /// an object (in List-of-Strings format), determine what namespace the object
 /// should be created in. Also returns the object name. Note: this does not
 /// apply any permissions check, nor lock the namespace.
-pub fn QualifiedNameGetCreationNamespace(names: NameList) -> PgResult<(Oid, String)> {
+pub fn QualifiedNameGetCreationNamespace<'a>(
+    mcx: Mcx<'_>,
+    names: NameList<'a>,
+) -> PgResult<(Oid, &'a str)> {
     let namespaceId: Oid;
 
     /* deconstruct the name list */
-    let (schemaname, objname) = DeconstructQualifiedName(names)?;
+    let (schemaname, objname) = DeconstructQualifiedName(mcx, names)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* check for pg_temp alias */
         if schemaname == "pg_temp" {
             /* Initialize temp namespace */
-            AccessTempTableNamespace(false)?;
+            AccessTempTableNamespace(mcx, false)?;
             return Ok((my_temp_namespace(), objname));
         }
         /* use exact schema given */
@@ -2706,10 +2785,10 @@ pub fn QualifiedNameGetCreationNamespace(names: NameList) -> PgResult<(Oid, Stri
         /* we do not check for USAGE rights here! */
     } else {
         /* use the default creation namespace */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
         if STATE.with(|s| s.borrow().active_temp_creation_pending) {
             /* Need to initialize temp namespace */
-            AccessTempTableNamespace(true)?;
+            AccessTempTableNamespace(mcx, true)?;
             return Ok((my_temp_namespace(), objname));
         }
         namespaceId = STATE.with(|s| s.borrow().active_creation_namespace);
@@ -2718,7 +2797,7 @@ pub fn QualifiedNameGetCreationNamespace(names: NameList) -> PgResult<(Oid, Stri
                 .errcode(ERRCODE_UNDEFINED_SCHEMA)
                 .errmsg("no schema has been selected to create in")
                 .finish(here("QualifiedNameGetCreationNamespace"))
-                .map(|()| (InvalidOid, String::new()));
+                .map(|()| (InvalidOid, ""));
         }
     }
 
@@ -2753,28 +2832,29 @@ pub fn get_namespace_oid(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
 /// `makeRangeVarFromNameList` — utility routine to convert a qualified-name
 /// list into RangeVar form.
 pub fn makeRangeVarFromNameList(names: NameList) -> PgResult<RangeVar> {
-    let parts = namelist_to_strings_required(names)?;
     let mut rel = makeRangeVar(None, None, -1);
 
-    match parts.len() {
+    /* The `RangeVar` node owns its strings (C shares the List's pointers);
+     * the copies live in the node, an owned-model adaptation. */
+    match names.len() {
         1 => {
-            rel.relname = Some(parts[0].clone());
+            rel.relname = Some(strVal(&names[0])?.to_string());
         }
         2 => {
-            rel.schemaname = Some(parts[0].clone());
-            rel.relname = Some(parts[1].clone());
+            rel.schemaname = Some(strVal(&names[0])?.to_string());
+            rel.relname = Some(strVal(&names[1])?.to_string());
         }
         3 => {
-            rel.catalogname = Some(parts[0].clone());
-            rel.schemaname = Some(parts[1].clone());
-            rel.relname = Some(parts[2].clone());
+            rel.catalogname = Some(strVal(&names[0])?.to_string());
+            rel.schemaname = Some(strVal(&names[1])?.to_string());
+            rel.relname = Some(strVal(&names[2])?.to_string());
         }
         _ => {
             return ereport(ERROR)
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!(
                     "improper relation name (too many dotted names): {}",
-                    NameListToString(names)?
+                    name_list_to_string(names)
                 ))
                 .finish(here("makeRangeVarFromNameList"))
                 .map(|()| RangeVar::default());
@@ -2794,9 +2874,27 @@ pub fn makeRangeVarFromNameList(names: NameList) -> PgResult<RangeVar> {
 ///
 /// In C the list elements may be either `String` or `A_Star`; the owned image
 /// is `None` for `A_Star`.
-pub fn NameListToString(names: NameList) -> PgResult<String> {
-    let mut string = String::new();
+pub fn NameListToString<'mcx>(mcx: Mcx<'mcx>, names: NameList) -> PgResult<PgString<'mcx>> {
+    let mut string = PgString::new_in(mcx);
 
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            string.try_push('.')?;
+        }
+        match name {
+            Some(s) => string.try_push_str(s)?,
+            None => string.try_push('*')?,
+        }
+    }
+
+    Ok(string)
+}
+
+/// [`NameListToString`] for error-message construction: the text goes into
+/// the `PgError` carrier (C: the errmsg is evaluated into `ErrorContext`),
+/// so it uses the error channel's own allocation, not a caller `Mcx`.
+fn name_list_to_string(names: NameList) -> String {
+    let mut string = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
             string.push('.');
@@ -2806,21 +2904,23 @@ pub fn NameListToString(names: NameList) -> PgResult<String> {
             None => string.push('*'),
         }
     }
-
-    Ok(string)
+    string
 }
 
 /// `NameListToQuotedString` — like NameListToString, but the names are
 /// double-quoted where necessary, so the string could be re-parsed.
-pub fn NameListToQuotedString(names: NameList) -> PgResult<String> {
-    let mut string = String::new();
+pub fn NameListToQuotedString<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: NameList,
+) -> PgResult<PgString<'mcx>> {
+    let mut string = PgString::new_in(mcx);
 
-    let parts = namelist_to_strings_required(names)?;
-    for (i, name) in parts.iter().enumerate() {
+    for (i, name) in names.iter().enumerate() {
         if i != 0 {
-            string.push('.');
+            string.try_push('.')?;
         }
-        string.push_str(&ruleutils_seams::quote_identifier::call(name)?);
+        let quoted = ruleutils_seams::quote_identifier::call(mcx, strVal(name)?)?;
+        string.try_push_str(quoted.as_str())?;
     }
 
     Ok(string)
@@ -2853,25 +2953,26 @@ pub fn isTempOrTempToastNamespace(namespaceId: Oid) -> PgResult<bool> {
 /// `isAnyTempNamespace` — is the given namespace a temporary-table namespace
 /// (either my own, or another backend's)? Temporary-toast-table namespaces
 /// are included, too.
-pub fn isAnyTempNamespace(namespaceId: Oid) -> PgResult<bool> {
+pub fn isAnyTempNamespace(mcx: Mcx<'_>, namespaceId: Oid) -> PgResult<bool> {
     /* True if the namespace name starts with "pg_temp_" or "pg_toast_temp_" */
-    let nspname = match lsyscache_seams::get_namespace_name::call(namespaceId)? {
+    let nspname = match lsyscache_seams::get_namespace_name::call(mcx, namespaceId)? {
         Some(n) => n,
         None => return Ok(false), /* no such namespace? */
     };
+    let nspname = nspname.as_str();
     let result = nspname.starts_with("pg_temp_") || nspname.starts_with("pg_toast_temp_");
     Ok(result)
 }
 
 /// `isOtherTempNamespace` — is the given namespace some other backend's
 /// temporary-table namespace (including temporary-toast-table namespaces)?
-pub fn isOtherTempNamespace(namespaceId: Oid) -> PgResult<bool> {
+pub fn isOtherTempNamespace(mcx: Mcx<'_>, namespaceId: Oid) -> PgResult<bool> {
     /* If it's my own temp namespace, say "false" */
     if isTempOrTempToastNamespace(namespaceId)? {
         return Ok(false);
     }
     /* Else, if it's any temp namespace, say "true" */
-    isAnyTempNamespace(namespaceId)
+    isAnyTempNamespace(mcx, namespaceId)
 }
 
 /* ===========================================================================
@@ -2884,10 +2985,10 @@ pub fn isOtherTempNamespace(namespaceId: Oid) -> PgResult<bool> {
 /// Note: this can be used while scanning relations in pg_class to detect
 /// orphaned temporary tables or namespaces with a backend connected to a
 /// given database.
-pub fn checkTempNamespaceStatus(namespaceId: Oid) -> PgResult<TempNamespaceStatus> {
+pub fn checkTempNamespaceStatus(mcx: Mcx<'_>, namespaceId: Oid) -> PgResult<TempNamespaceStatus> {
     debug_assert!(OidIsValid(globals_seams::my_database_id::call()));
 
-    let procNumber = GetTempNamespaceProcNumber(namespaceId)?;
+    let procNumber = GetTempNamespaceProcNumber(mcx, namespaceId)?;
 
     /* No such namespace, or its name shows it's not temp? */
     if procNumber == INVALID_PROC_NUMBER {
@@ -2922,14 +3023,15 @@ pub fn checkTempNamespaceStatus(namespaceId: Oid) -> PgResult<TempNamespaceStatu
 /// namespace (either my own, or another backend's), return the proc number
 /// that owns it. Temporary-toast-table namespaces are included, too. If it
 /// isn't a temp namespace, return INVALID_PROC_NUMBER.
-pub fn GetTempNamespaceProcNumber(namespaceId: Oid) -> PgResult<ProcNumber> {
+pub fn GetTempNamespaceProcNumber(mcx: Mcx<'_>, namespaceId: Oid) -> PgResult<ProcNumber> {
     let result: ProcNumber;
 
     /* See if the namespace name starts with "pg_temp_" or "pg_toast_temp_" */
-    let nspname = match lsyscache_seams::get_namespace_name::call(namespaceId)? {
+    let nspname = match lsyscache_seams::get_namespace_name::call(mcx, namespaceId)? {
         Some(n) => n,
         None => return Ok(INVALID_PROC_NUMBER), /* no such namespace? */
     };
+    let nspname = nspname.as_str();
     if let Some(rest) = nspname.strip_prefix("pg_temp_") {
         result = atoi(rest);
     } else if let Some(rest) = nspname.strip_prefix("pg_toast_temp_") {
@@ -3016,12 +3118,10 @@ pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
  * SearchPathMatchesCurrentEnvironment (C lines 3855-3965)
  * ======================================================================== */
 
-/// `GetSearchPathMatcher` — fetch current search path definition.
-///
-/// (The C `context` argument only selected the palloc memory context for the
-/// result; the owned image returns an owned value.)
-pub fn GetSearchPathMatcher() -> PgResult<SearchPathMatcher> {
-    recomputeNamespacePath()?;
+/// `GetSearchPathMatcher(context)` — fetch current search path definition,
+/// allocated in `mcx` (the C `context` argument).
+pub fn GetSearchPathMatcher<'mcx>(mcx: Mcx<'mcx>) -> PgResult<SearchPathMatcher<'mcx>> {
+    recomputeNamespacePath(mcx)?;
 
     let (active_path, active_creation, mtn, active_generation) = STATE.with(|s| {
         let st = s.borrow();
@@ -3034,7 +3134,7 @@ pub fn GetSearchPathMatcher() -> PgResult<SearchPathMatcher> {
     });
 
     /* list_copy(activeSearchPath) and consume the leading implicit entries */
-    let mut schemas: Vec<Oid> = active_path;
+    let mut schemas: PgVec<'mcx, Oid> = slice_in(mcx, &active_path)?;
     let mut add_temp = false;
     let mut add_catalog = false;
     while !schemas.is_empty() && schemas[0] != active_creation {
@@ -3055,15 +3155,27 @@ pub fn GetSearchPathMatcher() -> PgResult<SearchPathMatcher> {
     })
 }
 
-/// `CopySearchPathMatcher` — copy the specified SearchPathMatcher.
-pub fn CopySearchPathMatcher(path: &SearchPathMatcher) -> SearchPathMatcher {
-    path.clone()
+/// `CopySearchPathMatcher` — copy the specified SearchPathMatcher into
+/// `mcx` (C: palloc + list_copy in the current context).
+pub fn CopySearchPathMatcher<'mcx>(
+    mcx: Mcx<'mcx>,
+    path: &SearchPathMatcher<'_>,
+) -> PgResult<SearchPathMatcher<'mcx>> {
+    Ok(SearchPathMatcher {
+        schemas: slice_in(mcx, &path.schemas)?,
+        addCatalog: path.addCatalog,
+        addTemp: path.addTemp,
+        generation: path.generation,
+    })
 }
 
 /// `SearchPathMatchesCurrentEnvironment` — does path match the current
 /// environment?
-pub fn SearchPathMatchesCurrentEnvironment(path: &mut SearchPathMatcher) -> PgResult<bool> {
-    recomputeNamespacePath()?;
+pub fn SearchPathMatchesCurrentEnvironment(
+    mcx: Mcx<'_>,
+    path: &mut SearchPathMatcher<'_>,
+) -> PgResult<bool> {
+    recomputeNamespacePath(mcx)?;
 
     let (active_path, active_creation, mtn, active_generation) = STATE.with(|s| {
         let st = s.borrow();
@@ -3109,7 +3221,7 @@ pub fn SearchPathMatchesCurrentEnvironment(path: &mut SearchPathMatcher) -> PgRe
         return Ok(false);
     }
     /* The remainder of activeSearchPath should match path->schemas. */
-    for sch in &path.schemas {
+    for sch in path.schemas.iter() {
         if lc < active_path.len() && active_path[lc] == *sch {
             lc += 1;
         } else {
@@ -3138,34 +3250,34 @@ pub fn SearchPathMatchesCurrentEnvironment(path: &mut SearchPathMatcher) -> PgRe
 ///
 /// Note that this will only find collations that work with the current
 /// database's encoding.
-pub fn get_collation_oid(collname: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_collation_oid(mcx: Mcx<'_>, collname: NameList, missing_ok: bool) -> PgResult<Oid> {
     let dbencoding = mbutils_seams::get_database_encoding::call();
     let namespaceId: Oid;
 
     /* deconstruct the name list */
-    let (schemaname, collation_name) = DeconstructQualifiedName(collname)?;
+    let (schemaname, collation_name) = DeconstructQualifiedName(mcx, collname)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             return Ok(InvalidOid);
         }
 
-        let colloid = lookup_collation(&collation_name, namespaceId, dbencoding)?;
+        let colloid = lookup_collation(collation_name, namespaceId, dbencoding)?;
         if OidIsValid(colloid) {
             return Ok(colloid);
         }
     } else {
         /* search for it in search path */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
 
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
 
-            let colloid = lookup_collation(&collation_name, ns, dbencoding)?;
+            let colloid = lookup_collation(collation_name, ns, dbencoding)?;
             if OidIsValid(colloid) {
                 return Ok(colloid);
             }
@@ -3178,7 +3290,7 @@ pub fn get_collation_oid(collname: NameList, missing_ok: bool) -> PgResult<Oid> 
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "collation \"{}\" for encoding \"{}\" does not exist",
-                NameListToString(collname)?,
+                name_list_to_string(collname),
                 mbutils_seams::get_database_encoding_name::call()
             ))
             .finish(here("get_collation_oid"))
@@ -3188,31 +3300,31 @@ pub fn get_collation_oid(collname: NameList, missing_ok: bool) -> PgResult<Oid> 
 }
 
 /// `get_conversion_oid` — find a conversion by possibly qualified name.
-pub fn get_conversion_oid(conname: NameList, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_conversion_oid(mcx: Mcx<'_>, conname: NameList, missing_ok: bool) -> PgResult<Oid> {
     let namespaceId: Oid;
     let mut conoid: Oid = InvalidOid;
 
     /* deconstruct the name list */
-    let (schemaname, conversion_name) = DeconstructQualifiedName(conname)?;
+    let (schemaname, conversion_name) = DeconstructQualifiedName(mcx, conname)?;
 
-    if let Some(schemaname) = schemaname.as_deref() {
+    if let Some(schemaname) = schemaname {
         /* use exact schema given */
         namespaceId = LookupExplicitNamespace(schemaname, missing_ok)?;
         if missing_ok && !OidIsValid(namespaceId) {
             conoid = InvalidOid;
         } else {
-            conoid = syscache_seams::get_conversion_oid_cached::call(&conversion_name, namespaceId)?;
+            conoid = syscache_seams::get_conversion_oid_cached::call(conversion_name, namespaceId)?;
         }
     } else {
         /* search for it in search path */
-        recomputeNamespacePath()?;
+        recomputeNamespacePath(mcx)?;
 
         for ns in active_search_path() {
             if ns == my_temp_namespace() {
                 continue; /* do not look in temp namespace */
             }
 
-            conoid = syscache_seams::get_conversion_oid_cached::call(&conversion_name, ns)?;
+            conoid = syscache_seams::get_conversion_oid_cached::call(conversion_name, ns)?;
             if OidIsValid(conoid) {
                 return Ok(conoid);
             }
@@ -3225,7 +3337,7 @@ pub fn get_conversion_oid(conname: NameList, missing_ok: bool) -> PgResult<Oid> 
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "conversion \"{}\" does not exist",
-                NameListToString(conname)?
+                name_list_to_string(conname)
             ))
             .finish(here("get_conversion_oid"))
             .map(|()| InvalidOid);
@@ -3234,8 +3346,8 @@ pub fn get_conversion_oid(conname: NameList, missing_ok: bool) -> PgResult<Oid> 
 }
 
 /// `FindDefaultConversionProc` — find default encoding conversion proc.
-pub fn FindDefaultConversionProc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid> {
-    recomputeNamespacePath()?;
+pub fn FindDefaultConversionProc(mcx: Mcx<'_>, for_encoding: i32, to_encoding: i32) -> PgResult<Oid> {
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -3266,9 +3378,13 @@ pub fn FindDefaultConversionProc(for_encoding: i32, to_encoding: i32) -> PgResul
 /// leave them out of the list. (We can't raise an error, since the
 /// search_path setting has already been accepted.) Don't make duplicate
 /// entries, either.
-fn preprocessNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<(Vec<Oid>, bool)> {
+fn preprocessNamespacePath(
+    mcx: Mcx<'_>,
+    searchPath: &str,
+    roleid: Oid,
+) -> PgResult<(Vec<Oid>, bool)> {
     /* Parse string into list of identifiers */
-    let namelist = match varlena_seams::split_identifier_string::call(searchPath)? {
+    let namelist = match varlena_seams::split_identifier_string::call(mcx, searchPath)? {
         Some(l) => l,
         None => {
             /* syntax error in name list */
@@ -3282,12 +3398,12 @@ fn preprocessNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<(Vec<Oid>,
      */
     let mut oidlist: Vec<Oid> = Vec::new();
     let mut temp_missing = false;
-    for curname in &namelist {
+    for curname in namelist.iter() {
         let curname = curname.as_str();
         if curname == "$user" {
             /* $user --- substitute namespace matching user name, if any */
-            if let Some(rname) = syscache_seams::authid_rolname::call(roleid)? {
-                let namespaceId = get_namespace_oid(&rname, true)?;
+            if let Some(rname) = syscache_seams::authid_rolname::call(mcx, roleid)? {
+                let namespaceId = get_namespace_oid(rname.as_str(), true)?;
                 if OidIsValid(namespaceId)
                     && namespace_aclcheck(namespaceId, roleid, ACL_USAGE)?
                         == AclResult::AclcheckOk
@@ -3378,7 +3494,11 @@ struct CachedPathSnapshot {
 
 /// `cachedNamespacePath` — retrieve search path information from the cache;
 /// or if not there, fill it.
-fn cachedNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<CachedPathSnapshot> {
+fn cachedNamespacePath(
+    mcx: Mcx<'_>,
+    searchPath: &str,
+    roleid: Oid,
+) -> PgResult<CachedPathSnapshot> {
     spcache_init();
 
     spcache_insert(searchPath, roleid);
@@ -3400,7 +3520,7 @@ fn cachedNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<CachedPathSnap
 
     let mut new_oidlist: Option<(Vec<Oid>, bool)> = None;
     if !have_oidlist {
-        new_oidlist = Some(preprocessNamespacePath(searchPath, roleid)?);
+        new_oidlist = Some(preprocessNamespacePath(mcx, searchPath, roleid)?);
     }
     if let Some((oidlist, temp_missing)) = &new_oidlist {
         STATE.with(|s| {
@@ -3470,7 +3590,7 @@ fn cachedNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<CachedPathSnap
  * ======================================================================== */
 
 /// `recomputeNamespacePath` — recompute path derived variables if needed.
-fn recomputeNamespacePath() -> PgResult<()> {
+fn recomputeNamespacePath(mcx: Mcx<'_>) -> PgResult<()> {
     let roleid = miscinit_seams::get_user_id::call();
 
     /* Do nothing if path is already valid. */
@@ -3483,7 +3603,7 @@ fn recomputeNamespacePath() -> PgResult<()> {
     }
 
     let search_path = namespace_search_path();
-    let entry = cachedNamespacePath(&search_path, roleid)?;
+    let entry = cachedNamespacePath(mcx, &search_path, roleid)?;
 
     let pathChanged = STATE.with(|s| {
         let st = s.borrow();
@@ -3538,7 +3658,7 @@ fn recomputeNamespacePath() -> PgResult<()> {
 /// namespace gets in use in this transaction. `force` can be set true to
 /// enforce the creation of the temporary namespace for use in this backend,
 /// which happens if its creation is pending.
-fn AccessTempTableNamespace(force: bool) -> PgResult<()> {
+fn AccessTempTableNamespace(mcx: Mcx<'_>, force: bool) -> PgResult<()> {
     /*
      * Make note that this temporary namespace has been accessed in this
      * transaction.
@@ -3558,12 +3678,12 @@ fn AccessTempTableNamespace(force: bool) -> PgResult<()> {
      * The temporary tablespace does not exist yet and is wanted, so
      * initialize it.
      */
-    InitTempTableNamespace()
+    InitTempTableNamespace(mcx)
 }
 
 /// `InitTempTableNamespace` — initialize temp table namespace on first use in
 /// a particular backend.
-fn InitTempTableNamespace() -> PgResult<()> {
+fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
     debug_assert!(!OidIsValid(my_temp_namespace()));
 
     /*
@@ -3582,8 +3702,13 @@ fn InitTempTableNamespace() -> PgResult<()> {
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied to create temporary tables in database \"{}\"",
-                dbcommands_seams::get_database_name::call(globals_seams::my_database_id::call())?
-                    .unwrap_or_default()
+                dbcommands_seams::get_database_name::call(
+                    mcx,
+                    globals_seams::my_database_id::call()
+                )?
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or_default()
             ))
             .finish(here("InitTempTableNamespace"));
     }
@@ -3796,11 +3921,14 @@ pub fn RemoveTempRelationsCallback(_code: i32, _arg: Datum) -> PgResult<()> {
         /* Need to ensure we have a usable transaction. */
         xact_seams::abort_out_of_any_transaction::call()?;
         xact_seams::start_transaction_command::call()?;
-        snapmgr_seams::push_active_snapshot_for_transaction::call()?;
 
-        RemoveTempRelations(my_temp_namespace())?;
+        /* C: PushActiveSnapshot(GetTransactionSnapshot()) / PopActiveSnapshot()
+         * around the deletion — a snapmgr-owned scope here, per
+         * docs/query-lifecycle-raii.md (no ambient snapshot stack). */
+        snapmgr_seams::with_transaction_snapshot::call(&mut || {
+            RemoveTempRelations(my_temp_namespace())
+        })?;
 
-        snapmgr_seams::pop_active_snapshot::call()?;
         xact_seams::commit_transaction_command::call()?;
     }
     Ok(())
@@ -3825,7 +3953,7 @@ pub fn ResetTempTableNamespace() -> PgResult<()> {
 /// The only requirement is syntactic validity of the identifier list (there
 /// are many valid use-cases for schemas that don't exist, and we often are
 /// not inside a transaction here).
-pub fn check_search_path(newval: &str) -> PgResult<bool> {
+pub fn check_search_path(mcx: Mcx<'_>, newval: &str) -> PgResult<bool> {
     let mut roleid: Oid = InvalidOid;
     let searchPath = newval;
     let use_cache = STATE.with(|s| s.borrow().search_path_cache_context_created);
@@ -3849,7 +3977,7 @@ pub fn check_search_path(newval: &str) -> PgResult<bool> {
      * Ensure validity check succeeds before creating cache entry.
      */
     /* Parse string into list of identifiers */
-    if varlena_seams::split_identifier_string::call(searchPath)?.is_none() {
+    if varlena_seams::split_identifier_string::call(mcx, searchPath)?.is_none() {
         /* syntax error in name list */
         guc_seams::guc_check_errdetail::call("List syntax is invalid.".to_string());
         return Ok(false);
@@ -3910,24 +4038,32 @@ pub fn InitializeSearchPath() -> PgResult<()> {
          */
 
         /* namespace name or ACLs may have changed */
-        inval_seams::cache_register_syscache_callback::call(NAMESPACEOID, |_, _| {
-            InvalidationCallback()
-        })?;
+        inval_seams::cache_register_syscache_callback::call(
+            NAMESPACEOID,
+            |_, _, _| InvalidationCallback(),
+            Datum::from_usize(0),
+        )?;
 
         /* role name may affect the meaning of "$user" */
-        inval_seams::cache_register_syscache_callback::call(AUTHOID, |_, _| {
-            InvalidationCallback()
-        })?;
+        inval_seams::cache_register_syscache_callback::call(
+            AUTHOID,
+            |_, _, _| InvalidationCallback(),
+            Datum::from_usize(0),
+        )?;
 
         /* role membership may affect ACLs */
-        inval_seams::cache_register_syscache_callback::call(AUTHMEMROLEMEM, |_, _| {
-            InvalidationCallback()
-        })?;
+        inval_seams::cache_register_syscache_callback::call(
+            AUTHMEMROLEMEM,
+            |_, _, _| InvalidationCallback(),
+            Datum::from_usize(0),
+        )?;
 
         /* database owner may affect ACLs */
-        inval_seams::cache_register_syscache_callback::call(DATABASEOID, |_, _| {
-            InvalidationCallback()
-        })?;
+        inval_seams::cache_register_syscache_callback::call(
+            DATABASEOID,
+            |_, _, _| InvalidationCallback(),
+            Datum::from_usize(0),
+        )?;
 
         /* Force search path to be recomputed on next use */
         STATE.with(|s| {
@@ -3962,8 +4098,11 @@ pub fn InvalidationCallback() {
 ///
 /// The returned list includes the implicitly-prepended namespaces only if
 /// `includeImplicit` is true.
-pub fn fetch_search_path(includeImplicit: bool) -> PgResult<Vec<Oid>> {
-    recomputeNamespacePath()?;
+pub fn fetch_search_path<'mcx>(
+    mcx: Mcx<'mcx>,
+    includeImplicit: bool,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    recomputeNamespacePath(mcx)?;
 
     /*
      * If the temp namespace should be first, force it to exist. This is so
@@ -3973,14 +4112,18 @@ pub fn fetch_search_path(includeImplicit: bool) -> PgResult<Vec<Oid>> {
      * but the alternatives seem worse.
      */
     if STATE.with(|s| s.borrow().active_temp_creation_pending) {
-        AccessTempTableNamespace(true)?;
-        recomputeNamespacePath()?;
+        AccessTempTableNamespace(mcx, true)?;
+        recomputeNamespacePath(mcx)?;
     }
 
-    let (mut result, active_creation) = STATE.with(|s| {
+    /* list_copy(activeSearchPath) into the caller's context */
+    let (mut result, active_creation) = STATE.with(|s| -> PgResult<_> {
         let st = s.borrow();
-        (st.active_search_path.clone(), st.active_creation_namespace)
-    });
+        Ok((
+            slice_in(mcx, &st.active_search_path)?,
+            st.active_creation_namespace,
+        ))
+    })?;
     if !includeImplicit {
         while !result.is_empty() && result[0] != active_creation {
             result.remove(0);
@@ -3993,10 +4136,10 @@ pub fn fetch_search_path(includeImplicit: bool) -> PgResult<Vec<Oid>> {
 /// `fetch_search_path_array` — fetch the active search path into a
 /// caller-allocated array, returning the number of path entries. (If this is
 /// more than the array length, the extra entries were not stored.)
-pub fn fetch_search_path_array(sarray: &mut [Oid]) -> PgResult<i32> {
+pub fn fetch_search_path_array(mcx: Mcx<'_>, sarray: &mut [Oid]) -> PgResult<i32> {
     let mut count = 0;
 
-    recomputeNamespacePath()?;
+    recomputeNamespacePath(mcx)?;
 
     for namespaceId in active_search_path() {
         if namespaceId == my_temp_namespace() {
@@ -4019,11 +4162,11 @@ pub fn fetch_search_path_array(sarray: &mut [Oid]) -> PgResult<i32> {
  * predicate, return NULL (`None`) if the object was missing.
  * ======================================================================== */
 
-type IsVisibleFn = fn(Oid, Option<&mut bool>) -> PgResult<bool>;
+type IsVisibleFn = fn(Mcx<'_>, Oid, Option<&mut bool>) -> PgResult<bool>;
 
-fn pg_is_visible_body(oid: Oid, f: IsVisibleFn) -> PgResult<Option<bool>> {
+fn pg_is_visible_body(mcx: Mcx<'_>, oid: Oid, f: IsVisibleFn) -> PgResult<Option<bool>> {
     let mut is_missing = false;
-    let result = f(oid, Some(&mut is_missing))?;
+    let result = f(mcx, oid, Some(&mut is_missing))?;
     if is_missing {
         Ok(None)
     } else {
@@ -4032,68 +4175,68 @@ fn pg_is_visible_body(oid: Oid, f: IsVisibleFn) -> PgResult<Option<bool>> {
 }
 
 /// `pg_table_is_visible(oid) -> bool` (NULL if missing).
-pub fn pg_table_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, RelationIsVisibleExt)
+pub fn pg_table_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, RelationIsVisibleExt)
 }
 
 /// `pg_type_is_visible(oid) -> bool`.
-pub fn pg_type_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, TypeIsVisibleExt)
+pub fn pg_type_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, TypeIsVisibleExt)
 }
 
 /// `pg_function_is_visible(oid) -> bool`.
-pub fn pg_function_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, FunctionIsVisibleExt)
+pub fn pg_function_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, FunctionIsVisibleExt)
 }
 
 /// `pg_operator_is_visible(oid) -> bool`.
-pub fn pg_operator_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, OperatorIsVisibleExt)
+pub fn pg_operator_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, OperatorIsVisibleExt)
 }
 
 /// `pg_opclass_is_visible(oid) -> bool`.
-pub fn pg_opclass_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, OpclassIsVisibleExt)
+pub fn pg_opclass_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, OpclassIsVisibleExt)
 }
 
 /// `pg_opfamily_is_visible(oid) -> bool`.
-pub fn pg_opfamily_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, OpfamilyIsVisibleExt)
+pub fn pg_opfamily_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, OpfamilyIsVisibleExt)
 }
 
 /// `pg_collation_is_visible(oid) -> bool`.
-pub fn pg_collation_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, CollationIsVisibleExt)
+pub fn pg_collation_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, CollationIsVisibleExt)
 }
 
 /// `pg_conversion_is_visible(oid) -> bool`.
-pub fn pg_conversion_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, ConversionIsVisibleExt)
+pub fn pg_conversion_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, ConversionIsVisibleExt)
 }
 
 /// `pg_statistics_obj_is_visible(oid) -> bool`.
-pub fn pg_statistics_obj_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, StatisticsObjIsVisibleExt)
+pub fn pg_statistics_obj_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, StatisticsObjIsVisibleExt)
 }
 
 /// `pg_ts_parser_is_visible(oid) -> bool`.
-pub fn pg_ts_parser_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, TSParserIsVisibleExt)
+pub fn pg_ts_parser_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, TSParserIsVisibleExt)
 }
 
 /// `pg_ts_dict_is_visible(oid) -> bool`.
-pub fn pg_ts_dict_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, TSDictionaryIsVisibleExt)
+pub fn pg_ts_dict_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, TSDictionaryIsVisibleExt)
 }
 
 /// `pg_ts_template_is_visible(oid) -> bool`.
-pub fn pg_ts_template_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, TSTemplateIsVisibleExt)
+pub fn pg_ts_template_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, TSTemplateIsVisibleExt)
 }
 
 /// `pg_ts_config_is_visible(oid) -> bool`.
-pub fn pg_ts_config_is_visible(oid: Oid) -> PgResult<Option<bool>> {
-    pg_is_visible_body(oid, TSConfigIsVisibleExt)
+pub fn pg_ts_config_is_visible(mcx: Mcx<'_>, oid: Oid) -> PgResult<Option<bool>> {
+    pg_is_visible_body(mcx, oid, TSConfigIsVisibleExt)
 }
 
 /// `pg_my_temp_schema() -> oid` (zero if none).
@@ -4102,6 +4245,6 @@ pub fn pg_my_temp_schema() -> Oid {
 }
 
 /// `pg_is_other_temp_schema(oid) -> bool`.
-pub fn pg_is_other_temp_schema(oid: Oid) -> PgResult<bool> {
-    isOtherTempNamespace(oid)
+pub fn pg_is_other_temp_schema(mcx: Mcx<'_>, oid: Oid) -> PgResult<bool> {
+    isOtherTempNamespace(mcx, oid)
 }

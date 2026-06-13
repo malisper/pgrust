@@ -47,11 +47,13 @@ seam_core::seam!(
 /* ===========================================================================
  * namespace.c lookups: GetSysCacheOid* / SearchSysCacheExists* by-name
  * probes and the GETSTRUCT row projections its visibility predicates read.
- * The projected rows are transient owned copies (the cache tuple is released
- * before the seam returns); `Err` carries catcache-path `ereport(ERROR)`s
- * and OOM from the copies.
+ * The projected rows are transient copies out of the catcache (the cache
+ * tuple is released before the seam returns), made into the caller's `Mcx`
+ * and carrying its lifetime; dropping them is the release. `Err` carries
+ * catcache-path `ereport(ERROR)`s and OOM from the copies.
  * ========================================================================= */
 
+use mcx::PgString;
 use types_namespace::{CatalogObjectName, OperRow, ProcRow};
 
 seam_core::seam!(
@@ -156,9 +158,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `SearchSysCache1(AUTHOID, roleid)` projected to `rolname`; `Ok(None)`
-    /// on cache miss.
-    pub fn authid_rolname(roleid: Oid) -> PgResult<Option<String>>
+    /// `SearchSysCache1(AUTHOID, roleid)` projected to `rolname`, copied
+    /// into `mcx`; `Ok(None)` on cache miss.
+    pub fn authid_rolname<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -176,99 +178,121 @@ seam_core::seam!(
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, relid)` projected to
     /// `(relnamespace, relname)`; `Ok(None)` on cache miss.
-    pub fn relation_namespace_and_name(relid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn relation_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, typid)` projected to
     /// `(typnamespace, typname)`; `Ok(None)` on cache miss.
-    pub fn type_namespace_and_name(typid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn type_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(COLLOID, collid)` projected to
     /// `(collnamespace, collname)`; `Ok(None)` on cache miss.
-    pub fn collation_namespace_and_name(collid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn collation_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(CONVOID, conid)` projected to
     /// `(connamespace, conname)`; `Ok(None)` on cache miss.
-    pub fn conversion_namespace_and_name(conid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn conversion_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, conid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(STATEXTOID, stxid)` projected to
     /// `(stxnamespace, stxname)`; `Ok(None)` on cache miss.
-    pub fn statext_namespace_and_name(stxid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn statext_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, stxid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(TSPARSEROID, prsid)` projected to
     /// `(prsnamespace, prsname)`; `Ok(None)` on cache miss.
-    pub fn ts_parser_namespace_and_name(prsid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn ts_parser_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, prsid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(TSDICTOID, dictid)` projected to
     /// `(dictnamespace, dictname)`; `Ok(None)` on cache miss.
-    pub fn ts_dict_namespace_and_name(dictid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn ts_dict_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, dictid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(TSTEMPLATEOID, tmplid)` projected to
     /// `(tmplnamespace, tmplname)`; `Ok(None)` on cache miss.
-    pub fn ts_template_namespace_and_name(tmplid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn ts_template_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, tmplid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(TSCONFIGOID, cfgid)` projected to
     /// `(cfgnamespace, cfgname)`; `Ok(None)` on cache miss.
-    pub fn ts_config_namespace_and_name(cfgid: Oid) -> PgResult<Option<CatalogObjectName>>
+    pub fn ts_config_namespace_and_name<'mcx>(mcx: Mcx<'mcx>, cfgid: Oid) -> PgResult<Option<CatalogObjectName<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(CLAOID, opcid)` projected to
     /// `(opcnamespace, opcmethod, opcname)`; `Ok(None)` on cache miss.
-    pub fn opclass_namespace_method_name(opcid: Oid) -> PgResult<Option<(Oid, Oid, String)>>
+    pub fn opclass_namespace_method_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        opcid: Oid,
+    ) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(OPFAMILYOID, opfid)` projected to
     /// `(opfnamespace, opfmethod, opfname)`; `Ok(None)` on cache miss.
-    pub fn opfamily_namespace_method_name(opfid: Oid) -> PgResult<Option<(Oid, Oid, String)>>
+    pub fn opfamily_namespace_method_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfid: Oid,
+    ) -> PgResult<Option<(Oid, Oid, PgString<'mcx>)>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(PROCOID, funcid)` projected to the [`ProcRow`]
     /// fields; `Ok(None)` on cache miss (`FunctionIsVisibleExt`).
-    pub fn proc_row_by_oid(funcid: Oid) -> PgResult<Option<ProcRow>>
+    pub fn proc_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<ProcRow<'mcx>>>
 );
 
 seam_core::seam!(
     /// `SearchSysCache1(OPEROID, oprid)` projected to the [`OperRow`]
     /// fields; `Ok(None)` on cache miss (`OperatorIsVisibleExt`).
-    pub fn oper_row_by_oid(oprid: Oid) -> PgResult<Option<OperRow>>
+    pub fn oper_row_by_oid<'mcx>(mcx: Mcx<'mcx>, oprid: Oid) -> PgResult<Option<OperRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_proargnames, &isnull)`
+    /// null test for the pg_proc row of `funcid` (`MatchNamedCall`'s probe;
+    /// the C caller holds the tuple, the owned marshal re-fetches it by
+    /// OID). `Err` carries catcache-path `ereport(ERROR)`s (including a
+    /// missing row, impossible for a tuple the caller just read).
+    pub fn proc_proargnames_isnull(funcid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `SearchSysCacheList1(PROCNAMEARGSNSP, funcname)` projected member
     /// rows in catlist order, plus `catlist->ordered`.
-    pub fn proc_catlist(funcname: &str) -> PgResult<(Vec<ProcRow>, bool)>
+    pub fn proc_catlist<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcname: &str,
+    ) -> PgResult<(PgVec<'mcx, ProcRow<'mcx>>, bool)>
 );
 
 seam_core::seam!(
     /// `SearchSysCacheList3(OPERNAMENSP, opername, oprleft, oprright)`
     /// projected member rows in catlist order, plus `catlist->ordered`.
-    pub fn oper_catlist3(
+    pub fn oper_catlist3<'mcx>(
+        mcx: Mcx<'mcx>,
         opername: &str,
         oprleft: Oid,
         oprright: Oid,
-    ) -> PgResult<(Vec<OperRow>, bool)>
+    ) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)>
 );
 
 seam_core::seam!(
     /// `SearchSysCacheList1(OPERNAMENSP, opername)` projected member rows in
     /// catlist order, plus `catlist->ordered`.
-    pub fn oper_catlist1(opername: &str) -> PgResult<(Vec<OperRow>, bool)>
+    pub fn oper_catlist1<'mcx>(
+        mcx: Mcx<'mcx>,
+        opername: &str,
+    ) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)>
 );

@@ -8,8 +8,8 @@ pub fn init_all() {
     // One line per ported crate, kept sorted:
     backend_access_common_heaptuple::init_seams();
     backend_access_hashvalidate::init_seams();
-    backend_catalog_namespace::init_seams();
     backend_access_transam_xlogstats::init_seams();
+    backend_catalog_namespace::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();

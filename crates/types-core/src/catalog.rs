@@ -21,6 +21,9 @@ pub const PG_TOAST_NAMESPACE: Oid = 99;
 /// `BOOTSTRAP_SUPERUSERID` (`catalog/pg_authid_d.h`).
 pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
 
+/// `OIDOID` (`catalog/pg_type_d.h`) — the OID of the `oid` type.
+pub const OIDOID: Oid = 26;
+
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
 /// `RELPERSISTENCE_UNLOGGED` (`catalog/pg_class.h`) — unlogged permanent table.

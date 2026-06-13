@@ -12,8 +12,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `GetDatabaseEncodingName()` (mbutils.c): the database encoding's name
-    /// (a static string in C). Pure read.
-    pub fn get_database_encoding_name() -> String
+    /// — a pointer into the static `pg_enc2name` table in C, so no
+    /// allocation: `&'static str` mirrors the static-table read.
+    pub fn get_database_encoding_name() -> &'static str
 );
 
 seam_core::seam!(
