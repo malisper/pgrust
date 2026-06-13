@@ -19,5 +19,8 @@ types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+# Per-owner seams routed by the slot-ops vtable callbacks.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 # Owned seam crate this unit installs from init_seams().
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
