@@ -22,3 +22,8 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-common-relation = { path = "../backend-access-common-relation" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
