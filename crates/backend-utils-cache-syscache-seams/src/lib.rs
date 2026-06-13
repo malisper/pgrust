@@ -1399,3 +1399,47 @@ seam_core::seam!(
     /// caller raises `cache lookup failed for foreign table %u`).
     pub fn foreign_table_server_by_relid(relid: Oid) -> PgResult<Option<Oid>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver` plus the raw `ftoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_foreign_table_ftoptions)`): `(ftserver,
+    /// Some(bytes))` with the detoasted option array, or `(ftserver, None)`
+    /// when `ftoptions` is SQL NULL. `Ok(None)` on a cache miss (the caller
+    /// raises `cache lookup failed for foreign table %u`). The caller runs
+    /// `untransformRelOptions` on the bytes.
+    pub fn foreign_table_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(USERMAPPINGUSERSERVER, ObjectIdGetDatum(userid),
+    /// ObjectIdGetDatum(serverid))` projected to the mapping OID
+    /// (`Form_pg_user_mapping.oid`) plus the raw `umoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_user_mapping_umoptions)`): `(umid,
+    /// Some(bytes))` or `(umid, None)` when `umoptions` is SQL NULL. `Ok(None)`
+    /// on a cache miss — the caller (`GetUserMapping`) retries with
+    /// `userid = InvalidOid` (PUBLIC) and, if still absent, raises
+    /// `user mapping not found ...`. The caller runs `untransformRelOptions`.
+    pub fn user_mapping_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        userid: Oid,
+        serverid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// then `SysCacheGetAttr(Anum_pg_attribute_attfdwoptions)`: the raw
+    /// `attfdwoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+    /// `Ok(None)` on a cache miss (the caller raises
+    /// `cache lookup failed for attribute %d of relation %u`). The caller runs
+    /// `untransformRelOptions`.
+    pub fn attribute_fdwoptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
+);

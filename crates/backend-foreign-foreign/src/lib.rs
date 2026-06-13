@@ -15,10 +15,12 @@
 //! machinery cross the boundary through their owners' seams; the algorithm
 //! lives here.
 //!
-//! The descriptor types the accessors return are the trimmed
-//! `types_foreigncmds` carriers (the fields `commands/foreigncmds.c` and
-//! `executor/nodeForeignscan.c` actually read), matching the established
-//! `backend-foreign-foreign-seams` inward contract.
+//! The FDW/server descriptor carriers (`ForeignDataWrapper`/`ForeignServer`)
+//! are trimmed to the fields `commands/foreigncmds.c` and
+//! `executor/nodeForeignscan.c` read, matching the established
+//! `backend-foreign-foreign-seams` inward contract; the `ForeignTable` and
+//! `UserMapping` carriers retain their `options` (`(name, value)` pairs decoded
+//! by `untransformRelOptions`), as the C structs do.
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid, OidIsValid};
@@ -28,7 +30,7 @@ use types_error::{
 };
 use types_datum::Datum;
 use types_foreigncmds::{
-    ForeignDataWrapper, ForeignServer, ImportForeignSchemaStmt,
+    ForeignDataWrapper, ForeignServer, ForeignTable, ImportForeignSchemaStmt, UserMapping,
     FDW_IMPORT_SCHEMA_ALL, FDW_IMPORT_SCHEMA_EXCEPT, FDW_IMPORT_SCHEMA_LIMIT_TO,
 };
 use types_nodes::fmgr::FunctionCallInfoBaseData;
@@ -205,15 +207,133 @@ pub fn MappingUserName<'mcx>(mcx: Mcx<'mcx>, userid: Oid) -> PgResult<PgString<'
 }
 
 /* ===========================================================================
- * GetForeignTable / GetForeignColumnOptions
- *
- * `GetForeignTable` and `GetForeignColumnOptions` populate the full
- * `ForeignTable` / attfdwoptions option list. They are reached only through
- * `commands/foreigncmds.c`'s own catalog-DML seams in this decomposition
- * (`foreign_table_server_by_relid` covers `GetForeignServerIdByRelId`); the
- * descriptor-with-options path is owned there. Here we provide the
- * server-OID-only read used by the FDW-routine lookups.
+ * GetUserMapping
  * ======================================================================== */
+
+/// `GetUserMapping(userid, serverid)` — look up the user mapping. If no mapping
+/// is found for the supplied user, also look for PUBLIC mappings
+/// (`userid == InvalidOid`).
+pub fn GetUserMapping<'mcx>(
+    mcx: Mcx<'mcx>,
+    userid: Oid,
+    serverid: Oid,
+) -> PgResult<UserMapping> {
+    // tp = SearchSysCache2(USERMAPPINGUSERSERVER, userid, serverid);
+    let mut found = syscache::user_mapping_form::call(mcx, userid, serverid)?;
+
+    if found.is_none() {
+        // Not found for the specific user -- try PUBLIC (InvalidOid).
+        found = syscache::user_mapping_form::call(mcx, InvalidOid, serverid)?;
+    }
+
+    let (umid, raw_options) = match found {
+        Some(row) => row,
+        None => {
+            // ereport(ERROR, ERRCODE_UNDEFINED_OBJECT,
+            //   "user mapping not found for user \"%s\", server \"%s\"",
+            //   MappingUserName(userid), server->servername);
+            // server = GetForeignServer(serverid) (flags = 0 → raises if absent).
+            let server = match GetForeignServer(mcx, serverid)? {
+                Some(server) => server,
+                None => {
+                    return Err(elog_error(format!(
+                        "cache lookup failed for foreign server {}",
+                        serverid
+                    )))
+                }
+            };
+            let username = MappingUserName(mcx, userid)?;
+            return Err(PgError::error(format!(
+                "user mapping not found for user \"{}\", server \"{}\"",
+                username.as_str(),
+                server.servername.as_str()
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+        }
+    };
+
+    // um = palloc(...); um->umid = GETSTRUCT(tp)->oid; um->userid = userid;
+    // um->serverid = serverid;
+    // Extract the umoptions (NULL → NIL).
+    let options = match raw_options {
+        Some(bytes) => backend_access_common_reloptions::untransformRelOptions(
+            mcx,
+            Some(bytes.as_slice()),
+        )?,
+        None => Vec::new(),
+    };
+
+    Ok(UserMapping {
+        umid,
+        userid,
+        serverid,
+        options,
+    })
+}
+
+/* ===========================================================================
+ * GetForeignTable / GetForeignColumnOptions / GetForeignServerIdByRelId
+ * ======================================================================== */
+
+/// `GetForeignTable(relid)` — look up the foreign table definition by relation
+/// OID.
+pub fn GetForeignTable<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<ForeignTable> {
+    // tp = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid));
+    let (serverid, raw_options) = match syscache::foreign_table_form::call(mcx, relid)? {
+        Some(row) => row,
+        None => {
+            return Err(elog_error(format!(
+                "cache lookup failed for foreign table {}",
+                relid
+            )))
+        }
+    };
+
+    // ft = palloc(...); ft->relid = relid; ft->serverid = tableform->ftserver;
+    // Extract the ftoptions (NULL → NIL).
+    let options = match raw_options {
+        Some(bytes) => backend_access_common_reloptions::untransformRelOptions(
+            mcx,
+            Some(bytes.as_slice()),
+        )?,
+        None => Vec::new(),
+    };
+
+    Ok(ForeignTable {
+        relid,
+        serverid,
+        options,
+    })
+}
+
+/// `GetForeignColumnOptions(relid, attnum)` — get `attfdwoptions` of a given
+/// relation/attnum as a list of options.
+pub fn GetForeignColumnOptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Vec<(String, Option<String>)>> {
+    // tp = SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum));
+    let raw_options = match syscache::attribute_fdwoptions::call(mcx, relid, attnum)? {
+        Some(opt) => opt,
+        None => {
+            return Err(elog_error(format!(
+                "cache lookup failed for attribute {} of relation {}",
+                attnum, relid
+            )))
+        }
+    };
+
+    // datum = SysCacheGetAttr(..., attfdwoptions, &isnull);
+    // options = isnull ? NIL : untransformRelOptions(datum);
+    match raw_options {
+        Some(bytes) => backend_access_common_reloptions::untransformRelOptions(
+            mcx,
+            Some(bytes.as_slice()),
+        ),
+        None => Ok(Vec::new()),
+    }
+}
 
 /// `GetForeignServerIdByRelId` — the foreign server OID for a foreign table.
 pub fn GetForeignServerIdByRelId(relid: Oid) -> PgResult<Oid> {
