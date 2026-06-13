@@ -1,12 +1,14 @@
 //! Logic tests for the execAmi entry points, driving the real dispatchers
 //! against mock installs of the unported owners' seams (instrument,
-//! nodeSubplan, execUtils, syscache, amapi, and execTuples for the Material
-//! rescan arm). Per-test state is `thread_local!`.
+//! nodeSubplan, bitmapset, syscache, amapi, and execTuples for the Material
+//! rescan arm); execUtils is the real, directly-depended-on crate. Per-test
+//! state is `thread_local!`.
 
 use std::cell::Cell;
 use std::sync::Once;
 
 use backend_executor_execTuples_seams as execTuples;
+use backend_nodes_core_seams as bms_seams;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execexpr::SubPlanState;
@@ -23,7 +25,6 @@ use super::*;
 
 thread_local! {
     static INSTR_END_LOOPS: Cell<usize> = const { Cell::new(0) };
-    static EXPR_CONTEXT_RESCANS: Cell<usize> = const { Cell::new(0) };
     static PARAM_SET_UPDATES: Cell<usize> = const { Cell::new(0) };
     static SET_PARAM_PLAN_RESCANS: Cell<usize> = const { Cell::new(0) };
 }
@@ -33,18 +34,23 @@ fn mock_instr_end_loop(_instr: &mut Instrumentation) -> PgResult<()> {
     Ok(())
 }
 
-fn mock_re_scan_expr_context(_econtext: &mut ExprContext) -> PgResult<()> {
-    EXPR_CONTEXT_RESCANS.with(|c| c.set(c.get() + 1));
-    Ok(())
+/// `bms_intersect` mock: the real `UpdateChangedParamSet` (execUtils, a
+/// direct dependency) calls this exactly once per invocation, so the counter
+/// counts UpdateChangedParamSet calls.
+fn mock_bms_intersect<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _a: Option<&Bitmapset<'_>>,
+    _b: Option<&Bitmapset<'_>>,
+) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
+    PARAM_SET_UPDATES.with(|c| c.set(c.get() + 1));
+    Ok(None)
 }
 
-fn mock_update_changed_param_set<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _node: &mut PlanStateNode<'mcx>,
-    _newchg: &Bitmapset<'mcx>,
-) -> PgResult<()> {
-    PARAM_SET_UPDATES.with(|c| c.set(c.get() + 1));
-    Ok(())
+fn mock_bms_join<'mcx>(
+    a: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    b: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+) -> Option<PgBox<'mcx, Bitmapset<'mcx>>> {
+    a.or(b)
 }
 
 fn mock_exec_re_scan_set_param_plan<'mcx>(
@@ -79,8 +85,8 @@ fn install_mocks() {
     ONCE.call_once(|| {
         crate::init_seams();
         instrument::instr_end_loop::set(mock_instr_end_loop);
-        execUtils::re_scan_expr_context::set(mock_re_scan_expr_context);
-        nodeSubplan::update_changed_param_set::set(mock_update_changed_param_set);
+        bms_seams::bms_intersect::set(mock_bms_intersect);
+        bms_seams::bms_join::set(mock_bms_join);
         nodeSubplan::exec_re_scan_set_param_plan::set(mock_exec_re_scan_set_param_plan);
         execTuples::exec_clear_tuple::set(mock_exec_clear_tuple);
         syscache::search_relation_relam::set(mock_search_relation_relam);
@@ -112,13 +118,16 @@ fn exec_re_scan_walks_params_and_dispatches() {
     let mut splan_plan = Material::default();
     splan_plan.plan.extParam = Some(empty_bms(mcx).unwrap());
     let splan_plan = types_nodes::nodes::Node::Material(splan_plan);
+    let child_plan = types_nodes::nodes::Node::Material(Material::default());
 
     let mut estate = EStateData::new_in(mcx);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
 
     // Outer child: chgParam non-NULL so ExecReScanMaterial leaves the rescan
-    // to the next ExecProcNode (no recursive exec_re_scan).
+    // to the next ExecProcNode (no recursive exec_re_scan). The real
+    // UpdateChangedParamSet dereferences node->plan, so give it one.
     let mut child = MaterialState::default();
+    child.ss.ps.plan = Some(&child_plan);
     child.ss.ps.chgParam = Some(empty_bms(mcx).unwrap());
 
     // One InitPlan whose subselect state aliases `splan_plan` and has
@@ -170,15 +179,15 @@ fn exec_re_scan_walks_params_and_dispatches() {
     let mut node = PlanStateNode::Material(alloc_in(mcx, mat).unwrap());
 
     let instr0 = INSTR_END_LOOPS.with(|c| c.get());
-    let expr0 = EXPR_CONTEXT_RESCANS.with(|c| c.get());
     let upd0 = PARAM_SET_UPDATES.with(|c| c.get());
     let spp0 = SET_PARAM_PLAN_RESCANS.with(|c| c.get());
 
     exec_re_scan(&mut node, &mut estate).unwrap();
 
-    // InstrEndLoop ran once; ReScanExprContext ran once.
+    // InstrEndLoop ran once. (ReScanExprContext is the real execUtils
+    // implementation: it ran the — empty — callback list and reset the
+    // per-tuple context.)
     assert_eq!(INSTR_END_LOOPS.with(|c| c.get()), instr0 + 1);
-    assert_eq!(EXPR_CONTEXT_RESCANS.with(|c| c.get()), expr0 + 1);
     // UpdateChangedParamSet: once for the InitPlan's splan, once for lefttree.
     assert_eq!(PARAM_SET_UPDATES.with(|c| c.get()), upd0 + 2);
     // ExecReScanSetParamPlan: once for the InitPlan.
@@ -303,7 +312,7 @@ fn supports_mark_restore_matches_c_table() {
 
     // default: false.
     assert!(!exec_supports_mark_restore(&PathNode::Path(PathData {
-        pathtype: 9999
+        pathtype: types_nodes::nodes::NodeTag(9999)
     })));
 }
 

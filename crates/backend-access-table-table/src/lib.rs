@@ -8,27 +8,27 @@
 //! index, or a composite type. The caller should also check that the
 //! relation is not a view or foreign table before assuming it has storage.
 //!
-//! The C `Relation` crosses as an owned [`RelationData`] carrier holding the
-//! consumed relcache fields, allocated in the caller's `mcx`; close consumes
-//! it. The C NULL `Relation` of the `try_`/`missing_ok` flavors is `None`.
+//! The C `Relation` crosses as a [`types_rel::Relation`] handle (the trimmed
+//! relcache-entry copy, allocated in the caller-supplied `mcx`, armed by the
+//! relation.c owner with its close function). `table_close` consumes the
+//! handle; the C NULL `Relation` of the `try_`/`missing_ok` flavors is
+//! `None`.
 
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
+use types_rel::Relation;
 use types_storage::lock::LOCKMODE;
 use types_tuple::access::{
     RangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
 };
-use types_tuple::rel::RelationData;
 
-/// Install this crate's seam implementations into
-/// `backend-access-table-table-seams`.
-pub fn init_seams() {
-    backend_access_table_table_seams::table_open::set(table_open);
-    backend_access_table_table_seams::table_close::set(table_close);
-}
+/// Install this crate's seam implementations. Every consumer reaches this
+/// unit by direct dependency (no cycle exists), so there is no seams crate
+/// and nothing to install.
+pub fn init_seams() {}
 
 /// `table_open(relationId, lockmode)` — open a table relation by relation
 /// OID.
@@ -39,9 +39,8 @@ pub fn table_open<'mcx>(
     mcx: Mcx<'mcx>,
     relationId: Oid,
     lockmode: LOCKMODE,
-) -> PgResult<RelationData<'mcx>> {
-    let r =
-        backend_access_common_relation_seams::relation_open::call(mcx, relationId, lockmode)?;
+) -> PgResult<Relation<'mcx>> {
+    let r = backend_access_common_relation_seams::relation_open::call(mcx, relationId, lockmode)?;
 
     validate_relation_kind(&r)?;
 
@@ -54,7 +53,7 @@ pub fn try_table_open<'mcx>(
     mcx: Mcx<'mcx>,
     relationId: Oid,
     lockmode: LOCKMODE,
-) -> PgResult<Option<RelationData<'mcx>>> {
+) -> PgResult<Option<Relation<'mcx>>> {
     let r =
         backend_access_common_relation_seams::try_relation_open::call(mcx, relationId, lockmode)?;
 
@@ -74,7 +73,7 @@ pub fn table_openrv<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar,
     lockmode: LOCKMODE,
-) -> PgResult<RelationData<'mcx>> {
+) -> PgResult<Relation<'mcx>> {
     let r = backend_access_common_relation_seams::relation_openrv::call(mcx, relation, lockmode)?;
 
     validate_relation_kind(&r)?;
@@ -90,7 +89,7 @@ pub fn table_openrv_extended<'mcx>(
     relation: &RangeVar,
     lockmode: LOCKMODE,
     missing_ok: bool,
-) -> PgResult<Option<RelationData<'mcx>>> {
+) -> PgResult<Option<Relation<'mcx>>> {
     let r = backend_access_common_relation_seams::relation_openrv_extended::call(
         mcx, relation, lockmode, missing_ok,
     )?;
@@ -107,20 +106,20 @@ pub fn table_openrv_extended<'mcx>(
 /// If `lockmode` is not `NoLock`, the specified lock is then released. Note
 /// that it is often sensible to hold a lock beyond `relation_close`; in that
 /// case, the lock is released automatically at xact end.
-pub fn table_close(relation: RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()> {
-    backend_access_common_relation_seams::relation_close::call(relation, lockmode)
+pub fn table_close(relation: Relation<'_>, lockmode: LOCKMODE) -> PgResult<()> {
+    relation.close(lockmode)
 }
 
 /// `validate_relation_kind(r)` (static inline) — make sure relkind is not
 /// index or composite type.
-fn validate_relation_kind(r: &RelationData<'_>) -> PgResult<()> {
+fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
     let relkind = r.rd_rel.relkind;
 
     if relkind == RELKIND_INDEX
         || relkind == RELKIND_PARTITIONED_INDEX
         || relkind == RELKIND_COMPOSITE_TYPE
     {
-        let relname = r.rd_rel.relname.as_str();
+        let relname = r.name();
         let detail =
             backend_catalog_pg_class_seams::errdetail_relkind_not_supported::call(relkind)?;
         return Err(

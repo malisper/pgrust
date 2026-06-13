@@ -12,6 +12,14 @@ pub enum ScanDirection {
 
 pub use ScanDirection::{BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection};
 
+/// `ScanDirectionIsValid(direction)` (sdir.h).
+pub const fn ScanDirectionIsValid(direction: ScanDirection) -> bool {
+    matches!(
+        direction,
+        BackwardScanDirection | NoMovementScanDirection | ForwardScanDirection
+    )
+}
+
 /// `ScanDirectionIsForward(direction)` (sdir.h).
 pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
     matches!(direction, ForwardScanDirection)

@@ -20,8 +20,9 @@
 //!   `MemoryContextDelete(es_query_cxt)` is the drop).
 //! - `ExprContext *` / `ResultRelInfo *` are pool ids ([`EcxtId`]/[`RriId`])
 //!   into EState-owned pools — see `types-nodes::execnodes` for why.
-//! - `Relation` crosses as the relation's `Oid` (the relcache owns the open
-//!   entry); relation field reads go through the relcache owner's seams.
+//! - `Relation` crosses as a [`types_rel::Relation`] handle: `es_relations`
+//!   owns the opens (released at EState teardown or abort-path drop);
+//!   `ri_RelationDesc` and returned relations are aliases of those handles.
 //! - There is no ambient `CurrentMemoryContext`: C call sites that
 //!   `MemoryContextSwitchTo` translate to explicit `Mcx` threading
 //!   (docs/mctx-design.md). Functions whose C result is allocated in the
@@ -32,22 +33,26 @@
 //!   cannot lend across the later `&mut EStateData` uses).
 //!
 //! Calls into unported owners (execTuples.c, execExpr.c, execMain.c,
-//! nodeModifyTable.c, bitmapset.c, attmap.c/tupconvert.c, tableam.c, table.c,
-//! parallel.c, parse_relation.c, partdesc.c, lmgr.c, relcache.c, typcache.c,
-//! miscinit.c, globals.c, mbutils.c, jit.c) go through those owners' seam
-//! crates and panic until the owners land.
+//! nodeModifyTable.c, bitmapset.c, attmap.c/tupconvert.c, relation.c,
+//! parse_relation.c, partdesc.c, lmgr.c, typcache.c, mbutils.c, jit.c) go
+//! through those owners' seam crates and panic until the owners land.
+//! Ported neighbors (table.c, tableam.c) are direct dependencies. Per-backend
+//! globals of unported owners (`work_mem`, `IsParallelWorker`,
+//! `CurrentUserId`) are explicit parameters — callers read them off their
+//! facet/state when the owners land.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+// UnregisterExprContextCallback mirrors the C removal-by-(fn, arg) identity;
+// see DESIGN_DEBT.md (fn items can merge/duplicate across codegen units).
 #![allow(unpredictable_function_pointer_comparisons)]
 
 use backend_access_common_heaptuple::{
     getmissingattr, heap_attisnull, heap_getsysattr, nocachegetattr,
 };
 use backend_access_common_next_seams as tupconvert_seams;
-use backend_access_table_table_seams as table_seams;
-use backend_access_tableam_seams as tableam_seams;
-use backend_access_transam_parallel_seams as parallel_seams;
+use backend_access_table_table as table;
+use backend_access_table_tableam as tableam;
 use backend_executor_execExpr_seams as execExpr_seams;
 use backend_executor_execMain_seams as execMain_seams;
 use backend_executor_execTuples_seams as execTuples_seams;
@@ -57,10 +62,7 @@ use backend_nodes_core_seams as bms_seams;
 use backend_parser_relation_seams as parse_relation_seams;
 use backend_partitioning_core_seams as partdesc_seams;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
-use backend_utils_cache_relcache_seams as relcache_seams;
 use backend_utils_cache_typcache_seams as typcache_seams;
-use backend_utils_init_miscinit_seams as miscinit_seams;
-use backend_utils_init_small_seams as globals_seams;
 use backend_utils_mb_mbutils_seams as mbutils_seams;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
@@ -71,7 +73,8 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execnodes::{
     EStateData, EcxtId, ExprContext, ExprContextCallbackFunction, ExprContext_CB, RriId,
 };
-use types_nodes::nodes::{CmdType, CMD_UPDATE};
+use types_nodes::nodes::CMD_UPDATE;
+use types_rel::Relation;
 use types_nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
@@ -98,9 +101,11 @@ pub const ALLOCSET_DEFAULT_MAXSIZE: usize = 8 * 1024 * 1024;
 
 /// `pg_prevpower2_size_t(num)` (pg_bitutils.h): the largest power of two less
 /// than or equal to `num`. The C is undefined for 0 (`pg_leftmost_one_pos`
-/// asserts non-zero); mirrored as a debug assertion.
+/// asserts non-zero); mirrored as a debug assertion. Private: the helper
+/// belongs to port/pg_bitutils.h, not this unit's interface — it moves to
+/// the common bit-utils home when one exists.
 #[inline]
-pub fn pg_prevpower2_size_t(num: usize) -> usize {
+fn pg_prevpower2_size_t(num: usize) -> usize {
     debug_assert!(num > 0, "pg_prevpower2_size_t is undefined for 0");
     if num == 0 {
         return 0;
@@ -155,15 +160,19 @@ pub fn CreateExecutorState(parent: &MemoryContext) -> PgResult<ExecutorState> {
 /// or buffer pins, but shuts down any still-active ExprContexts (running
 /// their shutdown callbacks) and deallocates JITed expressions — sufficient
 /// cleanup where the EState was only used for expression evaluation.
-pub fn FreeExecutorState(mut estate: ExecutorState) {
-    estate.with_mut(|estate| {
+///
+/// Fallible: the shutdown callbacks run in ereport-capable code (in C an
+/// error here escapes mid-teardown). The per-query context is freed either
+/// way (the consumed bundle drops).
+pub fn FreeExecutorState(mut estate: ExecutorState) -> PgResult<()> {
+    let result = estate.with_mut(|estate| {
         // Shut down and free any remaining ExprContexts, so any remaining
         // shutdown callbacks get called. C: `while (estate->es_exprcontexts)
         // FreeExprContext(linitial(...), true)` — newest first (lcons order);
         // the pool equivalent is highest index first.
         for i in (0..estate.es_exprcontexts.len()).rev() {
             if estate.es_exprcontexts[i].is_some() {
-                FreeExprContext(estate, EcxtId(i as u32), true);
+                FreeExprContext(estate, EcxtId(i as u32), true)?;
             }
         }
 
@@ -177,11 +186,13 @@ pub fn FreeExecutorState(mut estate: ExecutorState) {
         if let Some(pdir) = estate.es_partition_directory.0.take() {
             partdesc_seams::destroy_partition_directory::call(pdir);
         }
+        Ok(())
     });
 
     // Free the per-query memory context, thereby releasing all working
     // memory, including the EState node itself.
     drop(estate);
+    result
 }
 
 /// Internal implementation for `CreateExprContext()` and
@@ -249,9 +260,12 @@ pub fn CreateExprContext(estate: &mut EStateData<'_>) -> PgResult<EcxtId> {
 /// AllocSet sizes to be reasonable in proportion to `work_mem`. If the
 /// maximum block allocation size is too large, it's easy to skip right past
 /// `work_mem` with a single allocation.
-pub fn CreateWorkExprContext(estate: &mut EStateData<'_>) -> PgResult<EcxtId> {
-    let mut max_block_size =
-        pg_prevpower2_size_t(globals_seams::work_mem::call() as usize * 1024 / 16);
+///
+/// `work_mem_kb` is the C `work_mem` GUC (globals.c, in KB) — an explicit
+/// parameter, not an ambient global; the caller reads it off its own
+/// facet/state when the GUC owner lands.
+pub fn CreateWorkExprContext(estate: &mut EStateData<'_>, work_mem_kb: i32) -> PgResult<EcxtId> {
+    let mut max_block_size = pg_prevpower2_size_t(work_mem_kb as usize * 1024 / 16);
 
     // But no bigger than ALLOCSET_DEFAULT_MAXSIZE
     max_block_size = core::cmp::min(max_block_size, ALLOCSET_DEFAULT_MAXSIZE);
@@ -304,21 +318,26 @@ pub fn CreateStandaloneExprContext<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ExprContext
 ///
 /// If `is_commit` is false, we are being called in error cleanup, and should
 /// not call callbacks but only release memory.
-pub fn FreeExprContext(estate: &mut EStateData<'_>, econtext: EcxtId, is_commit: bool) {
+pub fn FreeExprContext(
+    estate: &mut EStateData<'_>,
+    econtext: EcxtId,
+    is_commit: bool,
+) -> PgResult<()> {
     // Call any registered callbacks.
-    ShutdownExprContext(estate.ecxt_mut(econtext), is_commit);
+    ShutdownExprContext(estate.ecxt_mut(econtext), is_commit)?;
     // And clean up the memory used (MemoryContextDelete of the per-tuple
     // context), unlink self from the owning EState (list_delete_ptr), and
     // delete the ExprContext node (pfree): dropping the pool entry is all
     // three; the tombstone keeps other EcxtIds stable.
     estate.es_exprcontexts[econtext.0 as usize] = None;
+    Ok(())
 }
 
 /// [`FreeExprContext`] for a standalone context (the C `FreeExprContext` with
 /// `econtext->ecxt_estate == NULL`): consumes the value.
-pub fn FreeStandaloneExprContext(mut econtext: ExprContext<'_>, is_commit: bool) {
+pub fn FreeStandaloneExprContext(mut econtext: ExprContext<'_>, is_commit: bool) -> PgResult<()> {
     // Call any registered callbacks.
-    ShutdownExprContext(&mut econtext, is_commit);
+    ShutdownExprContext(&mut econtext, is_commit)
     // And clean up the memory used / delete the node: the drop.
 }
 
@@ -326,11 +345,12 @@ pub fn FreeStandaloneExprContext(mut econtext: ExprContext<'_>, is_commit: bool)
 /// rescan of its plan node. This requires calling any registered shutdown
 /// callbacks, since any partially complete set-returning-functions must be
 /// canceled.
-pub fn ReScanExprContext(econtext: &mut ExprContext<'_>) {
+pub fn ReScanExprContext(econtext: &mut ExprContext<'_>) -> PgResult<()> {
     // Call any registered callbacks
-    ShutdownExprContext(econtext, true);
+    ShutdownExprContext(econtext, true)?;
     // And clean up the memory used
     econtext.ecxt_per_tuple_memory.reset();
+    Ok(())
 }
 
 /// `ResetExprContext(econtext)` (executor.h macro):
@@ -646,22 +666,25 @@ pub fn ExecRelationIsTargetRelation(estate: &EStateData<'_>, scanrelid: Index) -
 
 /// `ExecOpenScanRelation` — open the heap relation to be scanned by a
 /// base-level scan plan node. This should be called during the node's
-/// ExecInit routine. Returns the open relation (as its OID).
-pub fn ExecOpenScanRelation(
-    estate: &mut EStateData<'_>,
+/// ExecInit routine. Returns an alias of the open relation (the handle is
+/// owned by `es_relations`).
+///
+/// `is_parallel_worker` is the C `IsParallelWorker()` global (parallel.c) —
+/// an explicit parameter, passed through to [`ExecGetRangeTableRelation`].
+pub fn ExecOpenScanRelation<'mcx>(
+    estate: &mut EStateData<'mcx>,
     scanrelid: Index,
     eflags: i32,
-) -> PgResult<Oid> {
+    is_parallel_worker: bool,
+) -> PgResult<Relation<'mcx>> {
     // Open the relation.
-    let rel = ExecGetRangeTableRelation(estate, scanrelid, false)?;
+    let rel = ExecGetRangeTableRelation(estate, scanrelid, false, is_parallel_worker)?;
 
     // Complain if we're attempting a scan of an unscannable relation, except
     // when the query won't actually be run. This is a slightly klugy place
     // to do this, perhaps, but there is no better place.
-    if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA)) == 0
-        && !relcache_seams::relation_rd_rel_relispopulated::call(rel)?
-    {
-        let relname = relcache_seams::relation_get_relation_name::call(rel)?;
+    if (eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA)) == 0 && !rel.is_scannable() {
+        let relname = rel.name();
         return Err(PgError::error(format!(
             "materialized view \"{relname}\" has not been populated"
         ))
@@ -706,10 +729,10 @@ pub fn ExecInitRangeTable<'mcx>(
     relations.resize_with(estate.es_range_table_size, || None);
     estate.es_relations = relations;
 
-    // es_result_relations and es_rowmarks are also parallel to
-    // es_range_table, but are allocated only if needed.
+    // es_result_relations (and, in C, es_rowmarks — a field with no consumer
+    // here yet) are also parallel to es_range_table, but are allocated only
+    // if needed.
     estate.es_result_relations = PgVec::new_in(mcx);
-    estate.es_rowmarks = PgVec::new_in(mcx);
     Ok(())
 }
 
@@ -728,11 +751,16 @@ pub fn exec_rt_fetch<'a>(rti: Index, estate: &'a EStateData<'_>) -> &'a RangeTbl
 /// caller must ensure that `rti` refers to an unpruned relation before
 /// calling this function — attempting to open a pruned relation for scanning
 /// results in an error.
-pub fn ExecGetRangeTableRelation(
-    estate: &mut EStateData<'_>,
+///
+/// `is_parallel_worker` is the C `IsParallelWorker()` global (parallel.c) —
+/// an explicit parameter; the caller reads it off its own facet/state when
+/// the parallel owner lands.
+pub fn ExecGetRangeTableRelation<'mcx>(
+    estate: &mut EStateData<'mcx>,
     rti: Index,
     is_result_rel: bool,
-) -> PgResult<Oid> {
+    is_parallel_worker: bool,
+) -> PgResult<Relation<'mcx>> {
     debug_assert!(rti > 0 && rti as usize <= estate.es_range_table_size);
 
     if !is_result_rel
@@ -748,17 +776,17 @@ pub fn ExecGetRangeTableRelation(
         let rte = exec_rt_fetch(rti, estate);
         debug_assert_eq!(rte.rtekind, RTE_RELATION);
         let (relid, rellockmode) = (rte.relid, rte.rellockmode);
-        // The opened carrier lives in the per-query context, owned by the
+        // The opened handle lives in the per-query context, owned by the
         // EState (C: es_relations holds the Relation pointers).
         let mcx = estate.es_query_cxt;
 
-        let rel = if !parallel_seams::is_parallel_worker::call() {
+        let rel = if !is_parallel_worker {
             // In a normal query, we should already have the appropriate
             // lock, but verify that through an Assert. Since there's already
             // an Assert inside table_open that insists on holding some lock,
             // it seems sufficient to check this only when rellockmode is
             // higher than the minimum.
-            let rel = table_seams::table_open::call(mcx, relid, NoLock)?;
+            let rel = table::table_open(mcx, relid, NoLock)?;
             debug_assert!(
                 rellockmode == AccessShareLock
                     || lmgr_seams::check_relation_locked_by_me::call(
@@ -770,7 +798,7 @@ pub fn ExecGetRangeTableRelation(
             // If we are a parallel worker, we need to obtain our own local
             // lock on the relation. This ensures sane behavior in case the
             // parent process exits before we do.
-            table_seams::table_open::call(mcx, relid, rellockmode)?
+            table::table_open(mcx, relid, rellockmode)?
         };
 
         estate.es_relations[idx] = Some(rel);
@@ -779,7 +807,7 @@ pub fn ExecGetRangeTableRelation(
     Ok(estate.es_relations[idx]
         .as_ref()
         .expect("just opened above")
-        .rd_id)
+        .alias())
 }
 
 /// `ExecInitResultRelation` — open the relation given by the passed-in RT
@@ -789,8 +817,12 @@ pub fn ExecGetRangeTableRelation(
 ///
 /// The C takes a caller-allocated `ResultRelInfo *`; the owned model
 /// allocates the node in the EState's pool and returns its id.
-pub fn ExecInitResultRelation(estate: &mut EStateData<'_>, rti: Index) -> PgResult<RriId> {
-    let result_relation_desc = ExecGetRangeTableRelation(estate, rti, true)?;
+pub fn ExecInitResultRelation(
+    estate: &mut EStateData<'_>,
+    rti: Index,
+    is_parallel_worker: bool,
+) -> PgResult<RriId> {
+    let result_relation_desc = ExecGetRangeTableRelation(estate, rti, true, is_parallel_worker)?;
 
     // InitResultRelInfo(resultRelInfo, resultRelationDesc, rti, NULL,
     //                   estate->es_instrument);
@@ -939,22 +971,25 @@ pub fn UnregisterExprContextCallback(
 /// If `is_commit` is false, just clean the callback list but don't call 'em.
 ///
 /// The C runs the callbacks inside `ecxt_per_tuple_memory` so any leak is
-/// mopped up; there is no ambient context here — callbacks allocate through
-/// handles they capture.
-fn ShutdownExprContext(econtext: &mut ExprContext<'_>, is_commit: bool) {
+/// mopped up; here that context is passed to the callback explicitly. A
+/// callback may `ereport(ERROR)`: as in C, the error propagates with the
+/// already-popped entries gone and the rest of the list still in place.
+fn ShutdownExprContext(econtext: &mut ExprContext<'_>, is_commit: bool) -> PgResult<()> {
     // Fast path in normal case where there's nothing to do.
     if econtext.ecxt_callbacks.is_none() {
-        return;
+        return Ok(());
     }
 
-    // Call each callback function in reverse registration order.
+    // Call each callback function in reverse registration order, inside the
+    // per-tuple memory context (passed as the callback's allocation target).
     while let Some(mut ecxt_callback) = econtext.ecxt_callbacks.take() {
         econtext.ecxt_callbacks = ecxt_callback.next.take();
         if is_commit {
-            (ecxt_callback.function)(ecxt_callback.arg);
+            (ecxt_callback.function)(econtext.ecxt_per_tuple_memory.mcx(), ecxt_callback.arg)?;
         }
         // pfree(ecxt_callback): drop
     }
+    Ok(())
 }
 
 // ===========================================================================
@@ -1127,12 +1162,12 @@ pub fn ExecCleanTargetListLength(targetlist: &[TargetEntry<'_>]) -> i32 {
 /// extra slot over the relation's descriptor with its table-AM slot
 /// callbacks, allocated in the per-query context (the C
 /// `MemoryContextSwitchTo(estate->es_query_cxt)` wrapper).
-fn make_rel_extra_slot(estate: &mut EStateData<'_>, rel: Oid) -> PgResult<SlotId> {
+fn make_rel_extra_slot(estate: &mut EStateData<'_>, rel: &Relation<'_>) -> PgResult<SlotId> {
     let mcx = estate.es_query_cxt;
-    // RelationGetDescr(rel) — cloned out of the relcache into the per-query
-    // context.
-    let tupdesc = relcache_seams::relation_rd_att::call(mcx, rel)?;
-    let callbacks = tableam_seams::table_slot_callbacks::call(rel)?;
+    // RelationGetDescr(rel) — cloned into the per-query context (the slot
+    // owns its copy).
+    let tupdesc = Some(alloc_in(mcx, rel.rd_att.clone_in(mcx)?)?);
+    let callbacks = tableam::table_slot_callbacks(rel);
     execTuples_seams::exec_init_extra_tuple_slot::call(estate, tupdesc, callbacks)
 }
 
@@ -1143,8 +1178,10 @@ pub fn ExecGetTriggerOldSlot(estate: &mut EStateData<'_>, rel_info: RriId) -> Pg
         let rel = estate
             .result_rel(rel_info)
             .ri_RelationDesc
-            .expect("ExecGetTriggerOldSlot: ResultRelInfo has no relation");
-        let slot = make_rel_extra_slot(estate, rel)?;
+            .as_ref()
+            .expect("ExecGetTriggerOldSlot: ResultRelInfo has no relation")
+            .alias();
+        let slot = make_rel_extra_slot(estate, &rel)?;
         estate.result_rel_mut(rel_info).ri_TrigOldSlot = Some(slot);
     }
     Ok(estate
@@ -1160,8 +1197,10 @@ pub fn ExecGetTriggerNewSlot(estate: &mut EStateData<'_>, rel_info: RriId) -> Pg
         let rel = estate
             .result_rel(rel_info)
             .ri_RelationDesc
-            .expect("ExecGetTriggerNewSlot: ResultRelInfo has no relation");
-        let slot = make_rel_extra_slot(estate, rel)?;
+            .as_ref()
+            .expect("ExecGetTriggerNewSlot: ResultRelInfo has no relation")
+            .alias();
+        let slot = make_rel_extra_slot(estate, &rel)?;
         estate.result_rel_mut(rel_info).ri_TrigNewSlot = Some(slot);
     }
     Ok(estate
@@ -1177,8 +1216,10 @@ pub fn ExecGetReturningSlot(estate: &mut EStateData<'_>, rel_info: RriId) -> PgR
         let rel = estate
             .result_rel(rel_info)
             .ri_RelationDesc
-            .expect("ExecGetReturningSlot: ResultRelInfo has no relation");
-        let slot = make_rel_extra_slot(estate, rel)?;
+            .as_ref()
+            .expect("ExecGetReturningSlot: ResultRelInfo has no relation")
+            .alias();
+        let slot = make_rel_extra_slot(estate, &rel)?;
         estate.result_rel_mut(rel_info).ri_ReturningSlot = Some(slot);
     }
     Ok(estate
@@ -1197,8 +1238,10 @@ pub fn ExecGetAllNullSlot(estate: &mut EStateData<'_>, rel_info: RriId) -> PgRes
         let rel = estate
             .result_rel(rel_info)
             .ri_RelationDesc
-            .expect("ExecGetAllNullSlot: ResultRelInfo has no relation");
-        let slot = make_rel_extra_slot(estate, rel)?;
+            .as_ref()
+            .expect("ExecGetAllNullSlot: ResultRelInfo has no relation")
+            .alias();
+        let slot = make_rel_extra_slot(estate, &rel)?;
         execTuples_seams::exec_store_all_null_tuple::call(estate, slot)?;
         estate.result_rel_mut(rel_info).ri_AllNullSlot = Some(slot);
     }
@@ -1231,20 +1274,22 @@ pub fn ExecGetChildToRootMap<'a, 'mcx>(
                 let child_rel = estate
                     .result_rel(result_rel_info)
                     .ri_RelationDesc
-                    .expect("ExecGetChildToRootMap: ResultRelInfo has no relation");
+                    .as_ref()
+                    .expect("ExecGetChildToRootMap: ResultRelInfo has no relation")
+                    .alias();
                 let root_rel = estate
                     .result_rel(root)
                     .ri_RelationDesc
-                    .expect("ExecGetChildToRootMap: root ResultRelInfo has no relation");
+                    .as_ref()
+                    .expect("ExecGetChildToRootMap: root ResultRelInfo has no relation")
+                    .alias();
                 let mcx = estate.es_query_cxt;
                 // convert_tuples_by_name(RelationGetDescr(child),
                 //                        RelationGetDescr(root))
-                let indesc = relcache_seams::relation_rd_att::call(mcx, child_rel)?;
-                let outdesc = relcache_seams::relation_rd_att::call(mcx, root_rel)?;
                 let map = tupconvert_seams::convert_tuples_by_name::call(
                     mcx,
-                    indesc.as_deref().expect("relation has no descriptor"),
-                    outdesc.as_deref().expect("relation has no descriptor"),
+                    &child_rel.rd_att,
+                    &root_rel.rd_att,
                 )?;
                 estate.result_rel_mut(result_rel_info).ri_ChildToRootMap = map;
             }
@@ -1283,27 +1328,31 @@ pub fn ExecGetRootToChildMap<'a, 'mcx>(
         let child_rel = estate
             .result_rel(result_rel_info)
             .ri_RelationDesc
-            .expect("ExecGetRootToChildMap: ResultRelInfo has no relation");
+            .as_ref()
+            .expect("ExecGetRootToChildMap: ResultRelInfo has no relation")
+            .alias();
         let root_rel = estate
             .result_rel(root)
             .ri_RelationDesc
-            .expect("ExecGetRootToChildMap: root ResultRelInfo has no relation");
+            .as_ref()
+            .expect("ExecGetRootToChildMap: root ResultRelInfo has no relation")
+            .alias();
         let mcx = estate.es_query_cxt;
-
-        let indesc = relcache_seams::relation_rd_att::call(mcx, root_rel)?;
-        let outdesc = relcache_seams::relation_rd_att::call(mcx, child_rel)?;
 
         // When this child table is not a partition (!relispartition), it may
         // have columns that are not present in the root table, which we ask
         // to ignore by passing true for missing_ok.
-        let relispartition = relcache_seams::relation_rd_rel_relispartition::call(child_rel)?;
+        let relispartition = child_rel.rd_rel.relispartition;
         let attr_map = tupconvert_seams::build_attrmap_by_name_if_req::call(
             mcx,
-            indesc.as_deref().expect("relation has no descriptor"),
-            outdesc.as_deref().expect("relation has no descriptor"),
+            &root_rel.rd_att,
+            &child_rel.rd_att,
             !relispartition,
         )?;
         if let Some(attr_map) = attr_map {
+            // The owned descriptors move into the map.
+            let indesc = Some(alloc_in(mcx, root_rel.rd_att.clone_in(mcx)?)?);
+            let outdesc = Some(alloc_in(mcx, child_rel.rd_att.clone_in(mcx)?)?);
             let map = tupconvert_seams::convert_tuples_by_name_attrmap::call(
                 mcx, indesc, outdesc, attr_map,
             )?;
@@ -1431,7 +1480,7 @@ pub fn ExecGetExtraUpdatedCols<'r>(
 ) -> PgResult<Option<PgBox<'r, Bitmapset<'r>>>> {
     // Compute the info if we didn't already
     if !estate.result_rel(rel_info).ri_extraUpdatedCols_valid {
-        modifytable_seams::exec_init_generated::call(estate, rel_info, CMD_UPDATE as CmdType)?;
+        modifytable_seams::exec_init_generated::call(estate, rel_info, CMD_UPDATE)?;
     }
     copy_cols(
         mcx,
@@ -1460,13 +1509,22 @@ pub fn ExecGetAllUpdatedCols<'r>(
 /// `ExecGetResultRelCheckAsUser` — returns the user to modify the passed-in
 /// result relation as, chosen by looking up the relation's or, if a child
 /// table, its root parent's RTEPermissionInfo.
-pub fn ExecGetResultRelCheckAsUser(estate: &EStateData<'_>, rel_info: RriId) -> PgResult<Oid> {
+///
+/// `current_user_id` is the C `GetUserId()` per-backend global (miscinit.c)
+/// — an explicit parameter; the caller reads it off its own facet/state when
+/// the miscinit owner lands.
+pub fn ExecGetResultRelCheckAsUser(
+    estate: &EStateData<'_>,
+    rel_info: RriId,
+    current_user_id: Oid,
+) -> PgResult<Oid> {
     let Some(pi) = GetResultRTEPermissionInfo(estate, rel_info)? else {
         // XXX - maybe ok to return GetUserId() in this case?
         let relid = estate
             .result_rel(rel_info)
             .ri_RelationDesc
-            .unwrap_or(InvalidOid);
+            .as_ref()
+            .map_or(InvalidOid, |r| r.rd_id);
         return Err(PgError::error(format!(
             "no RTEPermissionInfo found for result relation with OID {relid}"
         )));
@@ -1476,7 +1534,7 @@ pub fn ExecGetResultRelCheckAsUser(estate: &EStateData<'_>, rel_info: RriId) -> 
     Ok(if check_as_user != InvalidOid {
         check_as_user
     } else {
-        miscinit_seams::get_user_id::call()
+        current_user_id
     })
 }
 

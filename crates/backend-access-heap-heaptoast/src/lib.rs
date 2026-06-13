@@ -15,8 +15,9 @@
 //!   * a tuple travels as [`FormedTuple`] (owned header + user-data area); a
 //!     per-attribute `Datum` is [`TupleValue`] (`ByVal` scalar / `ByRef`
 //!     verbatim datum bytes, varlena header included);
-//!   * relations cross as their `Oid`; `rel.h` field reads go through the
-//!     by-OID relcache seams;
+//!   * relations cross as [`types_rel::Relation`] handles; `rel.h` field
+//!     reads are plain field reads on the trimmed `RelationData` (foreign
+//!     seams that key on the relation still take `rd_id`);
 //!   * the TOAST pass context is the transparent owned
 //!     [`ToastTupleContext`], a local value threaded `&mut` through the
 //!     `toast_helper.c` seams exactly as C threads `&ttc`;
@@ -36,15 +37,15 @@ extern crate alloc;
 mod tests;
 
 use alloc::format;
-use alloc::string::String;
 
 use backend_access_common_heaptuple::{
     heap_compute_data_size, heap_deform_tuple, heap_form_tuple, nocachegetattr, FormedTuple,
     HeapTupleError, TupleValue,
 };
 use backend_utils_error::ereport;
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
+use types_rel::Relation;
 use types_datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
@@ -70,7 +71,6 @@ use backend_access_common_detoast_seams as detoast_seams;
 use backend_access_common_toast_internals_seams as toast_internals_seams;
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_toast_helper_seams as toast_helper_seams;
-use backend_utils_cache_relcache_seams as relcache_seams;
 
 // ---------------------------------------------------------------------------
 // heaptoast.h — TOAST thresholds (derived exactly as the C macros derive
@@ -237,7 +237,7 @@ fn ScanKeyInit(
 /// toast-entries on DELETE. `mcx` holds the deform temporaries.
 pub fn heap_toast_delete(
     mcx: Mcx<'_>,
-    rel: Oid,
+    rel: &Relation<'_>,
     oldtup: &FormedTuple<'_>,
     is_speculative: bool,
 ) -> PgResult<()> {
@@ -251,14 +251,14 @@ pub fn heap_toast_delete(
     // heap_getattr() only the varlena columns. heap_deform_tuple costs only
     // O(N) while the heap_getattr way would cost O(N^2) if there are many
     // varlena columns, so it seems better to err on the side of linear cost.
-    let tuple_desc = rel_rd_att(mcx, rel)?;
+    let tuple_desc = &rel.rd_att;
 
     debug_assert!(tuple_desc.natts <= MaxHeapAttributeNumber);
-    let (toast_values, toast_isnull) = deform_split(mcx, oldtup, &tuple_desc)?;
+    let (toast_values, toast_isnull) = deform_split(mcx, oldtup, tuple_desc)?;
 
     // Do the real work.
     toast_internals_seams::toast_delete_external::call(
-        rel,
+        rel.rd_id,
         &toast_values,
         &toast_isnull,
         is_speculative,
@@ -279,7 +279,7 @@ pub fn heap_toast_delete(
 /// built modified tuple allocated in `mcx`. Neither input tuple is modified.
 pub fn heap_toast_insert_or_update<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: Oid,
+    rel: &Relation<'_>,
     newtup: &FormedTuple<'_>,
     oldtup: Option<&FormedTuple<'_>>,
     mut options: i32,
@@ -293,22 +293,21 @@ pub fn heap_toast_insert_or_update<'mcx>(
     // Assert(rel->rd_rel->relkind == RELKIND_RELATION || RELKIND_MATVIEW);
 
     // Get the tuple descriptor and break down the tuple(s) into fields.
-    let tuple_desc = rel_rd_att(mcx, rel)?;
+    let tuple_desc = &rel.rd_att;
     let num_attrs = tuple_desc.natts;
 
     debug_assert!(num_attrs <= MaxHeapAttributeNumber);
-    let (toast_values, toast_isnull) = deform_split(mcx, newtup, &tuple_desc)?;
+    let (toast_values, toast_isnull) = deform_split(mcx, newtup, tuple_desc)?;
     let (toast_oldvalues, toast_oldisnull) = match oldtup {
         Some(otup) => {
-            let (v, n) = deform_split(mcx, otup, &tuple_desc)?;
+            let (v, n) = deform_split(mcx, otup, tuple_desc)?;
             (Some(v), Some(n))
         }
         None => (None, None),
     };
 
-    // `rel->rd_rel->reltoastrelid` — C re-reads the field in each loop
-    // condition; the field cannot change during the call, so read it once.
-    let reltoastrelid = relcache_seams::relation_reltoastrelid::call(rel)?;
+    // rel->rd_rel->reltoastrelid
+    let reltoastrelid = rel.rd_rel.reltoastrelid;
 
     // Prepare for toasting.
     let mut ttc_attr: PgVec<'_, ToastAttrInfo<'_>> =
@@ -317,7 +316,7 @@ pub fn heap_toast_insert_or_update<'mcx>(
         ttc_attr.push(ToastAttrInfo::empty());
     }
     let mut ttc = ToastTupleContext {
-        ttc_rel: rel,
+        ttc_rel: rel.rd_id,
         ttc_values: toast_values,
         ttc_isnull: toast_isnull,
         ttc_oldvalues: toast_oldvalues,
@@ -343,7 +342,7 @@ pub fn heap_toast_insert_or_update<'mcx>(
     // Now convert to a limit on the tuple data size. C performs the
     // subtraction in unsigned `Size`, so wrap rather than checked-subtract.
     let mut max_data_len: usize =
-        (relcache_seams::relation_get_toast_tuple_target::call(rel, TOAST_TUPLE_TARGET)? as usize)
+        (rel.get_toast_tuple_target(TOAST_TUPLE_TARGET) as usize)
             .wrapping_sub(hoff);
 
     // Round 1: compress EXTENDED attributes; push very large EXTENDED /
@@ -649,7 +648,7 @@ pub fn toast_build_flattened_tuple<'mcx>(
 /// bytes), which this fills. `mcx` holds the scan temporaries.
 pub fn heap_fetch_toast_slice(
     mcx: Mcx<'_>,
-    toastrel: Oid,
+    toastrel: &Relation<'_>,
     valueid: Oid,
     attrsize: i32,
     sliceoffset: i32,
@@ -661,7 +660,7 @@ pub fn heap_fetch_toast_slice(
         ScanKeyData::empty(),
         ScanKeyData::empty(),
     ];
-    let toasttup_desc = rel_rd_att(mcx, toastrel)?;
+    let toasttup_desc = &toastrel.rd_att;
 
     // C: ((attrsize - 1) / TOAST_MAX_CHUNK_SIZE) + 1; TOAST_MAX_CHUNK_SIZE is
     // a Size expression, so the arithmetic is unsigned in C — wrap to match.
@@ -671,7 +670,7 @@ pub fn heap_fetch_toast_slice(
 
     // Look for the valid index of toast relation.
     let (toastidxs, valid_index) =
-        toast_internals_seams::toast_open_indexes::call(mcx, toastrel, AccessShareLock)?;
+        toast_internals_seams::toast_open_indexes::call(mcx, toastrel.rd_id, AccessShareLock)?;
 
     let startchunk: i32 =
         (sliceoffset as usize).wrapping_div(TOAST_MAX_CHUNK_SIZE as usize) as i32;
@@ -722,7 +721,7 @@ pub fn heap_fetch_toast_slice(
     // Prepare for scan.
     let snapshot = toast_internals_seams::get_toast_snapshot::call()?;
     let toastscan = genam_seams::systable_beginscan_ordered::call(
-        toastrel,
+        toastrel.rd_id,
         toastidxs[valid_index as usize],
         snapshot,
         &toastkey[..nscankeys],
@@ -736,7 +735,7 @@ pub fn heap_fetch_toast_slice(
         genam_seams::systable_getnext_ordered::call(mcx, toastscan, ForwardScanDirection)?
     {
         // Have a chunk, extract the sequence number and the data.
-        let (cur_value, isnull) = fastgetattr(mcx, &ttup, 2, &toasttup_desc)?;
+        let (cur_value, isnull) = fastgetattr(mcx, &ttup, 2, toasttup_desc)?;
         debug_assert!(!isnull);
         // DatumGetInt32(...): the chunk-index column is int4 (by value).
         let curchunk: i32 = match cur_value {
@@ -747,7 +746,7 @@ pub fn heap_fetch_toast_slice(
                     .errmsg_internal(format!(
                         "toast chunk-index column is not by-value for toast value {} in {}",
                         valueid,
-                        relation_name(toastrel)?
+                        toastrel.name()
                     ))
                     .into_error());
             }
@@ -763,7 +762,7 @@ pub fn heap_fetch_toast_slice(
                     .errmsg_internal(format!(
                         "toast chunk-data column is not by-reference for toast value {} in {}",
                         valueid,
-                        relation_name(toastrel)?
+                        toastrel.name()
                     ))
                     .into_error());
             }
@@ -787,7 +786,7 @@ pub fn heap_fetch_toast_slice(
                 .errmsg_internal(format!(
                     "found toasted toast chunk for toast value {} in {}",
                     valueid,
-                    relation_name(toastrel)?
+                    toastrel.name()
                 ))
                 .into_error());
         };
@@ -801,7 +800,7 @@ pub fn heap_fetch_toast_slice(
                     curchunk,
                     expectedchunk,
                     valueid,
-                    relation_name(toastrel)?
+                    toastrel.name()
                 ))
                 .into_error());
         }
@@ -814,7 +813,7 @@ pub fn heap_fetch_toast_slice(
                     startchunk,
                     endchunk,
                     valueid,
-                    relation_name(toastrel)?
+                    toastrel.name()
                 ))
                 .into_error());
         }
@@ -837,7 +836,7 @@ pub fn heap_fetch_toast_slice(
                     curchunk,
                     totalchunks,
                     valueid,
-                    relation_name(toastrel)?
+                    toastrel.name()
                 ))
                 .into_error());
         }
@@ -875,7 +874,7 @@ pub fn heap_fetch_toast_slice(
                 "missing chunk number {} for toast value {} in {}",
                 expectedchunk,
                 valueid,
-                relation_name(toastrel)?
+                toastrel.name()
             ))
             .into_error());
     }
@@ -921,23 +920,6 @@ fn fastgetattr<'mcx>(
 #[inline]
 fn att_isnull(att: usize, bits: &[u8]) -> bool {
     (bits[att >> 3] & (1 << (att & 7))) == 0
-}
-
-/// `rel->rd_att` (`RelationGetDescr`) via the by-OID relcache seam (the
-/// descriptor is cloned into `mcx`; the relcache owns the original). A
-/// missing descriptor is the C macro's NULL deref: an honest error.
-fn rel_rd_att<'mcx>(mcx: Mcx<'mcx>, rel: Oid) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-    relcache_seams::relation_rd_att::call(mcx, rel)?.ok_or_else(|| {
-        PgError::error(format!(
-            "RelationGetDescr: relation {rel} has no tuple descriptor (rd_att not built)"
-        ))
-    })
-}
-
-/// `RelationGetRelationName(rel)` via the by-OID relcache seam (used only in
-/// the corruption messages of [`heap_fetch_toast_slice`]).
-fn relation_name(rel: Oid) -> PgResult<String> {
-    relcache_seams::relation_get_relation_name::call(rel)
 }
 
 /// Split the deformed columns into the parallel `(values, isnull)` arrays C's

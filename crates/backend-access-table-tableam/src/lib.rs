@@ -6,9 +6,9 @@
 //!
 //! The dispatch model mirrors C: `relation->rd_tableam` is a vtable
 //! ([`types_tableam::TableAmRoutine`], fetched through the relcache owner's
-//! seam) whose callbacks the wrappers invoke. The open relation crosses as
-//! its `Oid`; scan and index-fetch descriptors are owned values created by
-//! the AM.
+//! seam) whose callbacks the wrappers invoke. The open relation crosses as a
+//! [`types_rel::Relation`] handle; scan and index-fetch descriptors are
+//! owned values created by the AM.
 //!
 //! `default_table_access_method` and `synchronize_seqscans` are this unit's
 //! GUC globals — backend-local state, so `thread_local!`.
@@ -24,9 +24,10 @@ use std::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::{
-    BlockNumber, ForkNumber, Oid, BLCKSZ, InvalidBlockNumber, InvalidForkNumber, FSM_FORKNUM,
+    BlockNumber, ForkNumber, BLCKSZ, InvalidBlockNumber, InvalidForkNumber, FSM_FORKNUM,
     MAIN_FORKNUM, MaxBlockNumber, VISIBILITYMAP_FORKNUM,
 };
+use types_rel::Relation;
 use types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_nodes::{TupleSlotKind, TupleTableSlot};
@@ -41,9 +42,7 @@ use types_tableam::tableam::{
     BulkInsertStateData, IndexFetchTableData, LockTupleMode, LockTupleNoKeyExclusive, Snapshot,
     TM_FailureData, TM_Result, TU_UpdateIndexes, TableAmRoutine,
 };
-use types_tuple::access::{
-    RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_VIEW, RELPERSISTENCE_TEMP,
-};
+use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_VIEW};
 use types_tuple::heaptuple::ItemPointerData;
 
 use backend_utils_cache_relcache_seams as relcache;
@@ -106,7 +105,7 @@ pub fn set_synchronize_seqscans(value: bool) {
 
 /// `relation->rd_tableam` where C dereferences it unconditionally: a missing
 /// vtable is the C NULL-pointer crash, so panic loudly.
-fn am(relation: Oid) -> TableAmRoutine {
+fn am(relation: &Relation<'_>) -> TableAmRoutine {
     relcache::relation_rd_tableam::call(relation)
         .expect("relation has no table access method (C would dereference NULL rd_tableam)")
 }
@@ -151,10 +150,10 @@ fn pg_nextpower2_32(num: u32) -> u32 {
 
 /// `table_slot_callbacks(relation)` — which slot callbacks (here: which slot
 /// class) suit the relation.
-pub fn table_slot_callbacks(relation: Oid) -> TupleSlotKind {
+pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
     if let Some(am) = relcache::relation_rd_tableam::call(relation) {
         (am.slot_callbacks)(relation)
-    } else if relcache::relation_relkind::call(relation) == RELKIND_FOREIGN_TABLE {
+    } else if relation.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
         // Historically FDWs expect to store heap tuples in slots. Continue
         // handing them one, to make it less painful to adapt FDWs to new
         // versions. The cost of a heap slot over a virtual slot is pretty
@@ -166,7 +165,7 @@ pub fn table_slot_callbacks(relation: Oid) -> TupleSlotKind {
         // centralize the knowledge that a heap slot is the right thing in
         // that case here.
         debug_assert!({
-            let relkind = relcache::relation_relkind::call(relation);
+            let relkind = relation.rd_rel.relkind;
             relkind == RELKIND_VIEW || relkind == RELKIND_PARTITIONED_TABLE
         });
         TupleSlotKind::Virtual
@@ -180,9 +179,12 @@ pub fn table_slot_callbacks(relation: Oid) -> TupleSlotKind {
 /// `lappend` so the caller can drop it later; in the owned model the caller
 /// owns the returned slot and registers it itself (push it onto the list
 /// standing in for `*reglist`).
-pub fn table_slot_create<'mcx>(mcx: Mcx<'mcx>, relation: Oid) -> PgResult<TupleTableSlot> {
+pub fn table_slot_create<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'_>,
+) -> PgResult<TupleTableSlot> {
     let tts_cb = table_slot_callbacks(relation);
-    let tupdesc = relcache::relation_rd_att::call(mcx, relation)?;
+    let tupdesc = Some(mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?);
     backend_executor_execTuples_seams::make_single_tuple_table_slot::call(mcx, tupdesc, tts_cb)
 }
 
@@ -191,14 +193,14 @@ pub fn table_slot_create<'mcx>(mcx: Mcx<'mcx>, relation: Oid) -> PgResult<TupleT
 // ===========================================================================
 
 /// `table_beginscan_catalog(relation, nkeys, key)`.
-pub fn table_beginscan_catalog(
-    relation: Oid,
+pub fn table_beginscan_catalog<'mcx>(
+    relation: &Relation<'mcx>,
     nkeys: i32,
     key: Vec<ScanKeyData>,
-) -> PgResult<TableScanDesc> {
+) -> PgResult<TableScanDesc<'mcx>> {
     let flags =
         SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
-    let relid = relation; // RelationGetRelid(relation)
+    let relid = relation.rd_id; // RelationGetRelid(relation)
     let snapshot = backend_utils_time_snapmgr_seams::register_snapshot::call(
         backend_utils_time_snapmgr_seams::get_catalog_snapshot::call(relid)?,
     )?;
@@ -211,7 +213,7 @@ pub fn table_beginscan_catalog(
 // ===========================================================================
 
 /// `table_parallelscan_estimate(rel, snapshot)`.
-pub fn table_parallelscan_estimate(rel: Oid, snapshot: &Snapshot) -> PgResult<usize> {
+pub fn table_parallelscan_estimate(rel: &Relation<'_>, snapshot: &Snapshot) -> PgResult<usize> {
     let mut sz: usize = 0;
 
     match snapshot {
@@ -234,7 +236,7 @@ pub fn table_parallelscan_estimate(rel: Oid, snapshot: &Snapshot) -> PgResult<us
 
 /// `table_parallelscan_initialize(rel, pscan, snapshot)`.
 pub fn table_parallelscan_initialize(
-    rel: Oid,
+    rel: &Relation<'_>,
     pscan: &mut ParallelTableScanDescData,
     snapshot: &Snapshot,
 ) -> PgResult<()> {
@@ -260,14 +262,14 @@ pub fn table_parallelscan_initialize(
 }
 
 /// `table_beginscan_parallel(relation, pscan)`.
-pub fn table_beginscan_parallel(
-    relation: Oid,
+pub fn table_beginscan_parallel<'mcx>(
+    relation: &Relation<'mcx>,
     pscan: Arc<ParallelTableScanDescData>,
-) -> PgResult<TableScanDesc> {
+) -> PgResult<TableScanDesc<'mcx>> {
     let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
 
     debug_assert!(types_storage::RelFileLocatorEquals(
-        &relcache::relation_rd_locator::call(relation),
+        &relation.rd_locator,
         &pscan.phs_locator
     ));
 
@@ -296,20 +298,22 @@ pub fn table_beginscan_parallel(
 // ===========================================================================
 
 /// `table_index_fetch_begin(rel)` (tableam.h inline).
-pub fn table_index_fetch_begin(rel: Oid) -> PgResult<Box<IndexFetchTableData>> {
+pub fn table_index_fetch_begin<'mcx>(
+    rel: &Relation<'mcx>,
+) -> PgResult<Box<IndexFetchTableData<'mcx>>> {
     (am(rel).index_fetch_begin)(rel)
 }
 
 /// `table_index_fetch_end(scan)` (tableam.h inline).
-pub fn table_index_fetch_end(scan: Box<IndexFetchTableData>) -> PgResult<()> {
-    let routine = am(scan.rel);
+pub fn table_index_fetch_end(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()> {
+    let routine = am(&scan.rel);
     (routine.index_fetch_end)(scan)
 }
 
 /// `table_index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
 /// (tableam.h inline).
 pub fn table_index_fetch_tuple(
-    scan: &mut IndexFetchTableData,
+    scan: &mut IndexFetchTableData<'_>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
     slot: &mut TupleTableSlot,
@@ -325,7 +329,7 @@ pub fn table_index_fetch_tuple(
         ));
     }
 
-    let routine = am(scan.rel);
+    let routine = am(&scan.rel);
     (routine.index_fetch_tuple)(scan, tid, snapshot, slot, call_again, all_dead)
 }
 
@@ -342,7 +346,7 @@ pub fn table_index_fetch_tuple(
 /// heap's HOT).
 pub fn table_index_fetch_tuple_check<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: Oid,
+    rel: &Relation<'_>,
     tid: &mut ItemPointerData,
     snapshot: Snapshot,
     all_dead: Option<&mut bool>,
@@ -371,11 +375,10 @@ pub fn table_index_fetch_tuple_check<'mcx>(
 
 /// `table_tuple_get_latest_tid(scan, tid)`.
 pub fn table_tuple_get_latest_tid(
-    scan: &mut TableScanDescData,
+    scan: &mut TableScanDescData<'_>,
     tid: &mut ItemPointerData,
 ) -> PgResult<()> {
-    let rel = scan.rs_rd;
-    let tableam = am(rel);
+    let tableam = am(&scan.rs_rd);
 
     // We don't expect direct calls to table_tuple_get_latest_tid with valid
     // CheckXidAlive for catalog or regular tables. See detailed comments in
@@ -391,7 +394,7 @@ pub fn table_tuple_get_latest_tid(
     if !(tableam.tuple_tid_valid)(scan, tid)? {
         let blk = tid.ip_blkid.block_number();
         let off = tid.ip_posid;
-        let relname = relcache::relation_name::call(rel)?;
+        let relname = scan.rs_rd.name();
         return Err(PgError::error(format!(
             "tid ({blk}, {off}) is not valid for relation \"{relname}\""
         ))
@@ -407,7 +410,7 @@ pub fn table_tuple_get_latest_tid(
 
 /// `table_tuple_insert(rel, slot, cid, options, bistate)` (tableam.h inline).
 pub fn table_tuple_insert(
-    rel: Oid,
+    rel: &Relation<'_>,
     slot: &mut TupleTableSlot,
     cid: types_core::xact::CommandId,
     options: i32,
@@ -419,7 +422,7 @@ pub fn table_tuple_insert(
 /// `table_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
 /// changingPart)` (tableam.h inline).
 pub fn table_tuple_delete(
-    rel: Oid,
+    rel: &Relation<'_>,
     tid: &ItemPointerData,
     cid: types_core::xact::CommandId,
     snapshot: &Snapshot,
@@ -435,7 +438,7 @@ pub fn table_tuple_delete(
 /// tmfd, lockmode, update_indexes)` (tableam.h inline).
 #[allow(clippy::too_many_arguments)]
 pub fn table_tuple_update(
-    rel: Oid,
+    rel: &Relation<'_>,
     otid: &ItemPointerData,
     slot: &mut TupleTableSlot,
     cid: types_core::xact::CommandId,
@@ -469,7 +472,7 @@ pub fn table_tuple_update(
 /// Currently, this routine differs from `table_tuple_insert` only in
 /// supplying a default command ID and not allowing access to the speedup
 /// options.
-pub fn simple_table_tuple_insert(rel: Oid, slot: &mut TupleTableSlot) -> PgResult<()> {
+pub fn simple_table_tuple_insert(rel: &Relation<'_>, slot: &mut TupleTableSlot) -> PgResult<()> {
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
     table_tuple_insert(rel, slot, cid, 0, None)
 }
@@ -481,7 +484,7 @@ pub fn simple_table_tuple_insert(rel: Oid, slot: &mut TupleTableSlot) -> PgResul
 /// relation associated with the tuple). Any failure is reported via
 /// `ereport()`.
 pub fn simple_table_tuple_delete(
-    rel: Oid,
+    rel: &Relation<'_>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
 ) -> PgResult<()> {
@@ -521,7 +524,7 @@ pub fn simple_table_tuple_delete(
 /// relation associated with the tuple). Any failure is reported via
 /// `ereport()`.
 pub fn simple_table_tuple_update(
-    rel: Oid,
+    rel: &Relation<'_>,
     otid: &ItemPointerData,
     slot: &mut TupleTableSlot,
     snapshot: &Snapshot,
@@ -564,21 +567,21 @@ pub fn simple_table_tuple_update(
 // ===========================================================================
 
 /// `table_block_parallelscan_estimate(rel)`.
-pub fn table_block_parallelscan_estimate(_rel: Oid) -> usize {
+pub fn table_block_parallelscan_estimate(_rel: &Relation<'_>) -> usize {
     core::mem::size_of::<ParallelTableScanDescData>()
 }
 
 /// `table_block_parallelscan_initialize(rel, pscan)`.
 pub fn table_block_parallelscan_initialize(
-    rel: Oid,
+    rel: &Relation<'_>,
     pscan: &mut ParallelTableScanDescData,
 ) -> PgResult<usize> {
-    pscan.phs_locator = relcache::relation_rd_locator::call(rel);
+    pscan.phs_locator = rel.rd_locator;
     let phs_nblocks = backend_storage_buffer_bufmgr_seams::
-        relation_get_number_of_blocks_in_fork::call(rel, MAIN_FORKNUM)?;
+        relation_get_number_of_blocks_in_fork::call(rel.rd_id, MAIN_FORKNUM)?;
     // compare phs_syncscan initialization to similar logic in initscan
     pscan.phs_syncscan = synchronize_seqscans()
-        && !relation_uses_local_buffers(rel)
+        && !rel.uses_local_buffers()
         && phs_nblocks > (backend_utils_init_small_seams::nbuffers::call() / 4) as BlockNumber;
     // SpinLockInit(&bpscan->phs_mutex); bpscan->phs_startblock =
     // InvalidBlockNumber; pg_atomic_init_u64(&bpscan->phs_nallocated, 0) —
@@ -593,7 +596,10 @@ pub fn table_block_parallelscan_initialize(
 }
 
 /// `table_block_parallelscan_reinitialize(rel, pscan)`.
-pub fn table_block_parallelscan_reinitialize(_rel: Oid, pscan: &ParallelTableScanDescData) {
+pub fn table_block_parallelscan_reinitialize(
+    _rel: &Relation<'_>,
+    pscan: &ParallelTableScanDescData,
+) {
     let bpscan = block_ext(pscan);
     // pg_atomic_write_u64(&bpscan->phs_nallocated, 0)
     bpscan.phs_nallocated.store(0, Ordering::SeqCst);
@@ -606,7 +612,7 @@ pub fn table_block_parallelscan_reinitialize(_rel: Oid, pscan: &ParallelTableSca
 /// called many times, once by each parallel worker. We must be careful only
 /// to set the startblock once.
 pub fn table_block_parallelscan_startblock_init(
-    rel: Oid,
+    rel: &Relation<'_>,
     pbscanwork: &mut ParallelBlockTableScanWorkerData,
     pbscan: &ParallelTableScanDescData,
 ) -> PgResult<()> {
@@ -663,7 +669,7 @@ pub fn table_block_parallelscan_startblock_init(
             } else {
                 drop(startblock); // SpinLockRelease(&pbscan->phs_mutex)
                 sync_startpage = backend_access_common_syncscan_seams::ss_get_location::call(
-                    rel,
+                    rel.rd_id,
                     bpscan.phs_nblocks,
                 )?;
                 continue; // goto retry
@@ -684,7 +690,7 @@ pub fn table_block_parallelscan_startblock_init(
 /// follow that the scan is done when the first backend gets an
 /// InvalidBlockNumber return.
 pub fn table_block_parallelscan_nextpage(
-    rel: Oid,
+    rel: &Relation<'_>,
     pbscanwork: &mut ParallelBlockTableScanWorkerData,
     pbscan: &ParallelTableScanDescData,
 ) -> PgResult<BlockNumber> {
@@ -759,9 +765,12 @@ pub fn table_block_parallelscan_nextpage(
     // of the scan once, though: subsequent callers will report nothing.
     if pbscan.phs_syncscan {
         if page != InvalidBlockNumber {
-            backend_access_common_syncscan_seams::ss_report_location::call(rel, page)?;
+            backend_access_common_syncscan_seams::ss_report_location::call(rel.rd_id, page)?;
         } else if nallocated == bpscan.phs_nblocks as u64 {
-            backend_access_common_syncscan_seams::ss_report_location::call(rel, phs_startblock)?;
+            backend_access_common_syncscan_seams::ss_report_location::call(
+                rel.rd_id,
+                phs_startblock,
+            )?;
         }
     }
 
@@ -790,12 +799,12 @@ fn block_ext(pscan: &ParallelTableScanDescData) -> &ParallelBlockTableScanExt {
 /// actual data is in the main fork rather than some other), it can use this
 /// implementation of the relation_size callback rather than implementing its
 /// own.
-pub fn table_block_relation_size(rel: Oid, forkNumber: ForkNumber) -> PgResult<u64> {
+pub fn table_block_relation_size(rel: &Relation<'_>, forkNumber: ForkNumber) -> PgResult<u64> {
     let mut nblocks: u64 = 0;
 
     // RelationGetSmgr(rel) — the smgr handle is the (locator, backend) pair.
-    let rlocator = relcache::relation_rd_locator::call(rel);
-    let backend = relcache::relation_rd_backend::call(rel);
+    let rlocator = rel.rd_locator;
+    let backend = rel.rd_backend;
 
     // InvalidForkNumber indicates returning the size for all forks
     if forkNumber == InvalidForkNumber {
@@ -834,7 +843,7 @@ pub fn table_block_relation_size(rel: Oid, forkNumber: ForkNumber) -> PgResult<u
 /// anticipated special space.
 #[allow(clippy::too_many_arguments)]
 pub fn table_block_relation_estimate_size(
-    rel: Oid,
+    rel: &Relation<'_>,
     attr_widths: Option<&mut [i32]>,
     pages: &mut BlockNumber,
     tuples: &mut f64,
@@ -845,14 +854,14 @@ pub fn table_block_relation_estimate_size(
     // it should have storage, so we can call the smgr
     let mut curpages: BlockNumber =
         backend_storage_buffer_bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-            rel,
+            rel.rd_id,
             MAIN_FORKNUM,
         )?;
 
     // coerce values in pg_class to more desirable types
-    let relpages = relcache::relation_relpages::call(rel) as BlockNumber;
-    let reltuples = relcache::relation_reltuples::call(rel) as f64;
-    let relallvisible = relcache::relation_relallvisible::call(rel) as BlockNumber;
+    let relpages = rel.rd_rel.relpages as BlockNumber;
+    let reltuples = rel.rd_rel.reltuples as f64;
+    let relallvisible = rel.rd_rel.relallvisible as BlockNumber;
 
     // HACK: if the relation has never yet been vacuumed, use a minimum size
     // estimate of 10 pages. The idea here is to avoid assuming a
@@ -874,7 +883,7 @@ pub fn table_block_relation_estimate_size(
     // If the table has inheritance children, we don't apply this heuristic.
     // Totally empty parent tables are quite common, so we should be willing
     // to believe that they are empty.
-    if curpages < 10 && reltuples < 0.0 && !relcache::relation_relhassubclass::call(rel) {
+    if curpages < 10 && reltuples < 0.0 && !rel.rd_rel.relhassubclass {
         curpages = 10;
     }
 
@@ -908,11 +917,10 @@ pub fn table_block_relation_estimate_size(
         // Without reltuples/relpages, we also need to consider fillfactor.
         // The other branch considers it implicitly by calculating density
         // from actual relpages/reltuples statistics.
-        let fillfactor =
-            relcache::relation_get_fillfactor::call(rel, HEAP_DEFAULT_FILLFACTOR);
+        let fillfactor = rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR);
 
         let mut tuple_width =
-            backend_optimizer_util_plancat_seams::get_rel_data_width::call(rel, attr_widths)?;
+            backend_optimizer_util_plancat_seams::get_rel_data_width::call(rel.rd_id, attr_widths)?;
         tuple_width = (tuple_width as usize).wrapping_add(overhead_bytes_per_tuple) as i32;
         // note: integer division is intentional here (C Size arithmetic)
         let raw = usable_bytes_per_page
@@ -942,12 +950,6 @@ pub fn table_block_relation_estimate_size(
 
 /// `HEAP_DEFAULT_FILLFACTOR` (`access/htup_details.h`).
 const HEAP_DEFAULT_FILLFACTOR: i32 = 100;
-
-/// `RelationUsesLocalBuffers(relation)` (utils/rel.h) —
-/// `relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP`.
-fn relation_uses_local_buffers(rel: Oid) -> bool {
-    relcache::relation_relpersistence::call(rel) == RELPERSISTENCE_TEMP
-}
 
 #[cfg(test)]
 mod tests;

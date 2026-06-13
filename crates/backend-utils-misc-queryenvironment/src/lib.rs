@@ -162,11 +162,10 @@ pub fn ENRMetadataGetTupDesc<'e, 'mcx>(
         // relation = table_open(enrmd->reliddesc, NoLock);
         // tupdesc = relation->rd_att;
         // table_close(relation, NoLock);
-        let mut relation =
-            backend_access_table_table_seams::table_open::call(mcx, enrmd.reliddesc, NoLock)?;
-        let tupdesc = relation.rd_att.take();
-        backend_access_table_table_seams::table_close::call(relation, NoLock)?;
-        Ok(tupdesc.map(EnrTupleDesc::Owned))
+        let relation = backend_access_table_table::table_open(mcx, enrmd.reliddesc, NoLock)?;
+        let tupdesc = mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?;
+        backend_access_table_table::table_close(relation, NoLock)?;
+        Ok(Some(EnrTupleDesc::Owned(tupdesc)))
     }
 }
 

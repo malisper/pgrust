@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
@@ -23,4 +24,3 @@ backend-access-common-detoast-seams = { path = "../backend-access-common-detoast
 backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-toast-helper-seams = { path = "../backend-access-table-toast-helper-seams" }
-backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }

@@ -14,15 +14,15 @@
 //! on the owned dispatch enums ([`PlanStateNode`], [`Node`], [`PathNode`]).
 //! Arms whose node type has no enum variant yet are covered by the wildcard
 //! (the C `default:`); each node port that adds a variant must add its arm
-//! here. Calls into unported owners (instrument.c, nodeSubplan.c, execUtils.c,
+//! here. Calls into unported owners (instrument.c, nodeSubplan.c,
 //! syscache.c, amapi.c) go through those owners' seam crates and panic until
-//! the owners land.
+//! the owners land; execUtils.c is ported and a direct dependency.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
 use backend_access_index_amapi_seams as amapi;
-use backend_executor_execUtils_seams as execUtils;
+use backend_executor_execUtils as execUtils;
 use backend_executor_instrument_seams as instrument;
 use backend_executor_nodeMaterial as nodeMaterial;
 use backend_executor_nodeSubplan_seams as nodeSubplan;
@@ -106,7 +106,7 @@ pub fn exec_re_scan<'mcx>(
                     .planstate
                     .as_deref_mut()
                     .expect("ExecReScan: initPlan planstate is NULL");
-                nodeSubplan::update_changed_param_set::call(mcx, splan, newchg)?;
+                execUtils::UpdateChangedParamSet(splan.ps_head_mut(), Some(newchg), mcx)?;
             }
 
             // if (splan->chgParam != NULL)
@@ -147,7 +147,7 @@ pub fn exec_re_scan<'mcx>(
                     .planstate
                     .as_deref_mut()
                     .expect("ExecReScan: subPlan planstate is NULL");
-                nodeSubplan::update_changed_param_set::call(mcx, splan, newchg)?;
+                execUtils::UpdateChangedParamSet(splan.ps_head_mut(), Some(newchg), mcx)?;
             }
         }
 
@@ -158,7 +158,7 @@ pub fn exec_re_scan<'mcx>(
                 .as_deref()
                 .expect("ExecReScan: chgParam went NULL before the child-tree walk");
             let outer = head.lefttree.as_deref_mut().expect("checked above");
-            nodeSubplan::update_changed_param_set::call(mcx, outer, newchg)?;
+            execUtils::UpdateChangedParamSet(outer.ps_head_mut(), Some(newchg), mcx)?;
         }
         if head.righttree.is_some() {
             let newchg = head
@@ -166,13 +166,13 @@ pub fn exec_re_scan<'mcx>(
                 .as_deref()
                 .expect("ExecReScan: chgParam went NULL before the child-tree walk");
             let inner = head.righttree.as_deref_mut().expect("checked above");
-            nodeSubplan::update_changed_param_set::call(mcx, inner, newchg)?;
+            execUtils::UpdateChangedParamSet(inner.ps_head_mut(), Some(newchg), mcx)?;
         }
     }
 
     // Call expression callbacks.
     if let Some(ecxt_id) = node.ps_head_mut().ps_ExprContext {
-        execUtils::re_scan_expr_context::call(estate.ecxt_mut(ecxt_id))?;
+        execUtils::ReScanExprContext(estate.ecxt_mut(ecxt_id))?;
     }
 
     // And do node-type-specific processing.
@@ -268,9 +268,15 @@ pub fn exec_supports_mark_restore(pathnode: &PathNode<'_>) -> bool {
             PathNode::ProjectionPath(pp) => exec_supports_mark_restore(&pp.subpath),
             PathNode::MinMaxAggPath(_) => false,  // childless Result
             PathNode::GroupResultPath(_) => false, // childless Result
-            // Simple RTE_RESULT base relation: Assert(IsA(pathnode, Path));
-            // childless Result.
-            _ => false,
+            // Simple RTE_RESULT base relation: Assert(IsA(pathnode, Path))
+            // (execAmi.c, T_Result default arm); childless Result.
+            other => {
+                debug_assert!(
+                    matches!(other, PathNode::Path(_)),
+                    "T_Result pathtype on unexpected Path node (C: Assert(IsA(pathnode, Path))): {other:?}"
+                );
+                false
+            }
         },
 
         T_Append => match pathnode {

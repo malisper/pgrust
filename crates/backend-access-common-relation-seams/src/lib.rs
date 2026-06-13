@@ -3,22 +3,23 @@
 //! shared by tables and indexes.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands;
-//! until then a call panics loudly. The C `Relation` crosses as an owned
-//! [`types_tuple::rel::RelationData`] carrier: open copies the consumed
-//! relcache fields into the caller's `mcx`; close consumes the carrier (the
-//! C pointer is dead after `relation_close`).
+//! until then a call panics loudly. An open relation crosses as a
+//! [`types_rel::Relation`] handle: the owner copies the consumed slice of
+//! the relcache entry into `mcx` and arms the handle with its own close
+//! function, so release goes through the handle (`close(lockmode)` is the C
+//! `relation_close`; `Drop` is the abort path) — there is no bare-OID close
+//! seam.
 
 seam_core::seam!(
     /// `relation_open(relationId, lockmode)` (relation.c): lock and open a
-    /// relation by OID. The returned carrier is allocated in `mcx`. `Err`
-    /// carries the C `ereport(ERROR)`s: lock acquisition failure, `could not
-    /// open relation with OID %u`, the `cannot access temporary tables of
-    /// other sessions` check, or OOM copying the entry.
+    /// relation by OID. `Err` carries the C `ereport(ERROR)`s: lock
+    /// acquisition failure, `could not open relation with OID %u`, or the
+    /// `cannot access temporary tables of other sessions` check.
     pub fn relation_open<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         relation_id: types_core::primitive::Oid,
         lockmode: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<types_tuple::rel::RelationData<'mcx>>
+    ) -> types_error::PgResult<types_rel::Relation<'mcx>>
 );
 
 seam_core::seam!(
@@ -29,7 +30,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         relation_id: types_core::primitive::Oid,
         lockmode: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<Option<types_tuple::rel::RelationData<'mcx>>>
+    ) -> types_error::PgResult<Option<types_rel::Relation<'mcx>>>
 );
 
 seam_core::seam!(
@@ -40,7 +41,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         relation: &types_tuple::access::RangeVar,
         lockmode: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<types_tuple::rel::RelationData<'mcx>>
+    ) -> types_error::PgResult<types_rel::Relation<'mcx>>
 );
 
 seam_core::seam!(
@@ -52,16 +53,5 @@ seam_core::seam!(
         relation: &types_tuple::access::RangeVar,
         lockmode: types_storage::lock::LOCKMODE,
         missing_ok: bool,
-    ) -> types_error::PgResult<Option<types_tuple::rel::RelationData<'mcx>>>
-);
-
-seam_core::seam!(
-    /// `relation_close(relation, lockmode)` (relation.c): close the relation
-    /// (decrement the relcache refcount) and, if `lockmode` is not `NoLock`,
-    /// release the lock. Consumes the carrier. `LockRelease` can
-    /// `elog(ERROR)`, carried on `Err`.
-    pub fn relation_close(
-        relation: types_tuple::rel::RelationData<'_>,
-        lockmode: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<()>
+    ) -> types_error::PgResult<Option<types_rel::Relation<'mcx>>>
 );

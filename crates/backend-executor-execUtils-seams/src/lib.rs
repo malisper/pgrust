@@ -1,20 +1,11 @@
 //! Seam declarations for the `backend-executor-execUtils` unit
 //! (`executor/execUtils.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! Consumers that can take a direct cargo dependency call the crate directly
+//! (AGENTS.md: direct dependency by default). The owner installs every
+//! declaration here from its `init_seams()`.
 
 #![allow(non_snake_case)]
-
-seam_core::seam!(
-    /// `ReScanExprContext(econtext)` (execUtils.c): reset an expression
-    /// context in preparation for a rescan of its plan node — run (and forget)
-    /// the registered shutdown callbacks, then reset the per-tuple memory.
-    /// Callbacks may `ereport(ERROR)`.
-    pub fn re_scan_expr_context(
-        econtext: &mut types_nodes::ExprContext,
-    ) -> types_error::PgResult<()>
-);
 
 seam_core::seam!(
     /// `ExecCreateScanSlotFromOuterPlan(estate, scanstate, tts_ops)`
