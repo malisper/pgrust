@@ -69,19 +69,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): initialize only the
-    /// node's result tuple type (`ExecTypeFromTL(planstate->plan->targetlist)`
-    /// into `planstate.ps_ResultTupleDesc`) without creating a slot. The
-    /// descriptor is allocated in `mcx` (C: `ExecTypeFromTL` pallocs in the
-    /// current per-query context), so the call is fallible on OOM. The owner
-    /// reads the plan target list off `planstate.plan`.
-    pub fn exec_init_result_type_tl<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h): clear the slot's contents
     /// (`slot->tts_ops->clear`).
     pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_error::PgResult<()>
@@ -294,17 +281,4 @@ seam_core::seam!(
         mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
         bool,
     )>
-);
-
-seam_core::seam!(
-    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch ordinary
-    /// attribute `attnum` (1-based) from `slot`, deforming the tuple as needed
-    /// (`slot_getsomeattrs` → `slot_getsomeattrs_int`), returning
-    /// `(value, isnull)`. The merge-append comparator only ever asks for
-    /// ordinary columns (`attnum >= 1`). Deforming can detoast / allocate and
-    /// the underlying ops can `ereport(ERROR)`, hence `PgResult`.
-    pub fn slot_getattr(
-        slot: &mut types_nodes::TupleTableSlot,
-        attnum: types_core::primitive::AttrNumber,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
 );

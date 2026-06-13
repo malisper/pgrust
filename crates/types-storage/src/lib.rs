@@ -19,7 +19,6 @@ pub mod storage;
 pub mod sync;
 pub mod waiteventset;
 
-pub use buf::*;
 pub use lock::*;
 pub use relfilelocator::*;
 pub use sinval::*;

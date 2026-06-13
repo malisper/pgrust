@@ -73,7 +73,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-seam_core::seam!(
     /// `bms_num_members(a)` (bitmapset.c): count the members of `a`. A `None`
     /// set is the C NULL (empty) set, yielding 0. Infallible.
     pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32

@@ -2256,25 +2256,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeLimit"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execGrouping-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils",
- "backend-tcop-postgres-seams",
- "mcx",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-tuple",
-]
-
-[[package]]
 name = "backend-executor-nodeMaterial"
 version = "0.0.0"
 dependencies = [
@@ -5526,7 +5507,6 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
- "backend-executor-nodeLimit",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
@@ -5550,7 +5530,6 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
- "backend-tcop-backend-startup",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-utils-activity-small",
@@ -5572,7 +5551,6 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
- "common-unicode-norm-bitfields",
  "interfaces-libpq-legacy-pqsignal",
 ]
 
