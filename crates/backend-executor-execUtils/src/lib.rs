@@ -88,10 +88,7 @@ use types_tuple::heaptuple::{
 // Constants (executor.h / memutils.h / pg_bitutils.h)
 // ===========================================================================
 
-/// `EXEC_FLAG_EXPLAIN_ONLY` (executor.h).
-pub const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
-/// `EXEC_FLAG_WITH_NO_DATA` (executor.h).
-pub const EXEC_FLAG_WITH_NO_DATA: i32 = 0x0040;
+use types_nodes::executor::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
 
 /// `ALLOCSET_DEFAULT_MINSIZE` (memutils.h).
 pub const ALLOCSET_DEFAULT_MINSIZE: usize = 0;

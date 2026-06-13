@@ -20,74 +20,24 @@ use types_core::{uint32, BlockNumber};
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BlockSamplerData {
     /// number of blocks, known in advance
-    N: BlockNumber,
+    pub N: BlockNumber,
     /// desired sample size
-    n: i32,
+    pub n: i32,
     /// current block number
-    t: BlockNumber,
+    pub t: BlockNumber,
     /// blocks selected so far
-    m: i32,
+    pub m: i32,
     /// random generator state
-    randstate: PgPrng,
-}
-
-impl BlockSamplerData {
-    /// Rebuild a sampler from its carried-by-value parts, for callers that
-    /// marshal the state across an owned-value seam boundary and back.
-    pub const fn from_parts(
-        N: BlockNumber,
-        n: i32,
-        t: BlockNumber,
-        m: i32,
-        randstate: PgPrng,
-    ) -> Self {
-        Self { N, n, t, m, randstate }
-    }
-
-    pub const fn total_blocks(&self) -> BlockNumber {
-        self.N
-    }
-
-    pub const fn sample_size(&self) -> i32 {
-        self.n
-    }
-
-    pub const fn scanned_blocks(&self) -> BlockNumber {
-        self.t
-    }
-
-    pub const fn selected_blocks(&self) -> i32 {
-        self.m
-    }
-
-    pub const fn randstate(&self) -> &PgPrng {
-        &self.randstate
-    }
+    pub randstate: PgPrng,
 }
 
 /// State for reservoir sampling Algorithm Z (Vitter 1985)
 /// (`utils/sampling.h` `ReservoirStateData`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ReservoirStateData {
-    W: f64,
+    pub W: f64,
     /// random generator state
-    randstate: PgPrng,
-}
-
-impl ReservoirStateData {
-    /// Rebuild a state from its carried-by-value parts (W + PRNG words), for
-    /// callers that marshal the state across an owned-value seam boundary.
-    pub const fn from_parts(W: f64, randstate: PgPrng) -> Self {
-        Self { W, randstate }
-    }
-
-    pub const fn W(&self) -> f64 {
-        self.W
-    }
-
-    pub const fn randstate(&self) -> &PgPrng {
-        &self.randstate
-    }
+    pub randstate: PgPrng,
 }
 
 /// `BlockSampler_Init` -- prepare for random sampling of blocknumbers.
@@ -303,7 +253,7 @@ thread_local! {
         RefCell::new((
             ReservoirStateData {
                 W: 0.0,
-                randstate: PgPrng::from_raw_state(0, 0),
+                randstate: PgPrng::from_raw(0, 0),
             },
             false,
         ))
@@ -367,8 +317,8 @@ mod tests {
         }
 
         assert_eq!(blocks, vec![0, 1, 2]);
-        assert_eq!(sampler.scanned_blocks(), 3);
-        assert_eq!(sampler.selected_blocks(), 3);
+        assert_eq!(sampler.t, 3);
+        assert_eq!(sampler.m, 3);
     }
 
     #[test]
@@ -423,7 +373,7 @@ mod tests {
         reservoir_init_selection_state(&mut state, 10);
 
         // W is exp(-ln(fract)/n) for fract in (0,1), so W > 1.
-        assert!(state.W() > 1.0);
+        assert!(state.W > 1.0);
     }
 
     #[test]

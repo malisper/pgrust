@@ -107,6 +107,13 @@ fn exec_re_scan_walks_params_and_dispatches() {
     install_mocks();
     let cx = MemoryContext::new("exec_re_scan test");
     let mcx = cx.mcx();
+    // The InitPlan's subselect plan node: declared before the EState so the
+    // state tree's borrowed plan back-link outlives it. plan->extParam is
+    // non-NULL to drive UpdateChangedParamSet.
+    let mut splan_plan = Material::default();
+    splan_plan.plan.extParam = Some(empty_bms(mcx).unwrap());
+    let splan_plan = types_nodes::nodes::Node::Material(splan_plan);
+
     let mut estate = EStateData::new_in(mcx);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
 
@@ -115,14 +122,10 @@ fn exec_re_scan_walks_params_and_dispatches() {
     let mut child = MaterialState::default();
     child.ss.ps.chgParam = Some(empty_bms(mcx).unwrap());
 
-    // One InitPlan whose subselect state has plan->extParam non-NULL (drives
-    // UpdateChangedParamSet) and chgParam non-NULL (drives
-    // ExecReScanSetParamPlan).
+    // One InitPlan whose subselect state aliases `splan_plan` and has
+    // chgParam non-NULL (drives ExecReScanSetParamPlan).
     let mut init_splan = MaterialState::default();
-    let mut splan_plan = Material::default();
-    splan_plan.plan.extParam = Some(empty_bms(mcx).unwrap());
-    init_splan.ss.ps.plan =
-        Some(alloc_in(mcx, types_nodes::nodes::Node::Material(splan_plan)).unwrap());
+    init_splan.ss.ps.plan = Some(&splan_plan);
     init_splan.ss.ps.chgParam = Some(empty_bms(mcx).unwrap());
     let init_state = SubPlanState {
         planstate: Some(

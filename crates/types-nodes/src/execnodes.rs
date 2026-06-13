@@ -43,23 +43,10 @@ use types_core::NodeTag;
 /// Material node.
 pub const T_MaterialState: NodeTag = 424;
 
-/// `ScanDirection` (access/sdir.h). Kept as the raw C scale so direction
-/// comparisons read like the original.
-pub type ScanDirection = i32;
-
-pub const BackwardScanDirection: ScanDirection = -1;
-pub const NoMovementScanDirection: ScanDirection = 0;
-pub const ForwardScanDirection: ScanDirection = 1;
-
-/// `ScanDirectionIsForward(direction)` (sdir.h).
-pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
-    direction == ForwardScanDirection
-}
-
-/// `ScanDirectionIsBackward(direction)` (sdir.h).
-pub const fn ScanDirectionIsBackward(direction: ScanDirection) -> bool {
-    direction == BackwardScanDirection
-}
+pub use types_scan::sdir::{
+    BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
+    ScanDirectionIsBackward, ScanDirectionIsForward, ScanDirectionIsNoMovement,
+};
 
 /// `TupleTableSlot *` in the owned model: a `Copy` index into the owning
 /// [`EStateData::es_tupleTable`] slot pool.
@@ -207,8 +194,10 @@ pub type ExecProcNodeMtd<'mcx> = Option<
 /// `PlanState` head (execnodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlanStateData<'mcx> {
-    /// `Plan *plan` — associated plan node.
-    pub plan: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `Plan *plan` — associated plan node. C aliases the shared, read-only
+    /// plan tree (`planstate->plan = (Plan *) node`); the borrow does the
+    /// same — node init never copies the plan.
+    pub plan: Option<&'mcx crate::nodes::Node<'mcx>>,
     /// `ExecProcNodeMtd ExecProcNode` — function to return next tuple.
     pub ExecProcNode: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.

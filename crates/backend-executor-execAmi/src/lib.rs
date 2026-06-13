@@ -94,7 +94,7 @@ pub fn exec_re_scan<'mcx>(
             let splan_has_ext_param = head.initPlan.as_ref().expect("checked above")[i]
                 .planstate
                 .as_deref()
-                .and_then(|splan| splan.ps_head().plan.as_deref())
+                .and_then(|splan| splan.ps_head().plan)
                 .is_some_and(|plan| plan.plan_head().extParam.is_some());
             if splan_has_ext_param {
                 let newchg = head
@@ -135,7 +135,7 @@ pub fn exec_re_scan<'mcx>(
             let splan_has_ext_param = head.subPlan.as_ref().expect("checked above")[i]
                 .planstate
                 .as_deref()
-                .and_then(|splan| splan.ps_head().plan.as_deref())
+                .and_then(|splan| splan.ps_head().plan)
                 .is_some_and(|plan| plan.plan_head().extParam.is_some());
             if splan_has_ext_param {
                 let newchg = head

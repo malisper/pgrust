@@ -21,14 +21,13 @@
 
 extern crate alloc;
 
-use mcx::{alloc_in, Mcx};
+use mcx::{Mcx, PgBox};
 use types_core::primitive::InvalidOid;
 use types_error::PgResult;
 use types_tuple::access::{
-    EphemeralNamedRelationData, EphemeralNamedRelationMetadata,
-    EphemeralNamedRelationMetadataData, NoLock,
+    EphemeralNamedRelationData, EphemeralNamedRelationMetadataData, NoLock,
 };
-use types_tuple::heaptuple::TupleDesc;
+use types_tuple::heaptuple::TupleDescData;
 use types_tuple::parse::QueryEnvironment;
 
 /// Install this crate's seam implementations. This unit owns no seams.
@@ -46,25 +45,15 @@ pub fn create_queryEnv(mcx: Mcx<'_>) -> QueryEnvironment<'_> {
 /// `get_visible_ENR_metadata(queryEnv, refname)` — return the metadata of the
 /// ENR registered under `refname`, or `None`.
 ///
-/// C returns NULL when `queryEnv == NULL` (here `None`). On a hit C returns
-/// `&(enr->md)`; the owned signature hands back an owned
-/// `EphemeralNamedRelationMetadata`, so the matched `md` is cloned into `mcx`
-/// (fallible: the copy allocates).
-pub fn get_visible_ENR_metadata<'mcx>(
-    mcx: Mcx<'mcx>,
-    query_env: Option<&QueryEnvironment<'_>>,
+/// C returns NULL when `queryEnv == NULL` (here `None`) and otherwise the
+/// borrowed `&(enr->md)` with zero allocation; same here.
+pub fn get_visible_ENR_metadata<'e, 'mcx>(
+    query_env: Option<&'e QueryEnvironment<'mcx>>,
     refname: &str,
-) -> PgResult<EphemeralNamedRelationMetadata<'mcx>> {
+) -> Option<&'e EphemeralNamedRelationMetadataData<'mcx>> {
     // Assert(refname != NULL) — `&str` is non-null by construction.
-
-    let Some(query_env) = query_env else {
-        return Ok(None);
-    };
-
-    match get_ENR(query_env, refname) {
-        Some(enr) => Ok(Some(alloc_in(mcx, enr.md.clone_in(mcx)?)?)),
-        None => Ok(None),
-    }
+    let query_env = query_env?;
+    get_ENR(query_env, refname).map(|enr| &enr.md)
 }
 
 /// `register_ENR(queryEnv, enr)` — register a named relation for use in the
@@ -129,16 +118,37 @@ fn enr_index(query_env: &QueryEnvironment<'_>, name: &str) -> Option<usize> {
         .position(|enr| enr.md.name.as_deref() == Some(name))
 }
 
+/// The `TupleDesc` return of [`ENRMetadataGetTupDesc`]: the inline-tupdesc
+/// path borrows the stored descriptor (C returns `enrmd->tupdesc` without
+/// allocating); the catalog path owns the copy the relcache seam allocates in
+/// `mcx`.
+#[derive(Debug)]
+pub enum EnrTupleDesc<'e, 'mcx> {
+    Borrowed(&'e TupleDescData<'mcx>),
+    Owned(PgBox<'mcx, TupleDescData<'mcx>>),
+}
+
+impl<'mcx> core::ops::Deref for EnrTupleDesc<'_, 'mcx> {
+    type Target = TupleDescData<'mcx>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            EnrTupleDesc::Borrowed(td) => td,
+            EnrTupleDesc::Owned(td) => td,
+        }
+    }
+}
+
 /// `ENRMetadataGetTupDesc(enrmd)` — gets the `TupleDesc` for an Ephemeral
 /// Named Relation, based on which field was filled.
 ///
 /// When the `TupleDesc` is based on a relation from the catalogs, we count on
 /// that relation being used at the same time, so that appropriate locks will
 /// already be held. Locking here would be too late anyway.
-pub fn ENRMetadataGetTupDesc<'mcx>(
+pub fn ENRMetadataGetTupDesc<'e, 'mcx>(
     mcx: Mcx<'mcx>,
-    enrmd: &EphemeralNamedRelationMetadataData<'_>,
-) -> types_error::PgResult<TupleDesc<'mcx>> {
+    enrmd: &'e EphemeralNamedRelationMetadataData<'mcx>,
+) -> PgResult<Option<EnrTupleDesc<'e, 'mcx>>> {
     // One, and only one, of these fields must be filled.
     debug_assert!(
         (enrmd.reliddesc == InvalidOid) != enrmd.tupdesc.is_none(),
@@ -146,7 +156,8 @@ pub fn ENRMetadataGetTupDesc<'mcx>(
     );
 
     if let Some(tupdesc) = &enrmd.tupdesc {
-        Ok(Some(alloc_in(mcx, tupdesc.clone_in(mcx)?)?))
+        // tupdesc = enrmd->tupdesc; — the stored descriptor, no copy.
+        Ok(Some(EnrTupleDesc::Borrowed(tupdesc)))
     } else {
         // relation = table_open(enrmd->reliddesc, NoLock);
         // tupdesc = relation->rd_att;
@@ -154,7 +165,7 @@ pub fn ENRMetadataGetTupDesc<'mcx>(
         let relation = backend_access_table_table_seams::table_open::call(enrmd.reliddesc, NoLock)?;
         let tupdesc = backend_utils_cache_relcache_seams::relation_rd_att::call(mcx, relation)?;
         backend_access_table_table_seams::table_close::call(relation, NoLock)?;
-        Ok(tupdesc)
+        Ok(tupdesc.map(EnrTupleDesc::Owned))
     }
 }
 

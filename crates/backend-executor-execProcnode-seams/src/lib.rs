@@ -13,9 +13,12 @@ seam_core::seam!(
     /// plan yields `None` (the C `if (node == NULL) return NULL;`). The state
     /// tree is allocated in `mcx` (C: `makeNode` in `CurrentMemoryContext`,
     /// the per-query context at init time), so the call is fallible on OOM.
+    /// The plan tree is shared and read-only: state nodes alias it
+    /// (`planstate->plan = (Plan *) node`), so the borrow must outlive the
+    /// state tree's `'mcx`.
     pub fn exec_init_node<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        node: Option<&types_nodes::nodes::Node<'_>>,
+        node: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
         estate: &mut types_nodes::EStateData<'mcx>,
         eflags: i32,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::PlanStateNode<'mcx>>>>

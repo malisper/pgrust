@@ -61,9 +61,6 @@ impl EphemeralNamedRelationMetadataData<'_> {
     }
 }
 
-pub type EphemeralNamedRelationMetadata<'mcx> =
-    Option<PgBox<'mcx, EphemeralNamedRelationMetadataData<'mcx>>>;
-
 /// `void *reldata` (`utils/queryenvironment.h`) — the execution-time backing
 /// payload for a named relation. PostgreSQL declares it as an untyped
 /// `void *`, so it stays a minimal constructible handle.

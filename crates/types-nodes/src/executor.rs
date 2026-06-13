@@ -5,6 +5,25 @@
 //! slot payload model grows when the slot-owning units (execTuples and
 //! friends) land.
 
+// `EXEC_FLAG_*` (executor.h) — the eflags bits passed down ExecutorStart /
+// ExecInitNode. Shared vocabulary: every executor node unit and the tuplestore
+// owner consume the same bits.
+
+/// `EXEC_FLAG_EXPLAIN_ONLY` (executor.h) — EXPLAIN, no ANALYZE.
+pub const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
+/// `EXEC_FLAG_EXPLAIN_GENERIC` (executor.h) — EXPLAIN (GENERIC_PLAN).
+pub const EXEC_FLAG_EXPLAIN_GENERIC: i32 = 0x0002;
+/// `EXEC_FLAG_REWIND` (executor.h) — need efficient rescan.
+pub const EXEC_FLAG_REWIND: i32 = 0x0004;
+/// `EXEC_FLAG_BACKWARD` (executor.h) — need backward scan.
+pub const EXEC_FLAG_BACKWARD: i32 = 0x0008;
+/// `EXEC_FLAG_MARK` (executor.h) — need mark/restore.
+pub const EXEC_FLAG_MARK: i32 = 0x0010;
+/// `EXEC_FLAG_SKIP_TRIGGERS` (executor.h) — skip AfterTrigger setup.
+pub const EXEC_FLAG_SKIP_TRIGGERS: i32 = 0x0020;
+/// `EXEC_FLAG_WITH_NO_DATA` (executor.h) — REFRESH ... WITH NO DATA.
+pub const EXEC_FLAG_WITH_NO_DATA: i32 = 0x0040;
+
 /// `TTS_FLAG_EMPTY` (tuptable.h) — true = slot is empty.
 pub const TTS_FLAG_EMPTY: u16 = 1 << 1;
 /// `TTS_FLAG_FIXED` (tuptable.h) — true = the slot's tuple descriptor and

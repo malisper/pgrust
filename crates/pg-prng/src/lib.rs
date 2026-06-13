@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 const FALLBACK_S0: u64 = 0x5851_f42d_4c95_7f2d;
 const FALLBACK_S1: u64 = 0x1405_7b7e_f767_814f;
@@ -34,14 +34,6 @@ impl PgPrng {
         let mut state = Self::default();
         state.seed_from_f64(seed);
         state
-    }
-
-    pub const fn from_raw_state(s0: u64, s1: u64) -> Self {
-        Self { s0, s1 }
-    }
-
-    pub const fn raw_state(self) -> (u64, u64) {
-        (self.s0, self.s1)
     }
 
     pub fn seed(&mut self, mut seed: u64) {
@@ -140,11 +132,16 @@ impl PgPrng {
     }
 }
 
-static GLOBAL_PRNG: Mutex<PgPrng> = Mutex::new(PgPrng::from_raw_state(0, 0));
+thread_local! {
+    /// `pg_global_prng_state` (pg_prng.c) lives in backend-private memory —
+    /// every backend has its own stream (reseeded per backend in
+    /// `InitProcessGlobals`) — so it is thread-local here, never a shared
+    /// static.
+    static GLOBAL_PRNG: RefCell<PgPrng> = const { RefCell::new(PgPrng::from_raw(0, 0)) };
+}
 
 pub fn global_prng<R>(f: impl FnOnce(&mut PgPrng) -> R) -> R {
-    let mut state = GLOBAL_PRNG.lock().expect("global PRNG state lock poisoned");
-    f(&mut state)
+    GLOBAL_PRNG.with_borrow_mut(f)
 }
 
 fn leftmost_one_pos64(word: u64) -> u32 {
@@ -169,7 +166,7 @@ mod tests {
 
         assert!(state.ensure_seeded());
 
-        assert_eq!(state.raw_state(), (FALLBACK_S0, FALLBACK_S1));
+        assert_eq!(state.raw(), (FALLBACK_S0, FALLBACK_S1));
     }
 
     #[test]
@@ -251,5 +248,24 @@ mod tests {
 
         let after = global_prng(|state| *state);
         assert_ne!(after, before);
+    }
+
+    #[test]
+    fn global_state_is_per_thread() {
+        // C's pg_global_prng_state is backend-private memory: seeding it on
+        // this thread must not move another thread's stream.
+        global_prng(|state| state.seed(1234));
+        let here = global_prng(|state| *state);
+
+        std::thread::spawn(move || {
+            let there = global_prng(|state| *state);
+            assert_ne!(
+                there, here,
+                "fresh thread saw another thread's global PRNG state"
+            );
+            assert_eq!(there, PgPrng::from_raw(0, 0));
+        })
+        .join()
+        .unwrap();
     }
 }

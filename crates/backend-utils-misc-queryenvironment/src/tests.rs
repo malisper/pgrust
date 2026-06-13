@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mcx::{PgString, PgVec};
 use types_tuple::access::ENR_NAMED_TUPLESTORE;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 
 fn make_enr<'mcx>(mcx: Mcx<'mcx>, name: &str) -> EphemeralNamedRelationData<'mcx> {
     EphemeralNamedRelationData {
@@ -45,20 +45,21 @@ fn register_then_get() {
 }
 
 #[test]
-fn get_visible_metadata_clones_md() {
+fn get_visible_metadata_borrows_md() {
     let ctx = mcx::MemoryContext::new("test");
     let mut env = create_queryEnv(ctx.mcx());
     register_ENR(&mut env, make_enr(ctx.mcx(), "trans")).unwrap();
 
-    let md = get_visible_ENR_metadata(ctx.mcx(), Some(&env), "trans")
-        .unwrap()
-        .expect("must find metadata");
+    let used_before = ctx.used();
+    let md = get_visible_ENR_metadata(Some(&env), "trans").expect("must find metadata");
     assert_eq!(md.name.as_deref(), Some("trans"));
+    // C returns &(enr->md) with zero allocation.
+    assert_eq!(ctx.used(), used_before, "lookup must not allocate");
 
     // NULL queryEnv -> None.
-    assert!(get_visible_ENR_metadata(ctx.mcx(), None, "trans").unwrap().is_none());
+    assert!(get_visible_ENR_metadata(None, "trans").is_none());
     // Unknown name -> None.
-    assert!(get_visible_ENR_metadata(ctx.mcx(), Some(&env), "nope").unwrap().is_none());
+    assert!(get_visible_ENR_metadata(Some(&env), "nope").is_none());
 }
 
 #[test]
@@ -121,8 +122,11 @@ fn tupdesc_branch_uses_inline_descriptor() {
     );
     md.tupdesc = desc;
 
+    let used_before = ctx.used();
     let out = ENRMetadataGetTupDesc(mcx, &md).unwrap();
-    assert!(out.is_some());
+    assert!(matches!(out, Some(EnrTupleDesc::Borrowed(_))));
+    // C returns the stored enrmd->tupdesc pointer without allocating.
+    assert_eq!(ctx.used(), used_before, "inline path must not allocate");
 }
 
 #[test]

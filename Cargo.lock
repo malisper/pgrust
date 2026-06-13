@@ -1644,6 +1644,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-scan",
  "types-tuple",
 ]
 
