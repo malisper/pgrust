@@ -4,10 +4,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
-use types_core::Oid;
+use mcx::{Mcx, PgString, PgVec};
+use types_core::{AttrNumber, Oid};
+use types_datum::Datum;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
+use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
 
 seam_core::seam!(
     /// `get_commutator(opno)` (lsyscache.c): the commutator operator of `opno`,
@@ -32,6 +34,103 @@ seam_core::seam!(
     ) -> PgResult<Option<AttStatsSlot<'mcx>>>
 );
 
+/// The `(typlen, typbyval, typalign)` triple `get_typlenbyvalalign` reports.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypLenByValAlign {
+    /// `typlen` — `pg_type.typlen`.
+    pub typlen: i16,
+    /// `typbyval` — `pg_type.typbyval`.
+    pub typbyval: bool,
+    /// `typalign` — `pg_type.typalign`.
+    pub typalign: i8,
+}
+
+seam_core::seam!(
+    /// `get_typlenbyvalalign(typid, &typlen, &typbyval, &typalign)`
+    /// (lsyscache.c): the type's length, by-value flag, and alignment from
+    /// its `pg_type` row. A missing type is the C `elog(ERROR, "cache lookup
+    /// failed for type %u")`, carried on `Err`.
+    pub fn get_typlenbyvalalign(typid: Oid) -> PgResult<TypLenByValAlign>
+);
+
+/// `IOFuncSelector` (`lsyscache.h`): which I/O function `get_type_io_data`
+/// resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IOFuncSelector {
+    /// `IOFunc_input`
+    Input,
+    /// `IOFunc_output`
+    Output,
+    /// `IOFunc_receive`
+    Receive,
+    /// `IOFunc_send`
+    Send,
+}
+
+/// The output of `get_type_io_data` (lsyscache.c): the `pg_type` storage
+/// parameters plus the resolved I/O proc OID and its I/O parameter OID.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypeIoData {
+    /// `typlen` — `pg_type.typlen`.
+    pub typlen: i16,
+    /// `typbyval` — `pg_type.typbyval`.
+    pub typbyval: bool,
+    /// `typalign` — `pg_type.typalign`.
+    pub typalign: i8,
+    /// `typdelim` — `pg_type.typdelim`.
+    pub typdelim: i8,
+    /// `typioparam` — `getTypeIOParam(typeTuple)`.
+    pub typioparam: Oid,
+    /// `func` — the resolved I/O function OID (`InvalidOid` when none, which
+    /// can only happen for receive/send).
+    pub func: Oid,
+}
+
+seam_core::seam!(
+    /// `get_type_io_data(typid, which_func, &typlen, &typbyval, &typalign,
+    /// &typdelim, &typioparam, &func)` (lsyscache.c): the storage parameters,
+    /// I/O parameter OID and selected I/O proc OID of a type, from its
+    /// `pg_type` row. `Err` carries the `elog(ERROR, "cache lookup failed for
+    /// type %u")` and the catcache machinery's `ereport(ERROR)`s.
+    pub fn get_type_io_data(typid: Oid, which_func: IOFuncSelector) -> PgResult<TypeIoData>
+);
+
+seam_core::seam!(
+    /// `get_rel_relispartition(relid)` (lsyscache.c): whether the relation is
+    /// a partition (`pg_class.relispartition`); `false` if there is no such
+    /// pg_class row. `Err` carries the syscache machinery's
+    /// `ereport(ERROR)`s.
+    pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(STATRELATTINH, relid, attnum, inherit)` +
+    /// `get_attstatsslot(&sslot, statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+    /// ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)` (the
+    /// `ExecHashBuildSkewHash` skew-MCV probe). Returns the MCV slot's
+    /// `(values, numbers)` arrays copied into `mcx` (the only `AttStatsSlot`
+    /// fields the skew build reads), or `Ok(None)` when there is no
+    /// `pg_statistic` row (`!HeapTupleIsValid`) or no MCV slot
+    /// (`get_attstatsslot` returns false). The owner does the matching
+    /// `free_attstatsslot` / `ReleaseSysCache`. `Err` carries the catcache /
+    /// detoast `ereport(ERROR)`s plus OOM from the copy.
+    pub fn get_attstatsslot_mcv<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inherit: bool,
+    ) -> PgResult<Option<(PgVec<'mcx, Datum>, PgVec<'mcx, f32>)>>
+);
+
+seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output function OID and whether it is varlena,
+    /// returned as `(typoutput, typisvarlena)`. A non-output type is the C
+    /// `ereport(ERROR, ...cannot display a value of type...)`; cache lookup
+    /// failure is `elog(ERROR)`. Both carried on `Err`.
+    pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)>
+);
+
 seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
     /// name, copied out of the syscache into `mcx` (C: `pstrdup` in the
@@ -43,6 +142,15 @@ seam_core::seam!(
         opfid: Oid,
         missing_ok: bool,
     ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `getTypeInputInfo(type, &typInput, &typIOParam)` (lsyscache.c): look up
+    /// the type's input conversion function OID and its typioparam, returned as
+    /// `(typInput, typIOParam)`. A missing type or one without a usable input
+    /// function is the C `ereport(ERROR)` (`cache lookup failed` / `no input
+    /// function available for type`), carried on `Err`.
+    pub fn get_type_input_info(typ: Oid) -> PgResult<(Oid, Oid)>
 );
 
 seam_core::seam!(
@@ -72,6 +180,16 @@ seam_core::seam!(
     /// copied out of the syscache into `mcx` (C: `pstrdup`). A missing
     /// namespace is `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
     pub fn get_namespace_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        nspid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_namespace_name_or_temp(nspid)` (lsyscache.c): `"pg_temp"` if
+    /// `isTempNamespace(nspid)`, else `get_namespace_name(nspid)`, copied into
+    /// `mcx` (C: `pstrdup`). A missing namespace is `Ok(None)`. `Err` is OOM.
+    pub fn get_namespace_name_or_temp<'mcx>(
         mcx: Mcx<'mcx>,
         nspid: Oid,
     ) -> PgResult<Option<PgString<'mcx>>>
@@ -114,6 +232,39 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
+    /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
+    /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
+    /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
+    pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, am_oid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_func_signature(funcid, &argtypes, &nargs)` (lsyscache.c): the
+    /// function's argument type OIDs (length `nargs`), palloc'd in `mcx`. A
+    /// missing pg_proc row is the C `elog(ERROR, "cache lookup failed for
+    /// function %u")`, carried on `Err` (also OOM from the copy).
+    pub fn get_func_signature<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `op_input_types(opno, &lefttype, &righttype)` (lsyscache.c): the
+    /// operator's input type OIDs. A missing pg_operator row is the C
+    /// `elog(ERROR, "cache lookup failed for operator %u")`, carried on `Err`.
+    pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)>
+);
+
+seam_core::seam!(
     /// `get_op_opfamily_properties(opno, opfamily, missing_ok, &strategy,
     /// &lefttype, &righttype)` (lsyscache.c): look up the operator's membership
     /// in the opfamily, returning its `(strategy, op_lefttype, op_righttype)`.
@@ -125,6 +276,18 @@ seam_core::seam!(
         opfamily: Oid,
         missing_ok: bool,
     ) -> PgResult<Option<(i32, Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `get_ordering_op_properties(opno, &opfamily, &opcintype, &cmptype)`
+    /// (lsyscache.c): given an ordering operator (a btree "<" or ">"
+    /// operator), return its containing opfamily, the opclass input type, and
+    /// the comparison type. `Some((opfamily, opcintype, cmptype))` is the C
+    /// `true`; `None` is the C `false` (the operator is not a valid ordering
+    /// operator). `Err` carries the syscache machinery's `ereport(ERROR)`s.
+    pub fn get_ordering_op_properties(
+        opno: Oid,
+    ) -> PgResult<Option<(Oid, Oid, i32)>>
 );
 
 seam_core::seam!(
@@ -145,4 +308,190 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_op_hash_functions(opno, &lhs_procno, &rhs_procno)` (lsyscache.c):
+    /// resolve the LHS and RHS hash support functions of a hashable equality
+    /// operator. Returns `Some((lhs, rhs))` when found (the C `true`), `None`
+    /// when not (the C `false`). `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn get_op_hash_functions(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `op_strict(opno)` (lsyscache.c): whether the operator's underlying
+    /// function is strict. `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn op_strict(opno: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `get_opfamily_member(opfamily, lefttype, righttype, strategy)`
+    /// (lsyscache.c): the operator OID registered for the given strategy/type
+    /// pair, or `InvalidOid` (0) if none. `Err` carries the syscache
+    /// machinery's `ereport(ERROR)`s.
+    pub fn get_opfamily_member(
+        opfamily: Oid,
+        lefttype: Oid,
+        righttype: Oid,
+        strategy: i16,
+    ) -> PgResult<Oid>
+);
+
+/* ---- additional reads consumed by the typcache port ----------------------- */
+
+seam_core::seam!(
+    /// `GetDefaultOpClass(type_id, am_id)` (indexing.c via lsyscache surface):
+    /// default operator-class OID for the type in the given access method, or
+    /// `InvalidOid`. `Err` carries the ambiguity `ereport(ERROR)` and the
+    /// catalog-scan failure surface.
+    pub fn get_default_opclass(type_id: Oid, am_id: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_opclass_family(opclass)` (lsyscache.c): the opclass's `opcfamily`.
+    /// A missing opclass is the C `elog(ERROR, "cache lookup failed for
+    /// opclass %u")`, carried on `Err`.
+    pub fn get_opclass_family(opclass: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_opcode(opno)` (lsyscache.c): the function OID implementing an
+    /// operator. A missing operator is the C `elog(ERROR, "cache lookup
+    /// failed for operator %u")`, carried on `Err`.
+    pub fn get_opcode(opno: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `getBaseTypeAndTypmod(type_id, &typmod)` (lsyscache.c): walk the domain
+    /// chain to the base type, returning `(basetype, typmod)`. `Err` carries
+    /// the syscache failure surface.
+    pub fn get_base_type_and_typmod(type_id: Oid) -> PgResult<(Oid, i32)>
+);
+
+seam_core::seam!(
+    /// `get_base_element_type(type_id)` (lsyscache.c): the element type of the
+    /// base type of `type_id`, or `InvalidOid`. `Err` carries the syscache
+    /// failure surface.
+    pub fn get_base_element_type(type_id: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_multirange_range(multirange_type_id)` (lsyscache.c): the range
+    /// type OID of a multirange, or `InvalidOid`. `Err` carries the syscache
+    /// failure surface.
+    pub fn get_multirange_range(multirange_type_id: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RANGETYPE, ...)` → `Form_pg_range` fields read by
+    /// `load_rangetype_info`, or `None` when no such row. `Err` carries the
+    /// catcache failure surface.
+    pub fn lookup_pg_range(
+        range_type_id: Oid,
+    ) -> PgResult<Option<types_cache::typcache::PgRangeRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, ...)` → the `Form_pg_type` fields the
+    /// typcache reads when building a `TypeCacheEntry`, or `None` when the
+    /// type OID does not exist. The `typname` (error-message only) rides as an
+    /// owned `String`. `Err` carries the catcache failure surface and OOM.
+    pub fn lookup_pg_type(
+        type_id: Oid,
+    ) -> PgResult<Option<types_cache::typcache::PgTypeRow>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(type_id))` — the
+    /// syscache hash value stored as `TypeCacheEntry.type_id_hash`. `Err`
+    /// carries the catcache failure surface.
+    pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
+);
+
+// ---------------------------------------------------------------------------
+// Element-type metadata seams driven by `utils/adt/arrayfuncs.c`
+// (backend-utils-adt-arrayfuncs). All are lsyscache.c lookups.
+// ---------------------------------------------------------------------------
+
+// NOTE: `get_typlenbyvalalign` is already declared above (returns
+// `TypLenByValAlign`); arrayfuncs reuses that seam rather than redeclaring it.
+
+seam_core::seam!(
+    /// `get_element_type(array_type)` (lsyscache.c): the element type OID of a
+    /// true array type, or `None` (C `InvalidOid`) if `array_type` is not an
+    /// array.
+    pub fn get_element_type(array_type: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `get_array_type(input_type)` (lsyscache.c): the `typarray` of
+    /// `input_type`, or `None` (C `InvalidOid`) if it has no array type.
+    pub fn get_array_type(input_type: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `get_type_io_data(typid, which, &typlen, &typbyval, &typalign,
+    /// &typdelim, &typioparam, &func)` (lsyscache.c): the element type's
+    /// storage metadata plus the OID of its selected I/O function (input /
+    /// output / receive / send per `which`).
+    ///
+    /// Array-element-typed projection of the same `get_type_io_data` C entry
+    /// point used by arrayfuncs.c; named distinctly from the canonical
+    /// [`get_type_io_data`] seam above (which other callers consume with the
+    /// `IOFuncSelector` / `TypeIoData` shape) to keep one symbol per decl.
+    pub fn get_array_element_io_data(
+        element_type: Oid,
+        which: ArrayIoFuncSelector,
+    ) -> PgResult<ArrayElementIoData>
+);
+
+// ---------------------------------------------------------------------------
+// Type-classification / range / collation lookups driven by
+// `utils/fmgr/funcapi.c` polymorphic resolution
+// (backend-utils-fmgr-funcapi). All are lsyscache.c lookups.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `get_range_subtype(rangeOid)` (lsyscache.c): the element/subtype OID of a
+    /// range type, or `InvalidOid` (0) if `rangeOid` is not a range type. `Err`
+    /// carries the catcache failure surface.
+    pub fn get_range_subtype(range_oid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_range_multirange(rangeOid)` (lsyscache.c): the multirange type OID
+    /// associated with a range type, or `InvalidOid` (0). `Err` carries the
+    /// catcache failure surface.
+    pub fn get_range_multirange(range_oid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_typcollation(typid)` (lsyscache.c): the type's collation OID
+    /// (`pg_type.typcollation`), or `InvalidOid` if the type is not collatable.
+    /// A missing type is the C `elog(ERROR, "cache lookup failed for type %u")`,
+    /// carried on `Err`.
+    pub fn get_typcollation(typid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_typtype(typid)` (lsyscache.c): the type's `pg_type.typtype` char
+    /// (`TYPTYPE_*`), or `0` ('\0') if the type does not exist. `Err` carries
+    /// the catcache failure surface.
+    pub fn get_typtype(typid: Oid) -> PgResult<u8>
 );

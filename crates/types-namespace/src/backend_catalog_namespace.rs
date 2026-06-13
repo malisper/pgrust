@@ -43,6 +43,78 @@ pub struct OidArrayDatum<'mcx> {
     pub values: PgVec<'mcx, Oid>,
 }
 
+/// The raw projection of a `"char"[]` `ArrayType` datum (e.g.
+/// `pg_proc.proargmodes`): the header fields the funcapi call sites validate
+/// (`ARR_NDIM != 1 || dim0 != numargs || ARR_HASNULL || ARR_ELEMTYPE != CHAROID`
+/// => `elog(ERROR, "... is not a 1-D char array ...")`) plus the element data
+/// read as raw `char` bytes (C reads `ARR_DATA_PTR(arr)` directly as `char[]`).
+/// The consumer performs the validity checks; the seam only projects.
+#[derive(Debug)]
+pub struct CharArrayDatum<'mcx> {
+    /// `ARR_NDIM(arr)`.
+    pub ndim: i32,
+    /// `ARR_DIMS(arr)[0]` (meaningful only when `ndim >= 1`; 0 otherwise).
+    pub dim0: i32,
+    /// `ARR_HASNULL(arr)`.
+    pub hasnull: bool,
+    /// `ARR_ELEMTYPE(arr)`.
+    pub elemtype: Oid,
+    /// `ARR_DATA_PTR(arr)` read as `dim0` `char`s (empty if the shape checks
+    /// above would fail — the consumer must check them before use).
+    pub values: PgVec<'mcx, u8>,
+}
+
+/// The raw projection of a `text[]` `ArrayType` datum (e.g.
+/// `pg_proc.proargnames`): the header fields the funcapi call sites validate
+/// (`ARR_NDIM != 1 || dim0 != numargs || ARR_HASNULL || ARR_ELEMTYPE != TEXTOID`
+/// => `elog(ERROR, "... is not a 1-D text array ...")`) plus the elements
+/// already passed through `deconstruct_array_builtin(arr, TEXTOID, ...)` +
+/// per-element `TextDatumGetCString`. The consumer performs the validity checks;
+/// the seam only projects.
+#[derive(Debug)]
+pub struct TextArrayDatum<'mcx> {
+    /// `ARR_NDIM(arr)`.
+    pub ndim: i32,
+    /// `ARR_DIMS(arr)[0]` (meaningful only when `ndim >= 1`; 0 otherwise).
+    pub dim0: i32,
+    /// `ARR_HASNULL(arr)`.
+    pub hasnull: bool,
+    /// `ARR_ELEMTYPE(arr)`.
+    pub elemtype: Oid,
+    /// The `nelems` element strings from `deconstruct_array_builtin` /
+    /// `TextDatumGetCString` (empty if the shape checks above would fail — the
+    /// consumer must check them before use).
+    pub values: PgVec<'mcx, PgString<'mcx>>,
+}
+
+/// The `pg_proc`-row attribute projection the `funcapi.c` `pg_proc`-row helpers
+/// (`get_func_arg_info`, `get_func_trftypes`, `get_func_result_name`,
+/// `build_function_result_tupdesc_t`) read out of a `SearchSysCache1(PROCOID,
+/// funcid)` tuple: the `Form_pg_proc` `GETSTRUCT` scalars plus the
+/// `SysCacheGetAttr` array columns, each projected (and detoasted /
+/// deconstructed) by the syscache seam. `None` array fields mirror a SQL-NULL
+/// attribute (`isNull`). The funcapi consumers perform the C shape checks and
+/// the business logic.
+#[derive(Debug)]
+pub struct FuncProcAttrs<'mcx> {
+    /// `procStruct->prorettype`.
+    pub prorettype: Oid,
+    /// `procStruct->prokind` (raw `char`).
+    pub prokind: u8,
+    /// `procStruct->pronargs`.
+    pub pronargs: i32,
+    /// `procStruct->proargtypes.values` (length `pronargs`).
+    pub proargtypes: PgVec<'mcx, Oid>,
+    /// `SysCacheGetAttr(PROCOID, .., Anum_pg_proc_proallargtypes, &isNull)`.
+    pub proallargtypes: Option<OidArrayDatum<'mcx>>,
+    /// `SysCacheGetAttr(PROCOID, .., Anum_pg_proc_proargmodes, &isNull)`.
+    pub proargmodes: Option<CharArrayDatum<'mcx>>,
+    /// `SysCacheGetAttr(PROCOID, .., Anum_pg_proc_proargnames, &isNull)`.
+    pub proargnames: Option<TextArrayDatum<'mcx>>,
+    /// `SysCacheGetAttr(PROCOID, .., Anum_pg_proc_protrftypes, &isNull)`.
+    pub protrftypes: Option<OidArrayDatum<'mcx>>,
+}
+
 /// The decomposed `pg_proc` row fields `FuncnameGetCandidates`/`MatchNamedCall`
 /// read out of each catlist member: the `Form_pg_proc` GETSTRUCT reads plus
 /// the `proallargtypes` `SysCacheGetAttr` extraction.
@@ -53,6 +125,9 @@ pub struct ProcRow<'mcx> {
     pub provariadic: Oid,
     pub pronargs: i32,
     pub pronargdefaults: i32,
+    /// `procform->prorettype` — the function's return type (read by
+    /// `assignProcTypes` in opclasscmds.c).
+    pub prorettype: Oid,
     /// `procform->proargtypes.values` (length `pronargs`).
     pub proargtypes: PgVec<'mcx, Oid>,
     /// The `proallargtypes` attribute as a raw array projection if non-null;
@@ -74,6 +149,9 @@ pub struct OperRow<'mcx> {
     pub oprkind: u8,
     pub oprleft: Oid,
     pub oprright: Oid,
+    /// `oprresult` — the operator's result type (read by `assignOperTypes`
+    /// in opclasscmds.c).
+    pub oprresult: Oid,
     pub oprname: PgString<'mcx>,
 }
 

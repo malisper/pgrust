@@ -29,3 +29,69 @@ seam_core::seam!(
     /// client. `Ok(0)` on success, `Ok(EOF)` on failure.
     pub fn pq_flush() -> types_error::PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `if (FeBeWaitSet) ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetLatchPos,
+    /// WL_LATCH_SET, latch)` (`miscinit.c` latch switches) — repoint the
+    /// backend wait set's latch event at the new `MyLatch`. A no-op when
+    /// `FeBeWaitSet` is unset. `ModifyWaitEvent` can `ereport(ERROR)`.
+    pub fn modify_fe_be_wait_set_latch(
+        latch: types_storage::latch::LatchHandle,
+    ) -> types_error::PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
+//  Input-side primitives + connection init used by backend_startup.c.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `pq_init(client_sock)` (`libpq/pqcomm.c`) — allocate the per-connection
+    /// `Port` in the caller's context, install it as `MyProcPort`, set the
+    /// socket non-blocking, and register the close-socket `on_proc_exit`. The
+    /// owner stores the `Port` in `MyProcPort` (globals.c) rather than
+    /// returning it (per the no-`&'static mut` rule, consumers read it back via
+    /// `with_my_proc_port`). `mcx` is the context the `Port` is allocated in
+    /// (C: `TopMemoryContext`). `client_sock` is the accepted socket (C's
+    /// `MyClientSocket`), passed explicitly. `Err` carries the palloc OOM
+    /// `ereport(ERROR)`.
+    pub fn pq_init<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        client_sock: types_net::ClientSocket,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pq_startmsgread()` (`libpq/pqcomm.c`) — mark the start of a message
+    /// read (the partial-read consistency guard). Infallible.
+    pub fn pq_startmsgread()
+);
+
+seam_core::seam!(
+    /// `pq_endmsgread()` (`libpq/pqcomm.c`) — mark the end of a message read.
+    /// Infallible.
+    pub fn pq_endmsgread()
+);
+
+seam_core::seam!(
+    /// `pq_getbytes(buf, len)` (`libpq/pqcomm.c`) — read exactly `len` bytes
+    /// from the connection into a fresh buffer allocated in `mcx`. `Ok(Some)`
+    /// the bytes read; `Ok(None)` for the C `EOF` return (peer closed /
+    /// incomplete). `Err` carries the blocking-wait interrupt-processing
+    /// `ereport(ERROR)` and the buffer-alloc OOM.
+    pub fn pq_getbytes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        len: usize,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `pq_peekbyte()` (`libpq/pqcomm.c`) — peek at the next input byte without
+    /// consuming it; returns the byte (0-255) or `EOF` (-1). Infallible.
+    pub fn pq_peekbyte() -> i32
+);
+
+seam_core::seam!(
+    /// `pq_buffer_remaining_data()` (`libpq/pqcomm.c`) — number of bytes still
+    /// buffered (unconsumed) in the receive buffer. Infallible.
+    pub fn pq_buffer_remaining_data() -> i64
+);

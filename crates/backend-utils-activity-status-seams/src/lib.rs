@@ -11,11 +11,22 @@
 //! unit installs these from its `init_seams()` when it lands; until then a
 //! call panics loudly.
 
+extern crate alloc;
+
 use types_pgstat::backend_status::PgBackendStatus;
 
 seam_core::seam!(
     /// `MyBEEntry != NULL` — is the backend status entry initialized?
     pub fn my_be_entry_present() -> bool
+);
+
+seam_core::seam!(
+    /// `pgstat_get_backend_current_activity(pid, checkUser)` (backend_status.c)
+    /// — the current query string of backend `pid`, for the server-log deadlock
+    /// detail. `check_user` is C's `checkUser` (redact for permission); the
+    /// deadlock detector passes `false`. Returns the activity string (the C
+    /// pointer into the backend's status entry).
+    pub fn backend_current_activity(pid: i32, check_user: bool) -> alloc::string::String
 );
 
 seam_core::seam!(
@@ -30,6 +41,65 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_report_activity(STATE_IDLE, NULL)` (`backend_status.c`): mark
+    /// this backend idle and clear the current activity string. Infallible.
+    pub fn pgstat_report_activity_idle()
+);
+
+seam_core::seam!(
     /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
     pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
+);
+
+// --- backend-utils-init-postinit consumers (backend_status.c) ---
+
+seam_core::seam!(
+    /// `pgstat_beinit()` (backend_status.c): initialize backend status
+    /// reporting (pick the MyBEEntry slot). `Err` carries its `ereport` surface.
+    pub fn pgstat_beinit() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_initial()` (backend_status.c): begin filling the
+    /// PgBackendStatus entry (the pre-auth portion).
+    pub fn pgstat_bestart_initial() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_security()` (backend_status.c): record SSL/GSS details.
+    pub fn pgstat_bestart_security() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_final()` (backend_status.c): finish the PgBackendStatus
+    /// entry (database/role/activity).
+    pub fn pgstat_bestart_final() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `conn_timing.auth_start = tstamp` (backend_status.c): record the
+    /// authentication start timestamp for logging.
+    pub fn set_conn_timing_auth_start(tstamp: types_core::TimestampTz)
+);
+
+seam_core::seam!(
+    /// `conn_timing.auth_end = tstamp` (backend_status.c).
+    pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
+);
+
+seam_core::seam!(
+    /// `BackendStatusShmemSize()` (backend_status.c) — shared-memory bytes for
+    /// the per-backend status array (`PgBackendStatus` entries, activity
+    /// buffers, app-name and client-host buffers); summed by ipci.c
+    /// `CalculateShmemSize`. `Err` carries the `add_size`/`mul_size` overflow
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn backend_status_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `BackendStatusShmemInit()` (backend_status.c) — allocate-or-attach the
+    /// per-backend status array in shared memory (called from ipci.c
+    /// `CreateOrAttachShmemStructs`). `Err` carries the out-of-shmem
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn backend_status_shmem_init() -> types_error::PgResult<()>
 );

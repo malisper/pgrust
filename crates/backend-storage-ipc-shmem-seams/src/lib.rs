@@ -1,8 +1,8 @@
 //! Seam declarations for the `backend-storage-ipc-shmem` unit
 //! (`storage/ipc/shmem.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! The owning crate `backend-storage-ipc-shmem` installs these from its
+//! `init_seams()`.
 
 use types_core::Size;
 use types_error::PgResult;
@@ -39,4 +39,25 @@ seam_core::seam!(
 seam_core::seam!(
     /// `SpinLockRelease(ShmemLock)`.
     pub fn shmem_lock_release()
+);
+
+seam_core::seam!(
+    /// `InitShmemAccess(PGShmemHeader *seghdr)` (shmem.c) — record the main
+    /// shared-memory segment so `ShmemAlloc`/`ShmemInitStruct` can carve from
+    /// it. The header is genuinely shared memory (raw pointer, opacity
+    /// inherited). Owner unported; scaffolded slot.
+    pub fn init_shmem_access(seghdr: *mut types_storage::PGShmemHeader)
+);
+
+seam_core::seam!(
+    /// `InitShmemAllocation()` (shmem.c) — set up the shmem allocation
+    /// mechanism (places `ShmemLock`). Owner unported; scaffolded slot.
+    pub fn init_shmem_allocation()
+);
+
+seam_core::seam!(
+    /// `InitShmemIndex()` (shmem.c) — create the `ShmemIndex` hashtable used to
+    /// find named shmem structures. `Err` carries the out-of-shmem
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn init_shmem_index() -> types_error::PgResult<()>
 );

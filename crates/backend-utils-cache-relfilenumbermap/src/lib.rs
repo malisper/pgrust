@@ -5,14 +5,19 @@
 
 use std::cell::RefCell;
 
+use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_index_genam_seams as genam_seams;
+use backend_access_table_table::{table_close, table_open};
 use backend_utils_cache_inval_seams as inval_seams;
 use backend_utils_cache_relmapper_seams as relmapper_seams;
+use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
-use types_cache::{BTEqualStrategyNumber, ScanKeyInit, F_OIDEQ};
+use types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, RelFileNumber};
 use types_datum::Datum;
 use types_error::{PgError, PgResult};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_storage::lock::AccessShareLock;
 use types_tuple::backend_access_common_heaptuple::TupleValue;
 
 /// `RelationRelationId` (`catalog/pg_class.h`) — pg_class.
@@ -40,10 +45,9 @@ struct RelfilenumberMapKey {
 struct RelfilenumberMap<'mcx> {
     mcx: Mcx<'mcx>,
     /// `static ScanKeyData relfilenumber_skey[2]` — built first time through
-    /// in `InitializeRelfilenumberMap` (the comparison proc `F_OIDEQ` crosses
-    /// the genam seam unresolved; the C `fmgr_info_cxt` resolution into
-    /// `sk_func` happens owner-side at scan time).
-    relfilenumber_skey: [ScanKeyInit; 2],
+    /// in `InitializeRelfilenumberMap`; `sk_func` is resolved eagerly the way
+    /// C does (`fmgr_info_cxt(F_OIDEQ, &sk_func, ..)`) through the fmgr seam.
+    relfilenumber_skey: [ScanKeyData; 2],
     /// `static HTAB *RelfilenumberMapHash` — the entry value is `relid`
     /// (`pg_class.oid`; `InvalidOid` is a negative cache entry).
     hash: PgHashMap<'mcx, RelfilenumberMapKey, Oid>,
@@ -79,15 +83,19 @@ fn RelfilenumberMapInvalidateCallback(_arg: Datum, relid: Oid) {
 /// `InitializeRelfilenumberMap` — initialize cache, either on first use or
 /// after a reset.
 fn InitializeRelfilenumberMap() -> PgResult<()> {
-    // build skey
-    let mut skey = [ScanKeyInit {
-        sk_attno: 0,
-        sk_strategy: BTEqualStrategyNumber,
-        sk_procedure: F_OIDEQ,
-        sk_argument: Datum::null(),
-        sk_subtype: InvalidOid,
-        sk_collation: InvalidOid,
-    }; 2];
+    // build skey — C fills the fields by hand (fmgr_info_cxt(F_OIDEQ, ..) +
+    // BTEqualStrategyNumber, subtype/collation InvalidOid) rather than
+    // calling ScanKeyInit; mirror that. The eager fmgr resolution crosses
+    // the fmgr seam (panics until fmgr lands, exactly where C does the
+    // lookup); the trimmed FmgrInfo records the resolved procedure OID.
+    let mut skey = [ScanKeyData::empty(), ScanKeyData::empty()];
+    for entry in &mut skey {
+        fmgr_seams::fmgr_info_check::call(F_OIDEQ)?;
+        entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: F_OIDEQ };
+        entry.sk_strategy = BTEqualStrategyNumber;
+        entry.sk_subtype = InvalidOid;
+        entry.sk_collation = InvalidOid;
+    }
     skey[0].sk_attno = Anum_pg_class_reltablespace as i16;
     skey[1].sk_attno = Anum_pg_class_relfilenode as i16;
 
@@ -167,27 +175,33 @@ pub fn RelidByRelfilenumber(
         // non-shared, nailed one, like e.g. pg_class.
 
         // copy scankey to local copy and set scan arguments
-        let mut skey = RELFILENUMBER_MAP
-            .with(|cell| cell.borrow().as_ref().unwrap().with(|s| s.relfilenumber_skey));
+        let mut skey = RELFILENUMBER_MAP.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .unwrap()
+                .with(|s| s.relfilenumber_skey.clone())
+        });
         skey[0].sk_argument = Datum::from_oid(reltablespace);
         skey[1].sk_argument = Datum::from_oid(relfilenumber);
 
-        // check for plain relations by looking in pg_class
-        // (table_open(RelationRelationId, AccessShareLock) +
-        // systable_beginscan(.., ClassTblspcRelfilenodeIndexId, true, NULL,
-        // 2, skey) + getnext loop + endscan + table_close, batched across
-        // the genam seam; the rows land in a scratch context dropped below).
+        // check for plain relations by looking in pg_class. The scan
+        // temporaries land in a scratch context dropped below.
         let scratch = MemoryContext::new("RelidByRelfilenumber scan");
-        let rows = genam_seams::systable_scan::call(
-            scratch.mcx(),
-            RelationRelationId,
+        let smcx = scratch.mcx();
+        let relation = table_open(smcx, RelationRelationId, AccessShareLock)?;
+        let mut scandesc = genam_seams::systable_beginscan::call(
+            &relation,
             ClassTblspcRelfilenodeIndexId,
             true,
+            None,
             &skey,
         )?;
 
         let mut found = false;
-        for row in &rows {
+        while let Some(ntp) = genam_seams::systable_getnext::call(smcx, scandesc.desc_mut())? {
+            // Form_pg_class classform = (Form_pg_class) GETSTRUCT(ntp);
+            // field reads, via the deformed columns.
+            let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
             let relpersistence = match &row[(Anum_pg_class_relpersistence - 1) as usize].0 {
                 TupleValue::ByVal(d) => d.as_char(),
                 TupleValue::ByRef(_) => {
@@ -224,7 +238,9 @@ pub fn RelidByRelfilenumber(
             }
             relid = classform_oid;
         }
-        drop(rows);
+
+        scandesc.end()?;
+        table_close(relation, AccessShareLock)?;
         drop(scratch);
 
         // check for tables that are mapped but not shared

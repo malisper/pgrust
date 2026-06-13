@@ -2,12 +2,19 @@
 //! (`access/transam/xlogrecovery.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::TimestampTz;
+use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
 
 seam_core::seam!(
     /// `GetXLogReceiptTime(*rtime, *fromStream)` — the last WAL receipt time
     /// and whether it arrived via streaming replication.
     pub fn get_xlog_receipt_time() -> (TimestampTz, bool)
+);
+
+seam_core::seam!(
+    /// `GetXLogReplayRecPtr(*replayTLI)` (xlogrecovery.c) — the last replayed
+    /// WAL record's end LSN and the timeline being replayed. Returns
+    /// `(lsn, tli)`.
+    pub fn get_xlog_replay_rec_ptr() -> (XLogRecPtr, TimeLineID)
 );
 
 seam_core::seam!(
@@ -46,10 +53,56 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `reachedConsistency` (xlogrecovery.c global) — true once recovery has
+    /// reached a consistent state. Pure read of backend-local/shared state.
+    pub fn reached_consistency() -> bool
+);
+
+seam_core::seam!(
     /// `InRecovery` (`access/xlogutils.h`, owned by xlogrecovery.c) — true
     /// while this process is performing WAL replay (the startup process's
     /// local flag, distinct from the shared `RecoveryInProgress()`). Pure
     /// read of the owner's per-backend flag at the point of use; the
     /// zero-arg-getter shape is recorded in DESIGN_DEBT.md.
     pub fn in_recovery() -> bool
+);
+
+seam_core::seam!(
+    /// `GetXLogReplayRecPtr(NULL)` (xlogrecovery.c) — the last WAL position
+    /// replayed by the startup process.
+    pub fn get_xlog_replay_recptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `HotStandbyActive()` (xlogrecovery.c) — true once hot standby is
+    /// accepting connections.
+    pub fn hot_standby_active() -> bool
+);
+
+seam_core::seam!(
+    /// `GetXLogReplayRecPtr(&replayTLI)` (xlogrecovery.c) — the position up to
+    /// which WAL has been replayed by the startup process, with the replay
+    /// timeline. Returns `(read_upto, replayTLI)`. Distinct from the
+    /// NULL-`replayTLI` variant some callers use.
+    pub fn get_xlog_replay_rec_ptr_tli() -> (XLogRecPtr, types_core::TimeLineID)
+);
+
+seam_core::seam!(
+    /// `StandbyMode` (xlogrecovery.c global bool): true while the server is in
+    /// standby mode (continuous recovery awaiting more WAL). Pure read.
+    pub fn standby_mode() -> bool
+);
+
+seam_core::seam!(
+    /// `XLogRecoveryShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_recovery_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `XLogRecoveryShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_recovery_shmem_init() -> types_error::PgResult<()>
 );

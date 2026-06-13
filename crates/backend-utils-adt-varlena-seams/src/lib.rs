@@ -8,6 +8,19 @@ use mcx::{Mcx, PgString, PgVec};
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `textToQualifiedNameList(textval)` (varlena.c): split a (possibly
+    /// qualified) name `text` on `.` into its identifier parts, downcasing
+    /// and dequoting per `SplitIdentifierString`. `textval` is the `text`
+    /// payload bytes (database encoding). Invalid name syntax (or an empty
+    /// list) raises `ERRCODE_INVALID_NAME` (`Err`); the returned parts are
+    /// `pstrdup`'d into `mcx`. `Err` includes OOM.
+    pub fn text_to_qualified_name_list<'mcx>(
+        mcx: Mcx<'mcx>,
+        textval: &[u8],
+    ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `cstring_to_text(s)` (varlena.c) — build a `text` varlena from a
     /// string, allocated in `mcx` (C: palloc in the caller's current
     /// context), returned as the `Datum` callers pass on (the
@@ -20,15 +33,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `SplitIdentifierString(rawstring, ',', &namelist)` (varlena.c) for the
-    /// comma separator: parse a comma-separated list of identifiers,
-    /// downcasing and dequoting per identifier rules. `Ok(None)` is the C
-    /// `false` return (syntax error); the returned strings are the
+    /// `bool SplitIdentifierString(char *rawstring, char separator,
+    /// List **namelist)` (varlena.c) — parse a `separator`-separated list of
+    /// identifiers, downcasing and dequoting per identifier rules. `Ok(None)`
+    /// is the C `false` return (syntax error); the returned strings are the
     /// truncated/downcased names, allocated in `mcx` (C: pstrdup + List in
     /// the current context). `Err` carries OOM from the copies.
     pub fn split_identifier_string<'mcx>(
         mcx: Mcx<'mcx>,
         raw: &str,
+        separator: char,
     ) -> PgResult<Option<PgVec<'mcx, PgString<'mcx>>>>
 );
 
@@ -68,4 +82,27 @@ seam_core::seam!(
         search_start: i32,
         n: i32,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `SplitDirectoriesString(rawstring, ',', &elemlist)` (varlena.c) — split
+    /// a comma-separated, possibly-quoted directory list into canonicalized
+    /// path elements, each allocated in `mcx`. `Ok(None)` is the C `false`
+    /// return (syntax error); `Ok(Some(list))` carries the parsed elements.
+    pub fn split_directories_string<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rawstring: &str,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `text_to_cstring(t)` (varlena.c), reached via the `TextDatumGetCString(d)`
+    /// macro (`text_to_cstring((text *) DatumGetPointer(d))`): detoast the
+    /// `text` varlena `d` points at and copy its payload out as a NUL-free
+    /// `String` in `mcx` (C: palloc in the caller's current context). `Err`
+    /// carries detoast/OOM `ereport(ERROR)`.
+    pub fn text_to_cstring<'mcx>(
+        mcx: Mcx<'mcx>,
+        d: types_datum::Datum,
+    ) -> PgResult<PgString<'mcx>>
 );

@@ -1,0 +1,44 @@
+[package]
+name = "backend-storage-lmgr-proc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_lmgr_proc"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-deadlock = { path = "../types-deadlock" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-stringinfo = { path = "../types-stringinfo" }
+types-timeout = { path = "../types-timeout" }
+types-wal = { path = "../types-wal" }
+
+# Inward seams this unit owns and installs from init_seams().
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+
+# Outward seams: neighbors this unit calls into (panic until each owner lands).
+# globals.c (MaxBackends/MaxConnections/max_prepared_xacts/...), shmem.c
+# (add_size/mul_size), and lwlock.c (LWLockInitialize for each PGPROC's
+# fpInfoLock).
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+# Outward per-owner seam crates the wait-queue family routes through.
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-deadlock-seams = { path = "../backend-storage-lmgr-deadlock-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
