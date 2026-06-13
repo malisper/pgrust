@@ -3,10 +3,12 @@
 //! `ri_triggers.c` keeps three private dynahash tables that live as long as the
 //! backend: `ri_constraint_cache` (the [`RiConstraintInfo`] per FK constraint),
 //! `ri_query_cache` (saved `SPIPlanPtr` per [`RiQueryKey`]) and
-//! `ri_compare_cache` (the cmp/cast `FmgrInfo`s per `RiCompareKey`). These are
+//! `ri_compare_cache` (the cmp/cast function OIDs per `RiCompareKey`). These are
 //! PROCESS-LOCAL (no shared memory), modelled as `thread_local!` per-backend
-//! tables. The `ri_compare_cache` belongs to the fmgr subsystem, so its
-//! `ri_HashCompareOp` + `ri_CompareWithCast` computation routes through a seam.
+//! tables. C caches resolved `FmgrInfo`s in the compare cache; an `FmgrInfo`
+//! embeds a C function pointer and cannot cross a seam, so we cache the
+//! resolved function OIDs and dispatch by OID through the fmgr seams at call
+//! time (`ri_hash_compare_op` / `ri_compare_with_cast`).
 
 extern crate alloc;
 use alloc::string::String;
@@ -14,11 +16,14 @@ use core::cell::RefCell;
 use std::collections::HashMap;
 
 use mcx::Mcx;
+use types_core::primitive::OidIsValid;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_OBJECT_DEFINITION,
 };
 use types_ri_triggers::{SpiPlanPtr, TriggerRef};
+
+use backend_parser_coerce_seams::CoercionPathType;
 
 use crate::{
     name_data_from_bytes, RelSide, RiConstraintInfo, RiQueryKey, FKCONSTR_MATCH_FULL,
@@ -27,10 +32,35 @@ use crate::{
 
 type QueryCacheEntry = Option<SpiPlanPtr>;
 
+/// `RI_CompareKey` --- the key identifying an entry showing how to compare two
+/// values.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RiCompareKey {
+    /// `Oid eq_opr` --- the equality operator to apply.
+    pub eq_opr: Oid,
+    /// `Oid typeid` --- the data type to apply it to.
+    pub typeid: Oid,
+}
+
+/// `RI_CompareHashEntry`.
+///
+/// C caches the resolved `FmgrInfo`s; an `FmgrInfo` embeds a C function pointer
+/// and cannot cross a seam, so the owned model caches the resolved function
+/// OIDs and dispatches by OID through the fmgr seams at call time.
+#[derive(Clone, Copy)]
+pub struct RiCompareHashEntry {
+    /// `eq_opr_finfo` --- the equality fn (the operator's `oprcode`).
+    pub eq_opr_func: Oid,
+    /// `cast_func_finfo` --- the input-coercion fn, or `InvalidOid` if none.
+    pub cast_func: Oid,
+}
+
 thread_local! {
     static RI_CONSTRAINT_CACHE: RefCell<Option<HashMap<Oid, RiConstraintInfo>>> =
         const { RefCell::new(None) };
     static RI_QUERY_CACHE: RefCell<Option<HashMap<RiQueryKey, QueryCacheEntry>>> =
+        const { RefCell::new(None) };
+    static RI_COMPARE_CACHE: RefCell<Option<HashMap<RiCompareKey, RiCompareHashEntry>>> =
         const { RefCell::new(None) };
     static RI_CONSTRAINT_VALID_LIST: RefCell<alloc::vec::Vec<Oid>> =
         const { RefCell::new(alloc::vec::Vec::new()) };
@@ -50,7 +80,81 @@ pub fn ri_init_hash_tables() -> PgResult<()> {
             *c.borrow_mut() = Some(HashMap::new());
         }
     });
+    RI_COMPARE_CACHE.with(|c| {
+        if c.borrow().is_none() {
+            *c.borrow_mut() = Some(HashMap::new());
+        }
+    });
     Ok(())
+}
+
+/// `ri_HashCompareOp` --- see if we know how to compare two values, and create
+/// a new hash entry if not.
+pub fn ri_hash_compare_op(mcx: Mcx<'_>, eq_opr: Oid, typeid: Oid) -> PgResult<RiCompareHashEntry> {
+    // On the first call initialize the hashtable.
+    let initialized = RI_COMPARE_CACHE.with(|c| c.borrow().is_some());
+    if !initialized {
+        ri_init_hash_tables()?;
+    }
+
+    let key = RiCompareKey { eq_opr, typeid };
+
+    // Find or create a hash entry.
+    let found = RI_COMPARE_CACHE.with(|c| c.borrow().as_ref().unwrap().get(&key).copied());
+    if let Some(entry) = found {
+        return Ok(entry);
+    }
+
+    // Not already initialized: do so. (C keeps the entry for the life of the
+    // backend; here the resolved FmgrInfos are re-resolved by OID at call time,
+    // so the entry just records the function OIDs.)
+    //
+    // We always need to know how to call the equality operator. `get_opcode`
+    // resolves the operator's `oprcode`; `fmgr_info_check` validates it the way
+    // C's `fmgr_info_cxt` would.
+    let eq_opr_func = backend_utils_cache_lsyscache_seams::get_opcode::call(eq_opr)?;
+    backend_utils_fmgr_fmgr_seams::fmgr_info_check::call(eq_opr_func)?;
+
+    // If we chose to use a cast from FK to PK type, we may have to apply the
+    // cast function to get to the operator's input type.
+    let (lefttype, _righttype) = backend_utils_cache_lsyscache_seams::op_input_types::call(eq_opr)?;
+    let castfunc = if typeid == lefttype {
+        InvalidOid // simplest case
+    } else {
+        let (pathtype, castfunc) =
+            backend_parser_coerce_seams::find_coercion_pathway_implicit::call(lefttype, typeid)?;
+        if pathtype != CoercionPathType::Func && pathtype != CoercionPathType::Relabeltype {
+            // The declared input type of the eq_opr might be a polymorphic type
+            // such as ANYARRAY or ANYENUM, or other special cases such as
+            // RECORD; find_coercion_pathway currently doesn't subsume these
+            // special cases.
+            if !backend_parser_coerce_seams::is_binary_coercible::call(typeid, lefttype)? {
+                let from = backend_utils_adt_format_type_seams::format_type_be::call(mcx, typeid)?;
+                let to = backend_utils_adt_format_type_seams::format_type_be::call(mcx, lefttype)?;
+                return Err(PgError::error(alloc::format!(
+                    "no conversion function from {} to {}",
+                    from.as_str(),
+                    to.as_str()
+                )));
+            }
+        }
+        castfunc
+    };
+    let cast_func = if OidIsValid(castfunc) {
+        backend_utils_fmgr_fmgr_seams::fmgr_info_check::call(castfunc)?;
+        castfunc
+    } else {
+        InvalidOid
+    };
+
+    let entry = RiCompareHashEntry {
+        eq_opr_func,
+        cast_func,
+    };
+    RI_COMPARE_CACHE.with(|c| {
+        c.borrow_mut().as_mut().unwrap().insert(key, entry);
+    });
+    Ok(entry)
 }
 
 /// `ri_FetchConstraintInfo` --- fetch the [`RiConstraintInfo`] for the trigger's

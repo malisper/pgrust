@@ -34,4 +34,6 @@ backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-ri-triggers-seams = { path = "../backend-utils-adt-ri-triggers-seams" }

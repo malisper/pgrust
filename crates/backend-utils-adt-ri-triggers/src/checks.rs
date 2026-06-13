@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_datum::Datum;
-use types_core::Oid;
+use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
     ERRCODE_INTERNAL_ERROR, ERRCODE_RESTRICT_VIOLATION, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_SCHEMA_NAME,
@@ -18,7 +18,7 @@ use types_error::{
 };
 use types_ri_triggers::{SpiPlanPtr, TriggerDataRef, TupleTableSlotRef};
 
-use crate::cache::ri_hash_prepared_plan;
+use crate::cache::{ri_hash_compare_op, ri_hash_prepared_plan};
 use crate::querybuild::{append_quoted_relation, quote_one_name, ri_generate_qual, try_extend};
 use crate::{
     trigger_fired_after, trigger_fired_by_delete, trigger_fired_by_insert, trigger_fired_by_update,
@@ -467,6 +467,7 @@ pub fn ri_null_check(
 
 /// `ri_KeysEqual` --- check if all key values in OLD and NEW are "equivalent".
 pub fn ri_keys_equal(
+    mcx: Mcx<'_>,
     rel: RelSide<'_, '_>,
     oldslot: TupleTableSlotRef,
     newslot: TupleTableSlotRef,
@@ -505,15 +506,54 @@ pub fn ri_keys_equal(
             };
             let typeid = rel.att_type(attnums[i]);
             let collid = rel.att_collation(attnums[i]);
-            if !backend_utils_fmgr_fmgr_seams::ri_compare_with_cast::call(
-                eq_opr, typeid, collid, newvalue, oldvalue,
-            )? {
+            if !ri_compare_with_cast(mcx, eq_opr, typeid, collid, newvalue, oldvalue)? {
                 return Ok(false);
             }
         }
     }
 
     Ok(true)
+}
+
+/// `ri_CompareWithCast` --- call the appropriate comparison operator for two
+/// values. Normally this is equality, but for the PERIOD part of foreign keys
+/// it is ContainedBy, so the order of lhs vs rhs is significant.
+///
+/// NB: we have already checked that neither value is null.
+fn ri_compare_with_cast(
+    mcx: Mcx<'_>,
+    eq_opr: Oid,
+    typeid: Oid,
+    collid: Oid,
+    mut lhs: Datum,
+    mut rhs: Datum,
+) -> PgResult<bool> {
+    let entry = ri_hash_compare_op(mcx, eq_opr, typeid)?;
+
+    // Do we need to cast the values?
+    if entry.cast_func != InvalidOid {
+        lhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
+            entry.cast_func,
+            lhs,
+            Datum::from_i32(-1),     // typmod
+            Datum::from_bool(false), // implicit coercion
+        )?;
+        rhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
+            entry.cast_func,
+            rhs,
+            Datum::from_i32(-1),
+            Datum::from_bool(false),
+        )?;
+    }
+
+    // Apply the comparison operator.
+    //
+    // Note: the comparison here would in principle need the collation of the
+    // *other* table; for simplicity we use our own collation, which is fine
+    // because both collations are required to share a notion of equality.
+    let result =
+        backend_utils_fmgr_fmgr_seams::function_call2_coll::call(entry.eq_opr_func, collid, lhs, rhs)?;
+    Ok(result.as_bool())
 }
 
 /// `RI_FKey_trigger_type` --- classify a trigger function OID.

@@ -80,3 +80,18 @@ seam_core::seam!(
     /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.
     pub fn get_relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `get_opcode(opno)` (lsyscache.c): the `oprcode` regproc OID of an
+    /// operator, or `InvalidOid` if there is no such operator. `Err` carries
+    /// catcache-path `ereport(ERROR)`s.
+    pub fn get_opcode(opno: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `op_input_types(opno, &lefttype, &righttype)` (lsyscache.c): the left
+    /// and right input datatypes of an operator, returned as `(lefttype,
+    /// righttype)`. A missing operator is the C `elog(ERROR, "cache lookup
+    /// failed for operator %u")`, carried on `Err`.
+    pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)>
+);

@@ -737,7 +737,7 @@ pub fn ri_fkey_pk_upd_check_required(
     }
 
     if let Some(newslot) = newslot {
-        if ri_keys_equal(pk_side, oldslot, newslot, &riinfo, true)? {
+        if ri_keys_equal(mcx, pk_side, oldslot, newslot, &riinfo, true)? {
             return Ok(false);
         }
     }
@@ -773,7 +773,7 @@ pub fn ri_fkey_fk_upd_check_required(
         return Ok(true);
     }
 
-    if ri_keys_equal(fk_side, oldslot, newslot, &riinfo, false)? {
+    if ri_keys_equal(mcx, fk_side, oldslot, newslot, &riinfo, false)? {
         return Ok(false);
     }
 

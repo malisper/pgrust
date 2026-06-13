@@ -38,19 +38,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ri_CompareWithCast(eq_opr, typeid, collid, lhs, rhs)` (ri_triggers.c
-    /// caller; fmgr owns the cached `ri_compare_cache` `FmgrInfo`s): apply the
-    /// equality (or contained-by) operator after the optional input cast,
-    /// returning the boolean result. The cache + `fmgr_info` lookups +
-    /// `FunctionCall2Coll` all belong to the fmgr/coercion layer, so the whole
-    /// computation crosses as one seam. Can `ereport(ERROR)`.
-    pub fn ri_compare_with_cast(
-        eq_opr: Oid,
-        typeid: Oid,
-        collid: Oid,
-        lhs: Datum,
-        rhs: Datum,
-    ) -> PgResult<bool>
+    /// `FunctionCall3(flinfo, arg1, arg2, arg3)` (fmgr.c): call the function
+    /// identified by `function_id` (the caller's cached `FmgrInfo`, which
+    /// cannot cross the seam, so we re-resolve by OID) with three
+    /// non-collation arguments under the default (invalid) collation, returning
+    /// its `Datum` result. Used by `ri_CompareWithCast` to apply a cast
+    /// function `(value, typmod=-1, implicit=false)`. The C path asserts the
+    /// result is non-null. Can `ereport(ERROR)`.
+    pub fn function_call3(
+        function_id: Oid,
+        arg1: Datum,
+        arg2: Datum,
+        arg3: Datum,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` (fmgr.c): call the
+    /// function identified by `function_id` (the caller's cached `FmgrInfo`,
+    /// re-resolved by OID) with two arguments under the given input
+    /// `collation`, returning its `Datum` result. Used by `ri_CompareWithCast`
+    /// to apply the equality/contained-by operator. The C path asserts the
+    /// result is non-null. Can `ereport(ERROR)`.
+    pub fn function_call2_coll(
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum,
+        arg2: Datum,
+    ) -> PgResult<Datum>
 );
 
 seam_core::seam!(
