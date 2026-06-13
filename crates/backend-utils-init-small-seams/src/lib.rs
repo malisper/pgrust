@@ -102,3 +102,11 @@ seam_core::seam!(
     /// buffers. Pure read of backend-local state.
     pub fn nbuffers() -> i32
 );
+
+seam_core::seam!(
+    /// `MyBackendType` (globals.c, declared in miscadmin.h) — this process's
+    /// identity, assigned once at startup (the `AmStartupProcess()` /
+    /// `AmWalReceiverProcess()` macros are `MyBackendType == B_*` tests).
+    /// Process-identity read, same class as `my_proc_pid`.
+    pub fn my_backend_type() -> types_core::init::BackendType
+);

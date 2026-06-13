@@ -22,3 +22,15 @@ seam_core::seam!(
         forknum: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<types_core::primitive::BlockNumber>
 );
+
+seam_core::seam!(
+    /// `smgrexists(smgropen(rlocator, backend), forknum)` (smgr.c): does the
+    /// fork's storage exist on disk? `Err` carries the file-layer
+    /// `ereport(ERROR)`s reachable under `mdexists` (the implicit `smgropen`
+    /// can also OOM-error creating the relation's smgr hash entry).
+    pub fn smgrexists(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+    ) -> types_error::PgResult<bool>
+);

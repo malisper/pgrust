@@ -18,3 +18,18 @@ seam_core::seam!(
         fork_num: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<types_core::primitive::BlockNumber>
 );
+
+seam_core::seam!(
+    /// `PrefetchSharedBuffer(smgropen(rlocator, backend), forkNum, blockNum)`
+    /// (bufmgr.c): initiate (or note as unnecessary) a prefetch of a shared
+    /// buffer. The C function takes the `SMgrRelation` handle; smgropen is
+    /// cached and cheap, so the seam takes the locator + backend pair like
+    /// the flattened smgr seams. `Err` carries the buffer-table /
+    /// `smgrprefetch` `ereport(ERROR)`s.
+    pub fn prefetch_shared_buffer(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        fork_num: types_core::primitive::ForkNumber,
+        block_num: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::PrefetchBufferResult>
+);

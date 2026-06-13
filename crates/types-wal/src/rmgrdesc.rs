@@ -95,6 +95,71 @@ impl xl_commit_ts_truncate {
     }
 }
 
+/// `xl_smgr_create` (catalog/storage_xlog.h).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_smgr_create {
+    rlocator: RelFileLocator,
+    forkNum: types_core::ForkNumber,
+}
+
+impl xl_smgr_create {
+    /// rlocator@0 (three `Oid`s), forkNum@12 (a C `int`).
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            rlocator: RelFileLocator::new(
+                read_u32(data, 0)?,
+                read_u32(data, 4)?,
+                read_u32(data, 8)?,
+            ),
+            forkNum: types_core::ForkNumber::from_i32(read_i32(data, 12)?)?,
+        })
+    }
+
+    pub const fn rlocator(&self) -> RelFileLocator {
+        self.rlocator
+    }
+
+    pub const fn fork_num(&self) -> types_core::ForkNumber {
+        self.forkNum
+    }
+}
+
+/// `xl_smgr_truncate` (catalog/storage_xlog.h).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct xl_smgr_truncate {
+    blkno: types_core::BlockNumber,
+    rlocator: RelFileLocator,
+    flags: i32,
+}
+
+impl xl_smgr_truncate {
+    /// blkno@0, rlocator@4 (three `Oid`s), flags@16.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        Some(Self {
+            blkno: read_u32(data, 0)?,
+            rlocator: RelFileLocator::new(
+                read_u32(data, 4)?,
+                read_u32(data, 8)?,
+                read_u32(data, 12)?,
+            ),
+            flags: read_i32(data, 16)?,
+        })
+    }
+
+    pub const fn blkno(&self) -> types_core::BlockNumber {
+        self.blkno
+    }
+
+    pub const fn rlocator(&self) -> RelFileLocator {
+        self.rlocator
+    }
+
+    /// The `SMGR_TRUNCATE_*` flag bits.
+    pub const fn flags(&self) -> i32 {
+        self.flags
+    }
+}
+
 /// `xl_dbase_create_file_copy_rec` (commands/dbcommands_xlog.h).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct xl_dbase_create_file_copy_rec {

@@ -309,3 +309,14 @@ pub struct RelFileLocator {
 pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
     a == b
 }
+
+/// `PrefetchBufferResult` (`storage/bufmgr.h`) — the result of
+/// `PrefetchBuffer`/`PrefetchSharedBuffer`: a buffer the block was already
+/// found in (`InvalidBuffer` when none), and whether an I/O was initiated.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrefetchBufferResult {
+    /// `Buffer recent_buffer` — the block's buffer if already cached.
+    pub recent_buffer: types_core::Buffer,
+    /// `bool initiated_io` — whether a prefetch was started.
+    pub initiated_io: bool,
+}

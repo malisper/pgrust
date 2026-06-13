@@ -12,6 +12,7 @@ pub fn init_all() {
     backend_access_rmgrdesc_small::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_executor_execAmi::init_seams();
