@@ -214,3 +214,20 @@ seam_core::seam!(
         arraydatum: Datum,
     ) -> PgResult<TextArrayDatum<'mcx>>
 );
+
+seam_core::seam!(
+    /// The `stanumbers` extraction of `get_attstatsslot` (lsyscache.c): detoast
+    /// + copy the `Datum` (`DatumGetArrayTypePCopy`), verify it is a 1-D
+    /// no-NULLs `float4` array (`ARR_NDIM(statarray) != 1 || narrayelem <= 0 ||
+    /// ARR_HASNULL(statarray) || ARR_ELEMTYPE(statarray) != FLOAT4OID` ->
+    /// `elog(ERROR, "stanumbers is not a 1-D float4 array")`), and return its
+    /// element values (`ARR_DATA_PTR` viewed as `float4[narrayelem]`) copied
+    /// into `mcx`. In C the slot's `numbers` points directly into the detoasted
+    /// array (freed by `free_attstatsslot`); the owned model returns the copy
+    /// so its `Drop` subsumes the free. `Err` carries the validation
+    /// `ereport(ERROR)` and detoast/OOM surface.
+    pub fn array_get_float4_values<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<PgVec<'mcx, f32>>
+);

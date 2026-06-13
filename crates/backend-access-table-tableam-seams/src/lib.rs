@@ -24,6 +24,17 @@ use types_rel::Relation;
 use types_snapshot::SnapshotData;
 
 seam_core::seam!(
+    /// `GetTableAmRoutine(amhandler)` (access/table/tableamapi.c): call the
+    /// table AM's handler function (`OidFunctionCall0(amhandler)` returning a
+    /// `const TableAmRoutine*`) and hand back the vtable for the relcache to
+    /// cache in `rd_tableam`. `Err` carries the handler's `ereport(ERROR)`
+    /// (wrong magic number / NULL routine).
+    pub fn get_table_am_routine(
+        amhandler: Oid,
+    ) -> PgResult<types_tableam::TableAmRoutine>
+);
+
+seam_core::seam!(
     /// `table_relation_toast_am(rel)` (access/tableam.h, static inline):
     /// `rel->rd_tableam->relation_toast_am(rel)` — the OID of the AM that
     /// should implement the TOAST table for `rel`. Infallible.
