@@ -29,6 +29,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_class_aclcheck(table_oid, roleid, mode)` (aclchk.c): check
+    /// table-level privilege bits. Returns `ACLCHECK_OK` / `ACLCHECK_NO_PRIV`
+    /// (no ereport on a privilege miss); a syscache lookup failure can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn pg_class_aclcheck(table_oid: Oid, roleid: Oid, mode: AclMode) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
+    /// `pg_attribute_aclcheck(table_oid, attnum, roleid, mode)` (aclchk.c):
+    /// check column-level privilege bits. Returns `ACLCHECK_OK` /
+    /// `ACLCHECK_NO_PRIV`; a syscache lookup failure can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn pg_attribute_aclcheck(
+        table_oid: Oid,
+        attnum: i16,
+        roleid: Oid,
+        mode: AclMode,
+    ) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
     /// `aclcheck_error(aclerr, objtype, objectname)` (aclchk.c): raise the
     /// standard permission-denied / must-be-owner error. Always raises for a
     /// non-OK `aclerr` (the only way callers reach it), carried on `Err`.

@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
@@ -147,6 +147,31 @@ seam_core::seam!(
     /// `GetSysCacheOid2(RELNAMENSP, ...)` — the relation's OID or
     /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.
     pub fn get_relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
+    /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
+    /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
+    pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, am_oid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_func_signature(funcid, &argtypes, &nargs)` (lsyscache.c): the
+    /// function's argument type OIDs (length `nargs`), palloc'd in `mcx`. A
+    /// missing pg_proc row is the C `elog(ERROR, "cache lookup failed for
+    /// function %u")`, carried on `Err` (also OOM from the copy).
+    pub fn get_func_signature<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `op_input_types(opno, &lefttype, &righttype)` (lsyscache.c): the
+    /// operator's input type OIDs. A missing pg_operator row is the C
+    /// `elog(ERROR, "cache lookup failed for operator %u")`, carried on `Err`.
+    pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)>
 );
 
 seam_core::seam!(
