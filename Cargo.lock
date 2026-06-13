@@ -1407,6 +1407,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-timezone-strftime"
+version = "0.0.0"
+dependencies = [
+ "types-pgtime",
+]
+
+[[package]]
 name = "backend-timezone-strftime-seams"
 version = "0.0.0"
 dependencies = [
@@ -2060,6 +2067,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-cache-attoptcache",

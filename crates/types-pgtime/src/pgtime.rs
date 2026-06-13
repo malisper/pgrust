@@ -1,6 +1,17 @@
 //! `struct pg_tm` (`pgtime.h`) — the timezone-aware broken-down time produced
 //! by `pg_localtime`/`pg_gmtime`.
 
+// Time unit constants from `src/timezone/private.h`.
+pub const SECSPERMIN: i32 = 60;
+pub const MINSPERHOUR: i32 = 60;
+pub const HOURSPERDAY: i32 = 24;
+pub const DAYSPERWEEK: i32 = 7;
+pub const DAYSPERNYEAR: i32 = 365;
+pub const DAYSPERLYEAR: i32 = 366;
+pub const MONSPERYEAR: i32 = 12;
+pub const TM_YEAR_BASE: i32 = 1900;
+
+
 use alloc::string::String;
 
 /// `struct pg_tm` (`pgtime.h`). Field conventions follow the producing
