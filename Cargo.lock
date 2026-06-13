@@ -898,6 +898,7 @@ name = "backend-access-table-table"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-table-table-seams",
  "backend-catalog-pg-class-seams",
  "mcx",
  "types-core",
@@ -1535,6 +1536,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-sink"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -1819,6 +1829,15 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-class"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-class-seams",
+ "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6183,6 +6202,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-cmdtag"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-numutils",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-tcop-dest-seams"
 version = "0.0.0"
 dependencies = [
@@ -6438,6 +6468,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-small-seams",
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
@@ -7574,6 +7605,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-hash-dynahash"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-hash-dynahash-seams"
 version = "0.0.0"
 dependencies = [
@@ -7876,6 +7922,7 @@ dependencies = [
  "common-controldata-utils-seams",
  "libc",
  "mcx",
+ "types-acl",
  "types-control",
  "types-core",
  "types-datum",
