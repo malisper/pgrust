@@ -120,10 +120,16 @@ mod _seam_deps {
 /// hooks consumers reach through `backend-executor-nodeHash-pq-seams`). Empty
 /// until the bodies land; wired into `seams-init` now so the slot exists.
 pub fn init_seams() {
-    // backend_executor_nodeHash_pq_seams::exec_hash_estimate::set(...);
-    // backend_executor_nodeHash_pq_seams::exec_hash_initialize_dsm::set(...);
-    // backend_executor_nodeHash_pq_seams::exec_hash_initialize_worker::set(...);
-    // backend_executor_nodeHash_pq_seams::exec_hash_retrieve_instrumentation::set(...);
+    backend_executor_nodeHash_pq_seams::exec_hash_estimate::set(instrument::ExecHashEstimate);
+    backend_executor_nodeHash_pq_seams::exec_hash_initialize_dsm::set(
+        instrument::ExecHashInitializeDSM,
+    );
+    backend_executor_nodeHash_pq_seams::exec_hash_initialize_worker::set(
+        instrument::ExecHashInitializeWorker,
+    );
+    backend_executor_nodeHash_pq_seams::exec_hash_retrieve_instrumentation::set(
+        instrument::ExecHashRetrieveInstrumentation,
+    );
 }
 
 /// Silence the unused-`Size` import warning in the scaffold.
