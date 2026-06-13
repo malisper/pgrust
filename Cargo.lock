@@ -1062,19 +1062,25 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-shm-toc",
+ "backend-storage-lmgr-lwlock",
  "backend-utils-error",
+ "backend-utils-mmgr-freepage",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
  "types-execparallel",
  "types-parallel",
+ "types-storage",
 ]
 
 [[package]]
 name = "backend-access-transam-parallel-rt-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-datum",
