@@ -140,6 +140,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentStatementStartTimestamp()` (xact.c): the `stmtStartTimestamp`
+    /// of the current transaction state — stamped into `portal->creation_time`.
+    /// Pure read of xact's owned state.
+    pub fn get_current_statement_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `RequireTransactionBlock(isTopLevel, stmtType)` (xact.c) — `ereport`s if
     /// the statement is not running inside a transaction block (so it would
     /// have no user-visible effect). The C arg is `const char *stmtType`.

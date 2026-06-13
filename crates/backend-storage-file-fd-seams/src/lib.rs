@@ -66,6 +66,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_file_exists(name)` (`storage/file/fd.c`) — true if the path exists
+    /// and is not a directory. May `ereport(ERROR)` for an access error other
+    /// than `ENOENT`/`ENOTDIR`/`EACCES`, surfaced as `Err`.
+    pub fn pg_file_exists(name: &str) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `MakePGDirectory(directoryName)` (`storage/file/fd.c`) —
     /// `mkdir(directoryName, pg_dir_create_mode)`. Returns the `mkdir`
     /// result (`0` on success, `-1` with errno set on failure); infallible
@@ -172,4 +179,12 @@ seam_core::seam!(
     /// classify a directory entry. Returns the `PGFileType` code
     /// (`PGFILETYPE_ERROR`=0, `_UNKNOWN`=1, `_REG`=2, `_DIR`=3, `_LNK`=4).
     pub fn get_dirent_type(path: &str) -> i32
+);
+
+seam_core::seam!(
+    /// `BasicOpenFile(path, O_RDONLY | PG_BINARY)` (fd.c) — open a file
+    /// outside the virtual-fd pool. `Ok(fd)` on success; `Err(errno)` carries
+    /// the `errno` the C caller inspects (e.g. `ENOENT`) to choose its
+    /// `ereport` message.
+    pub fn basic_open_file(path: &str) -> Result<i32, i32>
 );

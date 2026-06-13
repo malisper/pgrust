@@ -100,6 +100,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnregisterSnapshotFromOwner(snapshot, owner)` — drop the portal's
+    /// hold-snapshot registration against its resource owner. The snapshot
+    /// crosses as the shared `Rc<SnapshotData>` the stack/owner alias (the C
+    /// `Snapshot` is a shared pointer); the owner as the shared
+    /// `types_portal::ResourceOwner` handle.
+    pub fn unregister_snapshot_from_owner(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+        owner: types_portal::ResourceOwner,
+    )
+);
+
+seam_core::seam!(
+    /// `ActiveSnapshotSet()` — true if the active-snapshot stack is non-empty.
+    pub fn active_snapshot_set() -> bool
+);
+
+seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
+    /// catalog snapshot so the next catalog read takes a fresh one — driven by
+    /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;
+    /// infallible.
+    pub fn invalidate_catalog_snapshot()
+);
+
+seam_core::seam!(
     /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
     /// `None` (the C may return NULL when no snapshot is active). Snapshots
     /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared

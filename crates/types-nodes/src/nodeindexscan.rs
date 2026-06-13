@@ -137,6 +137,10 @@ pub struct PlannedStmt<'mcx> {
     /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
     /// planner port.
     pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `bool canSetTag` — do we set the command result tag/es_processed?
+    /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
+    /// the first stmt with this set.
+    pub canSetTag: bool,
 }
 
 impl PlannedStmt<'_> {
@@ -170,6 +174,7 @@ impl PlannedStmt<'_> {
                 None => None,
             },
             rowMarks,
+            canSetTag: self.canSetTag,
         })
     }
 }
