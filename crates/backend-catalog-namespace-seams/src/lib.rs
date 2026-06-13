@@ -60,3 +60,10 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+seam_core::seam!(
+    /// `LookupCreationNamespace(nspName)` (namespace.c): resolve the schema in
+    /// which to create an object and verify the caller has CREATE permission
+    /// on it. Raises on a missing schema or denied permission (`Err`).
+    pub fn lookup_creation_namespace(nsp_name: &str) -> PgResult<Oid>
+);

@@ -108,3 +108,10 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `superuser()` (superuser.c, reached via miscinit) — true if the current
+    /// effective user has superuser privilege. Reads the catalog cache; pure
+    /// for the caller's purposes.
+    pub fn superuser() -> bool
+);

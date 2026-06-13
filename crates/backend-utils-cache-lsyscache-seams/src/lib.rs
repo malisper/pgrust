@@ -122,3 +122,10 @@ seam_core::seam!(
         procnum: i16,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
+);

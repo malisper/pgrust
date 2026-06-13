@@ -39,3 +39,11 @@ seam_core::seam!(
         objectname: Option<String>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `errorConflictingDefElem(defel, pstate)` (aclchk.c): always raises
+    /// `ERRCODE_SYNTAX_ERROR` ("conflicting or redundant options") at the
+    /// `DefElem`'s parse location. `defname` carries the conflicting option
+    /// name for the message.
+    pub fn error_conflicting_def_elem(defname: String) -> PgResult<()>
+);
