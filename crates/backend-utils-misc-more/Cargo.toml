@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # Own inward seams (installed from init_seams).
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 
 # Shared vocabulary.
 types-core = { path = "../types-core" }

@@ -116,6 +116,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ProcessConfigFileInternal(context, applySettings, elevel)` (guc.c):
+    /// the parse-then-apply core of `ProcessConfigFile` — read the active
+    /// `ConfigFileName` (and `postgresql.auto.conf`), parse it into a
+    /// `ConfigVariable` list, then apply each setting to the live GUC
+    /// registry at `PGC_S_FILE`. The list it returns feeds `pg_file_settings`;
+    /// `ProcessConfigFile` (guc-file.l) discards it, so the seam returns `()`.
+    /// Parse/apply errors `ereport(ERROR)` (carried on `Err`) during
+    /// postmaster startup.
+    pub fn process_config_file_internal(
+        context: types_guc::GucContext,
+        apply_settings: bool,
+        elevel: types_error::ErrorLevel,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `set_config_option("search_path", "", PGC_SUSET, PGC_S_OVERRIDE, ...)`
     /// (slotsync.c): force an empty search_path for the worker's catalog
     /// access. `Err` carries the option-set `ereport(ERROR)`.

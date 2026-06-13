@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod access;
 pub mod attmap;
 pub mod backend_access_common_heaptuple;
+pub mod backend_access_common_tupdesc;
 pub mod heap;
 pub mod heaptuple;
 pub mod pg_type;
