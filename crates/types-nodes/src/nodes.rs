@@ -74,6 +74,8 @@ pub use CmdType::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
+    /// `T_Result`.
+    Result(crate::noderesult::Result<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
@@ -84,6 +86,7 @@ impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            Node::Result(_) => T_Result,
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
         }
@@ -92,6 +95,7 @@ impl<'mcx> Node<'mcx> {
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
+            Node::Result(m) => &m.plan,
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
         }
@@ -106,6 +110,7 @@ impl<'mcx> Node<'mcx> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
+            Node::Result(m) => Ok(Node::Result(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
         }

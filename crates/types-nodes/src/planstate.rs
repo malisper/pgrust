@@ -10,6 +10,7 @@ use crate::nodes::NodeTag;
 use crate::execnodes::PlanStateData;
 use crate::execnodes::T_MaterialState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::noderesult::T_ResultState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -17,6 +18,8 @@ use crate::nodemergejoin::T_MergeJoinState;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PlanStateNode<'mcx> {
+    /// `T_ResultState`.
+    Result(PgBox<'mcx, crate::noderesult::ResultStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeJoinState`.
@@ -27,6 +30,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete state node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
         }
@@ -36,6 +40,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `<Node>State` struct begins with.
     pub fn ps_head(&self) -> &PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Result(m) => &m.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
         }
@@ -44,6 +49,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `&mut ((PlanState *) node)->...`.
     pub fn ps_head_mut(&mut self) -> &mut PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Result(m) => &mut m.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
         }
