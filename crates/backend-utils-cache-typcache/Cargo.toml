@@ -1,0 +1,31 @@
+[package]
+name = "backend-utils-cache-typcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_typcache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-cache = { path = "../types-cache" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+
+# inward seams installed by this crate
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+
+# outward owner seams (mirror-PG-and-panic until the owners land)
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-access-common-session-seams = { path = "../backend-access-common-session-seams" }
+backend-catalog-pg-enum-seams = { path = "../backend-catalog-pg-enum-seams" }

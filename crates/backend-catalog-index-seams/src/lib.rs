@@ -8,6 +8,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReindexIsProcessingIndex(indexOid)` (catalog/index.c): is the given
+    /// index OID the one currently being reindexed, or pending reindex? Reads
+    /// index.c's backend-local reindex state. Pure lookup; cannot `ereport`.
+    pub fn reindex_is_processing_index(index_oid: types_core::primitive::Oid) -> bool
+);
+
+seam_core::seam!(
     /// `BuildIndexInfo(index)` (catalog/index.c): construct an `IndexInfo`
     /// describing the open index relation. The owned `IndexInfo` is trimmed
     /// to the fields consumers read, so no allocation crosses the seam yet;
@@ -32,4 +39,15 @@ seam_core::seam!(
         [types_datum::Datum; types_core::fmgr::INDEX_MAX_KEYS as usize],
         [bool; types_core::fmgr::INDEX_MAX_KEYS as usize],
     )>
+);
+
+seam_core::seam!(
+    /// `index_build(heapRelation, indexRelation, indexInfo, isreindex=false,
+    /// parallel=false)` (index.c) as called from bootstrap's `build_indices`:
+    /// scan the heap and fill the index. `Err` carries the build error surface.
+    pub fn index_build(
+        heap: &types_rel::Relation<'_>,
+        index: &types_rel::Relation<'_>,
+        index_info: &types_nodes::execnodes::IndexInfo,
+    ) -> types_error::PgResult<()>
 );

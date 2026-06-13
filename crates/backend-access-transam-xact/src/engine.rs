@@ -380,7 +380,7 @@ fn StartTransaction() -> PgResult<()> {
         proc_number: globals_seams::my_proc_number::call(),
         local_transaction_id: sinval_seams::get_next_local_transaction_id::call(),
     };
-    lmgr_seams::virtual_xact_lock_table_insert::call(vxid)?;
+    lock_seams::virtual_xact_lock_table_insert::call(vxid)?;
     proc_seams::set_my_proc_lxid::call(vxid.local_transaction_id);
 
     // set transaction_timestamp() (a/k/a now()): normally the same as the

@@ -1,6 +1,9 @@
 //! Seam declarations for the `backend-storage-ipc-procarray` unit
-//! (`storage/ipc/procarray.c`). The owning unit installs these from its
-//! `init_seams()` when it lands; until then a call panics loudly.
+//! (`storage/ipc/procarray.c`), incl. the subset consumed by logical decoding.
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+#![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
 use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
@@ -149,4 +152,59 @@ seam_core::seam!(
     /// PREPARED, advancing the latest-completed xid to `latest_xid`. Takes
     /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
     pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
+);
+
+// --- Subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)`.
+    pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> TransactionId
+);
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE)`.
+    pub fn ProcArrayLock_acquire_exclusive()
+);
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn ProcArrayLock_release()
+);
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_IN_LOGICAL_DECODING;
+    /// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;`
+    /// performed while holding `ProcArrayLock`.
+    pub fn mark_proc_in_logical_decoding()
+);
+
+// --- Subset consumed by slot.c ---
+
+seam_core::seam!(
+    /// `void ProcArraySetReplicationSlotXmin(TransactionId xmin,
+    /// TransactionId catalog_xmin, bool already_locked)` (procarray.c) —
+    /// publish the aggregate slot xmin horizons into the ProcArray.
+    pub fn proc_array_set_replication_slot_xmin(
+        xmin: TransactionId,
+        catalog_xmin: TransactionId,
+        already_locked: bool,
+    )
+);
+
+seam_core::seam!(
+    /// Clear `PROC_IN_LOGICAL_DECODING` on `MyProc` and mirror it into
+    /// `ProcGlobal->statusFlags[MyProc->pgxactoff]`, under `ProcArrayLock`
+    /// exclusive (slot.c `ReplicationSlotRelease`). The acquire/release of
+    /// `ProcArrayLock` is part of this operation in the owner.
+    pub fn proc_array_clear_logical_decoding_flag()
+);
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);
+
+seam_core::seam!(
+    /// `IsBackendPid(pid)` (procarray.c) — is `pid` the PID of a live backend
+    /// (`BackendPidGetProc(pid) != NULL`)? Shared-memory scan; cannot
+    /// `ereport`.
+    pub fn is_backend_pid(pid: i32) -> bool
 );

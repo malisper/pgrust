@@ -9,6 +9,16 @@ use types_core::Oid;
 /// `LOCKMODE` (`storage/lockdefs.h`) — was C `int`.
 pub type LOCKMODE = i32;
 
+/// `LOCKMASK` (`storage/lock.h`) — a bitmask of lock modes (`typedef int`).
+pub type LOCKMASK = i32;
+
+/// `LOCKMETHODID` (`storage/lock.h`) — index of a lock method (`typedef uint16`).
+pub type LOCKMETHODID = uint16;
+
+/// `MAX_LOCKMODES` (`storage/lock.h`) — max number of lock modes; cannot be
+/// larger than the number of bits in `LOCKMASK`.
+pub const MAX_LOCKMODES: usize = 10;
+
 pub const NoLock: LOCKMODE = 0;
 pub const AccessShareLock: LOCKMODE = 1;
 pub const RowShareLock: LOCKMODE = 2;
