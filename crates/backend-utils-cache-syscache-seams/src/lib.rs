@@ -561,6 +561,26 @@ seam_core::seam!(
     ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>>
 );
 seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexOid))` +
+    /// `heap_copytuple` projected to the `pg_index` row the relcache's
+    /// `RelationInitIndexAccessInfo` consumes: the fixed `Form_pg_index`
+    /// scalars plus the variable-length `indkey`/`indcollation`/`indclass`/
+    /// `indoption` arrays (which the C reads off `rd_indextuple` with
+    /// `fastgetattr`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the
+    /// caller raises `cache lookup failed for index %u`.
+    pub fn search_pg_index_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_oid: Oid,
+    ) -> PgResult<Option<types_cache::PgIndexInfo<'mcx>>>
+);
+seam_core::seam!(
+    /// `SearchSysCache1(AMOID, ObjectIdGetDatum(amoid))` +
+    /// `GETSTRUCT(Form_pg_am)->amhandler` (syscache.c): the access method's
+    /// handler-function OID. `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+    /// the caller raises `cache lookup failed for access method %u`.
+    pub fn search_am_handler(amoid: Oid) -> PgResult<Option<Oid>>
+);
+seam_core::seam!(
     /// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` (syscache.c):
     /// look up a column of `relid` by name, returning its
     /// `(attnum, atttypid)`; `None` when no such (non-dropped) column exists
