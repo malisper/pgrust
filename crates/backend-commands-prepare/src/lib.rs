@@ -179,7 +179,11 @@ pub fn PrepareQuery<'mcx>(
     let mut argtypes: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nargs)?;
     if nargs != 0 {
         for tn in stmt.argtypes.iter() {
-            let toid = parsetype_seam::typename_type_id::call(p_sourcetext, tn)?;
+            // C: typenameTypeId(pstate, tn). main's seam mirrors PostgreSQL's
+            // own typenameTypeId(NULL, typeName) entry point: it reads only the
+            // TypeName, so pstate (its sole field here, p_sourcetext) is not
+            // threaded across the seam.
+            let toid = parsetype_seam::typename_type_id::call(tn)?;
             argtypes.push(toid);
         }
     }

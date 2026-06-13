@@ -1509,6 +1509,117 @@ fn seam_xact_last_rec_end() -> types_core::XLogRecPtr {
     xlog_seams::xact_last_rec_end::call()
 }
 
+/// Seam adapter for `xact_redo` — the rmgr `rm_redo` slot hands us a
+/// `&mut XLogReaderState`, exactly as C's `xact_redo(XLogReaderState *record)`.
+/// Marshal the fields `xact_redo` reads in C (`XLogRecGetInfo` / `XLogRecGetXid`
+/// / `XLogRecGetOrigin`, `ReadRecPtr` / `EndRecPtr`, `XLogRecGetData`) into the
+/// in-crate [`redo::XactRedoInfo`] view and dispatch.
+fn seam_xact_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
+    // C: Assert(!XLogRecHasAnyBlockRefs(record)). Backup blocks aren't used in
+    // xact records; the decoded record must be present to redo.
+    let decoded = record
+        .record
+        .as_ref()
+        .ok_or_else(|| PgError::error("xact_redo: no decoded record"))?;
+    let info = redo::XactRedoInfo {
+        info: decoded.info(),
+        xid: decoded.xid(),
+        origin_id: decoded.record_origin(),
+        read_rec_ptr: record.ReadRecPtr,
+        end_rec_ptr: record.EndRecPtr,
+        data: decoded.data(),
+    };
+    redo::xact_redo(info)
+}
+
+/// The xact-records argument bundles carry `types_wal`'s own `RelFileLocator`
+/// and `types_core`'s `XlXactStatsItem`; the in-crate WAL builders take
+/// `types_storage::RelFileLocator` / `types_wal::XlXactStatsItem`. These are the
+/// same C structs under different nominal types; convert field-for-field.
+fn convert_rels(rels: &[types_wal::RelFileLocator]) -> Vec<types_storage::RelFileLocator> {
+    rels.iter()
+        .map(|r| types_storage::RelFileLocator {
+            spcOid: r.spc_oid(),
+            dbOid: r.db_oid(),
+            relNumber: r.rel_number(),
+        })
+        .collect()
+}
+
+fn convert_stats(stats: &[types_core::xact::XlXactStatsItem]) -> Vec<types_wal::XlXactStatsItem> {
+    stats
+        .iter()
+        .map(|s| types_wal::XlXactStatsItem {
+            kind: s.kind,
+            dboid: s.dboid,
+            objid: s.objid,
+        })
+        .collect()
+}
+
+/// Seam adapter for `XactLogCommitRecord` — the 2PC caller marshals its inputs
+/// into a [`types_wal::xact_records::XactLogCommitRecordArgs`]; the in-crate
+/// builder reads the remaining inputs (`forceSyncCommit`, `synchronous_commit`,
+/// `XLogLogicalInfoActive`, `MyDatabaseId`/`MyDatabaseTableSpace`, the session
+/// replication origin) from backend state itself, exactly as C's
+/// `XactLogCommitRecord` does, so the marshaled copies of those globals are
+/// ignored here.
+fn seam_xact_log_commit_record(
+    args: &types_wal::xact_records::XactLogCommitRecordArgs,
+) -> PgResult<XLogRecPtr> {
+    use types_storage::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
+
+    // C passes `SharedInvalidationMessage *invalmsgs`; the 2PC caller marshals
+    // them as the on-the-wire bytes (their `to_wire_bytes` form, read from the
+    // 2PC state file). Decode back to the typed array the in-crate builder
+    // re-serializes, so the byte layout round-trips identically.
+    let nmsgs = args.nmsgs as usize;
+    let mut msgs: Vec<SharedInvalidationMessage> = Vec::new();
+    msgs.try_reserve(nmsgs).map_err(|_| {
+        PgError::error("out of memory decoding transaction commit invalidation messages")
+    })?;
+    for i in 0..nmsgs {
+        let off = i * SHARED_INVALIDATION_MESSAGE_SIZE;
+        let raw: [u8; SHARED_INVALIDATION_MESSAGE_SIZE] = args
+            .msgs
+            .get(off..off + SHARED_INVALIDATION_MESSAGE_SIZE)
+            .ok_or_else(|| PgError::error("truncated transaction commit invalidation messages"))?
+            .try_into()
+            .unwrap();
+        let msg = SharedInvalidationMessage::from_wire_bytes(raw).ok_or_else(|| {
+            PgError::error("invalid shared-invalidation message in transaction commit record")
+        })?;
+        msgs.push(msg);
+    }
+
+    wal::XactLogCommitRecord(
+        args.commit_time,
+        &args.subxacts,
+        &convert_rels(&args.rels),
+        &convert_stats(&args.dropped_stats),
+        &msgs,
+        args.relcache_inval,
+        args.xactflags,
+        args.twophase_xid,
+        args.twophase_gid.as_deref(),
+    )
+}
+
+/// Seam adapter for `XactLogAbortRecord` — see [`seam_xact_log_commit_record`].
+fn seam_xact_log_abort_record(
+    args: &types_wal::xact_records::XactLogAbortRecordArgs,
+) -> PgResult<XLogRecPtr> {
+    wal::XactLogAbortRecord(
+        args.abort_time,
+        &args.subxacts,
+        &convert_rels(&args.rels),
+        &convert_stats(&args.dropped_stats),
+        args.xactflags,
+        args.twophase_xid,
+        args.twophase_gid.as_deref(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 //  Seam installation
 // ---------------------------------------------------------------------------
@@ -1538,6 +1649,11 @@ pub fn init_seams() {
     seams::set_check_xid_alive::set(SetCheckXidAlive);
     seams::set_bsysscan::set(SetBsysscan);
     seams::get_current_statement_start_timestamp::set(GetCurrentStatementStartTimestamp);
+    seams::is_in_parallel_mode::set(IsInParallelMode);
+    seams::require_transaction_block::set(RequireTransactionBlock);
+    seams::xact_redo::set(seam_xact_redo);
+    seams::xact_log_commit_record::set(seam_xact_log_commit_record);
+    seams::xact_log_abort_record::set(seam_xact_log_abort_record);
 }
 
 #[cfg(test)]

@@ -48,7 +48,6 @@ backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
-backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
@@ -60,6 +59,7 @@ backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
+backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }

@@ -25,11 +25,22 @@ use crate::scankey::ScanKeyData;
 pub type Snapshot = Option<SnapshotData>;
 
 /// `LockTupleMode` (`nodes/lockoptions.h`).
-pub type LockTupleMode = i32;
-pub const LockTupleKeyShare: LockTupleMode = 0;
-pub const LockTupleShare: LockTupleMode = 1;
-pub const LockTupleNoKeyExclusive: LockTupleMode = 2;
-pub const LockTupleExclusive: LockTupleMode = 3;
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LockTupleMode {
+    /// `SELECT FOR KEY SHARE`
+    LockTupleKeyShare = 0,
+    /// `SELECT FOR SHARE`
+    LockTupleShare,
+    /// `SELECT FOR NO KEY UPDATE`, and UPDATEs that don't modify key columns
+    LockTupleNoKeyExclusive,
+    /// `SELECT FOR UPDATE`, UPDATEs that modify key columns, and DELETE
+    LockTupleExclusive,
+}
+
+pub use LockTupleMode::{
+    LockTupleExclusive, LockTupleKeyShare, LockTupleNoKeyExclusive, LockTupleShare,
+};
 
 /// `TM_Result` (`access/tableam.h`) — result codes for `table_tuple_update`
 /// and friends.
@@ -131,6 +142,10 @@ pub struct TableAmRoutine {
     /// `index_fetch_begin(rel)` — set up index-fetch state.
     pub index_fetch_begin:
         for<'mcx> fn(rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
+
+    /// `index_fetch_reset(data)` — release resources (buffer pins) held by
+    /// the index fetch, without ending it.
+    pub index_fetch_reset: fn(data: &mut IndexFetchTableData<'_>) -> PgResult<()>,
 
     /// `index_fetch_end(scan)` — release index-fetch resources.
     pub index_fetch_end: fn(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>,

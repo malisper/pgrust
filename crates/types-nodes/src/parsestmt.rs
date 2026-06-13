@@ -13,6 +13,7 @@
 
 use mcx::PgBox;
 use types_core::primitive::TimestampTz;
+use types_opclass::TypeName;
 
 use crate::nodes::Node;
 
@@ -119,16 +120,6 @@ impl QueryCompletionHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CommandTag(pub i32);
 
-/// `TypeName` (`nodes/parsenodes.h`) — a not-yet-resolved type reference. The
-/// PREPARE driver only threads it through `typenameTypeId`, so it is carried as
-/// the opaque parser node payload that resolver consumes.
-#[derive(Debug)]
-pub struct TypeName<'mcx> {
-    /// The full `TypeName` node, owned by the parser. The PREPARE driver never
-    /// inspects its fields; it hands the node straight to `typenameTypeId`.
-    pub node: PgBox<'mcx, Node<'mcx>>,
-}
-
 /// `ParseState *` (`parser/parse_node.h`), trimmed to what the command drivers
 /// read. The full struct has ~36 fields; the PREPARE/EXECUTE/EXPLAIN drivers
 /// only read `p_sourcetext` and `p_queryEnv`.
@@ -167,8 +158,11 @@ pub struct PrepareStmt<'mcx> {
     /// `char *name` — name of plan, arbitrary (`None` / empty = the protocol
     /// unnamed statement, which PREPARE rejects).
     pub name: Option<mcx::PgString<'mcx>>,
-    /// `List *argtypes` — type names for parameters (each a `TypeName` node).
-    pub argtypes: mcx::PgVec<'mcx, TypeName<'mcx>>,
+    /// `List *argtypes` — type names for parameters. Each is a concrete
+    /// `TypeName` (the real fields the grammar's `makeTypeName` produced:
+    /// `names`/`typeOid`/`setof`/`pct_type`/`typemod`/`location`); the PREPARE
+    /// driver never inspects them, it hands each straight to `typenameTypeId`.
+    pub argtypes: mcx::PgVec<'mcx, TypeName>,
     /// `Node *query` — the query itself (as a raw parse tree).
     pub query: Option<PgBox<'mcx, Node<'mcx>>>,
 }

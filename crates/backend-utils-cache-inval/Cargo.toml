@@ -1,0 +1,37 @@
+[package]
+name = "backend-utils-cache-inval"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_inval"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-cache = { path = "../types-cache" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-syscache = { path = "../types-syscache" }
+types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }
+# Inward seam crate (this unit's own public API, called by siblings).
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+# Outward seams to other owners.
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }

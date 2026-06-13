@@ -24,3 +24,17 @@ seam_core::seam!(
     /// installed (drives namespace.c's finalPath recompute). Pure read.
     pub fn object_access_hook_present() -> bool
 );
+
+seam_core::seam!(
+    /// `RunObjectPostCreateHook(classId, objectId, subId, is_internal)`
+    /// (objectaccess.c) — the post-create object-access hook body. The
+    /// `InvokeObjectPostCreateHook` macro's `if (object_access_hook)` guard is
+    /// the caller's (use [`object_access_hook_present`]); the C macro passes
+    /// `is_internal = false`. The hook may `ereport(ERROR)`, carried on `Err`.
+    pub fn run_object_post_create_hook(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        is_internal: bool,
+    ) -> PgResult<()>
+);

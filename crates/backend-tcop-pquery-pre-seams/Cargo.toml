@@ -12,4 +12,4 @@ path = "src/lib.rs"
 seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
-types-scan = { path = "../types-scan" }
+types-execparallel = { path = "../types-execparallel" }

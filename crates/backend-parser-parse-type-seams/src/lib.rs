@@ -4,16 +4,24 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
-use types_nodes::parsestmt::TypeName;
+use types_opclass::TypeName;
 
 seam_core::seam!(
-    /// `typenameTypeId(pstate, typeName)` (parse_type.c) — resolve a
-    /// `TypeName` to its type OID. `source_text` is `pstate->p_sourcetext`
-    /// (used for error positions). Can `ereport(ERROR)` (unknown type).
-    pub fn typename_type_id<'mcx>(
-        source_text: &str,
-        type_name: &TypeName<'mcx>,
-    ) -> PgResult<Oid>
+    /// `typenameTypeId(NULL, typeName)` (parse_type.c): resolve a `TypeName`
+    /// to its type OID, raising if the type does not exist or is only a shell.
+    /// `Err` carries that `ereport(ERROR)` surface.
+    pub fn typename_type_id(type_name: &TypeName) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `TypeNameToString(typeName)` (parse_type.c): the type name rendered for
+    /// an error message, palloc'd in the caller's current context (`mcx`).
+    /// `Err` includes OOM from the construction.
+    pub fn typename_to_string<'mcx>(
+        mcx: Mcx<'mcx>,
+        type_name: &TypeName,
+    ) -> PgResult<PgString<'mcx>>
 );

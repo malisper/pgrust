@@ -14,7 +14,7 @@ use types_error::PgResult;
 use types_nodes::parsestmt::{
     DestReceiverHandle, ParamListInfoHandle, PortalHandle, QueryCompletionHandle,
 };
-use types_scan::snapshot::SnapshotHandle;
+use types_execparallel::SnapshotHandle;
 
 seam_core::seam!(
     /// `PortalStart(portal, params, eflags, snapshot)` (pquery.c). `snapshot`
