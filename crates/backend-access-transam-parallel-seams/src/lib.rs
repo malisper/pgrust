@@ -85,6 +85,8 @@ seam_core::seam!(pub fn make_parallel_worker_context(
     seg: DsmSegmentHandle,
     toc: ShmTocHandle,
 ) -> ParallelWorkerContextHandle);
+/// `pwcxt->toc` — the worker context's `shm_toc *`.
+seam_core::seam!(pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ShmTocHandle);
 /// `ParallelWorkerNumber`.
 seam_core::seam!(pub fn parallel_worker_number() -> i32);
 

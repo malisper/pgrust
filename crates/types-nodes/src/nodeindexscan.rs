@@ -31,6 +31,10 @@ pub struct Plan<'mcx> {
     pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `bool async_capable` — engage asynchronous-capable logic?
+    pub async_capable: bool,
+    /// `int plan_node_id` — unique across the entire final plan tree.
+    pub plan_node_id: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -67,6 +71,8 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            async_capable: self.async_capable,
+            plan_node_id: self.plan_node_id,
             targetlist,
             qual,
             parallel_aware: self.parallel_aware,

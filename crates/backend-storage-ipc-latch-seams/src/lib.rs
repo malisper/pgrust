@@ -21,6 +21,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyLatch` (globals.c): this backend's own process-latch identity. The
+    /// latch unit resolves it when installing, matching the existing
+    /// [`set_latch_my_latch`]/[`reset_latch_my_latch`] convention (a few C
+    /// callers — e.g. `AddWaitEventToSet(set, WL_LATCH_SET, …, MyLatch, …)` —
+    /// need the handle, not just an action on it). Infallible.
+    pub fn my_latch() -> types_storage::latch::LatchHandle
+);
+
+seam_core::seam!(
     /// `SetLatch(latch)`: set the given latch (possibly another backend's —
     /// e.g. `SetLatch(&proc->procLatch)`), waking any wait on it. Infallible
     /// in C.

@@ -24,6 +24,11 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+/// `WAIT_EVENT_APPEND_READY` — "Waiting for subplan nodes of an Append plan
+/// node to be ready." 1st entry (0-based 0) of the IPC section, so
+/// `PG_WAIT_IPC | 0` (= 134217728, matching c2rust).
+pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
+
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).

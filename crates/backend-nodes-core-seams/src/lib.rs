@@ -55,3 +55,68 @@ seam_core::seam!(
         b: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `bms_num_members(a)` (bitmapset.c): count the members of `a` (`0` for
+    /// the C NULL set). Infallible.
+    pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_is_empty(a)` (bitmapset.c): is `a` empty (or NULL)? Infallible.
+    pub fn bms_is_empty(a: Option<&types_nodes::Bitmapset<'_>>) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_next_member(a, prevbit)` (bitmapset.c): the smallest member of `a`
+    /// greater than `prevbit` (pass `-1` to start). Returns `-2` when there is
+    /// no such member (the C `-2` sentinel). Infallible.
+    pub fn bms_next_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_prev_member(a, prevbit)` (bitmapset.c): the greatest member of `a`
+    /// less than `prevbit` (pass `-1` to start from the top). Returns `-2`
+    /// when there is no such member. Infallible.
+    pub fn bms_prev_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_overlap(a, b)` (bitmapset.c): do the two sets have a common
+    /// member? Infallible.
+    pub fn bms_overlap(
+        a: Option<&types_nodes::Bitmapset<'_>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_add_range(a, lower, upper)` (bitmapset.c): add all members in the
+    /// inclusive range `[lower, upper]` to the set, recycling the input (the C
+    /// reallocs/extends `a` in place and returns it). Growth allocates in
+    /// `mcx`, so the call is fallible on OOM. An empty range
+    /// (`upper < lower`) returns the input unchanged.
+    pub fn bms_add_range<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        lower: i32,
+        upper: i32,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_del_members(a, b)` (bitmapset.c): remove the members of `b` from
+    /// `a`, recycling and returning `a` (a `None`/empty result is the C NULL
+    /// set). No allocation, so infallible.
+    pub fn bms_del_members<'mcx>(
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `bms_free(a)` (bitmapset.c): free the set's storage. The owned model
+    /// drops the `PgBox`, so this seam only consumes the value; no-op for a
+    /// `None` (NULL) set. Infallible.
+    pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
+);

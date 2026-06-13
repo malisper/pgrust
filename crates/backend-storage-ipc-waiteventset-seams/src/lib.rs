@@ -62,6 +62,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetNumRegisteredWaitEvents(set)` — the number of events currently
+    /// registered in the set (`set->nevents`). Infallible. Consumers call
+    /// [`WaitEventSet::num_registered_events`].
+    pub fn get_num_registered_wait_events(set: WaitEventSetHandle) -> i32
+);
+
+seam_core::seam!(
     /// `FreeWaitEventSet(set)` — release the set's kernel object and memory.
     /// Infallible in C. Called from [`WaitEventSet`]'s `Drop`, never
     /// directly by consumers.
@@ -126,6 +133,11 @@ impl WaitEventSet {
         wait_event_info: u32,
     ) -> types_error::PgResult<i32> {
         wait_event_set_wait::call(self.0, timeout, occurred_events, wait_event_info)
+    }
+
+    /// `GetNumRegisteredWaitEvents(set)`.
+    pub fn num_registered_events(&self) -> i32 {
+        get_num_registered_wait_events::call(self.0)
     }
 }
 
