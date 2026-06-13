@@ -6918,15 +6918,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-utils-adt-encode-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-error",
-]
-
-[[package]]
 name = "backend-utils-adt-format-type"
 version = "0.0.0"
 dependencies = [
@@ -7368,17 +7359,19 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
- "backend-utils-adt-encode-seams",
+ "backend-regex-core-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-regexp-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-mb-mbutils-seams",
- "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
  "types-locale",
+ "types-regex",
  "types-sortsupport",
 ]
 
