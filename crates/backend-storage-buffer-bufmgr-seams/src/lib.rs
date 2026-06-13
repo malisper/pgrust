@@ -37,6 +37,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BufferGetPage(buffer)` with write access (`storage/bufpage.h`): runs
+    /// `f` over the buffer's live page bytes (`BLCKSZ`). The owner holds the
+    /// buffer pin/content lock across the callback (the caller already holds
+    /// the exclusive content lock), so reads and in-place writes both happen
+    /// against the shared page — modelling C's direct `Page` pointer without
+    /// handing out an aliasable `&'static mut`. The page is mutated in place;
+    /// `f`'s `Err` (and any buffer-access `ereport`) propagates.
+    pub fn with_buffer_page(
+        buffer: types_storage::Buffer,
+        f: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MarkBufferDirty(buffer)` (bufmgr.c) — mark the buffer's contents as
+    /// dirty. Called inside a critical section; the C path only `Assert`s,
+    /// so the seam is infallible.
+    pub fn mark_buffer_dirty(buffer: types_storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `UnlockReleaseBuffer(buffer)` (bufmgr.c) — release the buffer's content
+    /// lock and pin. Infallible.
+    pub fn unlock_release_buffer(buffer: types_storage::Buffer)
+);
+
+seam_core::seam!(
     /// `PrefetchSharedBuffer(smgropen(rlocator, backend), forkNum, blockNum)`
     /// (bufmgr.c): initiate (or note as unnecessary) a prefetch of a shared
     /// buffer. The C function takes the `SMgrRelation` handle; smgropen is
@@ -52,7 +79,47 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ReleaseBuffer(buffer)` (bufmgr.c): drop a pin on a buffer (the VM
-    /// buffer an index-only scan holds). `InvalidBuffer` is never passed.
-    pub fn release_buffer(buffer: types_storage::Buffer)
+    /// `BufferGetBlockNumber(buffer)` (bufmgr.c): the block number the buffer
+    /// currently holds. Pure read of a valid pinned buffer.
+    pub fn buffer_get_block_number(
+        buf: types_storage::storage::Buffer,
+    ) -> types_core::primitive::BlockNumber
+);
+
+seam_core::seam!(
+    /// `BufferGetPage(buffer)` (bufmgr.h): a snapshot copy of the buffer's
+    /// page image in `mcx` (the consumer reads page-format fields off it).
+    /// `Err` carries OOM.
+    pub fn buffer_get_page<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        buf: types_storage::storage::Buffer,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `ReleaseBuffer(buffer)` (bufmgr.c): drop one pin on a buffer.
+    pub fn release_buffer(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `IncrBufferRefCount(buffer)` (bufmgr.c): bump the local pin count on a
+    /// buffer the backend already has pinned.
+    pub fn incr_buffer_ref_count(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `MarkBufferDirtyHint(buffer, buffer_std = false)` (bufmgr.c): mark a
+    /// buffer dirty for a non-WAL-logged hint-bit-style change (the nbtree
+    /// cycle-id clear passes `buffer_std = false`).
+    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy)`
+    /// (bufmgr.c): pin (reading in if needed) a block, using the VACUUM
+    /// buffer-access strategy. `Err` carries the smgr read ereports.
+    pub fn read_buffer_extended<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
 );

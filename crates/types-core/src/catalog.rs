@@ -21,6 +21,10 @@ pub const PG_TOAST_NAMESPACE: Oid = 99;
 /// `BOOTSTRAP_SUPERUSERID` (`catalog/pg_authid_d.h`).
 pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
 
+/// `FirstNormalObjectId` (`access/transam.h`) — first OID assignable to
+/// user-created objects; OIDs below this belong to built-in system objects.
+pub const FirstNormalObjectId: Oid = 16384;
+
 /// `OIDOID` (`catalog/pg_type_d.h`) — the OID of the `oid` type.
 pub const OIDOID: Oid = 26;
 
