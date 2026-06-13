@@ -7044,8 +7044,10 @@ dependencies = [
 name = "backend-utils-cache-catcache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-utils-cache-catcache-seams",
  "backend-utils-cache-relcache-seams",
+ "backend-utils-init-small-seams",
  "common-hashfn-seams",
  "mcx",
  "seam-core",
