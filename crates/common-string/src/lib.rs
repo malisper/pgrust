@@ -72,75 +72,72 @@ pub fn pg_strip_crlf(s: &str) -> &str {
     s.trim_end_matches(['\n', '\r'])
 }
 
-/// `strtoint` — like `strtol`, but returns `i32`. Parses a leading integer in
-/// `base` (with the libc semantics: leading C-`isspace`, optional sign,
-/// optional `0x`/octal prefix when `base` is 0 or 16), returning the value and
-/// the offset of the first unconsumed byte. Out-of-`i32`-range sets the
-/// `OutOfRange` error (the C analog sets `errno = ERANGE`).
-pub fn strtoint(s: &str, base: u32) -> Result<i32, StrToIntError> {
-    strtoint_prefix(s, base).map(|parsed| parsed.value)
-}
-
-/// As [`strtoint`], but also returns the byte offset where parsing stopped
-/// (the C `endptr`).
-pub fn strtoint_prefix(s: &str, base: u32) -> Result<StrToInt, StrToIntError> {
-    let parsed = parse_c_long_prefix(s, base)?;
-
-    if parsed.value < i32::MIN as i64 || parsed.value > i32::MAX as i64 {
-        return Err(StrToIntError {
-            value: parsed.value,
-            end: parsed.end,
-            kind: StrToIntErrorKind::OutOfRange,
-        });
-    }
-
-    Ok(StrToInt {
-        value: parsed.value as i32,
+/// `strtoint` — like `strtol`, but returns `int`.
+///
+/// C: `val = strtol(str, endptr, base); if (val != (int) val) errno = ERANGE;
+/// return (int) val;`. This is a *total* function — it never "fails": on a
+/// string with no parseable digits `strtol` returns 0 (and leaves `endptr` at
+/// the start), and the only out-of-band signal is `errno = ERANGE` when the
+/// `long` value does not fit in `int`. The returned [`StrToInt`] mirrors that:
+/// `value` is the truncated `(int) val`, `end` is the `endptr` offset, and
+/// `erange` is the ERANGE flag.
+///
+/// `base` follows `strtol`: 0 auto-detects (leading `0x`/`0X` → hex, leading
+/// `0` → octal, else decimal), or a fixed 2..=36. Like the C build's callers,
+/// only valid bases are passed; a base outside `{0} ∪ 2..=36` yields the
+/// `strtol(EINVAL)` outcome (value 0, `end` 0, `erange` false).
+pub fn strtoint(s: &str, base: u32) -> StrToInt {
+    let parsed = strtol(s, base);
+    let value = parsed.value as i32;
+    StrToInt {
+        value,
         end: parsed.end,
-    })
+        // C: `errno = ERANGE` when (int) val != val, i.e. the long didn't fit
+        // in int. `parsed.erange` already covers the long-range clamp strtol
+        // performs (LONG_MIN/LONG_MAX), which also implies ERANGE here.
+        erange: parsed.erange || value as i64 != parsed.value,
+    }
 }
 
+/// Result of [`strtoint`]: the truncated `int` value, the `endptr` offset (the
+/// byte index of the first unconsumed character; equals the start offset when
+/// nothing was parsed), and the ERANGE flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrToInt {
     pub value: i32,
     pub end: usize,
+    pub erange: bool,
 }
 
+/// Result of the internal `strtol` emulation: the `long` value (clamped to
+/// `i64::MIN`/`i64::MAX` on overflow, as `strtol` clamps to `LONG_MIN`/
+/// `LONG_MAX`), the `endptr` offset, and the ERANGE flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedLong {
     value: i64,
     end: usize,
+    erange: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrToIntError {
-    pub value: i64,
-    pub end: usize,
-    pub kind: StrToIntErrorKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StrToIntErrorKind {
-    InvalidBase,
-    NoDigits,
-    OutOfRange,
-}
-
-fn parse_c_long_prefix(text: &str, base: u32) -> Result<ParsedLong, StrToIntError> {
+/// Emulate libc `strtol(str, endptr, base)` on a `&str` (the C build is
+/// 64-bit, so `long` is `i64`). Returns the parsed value, the `endptr` offset,
+/// and the ERANGE flag. No-conversion returns `value 0`, `end` at the original
+/// start (offset 0). An invalid base returns the EINVAL outcome (`0`, end `0`).
+fn strtol(text: &str, base: u32) -> ParsedLong {
     if base != 0 && !(2..=36).contains(&base) {
-        return Err(StrToIntError {
-            value: 0,
-            end: 0,
-            kind: StrToIntErrorKind::InvalidBase,
-        });
+        // strtol with an invalid base: returns 0, endptr = str (offset 0).
+        return ParsedLong { value: 0, end: 0, erange: false };
     }
 
     let bytes = text.as_bytes();
-    let mut index = bytes
+    // strtol skips leading C-isspace, then sets endptr = str (offset 0) if no
+    // digits are found — note the no-conversion endptr is the *original* start,
+    // not the post-whitespace position.
+    let after_ws = bytes
         .iter()
         .position(|byte| !is_c_space(*byte))
         .unwrap_or(bytes.len());
-    let start = index;
+    let mut index = after_ws;
     let negative = match bytes.get(index) {
         Some(b'-') => {
             index += 1;
@@ -183,6 +180,7 @@ fn parse_c_long_prefix(text: &str, base: u32) -> Result<ParsedLong, StrToIntErro
 
     let digits_start = index;
     let mut value: i64 = 0;
+    let mut erange = false;
 
     while let Some(&byte) = bytes.get(index) {
         let Some(digit) = digit_value(byte) else {
@@ -192,41 +190,37 @@ fn parse_c_long_prefix(text: &str, base: u32) -> Result<ParsedLong, StrToIntErro
             break;
         }
 
-        value = match value
-            .checked_mul(actual_base as i64)
-            .and_then(|value| value.checked_add(digit as i64))
-        {
-            Some(value) => value,
-            None => {
-                return Err(StrToIntError {
-                    value: if negative { i64::MIN } else { i64::MAX },
-                    end: index,
-                    kind: StrToIntErrorKind::OutOfRange,
-                });
-            }
-        };
+        // strtol keeps consuming digits even past overflow, clamping the value
+        // to LONG_MIN/LONG_MAX and setting ERANGE.
+        if !erange {
+            value = match value
+                .checked_mul(actual_base as i64)
+                .and_then(|value| value.checked_add(digit as i64))
+            {
+                Some(value) => value,
+                None => {
+                    erange = true;
+                    if negative { i64::MIN } else { i64::MAX }
+                }
+            };
+        }
         index += 1;
     }
 
     if index == digits_start {
-        return Err(StrToIntError {
-            value: 0,
-            end: start,
-            kind: StrToIntErrorKind::NoDigits,
-        });
+        // No digits converted: strtol returns 0 with endptr = the original str.
+        return ParsedLong { value: 0, end: 0, erange: false };
     }
 
-    let value = if negative {
-        value.checked_neg().ok_or(StrToIntError {
-            value: i64::MIN,
-            end: index,
-            kind: StrToIntErrorKind::OutOfRange,
-        })?
+    let value = if negative && !erange {
+        // -value; the negation of an in-range positive magnitude cannot
+        // overflow i64 here (max magnitude consumed without erange is i64::MAX).
+        -value
     } else {
         value
     };
 
-    Ok(ParsedLong { value, end: index })
+    ParsedLong { value, end: index, erange }
 }
 
 /// The C `isspace` set in the "C" locale, as `strtol` skips leading
@@ -273,59 +267,73 @@ mod tests {
     #[test]
     fn parses_integer_prefixes() {
         assert_eq!(
-            strtoint_prefix("  -123xyz", 10),
-            Ok(StrToInt { value: -123, end: 6 })
+            strtoint("  -123xyz", 10),
+            StrToInt { value: -123, end: 6, erange: false }
         );
-        assert_eq!(strtoint("7fffffff", 16), Ok(i32::MAX));
-        assert_eq!(strtoint("010", 0), Ok(8));
-        assert_eq!(strtoint("0x10", 0), Ok(16));
-        assert_eq!(strtoint("0x10", 16), Ok(16));
+        assert_eq!(strtoint("7fffffff", 16).value, i32::MAX);
+        assert_eq!(strtoint("010", 0), StrToInt { value: 8, end: 3, erange: false });
+        assert_eq!(strtoint("0x10", 0), StrToInt { value: 16, end: 4, erange: false });
+        assert_eq!(strtoint("0x10", 16).value, 16);
+        // `0xABCdef` under base 10: strtol parses the leading `0` then stops.
+        assert_eq!(strtoint("  0xABCdef", 10), StrToInt { value: 0, end: 3, erange: false });
+        // Trailing non-digit after digits leaves endptr at the digit boundary.
+        assert_eq!(strtoint("123 456", 16), StrToInt { value: 0x123, end: 3, erange: false });
     }
 
     #[test]
     fn parses_bare_zero_when_hex_prefix_has_no_following_digit() {
-        assert_eq!(strtoint_prefix("0x", 16), Ok(StrToInt { value: 0, end: 1 }));
-        assert_eq!(strtoint_prefix("0X", 16), Ok(StrToInt { value: 0, end: 1 }));
-        assert_eq!(strtoint_prefix("0xg", 16), Ok(StrToInt { value: 0, end: 1 }));
-        assert_eq!(strtoint("0x", 0), Ok(0));
-        assert_eq!(strtoint("0xz", 0), Ok(0));
+        assert_eq!(strtoint("0x", 16), StrToInt { value: 0, end: 1, erange: false });
+        assert_eq!(strtoint("0X", 16), StrToInt { value: 0, end: 1, erange: false });
+        assert_eq!(strtoint("0xg", 16), StrToInt { value: 0, end: 1, erange: false });
+        assert_eq!(strtoint("0x", 0), StrToInt { value: 0, end: 1, erange: false });
+        assert_eq!(strtoint("0xz", 0), StrToInt { value: 0, end: 1, erange: false });
     }
 
     #[test]
     fn skips_full_c_isspace_set_including_vertical_tab() {
-        assert_eq!(strtoint_prefix("\x0b42", 10), Ok(StrToInt { value: 42, end: 3 }));
-        assert_eq!(strtoint_prefix("\x0c42", 10), Ok(StrToInt { value: 42, end: 3 }));
+        assert_eq!(strtoint("\x0b42", 10), StrToInt { value: 42, end: 3, erange: false });
+        assert_eq!(strtoint("\x0c42", 10), StrToInt { value: 42, end: 3, erange: false });
         assert_eq!(
-            strtoint_prefix(" \t\n\x0b\x0c\r7", 10),
-            Ok(StrToInt { value: 7, end: 7 })
+            strtoint(" \t\n\x0b\x0c\r7", 10),
+            StrToInt { value: 7, end: 7, erange: false }
         );
     }
 
     #[test]
-    fn reports_integer_errors() {
+    fn no_conversion_returns_zero_like_strtol() {
+        // C `strtoint` never errors on no-digit input: strtol returns 0 with
+        // endptr at the original start (offset 0) and no ERANGE.
+        assert_eq!(strtoint("xyz", 10), StrToInt { value: 0, end: 0, erange: false });
+        assert_eq!(strtoint("", 10), StrToInt { value: 0, end: 0, erange: false });
+        assert_eq!(strtoint("-", 10), StrToInt { value: 0, end: 0, erange: false });
+        assert_eq!(strtoint("  ", 10), StrToInt { value: 0, end: 0, erange: false });
+        assert_eq!(strtoint("  -", 10), StrToInt { value: 0, end: 0, erange: false });
+        assert_eq!(strtoint("z", 10), StrToInt { value: 0, end: 0, erange: false });
+        // Invalid base: strtol(EINVAL) returns 0, endptr at start.
+        assert_eq!(strtoint("10", 1), StrToInt { value: 0, end: 0, erange: false });
+    }
+
+    #[test]
+    fn flags_erange_with_truncated_value() {
+        // (int) 0x80000000 == i32::MIN; ERANGE because the value doesn't fit int.
         assert_eq!(
             strtoint("80000000", 16),
-            Err(StrToIntError {
-                value: 2_147_483_648,
-                end: 8,
-                kind: StrToIntErrorKind::OutOfRange,
-            })
+            StrToInt { value: i32::MIN, end: 8, erange: true }
         );
+        // long overflow: strtol clamps to LONG_MAX, (int) LONG_MAX == -1.
         assert_eq!(
-            strtoint("xyz", 10),
-            Err(StrToIntError {
-                value: 0,
-                end: 0,
-                kind: StrToIntErrorKind::NoDigits,
-            })
+            strtoint("99999999999999999999", 0),
+            StrToInt { value: -1, end: 20, erange: true }
         );
+        // negative long overflow: clamps to LONG_MIN, (int) LONG_MIN == 0.
         assert_eq!(
-            strtoint("10", 1),
-            Err(StrToIntError {
-                value: 0,
-                end: 0,
-                kind: StrToIntErrorKind::InvalidBase,
-            })
+            strtoint("-99999999999999999999", 0),
+            StrToInt { value: 0, end: 21, erange: true }
+        );
+        // 0x2147483648 fits in long but not int: (int) low-32 == 0x47483648.
+        assert_eq!(
+            strtoint("2147483648", 16),
+            StrToInt { value: 0x4748_3648, end: 10, erange: true }
         );
     }
 
