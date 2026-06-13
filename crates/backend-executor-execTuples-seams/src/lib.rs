@@ -159,6 +159,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch a regular
+    /// (positive) attribute `attnum` (1-based) of the slot's current tuple as
+    /// `(datum, isnull)`, deforming up to `attnum` first via
+    /// `slot_getsomeattrs`/`slot_getsomeattrs_int` (`slot->tts_ops->getsomeattrs`
+    /// dispatch). The slot is borrowed mutably because deforming populates the
+    /// slot's `tts_values`/`tts_isnull`/`tts_nvalid`; deforming can
+    /// detoast/allocate, so the call is fallible. System (non-positive) attnums
+    /// take the `slot_getsysattr` path instead and are never passed here.
+    pub fn slot_getattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
     /// `ExecInitNullTupleSlot(estate, tupledesc, tts_ops)` (execTuples.c):
     /// create a slot in the EState slot pool and store an all-NULL virtual
     /// tuple of the given descriptor in it (the null-padding slot for outer
