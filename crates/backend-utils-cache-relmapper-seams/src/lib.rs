@@ -42,3 +42,10 @@ seam_core::seam!(
     /// map (not supported under 2PC).
     pub fn at_prepare_relation_map() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationMapFinishBootstrap()` (relmapper.c): write out the initial
+    /// relation-map files at the end of bootstrap. `ereport(ERROR/FATAL)` on
+    /// an I/O failure.
+    pub fn relation_map_finish_bootstrap() -> types_error::PgResult<()>
+);

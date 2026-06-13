@@ -2,8 +2,10 @@
 //! (`commands/tablecmds.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+use types_core::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
+use types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `PreCommit_on_commit_actions()` — ON COMMIT DROP / DELETE ROWS work;
@@ -23,4 +25,18 @@ seam_core::seam!(
         my_subid: SubTransactionId,
         parent_subid: SubTransactionId,
     )
+);
+
+seam_core::seam!(
+    /// `ATExecChangeOwner(relationOid, newOwnerId, recursing, lockmode)`
+    /// (tablecmds.c): change a relation's owner (and its dependent objects:
+    /// indexes, owned sequences, toast tables). REASSIGN OWNED passes
+    /// `recursing = true` so visiting a dependent before its parent doesn't
+    /// fail. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn at_exec_change_owner(
+        relation_oid: Oid,
+        new_owner_id: Oid,
+        recursing: bool,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
 );

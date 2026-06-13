@@ -109,7 +109,21 @@ impl QueryOperand {
     pub fn distance(self) -> uint32 {
         (self.len_dist >> 12) & 0xFFFFF
     }
+    /// Set `length:12`.
+    #[inline]
+    pub fn set_length(&mut self, v: uint32) {
+        self.len_dist = (self.len_dist & !0xFFF) | (v & 0xFFF);
+    }
+    /// Set `distance:20`.
+    #[inline]
+    pub fn set_distance(&mut self, v: uint32) {
+        self.len_dist = (self.len_dist & !(0xFFFFF << 12)) | ((v & 0xFFFFF) << 12);
+    }
 }
+
+/// `HDRSIZETQ` (ts_type.h) — `VARHDRSZ + sizeof(int32)`, the `tsquery` header
+/// size up to the start of the `QueryItem` array.
+pub const HDRSIZETQ: usize = 4 + core::mem::size_of::<i32>();
 
 /// `OP_NOT` (ts_type.h).
 pub const OP_NOT: i8 = 1;
