@@ -6495,6 +6495,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-rangetypes",
+ "types-scan",
 ]
 
 [[package]]

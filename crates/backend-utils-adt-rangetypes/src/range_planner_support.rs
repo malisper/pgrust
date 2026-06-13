@@ -20,9 +20,14 @@
 //! the seams below.
 
 use mcx::Mcx;
-use types_core::primitive::Oid;
+use types_core::catalog::BOOLOID;
+use types_core::primitive::{Oid, OidIsValid};
 use types_datum::datum::Datum;
 use types_error::PgResult;
+use types_scan::scankey::{
+    BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber, BTLessEqualStrategyNumber,
+    BTLessStrategyNumber,
+};
 
 /// A planner `Node *` (`nodes.h`). Inherited opacity: the optimizer is a
 /// genuinely-external neighbor whose node trees this crate only forwards to the
@@ -142,25 +147,48 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The `build_bound_expr` node fabrication (rangetypes.c:2972): identify the
-    /// btree comparison operator from `opfamily` for the element type `elem_type`
-    /// (strategy chosen by `is_lower_bound`/`is_inclusive` via
-    /// `get_opfamily_member`), wrap `val` in a `makeConst` of the element type
-    /// (its `typlen`/`typbyval`/`typcollation` read off `elem_type`'s typcache
-    /// entry, which the trimmed `TypeCacheEntry` here does not carry), and
-    /// `make_opclause(oproid, BOOLOID, false, elemExpr, constExpr, InvalidOid,
-    /// rng_collation)`. `NULL` if the operator is missing. Allocated in `mcx`.
-    /// `Err` carries catalog-lookup `ereport(ERROR)`s.
-    pub fn build_bound_op_expr<'mcx>(
-        mcx: Mcx<'mcx>,
-        elem_expr: PlannerNode,
-        val: Datum,
-        is_lower_bound: bool,
-        is_inclusive: bool,
-        elem_type: Oid,
+    /// `get_opfamily_member(opfamily, lefttype, righttype, strategy)`
+    /// (lsyscache.c): the OID of the btree operator in `opfamily` for the given
+    /// left/right input types and strategy number, or `InvalidOid` if none. The
+    /// strategy-number selection and the `OidIsValid` guard stay in this crate's
+    /// `build_bound_expr`; this is the bare catalog lookup. `Err` carries the
+    /// catalog-lookup `ereport(ERROR)`s.
+    pub fn get_opfamily_member(
         opfamily: Oid,
-        rng_collation: Oid,
-    ) -> PgResult<PlannerNode>
+        lefttype: Oid,
+        righttype: Oid,
+        strategy: i16,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `makeConst(consttype, -1, constcollid, constlen, constvalue, false,
+    /// constbyval)` (makefuncs.c): fabricate a `Const` node. The element type's
+    /// `typlen`/`typbyval`/`typcollation` are read off `elem_type`'s typcache
+    /// entry on the owner side (the trimmed `TypeCacheEntry` here does not carry
+    /// them). Allocated in `mcx`.
+    pub fn make_const<'mcx>(
+        mcx: Mcx<'mcx>,
+        consttype: Oid,
+        constvalue: Datum,
+    ) -> PlannerNode
+);
+
+seam_core::seam!(
+    /// `make_opclause(opno, opresulttype, opretset, leftop, rightop,
+    /// opcollid, inputcollid)` (makefuncs.c): fabricate an `OpExpr` node.
+    /// Called here as `make_opclause(oproid, BOOLOID, false, elemExpr,
+    /// constExpr, InvalidOid, rng_collation)`. Allocated in `mcx`.
+    pub fn make_opclause<'mcx>(
+        mcx: Mcx<'mcx>,
+        opno: Oid,
+        opresulttype: Oid,
+        opretset: bool,
+        leftop: PlannerNode,
+        rightop: PlannerNode,
+        opcollid: Oid,
+        inputcollid: Oid,
+    ) -> PlannerNode
 );
 
 /// `elem_contained_by_range_support(arg)` body (rangetypes.c:2251): the support
@@ -355,10 +383,12 @@ pub fn find_simplified_clause<'mcx>(
 ///
 /// The element-type identity that C reads off the `typeCache` argument is the
 /// `type_id` threaded here (the element type's `typlen`/`typbyval`/
-/// `typcollation` are resolved on the owner side, since the trimmed
-/// `TypeCacheEntry` does not carry them); the operator lookup + `makeConst` +
-/// `make_opclause` fabrication is routed to the planner/makefuncs owner through
-/// the `build_bound_op_expr` seam.
+/// `typcollation` are resolved on the `make_const` owner side, since the trimmed
+/// `TypeCacheEntry` does not carry them). The strategy-number selection and the
+/// `OidIsValid` guard are this crate's own logic; only the catalog lookup
+/// (`get_opfamily_member`) and the node fabrication (`makeConst` /
+/// `make_opclause`) route to the lsyscache / makefuncs owners through thin
+/// seams.
 pub fn build_bound_expr<'mcx>(
     mcx: Mcx<'mcx>,
     elem_expr: PlannerNode,
@@ -369,14 +399,43 @@ pub fn build_bound_expr<'mcx>(
     opfamily: Oid,
     rng_collation: Oid,
 ) -> PgResult<PlannerNode> {
-    build_bound_op_expr::call(
+    // Identify the comparison operator to use. C's local `strategy` is `int16`;
+    // the `BT*StrategyNumber` macros are small positive constants.
+    let strategy: i16 = (if is_lower_bound {
+        if is_inclusive {
+            BTGreaterEqualStrategyNumber
+        } else {
+            BTGreaterStrategyNumber
+        }
+    } else if is_inclusive {
+        BTLessEqualStrategyNumber
+    } else {
+        BTLessStrategyNumber
+    }) as i16;
+
+    // We could use exprType(elemExpr) here, if it ever becomes possible that
+    // elemExpr is not the exact same type as the range elements.
+    let oproid = get_opfamily_member::call(opfamily, elem_type, elem_type, strategy)?;
+
+    // We don't really expect failure here, but just in case ...
+    if !OidIsValid(oproid) {
+        return Ok(PlannerNode::NULL);
+    }
+
+    // OK, convert "val" to a full-fledged Const node, and make the OpExpr.
+    // makeConst(elemType, -1, elemCollation, elemTypeLen, val, false, elemByValue)
+    let const_expr = make_const::call(mcx, elem_type, val);
+
+    // make_opclause(oproid, BOOLOID, false, elemExpr, constExpr, InvalidOid,
+    //               rng_collation)
+    Ok(make_opclause::call(
         mcx,
+        oproid,
+        BOOLOID,
+        false,
         elem_expr,
-        val,
-        is_lower_bound,
-        is_inclusive,
-        elem_type,
-        opfamily,
+        const_expr,
+        types_core::primitive::InvalidOid,
         rng_collation,
-    )
+    ))
 }
