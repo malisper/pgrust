@@ -34,6 +34,22 @@ pub fn init_seams() {
         // is infallible, so a failure aborts here, matching the C contract.
         ps_status::init_ps_display(fixed_part).expect("init_ps_display");
     });
+    backend_utils_misc_more_seams::set_ps_display::set(|activity| {
+        ps_status::set_ps_display(activity);
+    });
+    backend_utils_misc_ps_status_seams::set_ps_display::set(|activity| {
+        ps_status::set_ps_display(&activity);
+    });
+    backend_utils_misc_ps_status_seams::init_ps_display::set(|fixed_part| {
+        // `fixed_part` is the worker's `bgw_name` C string: NUL-terminated
+        // bytes. Mirror C `init_ps_display(const char *)` by reading up to the
+        // first NUL; the C contract is a valid C string, so a non-NUL value is
+        // an internal error (matching C `strlen` over an unterminated buffer
+        // being UB) and lossy UTF-8 is acceptable for a display string.
+        let end = fixed_part.iter().position(|&b| b == 0).unwrap_or(fixed_part.len());
+        let s = String::from_utf8_lossy(&fixed_part[..end]);
+        ps_status::init_ps_display(Some(&s)).expect("init_ps_display");
+    });
     backend_utils_misc_ps_status_seams::set_ps_display_suffix::set(|suffix| {
         ps_status::set_ps_display_suffix(suffix);
     });
