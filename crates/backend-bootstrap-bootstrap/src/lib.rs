@@ -286,7 +286,7 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
 
     debug_assert!(!is_under_postmaster());
 
-    backend_utils_init_miscinit_seams::init_standalone_process::call(&argv[0]);
+    backend_utils_init_miscinit_seams::init_standalone_process::call(&argv[0])?;
 
     /* Set defaults, to be overridden by explicit options below */
     backend_utils_misc_guc_seams::initialize_guc_options::call()?;
@@ -440,7 +440,7 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
             .finish(loc(371, "BootstrapModeMain"));
     }
 
-    backend_utils_init_postinit_seams::init_postgres_bootstrap::call()?;
+    backend_utils_init_postinit_seams::init_postgres_bootstrap::call(mcx)?;
 
     /* Initialize stuff for bootstrap-file processing */
     STATE.with(|s| {

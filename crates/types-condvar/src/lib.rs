@@ -12,6 +12,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod barrier;
 pub mod condition_variable;
 
+pub use barrier::Barrier;
 pub use condition_variable::{ConditionVariable, ConditionVariableMinimallyPadded, CV_MINIMAL_SIZE};

@@ -17,6 +17,8 @@ use crate::nodemergejoin::T_MergeJoinState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
 use crate::nodenestloop::T_NestLoopState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
+use crate::nodehash::HashState;
+use crate::execstate_tags::T_HashState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -48,6 +50,8 @@ pub enum PlanStateNode<'mcx> {
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
     /// `T_ForeignScanState`.
     ForeignScan(PgBox<'mcx, crate::nodeforeigncustom::ForeignScanState<'mcx>>),
+    /// `T_HashState` — the inner Hash node of a hash join.
+    Hash(PgBox<'mcx, HashState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -66,6 +70,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
             PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
+            PlanStateNode::Hash(_) => T_HashState,
         }
     }
 
@@ -85,6 +90,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
             PlanStateNode::ForeignScan(f) => &f.ss.ps,
+            PlanStateNode::Hash(h) => &h.ps,
         }
     }
 
@@ -103,6 +109,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
             PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
+            PlanStateNode::Hash(h) => &mut h.ps,
         }
     }
 

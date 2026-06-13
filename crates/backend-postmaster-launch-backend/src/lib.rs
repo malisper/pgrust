@@ -228,8 +228,10 @@ pub fn postmaster_child_launch(
             child_type == BackendType::Logger,
         );
 
-        // Detangle from postmaster.
-        backend_utils_init_miscinit_seams::init_postmaster_child::call();
+        // Detangle from postmaster. A FATAL here aborts this freshly-forked
+        // child, matching C's proc_exit on the InitPostmasterChild failure path.
+        backend_utils_init_miscinit_seams::init_postmaster_child::call()
+            .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
 
         // Detach shared memory if not needed.
         if !CHILD_PROCESS_KINDS[child_type as usize].shmem_attach {

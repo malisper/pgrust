@@ -62,3 +62,11 @@ seam_core::seam!(
     /// `SMgrRelation` objects. Used by `XLogDropDatabase` during replay.
     pub fn smgrdestroyall() -> PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumer (smgr.c) ---
+
+seam_core::seam!(
+    /// `smgrinit()` (smgr.c): initialize the storage-manager switch and
+    /// register its shutdown hook. `Err` carries its `ereport` surface.
+    pub fn smgrinit() -> types_error::PgResult<()>
+);

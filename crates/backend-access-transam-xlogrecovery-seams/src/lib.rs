@@ -86,3 +86,9 @@ seam_core::seam!(
     /// NULL-`replayTLI` variant some callers use.
     pub fn get_xlog_replay_rec_ptr_tli() -> (XLogRecPtr, types_core::TimeLineID)
 );
+
+seam_core::seam!(
+    /// `StandbyMode` (xlogrecovery.c global bool): true while the server is in
+    /// standby mode (continuous recovery awaiting more WAL). Pure read.
+    pub fn standby_mode() -> bool
+);

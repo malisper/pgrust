@@ -5,7 +5,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::Oid;
+use types_core::{AttrNumber, Oid};
+use types_datum::Datum;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
 
@@ -57,6 +58,25 @@ seam_core::seam!(
     /// pg_class row. `Err` carries the syscache machinery's
     /// `ereport(ERROR)`s.
     pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(STATRELATTINH, relid, attnum, inherit)` +
+    /// `get_attstatsslot(&sslot, statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+    /// ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)` (the
+    /// `ExecHashBuildSkewHash` skew-MCV probe). Returns the MCV slot's
+    /// `(values, numbers)` arrays copied into `mcx` (the only `AttStatsSlot`
+    /// fields the skew build reads), or `Ok(None)` when there is no
+    /// `pg_statistic` row (`!HeapTupleIsValid`) or no MCV slot
+    /// (`get_attstatsslot` returns false). The owner does the matching
+    /// `free_attstatsslot` / `ReleaseSysCache`. `Err` carries the catcache /
+    /// detoast `ereport(ERROR)`s plus OOM from the copy.
+    pub fn get_attstatsslot_mcv<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inherit: bool,
+    ) -> PgResult<Option<(PgVec<'mcx, Datum>, PgVec<'mcx, f32>)>>
 );
 
 seam_core::seam!(

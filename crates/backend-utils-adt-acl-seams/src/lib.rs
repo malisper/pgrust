@@ -51,3 +51,9 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `initialize_acl()` (acl.c): set up the ACL framework (role membership
+    /// cache). `Err` carries its `ereport` surface.
+    pub fn initialize_acl() -> types_error::PgResult<()>
+);

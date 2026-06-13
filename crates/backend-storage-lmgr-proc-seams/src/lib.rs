@@ -338,8 +338,62 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `&MyProc->procLatch` (`storage/proc.c`) — this backend's PGPROC shared
+    /// latch, the latch `SwitchToSharedLatch` points `MyLatch` at.
+    pub fn my_proc_latch() -> types_storage::latch::LatchHandle
+);
+
+seam_core::seam!(
+    /// `MyProc->roleId = userid` (`storage/proc.c`) — stamp this backend's
+    /// PGPROC entry with the authenticated user id (an atomic store; no lock).
+    pub fn set_my_proc_role_id(userid: Oid)
+);
+
+seam_core::seam!(
     /// `InitProcess()` (proc.c): initialize the per-backend `PGPROC` entry,
     /// claiming a slot from the shared `ProcGlobal` free list. `ereport(FATAL)`
     /// when no slot is available ("sorry, too many clients already").
     pub fn init_process() -> types_error::PgResult<()>
+);
+
+// --- backend-utils-init-postinit consumers (proc.c) ---
+
+seam_core::seam!(
+    /// `InitProcessPhase2()` (proc.c): add MyProc to the ProcArray; after this
+    /// the backend is visible to others. `Err` carries its `ereport` surface.
+    pub fn init_process_phase2() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CheckDeadLockAlert()` (proc.c): the DEADLOCK_TIMEOUT handler body.
+    pub fn check_dead_lock_alert()
+);
+
+seam_core::seam!(
+    /// `HaveNFreeProcs(n, &nfree)` (proc.c): are at least `n` PGPROC slots
+    /// free? Returns `(have_n, nfree)` where `nfree` is the actual free count
+    /// (the C out-parameter).
+    pub fn have_n_free_procs(n: i32) -> types_error::PgResult<(bool, i32)>
+);
+
+seam_core::seam!(
+    /// `AmRegularBackendProcess()` (miscadmin.h): is this a regular client
+    /// backend (not an aux/background process)?
+    pub fn am_regular_backend_process() -> bool
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend` (proc.c global): the current value.
+    pub fn fast_path_lock_groups_per_backend() -> i32
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend = value` (proc.c global).
+    pub fn set_fast_path_lock_groups_per_backend(value: i32)
+);
+
+seam_core::seam!(
+    /// `MyProc->databaseId = dboid` (proc.c): mark this backend's PGPROC entry
+    /// with the database OID.
+    pub fn set_my_proc_database_id(dboid: types_core::Oid)
 );
