@@ -4,78 +4,95 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 //!
-//! C exposes an iterator (`systable_beginscan` / `systable_getnext` /
-//! `systable_endscan` over an open `Relation`); a cross-cycle iterator with
-//! owner-held scan state cannot be expressed as a seam slot, so each scan
-//! crosses as one batched call: the owner opens the catalog
-//! (`table_open(rel, AccessShareLock)`), runs the full scan, deforms each
-//! result tuple against the relation's descriptor, closes the relation
-//! (the acquired lock persisting to end of transaction as in C), and returns
-//! the deformed rows in scan order. Row values are copies in `mcx`
-//! (`row[attnum - 1]` is the column's `(value, isnull)`); the consuming
-//! crate's per-tuple loop logic stays in the consuming crate.
+//! The API mirrors C's iterator (`systable_beginscan*` /
+//! `systable_getnext*` / `systable_endscan*`): the caller opens the catalog
+//! (and, for the ordered variant, the index) itself, exactly as in C.
+//! Relations cross as borrows of the caller's open
+//! `types_rel::RelationData` carriers; snapshots as trimmed
+//! `types_snapshot::SnapshotData`; the live scan state is the trimmed
+//! `types_scan::genam::SysScanDescData`, held by a [`SysScanGuard`] so the
+//! scan is closed on every early return (AGENTS.md "Locks and held
+//! resources"). C returns a `HeapTuple` owned by the scan (valid until the
+//! next call); the owned model copies each result tuple out into `mcx`.
 
-use mcx::{Mcx, PgVec};
-use types_cache::ScanKeyInit;
-use types_core::Oid;
 use types_error::PgResult;
-use types_tuple::backend_access_common_heaptuple::DeformedColumn;
-
-/// One scanned tuple, deformed: `natts` columns in attribute-number order.
-pub type DeformedRow<'mcx> = PgVec<'mcx, DeformedColumn<'mcx>>;
+use types_scan::genam::SysScanDescData;
 
 seam_core::seam!(
-    /// `table_open(rel_oid, AccessShareLock)` + `systable_beginscan(rel,
-    /// index_oid, index_ok, NULL, keys.len(), keys)` + `systable_getnext`
-    /// loop + `systable_endscan` + `table_close(rel, AccessShareLock)`
-    /// (genam.c), batched. `Err` carries the C `ereport(ERROR)` surface of
-    /// opening/scanning the catalog plus OOM from the copies.
-    pub fn systable_scan<'mcx>(
-        mcx: Mcx<'mcx>,
-        rel_oid: Oid,
-        index_oid: Oid,
+    /// `systable_beginscan(heapRelation, indexId, indexOK, snapshot, nkeys,
+    /// key)` (genam.c): begin a scan of a system(-like) table. `index_ok`
+    /// false forces a heap scan; `snapshot` `None` is the C NULL (use the
+    /// catalog snapshot, registered by the owner and recorded in the
+    /// descriptor for unregistration at end of scan). The `keys` slice
+    /// carries `nkeys`. `Err` carries the scan-setup error surface (fmgr
+    /// lookup of the key procedures, AM begin-scan).
+    pub fn systable_beginscan(
+        heap_relation: &types_rel::RelationData<'_>,
+        index_id: types_core::primitive::Oid,
         index_ok: bool,
-        keys: &[ScanKeyInit],
-    ) -> PgResult<PgVec<'mcx, DeformedRow<'mcx>>>
+        snapshot: Option<&types_snapshot::SnapshotData>,
+        keys: &[types_scan::scankey::ScanKeyData],
+    ) -> types_error::PgResult<SysScanGuard>
 );
 
 seam_core::seam!(
-    /// As [`systable_scan`], but the ordered variant: `index_open(index_oid,
-    /// AccessShareLock)` + `systable_beginscan_ordered` +
-    /// `systable_getnext_ordered(ForwardScanDirection)` loop +
-    /// `systable_endscan_ordered` + `index_close` + `table_close`
-    /// (genam.c), so rows come back in index order.
-    pub fn systable_scan_ordered<'mcx>(
-        mcx: Mcx<'mcx>,
-        rel_oid: Oid,
-        index_oid: Oid,
-        keys: &[ScanKeyInit],
-    ) -> PgResult<PgVec<'mcx, DeformedRow<'mcx>>>
+    /// `systable_getnext(sysscan)` (genam.c): the next tuple of the scan,
+    /// copied into `mcx`, or `None` at the end. `Err` carries the index/heap
+    /// fetch error surface.
+    pub fn systable_getnext<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        sysscan: &mut types_scan::genam::SysScanDescData,
+    ) -> types_error::PgResult<
+        Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+    >
+);
+
+seam_core::seam!(
+    /// `systable_endscan(sysscan)` (genam.c): finish the scan, releasing
+    /// the AM scan state and unregistering the descriptor's snapshot.
+    /// Reached only through [`SysScanGuard`] (`end()` or `Drop`); consumers
+    /// never call it directly. `Err` carries the AM end-scan error surface.
+    pub fn systable_endscan(
+        sysscan: types_scan::genam::SysScanDescData,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `systable_recheck_tuple(sysscan, tup)` (genam.c): recheck visibility of
+    /// the most-recently-fetched tuple under a fresh catalog snapshot,
+    /// returning whether it is still live. The C `tup` argument only asserts
+    /// it matches `sysscan->slot`; the recheck itself reads the scan's live
+    /// slot, so the owned model passes only the scan descriptor (the caller
+    /// invokes this immediately after the `systable_getnext` that produced the
+    /// current row). `Err` carries the snapshot-acquisition / heap-fetch error
+    /// surface as well as any concurrent-abort handling.
+    pub fn systable_recheck_tuple(
+        sysscan: &mut types_scan::genam::SysScanDescData,
+    ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
     /// `systable_beginscan_ordered(heapRelation, indexRelation, snapshot,
     /// nkeys, key)` (genam.c): begin an index scan on a system(-like) table,
-    /// ordered by the index. The `keys` slice carries `nkeys`. `Err` carries
-    /// the index-scan-setup error surface (fmgr lookup of the key procedures,
-    /// AM begin-scan).
+    /// ordered by the index. The caller has the index open (`index_open`),
+    /// as in C. `snapshot` `None` is the C NULL (use the catalog snapshot).
+    /// The `keys` slice carries `nkeys`. `Err` carries the index-scan-setup
+    /// error surface.
     pub fn systable_beginscan_ordered(
-        heap_relation: types_core::Oid,
-        index_relation: types_core::Oid,
-        snapshot: types_scan::snapshot::SnapshotHandle,
+        heap_relation: &types_rel::RelationData<'_>,
+        index_relation: &types_rel::RelationData<'_>,
+        snapshot: Option<&types_snapshot::SnapshotData>,
         keys: &[types_scan::scankey::ScanKeyData],
-    ) -> types_error::PgResult<types_scan::genam::SysScanHandle>
+    ) -> types_error::PgResult<SysScanGuard>
 );
 
 seam_core::seam!(
     /// `systable_getnext_ordered(sysscan, direction)` (genam.c): the next
-    /// tuple of the ordered scan, or `None` at the end. C returns a
-    /// `HeapTuple` owned by the scan (valid until the next call); the owned
-    /// model copies it out into `mcx`. `Err` carries the index/heap fetch
-    /// error surface.
+    /// tuple of the ordered scan, copied into `mcx`, or `None` at the end.
+    /// `Err` carries the index/heap fetch error surface.
     pub fn systable_getnext_ordered<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        sysscan: types_scan::genam::SysScanHandle,
+        sysscan: &mut types_scan::genam::SysScanDescData,
         direction: types_scan::sdir::ScanDirection,
     ) -> types_error::PgResult<
         Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
@@ -83,31 +100,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `systable_endscan_ordered(sysscan)` (genam.c): finish the ordered scan
-    /// and release the handle. `Err` carries the AM end-scan error surface.
+    /// `systable_endscan_ordered(sysscan)` (genam.c): finish the ordered
+    /// scan. Reached only through [`SysScanGuard`] (`end()` or `Drop`);
+    /// consumers never call it directly. `Err` carries the AM end-scan
+    /// error surface.
     pub fn systable_endscan_ordered(
-        sysscan: types_scan::genam::SysScanHandle,
+        sysscan: types_scan::genam::SysScanDescData,
     ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    /// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` + the
-    /// `systable_getnext` loop + `systable_endscan` over an already-open
-    /// catalog relation: invoke `body` once per matching row (the deformed
-    /// columns + `t_self`), in scan order. `body` returning `Ok(false)` stops
-    /// the scan early (the C `break`); an `Err` from `body` propagates after
-    /// the owner ends the scan. The scan uses the catalog snapshot taken at
-    /// beginscan, so `body` may delete/update the current row through the
-    /// indexing seams without affecting which rows the scan visits — exactly
-    /// the C pattern. `Err` carries the scan machinery's own
-    /// `ereport(ERROR)`s as well. (The by-OID batched [`systable_scan`] above
-    /// serves consumers without an open relation or per-row write legs.)
-    pub fn systable_scan_foreach(
-        rel: &types_rel::RelationData<'_>,
-        index_id: Oid,
-        keys: &[ScanKeyInit],
-        body: &mut dyn FnMut(&types_scan::backend_access_index_genam::SysScanRow<'_>) -> PgResult<bool>,
-    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -124,3 +123,56 @@ seam_core::seam!(
         isnull: &[bool],
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+/// The live-scan token returned by [`systable_beginscan`] /
+/// [`systable_beginscan_ordered`]: owns the `SysScanDescData`. `Drop` ends
+/// the scan silently (the abort path); [`Self::end`] is the explicit
+/// `systable_endscan(_ordered)` at the C call site, surfacing its error.
+#[derive(Debug)]
+pub struct SysScanGuard {
+    desc: Option<SysScanDescData>,
+    ordered: bool,
+}
+
+impl SysScanGuard {
+    /// Wrap a just-begun scan (`ordered` records which begin-scan flavor
+    /// created it, so release dispatches to the matching end-scan). Called
+    /// by the owner's installed implementation (and test fixtures);
+    /// consumers only ever receive one.
+    pub fn new(desc: SysScanDescData, ordered: bool) -> Self {
+        SysScanGuard {
+            desc: Some(desc),
+            ordered,
+        }
+    }
+
+    /// The scan descriptor, as `systable_getnext*` consumes it.
+    pub fn desc_mut(&mut self) -> &mut SysScanDescData {
+        self.desc.as_mut().expect("SysScanGuard already ended")
+    }
+
+    /// `systable_endscan(sysscan)` / `systable_endscan_ordered(sysscan)` at
+    /// the C call site, consuming the guard.
+    pub fn end(mut self) -> PgResult<()> {
+        let desc = self.desc.take().expect("SysScanGuard ended twice");
+        if self.ordered {
+            systable_endscan_ordered::call(desc)
+        } else {
+            systable_endscan::call(desc)
+        }
+    }
+}
+
+impl Drop for SysScanGuard {
+    fn drop(&mut self) {
+        if let Some(desc) = self.desc.take() {
+            // The abort path: end silently (C reaches the equivalent
+            // releases through error-recovery resource cleanup).
+            let _ = if self.ordered {
+                systable_endscan_ordered::call(desc)
+            } else {
+                systable_endscan::call(desc)
+            };
+        }
+    }
+}

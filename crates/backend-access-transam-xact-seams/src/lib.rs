@@ -7,11 +7,30 @@
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `GetCurrentStatementStartTimestamp()` (xact.c): the timestamp the
+    /// current statement (transaction command) started. Pure read of
+    /// backend-local transaction state.
+    pub fn get_current_statement_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `CommandCounterIncrement()` (xact.c): bump the command counter so
     /// in-progress catalog changes become visible. Can `ereport(ERROR)`
     /// (e.g. `cannot have more than 2^32-2 commands in a transaction`),
     /// carried on `Err`.
     pub fn command_counter_increment() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `StartTransactionCommand()` (xact.c): begin a transaction command,
+    /// starting a transaction if none is active. Can `ereport(ERROR)`.
+    pub fn start_transaction_command() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CommitTransactionCommand()` (xact.c): commit the current transaction
+    /// command. Can `ereport(ERROR)`.
+    pub fn commit_transaction_command() -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -33,6 +52,22 @@ seam_core::seam!(
     /// `IsTransactionState()` (xact.c): true when in a live transaction
     /// (`TRANS_INPROGRESS`). Pure read of backend-local transaction state.
     pub fn is_transaction_state() -> bool
+);
+
+seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h): true when the current
+    /// transaction isolation level is REPEATABLE READ or higher
+    /// (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read of the backend-local
+    /// `XactIsoLevel`.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);
+
+seam_core::seam!(
+    /// `IsInParallelMode()` (xact.c): true when the current transaction (or
+    /// subtransaction) has entered parallel mode
+    /// (`CurrentTransactionState->parallelModeLevel != 0`). Pure read of
+    /// backend-local transaction state; cannot `ereport`.
+    pub fn is_in_parallel_mode() -> bool
 );
 
 seam_core::seam!(
@@ -88,21 +123,47 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `StartTransactionCommand()` (xact.c). Can `ereport(ERROR)`, carried
-    /// on `Err`.
-    pub fn start_transaction_command() -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `CommitTransactionCommand()` (xact.c). Can `ereport(ERROR)`, carried
-    /// on `Err`.
-    pub fn commit_transaction_command() -> PgResult<()>
-);
-
-seam_core::seam!(
     /// `AbortOutOfAnyTransaction()` (xact.c): abort the current transaction
     /// (at any nesting level) and return to default state.
     pub fn abort_out_of_any_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AbortCurrentTransaction()` (xact.c): abort the current transaction
+    /// command. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn abort_current_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BeginTransactionBlock()` (xact.c): begin a transaction block (the
+    /// `BEGIN`/`START TRANSACTION` driver). Can `ereport(ERROR)`/`WARNING`,
+    /// carried on `Err`.
+    pub fn begin_transaction_block() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EndTransactionBlock(chain)` (xact.c): end a transaction block
+    /// (`COMMIT`/`END`); `chain` requests `AND CHAIN`. Returns whether the
+    /// commit should be fully performed now. Can `ereport`, carried on `Err`.
+    pub fn end_transaction_block(chain: bool) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `DefineSavepoint(name)` (xact.c): define a savepoint with `name`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn define_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RollbackToSavepoint(name)` (xact.c): roll back to the named savepoint.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn rollback_to_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IsTransactionBlock()` (xact.c): true when inside an explicit
+    /// transaction block (`BEGIN`...). Pure read of backend-local state.
+    pub fn is_transaction_block() -> bool
 );
 
 seam_core::seam!(
@@ -132,6 +193,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RequireTransactionBlock(isTopLevel, stmtType)` (xact.c) — `ereport`s if
+    /// the statement is not running inside a transaction block (so it would
+    /// have no user-visible effect). The C arg is `const char *stmtType`.
+    pub fn require_transaction_block(is_top_level: bool, stmt_type: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `IsTransactionOrTransactionBlock()` (xact.c): true when in a
     /// transaction or transaction block. Pure read of backend-local state.
     pub fn is_transaction_or_transaction_block() -> bool
@@ -152,4 +220,23 @@ seam_core::seam!(
 seam_core::seam!(
     /// Set the `bsysscan` global (xact.c) — `ResetLogicalStreamingState`.
     pub fn set_bsysscan(value: bool)
+);
+
+seam_core::seam!(
+    /// `PreventInTransactionBlock(isTopLevel, stmtType)` (xact.c).
+    pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: &str) -> PgResult<()>
+);
+
+// --- backend-utils-init-postinit consumers (xact.c) ---
+
+seam_core::seam!(
+    /// `SetCurrentStatementStartTimestamp()` (xact.c): set the statement-start
+    /// timestamp (required for timeouts to work).
+    pub fn set_current_statement_start_timestamp()
+);
+
+seam_core::seam!(
+    /// `XactIsoLevel = XACT_READ_COMMITTED` (xact.c global): lower the
+    /// just-started transaction's isolation level to read committed.
+    pub fn set_xact_iso_level_read_committed()
 );

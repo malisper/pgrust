@@ -19,6 +19,8 @@ pub type Size = usize;
 pub type AttrNumber = i16;
 /// `Index` (`c.h`) — index into an array (e.g. a range-table index).
 pub type Index = u32;
+/// `ParseLoc` (`nodes/nodes.h`) — a token/parse location, or -1 if unknown.
+pub type ParseLoc = i32;
 /// `InvalidAttrNumber` (`access/attnum.h`).
 pub const InvalidAttrNumber: AttrNumber = 0;
 /// `RegProcedure` (`c.h`) — a pg_proc OID ("RegProcedure is the preferred
@@ -40,6 +42,8 @@ pub type uint16 = u16;
 pub type uint32 = u32;
 pub type uint64 = u64;
 pub type int64 = i64;
+/// `bits32` (`c.h`) — a `>= 32` bit unsigned bitmask container.
+pub type bits32 = uint32;
 pub type RmgrId = uint8;
 pub type XLogSegNo = uint64;
 pub type pg_crc32c = uint32;
@@ -53,6 +57,8 @@ pub type pid_t = i32;
 pub type sig_atomic_t = i32;
 
 pub const BLCKSZ: usize = 8192;
+/// `BITS_PER_BYTE` (`c.h`).
+pub const BITS_PER_BYTE: i32 = 8;
 pub const InvalidOid: Oid = 0;
 pub const INVALID_OID: Oid = InvalidOid;
 

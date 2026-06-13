@@ -48,3 +48,16 @@ seam_core::seam!(
         ssup: &SortSupportData<'_>,
     ) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `PrepareSortSupportFromOrderingOp(orderingOp, ssup)` (sortsupport.c):
+    /// fill in `ssup` (sets `ssup_reverse` and resolves/installs the type's
+    /// comparator) from the ordering operator `orderingOp` (a "<" or ">" btree
+    /// operator). Catalog lookups and comparator setup allocate / can
+    /// `ereport(ERROR)`, hence `PgResult`. `ssup.ssup_cxt` selects the context
+    /// the comparator state is built in.
+    pub fn prepare_sort_support_from_ordering_op(
+        ordering_op: Oid,
+        ssup: &mut SortSupportData<'_>,
+    ) -> PgResult<()>
+);

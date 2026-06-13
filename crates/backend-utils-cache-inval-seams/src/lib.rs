@@ -59,6 +59,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CacheInvalidateRelmap(databaseId)` (inval.c): register a relmap
+    /// invalidation to be sent to other backends after a relation-map file
+    /// rewrite (`databaseId == InvalidOid` for the shared map). Sent inside a
+    /// critical section by relmapper; a failure forces a database-wide PANIC.
+    pub fn cache_invalidate_relmap(database_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtEOXact_Inval(isCommit)` — process/discard pending invalidations at
     /// top-level transaction end.
     pub fn at_eoxact_inval(is_commit: bool) -> PgResult<()>
@@ -115,4 +123,19 @@ seam_core::seam!(
     /// around its fast-forward WAL read loops. `Err` carries any error raised
     /// by an invalidation callback.
     pub fn invalidate_system_caches() -> PgResult<()>
+);
+
+/* ---- CLUSTER catalog invalidations (backend-commands-cluster) ------------ */
+
+seam_core::seam!(
+    /// `CacheInvalidateCatalog(catalogId)` (inval.c).
+    pub fn cache_invalidate_catalog(catalog_id: Oid) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CacheInvalidateRelcacheByTuple(classTuple)` (inval.c): invalidate the
+    /// relcache entry described by the (reformed) pg_class row.
+    pub fn cache_invalidate_relcache_by_pg_class(
+        tid: types_tuple::heaptuple::ItemPointerData,
+        form: &types_cluster::PgClassForm,
+    ) -> PgResult<()>
 );

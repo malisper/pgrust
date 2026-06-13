@@ -1,0 +1,18 @@
+//! Install this crate's seams (`backend-storage-file-buffile-seams`) to the
+//! real `buffile.c` functions. Marshal-and-delegate only.
+
+use backend_storage_file_buffile_seams as seams;
+
+/// Install every `backend-storage-file-buffile` seam.
+pub fn init_seams() {
+    seams::buf_file_create_temp::set(|mcx, inter_xact| super::BufFileCreateTemp(mcx, inter_xact));
+    seams::buf_file_close::set(|mut file| super::BufFileClose(&mut file));
+    seams::buf_file_seek::set(|file, fileno, offset, whence| {
+        super::BufFileSeek(file, fileno, offset, whence)
+    });
+    seams::buf_file_write::set(|file, data| super::BufFileWrite(file, data));
+    seams::buf_file_read_maybe_eof::set(|file, buf, eof_ok| {
+        super::BufFileReadMaybeEOF(file, buf, eof_ok)
+    });
+    seams::buf_file_read_exact::set(|file, buf| super::BufFileReadExact(file, buf));
+}

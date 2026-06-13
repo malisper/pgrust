@@ -19,6 +19,29 @@ use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
 };
 
 seam_core::seam!(
+    /// `pgstat_init_relation(rel)` (pgstat_relation.c): set the relcache
+    /// entry's `pgstat_enabled` / `pgstat_info` according to whether the
+    /// relation has storage (or is a partitioned table) and whether
+    /// `pgstat_track_counts` is on. Keyed by the relation OID; the owner reads
+    /// the relkind and mutates its per-relation pending-stats bookkeeping.
+    pub fn pgstat_init_relation(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_count_index_tuples(rel, n)` (pgstat.h macro): add `n` to the
+    /// relation's pending `t_tuples_returned` counter (only when
+    /// `rel->pgstat_info` is set). The per-relation pending stats live in
+    /// pgstat; the macro never errors.
+    pub fn pgstat_count_index_tuples(index_oid: types_core::primitive::Oid, n: i64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_heap_fetch(rel)` (pgstat.h macro): increment the
+    /// relation's pending `t_tuples_fetched` counter.
+    pub fn pgstat_count_heap_fetch(index_oid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
     /// Run `f` on `&pgStatLocal.shmem->archiver`.
     pub fn with_shmem_archiver(f: &mut dyn FnMut(&mut PgStatShared_Archiver))
 );
@@ -105,4 +128,37 @@ seam_core::seam!(
     /// `pgstat_report_stat(force)` (pgstat.c) — flush pending stats; returns
     /// the soonest time another flush could be useful (0 if idle).
     pub fn pgstat_report_stat(force: bool) -> types_error::PgResult<i64>
+);
+
+// --- backend-utils-init-postinit consumers (pgstat.c) ---
+
+seam_core::seam!(
+    /// `pgstat_initialize()` (pgstat.c): initialize this backend's cumulative
+    /// statistics state and register the pgstat shutdown callback. `Err`
+    /// carries its `ereport` surface.
+    pub fn pgstat_initialize() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_before_server_shutdown(code, arg)` (pgstat.c): the
+    /// before_shmem_exit callback that flushes pending statistics. `Err`
+    /// carries its `ereport` surface.
+    pub fn pgstat_before_server_shutdown(
+        code: i32,
+        arg: types_datum::Datum,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `StatsShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn stats_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `StatsShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn stats_shmem_init() -> types_error::PgResult<()>
 );

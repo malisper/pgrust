@@ -1,0 +1,47 @@
+[package]
+name = "backend-utils-misc-more"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_misc_more"
+path = "src/lib.rs"
+
+[dependencies]
+# Own inward seams (installed from init_seams).
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+
+# Shared vocabulary.
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-control = { path = "../types-control" }
+types-syscache = { path = "../types-syscache" }
+types-storage = { path = "../types-storage" }
+
+# Direct deps (no cycle): pure globals / GUC tables.
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
+# Outward seams (cross-cycle owners not ported yet, or callers that would cycle).
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+common-controldata-utils-seams = { path = "../common-controldata-utils-seams" }
+
+# Datum/Mcx/types needed for name resolution + control-file projection.
+types-datum = { path = "../types-datum" }
+types-acl = { path = "../types-acl" }
+mcx = { path = "../mcx" }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"

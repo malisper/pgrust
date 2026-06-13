@@ -48,14 +48,16 @@ pub struct BackendStartupData {
 /// Unix launch sites in C pass either NULL ([`StartupData::None`]; all
 /// auxiliary processes and, on non-`EXEC_BACKEND` builds, the syslogger) or a
 /// `BackendStartupData` ([`StartupData::Backend`]; `B_BACKEND` /
-/// `B_DEAD_END_BACKEND`, `postmaster.c BackendStartup`). The remaining Unix
-/// payload — `B_BG_WORKER`'s `BackgroundWorker` (`postmaster.c
-/// do_start_bgworker`) — gains its variant when the bgworker/postmaster units
-/// port; neither its producer nor its consumer exists in this repo yet.
+/// `B_DEAD_END_BACKEND`, `postmaster.c BackendStartup`). The `B_BG_WORKER`
+/// payload — `BackgroundWorker` (`postmaster.c do_start_bgworker`) — is
+/// [`StartupData::BgWorker`], consumed by `BackgroundWorkerMain`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupData {
     /// C `startup_data == NULL, startup_data_len == 0`.
     None,
     /// A `BackendStartupData` (connection backends).
     Backend(BackendStartupData),
+    /// `B_BG_WORKER`'s `BackgroundWorker` (`postmaster.c do_start_bgworker`),
+    /// handed to `BackgroundWorkerMain`.
+    BgWorker(types_bgworker::BackgroundWorker),
 }

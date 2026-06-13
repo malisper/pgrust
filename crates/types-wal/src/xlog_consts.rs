@@ -21,6 +21,8 @@ pub const WAL_SEG_MAX_SIZE: i32 = 1024 * 1024 * 1024;
 pub const XLOG_FNAME_LEN: usize = 24;
 /// `XLOGDIR` (access/xlog_internal.h).
 pub const XLOGDIR: &str = "pg_wal";
+/// `MAXFNAMELEN` (access/xlog_internal.h) — max length of a WAL file name.
+pub const MAXFNAMELEN: usize = 64;
 /// `SizeOfXLogShortPHD` (access/xlog_internal.h) — `MAXALIGN(sizeof(XLogPageHeaderData))`.
 pub const SIZE_OF_XLOG_SHORT_PHD: usize = 24;
 /// `SizeOfXLogLongPHD` (access/xlog_internal.h) — `MAXALIGN(sizeof(XLogLongPageHeaderData))`.

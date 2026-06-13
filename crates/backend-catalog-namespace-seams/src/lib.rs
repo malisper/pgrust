@@ -12,6 +12,13 @@ use types_storage::lock::LOCKMODE;
 use types_tuple::access::RangeVar;
 
 seam_core::seam!(
+    /// `TypeIsVisible(typid)` (namespace.c): whether the type is visible in
+    /// the current search path (so it can be referenced unqualified). Reads
+    /// the syscache; `Err` carries the cache-lookup `elog(ERROR)` and OOM.
+    pub fn type_is_visible(mcx: Mcx<'_>, typid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
     /// text-search configuration given its possibly-qualified name list.
     /// With `missing_ok = false` a missing configuration raises
@@ -25,6 +32,15 @@ seam_core::seam!(
     /// namespace's OID; with `missing_ok = false` a missing schema raises
     /// `ERRCODE_UNDEFINED_SCHEMA`, carried on `Err`.
     pub fn get_namespace_oid(nspname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `makeRangeVarFromNameList(names)` (namespace.c): build a `RangeVar`
+    /// from a 1-to-3-element qualified name list (relname / schema.relname /
+    /// catalog.schema.relname). More than three dotted names raises
+    /// `ERRCODE_SYNTAX_ERROR` (`Err`). The `RangeVar` strings are owned
+    /// `String`s (the type's own representation).
+    pub fn make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar>
 );
 
 seam_core::seam!(
@@ -47,6 +63,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(name)),
+    /// lockmode, missing_ok)` — the SQL-function idiom for resolving a
+    /// possibly-qualified relation name text to its OID without holding a lock
+    /// (callers that lack privileges to lock it). With `missing_ok = false` a
+    /// missing relation raises `ERRCODE_UNDEFINED_TABLE`, carried on `Err`.
+    pub fn range_var_get_relid_from_text(
+        mcx: Mcx<'_>,
+        name: &str,
+        lockmode: LOCKMODE,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `AtEOXact_Namespace(isCommit, parallel)` — end-of-xact temp-namespace
     /// and search-path cleanup.
     pub fn at_eoxact_namespace(is_commit: bool, parallel: bool)
@@ -59,4 +89,27 @@ seam_core::seam!(
         my_subid: SubTransactionId,
         parent_subid: SubTransactionId,
     )
+);
+
+/* ---- CLUSTER target resolution (used by backend-commands-cluster) -------- */
+
+seam_core::seam!(
+    /// `RangeVarGetRelidExtended(relation, AccessExclusiveLock, 0,
+    /// RangeVarCallbackMaintainsTable, NULL)` (namespace.c): resolve+lock the
+    /// CLUSTER target, running the maintains-table permission callback.
+    pub fn range_var_get_relid_maintains_table<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &RangeVar,
+        lockmode: LOCKMODE,
+    ) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `LookupCreationNamespace(nspname)` (namespace.c): OID of the namespace
+    /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
+    pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `RestrictSearchPath()` (namespace.c): set search_path to a safe value
+    /// for a security-restricted operation.
+    pub fn restrict_search_path() -> PgResult<()>
 );
