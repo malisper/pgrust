@@ -20,6 +20,9 @@ pub fn init_seams() {
     backend_utils_init_small_seams::is_under_postmaster::set(globals::IsUnderPostmaster);
     backend_utils_init_small_seams::max_backends::set(globals::MaxBackends);
     backend_utils_init_small_seams::with_my_proc_port::set(globals::with_my_proc_port_seam);
+    backend_utils_init_small_seams::set_my_proc_port::set(|port| {
+        globals::SetMyProcPort(Some(Box::new(port)))
+    });
     backend_utils_init_small_seams::set_client_connection_lost::set(globals::SetClientConnectionLost);
     backend_utils_init_small_seams::set_interrupt_pending::set(globals::SetInterruptPending);
     backend_utils_init_small_seams::set_proc_die_pending::set(globals::SetProcDiePending);

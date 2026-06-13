@@ -87,6 +87,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyProcPort = port` (globals.c): install the per-connection `Port` as
+    /// `MyProcPort`. C's `port = MyProcPort = pq_init(client_sock)` assigns the
+    /// `pq_init` result; the owner `pq_init` returns the `Port` and the caller
+    /// stores it here.
+    pub fn set_my_proc_port(port: types_net::Port)
+);
+
+seam_core::seam!(
     /// `ClientConnectionLost = value` (globals.c / miscadmin.h).
     pub fn set_client_connection_lost(value: bool)
 );
