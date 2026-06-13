@@ -225,6 +225,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `get_op_hash_functions(opno, &lhs_procno, &rhs_procno)` (lsyscache.c):
     /// resolve the LHS and RHS hash support functions of a hashable equality
     /// operator. Returns `Some((lhs, rhs))` when found (the C `true`), `None`

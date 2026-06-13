@@ -15,6 +15,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsCatalogRelationOid(relid)` (catalog/catalog.c): a relation is a
+    /// system catalog iff it has a pinned OID (`relid < FirstUnpinnedObjectId`).
+    /// Pure OID-range arithmetic — infallible.
+    pub fn is_catalog_relation_oid(relid: Oid) -> bool
+);
+
+seam_core::seam!(
     /// `IsCatalogRelation(relation)` (catalog/catalog.c): is this relation a
     /// system catalog (`IsCatalogRelationOid(RelationGetRelid(relation))`)?
     /// Pure OID-range check; infallible.

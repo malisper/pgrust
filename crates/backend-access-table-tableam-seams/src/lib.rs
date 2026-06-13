@@ -1,18 +1,41 @@
-//! Seam declarations for the table-AM sequential-scan entry points
-//! (`access/tableam.h` inline wrappers `table_beginscan` /
-//! `table_scan_getnextslot` / `table_endscan`) that dispatch through the
-//! relation's AM vtable (the heap AM `scan_begin` / `scan_getnextslot` /
-//! `scan_end`). The heap AM is not ported yet, so these panic until it lands.
+//! Seam declarations for table-AM dispatch helpers in
+//! `access/table/tableam.c` / `access/tableam.h` inline wrappers that dispatch
+//! through a relation's `rd_tableam` vtable into its access method:
+//! the TOAST helpers (`table_relation_toast_am` /
+//! `table_relation_needs_toast_table`) and the sequential-scan entry points
+//! (`table_beginscan` / `table_scan_getnextslot` / `table_endscan`).
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly. (The heap AM implementations these dispatch to —
+//! `heapam_relation_toast_am` / `heapam_relation_needs_toast_table` /
+//! `scan_begin` / `scan_getnextslot` / `scan_end` — are
+//! `access/heap/heapam_handler.c`, also unported, so the call panics until
+//! both land.)
 //!
 //! The scan descriptor (`TableScanDesc`) is owned by the AM; it crosses as an
 //! opaque [`ScanToken`].
 
 use std::rc::Rc;
 
+use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::TupleTableSlot;
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
+
+seam_core::seam!(
+    /// `table_relation_toast_am(rel)` (access/tableam.h, static inline):
+    /// `rel->rd_tableam->relation_toast_am(rel)` — the OID of the AM that
+    /// should implement the TOAST table for `rel`. Infallible.
+    pub fn table_relation_toast_am(rel: &Relation<'_>) -> Oid
+);
+
+seam_core::seam!(
+    /// `table_relation_needs_toast_table(rel)` (access/tableam.h, static
+    /// inline): `rel->rd_tableam->relation_needs_toast_table(rel)` — does the
+    /// relation need a TOAST table? Infallible.
+    pub fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool
+);
 
 /// An open `TableScanDesc` (the AM-owned scan state). C's pointer is opaque to
 /// the COPY driver, which only threads it back into `getnextslot`/`endscan`.
