@@ -880,7 +880,9 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-snapshot",
+ "types-tableam",
 ]
 
 [[package]]
@@ -3093,6 +3095,32 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeSeqscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeSeqscan-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-snapshot",
+ "types-tableam",
 ]
 
 [[package]]
@@ -7116,6 +7144,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeSeqscan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

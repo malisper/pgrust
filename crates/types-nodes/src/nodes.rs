@@ -28,6 +28,7 @@ impl core::fmt::Display for NodeTag {
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
 pub const T_Result: NodeTag = NodeTag(331);
+pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
 pub const T_MergeAppend: NodeTag = NodeTag(335);
 pub const T_IndexScan: NodeTag = NodeTag(341);
@@ -132,6 +133,8 @@ pub enum Node<'mcx> {
     Hash(crate::nodehashjoin::Hash<'mcx>),
     /// `T_TidRangeScan`.
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
+    /// `T_SeqScan`.
+    SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -150,6 +153,7 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
+            Node::SeqScan(_) => T_SeqScan,
         }
     }
 
@@ -168,6 +172,7 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
+            Node::SeqScan(s) => &s.scan.plan,
         }
     }
 
@@ -192,6 +197,7 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
+            Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
         }
     }
 }

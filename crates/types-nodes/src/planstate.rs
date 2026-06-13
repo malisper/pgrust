@@ -44,6 +44,8 @@ pub enum PlanStateNode<'mcx> {
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
+    /// `T_SeqScanState`.
+    SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -60,6 +62,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
+            PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
         }
     }
 
@@ -77,6 +80,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
+            PlanStateNode::SeqScan(s) => &s.ss.ps,
         }
     }
 
@@ -93,6 +97,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
+            PlanStateNode::SeqScan(s) => &mut s.ss.ps,
         }
     }
 
@@ -103,7 +108,9 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// here as their executor units land.
     pub fn as_scan_state(&self) -> Option<&ScanStateData<'mcx>> {
         match self {
-            // No current variant is a relation-scan node (the C
+            // `SeqScanState` begins with a `ScanState`.
+            PlanStateNode::SeqScan(s) => Some(&s.ss),
+            // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.
             _ => None,

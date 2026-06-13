@@ -16,6 +16,21 @@
 // removed here per docs/types.md rule 3 (lands with first consumer).
 
 seam_core::seam!(
+    /// `EvalPlanQualFetchRowMark(epqstate, rti, slot)` (execMain.c): fetch the
+    /// replacement tuple for the non-locking rowmark of relation `rti` (the
+    /// scan node's `scanrelid`) into `slot` (the node's scan slot id),
+    /// returning `false` when the row no longer exists (the C `return false`).
+    /// Reads the active `EPQState` from `estate.es_epq_active`. Owner:
+    /// `backend-executor-execMain` (the EvalPlanQual machinery); fallible on
+    /// `ereport(ERROR)`.
+    pub fn eval_plan_qual_fetch_row_mark<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        rti: types_core::primitive::Index,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `fetch_cursor_param_value`'s live-state core (execCurrent.c): read
     /// `econtext->ecxt_param_list_info->params[param_id - 1]` (calling the
     /// dynamic `paramFetch` hook when present), and for an OID-valid, non-NULL

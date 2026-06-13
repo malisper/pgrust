@@ -67,6 +67,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `table_scan_getnextslot(scan, direction, slot)` (access/tableam.h,
+    /// static inline) — the direction-carrying form `nodeSeqscan.c`'s `SeqNext`
+    /// uses (`estate->es_direction`). Fetches the next tuple into `slot`,
+    /// returning `true` if a tuple was produced (`false` at end of scan). `Err`
+    /// carries the AM's `ereport(ERROR)`.
+    pub fn table_scan_getnextslot_direction(
+        scan: ScanToken,
+        direction: types_scan::sdir::ScanDirection,
+        slot: &mut TupleTableSlot,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `table_rescan(scan, NULL)` (access/tableam.h, static inline) — restart
+    /// the scan `scan` with no new scan keys (`nodeSeqscan.c`'s
+    /// `ExecReScanSeqScan`). `Err` carries the AM's `ereport(ERROR)`.
+    pub fn table_rescan(scan: ScanToken) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `table_parallelscan_reinitialize(rel, pscan)` (tableam.c): reset the
+    /// shared parallel-scan state in `pscan` before a re-scan
+    /// (`nodeSeqscan.c`'s `ExecSeqScanReInitializeDSM`). `Err` carries the AM's
+    /// `ereport(ERROR)`.
+    pub fn table_parallelscan_reinitialize(
+        rel: &Relation<'_>,
+        pscan: &mut types_tableam::relscan::ParallelTableScanDescData,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `table_endscan(scan)` (copyto.c:1099): close the scan and release its
     /// resources. `Err` carries the AM's `ereport(ERROR)`.
     pub fn table_endscan(scan: ScanToken) -> PgResult<()>

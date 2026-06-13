@@ -33,6 +33,7 @@ pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod nodenestloop;
 pub mod nodes;
+pub mod nodeseqscan;
 pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
@@ -82,6 +83,7 @@ pub use nodesort::{
     TUPLESORT_RANDOMACCESS,
 };
 pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
+pub use nodeseqscan::{SeqScan, SeqScanState};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
