@@ -22,8 +22,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
-    ParallelWorkerMainFn, ParsedErrorNotice, PgProcHandle, ShmMqHandle, ShmMqHandleHandle,
-    ShmMqResult,
+    ParallelWorkerMainFn, ParsedErrorNotice, PgProcHandle, ShmMqHandleHandle,
 };
 
 // --- memory contexts (utils/mmgr) ------------------------------------------
@@ -71,17 +70,14 @@ seam_core::seam!(pub fn dsm_detach_handle(seg: DsmSegmentHandle) -> PgResult<()>
 seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum) -> PgResult<DsmSegmentHandle>);
 
 // --- shm_mq (storage/ipc/shm_mq.c) -----------------------------------------
-seam_core::seam!(pub fn shm_mq_create(address: usize, size: Size) -> PgResult<ShmMqHandle>);
-seam_core::seam!(pub fn shm_mq_set_receiver_to_myproc(mq: ShmMqHandle) -> PgResult<()>);
-seam_core::seam!(pub fn shm_mq_set_sender_to_myproc(mq: ShmMqHandle) -> PgResult<()>);
-seam_core::seam!(pub fn shm_mq_get_sender(mq: ShmMqHandle) -> PgResult<PgProcHandle>);
-seam_core::seam!(pub fn shm_mq_attach(mq: ShmMqHandle, seg: DsmSegmentHandle, handle: BgwHandle) -> PgResult<ShmMqHandleHandle>);
-seam_core::seam!(pub fn shm_mq_detach(mqh: ShmMqHandleHandle) -> PgResult<()>);
-seam_core::seam!(pub fn shm_mq_set_handle(mqh: ShmMqHandleHandle, handle: BgwHandle) -> PgResult<()>);
-seam_core::seam!(pub fn shm_mq_get_queue(mqh: ShmMqHandleHandle) -> PgResult<ShmMqHandle>);
-/// `shm_mq_receive(error_mqh, &nbytes, &data, true)` — the message bytes (valid
-/// only when `result == Some(Success)`) and its result code.
-seam_core::seam!(pub fn shm_mq_receive(mqh: ShmMqHandleHandle) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)>);
+// NOTE (family `shm-mq-leader`): the leader (and worker) error-queue `shm_mq_*`
+// seams are retired here — parallel.c now drives the merged `shm-mq` over real
+// chunk addresses through the owner's `backend-storage-ipc-shm-mq-seams` (OPTION
+// (i): the backend-private `shm_mq_handle` is an owned `PgBox<ShmMqHandle>` in
+// the owner's registry, named across the seam by `ShmMqAttachHandle`). The
+// retired `shm_mq_create`/`shm_mq_set_receiver_to_myproc`/`set_sender_to_myproc`/
+// `get_sender`/`attach`/`detach`/`set_handle`/`get_queue`/`receive` seams are
+// gone (`ShmMqHandle`/`ShmMqHandleHandle` carriers retired with them).
 
 // --- background workers (postmaster/bgworker.c) ----------------------------
 seam_core::seam!(pub fn register_dynamic_background_worker(seg: DsmSegmentHandle, worker_index: i32) -> PgResult<BgwHandle>);

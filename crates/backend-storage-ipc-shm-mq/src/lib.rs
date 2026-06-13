@@ -1448,10 +1448,220 @@ fn alloc_buffer(mcx: Mcx<'_>, len: Size) -> PgResult<PgVec<'_, u8>> {
     Ok(buf)
 }
 
-/// Install this crate's implementations into the seam crates it owns.
-/// shm_mq has no inward seam declarations yet (no cyclic consumer), so this
-/// is empty; it exists so `seams-init` covers the crate uniformly.
-pub fn init_seams() {}
+// ===========================================================================
+// Seam layer (OPTION (i)): the backend-private `shm_mq_handle` is the owned
+// `PgBox<ShmMqHandle>` parked in this process-global registry; across the seam
+// it is named by a small id ([`types_execparallel::ShmMqAttachHandle`]). The
+// in-segment `shm_mq` is named by its real base address
+// ([`types_execparallel::ShmMqHandle`], value == base as usize). This is the
+// real-DSM substrate the parallel executor and parallel orchestration consume.
+// ===========================================================================
+mod seam_layer {
+    use core::cell::RefCell;
+    use core::ptr::NonNull;
+
+    use backend_postmaster_bgworker_seams::background_worker_handle_from_token;
+    use backend_storage_ipc_dsm_core::dsm::DsmSegmentId;
+    use backend_utils_mmgr_mcxt_seams::top_memory_context;
+    use mcx::PgBox;
+    use types_error::PgResult;
+    use types_execparallel::{
+        BackgroundWorkerHandle as ExecBgwHandle, DsmSegmentHandle as ExecDsmSeg, SerializeCursor,
+        ShmMqAttachHandle, ShmMqHandle as ExecShmMq, Size,
+    };
+    use types_parallel::ShmMqResult;
+
+    use crate::{
+        shm_mq_attach as real_attach, shm_mq_create as real_create, shm_mq_detach as real_detach,
+        shm_mq_get_queue as real_get_queue, shm_mq_get_sender as real_get_sender,
+        shm_mq_receive as real_receive, shm_mq_set_handle as real_set_handle,
+        shm_mq_set_receiver, shm_mq_set_sender, ShmMq, ShmMqHandle, SHM_MQ_DETACHED,
+        SHM_MQ_SUCCESS, SHM_MQ_WOULD_BLOCK,
+    };
+
+    /// `MyProcNumber` — the identity passed to `shm_mq_set_receiver/sender(mq,
+    /// MyProc)`.
+    fn my_proc() -> types_core::ProcNumber {
+        backend_utils_init_small_seams::my_proc_number::call()
+    }
+
+    /// One live attached handle: the owned box (OPTION (i): its `Drop`/`detach`
+    /// owns the free). `'static` because it is parked here for the queue's life
+    /// and allocated in `TopMemoryContext`.
+    struct Registry {
+        /// `Some` for a live slot; `None` for a freed one (reusable).
+        slots: alloc::vec::Vec<Option<PgBox<'static, ShmMqHandle<'static>>>>,
+    }
+
+    impl Registry {
+        const fn new() -> Self {
+            Self {
+                slots: alloc::vec::Vec::new(),
+            }
+        }
+
+        /// Park an owned handle, returning its 1-based id (0 is the NULL
+        /// sentinel of `ShmMqAttachHandle`).
+        fn insert(&mut self, h: PgBox<'static, ShmMqHandle<'static>>) -> ShmMqAttachHandle {
+            if let Some(i) = self.slots.iter().position(Option::is_none) {
+                self.slots[i] = Some(h);
+                ShmMqAttachHandle(i + 1)
+            } else {
+                self.slots.push(Some(h));
+                ShmMqAttachHandle(self.slots.len())
+            }
+        }
+
+        fn idx(h: ShmMqAttachHandle) -> usize {
+            debug_assert!(h.0 >= 1, "ShmMqAttachHandle 0 is the NULL sentinel");
+            h.0 - 1
+        }
+
+        fn get_mut(&mut self, h: ShmMqAttachHandle) -> &mut PgBox<'static, ShmMqHandle<'static>> {
+            self.slots[Self::idx(h)]
+                .as_mut()
+                .expect("live shm_mq_handle id")
+        }
+
+        fn get(&self, h: ShmMqAttachHandle) -> &PgBox<'static, ShmMqHandle<'static>> {
+            self.slots[Self::idx(h)]
+                .as_ref()
+                .expect("live shm_mq_handle id")
+        }
+
+        /// Take the owned box back out (freeing the slot); the caller consumes
+        /// it via `shm_mq_detach`.
+        fn take(&mut self, h: ShmMqAttachHandle) -> PgBox<'static, ShmMqHandle<'static>> {
+            self.slots[Self::idx(h)]
+                .take()
+                .expect("live shm_mq_handle id")
+        }
+    }
+
+    thread_local! {
+        static REGISTRY: RefCell<Registry> = const { RefCell::new(Registry::new()) };
+    }
+
+    fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+        REGISTRY.with(|r| f(&mut r.borrow_mut()))
+    }
+
+    /// `ShmMqHandle` token (real base address as usize) -> live `ShmMq`.
+    fn mq_from_token(mq: ExecShmMq) -> ShmMq {
+        // SAFETY: the token value is the real in-segment base minted by
+        // `shm_mq_create_at` (a real `shm_toc` chunk address); it addresses a
+        // live `InSegmentShmMq`.
+        unsafe { ShmMq::from_base(NonNull::new(mq.0 as *mut u8).expect("shm_mq base non-null")) }
+    }
+
+    fn token_from_mq(mq: ShmMq) -> ExecShmMq {
+        ExecShmMq(mq.base().as_ptr() as usize)
+    }
+
+    /// The leader/worker `DsmSegmentHandle` carries the real `DsmSegmentId`
+    /// (opacity-inherited: handle value == id), `0` being the NULL sentinel.
+    fn seg_id_of(seg: ExecDsmSeg) -> DsmSegmentId {
+        DsmSegmentId::from_u64(seg.0 as u64)
+    }
+
+    /// `shm_mq_create_at` (`shm_mq_create(chunk + i*size, size)`).
+    fn shm_mq_create_at(chunk: SerializeCursor, index: i32, size: Size) -> ExecShmMq {
+        let addr = chunk.0 + (index as Size) * size;
+        let base = NonNull::new(addr as *mut u8).expect("shm_mq chunk address non-null");
+        // SAFETY: `addr` is a real, MAXALIGN'd, `size`-byte in-segment chunk the
+        // caller carved out of the queue DSM region.
+        let mq = unsafe { real_create(base, size) };
+        token_from_mq(mq)
+    }
+
+    fn shm_mq_set_receiver_to_myproc(mq: ExecShmMq) {
+        shm_mq_set_receiver(mq_from_token(mq), my_proc());
+    }
+
+    fn shm_mq_set_sender_to_myproc(mq: ExecShmMq) {
+        shm_mq_set_sender(mq_from_token(mq), my_proc());
+    }
+
+    fn shm_mq_get_sender(mq: ExecShmMq) -> Option<types_core::ProcNumber> {
+        real_get_sender(mq_from_token(mq))
+    }
+
+    fn shm_mq_attach(mq: ExecShmMq, seg: Option<ExecDsmSeg>) -> PgResult<ShmMqAttachHandle> {
+        // C `shm_mq_attach` allocates the handle in `CurrentMemoryContext`; the
+        // error/tuple queues live as long as the parallel context, so we use
+        // `TopMemoryContext` (also the `'static` context the dsm unit records
+        // its `on_dsm_detach` callback in).
+        let top = top_memory_context::call();
+        // `0` is the NULL sentinel for the execParallel `DsmSegmentHandle`.
+        let seg = seg.filter(|s| s.0 != 0).map(|s| (seg_id_of(s), top));
+        let my_latch = backend_storage_ipc_latch_seams::my_latch::call();
+        let mqh = real_attach(mq_from_token(mq), top, seg, None, my_latch)?;
+        Ok(with_registry(|r| r.insert(mqh)))
+    }
+
+    fn shm_mq_set_handle(mqh: ShmMqAttachHandle, handle: ExecBgwHandle) {
+        let real = background_worker_handle_from_token::call(handle);
+        with_registry(|r| real_set_handle(r.get_mut(mqh), real));
+    }
+
+    fn shm_mq_get_queue(mqh: ShmMqAttachHandle) -> ExecShmMq {
+        with_registry(|r| token_from_mq(real_get_queue(r.get(mqh))))
+    }
+
+    fn shm_mq_receive(
+        mqh: ShmMqAttachHandle,
+    ) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)> {
+        // C: `shm_mq_receive(error_mqh, &nbytes, &data, true)` — non-blocking.
+        // The payload borrows the queue/reassembly buffer; copy it out (within
+        // the registry borrow) for the caller, which re-parses it in its own
+        // context. Empty on any non-success result.
+        with_registry(|r| {
+            // SAFETY: the registry holds a live, attached handle for this id.
+            let (res, data) = unsafe { real_receive(r.get_mut(mqh), true) }?;
+            let result = match res {
+                SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
+                SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
+                SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
+            };
+            let owned = if result == Some(ShmMqResult::Success) {
+                data.to_vec()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            Ok((result, owned))
+        })
+    }
+
+    fn shm_mq_detach(mqh: ShmMqAttachHandle) {
+        // Take the owned box out of the registry and consume it: `shm_mq_detach`
+        // notifies the counterparty, cancels the on_dsm_detach callback, and the
+        // box's `Drop` frees the handle + its reassembly buffer (OPTION (i)).
+        let owned = with_registry(|r| r.take(mqh));
+        real_detach(owned);
+    }
+
+    pub fn install() {
+        use backend_storage_ipc_shm_mq_seams as seams;
+        seams::shm_mq_create_at::set(shm_mq_create_at);
+        seams::shm_mq_set_receiver_to_myproc::set(shm_mq_set_receiver_to_myproc);
+        seams::shm_mq_set_sender_to_myproc::set(shm_mq_set_sender_to_myproc);
+        seams::shm_mq_get_sender::set(shm_mq_get_sender);
+        seams::shm_mq_attach::set(shm_mq_attach);
+        seams::shm_mq_set_handle::set(shm_mq_set_handle);
+        seams::shm_mq_get_queue::set(shm_mq_get_queue);
+        seams::shm_mq_receive::set(shm_mq_receive);
+        seams::shm_mq_detach::set(shm_mq_detach);
+    }
+}
+
+extern crate alloc;
+
+/// Install this crate's implementations into the `shm-mq` seam crate: the
+/// OPTION (i) `PgBox<ShmMqHandle>`-registry-backed create/attach/detach/… seams
+/// the parallel executor and parallel orchestration consume.
+pub fn init_seams() {
+    seam_layer::install();
+}
 
 #[cfg(test)]
 mod tests;

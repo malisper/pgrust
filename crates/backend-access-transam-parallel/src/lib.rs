@@ -61,12 +61,14 @@ use types_execparallel::{
     BackgroundWorkerHandle, DsmSegmentHandle as ExecDsmSeg, FixedParallelExecutorState,
     FixedStateHandle, InstrumentationHandle, JitInstrumentationHandle, ParallelContextHandle,
     ParallelWorkerContextHandle, SerializeCursor, SharedExecutorInstrumentation,
-    ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
+    ShmMqAttachHandle, ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
 };
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
     ShmMqResult,
 };
+
+use backend_storage_ipc_shm_mq_seams as shmmq;
 use types_storage::storage::shm_toc_estimator;
 
 use backend_access_transam_parallel_rt_seams as rt;
@@ -145,20 +147,31 @@ static INTERNAL_PARALLEL_WORKERS: [&str; 5] = [
 // owns).
 // ===========================================================================
 
+/// `shm_mq_handle *error_mqh` — the OPTION (i) registry id the `shm-mq` owner
+/// hands back from `shm_mq_attach`, or [`ERROR_MQH_NULL`] for the C NULL
+/// `shm_mq_handle *`. (execParallel's `ShmMqAttachHandle` has no NULL sentinel
+/// of its own; `0` is the registry's NULL because ids are 1-based.)
+const ERROR_MQH_NULL: ShmMqAttachHandle = ShmMqAttachHandle(0);
+
+/// `error_mqh == NULL`.
+fn error_mqh_is_null(h: ShmMqAttachHandle) -> bool {
+    h.0 == 0
+}
+
 /// Per-worker leader-side state (`ParallelWorkerInfo`, access/parallel.h:24-28).
 #[derive(Clone, Copy, Debug)]
 struct ParallelWorkerInfo {
     /// `BackgroundWorkerHandle *bgwhandle`.
     bgwhandle: BgwHandle,
     /// `shm_mq_handle *error_mqh`.
-    error_mqh: ShmMqHandleHandle,
+    error_mqh: ShmMqAttachHandle,
 }
 
 impl ParallelWorkerInfo {
     const fn new() -> Self {
         Self {
             bgwhandle: BgwHandle::NULL,
-            error_mqh: ShmMqHandleHandle::NULL,
+            error_mqh: ERROR_MQH_NULL,
         }
     }
 }
@@ -1100,13 +1113,14 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         // Establish error queues in dynamic shared memory.
         let error_queue_space =
             shm_toc_allocate(toc, mul_size(PARALLEL_ERROR_QUEUE_SIZE, nworkers as Size)?);
-        let eq_base = error_queue_space.0;
         let mut i = 0;
         while i < nworkers {
-            let start = eq_base + (i as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-            let mq = rt::shm_mq_create::call(start, PARALLEL_ERROR_QUEUE_SIZE)?;
-            rt::shm_mq_set_receiver_to_myproc::call(mq)?;
-            workers[i as usize].error_mqh = rt::shm_mq_attach::call(mq, seg_to_parallel(seg), BgwHandle::NULL)?;
+            // C: mq = shm_mq_create(error_queue_space + i*SIZE, SIZE);
+            //    shm_mq_set_receiver(mq, MyProc);
+            //    pcxt->worker[i].error_mqh = shm_mq_attach(mq, pcxt->seg, NULL);
+            let mq = shmmq::shm_mq_create_at::call(error_queue_space, i, PARALLEL_ERROR_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            workers[i as usize].error_mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
             i += 1;
         }
         with_globals(|g| g.get_mut(pcxt).worker = workers);
@@ -1137,6 +1151,26 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
 /// handle the rt seams use.
 fn seg_to_parallel(seg: DsmSegmentHandle) -> DsmSegmentHandle {
     seg
+}
+
+/// The `pcxt.seg` handle as the execParallel `DsmSegmentHandle` the `shm-mq`
+/// seam consumes (both carry the real `DsmSegmentId`; `NULL`/`0` -> `None`, so
+/// the error queue gets no `on_dsm_detach` auto-detach in the private-memory
+/// no-DSM fallback — exactly C's `shm_mq_attach(mq, NULL, NULL)`).
+fn seg_to_exec(seg: DsmSegmentHandle) -> Option<ExecDsmSeg> {
+    if seg.is_null() {
+        None
+    } else {
+        Some(ExecDsmSeg(seg.0))
+    }
+}
+
+/// The `bgwhandle` as the execParallel `BackgroundWorkerHandle` the `shm-mq`
+/// seam consumes (same id value; the `shm-mq` owner resolves it to the real
+/// `BackgroundWorkerHandle` via the bgworker owner's
+/// `background_worker_handle_from_token`).
+fn bgw_to_exec(h: BgwHandle) -> BackgroundWorkerHandle {
+    BackgroundWorkerHandle(h.0)
 }
 
 // ===========================================================================
@@ -1171,15 +1205,16 @@ pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
     if pcxt_nworkers(pcxt) > 0 {
         let error_queue_space =
             shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false).ok_or_else(missing_error_queue_key)?;
-        let eq_base = error_queue_space.0;
         let nworkers = pcxt_nworkers(pcxt);
         let seg = with_globals(|g| g.get(pcxt).seg);
         let mut i = 0;
         while i < nworkers {
-            let start = eq_base + (i as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-            let mq = rt::shm_mq_create::call(start, PARALLEL_ERROR_QUEUE_SIZE)?;
-            rt::shm_mq_set_receiver_to_myproc::call(mq)?;
-            let mqh = rt::shm_mq_attach::call(mq, seg_to_parallel(seg), BgwHandle::NULL)?;
+            // C: mq = shm_mq_create(error_queue_space + i*SIZE, SIZE);
+            //    shm_mq_set_receiver(mq, MyProc);
+            //    pcxt->worker[i].error_mqh = shm_mq_attach(mq, pcxt->seg, NULL);
+            let mq = shmmq::shm_mq_create_at::call(error_queue_space, i, PARALLEL_ERROR_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            let mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
             with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = mqh);
             i += 1;
         }
@@ -1247,7 +1282,8 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
                 c.worker[i as usize].bgwhandle = bgwhandle;
                 c.worker[i as usize].error_mqh
             });
-            rt::shm_mq_set_handle::call(error_mqh, bgwhandle)?;
+            // C: shm_mq_set_handle(pcxt->worker[i].error_mqh, bgwhandle);
+            shmmq::shm_mq_set_handle::call(error_mqh, bgw_to_exec(bgwhandle));
             with_globals(|g| g.get_mut(pcxt).nworkers_launched += 1);
         } else {
             // We've hit the max_worker_processes limit; future registrations
@@ -1259,8 +1295,8 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
                 c.worker[i as usize].bgwhandle = BgwHandle::NULL;
                 c.worker[i as usize].error_mqh
             });
-            rt::shm_mq_detach::call(error_mqh)?;
-            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+            shmmq::shm_mq_detach::call(error_mqh);
+            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
         }
         i += 1;
     }
@@ -1304,7 +1340,7 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
 
             // If error_mqh is NULL, the worker has already exited cleanly.
             let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-            if error_mqh.is_null() {
+            if error_mqh_is_null(error_mqh) {
                 with_globals(|g| {
                     let c = g.get_mut(pcxt);
                     c.known_attached_workers[i as usize] = true;
@@ -1318,8 +1354,8 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
             let (status, _pid) = rt::get_background_worker_pid::call(bgwhandle)?;
             if status == BgwHandleStatus::Started {
                 // Has the worker attached to the error queue?
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if !rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_some() {
                     with_globals(|g| {
                         let c = g.get_mut(pcxt);
                         c.known_attached_workers[i as usize] = true;
@@ -1328,8 +1364,8 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
                 }
             } else if status == BgwHandleStatus::Stopped {
                 // If the worker stopped without attaching, throw an error.
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_none() {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                         .errmsg("parallel worker failed to initialize")
@@ -1384,7 +1420,7 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
             let (error_mqh_null, known) = with_globals(|g| {
                 let c = g.get(pcxt);
                 (
-                    c.worker[i as usize].error_mqh.is_null(),
+                    error_mqh_is_null(c.worker[i as usize].error_mqh),
                     c.known_attached_workers[i as usize],
                 )
             });
@@ -1412,7 +1448,7 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
                     let c = g.get(pcxt);
                     (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
                 });
-                if error_mqh.is_null()
+                if error_mqh_is_null(error_mqh)
                     || bgwhandle.is_null()
                     || rt::get_background_worker_pid::call(bgwhandle)?.0 != BgwHandleStatus::Stopped
                 {
@@ -1422,8 +1458,8 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
 
                 // Check whether the worker stopped without ever attaching to the
                 // error queue. If so, throw an error.
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_none() {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                         .errmsg("parallel worker failed to initialize")
@@ -1511,10 +1547,10 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
                 let c = g.get(pcxt);
                 (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
             });
-            if !error_mqh.is_null() {
+            if !error_mqh_is_null(error_mqh) {
                 rt::terminate_background_worker::call(bgwhandle)?;
-                rt::shm_mq_detach::call(error_mqh)?;
-                with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+                shmmq::shm_mq_detach::call(error_mqh);
+                with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
             }
             i += 1;
         }
@@ -1607,10 +1643,10 @@ pub fn process_parallel_messages() -> PgResult<()> {
             // without blocking.
             loop {
                 let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-                if error_mqh.is_null() {
+                if error_mqh_is_null(error_mqh) {
                     break;
                 }
-                let (res, data) = rt::shm_mq_receive::call(error_mqh)?;
+                let (res, data) = shmmq::shm_mq_receive::call(error_mqh)?;
                 match res {
                     Some(ShmMqResult::WouldBlock) => break,
                     Some(ShmMqResult::Success) => {
@@ -1692,8 +1728,8 @@ fn process_parallel_message(pcxt: ParallelContextHandle, i: i32, msg: &[u8]) -> 
 
         m if m == PqMsg_Terminate => {
             let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-            rt::shm_mq_detach::call(error_mqh)?;
-            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+            shmmq::shm_mq_detach::call(error_mqh);
+            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
         }
 
         _ => {
@@ -1836,13 +1872,20 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     rt::register_parallel_worker_shutdown::call(seg)?;
 
     // Find and attach to the error queue provided for us.
-    let error_queue_space = worker_lookup(toc, PARALLEL_KEY_ERROR_QUEUE)?;
-    let mq_addr =
-        error_queue_space + (with_globals(|g| g.parallel_worker_number) as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-    let mq = rt::shm_mq_create::call(mq_addr, PARALLEL_ERROR_QUEUE_SIZE)?;
-    rt::shm_mq_set_sender_to_myproc::call(mq)?;
-    let mqh = rt::shm_mq_attach::call(mq, seg, BgwHandle::NULL)?;
-    rt::pq_redirect_to_shm_mq::call(seg, mqh)?;
+    // C: error_queue_space = shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false);
+    //    mq = shm_mq_create(error_queue_space + ParallelWorkerNumber*SIZE, SIZE);
+    //    shm_mq_set_sender(mq, MyProc);
+    //    mqh = shm_mq_attach(mq, seg, NULL);
+    //    pq_redirect_to_shm_mq(seg, mqh);
+    // The error_queue_space chunk is a real in-segment address; the worker's mq
+    // is the real shm_mq over `chunk + ParallelWorkerNumber*SIZE`. `seg` carries
+    // the real `DsmSegmentId`, so the queue auto-detaches with the segment.
+    let error_queue_space = SerializeCursor(worker_lookup(toc, PARALLEL_KEY_ERROR_QUEUE)?);
+    let worker_number = with_globals(|g| g.parallel_worker_number);
+    let mq = shmmq::shm_mq_create_at::call(error_queue_space, worker_number, PARALLEL_ERROR_QUEUE_SIZE);
+    shmmq::shm_mq_set_sender_to_myproc::call(mq);
+    let mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
+    rt::pq_redirect_to_shm_mq::call(seg, ShmMqHandleHandle(mqh.0))?;
     rt::pq_set_parallel_leader::call(fps.parallel_leader_pid, fps.parallel_leader_proc_number)?;
 
     // Join locking group. If we can't, the leader has gone away, so exit quietly.

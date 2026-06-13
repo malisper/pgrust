@@ -1063,6 +1063,7 @@ dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-shm-mq-seams",
  "backend-storage-ipc-shm-toc",
  "backend-storage-lmgr-lwlock",
  "backend-utils-error",
@@ -4578,6 +4579,7 @@ dependencies = [
  "types-bgworker",
  "types-core",
  "types-error",
+ "types-execparallel",
  "types-startup",
 ]
 
@@ -5915,16 +5917,20 @@ dependencies = [
  "backend-postmaster-bgworker-seams",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-shm-mq-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-mmgr-mcxt-seams",
  "mcx",
  "types-bgworker",
  "types-core",
  "types-datum",
  "types-error",
+ "types-execparallel",
+ "types-parallel",
  "types-pgstat",
  "types-storage",
 ]
@@ -5934,8 +5940,10 @@ name = "backend-storage-ipc-shm-mq-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-execparallel",
+ "types-parallel",
 ]
 
 [[package]]
@@ -8514,6 +8522,7 @@ dependencies = [
 name = "backend-utils-mmgr-mcxt-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-logical",

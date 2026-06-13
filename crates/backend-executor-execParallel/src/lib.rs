@@ -426,7 +426,7 @@ fn ExecParallelSetupTupleQueues<'mcx>(
     for i in 0..nworkers {
         let mq = shmmq::shm_mq_create_at::call(tqueuespace, i, PARALLEL_TUPLE_QUEUE_SIZE);
         shmmq::shm_mq_set_receiver_to_myproc::call(mq);
-        responseq.push(shmmq::shm_mq_attach::call(mq, seg));
+        responseq.push(shmmq::shm_mq_attach::call(mq, seg)?);
     }
 
     // Add array of queues to shm_toc, so others can find it.
@@ -1032,7 +1032,7 @@ fn ExecParallelGetReceiver(
         PARALLEL_TUPLE_QUEUE_SIZE,
     );
     shmmq::shm_mq_set_sender_to_myproc::call(mq);
-    Ok(tqueue::create_tuple_queue_dest_receiver::call(shmmq::shm_mq_attach::call(mq, Some(seg))))
+    Ok(tqueue::create_tuple_queue_dest_receiver::call(shmmq::shm_mq_attach::call(mq, Some(seg))?))
 }
 
 // ===========================================================================

@@ -19,6 +19,7 @@ mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
+backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 
