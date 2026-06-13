@@ -25,6 +25,7 @@
 //! the scaffold stage panics through them so the control flow in
 //! `proc_lifecycle` is the real one, never a stub of proc.c's own logic.
 
+use types_core::init::BackendType;
 use types_core::{LocalTransactionId, ProcNumber, TransactionId};
 use types_datum::Datum;
 use types_error::PgResult;
@@ -123,14 +124,16 @@ pub(crate) fn freelist_regular_iter() -> impl Iterator<Item = ProcNumber> {
     crate::proc_shmem::freelist_regular_snapshot().into_iter()
 }
 
-/// `SpinLockAcquire(ProcStructLock)`.
+/// `SpinLockAcquire(ProcStructLock)`. The `ProcStructLock` word is this unit's
+/// own state (held in `proc_shmem`); the contended-acquire backoff loop is the
+/// merged `s_lock.c` primitive.
 pub(crate) fn spin_lock_acquire_proc_struct_lock() {
-    todo!("s_lock: SpinLockAcquire(ProcStructLock)")
+    crate::proc_shmem::spin_lock_acquire_proc_struct_lock();
 }
 
 /// `SpinLockRelease(ProcStructLock)`.
 pub(crate) fn spin_lock_release_proc_struct_lock() {
-    todo!("s_lock: SpinLockRelease(ProcStructLock)")
+    crate::proc_shmem::spin_lock_release_proc_struct_lock();
 }
 
 /// `ProcGlobal->spins_per_delay`.
@@ -217,155 +220,199 @@ pub(crate) fn lock_awaited_is_set() -> bool {
 }
 
 // ---- backend-class predicates (miscadmin.h) ----
+//
+// These are pure macros over `MyBackendType` (globals.c), so each is a direct
+// read of the `my_backend_type()` global through the init-small owner's seam
+// and a compare, exactly as the C macro expands.
 
-/// `AmAutoVacuumWorkerProcess()`.
+/// `AmAutoVacuumWorkerProcess()` — `MyBackendType == B_AUTOVAC_WORKER`.
 pub(crate) fn am_autovacuum_worker_process() -> bool {
-    todo!("miscadmin: AmAutoVacuumWorkerProcess()")
+    backend_utils_init_small_seams::my_backend_type::call() == BackendType::AutovacWorker
 }
 
-/// `AmSpecialWorkerProcess()`.
+/// `AmSpecialWorkerProcess()` — `AmAutoVacuumLauncherProcess() ||
+/// AmLogicalSlotSyncWorkerProcess()`.
 pub(crate) fn am_special_worker_process() -> bool {
-    todo!("miscadmin: AmSpecialWorkerProcess()")
+    let bt = backend_utils_init_small_seams::my_backend_type::call();
+    bt == BackendType::AutovacLauncher || bt == BackendType::SlotsyncWorker
 }
 
-/// `AmBackgroundWorkerProcess()`.
+/// `AmBackgroundWorkerProcess()` — `MyBackendType == B_BG_WORKER`.
 pub(crate) fn am_background_worker_process() -> bool {
-    todo!("miscadmin: AmBackgroundWorkerProcess()")
+    backend_utils_init_small_seams::my_backend_type::call() == BackendType::BgWorker
 }
 
-/// `AmWalSenderProcess()`.
+/// `AmWalSenderProcess()` — `MyBackendType == B_WAL_SENDER`.
 pub(crate) fn am_wal_sender_process() -> bool {
-    todo!("miscadmin: AmWalSenderProcess()")
+    backend_utils_init_small_seams::my_backend_type::call() == BackendType::WalSender
 }
 
-/// `AmRegularBackendProcess()`.
+/// `AmRegularBackendProcess()` — `MyBackendType == B_BACKEND`.
 pub(crate) fn am_regular_backend_process() -> bool {
-    todo!("miscadmin: AmRegularBackendProcess()")
+    backend_utils_init_small_seams::my_backend_type::call() == BackendType::Backend
 }
 
-/// `IsUnderPostmaster`.
+/// `IsUnderPostmaster` (globals.c).
 pub(crate) fn is_under_postmaster() -> bool {
-    todo!("miscadmin: IsUnderPostmaster")
+    backend_utils_init_small_seams::is_under_postmaster::call()
 }
 
-/// `max_wal_senders` GUC.
+/// `AmStartupProcess()` — `MyBackendType == B_STARTUP`. Only used in a
+/// `MarkAsPreparingGuts` assert.
+pub(crate) fn am_startup_process() -> bool {
+    backend_utils_init_small_seams::my_backend_type::call() == BackendType::Startup
+}
+
+/// `max_wal_senders` GUC (walsender.c).
 pub(crate) fn max_wal_senders() -> i32 {
-    todo!("walsender: max_wal_senders GUC")
+    backend_replication_walsender_seams::max_wal_senders::call()
 }
 
-/// `AutovacuumLauncherPid` (postmaster global).
+/// `AutovacuumLauncherPid` (autovacuum.c postmaster-side global).
 pub(crate) fn autovacuum_launcher_pid() -> i32 {
-    todo!("postmaster: AutovacuumLauncherPid")
+    backend_postmaster_autovacuum_ext_seams::get_launcher_pid::call()
 }
 
 // ---- libc ----
 
 /// `getpid()`.
 pub(crate) fn getpid() -> i32 {
-    todo!("libc: getpid()")
+    std::process::id() as i32
 }
 
 /// `kill(pid, SIGUSR2)`.
-pub(crate) fn kill_sigusr2(_pid: i32) {
-    todo!("libc: kill(pid, SIGUSR2)")
+pub(crate) fn kill_sigusr2(pid: i32) {
+    // C `kill(AutovacuumLauncherPid, SIGUSR2)`: ProcKill's nudge of the
+    // autovacuum launcher when an AV worker that was blocking us exits. A
+    // failure here is non-fatal in C (the return value is ignored), so the
+    // errno is dropped, matching the C call site.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGUSR2);
+    }
 }
 
 // ---- spin-delay estimate (s_lock.c) ----
 
-/// `set_spins_per_delay(value)`.
-pub(crate) fn set_spins_per_delay(_value: i32) {
-    todo!("s_lock: set_spins_per_delay(value)")
+/// `set_spins_per_delay(value)` (s_lock.c).
+pub(crate) fn set_spins_per_delay(value: i32) {
+    backend_storage_lmgr_s_lock::set_spins_per_delay(value);
 }
 
-/// `update_spins_per_delay(value)`.
-pub(crate) fn update_spins_per_delay(_value: i32) -> i32 {
-    todo!("s_lock: update_spins_per_delay(value)")
+/// `update_spins_per_delay(value)` (s_lock.c).
+pub(crate) fn update_spins_per_delay(value: i32) -> i32 {
+    backend_storage_lmgr_s_lock::update_spins_per_delay(value)
 }
 
 // ---- pmsignal ----
 
-/// `RegisterPostmasterChildActive()`.
+/// `RegisterPostmasterChildActive()` (pmsignal.c).
 pub(crate) fn register_postmaster_child_active() {
-    todo!("pmsignal: RegisterPostmasterChildActive()")
+    backend_storage_ipc_pmsignal_seams::register_postmaster_child_active::call()
+        .expect("RegisterPostmasterChildActive");
 }
 
 // ---- ipc ----
 
 /// `on_shmem_exit(callback, arg)` — register a backend-exit callback.
-pub(crate) fn on_shmem_exit(_callback: fn(i32, Datum), _arg: Datum) {
-    todo!("ipc: on_shmem_exit(callback, arg)")
+pub(crate) fn on_shmem_exit(callback: fn(i32, Datum) -> PgResult<()>, arg: Datum) {
+    // C `on_shmem_exit` ereport(FATAL)s only on the static-array overflow past
+    // `MAX_ON_EXITS`; surface that `Err` as a panic rather than swallow.
+    backend_storage_ipc_seams::on_shmem_exit::call(callback, arg)
+        .expect("on_shmem_exit: callback array full");
 }
 
 // ---- latch ----
+//
+// `OwnLatch`/`DisownLatch` (latch.c) and `SwitchToSharedLatch`/
+// `SwitchBackToLocalLatch` (miscinit.c) operate on the latch *embedded in this
+// backend's PGPROC* (`&MyProc->procLatch`). The ported latch unit reaches
+// latches through a handle registry that does not yet know the PGPROC-embedded
+// `procLatch`; registering it (so `OwnLatch` can resolve the handle and
+// `SwitchToSharedLatch` can repoint `MyLatch` at it) is the latch <-> proc
+// integration step. Until that bridge lands these abort loudly rather than call
+// the registry with an unregistered handle.
 
 /// `OwnLatch(&GetPGProcByNumber(procno)->procLatch)`.
 pub(crate) fn own_latch(_procno: ProcNumber) {
-    todo!("latch: OwnLatch(&proc->procLatch)")
+    panic!("OwnLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
 }
 
 /// `DisownLatch(&GetPGProcByNumber(procno)->procLatch)`.
 pub(crate) fn disown_latch(_procno: ProcNumber) {
-    todo!("latch: DisownLatch(&proc->procLatch)")
+    panic!("DisownLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
 }
 
-/// `SwitchToSharedLatch()`.
+/// `SwitchToSharedLatch()` (miscinit.c).
 pub(crate) fn switch_to_shared_latch() {
-    todo!("latch: SwitchToSharedLatch()")
+    panic!("SwitchToSharedLatch(): latch <-> proc PGPROC-latch bridge not yet wired")
 }
 
-/// `SwitchBackToLocalLatch()`.
+/// `SwitchBackToLocalLatch()` (miscinit.c).
 pub(crate) fn switch_back_to_local_latch() {
-    todo!("latch: SwitchBackToLocalLatch()")
+    panic!("SwitchBackToLocalLatch(): latch <-> proc PGPROC-latch bridge not yet wired")
 }
 
 // ---- pgstat wait events ----
 
 /// `pgstat_set_wait_event_storage(&GetPGProcByNumber(procno)->wait_event_info)`.
-pub(crate) fn pgstat_set_wait_event_storage(_procno: ProcNumber) {
-    todo!("pgstat: pgstat_set_wait_event_storage(&proc->wait_event_info)")
+pub(crate) fn pgstat_set_wait_event_storage(procno: ProcNumber) {
+    backend_utils_activity_pgstat_seams::pgstat_set_wait_event_storage_for_proc::call(procno);
 }
 
 /// `pgstat_reset_wait_event_storage()`.
 pub(crate) fn pgstat_reset_wait_event_storage() {
-    todo!("pgstat: pgstat_reset_wait_event_storage()")
+    backend_utils_activity_pgstat_seams::pgstat_reset_wait_event_storage::call();
 }
 
 // ---- semaphore ----
 
 /// `PGSemaphoreReset(GetPGProcByNumber(procno)->sem)`.
-pub(crate) fn pg_semaphore_reset(_procno: ProcNumber) {
-    todo!("pg_sema: PGSemaphoreReset(proc->sem)")
+pub(crate) fn pg_semaphore_reset(procno: ProcNumber) {
+    backend_port_pg_sema_seams::pg_semaphore_reset::call(procno);
 }
 
 // ---- lwlock ----
 
 /// `InitLWLockAccess()`.
 pub(crate) fn init_lwlock_access() {
-    todo!("lwlock: InitLWLockAccess()")
+    backend_storage_lmgr_lwlock_seams::init_lwlock_access::call();
 }
 
 /// `LWLockReleaseAll()`.
 pub(crate) fn lwlock_release_all() {
-    todo!("lwlock: LWLockReleaseAll()")
+    backend_storage_lmgr_lwlock_seams::lwlock_release_all::call();
 }
 
-/// An LWLock handle returned by [`lock_hash_partition_lock_by_proc`].
-pub(crate) type LWLockHandle = ProcNumber;
+/// An LWLock handle returned by [`lock_hash_partition_lock_by_proc`] — the
+/// `MainLWLockArray` offset of the lock-hash partition lock (lock.c).
+pub(crate) type LWLockHandle = usize;
 
 /// `LockHashPartitionLockByProc(GetPGProcByNumber(procno))` — the lock-manager
-/// partition LWLock guarding `procno`'s lock group (lock.c).
-pub(crate) fn lock_hash_partition_lock_by_proc(_procno: ProcNumber) -> LWLockHandle {
-    todo!("lock: LockHashPartitionLockByProc(leader)")
+/// partition LWLock guarding `procno`'s lock group (lock.c). The offset
+/// computation is lock.h's own arithmetic, reused from `proc_misc`.
+pub(crate) fn lock_hash_partition_lock_by_proc(procno: ProcNumber) -> LWLockHandle {
+    crate::proc_misc::lock_hash_partition_lock_offset_by_proc(procno)
 }
 
 /// `LWLockAcquire(lock, LW_EXCLUSIVE)`.
-pub(crate) fn lwlock_acquire_exclusive(_lock: LWLockHandle) {
-    todo!("lwlock: LWLockAcquire(lock, LW_EXCLUSIVE)")
+pub(crate) fn lwlock_acquire_exclusive(lock: LWLockHandle) {
+    // C `LWLockAcquire` returns whether the lock had to wait; proc.c's caller
+    // ignores it. The guard is dropped immediately because the matching
+    // `lwlock_release` here issues an explicit release (mirroring the C
+    // `LWLockRelease(lock)` rather than RAII), so `core::mem::forget` keeps the
+    // owner-side acquisition live until that release.
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+        lock,
+        types_storage::LWLockMode::LW_EXCLUSIVE,
+    )
+    .expect("LWLockAcquire(lock_group partition, LW_EXCLUSIVE)");
+    core::mem::forget(guard);
 }
 
 /// `LWLockRelease(lock)`.
-pub(crate) fn lwlock_release(_lock: LWLockHandle) {
-    todo!("lwlock: LWLockRelease(lock)")
+pub(crate) fn lwlock_release(lock: LWLockHandle) {
+    backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(lock)
+        .expect("LWLockRelease(lock_group partition)");
 }
 
 // ---- deadlock checker ----
@@ -381,83 +428,119 @@ pub(crate) fn lwlock_release(_lock: LWLockHandle) {
 
 /// `InitDeadLockChecking()`.
 pub(crate) fn init_deadlock_checking() {
-    todo!("deadlock: InitDeadLockChecking()")
+    // C is void and aborts on OOM; surface the seam's `Err` as a panic.
+    backend_storage_lmgr_deadlock_seams::init_dead_lock_checking::call()
+        .expect("InitDeadLockChecking");
 }
 
 /// `DeadLockCheck(MyProc)` — run the deadlock check rooted at this backend's
-/// proc, returning the resulting state. Walks lock.c-owned shmem tables.
+/// proc, returning the resulting state. The merged deadlock checker's
+/// `dead_lock_check` operates over a lock.c-built `LockSpace` arena (the lock
+/// and proc records) that proc.c cannot construct until lock.c lands; that
+/// bridge is the lock.c-integration step (see module note above), so this
+/// aborts loudly until then rather than fabricating an arena.
 pub(crate) fn deadlock_check(_procno: ProcNumber) -> DeadLockState {
-    todo!("deadlock: DeadLockCheck(MyProc)")
+    panic!("DeadLockCheck(MyProc) over the lock.c-built LockSpace arena: lock.c not yet ported")
 }
 
 /// `GetBlockingAutoVacuumPgproc()` — the autovacuum worker found by the last
-/// `DeadLockCheck` to be directly blocking us, as a `ProcNumber`.
+/// `DeadLockCheck` to be directly blocking us, as a `ProcNumber` (or
+/// `INVALID_PROC_NUMBER` when none).
 pub(crate) fn get_blocking_autovacuum_pgproc() -> ProcNumber {
-    todo!("deadlock: GetBlockingAutoVacuumPgproc()")
+    match backend_storage_lmgr_deadlock_seams::get_blocking_auto_vacuum_pgproc::call() {
+        Some(proc_id) => proc_id.0 as ProcNumber,
+        None => types_core::INVALID_PROC_NUMBER,
+    }
 }
 
 /// `RememberSimpleDeadLock(proc1, lockmode, lock, proc2)` — record an
 /// already-detected (non-search) two-way deadlock for the eventual report.
+/// Like [`deadlock_check`], the merged `remember_simple_dead_lock` records into
+/// the lock.c-built `LockSpace` arena that proc.c cannot construct yet; this is
+/// the lock.c-integration boundary, so it aborts loudly until lock.c lands.
 pub(crate) fn remember_simple_deadlock(
     _proc1: ProcNumber,
     _lockmode: LOCKMODE,
     _lock: LOCKTAG,
     _proc2: ProcNumber,
 ) {
-    todo!("deadlock: RememberSimpleDeadLock(proc1, lockmode, lock, proc2)")
+    panic!(
+        "RememberSimpleDeadLock over the lock.c-built LockSpace arena: lock.c not yet ported"
+    )
 }
 
 // ---- condition variable ----
 
 /// `ConditionVariableCancelSleep()`.
 pub(crate) fn condition_variable_cancel_sleep() {
-    todo!("condition_variable: ConditionVariableCancelSleep()")
+    // C returns whether a sleep was actually cancelled; proc.c ignores it.
+    backend_storage_lmgr_condition_variable_seams::condition_variable_cancel_sleep::call();
 }
 
 // ---- syncrep ----
 
 /// `SyncRepCleanupAtProcExit()`.
 pub(crate) fn sync_rep_cleanup_at_proc_exit() {
-    todo!("syncrep: SyncRepCleanupAtProcExit()")
+    backend_replication_syncrep_seams::sync_rep_cleanup_at_proc_exit::call();
 }
 
 // ---- procarray ----
 
 /// `ProcArrayAdd(GetPGProcByNumber(procno))`.
-pub(crate) fn proc_array_add(_procno: ProcNumber) {
-    todo!("procarray: ProcArrayAdd(MyProc)")
+pub(crate) fn proc_array_add(procno: ProcNumber) {
+    // C is void and aborts on out-of-shared-memory; surface `Err` as a panic.
+    backend_storage_ipc_procarray_seams::proc_array_add::call(procno).expect("ProcArrayAdd");
 }
 
 /// `ProcArrayRemove(GetPGProcByNumber(procno), latestXid)`.
-pub(crate) fn proc_array_remove(_procno: ProcNumber, _latest_xid: TransactionId) {
-    todo!("procarray: ProcArrayRemove(MyProc, InvalidTransactionId)")
+pub(crate) fn proc_array_remove(procno: ProcNumber, latest_xid: TransactionId) {
+    backend_storage_ipc_procarray_seams::proc_array_remove::call(procno, latest_xid)
+        .expect("ProcArrayRemove");
 }
 
 // ---- elog / ereport ----
+//
+// proc.c's diagnostic ereports are this unit's own logic, emitted through the
+// merged `backend-utils-error` crate (a direct dependency, not a seam).
+
+/// Source file for the `ErrorLocation` of proc.c's ereports.
+const SRC: &str = "src/backend/storage/lmgr/proc.c";
 
 /// `elog(PANIC, msg)`.
-pub(crate) fn elog_panic(_msg: &str) -> ! {
-    todo!("elog(PANIC, ...)")
+pub(crate) fn elog_panic(msg: &str) -> ! {
+    // PANIC is unconditionally fatal; the error path never returns. The merged
+    // elog promotes PANIC to a process abort, realized here as a panic.
+    let _ = backend_utils_error::elog(types_error::PANIC, msg.to_string());
+    panic!("PANIC: {msg}")
 }
 
 /// `elog(FATAL, msg)`.
-pub(crate) fn elog_fatal(_msg: &str) -> ! {
-    todo!("elog(FATAL, ...)")
+pub(crate) fn elog_fatal(msg: &str) -> ! {
+    let _ = backend_utils_error::elog(types_error::FATAL, msg.to_string());
+    panic!("FATAL: {msg}")
 }
 
 /// `elog(ERROR, msg)` — surfaced as the `PgResult` error path.
-pub(crate) fn elog_error(_msg: &str) -> PgResult<()> {
-    todo!("elog(ERROR, ...)")
+pub(crate) fn elog_error(msg: &str) -> PgResult<()> {
+    backend_utils_error::elog(types_error::ERROR, msg.to_string())
 }
 
 /// `ereport(FATAL, errcode(ERRCODE_TOO_MANY_CONNECTIONS), errmsg("sorry, too
 /// many clients already"))`.
 pub(crate) fn ereport_fatal_too_many_clients() -> PgResult<()> {
-    todo!("ereport(FATAL, ERRCODE_TOO_MANY_CONNECTIONS, 'sorry, too many clients already')")
+    backend_utils_error::ereport(types_error::FATAL)
+        .errcode(types_error::ERRCODE_TOO_MANY_CONNECTIONS)
+        .errmsg("sorry, too many clients already")
+        .finish(types_error::ErrorLocation::new(SRC, 457, "InitProcess"))
 }
 
 /// `ereport(FATAL, errcode(ERRCODE_TOO_MANY_CONNECTIONS), errmsg("number of
-/// requested standby connections exceeds max_wal_senders (currently %d)"))`.
-pub(crate) fn ereport_fatal_too_many_wal_senders(_max_wal_senders: i32) -> PgResult<()> {
-    todo!("ereport(FATAL, ERRCODE_TOO_MANY_CONNECTIONS, 'exceeds max_wal_senders')")
+/// requested standby connections exceeds \"max_wal_senders\" (currently %d)"))`.
+pub(crate) fn ereport_fatal_too_many_wal_senders(max_wal_senders: i32) -> PgResult<()> {
+    backend_utils_error::ereport(types_error::FATAL)
+        .errcode(types_error::ERRCODE_TOO_MANY_CONNECTIONS)
+        .errmsg(format!(
+            "number of requested standby connections exceeds \"max_wal_senders\" (currently {max_wal_senders})"
+        ))
+        .finish(types_error::ErrorLocation::new(SRC, 453, "InitProcess"))
 }
