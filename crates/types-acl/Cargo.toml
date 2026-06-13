@@ -7,3 +7,6 @@ publish.workspace = true
 [lib]
 name = "types_acl"
 path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }

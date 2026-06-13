@@ -6179,6 +6179,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-acl"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-acl-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-acl-seams"
 version = "0.0.0"
 dependencies = [
@@ -8092,6 +8103,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-acl",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
@@ -8140,6 +8152,9 @@ dependencies = [
 [[package]]
 name = "types-acl"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-amapi"
