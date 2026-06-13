@@ -15,3 +15,5 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-hash = { path = "../types-hash" }
 types-namespace = { path = "../types-namespace" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }

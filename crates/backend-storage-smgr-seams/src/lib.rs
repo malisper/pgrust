@@ -5,7 +5,15 @@
 //! until then a call panics loudly.
 
 use types_error::PgResult;
-use types_storage::RelFileLocator;
+use types_storage::{RelFileLocator, RelFileLocatorBackend};
+
+seam_core::seam!(
+    /// `smgrreleaserellocator(rlocator)` (smgr.c) — close (release) the smgr
+    /// file handles for one relation file locator, the SMGR arm of
+    /// `LocalExecuteInvalidationMessage`. Reachable file-layer
+    /// `ereport(ERROR)`s are carried on `Err`.
+    pub fn smgr_release_rellocator(rlocator: RelFileLocatorBackend) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `ProcessBarrierSmgrRelease()` (smgr.c) — close all smgr file handles

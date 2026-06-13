@@ -1011,6 +1011,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-rel",
 ]
 
 [[package]]
@@ -2551,6 +2552,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -3142,6 +3144,36 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-inval"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-catalog-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-syscache",
  "types-tuple",
 ]
 
@@ -3254,6 +3286,8 @@ dependencies = [
  "types-error",
  "types-hash",
  "types-namespace",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3818,6 +3852,7 @@ dependencies = [
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-inval",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",

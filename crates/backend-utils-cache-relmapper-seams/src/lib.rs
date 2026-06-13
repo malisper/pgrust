@@ -42,3 +42,12 @@ seam_core::seam!(
     /// map (not supported under 2PC).
     pub fn at_prepare_relation_map() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationMapInvalidate(shared)` (relmapper.c): reload the active
+    /// relation map (the `shared` map when `shared`, else this database's
+    /// local map) from the on-disk file — the `SHAREDINVALRELMAP_ID` arm of
+    /// `LocalExecuteInvalidationMessage`. Reads the file, so can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_map_invalidate(shared: bool) -> PgResult<()>
+);
