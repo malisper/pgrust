@@ -2123,6 +2123,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-origin"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-origin-extern-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-init-small-seams",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-replication-logical-origin-extern-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-logical-origin-seams"
 version = "0.0.0"
 dependencies = [
@@ -3558,6 +3585,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-replication-logical-conflict",
+ "backend-replication-logical-origin",
  "backend-replication-logical-proto",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
