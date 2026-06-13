@@ -17,9 +17,18 @@
 //! per-backend registry here. C's `pcxt_list` `dlist` of live contexts becomes
 //! an ordered list of handles over a slab of contexts.
 //!
-//! The DSM segment is owned here as a byte buffer; `shm_toc` estimate/allocate/
-//! insert/lookup and the typed chunk store/load helpers operate on it. A
-//! [`SerializeCursor`] is `(ctx_slot << 32) | offset` into that buffer.
+//! The DSM segment is a *real* `dsm-core` segment: `pcxt.seg` carries the real
+//! [`DsmSegmentId`] and the context owns the [`DsmSegment`] RAII guard (or, for
+//! the no-worker fallback, a `TopMemoryContext`-allocated private buffer). The
+//! `shm_toc` estimate/allocate/insert/lookup helpers delegate to a real
+//! [`ShmToc`] built over the segment base. A [`SerializeCursor`] is the *real
+//! chunk address* the `ShmToc` hands back (a raw pointer reinterpreted as
+//! `usize`), and the typed `*Handle` newtypes are thin views carrying that same
+//! address. The `repr(C)` chunk payloads
+//! ([`FixedParallelExecutorState`]/[`SharedExecutorInstrumentation`]/the JIT
+//! header) and the `"library\0function\0"` entrypoint bytes are written and
+//! read back IN PLACE at the real address — no side tables (family
+//! `shm-toc-address`).
 //!
 //! Everything genuinely external (DSM creation, `shm_mq`, background workers,
 //! the latch/wait layer, the transaction/snapshot/GUC/namespace/relmapper/
@@ -33,10 +42,16 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+use std::alloc::Layout;
 use std::cell::RefCell;
+use std::ptr::NonNull;
 
+use backend_storage_ipc_dsm_core::dsm::{
+    dsm_create, dsm_segment_address, DsmSegment, DsmSegmentId, DSM_CREATE_NULL_IF_MAXSEGMENTS,
+};
+use backend_storage_ipc_shm_toc::{shm_toc_estimate, ShmToc};
 use backend_utils_error::{elog, ereport, PgResult};
-use mcx::Mcx;
+use mcx::{Allocator, Mcx};
 use types_core::{pid_t, Size, SubTransactionId, XLogRecPtr};
 use types_datum::Datum;
 use types_error::{
@@ -52,6 +67,7 @@ use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
     ShmMqResult,
 };
+use types_storage::storage::shm_toc_estimator;
 
 use backend_access_transam_parallel_rt_seams as rt;
 
@@ -147,25 +163,21 @@ impl ParallelWorkerInfo {
     }
 }
 
-/// A live `shm_toc` over a context's DSM buffer: a magic + the key→chunk table.
-#[derive(Clone, Debug, Default)]
-struct ShmToc {
-    /// `(key, offset, nbytes)` of each inserted chunk.
-    entries: Vec<(u64, usize, usize)>,
-    /// Next free offset in the buffer (chunks allocated bump-style, BUFFERALIGN'd).
-    alloc_cursor: usize,
+/// A `TopMemoryContext`-allocated private buffer backing the `shm_toc` when no
+/// workers are budgeted (C: `pcxt->private_memory = MemoryContextAlloc(...)`).
+/// Holds the raw allocation so `DestroyParallelContext`'s `pfree` can return it.
+struct PrivateSeg {
+    ptr: NonNull<u8>,
+    layout: Layout,
 }
 
-/// `shm_toc_estimator` (storage/shm_toc.h:38-42) — accumulated estimate.
-#[derive(Clone, Copy, Debug, Default)]
-struct Estimator {
-    space_for_chunks: Size,
-    number_of_keys: Size,
-}
+// SAFETY: the parallel registry is thread-local (the `G` thread_local), so the
+// pointer never crosses threads; `NonNull` is `!Send`/`!Sync` only out of
+// caution. The buffer is a backend-private `MemoryContextAlloc` allocation.
+unsafe impl Send for PrivateSeg {}
 
 /// A parallel execution context (`ParallelContext`, access/parallel.h:30-46)
-/// plus the DSM buffer this subsystem owns for it.
-#[derive(Clone, Debug)]
+/// plus the real DSM segment / private buffer this subsystem owns for it.
 struct ParallelContext {
     subid: SubTransactionId,
     nworkers: i32,
@@ -175,14 +187,20 @@ struct ParallelContext {
     function_name: String,
     /// `ErrorContextCallback *error_context_stack` — opaque pointer handle.
     error_context_stack: usize,
-    estimator: Estimator,
-    /// `dsm_segment *seg` (NULL when running in private memory).
+    /// `shm_toc_estimator estimator` (`storage/shm_toc.h`).
+    estimator: shm_toc_estimator,
+    /// `dsm_segment *seg` (NULL when running in private memory). Carries the
+    /// real [`DsmSegmentId`] (opacity-inherited: the handle value *is* the id).
     seg: DsmSegmentHandle,
-    /// `void *private_memory` base handle (0 == NULL).
-    private_memory: usize,
-    /// The DSM (or private) byte buffer backing the `shm_toc`.
-    buffer: Vec<u8>,
-    toc: ShmToc,
+    /// The real `DsmSegment` RAII guard — owns the segment's mapping until the
+    /// context is destroyed (C: `pcxt->seg`).
+    seg_guard: Option<DsmSegment>,
+    /// `void *private_memory` — the no-worker fallback backing buffer.
+    private_memory: Option<PrivateSeg>,
+    /// The real `shm_toc` over the segment (or private) base, plus that base
+    /// address (so the offset<->address helpers can relativize chunks).
+    toc: Option<ShmToc>,
+    toc_base: usize,
     /// `ParallelWorkerInfo *worker` — empty until `InitializeParallelDSM`.
     worker: Vec<ParallelWorkerInfo>,
     nknown_attached_workers: i32,
@@ -283,23 +301,16 @@ fn with_globals<R>(f: impl FnOnce(&mut ParallelGlobals) -> R) -> R {
 }
 
 // ===========================================================================
-// Cursor codec: SerializeCursor encodes (ctx_slot << 32) | offset. The high bit
-// distinguishes a context-owned chunk from a freestanding pointer-sized one.
+// Cursor / address model (family `shm-toc-address`): a `SerializeCursor` is now
+// the *real* chunk address — the raw pointer `shm_toc_allocate`/`shm_toc_lookup`
+// hands back, reinterpreted as `usize`. The typed handles (FixedStateHandle,
+// InstrumentationHandle, JitInstrumentationHandle) are thin views carrying that
+// same real address; the `repr(C)` payloads are written/read in place at it.
 // ===========================================================================
 
-const CURSOR_OFFSET_BITS: usize = 32;
-const CURSOR_OFFSET_MASK: usize = (1usize << CURSOR_OFFSET_BITS) - 1;
-
-fn make_cursor(slot: usize, offset: usize) -> SerializeCursor {
-    SerializeCursor((slot << CURSOR_OFFSET_BITS) | (offset & CURSOR_OFFSET_MASK))
-}
-
-fn cursor_parts(c: SerializeCursor) -> (usize, usize) {
-    (c.0 >> CURSOR_OFFSET_BITS, c.0 & CURSOR_OFFSET_MASK)
-}
-
-/// shm_toc handle and dsm-seg handle encode the owning context slot directly
-/// (the execParallel contract threads the same handle through every call).
+/// shm_toc handle encodes the owning context slot directly (the execParallel
+/// contract threads the same handle through every call so the leader-side
+/// allocate/insert/lookup can find the real `ShmToc`).
 fn toc_handle(slot: usize) -> ExecShmToc {
     ExecShmToc(slot)
 }
@@ -307,11 +318,18 @@ fn toc_slot(toc: ExecShmToc) -> usize {
     toc.0
 }
 
-/// `BUFFERALIGN` (c.h) — align to `MAXIMUM_ALIGNOF`-padded 8 KB buffer line; the
-/// shm_toc rounds chunk sizes up to `BUFFERALIGN`.
-const BUFFER_ALIGNMENT: usize = 64;
-fn buffer_align(n: usize) -> usize {
-    (n + BUFFER_ALIGNMENT - 1) & !(BUFFER_ALIGNMENT - 1)
+/// The leader-side `DsmSegmentHandle` carries the real [`DsmSegmentId`]: the
+/// handle value *is* `DsmSegmentId::as_u64()` (opacity-inherited), and `0`
+/// remains the NULL sentinel because `dsm-core` never hands out id `0`
+/// (`DSM_NEXT_ID` starts at 1).
+fn seg_handle_of(id: DsmSegmentId) -> DsmSegmentHandle {
+    DsmSegmentHandle(id.as_u64() as usize)
+}
+// Used by the runtime test (and the worker-side follow-up family); the inverse
+// of `seg_handle_of`, recovering the real id from the opacity-inherited handle.
+#[cfg_attr(not(test), allow(dead_code))]
+fn seg_id_of(seg: DsmSegmentHandle) -> DsmSegmentId {
+    DsmSegmentId::from_u64(seg.0 as u64)
 }
 
 /// `shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false)` missing — the corruption
@@ -347,240 +365,297 @@ fn estimator_slot_of(_e: ShmTocEstimatorHandle) -> usize {
     _e.0
 }
 
+/// `shm_toc_estimate_chunk(&pcxt->estimator, sz)` — delegates to the real
+/// `shm-toc` estimator inline. `space_for_chunks += BUFFERALIGN(sz)`; an
+/// `add_size` overflow `ereport(ERROR)`s in C. The execParallel contract is
+/// infallible here and the requests are bounded, so an overflow is a
+/// programming error: panic loudly (matches the `ereport(ERROR)` non-return).
 fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        // shm_toc_estimate: space_for_chunks += BUFFERALIGN(nbytes).
-        c.estimator.space_for_chunks += buffer_align(sz);
+        backend_storage_ipc_shm_toc::shm_toc_estimate_chunk(&mut c.estimator, sz)
+            .expect("shm_toc_estimate_chunk overflow");
     });
 }
 
+/// `shm_toc_estimate_keys(&pcxt->estimator, nkeys)`.
 fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        c.estimator.number_of_keys += nkeys as Size;
+        backend_storage_ipc_shm_toc::shm_toc_estimate_keys(&mut c.estimator, nkeys as Size)
+            .expect("shm_toc_estimate_keys overflow");
     });
 }
 
-/// `shm_toc_allocate(toc, nbytes)` — bump-allocate a BUFFERALIGN'd chunk.
+/// Run `f` on the live real `ShmToc` and segment base for the context owning
+/// `toc`. Panics on a `toc` for a context whose DSM has not been created
+/// (a programming error — `shm_toc_*` is never called before the segment is
+/// established, mirroring C's `shm_toc_allocate(pcxt->toc, ...)` after
+/// `shm_toc_create`).
+fn with_toc<R>(toc: ExecShmToc, f: impl FnOnce(&ShmToc, usize) -> R) -> R {
+    with_globals(|g| {
+        let c = g.get(ParallelContextHandle(toc_slot(toc)));
+        let real = c.toc.expect("shm_toc not yet created for parallel context");
+        f(&real, c.toc_base)
+    })
+}
+
+/// `shm_toc_allocate(toc, nbytes)` — delegate to the real `ShmToc`; return the
+/// chunk's *real address* as a `SerializeCursor` (the raw pointer reinterpreted
+/// as `usize`).
+///
+/// The real `shm_toc_allocate` `ereport(ERROR)`s ("out of shared memory") on
+/// exhaustion; the segment is sized exactly by `shm_toc_estimate`, so this
+/// cannot happen in correct operation. The execParallel contract is infallible,
+/// so an allocation failure is a programming error: panic loudly (matches the
+/// `ereport(ERROR)` non-return).
 fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
-    with_globals(|g| {
-        let slot = toc_slot(toc);
-        let c = g.get_mut(ParallelContextHandle(slot));
-        let offset = c.toc.alloc_cursor;
-        let nalloc = buffer_align(nbytes);
-        let end = offset + nalloc;
-        if end > c.buffer.len() {
-            c.buffer.resize(end, 0);
-        }
-        c.toc.alloc_cursor = end;
-        make_cursor(slot, offset)
+    with_toc(toc, |real, _base| {
+        let ptr = real
+            .allocate(nbytes)
+            .expect("shm_toc_allocate out of shared memory");
+        SerializeCursor(ptr.as_ptr() as usize)
     })
 }
 
+/// `shm_toc_insert(toc, key, address)` — register the chunk's real address in
+/// the real in-segment entry table.
 fn shm_toc_insert(toc: ExecShmToc, key: u64, address: SerializeCursor) {
-    with_globals(|g| {
-        let slot = toc_slot(toc);
-        let (_aslot, offset) = cursor_parts(address);
-        let c = g.get_mut(ParallelContextHandle(slot));
-        c.toc.entries.push((key, offset, 0));
+    with_toc(toc, |real, _base| {
+        let addr =
+            NonNull::new(address.0 as *mut u8).expect("shm_toc chunk address is non-null");
+        // SAFETY: `addr` is a chunk previously handed out by `real.allocate`,
+        // so it lies within the segment, strictly past the TOC start.
+        unsafe { real.insert(key, addr) }.expect("shm_toc_insert out of shared memory");
     });
 }
 
-/// `shm_toc_lookup(toc, key, noError)` — `None` when `noError` and absent.
+/// `shm_toc_lookup(toc, key, noError)` — `None` when `noError` and absent. The
+/// chunk's real address is returned as a `SerializeCursor`.
 fn shm_toc_lookup(toc: ExecShmToc, key: u64, no_error: bool) -> Option<SerializeCursor> {
-    with_globals(|g| {
-        let slot = toc_slot(toc);
-        let c = g.get(ParallelContextHandle(slot));
-        match c.toc.entries.iter().find(|(k, _, _)| *k == key) {
-            Some((_, offset, _)) => Some(make_cursor(slot, *offset)),
-            None => {
-                if no_error {
-                    None
-                } else {
-                    // shm_toc_lookup elog(ERROR) on missing key. The execParallel
-                    // contract is infallible here, so a missing required key is a
-                    // programming error: panic loudly (matches elog(ERROR) which
-                    // never returns).
-                    panic!("could not find key {key:#x} in shm TOC");
-                }
-            }
-        }
+    with_toc(toc, |real, _base| {
+        // shm_toc_lookup elog(ERROR) on a missing required key. The execParallel
+        // contract is infallible, so a missing required key is a programming
+        // error: the `?`-less `expect` matches elog(ERROR) which never returns.
+        let found = real
+            .lookup(key, no_error)
+            .expect("shm_toc_lookup on missing required key");
+        found.map(|ptr| SerializeCursor(ptr.as_ptr() as usize))
     })
 }
 
 // ===========================================================================
-// Typed DSM chunk stores/loads. The chunk addresses index into the context
-// buffer; the typed payloads are stored in a side table keyed by (slot,offset)
-// because the execParallel structs are richer than raw bytes here. The store
-// helpers satisfy execParallel's serialization seam contract.
+// Typed DSM chunk stores/loads. The chunk address IS the real in-segment
+// pointer (a `SerializeCursor`/`*Handle` carries the raw address): the `repr(C)`
+// payloads are written and read back IN PLACE at it, exactly as C dereferences
+// `(FixedParallelExecutorState *) shm_toc_allocate(...)`. No side tables.
 // ===========================================================================
 
-thread_local! {
-    static FIXED_STATES: RefCell<Vec<(SerializeCursor, FixedParallelExecutorState)>> =
-        const { RefCell::new(Vec::new()) };
-    static CSTRINGS: RefCell<Vec<(SerializeCursor, String)>> = const { RefCell::new(Vec::new()) };
-    static INSTRUMENTATIONS: RefCell<Vec<(SerializeCursor, SharedExecutorInstrumentation)>> =
-        const { RefCell::new(Vec::new()) };
-    static JIT_HEADERS: RefCell<Vec<(SerializeCursor, i32)>> = const { RefCell::new(Vec::new()) };
-}
+// SAFETY contract shared by every accessor below: the address inside a
+// `SerializeCursor`/`FixedStateHandle`/`InstrumentationHandle`/
+// `JitInstrumentationHandle` is a chunk previously handed out by the real
+// `shm_toc_allocate` (or recovered via `shm_toc_lookup`), so it points at
+// `>= sizeof(payload)` writable, suitably-aligned bytes inside the mapped DSM
+// (or private-memory) segment, live for as long as the owning `ParallelContext`
+// holds the segment. The execParallel contract never resurrects a handle past
+// `DestroyParallelContext`. Chunks come from `BUFFERALIGN`ed `shm_toc_allocate`,
+// which over-aligns relative to these structs' natural alignment.
 
+/// `fpes = shm_toc_allocate(...); *fpes = state;` — write the `repr(C)`
+/// `FixedParallelExecutorState` in place at the chunk address.
 fn store_fixed_state(chunk: SerializeCursor, state: FixedParallelExecutorState) -> FixedStateHandle {
-    FIXED_STATES.with(|s| {
-        let mut v = s.borrow_mut();
-        if let Some(slot) = v.iter_mut().find(|(c, _)| *c == chunk) {
-            slot.1 = state;
-        } else {
-            v.push((chunk, state));
-        }
-    });
+    let p = chunk.0 as *mut FixedParallelExecutorState;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.write_unaligned(state) };
     FixedStateHandle(chunk.0)
 }
 
+/// `fpes = (FixedParallelExecutorState *) chunk` — reinterpret an existing chunk.
 fn fixed_state_from_chunk(chunk: SerializeCursor) -> FixedStateHandle {
     FixedStateHandle(chunk.0)
 }
 
-fn with_fixed_state<R>(fpes: FixedStateHandle, f: impl FnOnce(&mut FixedParallelExecutorState) -> R) -> R {
-    let chunk = SerializeCursor(fpes.0);
-    FIXED_STATES.with(|s| {
-        let mut v = s.borrow_mut();
-        match v.iter_mut().find(|(c, _)| *c == chunk) {
-            Some((_, st)) => f(st),
-            None => {
-                v.push((chunk, FixedParallelExecutorState::default()));
-                let n = v.len() - 1;
-                f(&mut v[n].1)
-            }
-        }
-    })
+fn read_fixed_state(fpes: FixedStateHandle) -> FixedParallelExecutorState {
+    let p = fpes.0 as *const FixedParallelExecutorState;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.read_unaligned() }
 }
 
 fn set_fixed_param_exec(fpes: FixedStateHandle, dp: u64) {
-    with_fixed_state(fpes, |st| st.param_exec = dp);
+    let mut st = read_fixed_state(fpes);
+    st.param_exec = dp;
+    let p = fpes.0 as *mut FixedParallelExecutorState;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.write_unaligned(st) };
 }
 fn fixed_param_exec(fpes: FixedStateHandle) -> u64 {
-    with_fixed_state(fpes, |st| st.param_exec)
+    read_fixed_state(fpes).param_exec
 }
 fn fixed_eflags(fpes: FixedStateHandle) -> i32 {
-    with_fixed_state(fpes, |st| st.eflags)
+    read_fixed_state(fpes).eflags
 }
 fn fixed_jit_flags(fpes: FixedStateHandle) -> i32 {
-    with_fixed_state(fpes, |st| st.jit_flags)
+    read_fixed_state(fpes).jit_flags
 }
 fn fixed_tuples_needed(fpes: FixedStateHandle) -> i64 {
-    with_fixed_state(fpes, |st| st.tuples_needed)
+    read_fixed_state(fpes).tuples_needed
 }
 
+/// `memcpy(chunk, value, strlen(value) + 1)` — copy the NUL-terminated string
+/// into the chunk. The chunk was sized `value.len() + 1` by the caller.
 fn store_cstring(chunk: SerializeCursor, value: String) {
-    CSTRINGS.with(|s| {
-        let mut v = s.borrow_mut();
-        if let Some(slot) = v.iter_mut().find(|(c, _)| *c == chunk) {
-            slot.1 = value;
-        } else {
-            v.push((chunk, value));
-        }
-    });
+    let bytes = value.as_bytes();
+    let dst = chunk.0 as *mut u8;
+    // SAFETY: see the module SAFETY contract above; the chunk was allocated with
+    // `value.len() + 1` bytes so the body plus the trailing NUL fit.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        dst.add(bytes.len()).write(0);
+    }
 }
 
+/// Read the NUL-terminated string back out of a chunk (`pstrdup(chunk)`).
 fn cursor_cstring(chunk: SerializeCursor) -> PgResult<String> {
-    CSTRINGS.with(|s| {
-        s.borrow()
-            .iter()
-            .find(|(c, _)| *c == chunk)
-            .map(|(_, val)| val.clone())
-            .ok_or_else(|| {
-                ereport(ERROR)
-                    .errmsg("no string stored at parallel DSM chunk")
-                    .into_error()
-            })
-    })
+    let p = chunk.0 as *const u8;
+    // SAFETY: see the module SAFETY contract above; `store_cstring` (or the C
+    // leader) wrote a NUL-terminated string here.
+    let mut len = 0usize;
+    unsafe {
+        while p.add(len).read() != 0 {
+            len += 1;
+        }
+        let slice = core::slice::from_raw_parts(p, len);
+        String::from_utf8(slice.to_vec()).map_err(|_| {
+            ereport(ERROR)
+                .errmsg("invalid UTF-8 string stored at parallel DSM chunk")
+                .into_error()
+        })
+    }
 }
 
+/// Write `"library\0function\0"` into the entrypoint chunk in place. Mirrors
+/// `strcpy(entrypointstate, library_name); strcpy(entrypointstate + lnamelen +
+/// 1, function_name)` (parallel.c:488-492). The chunk was sized
+/// `library.len() + function.len() + 2`.
+fn write_entrypoint(chunk: SerializeCursor, library: &str, function: &str) {
+    let dst = chunk.0 as *mut u8;
+    let lname = library.as_bytes();
+    let fname = function.as_bytes();
+    // SAFETY: see the module SAFETY contract above; the chunk was allocated with
+    // `lname.len() + fname.len() + 2` bytes so both strings plus their NULs fit.
+    unsafe {
+        core::ptr::copy_nonoverlapping(lname.as_ptr(), dst, lname.len());
+        dst.add(lname.len()).write(0);
+        let f = dst.add(lname.len() + 1);
+        core::ptr::copy_nonoverlapping(fname.as_ptr(), f, fname.len());
+        f.add(fname.len()).write(0);
+    }
+}
+
+/// Read back the two NUL-terminated strings from an entrypoint chunk. Mirrors
+/// `library_name = entrypointstate; function_name = entrypointstate +
+/// strlen(library_name) + 1` (parallel.c:1416-1418).
+fn read_entrypoint(chunk: SerializeCursor) -> PgResult<(String, String)> {
+    let library = cursor_cstring(chunk)?;
+    let function = cursor_cstring(SerializeCursor(chunk.0 + library.len() + 1))?;
+    Ok((library, function))
+}
+
+/// Offset of the `plan_node_id` flexible array past the
+/// `SharedExecutorInstrumentation` header (the four leading `int`s).
+const SEI_PLAN_NODE_ID_OFFSET: usize =
+    types_execparallel::SHARED_EXEC_INSTRUMENTATION_HEADER_SIZE;
+
+/// `instrumentation = shm_toc_allocate(...); instrumentation->{...} = ...` —
+/// write the `repr(C)` `SharedExecutorInstrumentation` header in place. The
+/// trailing `plan_node_id` array and the `Instrumentation` slots are written
+/// separately into the same chunk (`set_sei_plan_node_id` / the `instr_*`
+/// support seams), matching C's writes past the header.
 fn store_instrumentation_header(
     chunk: SerializeCursor,
     header: SharedExecutorInstrumentation,
 ) -> InstrumentationHandle {
-    INSTRUMENTATIONS.with(|s| {
-        let mut v = s.borrow_mut();
-        if let Some(slot) = v.iter_mut().find(|(c, _)| *c == chunk) {
-            slot.1 = header;
-        } else {
-            v.push((chunk, header));
-        }
-    });
+    let p = chunk.0 as *mut SharedExecutorInstrumentation;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.write_unaligned(header) };
     InstrumentationHandle(chunk.0)
 }
 
+/// `instrumentation = (SharedExecutorInstrumentation *) chunk`.
 fn instrumentation_from_chunk(chunk: SerializeCursor) -> InstrumentationHandle {
     InstrumentationHandle(chunk.0)
 }
 
-fn with_instrumentation<R>(
-    sei: InstrumentationHandle,
-    f: impl FnOnce(&mut SharedExecutorInstrumentation) -> R,
-) -> R {
-    let chunk = SerializeCursor(sei.0);
-    INSTRUMENTATIONS.with(|s| {
-        let mut v = s.borrow_mut();
-        match v.iter_mut().find(|(c, _)| *c == chunk) {
-            Some((_, st)) => f(st),
-            None => {
-                v.push((chunk, SharedExecutorInstrumentation::default()));
-                let n = v.len() - 1;
-                f(&mut v[n].1)
-            }
-        }
-    })
+fn read_sei_header(sei: InstrumentationHandle) -> SharedExecutorInstrumentation {
+    let p = sei.0 as *const SharedExecutorInstrumentation;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.read_unaligned() }
 }
 
 fn sei_instrument_options(sei: InstrumentationHandle) -> i32 {
-    with_instrumentation(sei, |s| s.instrument_options)
+    read_sei_header(sei).instrument_options
 }
 fn sei_num_workers(sei: InstrumentationHandle) -> i32 {
-    with_instrumentation(sei, |s| s.num_workers)
+    read_sei_header(sei).num_workers
 }
 fn sei_num_plan_nodes(sei: InstrumentationHandle) -> i32 {
-    with_instrumentation(sei, |s| s.num_plan_nodes)
+    read_sei_header(sei).num_plan_nodes
 }
+/// `sei->plan_node_id[index]` — the flexible array immediately follows the header.
 fn sei_plan_node_id(sei: InstrumentationHandle, index: i32) -> i32 {
-    with_instrumentation(sei, |s| s.plan_node_id[index as usize])
+    let p = (sei.0 + SEI_PLAN_NODE_ID_OFFSET) as *const i32;
+    // SAFETY: see the module SAFETY contract above; `index < num_plan_nodes`,
+    // and the chunk was sized `header + num_plan_nodes * sizeof(int) + ...`.
+    unsafe { p.add(index as usize).read_unaligned() }
 }
+/// `sei->plan_node_id[index] = value`.
 fn set_sei_plan_node_id(sei: InstrumentationHandle, index: i32, value: i32) {
-    with_instrumentation(sei, |s| {
-        let idx = index as usize;
-        if s.plan_node_id.len() <= idx {
-            s.plan_node_id.resize(idx + 1, 0);
-        }
-        s.plan_node_id[idx] = value;
-    });
+    let p = (sei.0 + SEI_PLAN_NODE_ID_OFFSET) as *mut i32;
+    // SAFETY: see the module SAFETY contract above; `index < num_plan_nodes`.
+    unsafe { p.add(index as usize).write_unaligned(value) };
 }
 
-fn store_jit_instrumentation_header(chunk: SerializeCursor, num_workers: i32) -> JitInstrumentationHandle {
-    JIT_HEADERS.with(|s| {
-        let mut v = s.borrow_mut();
-        if let Some(slot) = v.iter_mut().find(|(c, _)| *c == chunk) {
-            slot.1 = num_workers;
-        } else {
-            v.push((chunk, num_workers));
-        }
-    });
+/// `jit_instrumentation = shm_toc_allocate(...);
+/// jit_instrumentation->num_workers = num_workers; memset(jit_instr, 0, ...)`.
+/// The `SharedJitInstrumentation` header is a single leading `int num_workers`,
+/// followed (at `offsetof(.., jit_instr)`) by `num_workers` zeroed
+/// `JitInstrumentation` objects. The caller sized the chunk for both; the
+/// `jit_instr` array is left zeroed (chunk space is not pre-zeroed, so zero it).
+fn store_jit_instrumentation_header(
+    chunk: SerializeCursor,
+    num_workers: i32,
+) -> JitInstrumentationHandle {
+    // Write num_workers, then zero the jit_instr array region. The header is one
+    // int; the JitInstrumentation array starts at MAXALIGN(sizeof(int)).
+    let p = chunk.0 as *mut i32;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.write_unaligned(num_workers) };
+    let arr_off = jit_instr_offset();
+    let arr = (chunk.0 + arr_off) as *mut u8;
+    let arr_len = (num_workers as usize)
+        .saturating_mul(core::mem::size_of::<types_execparallel::JitInstrumentation>());
+    // SAFETY: the chunk was sized `arr_off + num_workers * sizeof(JitInstrumentation)`.
+    unsafe { core::ptr::write_bytes(arr, 0, arr_len) };
     JitInstrumentationHandle(chunk.0)
 }
 
+/// `offsetof(SharedJitInstrumentation, jit_instr)` — one leading `int`,
+/// MAXALIGNed (jit/jit.h: `int num_workers; JitInstrumentation jit_instr[];`).
+fn jit_instr_offset() -> usize {
+    const MAXIMUM_ALIGNOF: usize = 8;
+    (core::mem::size_of::<i32>() + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
+}
+
+/// `jit_instrumentation = (SharedJitInstrumentation *) chunk`.
 fn jit_instrumentation_from_chunk(chunk: SerializeCursor) -> JitInstrumentationHandle {
     JitInstrumentationHandle(chunk.0)
 }
 
+/// `shared_jit->num_workers`.
 fn shared_jit_num_workers(shared_jit: JitInstrumentationHandle) -> i32 {
-    let chunk = SerializeCursor(shared_jit.0);
-    JIT_HEADERS.with(|s| {
-        s.borrow()
-            .iter()
-            .find(|(c, _)| *c == chunk)
-            .map(|(_, n)| *n)
-            .unwrap_or(0)
-    })
+    let p = shared_jit.0 as *const i32;
+    // SAFETY: see the module SAFETY contract above.
+    unsafe { p.read_unaligned() }
 }
 
 // ===========================================================================
@@ -606,6 +681,8 @@ fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
         if c.seg.is_null() {
             None
         } else {
+            // The execParallel-visible `DsmSegmentHandle` carries the same real
+            // id value (no contract change; both are the segment's identity).
             Some(ExecDsmSeg(c.seg.0))
         }
     })
@@ -686,11 +763,12 @@ pub fn create_parallel_context<'mcx>(
         library_name,
         function_name,
         error_context_stack: rt::error_context_stack::call()?,
-        estimator: Estimator::default(),
+        estimator: shm_toc_estimator::default(),
         seg: DsmSegmentHandle::NULL,
-        private_memory: 0,
-        buffer: Vec::new(),
-        toc: ShmToc::default(),
+        seg_guard: None,
+        private_memory: None,
+        toc: None,
+        toc_base: 0,
         worker: Vec::new(),
         nknown_attached_workers: 0,
         known_attached_workers: Vec::new(),
@@ -708,20 +786,85 @@ pub fn create_parallel_context<'mcx>(
 // InitializeParallelDSM (parallel.c:210-501).
 // ===========================================================================
 
-/// Fallibly allocate the zeroed `segsize`-byte buffer that backs the TOC.
+/// Alignment for the no-worker private buffer: it backs an `InSegmentShmToc`
+/// header (laid out at the buffer start by `ShmToc::create`), so it must be at
+/// least as aligned as that header. The atomic-safety note in `shm_toc.c` wants
+/// `BUFFERALIGN` (`ALIGNOF_BUFFER`, 32); a real `dsm_segment_address` is page
+/// aligned, so we match that floor for the private fallback too.
+const PRIVATE_SEG_ALIGN: usize = 64;
+
+/// Create the DSM segment (or no-worker private buffer) backing `pcxt`'s
+/// `shm_toc`, build the real [`ShmToc`] over its base, and record the segment
+/// id / toc / base in the context. Mirrors the
+/// `segsize = shm_toc_estimate(...)` ... `shm_toc_create(PARALLEL_MAGIC, base,
+/// segsize)` block of `InitializeParallelDSM` (parallel.c:325-339).
 ///
-/// This stands in for the segment storage (`dsm_create` on the worker path,
-/// `MemoryContextAlloc(TopMemoryContext, segsize)` on the no-worker fallback)
-/// until a real cross-process DSM layout lands. `segsize` is caller-controlled
-/// (the estimator total), so the allocation must be fallible: OOM converts to
-/// the context's `mcx.oom(segsize)` (`ERRCODE_OUT_OF_MEMORY` + context name)
-/// rather than aborting the process via `vec![0u8; segsize]`.
-fn alloc_zeroed_buffer(mcx: Mcx<'_>, segsize: usize) -> PgResult<Vec<u8>> {
-    mcx::check_alloc_size(segsize)?;
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.try_reserve_exact(segsize).map_err(|_| mcx.oom(segsize))?;
-    buffer.resize(segsize, 0);
-    Ok(buffer)
+/// `segsize` is the `shm_toc_estimate` total. When the context budgets workers
+/// we try the real `dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS)`; if it
+/// returns `None` (max segments) we fall back to backend-private memory and
+/// plan for no workers, exactly like the C.
+fn establish_parallel_segment(
+    pcxt: ParallelContextHandle,
+    segsize: Size,
+) -> PgResult<()> {
+    // dsm_create allocates its descriptor in TopMemoryContext (the C global);
+    // the descriptor outlives this (possibly short-lived) caller context.
+    let top = rt::top_memory_context::call();
+
+    let seg: Option<DsmSegment> = if pcxt_nworkers(pcxt) > 0 {
+        dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS, top)?
+    } else {
+        None
+    };
+
+    match seg {
+        Some(seg) => {
+            // The TOC lives in the real DSM segment.
+            let id = seg.id();
+            let base = dsm_segment_address(id);
+            debug_assert!(!base.is_null(), "dsm_segment_address returned NULL");
+            let base_nn = NonNull::new(base).expect("dsm segment base is non-null");
+            // SAFETY: `base` addresses `>= segsize` writable, page-aligned bytes
+            // of the freshly created segment, which outlives the toc handle
+            // (held in the same context as the `DsmSegment` guard).
+            let toc = unsafe { ShmToc::create(PARALLEL_MAGIC, base_nn, segsize) };
+            with_globals(|g| {
+                let c = g.get_mut(pcxt);
+                c.seg = seg_handle_of(id);
+                c.seg_guard = Some(seg);
+                c.toc = Some(toc);
+                c.toc_base = base as usize;
+            });
+        }
+        None => {
+            // No workers (or max segments hit): use backend-private memory.
+            // C: pcxt->private_memory = MemoryContextAlloc(TopMemoryContext,
+            // segsize). Fallible: OOM on the caller-controlled segsize carries
+            // ERRCODE_OUT_OF_MEMORY (the context's oom), not a process abort.
+            mcx::check_alloc_size(segsize)?;
+            let layout = Layout::from_size_align(segsize, PRIVATE_SEG_ALIGN)
+                .expect("valid private-segment layout");
+            let ptr = top
+                .allocate(layout)
+                .map_err(|_| top.oom(segsize))?
+                .cast::<u8>();
+            // MemoryContextAlloc does not zero; shm_toc_create writes the header
+            // and the chunks are filled before use, matching the C.
+            let base_nn = ptr;
+            // SAFETY: `ptr` is a fresh `segsize`-byte allocation aligned to
+            // PRIVATE_SEG_ALIGN (>= the header alignment), live until the
+            // context frees it in DestroyParallelContext.
+            let toc = unsafe { ShmToc::create(PARALLEL_MAGIC, base_nn, segsize) };
+            with_globals(|g| {
+                let c = g.get_mut(pcxt);
+                c.nworkers = 0;
+                c.private_memory = Some(PrivateSeg { ptr, layout });
+                c.toc = Some(toc);
+                c.toc_base = ptr.as_ptr() as usize;
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Establish the dynamic shared memory segment for a parallel context and copy
@@ -806,38 +949,13 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         shm_toc_estimate_keys(est, 1);
     }
 
-    // Create DSM and initialize TOC. If no workers, use backend-private memory.
-    // Also fall back if dsm_create hits the max-segments limit.
-    let segsize = with_globals(|g| {
-        let c = g.get(pcxt);
-        c.estimator.space_for_chunks
-    });
-    if pcxt_nworkers(pcxt) > 0 {
-        let seg = rt::dsm_create_null_if_maxsegments::call(segsize)?;
-        with_globals(|g| g.get_mut(pcxt).seg = DsmSegmentHandle(seg.0));
-    }
-    if !with_globals(|g| g.get(pcxt).seg).is_null() {
-        // The TOC lives in the DSM segment; back it with a context buffer.
-        // C: dsm_create(segsize). Fallible alloc: OOM on the caller-controlled
-        // segsize must carry ERRCODE_OUT_OF_MEMORY (mcx.oom), not abort.
-        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
-        with_globals(|g| {
-            let c = g.get_mut(pcxt);
-            c.buffer = buffer;
-            c.toc = ShmToc::default();
-        });
-    } else {
-        let pm = rt::top_memory_context_alloc::call(segsize)?;
-        // C: MemoryContextAlloc(TopMemoryContext, segsize). Same fallible rule.
-        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
-        with_globals(|g| {
-            let c = g.get_mut(pcxt);
-            c.nworkers = 0;
-            c.private_memory = pm;
-            c.buffer = buffer;
-            c.toc = ShmToc::default();
-        });
-    }
+    // Create DSM and initialize with a new table of contents. But if the user
+    // didn't request any workers, just use backend-private memory; also fall
+    // back to private memory (and no workers) if dsm_create hits the
+    // max-segments limit. segsize is the full shm_toc_estimate total (TOC
+    // header + entry array + chunk space), not just the chunk space.
+    let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator))?;
+    establish_parallel_segment(pcxt, segsize)?;
 
     let toc = pcxt_toc(pcxt);
 
@@ -845,8 +963,7 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
     let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
     {
         let init = rt::collect_fixed_parallel_state::call()?;
-        let (_slot, offset) = cursor_parts(fps);
-        rt::fps_init::call(offset, init)?;
+        rt::fps_init::call(fps.0, init)?;
     }
     shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
 
@@ -854,64 +971,64 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
     if pcxt_nworkers(pcxt) > 0 {
         // Serialize shared libraries we have loaded.
         let libraryspace = shm_toc_allocate(toc, library_len);
-        rt::serialize_library_state::call(library_len, cursor_parts(libraryspace).1)?;
+        rt::serialize_library_state::call(library_len, libraryspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_LIBRARY, libraryspace);
 
         // Serialize GUC settings.
         let gucspace = shm_toc_allocate(toc, guc_len);
-        rt::serialize_guc_state::call(guc_len, cursor_parts(gucspace).1)?;
+        rt::serialize_guc_state::call(guc_len, gucspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_GUC, gucspace);
 
         // Serialize combo CID state.
         let combocidspace = shm_toc_allocate(toc, combocidlen);
-        rt::serialize_combocid_state::call(combocidlen, cursor_parts(combocidspace).1)?;
+        rt::serialize_combocid_state::call(combocidlen, combocidspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_COMBO_CID, combocidspace);
 
         // Serialize the transaction snapshot if the isolation level uses one.
         if rt::isolation_uses_xact_snapshot::call() {
             let tsnapspace = shm_toc_allocate(toc, tsnaplen);
-            rt::serialize_snapshot::call(transaction_snapshot, cursor_parts(tsnapspace).1)?;
+            rt::serialize_snapshot::call(transaction_snapshot, tsnapspace.0)?;
             shm_toc_insert(toc, PARALLEL_KEY_TRANSACTION_SNAPSHOT, tsnapspace);
         }
 
         // Serialize the active snapshot.
         let asnapspace = shm_toc_allocate(toc, asnaplen);
-        rt::serialize_snapshot::call(active_snapshot, cursor_parts(asnapspace).1)?;
+        rt::serialize_snapshot::call(active_snapshot, asnapspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_ACTIVE_SNAPSHOT, asnapspace);
 
         // Provide the handle for per-session segment.
         let session_dsm_handle_space = shm_toc_allocate(toc, core::mem::size_of::<dsm_handle>());
-        rt::write_dsm_handle::call(cursor_parts(session_dsm_handle_space).1, session_dsm_handle)?;
+        rt::write_dsm_handle::call(session_dsm_handle_space.0, session_dsm_handle)?;
         shm_toc_insert(toc, PARALLEL_KEY_SESSION_DSM, session_dsm_handle_space);
 
         // Serialize transaction state.
         let tstatespace = shm_toc_allocate(toc, tstatelen);
-        rt::serialize_transaction_state::call(tstatelen, cursor_parts(tstatespace).1)?;
+        rt::serialize_transaction_state::call(tstatelen, tstatespace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_TRANSACTION_STATE, tstatespace);
 
         // Serialize pending syncs.
         let pendingsyncsspace = shm_toc_allocate(toc, pendingsyncslen);
-        rt::serialize_pending_syncs::call(pendingsyncslen, cursor_parts(pendingsyncsspace).1)?;
+        rt::serialize_pending_syncs::call(pendingsyncslen, pendingsyncsspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_PENDING_SYNCS, pendingsyncsspace);
 
         // Serialize reindex state.
         let reindexspace = shm_toc_allocate(toc, reindexlen);
-        rt::serialize_reindex_state::call(reindexlen, cursor_parts(reindexspace).1)?;
+        rt::serialize_reindex_state::call(reindexlen, reindexspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_REINDEX_STATE, reindexspace);
 
         // Serialize relmapper state.
         let relmapperspace = shm_toc_allocate(toc, relmapperlen);
-        rt::serialize_relation_map::call(relmapperlen, cursor_parts(relmapperspace).1)?;
+        rt::serialize_relation_map::call(relmapperlen, relmapperspace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_RELMAPPER_STATE, relmapperspace);
 
         // Serialize uncommitted enum state.
         let uncommittedenumsspace = shm_toc_allocate(toc, uncommittedenumslen);
-        rt::serialize_uncommitted_enums::call(cursor_parts(uncommittedenumsspace).1, uncommittedenumslen)?;
+        rt::serialize_uncommitted_enums::call(uncommittedenumsspace.0, uncommittedenumslen)?;
         shm_toc_insert(toc, PARALLEL_KEY_UNCOMMITTEDENUMS, uncommittedenumsspace);
 
         // Serialize our ClientConnectionInfo.
         let clientconninfospace = shm_toc_allocate(toc, clientconninfolen);
-        rt::serialize_client_connection_info::call(clientconninfolen, cursor_parts(clientconninfospace).1)?;
+        rt::serialize_client_connection_info::call(clientconninfolen, clientconninfospace.0)?;
         shm_toc_insert(toc, PARALLEL_KEY_CLIENTCONNINFO, clientconninfospace);
 
         // Allocate space for worker information (palloc0). Fallible: OOM goes
@@ -933,7 +1050,7 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         // Establish error queues in dynamic shared memory.
         let error_queue_space =
             shm_toc_allocate(toc, mul_size(PARALLEL_ERROR_QUEUE_SIZE, nworkers as Size)?);
-        let eq_base = cursor_parts(error_queue_space).1;
+        let eq_base = error_queue_space.0;
         let mut i = 0;
         while i < nworkers {
             let start = eq_base + (i as Size) * PARALLEL_ERROR_QUEUE_SIZE;
@@ -946,10 +1063,12 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         shm_toc_insert(toc, PARALLEL_KEY_ERROR_QUEUE, error_queue_space);
 
         // Serialize entrypoint information. "library\0function\0".
+        // C: strcpy(entrypointstate, library_name);
+        //    strcpy(entrypointstate + lnamelen + 1, function_name);
         let (library_name, function_name) =
             with_globals(|g| (g.get(pcxt).library_name.clone(), g.get(pcxt).function_name.clone()));
         let entrypointstate = shm_toc_allocate(toc, library_name.len() + function_name.len() + 2);
-        rt::write_entrypoint::call(cursor_parts(entrypointstate).1, &library_name, &function_name)?;
+        write_entrypoint(entrypointstate, &library_name, &function_name);
         shm_toc_insert(toc, PARALLEL_KEY_ENTRYPOINT, entrypointstate);
     }
 
@@ -996,13 +1115,13 @@ pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
     // Reset a few bits of fixed parallel state to a clean state.
     let toc = pcxt_toc(pcxt);
     let fps = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).ok_or_else(missing_fixed_key)?;
-    rt::fps_reset_last_xlog_end::call(cursor_parts(fps).1)?;
+    rt::fps_reset_last_xlog_end::call(fps.0)?;
 
     // Recreate error queues (if they exist).
     if pcxt_nworkers(pcxt) > 0 {
         let error_queue_space =
             shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false).ok_or_else(missing_error_queue_key)?;
-        let eq_base = cursor_parts(error_queue_space).1;
+        let eq_base = error_queue_space.0;
         let nworkers = pcxt_nworkers(pcxt);
         let seg = with_globals(|g| g.get(pcxt).seg);
         let mut i = 0;
@@ -1273,9 +1392,9 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
     }
 
     let toc = pcxt_toc(pcxt);
-    if !with_globals(|g| g.get(pcxt).buffer.is_empty()) {
+    if with_globals(|g| g.get(pcxt).toc.is_some()) {
         let fps = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).ok_or_else(missing_fixed_key)?;
-        let last = rt::fps_get_last_xlog_end::call(cursor_parts(fps).1)?;
+        let last = rt::fps_get_last_xlog_end::call(fps.0)?;
         if last > rt::xact_last_rec_end::call()? {
             rt::set_xact_last_rec_end::call(last)?;
         }
@@ -1351,18 +1470,31 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
         }
     }
 
-    // If we allocated a shared memory segment, detach it.
-    let seg = with_globals(|g| g.get(pcxt).seg);
-    if !seg.is_null() {
-        rt::dsm_detach::call(seg_to_parallel(seg))?;
-        with_globals(|g| g.get_mut(pcxt).seg = DsmSegmentHandle::NULL);
-    }
+    // If we allocated a shared memory segment, detach it (C: dsm_detach(seg);
+    // seg = NULL). Dropping the real `DsmSegment` guard runs `dsm_detach`.
+    let seg_guard = with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        c.seg = DsmSegmentHandle::NULL;
+        c.toc = None;
+        c.toc_base = 0;
+        c.seg_guard.take()
+    });
+    drop(seg_guard);
 
-    // If this context is in backend-private memory, free that instead.
-    let private_memory = with_globals(|g| g.get(pcxt).private_memory);
-    if private_memory != 0 {
-        rt::pfree::call(private_memory)?;
-        with_globals(|g| g.get_mut(pcxt).private_memory = 0);
+    // If this context is in backend-private memory, free that instead (C:
+    // pfree(private_memory); private_memory = NULL). The buffer was allocated in
+    // TopMemoryContext, so it is freed back there.
+    let private_memory = with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        c.toc = None;
+        c.toc_base = 0;
+        c.private_memory.take()
+    });
+    if let Some(pm) = private_memory {
+        let top = rt::top_memory_context::call();
+        // SAFETY: `pm.ptr`/`pm.layout` are exactly the allocation made from this
+        // same TopMemoryContext in `establish_parallel_segment`, freed once.
+        unsafe { top.deallocate(pm.ptr, pm.layout) };
     }
 
     // We can't finish transaction commit/abort until all workers have exited; in
@@ -1636,8 +1768,10 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     rt::set_parallel_start_timestamps::call(fps.xact_ts, fps.stmt_ts)?;
 
     // Identify the entry point to be called.
+    // C: library_name = entrypointstate;
+    //    function_name = entrypointstate + strlen(library_name) + 1;
     let entrypointstate = worker_lookup(toc, PARALLEL_KEY_ENTRYPOINT)?;
-    let (library_name, function_name) = rt::read_entrypoint::call(entrypointstate)?;
+    let (library_name, function_name) = read_entrypoint(SerializeCursor(entrypointstate))?;
     let entrypt = lookup_parallel_worker_function(&library_name, &function_name)?;
 
     // Restore current session authorization and role id. No verification.
@@ -1877,4 +2011,323 @@ pub fn init_seams() {
     seams::store_jit_instrumentation_header::set(store_jit_instrumentation_header);
     seams::jit_instrumentation_from_chunk::set(jit_instrumentation_from_chunk);
     seams::shared_jit_num_workers::set(shared_jit_num_workers);
+}
+
+// ===========================================================================
+// Runtime test: the DSM-init core over a REAL dsm-core segment.
+// ===========================================================================
+
+#[cfg(test)]
+mod dsm_substrate_tests {
+    //! Drive `InitializeParallelDSM`'s DSM-init core
+    //! ([`establish_parallel_segment`] + the `shm_toc` allocate/insert/lookup
+    //! helpers) over a *real* `dsm-core` segment, using the merged
+    //! `dsm_test_bringup()` harness (feature `test-bringup`). This proves the
+    //! conversion off the `Vec<u8>` emulation actually creates a real DSM
+    //! segment and that the TOC chunks resolve to real, in-segment addresses —
+    //! the whole point of family `dsm-substrate-convert`.
+
+    use std::sync::{Mutex, Once};
+
+    use backend_storage_ipc_dsm_core::dsm::{dsm_segment_address, dsm_segment_map_length};
+    use backend_storage_ipc_dsm_core::test_bringup::dsm_test_bringup;
+
+    use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    static INSTALL_TOP_MCX: Once = Once::new();
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The `top_memory_context()` seam body for the test: the bring-up's
+    /// `TopMemoryContext` stand-in. `dsm_test_bringup()` is idempotent per
+    /// thread and returns that same thread-local `Mcx<'static>`, so the seam
+    /// (a plain `fn` pointer, no captures) can recover it here.
+    fn test_top_mcx() -> Mcx<'static> {
+        dsm_test_bringup()
+    }
+
+    /// Install the `top_memory_context` seam once for the whole test process
+    /// (seam slots are process-global; a second `set` panics "installed twice").
+    fn install_top_mcx_once() {
+        INSTALL_TOP_MCX.call_once(|| rt::top_memory_context::set(test_top_mcx));
+    }
+
+    /// Push a bare context into the registry directly (the seam-driven
+    /// `create_parallel_context` would need the transaction/error-stack seams,
+    /// which are out of family A's scope). Mirrors the post-`palloc0`
+    /// `ParallelContext` with `nworkers` set.
+    fn new_test_context(nworkers: i32) -> ParallelContextHandle {
+        with_globals(|g| {
+            let slot = g.slots.len();
+            g.slots.push(Some(ParallelContext {
+                subid: 0,
+                nworkers,
+                nworkers_to_launch: nworkers,
+                nworkers_launched: 0,
+                library_name: "postgres".to_string(),
+                function_name: "ParallelQueryMain".to_string(),
+                error_context_stack: 0,
+                estimator: shm_toc_estimator::default(),
+                seg: DsmSegmentHandle::NULL,
+                seg_guard: None,
+                private_memory: None,
+                toc: None,
+                toc_base: 0,
+                worker: Vec::new(),
+                nknown_attached_workers: 0,
+                known_attached_workers: Vec::new(),
+            }));
+            let h = ParallelContextHandle(slot);
+            g.list.insert(0, h);
+            h
+        })
+    }
+
+    /// Tear a test context back down (the registry slot drop + segment detach /
+    /// private-memory free), mirroring `DestroyParallelContext`'s resource
+    /// release without the worker/bgworker seams.
+    fn drop_test_context(pcxt: ParallelContextHandle, top: Mcx<'static>) {
+        with_globals(|g| {
+            if let Some(pos) = g.list.iter().position(|&p| p == pcxt) {
+                g.list.remove(pos);
+            }
+        });
+        let (seg_guard, private_memory) = with_globals(|g| {
+            let c = g.get_mut(pcxt);
+            c.seg = DsmSegmentHandle::NULL;
+            c.toc = None;
+            c.toc_base = 0;
+            (c.seg_guard.take(), c.private_memory.take())
+        });
+        drop(seg_guard);
+        if let Some(pm) = private_memory {
+            // SAFETY: pm was allocated from this same TopMemoryContext.
+            unsafe { top.deallocate(pm.ptr, pm.layout) };
+        }
+        with_globals(|g| {
+            if let Some(slot) = g.slots.get_mut(pcxt.0) {
+                *slot = None;
+            }
+        });
+    }
+
+    /// With workers budgeted, the DSM-init core creates a REAL dsm-core segment,
+    /// builds a real `shm_toc` over its base, and the allocate/insert/lookup
+    /// helpers round-trip chunks to real, in-segment addresses.
+    #[test]
+    fn dsm_init_core_creates_real_segment_and_resolves_chunks() {
+        let _g = guard();
+        let top = dsm_test_bringup();
+        // The DSM-init core reaches TopMemoryContext through this seam; point it
+        // at the bring-up's TopMemoryContext stand-in.
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 2);
+
+        // Estimate: fixed state + one error queue + an entrypoint string, plus
+        // their keys — enough to size a non-trivial segment.
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, core::mem::size_of::<FixedParallelState>());
+        shm_toc_estimate_keys(est, 1);
+        shm_toc_estimate_chunk(est, PARALLEL_ERROR_QUEUE_SIZE * 2);
+        shm_toc_estimate_keys(est, 1);
+        shm_toc_estimate_chunk(est, 32);
+        shm_toc_estimate_keys(est, 1);
+
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        assert!(segsize >= PARALLEL_ERROR_QUEUE_SIZE * 2);
+
+        // The DSM-init core: real dsm_create + ShmToc::create.
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+
+        // A real segment was created (no private-memory fallback), and its id is
+        // the real dsm-core id carried by the handle.
+        let (seg_handle, base_recorded, has_guard, no_private) = with_globals(|g| {
+            let c = g.get(pcxt);
+            (c.seg, c.toc_base, c.seg_guard.is_some(), c.private_memory.is_none())
+        });
+        assert!(!seg_handle.is_null(), "expected a real DSM segment");
+        assert!(has_guard, "expected the real DsmSegment guard to be held");
+        assert!(no_private, "expected no private-memory fallback with workers");
+
+        // The recorded base equals the real dsm_segment_address for the id the
+        // handle carries (opacity-inherited: handle value == DsmSegmentId).
+        let id = seg_id_of(seg_handle);
+        let real_base = dsm_segment_address(id);
+        assert!(!real_base.is_null());
+        assert_eq!(base_recorded, real_base as usize);
+        assert!(dsm_segment_map_length(id) >= segsize);
+
+        // Allocate + insert + look up chunks through the real shm_toc; every
+        // resolved chunk must be a real address inside the mapped segment.
+        let toc = pcxt_toc(pcxt);
+        let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
+        shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
+        let eq = shm_toc_allocate(toc, PARALLEL_ERROR_QUEUE_SIZE * 2);
+        shm_toc_insert(toc, PARALLEL_KEY_ERROR_QUEUE, eq);
+
+        let seg_lo = real_base as usize;
+        let seg_hi = seg_lo + segsize;
+        for key in [PARALLEL_KEY_FIXED, PARALLEL_KEY_ERROR_QUEUE] {
+            let found = shm_toc_lookup(toc, key, false).expect("key present");
+            // The cursor IS the real chunk address (family shm-toc-address).
+            let addr = found.0;
+            let _ = base_recorded;
+            assert!(
+                addr >= seg_lo && addr < seg_hi,
+                "chunk for key {key:#x} resolves to a real in-segment address"
+            );
+            // The chunk is genuinely writable shared memory.
+            unsafe {
+                let p = addr as *mut u8;
+                p.write(0xAB);
+                assert_eq!(p.read(), 0xAB);
+            }
+        }
+
+        // A missing key with no_error returns None (real shm_toc_lookup).
+        assert!(shm_toc_lookup(toc, PARALLEL_KEY_GUC, true).is_none());
+
+        drop_test_context(pcxt, top);
+    }
+
+    /// The typed chunk store/load contract (family `shm-toc-address`): the
+    /// `repr(C)` payloads are written and read back IN PLACE at the real chunk
+    /// address — no side tables. Proves `store_fixed_state`/`fixed_*`,
+    /// `store_cstring`/`cursor_cstring`, `store_instrumentation_header`/`sei_*`/
+    /// `set_sei_plan_node_id`, `store_jit_instrumentation_header`/
+    /// `shared_jit_num_workers`, and `write_entrypoint`/`read_entrypoint`
+    /// round-trip through real in-segment memory.
+    #[test]
+    fn typed_chunks_round_trip_in_place_at_real_address() {
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 2);
+
+        // Size a segment big enough for everything below.
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, 4096);
+        shm_toc_estimate_keys(est, 6);
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+        let toc = pcxt_toc(pcxt);
+        let base = with_globals(|g| g.get(pcxt).toc_base);
+        let seg_hi = base + segsize;
+        let in_seg = |c: SerializeCursor| c.0 >= base && c.0 < seg_hi;
+
+        // FixedParallelExecutorState: write in place, read each field back.
+        let fps_chunk =
+            shm_toc_allocate(toc, core::mem::size_of::<FixedParallelExecutorState>());
+        assert!(in_seg(fps_chunk));
+        let fpes = store_fixed_state(
+            fps_chunk,
+            FixedParallelExecutorState {
+                tuples_needed: 42,
+                param_exec: 7,
+                eflags: 3,
+                jit_flags: 5,
+            },
+        );
+        assert_eq!(fpes.0, fps_chunk.0, "handle is a thin view over the address");
+        assert_eq!(fixed_tuples_needed(fpes), 42);
+        assert_eq!(fixed_param_exec(fpes), 7);
+        assert_eq!(fixed_eflags(fpes), 3);
+        assert_eq!(fixed_jit_flags(fpes), 5);
+        set_fixed_param_exec(fpes, 99);
+        assert_eq!(fixed_param_exec(fpes), 99);
+        // Reinterpreting the same chunk recovers the same data.
+        assert_eq!(fixed_eflags(fixed_state_from_chunk(fps_chunk)), 3);
+
+        // cstring: store + read back NUL-terminated.
+        let s_chunk = shm_toc_allocate(toc, 16);
+        store_cstring(s_chunk, "hello".to_string());
+        assert_eq!(cursor_cstring(s_chunk).unwrap(), "hello");
+
+        // SharedExecutorInstrumentation header + plan_node_id flexible array.
+        let num_plan_nodes = 3;
+        let num_workers = 2;
+        let instr_len = SEI_PLAN_NODE_ID_OFFSET + 4 * (num_plan_nodes as usize);
+        let i_chunk = shm_toc_allocate(toc, instr_len);
+        let sei = store_instrumentation_header(
+            i_chunk,
+            SharedExecutorInstrumentation {
+                instrument_options: 11,
+                instrument_offset: instr_len as i32,
+                num_workers,
+                num_plan_nodes,
+            },
+        );
+        assert_eq!(sei_instrument_options(sei), 11);
+        assert_eq!(sei_num_workers(sei), num_workers);
+        assert_eq!(sei_num_plan_nodes(sei), num_plan_nodes);
+        for i in 0..num_plan_nodes {
+            set_sei_plan_node_id(sei, i, 100 + i);
+        }
+        for i in 0..num_plan_nodes {
+            assert_eq!(sei_plan_node_id(sei, i), 100 + i);
+        }
+        // The header reinterpreted from the chunk reads identically.
+        assert_eq!(sei_num_plan_nodes(instrumentation_from_chunk(i_chunk)), num_plan_nodes);
+
+        // SharedJitInstrumentation header.
+        let jit_chunk = shm_toc_allocate(toc, 256);
+        let jit = store_jit_instrumentation_header(jit_chunk, 4);
+        assert_eq!(shared_jit_num_workers(jit), 4);
+        assert_eq!(shared_jit_num_workers(jit_instrumentation_from_chunk(jit_chunk)), 4);
+
+        // Entrypoint "library\0function\0" bytes round-trip.
+        let e_chunk = shm_toc_allocate(toc, "postgres".len() + "ParallelQueryMain".len() + 2);
+        write_entrypoint(e_chunk, "postgres", "ParallelQueryMain");
+        let (lib, func) = read_entrypoint(e_chunk).unwrap();
+        assert_eq!(lib, "postgres");
+        assert_eq!(func, "ParallelQueryMain");
+
+        drop_test_context(pcxt, top);
+    }
+
+    /// With no workers budgeted, the DSM-init core takes the backend-private
+    /// memory fallback: no real DSM segment, a private buffer, and the shm_toc
+    /// still resolves chunks to real addresses inside that buffer.
+    #[test]
+    fn dsm_init_core_no_workers_uses_private_memory() {
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 0);
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, core::mem::size_of::<FixedParallelState>());
+        shm_toc_estimate_keys(est, 1);
+
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+
+        let (seg_null, has_private, base) = with_globals(|g| {
+            let c = g.get(pcxt);
+            (c.seg.is_null(), c.private_memory.is_some(), c.toc_base)
+        });
+        assert!(seg_null, "no DSM segment when nworkers == 0");
+        assert!(has_private, "expected the private-memory fallback");
+        assert!(base != 0);
+
+        let toc = pcxt_toc(pcxt);
+        let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
+        shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
+        let found = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).expect("fixed key present");
+        // The cursor IS the real chunk address (family shm-toc-address).
+        let addr = found.0;
+        assert!(addr >= base && addr < base + segsize);
+        unsafe {
+            let p = addr as *mut u8;
+            p.write(0xCD);
+            assert_eq!(p.read(), 0xCD);
+        }
+
+        drop_test_context(pcxt, top);
+    }
 }

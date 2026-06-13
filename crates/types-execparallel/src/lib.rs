@@ -24,8 +24,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use types_core::instrument::instr_time;
 use types_datum::Datum;
 
@@ -100,6 +98,11 @@ pub struct JitInstrumentation {
 
 /// `struct FixedParallelExecutorState` (execParallel.c) — fixed-size random
 /// state passed to parallel workers, stored under `PARALLEL_KEY_EXECUTOR_FIXED`.
+///
+/// `#[repr(C)]` because this is written/read *in place* at a real `shm_toc`
+/// chunk address that crosses the leader/worker process boundary: the field
+/// order and layout must match the C struct exactly.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedParallelExecutorState {
     /// `int64 tuples_needed` — tuple bound (see `ExecSetTupleBound`).
@@ -113,11 +116,21 @@ pub struct FixedParallelExecutorState {
     pub jit_flags: i32,
 }
 
-/// `struct SharedExecutorInstrumentation` (execParallel.c) — DSM structure for
-/// accumulating per-`PlanState` instrumentation, stored under
-/// `PARALLEL_KEY_INSTRUMENTATION`. `plan_node_id` is the C flexible array
-/// member, modeled as an owned `Vec`.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// `struct SharedExecutorInstrumentation` (execParallel.c) — the fixed leading
+/// header of the DSM structure for accumulating per-`PlanState`
+/// instrumentation, stored under `PARALLEL_KEY_INSTRUMENTATION`.
+///
+/// `#[repr(C)]` because it is written/read *in place* at a real `shm_toc` chunk
+/// address. In C the four leading `int`s are followed by the
+/// `plan_node_id[FLEXIBLE_ARRAY_MEMBER]` array (this many = `num_plan_nodes`),
+/// and then, at `instrument_offset` from the start of the struct, by
+/// `num_plan_nodes * num_workers` `Instrumentation` objects
+/// (`GetInstrumentationArray`). The trailing `plan_node_id` ints and the
+/// `Instrumentation` array are written separately into the same chunk through
+/// the `set_sei_plan_node_id` / `instr_*` / `sei_*` seams, exactly as the C
+/// writes them past the header.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SharedExecutorInstrumentation {
     /// `int instrument_options` — same meaning as in instrument.c.
     pub instrument_options: i32,
@@ -127,9 +140,12 @@ pub struct SharedExecutorInstrumentation {
     pub num_workers: i32,
     /// `int num_plan_nodes`.
     pub num_plan_nodes: i32,
-    /// `int plan_node_id[FLEXIBLE_ARRAY_MEMBER]`.
-    pub plan_node_id: Vec<i32>,
 }
+
+/// `offsetof(SharedExecutorInstrumentation, plan_node_id)` — the four leading
+/// `int`s before the flexible `plan_node_id` array.
+pub const SHARED_EXEC_INSTRUMENTATION_HEADER_SIZE: usize =
+    core::mem::size_of::<SharedExecutorInstrumentation>();
 
 // ===========================================================================
 // Handle newtypes for live objects owned by not-yet-ported subsystems.
@@ -200,13 +216,21 @@ handle!(
     /// Live `ExprContext *` (`nodes/execnodes.h`).
     ExprContextHandle);
 handle!(
-    /// In-DSM `FixedParallelExecutorState` allocation.
+    /// In-DSM `FixedParallelExecutorState *` — the real `shm_toc` chunk address
+    /// (a raw pointer reinterpreted as `usize`), a thin view over the in-segment
+    /// `repr(C)` struct. `0` is the NULL sentinel.
     FixedStateHandle);
 handle!(
-    /// In-DSM `SharedExecutorInstrumentation` allocation.
+    /// In-DSM `SharedExecutorInstrumentation *` — the real `shm_toc` chunk
+    /// address (a raw pointer reinterpreted as `usize`), a thin view over the
+    /// in-segment `repr(C)` header (and the `plan_node_id` /`Instrumentation`
+    /// arrays that follow it). `0` is the NULL sentinel.
     InstrumentationHandle);
 handle!(
-    /// In-DSM `SharedJitInstrumentation` allocation.
+    /// In-DSM `SharedJitInstrumentation *` — the real `shm_toc` chunk address
+    /// (a raw pointer reinterpreted as `usize`), a thin view over the in-segment
+    /// `repr(C)` header (and the `JitInstrumentation` array that follows it).
+    /// `0` is the NULL sentinel.
     JitInstrumentationHandle);
 handle!(
     /// Live `Snapshot` (`utils/snapshot.h`) — the active snapshot, threaded by
@@ -237,9 +261,14 @@ handle!(
     /// it is an inherited-opacity handle here.
     FileSetHandle);
 
-/// Cursor over a serialized buffer in DSA/DSM storage that the
-/// (de)serialization helpers advance as they read/write
-/// (`utils/adt/datum.c` / `nodes/params.c` `start_address`).
+/// A real chunk address in DSM/DSA storage — the raw pointer
+/// (`shm_toc_allocate`/`shm_toc_lookup` result, or a `dsa_get_address` result)
+/// reinterpreted as `usize`. The (de)serialization helpers advance it as they
+/// read/write (`utils/adt/datum.c` / `nodes/params.c` `start_address`), so it
+/// doubles as the moving cursor C threads through `&start_address`.
+///
+/// This is a *real address* into the mapped segment (since family
+/// `shm-toc-address`), not a `(slot<<32)|offset` side-table token.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SerializeCursor(pub usize);
 

@@ -1560,6 +1560,32 @@ pub fn init_seams() {
         Ok(())
     });
     seams::pop_active_snapshot::set(PopActiveSnapshot);
+    seams::historic_snapshot_active::set(HistoricSnapshotActive);
+    seams::active_snapshot_set::set(ActiveSnapshotSet);
+    seams::get_latest_snapshot::set(|| Ok(GetLatestSnapshot()?.borrow().clone()));
+    seams::get_transaction_snapshot::set(|| Ok(GetTransactionSnapshot()?.borrow().clone()));
+    seams::invalidate_catalog_snapshot::set(|| {
+        // The seam is infallible (`InvalidateCatalogSnapshot` is `void` in C);
+        // its only fallible step is `SnapshotResetXmin`, which does not
+        // `ereport` in C.
+        InvalidateCatalogSnapshot().expect("InvalidateCatalogSnapshot: SnapshotResetXmin must not ereport");
+    });
+    seams::push_active_snapshot_transaction::set(|| {
+        PushActiveSnapshot(&GetTransactionSnapshot()?);
+        Ok(())
+    });
+    seams::push_copied_active_snapshot::set(|| {
+        PushCopiedSnapshot(&GetActiveSnapshot());
+        Ok(())
+    });
+    seams::update_active_snapshot_command_id::set(UpdateActiveSnapshotCommandId);
+    seams::unregister_snapshot_from_owner::set(|snapshot, _owner| {
+        // The C `Snapshot` is a shared pointer crossing as a bare `Rc`; the
+        // resowner `Forget` is the caller's RAII responsibility, so the owner is
+        // unused here (the `NoOwner` core). Cannot `ereport` in C; modeled bare.
+        UnregisterSnapshotFromOwner(&new_handle((*snapshot).clone()))
+            .expect("UnregisterSnapshotFromOwner: SnapshotResetXmin must not ereport");
+    });
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket

@@ -74,4 +74,7 @@ fn auto_vac_worker_main_entry(_startup_data: &StartupData) -> ! {
 pub fn init_seams() {
     backend_postmaster_autovacuum_seams::auto_vac_launcher_main::set(auto_vac_launcher_main_entry);
     backend_postmaster_autovacuum_seams::auto_vac_worker_main::set(auto_vac_worker_main_entry);
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match.
+    backend_postmaster_autovacuum_seams::autovacuum_worker_slots::set(core::autovacuum_worker_slots);
+    backend_postmaster_autovacuum_seams::auto_vacuum_shmem_init::set(shmem::AutoVacuumShmemInit);
 }

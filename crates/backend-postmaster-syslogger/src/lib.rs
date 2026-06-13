@@ -1391,12 +1391,51 @@ fn truncate_to_cstr_capacity(s: &mut String, cap: usize) {
     s.truncate(end);
 }
 
+/// `sys_logger_main` inward-seam adapter (`-> !`): the child-launch machinery
+/// (`postmaster_child_launch`) invokes the seam with only `&StartupData`, but
+/// the C `SysLoggerMain` also reads the per-process globals `MyStartTime`,
+/// `pg_mode_mask`, and `MyLatch`. Those are sourced here at the seam boundary —
+/// `MyStartTime`/`data_directory_mode` (the C `pg_mode_mask`) from
+/// `backend_utils_init_small::globals`, and `MyLatch` from the latch unit's
+/// `my_latch()` (the C `MyLatch` global, set by `InitProcessLocalLatch`; NULL
+/// is a C NULL-deref) — and passed into the real body. `SysLoggerMain` is
+/// `pg_noreturn` in C and
+/// only leaves via `proc_exit` on pipe EOF, so a returned `Ok` is unreachable;
+/// a top-level `Err` is an unhandled ERROR promoted to FATAL, re-thrown to the
+/// process exit exactly as in C.
+fn sys_logger_main_entry(startup_data: &types_startup::StartupData) -> ! {
+    // Assert(startup_data_len == 0); — non-EXEC_BACKEND syslogger gets NULL.
+    debug_assert!(matches!(startup_data, types_startup::StartupData::None));
+    let startup_slice: &[u8] = &[];
+
+    let start_time = backend_utils_init_small::globals::MyStartTime();
+    let mode_mask = backend_utils_init_small::globals::data_directory_mode() as u32;
+    let my_latch = backend_storage_ipc_latch::my_latch()
+        .expect("SysLoggerMain: MyLatch is NULL (InitProcessLocalLatch not run)");
+
+    match SysLoggerMain(startup_slice, start_time, mode_mask, my_latch) {
+        Ok(()) => unreachable!("SysLoggerMain returned Ok; it only exits via proc_exit"),
+        Err(err) => {
+            backend_utils_error::emit_error_report_for(&err);
+            backend_storage_ipc_seams::proc_exit::call(
+                1,
+                backend_utils_init_small_seams::my_proc_pid::call(),
+            )
+        }
+    }
+}
+
 /// Install this crate's implementations into its seam crate, plus its GUC
 /// storage variables into the GUC tables' slots.
 pub fn init_seams() {
     use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
 
     backend_postmaster_syslogger_seams::write_syslogger_file::set(crate::write_syslogger_file);
+    backend_postmaster_syslogger_seams::sys_logger_main::set(sys_logger_main_entry);
+    // The plain `logging_collector` seam (read by signalfuncs.c's
+    // pg_rotate_logfile) mirrors the `Logging_collector` GUC; install it to the
+    // same accessor backing the GUC get/set pair below.
+    backend_postmaster_syslogger_seams::logging_collector::set(config::logging_collector);
 
     vars::Logging_collector.install(GucVarAccessors {
         get: config::logging_collector,
