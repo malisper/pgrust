@@ -218,10 +218,14 @@ fn backend_initialize_inner(
 
     // port = MyProcPort = pq_init(client_sock);
     //
-    // pq_init allocates the Port in TopMemoryContext, installs it as MyProcPort,
-    // and registers a socket on_proc_exit. The owner stores the result in
-    // MyProcPort; we then read/mutate it through `with_my_proc_port`.
-    backend_libpq_pqcomm_seams::pq_init::call(mcx, client_sock)?;
+    // pq_init allocates the Port, applies TCP options, initializes the message
+    // buffers, registers a socket on_proc_exit, and builds FeBeWaitSet (reading
+    // C's MyLatch, passed explicitly here per the no-ambient-global rule). It
+    // returns the Port; we install it as MyProcPort, then read/mutate it
+    // through `with_my_proc_port`.
+    let my_latch = backend_storage_ipc_latch_seams::my_latch::call();
+    let port = backend_libpq_pqcomm_seams::pq_init::call(&client_sock, my_latch)?;
+    backend_utils_init_small_seams::set_my_proc_port::call(port);
 
     // whereToSendOutput = DestRemote; (now safe to ereport to client)
     backend_utils_error::config::set_where_to_send_output(types_dest::CommandDest::Remote);
@@ -452,8 +456,8 @@ fn build_ps_title() {
 fn process_ssl_startup() -> PgResult<i32> {
     // Assert(!port->ssl_in_use);
     // pq_startmsgread(); firstbyte = pq_peekbyte(); pq_endmsgread();
-    backend_libpq_pqcomm_seams::pq_startmsgread::call();
-    let firstbyte = backend_libpq_pqcomm_seams::pq_peekbyte::call();
+    backend_libpq_pqcomm_seams::pq_startmsgread::call()?;
+    let firstbyte = backend_libpq_pqcomm_seams::pq_peekbyte::call()?;
     backend_libpq_pqcomm_seams::pq_endmsgread::call();
 
     // if (firstbyte == EOF) return STATUS_ERROR;
@@ -522,7 +526,7 @@ fn reject_direct_ssl() -> PgResult<i32> {
 /// option strings and the negotiate-version message are allocated.
 fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgResult<i32> {
     // pq_startmsgread();
-    backend_libpq_pqcomm_seams::pq_startmsgread::call();
+    backend_libpq_pqcomm_seams::pq_startmsgread::call()?;
 
     // Read the 4-byte big-endian length word one-then-three bytes.
     let mut len_bytes = [0u8; 4];

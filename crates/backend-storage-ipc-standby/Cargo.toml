@@ -34,6 +34,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
 mcx = { path = "../mcx" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
 types-core = { path = "../types-core" }

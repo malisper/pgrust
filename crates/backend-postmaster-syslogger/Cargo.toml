@@ -25,12 +25,15 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
 backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-postmaster-launch-backend-seams = { path = "../backend-postmaster-launch-backend-seams" }
 backend-timezone-pgtz-seams = { path = "../backend-timezone-pgtz-seams" }
 backend-timezone-strftime-seams = { path = "../backend-timezone-strftime-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+types-startup = { path = "../types-startup" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
 libc = "0.2"
