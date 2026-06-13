@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, PgString, PgVec};
 use types_core::{Oid, PgWChar};
 use types_error::PgResult;
 use types_locale::PgLocale;
@@ -101,6 +101,41 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_newlocale_from_collation(collid)->collate_is_c` (pg_locale.c): whether
+    /// the collation's `LC_COLLATE` is the C/POSIX locale. The C `varstr_cmp`
+    /// reads this off the resolved `pg_locale_t`; the comparison family has no
+    /// `Mcx` to materialize the full [`PgLocale`] handle, so this seam exposes the
+    /// single flag keyed by OID against pg_locale.c's permanent cache. `Err`
+    /// carries the catalog-read / `ereport(ERROR)` surface of resolving the
+    /// collation (e.g. a dropped collation).
+    pub fn collation_is_c(collid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pg_newlocale_from_collation(collid)->deterministic` (pg_locale.c): whether
+    /// the collation is deterministic (no equal-but-distinct byte sequences).
+    /// Read off the resolved `pg_locale_t` by `texteq`/`textne`/`text_starts_with`
+    /// /`btvarstrequalimage`; exposed as the single flag keyed by OID for the same
+    /// reason as [`collation_is_c`]. `Err` carries the resolve failure surface.
+    pub fn collation_is_deterministic(collid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `pg_strncoll(arg1, len1, arg2, len2, locale)` (pg_locale.c): collation
+    /// comparison of two byte ranges under the resolved locale identified by
+    /// `collid`. C passes the `pg_locale_t` cache pointer directly; the layered
+    /// `PgLocale` flag core does not carry the provider-specific `info` union,
+    /// so this seam re-keys by `collid` (the owner re-resolves the same cache
+    /// entry `pg_newlocale_from_collation` built). Returns the libc/ICU
+    /// `strncoll` sign result (`<0`, `0`, `>0`). The non-greedy / greedy
+    /// substring search and the nondeterministic-collation comparators are the
+    /// callers. Argument order follows the crate convention (`collid` first,
+    /// matching `pg_strcoll`). `Err` carries the provider's `ereport(ERROR)`
+    /// surface (e.g. an encoding conversion failure inside ICU).
+    pub fn pg_strncoll(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `pg_wc_is*` (regc_pg_locale.c): evaluate one ctype predicate of the
     /// `class` family for wide character `c` under the active non-C-locale
     /// regex `collation`. The regex engine owns the strategy selection and the
@@ -126,4 +161,63 @@ seam_core::seam!(
     /// engine handles the C-locale path and the LIBC `is_default` ASCII-forcing;
     /// everything else reaches the provider `info` union owned by pg_locale.c.
     pub fn regex_wc_tolower(collation: Oid, c: PgWChar) -> PgWChar
+);
+
+seam_core::seam!(
+    /// `int pg_strcoll(const char *arg1, const char *arg2, pg_locale_t locale)`
+    /// (pg_locale.c): collation-aware 3-way compare of two NUL-terminated
+    /// strings through the locale's `strncoll` provider method. The C value is
+    /// keyed on a `pg_locale_t`; here it is keyed on the collation OID
+    /// (`collid`), which the owner re-resolves through its permanent cache (the
+    /// `info` union / `collate` vtable live in pg_locale.c). `arg1`/`arg2` are
+    /// the string payload bytes (the caller has stripped trailing NULs and
+    /// NUL-terminates internally). `Err` carries the provider's
+    /// `ereport(ERROR)`.
+    pub fn pg_strcoll(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `bool pg_strxfrm_enabled(pg_locale_t locale)` (pg_locale.c): whether the
+    /// locale's provider supports `strxfrm`-style transformation (used to decide
+    /// whether abbreviated keys are usable). Keyed on `collid` per the
+    /// re-resolution convention above.
+    pub fn pg_strxfrm_enabled(collid: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `size_t pg_strxfrm(char *dest, const char *src, size_t destsize,
+    /// pg_locale_t locale)` (pg_locale.c): transform `src` into a binary blob
+    /// whose plain byte comparison equals the locale comparison. The C API
+    /// fills a caller buffer of `destsize` and returns the full blob length
+    /// (which may exceed `destsize`, leaving the buffer undefined). The owned
+    /// surface returns the complete transformed blob (charged to `mcx`); the
+    /// caller takes the prefix it needs. `Err` carries the provider's
+    /// `ereport(ERROR)` and OOM.
+    pub fn pg_strxfrm<'mcx>(
+        mcx: Mcx<'mcx>,
+        collid: Oid,
+        src: &[u8],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `bool pg_strxfrm_prefix_enabled(pg_locale_t locale)` (pg_locale.c):
+    /// whether the locale's provider supports the cheaper prefix-only transform
+    /// (`pg_strxfrm_prefix`). Keyed on `collid`.
+    pub fn pg_strxfrm_prefix_enabled(collid: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `size_t pg_strxfrm_prefix(char *dest, const char *src, size_t destsize,
+    /// pg_locale_t locale)` (pg_locale.c): transform only enough of `src` to
+    /// fill a `destsize`-byte prefix of the comparison blob, returning the
+    /// number of bytes actually written. The owned surface returns the written
+    /// prefix bytes (charged to `mcx`); its length is the C return value.
+    /// `Err` carries the provider's `ereport(ERROR)` and OOM.
+    pub fn pg_strxfrm_prefix<'mcx>(
+        mcx: Mcx<'mcx>,
+        collid: Oid,
+        src: &[u8],
+        destsize: usize,
+    ) -> PgResult<PgVec<'mcx, u8>>
 );
