@@ -52,3 +52,12 @@ seam_core::seam!(
     /// fallible (OOM).
     pub fn get_database_path(db_oid: Oid, spc_oid: Oid) -> PgResult<String>
 );
+
+seam_core::seam!(
+    /// `IsSystemRelation(rel)` (catalog.c).
+    pub fn is_system_relation(rel: &types_rel::Relation<'_>) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `IsSystemClass(relid, reltuple)` (catalog.c).
+    pub fn is_system_class(relid: Oid, form: &types_cluster::PgClassForm) -> PgResult<bool>
+);

@@ -1,0 +1,13 @@
+[package]
+name = "types-dfmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_dfmgr"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+libc = { version = "0.2", default-features = false }
