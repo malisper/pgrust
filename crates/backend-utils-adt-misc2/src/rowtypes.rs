@@ -1211,20 +1211,18 @@ fn column_image_cmp(
         let n = attlen as usize;
         Ok(memcmp_sign(&b1[..n], &b2[..n]))
     } else if attlen == -1 {
-        // Both images are already-detoasted 4-byte-header varlenas.
-        let b1 = v1.as_ref_bytes();
-        let b2 = v2.as_ref_bytes();
-        let data1 = &b1[VARHDRSZ..];
-        let data2 = &b2[VARHDRSZ..];
-        let min = core::cmp::min(data1.len(), data2.len());
+        // Both images are already-detoasted in-line varlenas (no external TOAST
+        // pointers / compression). They may carry a 1-byte ("short") or 4-byte
+        // header, exactly as `heap_deform_tuple` produced them, so read the
+        // payload via `VARDATA_ANY` / the logical payload length via
+        // `VARSIZE_ANY_EXHDR` (C: `toast_raw_datum_size` minus `VARHDRSZ`).
+        let (data1, len1) = varlena_payload(v1.as_ref_bytes());
+        let (data2, len2) = varlena_payload(v2.as_ref_bytes());
+        let min = core::cmp::min(len1, len2);
         let mut cmpresult = memcmp_sign(&data1[..min], &data2[..min]);
-        if cmpresult == 0 {
-            // Tie-break on total image length (C compares VARSIZE_ANY).
-            cmpresult = match b1.len().cmp(&b2.len()) {
-                core::cmp::Ordering::Less => -1,
-                core::cmp::Ordering::Equal => 0,
-                core::cmp::Ordering::Greater => 1,
-            };
+        if cmpresult == 0 && len1 != len2 {
+            // Tie-break on logical payload length (C: `len1 < len2`).
+            cmpresult = if len1 < len2 { -1 } else { 1 };
         }
         Ok(cmpresult)
     } else {
@@ -1239,4 +1237,23 @@ fn memcmp_sign(a: &[u8], b: &[u8]) -> i32 {
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,
     }
+}
+
+/// `(VARDATA_ANY(ptr), VARSIZE_ANY_EXHDR(ptr))` (varatt.h) for an in-line,
+/// already-detoasted varlena image: the payload slice and its length, handling
+/// both the 1-byte ("short", `VARATT_IS_1B`) and 4-byte header forms. The total
+/// size comes from the shared `varsize_any` (`backend-access-common-heaptuple`);
+/// the header width is `VARHDRSZ_SHORT` (1) for a short header, else `VARHDRSZ`
+/// (4). `ByRef` never carries an external TOAST pointer (it is detoasted), so
+/// only these two forms occur.
+fn varlena_payload(b: &[u8]) -> (&[u8], usize) {
+    const VARHDRSZ_SHORT: usize = 1;
+    // `VARATT_IS_1B(PTR)` (varatt.h, little-endian): low bit of the first byte.
+    let hdr = if (b[0] & 0x01) == 0x01 {
+        VARHDRSZ_SHORT
+    } else {
+        VARHDRSZ
+    };
+    let total = backend_access_common_heaptuple::varsize_any(b);
+    (&b[hdr..total], total - hdr)
 }
