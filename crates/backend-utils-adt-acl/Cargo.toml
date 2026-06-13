@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 mcx = { path = "../mcx" }
 types-acl = { path = "../types-acl" }
 types-core = { path = "../types-core" }

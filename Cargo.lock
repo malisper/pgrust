@@ -6183,6 +6183,7 @@ name = "backend-utils-adt-acl"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-acl-seams",
+ "backend-utils-cache-syscache-seams",
  "mcx",
  "types-acl",
  "types-core",

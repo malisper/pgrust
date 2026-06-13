@@ -32,6 +32,53 @@ pub const ACLITEM_ALL_PRIV_BITS: AclMode = 0xFFFF_FFFF;
 /// `ACLITEM_ALL_GOPTION_BITS` (`utils/acl.h`) — `(AclMode) 0xFFFFFFFF << 32`.
 pub const ACLITEM_ALL_GOPTION_BITS: AclMode = 0xFFFF_FFFF << 32;
 
+/// `N_ACL_RIGHTS` (`nodes/parsenodes.h`) — 1 plus the last `1<<x` privilege bit.
+pub const N_ACL_RIGHTS: u32 = 15;
+
+/// `ACL_ALL_RIGHTS_STR` (`utils/acl.h`) — the privilege characters, in bit order.
+pub const ACL_ALL_RIGHTS_STR: &[u8; 15] = b"arwdDxtXUCTcsAm";
+
+// `ACL_*_CHR` (`utils/acl.h`) — the external privilege character for each bit.
+pub const ACL_INSERT_CHR: u8 = b'a';
+pub const ACL_SELECT_CHR: u8 = b'r';
+pub const ACL_UPDATE_CHR: u8 = b'w';
+pub const ACL_DELETE_CHR: u8 = b'd';
+pub const ACL_TRUNCATE_CHR: u8 = b'D';
+pub const ACL_REFERENCES_CHR: u8 = b'x';
+pub const ACL_TRIGGER_CHR: u8 = b't';
+pub const ACL_EXECUTE_CHR: u8 = b'X';
+pub const ACL_USAGE_CHR: u8 = b'U';
+pub const ACL_CREATE_CHR: u8 = b'C';
+pub const ACL_CREATE_TEMP_CHR: u8 = b'T';
+pub const ACL_CONNECT_CHR: u8 = b'c';
+pub const ACL_SET_CHR: u8 = b's';
+pub const ACL_ALTER_SYSTEM_CHR: u8 = b'A';
+pub const ACL_MAINTAIN_CHR: u8 = b'm';
+
+/// `ACLITEM_GET_PRIVS(item)` (`utils/acl.h`) — the lower 32 privilege bits.
+#[inline]
+pub fn aclitem_get_privs(item: AclItem) -> AclMode {
+    item.ai_privs & 0xFFFF_FFFF
+}
+
+/// `ACLITEM_GET_GOPTIONS(item)` (`utils/acl.h`) — the upper 32 grant-option bits.
+#[inline]
+pub fn aclitem_get_goptions(item: AclItem) -> AclMode {
+    (item.ai_privs >> 32) & 0xFFFF_FFFF
+}
+
+/// `ACLITEM_GET_RIGHTS(item)` (`utils/acl.h`) — the combined rights field.
+#[inline]
+pub fn aclitem_get_rights(item: AclItem) -> AclMode {
+    item.ai_privs
+}
+
+/// `ACLITEM_SET_PRIVS_GOPTIONS(item, privs, goptions)` (`utils/acl.h`).
+#[inline]
+pub fn aclitem_set_privs_goptions(item: &mut AclItem, privs: AclMode, goptions: AclMode) {
+    item.ai_privs = (privs & 0xFFFF_FFFF) | ((goptions & 0xFFFF_FFFF) << 32);
+}
+
 /// `AclItem` (`utils/acl.h`). Must be a fixed 16-byte layout on every platform
 /// (the size is hardcoded in `pg_type.h`); the upper 32 bits of `ai_privs` are
 /// the grant-option bits, the lower 32 the privilege bits.
