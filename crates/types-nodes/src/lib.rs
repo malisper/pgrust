@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bitmapset;
+pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;
@@ -22,38 +23,122 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod modifytable;
+pub mod nodeagg;
+pub mod nodeappend;
 pub mod nodeforeigncustom;
+pub mod nodehash;
+pub mod nodehashjoin;
+pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
+pub mod nodelimit;
+pub mod nodememoize;
+pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod noderesult;
+pub mod nodenestloop;
 pub mod nodes;
+pub mod nodeseqscan;
+pub mod nodesort;
+pub mod nodetablefuncscan;
+pub mod nodetidrangescan;
 pub mod parsenodes;
+pub mod parsestmt;
+pub mod partition;
 pub mod pathnodes;
+pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
 pub mod queryenvironment;
+pub mod tuptable;
 
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
+    CurrentOfTid, EPQState, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
+    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, Opaque,
+    ParamExecData,
+    PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
+};
+pub use primnodes::CurrentOfExpr;
+pub use modifytable::{
+    EPQState as ModifyTableEPQState, MergeAction, MergeActionState, MergeMatchKind, ModifyTable,
+    ModifyTableState, OnConflictSetState, OverridingKind, PartitionTupleRouting, ResultRelHash,
+    TransitionCaptureState,
 };
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
-    JOIN_RIGHT_ANTI, JOIN_SEMI,
+    JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
+};
+pub use nodemergeappend::{
+    BinaryHeap, MergeAppend, MergeAppendStateData, T_MergeAppend,
+    T_MergeAppendState,
+};
+pub use nodelimit::{
+    Limit, LimitOption, LimitStateCond, LimitStateData, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
+};
+pub use nodehash::{
+    AttStatsSlot, BucketAndBatch, Hash, HashChunkIdx, HashInstrumentation, HashJoinBuckets,
+    HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
+    HashMemoryChunkLink, HashSkewBucket, HashState, HashTupleIdx, ParallelHashGrowth,
+    ParallelHashJoinBatch, ParallelHashJoinBatchAccessor, ParallelHashJoinState, SharedHashInfo,
+    INVALID_SKEW_BUCKET_NO,
+};
+pub use nodeindexonlyscan::{
+    IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
+    IndexScanInstrumentation, ParallelIndexScanDesc, ParallelIndexScanDescData, Scan,
+    SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+};
+pub use nodeappend::{
+    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
+    T_Append, T_AppendState,
+};
+pub use nodeagg::{
+    Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
+    AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
+    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
+    AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
+pub use nodesort::{
+    SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
+    TuplesortMethod, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
+    TUPLESORT_RANDOMACCESS,
+};
+pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
+pub use nodeseqscan::{SeqScan, SeqScanState};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
+pub use tuptable::{
+    AttInMetadata, BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase,
+    SlotData, TupOutputState, TupleTableSlotOps, VirtualTupleTableSlot,
+};
 pub use funcapi::Tuplestorestate;
-pub use nodeforeigncustom::{Material, MaterialState};
+pub use nodeforeigncustom::{
+    AsyncRequest, FdwRoutine, ForeignScan, ForeignScanState, Material, MaterialState,
+    ParallelContext, ParallelWorkerContext,
+};
+pub use nodememoize::{
+    CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
+    MemoizeScanState, SharedMemoizeInfo, T_Memoize, T_MemoizeState,
+};
+pub use nodetablefuncscan::{
+    TableFuncRoutineKind, TableFuncScan, TableFuncScanState, T_TableFuncScanState,
+};
+pub use primnodes::{TableFunc, TableFuncType, TFT_JSON_TABLE, TFT_XMLTABLE, Expr, TargetEntry, Var};
+pub use nodehashjoin::{
+    HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
+};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
+pub use partition::{
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionDesc, PartitionDescData, PartitionKey,
+    PartitionKeyData, PartitionPruneContext, PartitionPruneState, PartitionPruningData,
+    PartitionRangeDatumKind, PartitionStrategy, PartitionedRelPruningData,
+};
 pub use planstate::PlanStateNode;
-pub use primnodes::{Expr, TargetEntry, Var};
 pub use queryenvironment::{
     EphemeralNameRelationType, EphemeralNamedRelation, EphemeralNamedRelationData,
     EphemeralNamedRelationMetadata, EphemeralNamedRelationMetadataData, QueryEnvironment,

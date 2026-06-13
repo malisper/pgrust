@@ -18,6 +18,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelFileLocatorSkippingWAL(rlocator)` (storage.c): true if the relation
+    /// is in the `pendingDeletes`/`pendingSyncs` set such that WAL is being
+    /// skipped for its current relfilenode this transaction
+    /// (`wal_skip_threshold`). Pure in-memory hash lookup; cannot `ereport`.
+    pub fn rel_file_locator_skipping_wal(rlocator: RelFileLocator) -> bool
+);
+
+seam_core::seam!(
     /// `smgrDoPendingSyncs(isCommit, isParallelWorker)` — fsync files created
     /// and not WAL-logged in this transaction.
     pub fn smgr_do_pending_syncs(is_commit: bool, is_parallel_worker: bool) -> PgResult<()>
@@ -58,4 +66,15 @@ seam_core::seam!(
     /// the physical files a finished prepared transaction was supposed to
     /// delete. Can `ereport(ERROR)`, carried on `Err`.
     pub fn drop_relation_files(rels: &[types_wal::RelFileLocator]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationPreserveStorage(rlocator, atCommit)` (storage.c) — protect the
+    /// physical file named by `rlocator` from deletion at transaction
+    /// end/abort. relmapper calls this with `atCommit=false` for each mapped
+    /// file when committing a relmap update, inside a critical section.
+    pub fn relation_preserve_storage(
+        rlocator: RelFileLocator,
+        at_commit: bool,
+    ) -> PgResult<()>
 );

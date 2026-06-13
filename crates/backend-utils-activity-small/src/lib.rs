@@ -20,9 +20,37 @@ pub use pgstat_archiver::*;
 pub use pgstat_bgwriter::*;
 pub use pgstat_checkpointer::*;
 
-/// This crate declares no inward seams of its own (callers can depend on it
-/// directly without creating a cycle), so there is nothing to install.
-pub fn init_seams() {}
+/// Install this crate's `backend_progress.c` inward seams.
+pub fn init_seams() {
+    use types_pgstat::backend_progress::ProgressCommandType;
+
+    // `pgstat_progress_start_command(cmdtype, relid)`. The seam carries
+    // `cmdtype` as the raw `int` the C `ProgressCommandType` enum value
+    // (`utils/backend_progress.h`); map it back to the enum. The C entry point
+    // is infallible (`void`), so wrap in `Ok`.
+    backend_utils_activity_small_seams::pgstat_progress_start_command::set(|cmdtype, relid| {
+        let cmdtype = match cmdtype {
+            0 => ProgressCommandType::Invalid,
+            1 => ProgressCommandType::Vacuum,
+            2 => ProgressCommandType::Analyze,
+            3 => ProgressCommandType::Cluster,
+            4 => ProgressCommandType::CreateIndex,
+            5 => ProgressCommandType::Basebackup,
+            6 => ProgressCommandType::Copy,
+            other => panic!("pgstat_progress_start_command: invalid ProgressCommandType {other}"),
+        };
+        backend_progress::pgstat_progress_start_command(cmdtype, relid);
+        Ok(())
+    });
+    backend_utils_activity_small_seams::pgstat_progress_update_param::set(|index, val| {
+        backend_progress::pgstat_progress_update_param(index, val);
+        Ok(())
+    });
+    backend_utils_activity_small_seams::pgstat_progress_end_command::set(|| {
+        backend_progress::pgstat_progress_end_command();
+        Ok(())
+    });
+}
 
 #[cfg(test)]
 mod test_seams;

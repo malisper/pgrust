@@ -21,17 +21,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `AddWaitEventToSet(set, events, fd, latch, NULL /* user_data */)` —
-    /// register an event; returns its position. `latch` mirrors the C
-    /// `Latch *` argument (`None` = `NULL`); `WL_LATCH_SET` callers pass the
-    /// latch they hold (C's `MyLatch` reads become explicit parameters at
-    /// the call sites). Can `elog(ERROR)` (too many events, bad flags,
-    /// kernel registration failure).
+    /// `AddWaitEventToSet(set, events, fd, latch, user_data)` — register an
+    /// event; returns its position. `latch` mirrors the C `Latch *` argument
+    /// (`None` = `NULL`); `WL_LATCH_SET` callers pass the latch they hold (C's
+    /// `MyLatch` reads become explicit parameters at the call sites).
+    /// `user_data` mirrors the C `void *user_data` payload stored on the event
+    /// and handed back by `WaitEventSetWait` (`None` = `NULL`); the owned model
+    /// carries a non-aliasing key (see [`WaitEvent::user_data`]). Can
+    /// `elog(ERROR)` (too many events, bad flags, kernel registration failure).
     pub fn add_wait_event_to_set(
         set: WaitEventSetHandle,
         events: u32,
         fd: types_core::pgsocket,
         latch: Option<LatchHandle>,
+        user_data: Option<i32>,
     ) -> types_error::PgResult<i32>
 );
 
@@ -59,6 +62,13 @@ seam_core::seam!(
         occurred_events: &mut [WaitEvent],
         wait_event_info: u32,
     ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `GetNumRegisteredWaitEvents(set)` — the number of events currently
+    /// registered in the set (`set->nevents`). Infallible. Consumers call
+    /// [`WaitEventSet::num_registered_events`].
+    pub fn get_num_registered_wait_events(set: WaitEventSetHandle) -> i32
 );
 
 seam_core::seam!(
@@ -94,16 +104,17 @@ impl WaitEventSet {
         Ok(WaitEventSet(create_wait_event_set::call(nevents)?))
     }
 
-    /// `AddWaitEventToSet(set, events, fd, latch, NULL)`; see
-    /// [`add_wait_event_to_set`] for the `latch` marshaling (`None` =
-    /// `NULL`; `WL_LATCH_SET` callers pass the latch they hold).
+    /// `AddWaitEventToSet(set, events, fd, latch, user_data)`; see
+    /// [`add_wait_event_to_set`] for the `latch`/`user_data` marshaling
+    /// (`None` = `NULL`; `WL_LATCH_SET` callers pass the latch they hold).
     pub fn add_event(
         &self,
         events: u32,
         fd: types_core::pgsocket,
         latch: Option<LatchHandle>,
+        user_data: Option<i32>,
     ) -> types_error::PgResult<i32> {
-        add_wait_event_to_set::call(self.0, events, fd, latch)
+        add_wait_event_to_set::call(self.0, events, fd, latch, user_data)
     }
 
     /// `ModifyWaitEvent(set, pos, events, latch)`; `latch` as in
@@ -127,6 +138,11 @@ impl WaitEventSet {
     ) -> types_error::PgResult<i32> {
         wait_event_set_wait::call(self.0, timeout, occurred_events, wait_event_info)
     }
+
+    /// `GetNumRegisteredWaitEvents(set)`.
+    pub fn num_registered_events(&self) -> i32 {
+        get_num_registered_wait_events::call(self.0)
+    }
 }
 
 impl Drop for WaitEventSet {
@@ -135,3 +151,11 @@ impl Drop for WaitEventSet {
         free_wait_event_set::call(self.0);
     }
 }
+
+seam_core::seam!(
+    /// `InitializeWaitEventSupport()` (`storage/ipc/waiteventset.c`) — set up
+    /// the process-local wait-event support (epoll/kqueue fd, self-pipe). Called
+    /// from `InitPostmasterChild`/`InitStandaloneProcess`. `Err` on the
+    /// epoll_create/pipe failure path (`elog(ERROR)`).
+    pub fn initialize_wait_event_support() -> types_error::PgResult<()>
+);

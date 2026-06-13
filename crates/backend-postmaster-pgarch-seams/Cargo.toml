@@ -9,5 +9,7 @@ name = "backend_postmaster_pgarch_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
 seam-core = { path = "../seam-core" }
 types-startup = { path = "../types-startup" }

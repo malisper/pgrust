@@ -60,3 +60,33 @@ seam_core::seam!(
     /// `PostPrepare_MultiXact(xid)` — transfer the entry to the dummy proc.
     pub fn post_prepare_multixact(xid: types_core::primitive::TransactionId)
 );
+
+seam_core::seam!(
+    /// `multixactoffsetssyncfiletag(const FileTag *ftag, char *path)`
+    /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_OFFSET]` sync callback)
+    /// — fsync the `pg_multixact/offsets` SLRU segment the tag names, returning
+    /// the `0`/`<0` code, resolved path, and saved `errno`.
+    pub fn multixactoffsetssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+);
+
+seam_core::seam!(
+    /// `multixactmemberssyncfiletag(const FileTag *ftag, char *path)`
+    /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_MEMBER]` sync callback)
+    /// — fsync the `pg_multixact/members` SLRU segment the tag names, returning
+    /// the `0`/`<0` code, resolved path, and saved `errno`.
+    pub fn multixactmemberssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+);
+
+seam_core::seam!(
+    /// `MultiXactShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn multi_xact_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `MultiXactShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn multi_xact_shmem_init() -> types_error::PgResult<()>
+);

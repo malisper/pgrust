@@ -15,6 +15,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `set_ps_display(activity)` (`ps_status.c`) — set the variable
+    /// "activity" portion of the process title. The implementation copies the
+    /// string. Infallible.
+    pub fn set_ps_display(activity: String)
+);
+
+seam_core::seam!(
     /// `update_process_title` (ps_status.c GUC).
     pub fn update_process_title() -> bool
+);
+
+seam_core::seam!(
+    /// `init_ps_display(fixed_part)` (ps_status.c) — set the fixed (initial)
+    /// part of the process-title display. `fixed_part` is the worker's
+    /// `bgw_name` C string (NUL-terminated bytes).
+    pub fn init_ps_display(fixed_part: &[u8])
 );

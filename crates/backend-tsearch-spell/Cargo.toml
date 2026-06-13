@@ -1,0 +1,25 @@
+[package]
+name = "backend-tsearch-spell"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_tsearch_spell"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-regex = { path = "../types-regex" }
+types-tsearch = { path = "../types-tsearch" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
+backend-tsearch-spell-seams = { path = "../backend-tsearch-spell-seams" }
+backend-tsearch-ts-locale-seams = { path = "../backend-tsearch-ts-locale-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-adt-formatting-seams = { path = "../backend-utils-adt-formatting-seams" }
+backend-regex-core-seams = { path = "../backend-regex-core-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }

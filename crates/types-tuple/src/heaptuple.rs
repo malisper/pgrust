@@ -31,6 +31,8 @@ pub const TEXTOID: Oid = 25;
 pub const OIDOID: Oid = 26;
 pub const JSONOID: Oid = 114;
 pub const JSONBOID: Oid = 3802;
+/// `TSQUERYOID` — `tsquery` type OID (`pg_type_d.h`).
+pub const TSQUERYOID: Oid = 3615;
 pub const XMLOID: Oid = 142;
 pub const FLOAT4OID: Oid = 700;
 pub const FLOAT8OID: Oid = 701;
@@ -41,16 +43,56 @@ pub const INT2ARRAYOID: Oid = 1005;
 pub const TEXTARRAYOID: Oid = 1009;
 pub const OIDARRAYOID: Oid = 1028;
 pub const BITOID: Oid = 1560;
+/// `VARBITOID` — `varbit` (bit varying) type OID (`pg_type.dat`).
+pub const VARBITOID: Oid = 1562;
 pub const NUMERICOID: Oid = 1700;
 pub const CSTRINGOID: Oid = 2275;
 pub const VARCHAROID: Oid = 1043;
+/// `BPCHAROID` — `bpchar` (blank-padded char) type OID (`pg_type.dat`).
+pub const BPCHAROID: Oid = 1042;
 pub const DATEOID: Oid = 1082;
+/// `TIMEOID` — `time without time zone` type OID (`pg_type.dat`).
+pub const TIMEOID: Oid = 1083;
+/// `TIMETZOID` — `time with time zone` type OID (`pg_type.dat`).
+pub const TIMETZOID: Oid = 1266;
+/// `TIMESTAMPOID` — `timestamp without time zone` type OID (`pg_type.dat`).
+pub const TIMESTAMPOID: Oid = 1114;
+/// `TIMESTAMPTZOID` — `timestamp with time zone` type OID (`pg_type.dat`).
+pub const TIMESTAMPTZOID: Oid = 1184;
+/// `INTERVALOID` — `interval` type OID (`pg_type.dat`).
+pub const INTERVALOID: Oid = 1186;
 pub const TIDOID: Oid = 27;
 pub const XIDOID: Oid = 28;
 pub const CIDOID: Oid = 29;
 /// `refcursor` — reference to a cursor (portal name); uses `text`'s I/O routines
 /// (`catalog/pg_type.dat`, oid 1790).
 pub const REFCURSOROID: Oid = 1790;
+/// `internal` pseudo-type (`pg_type_d.h`, oid 2281).
+pub const INTERNALOID: Oid = 2281;
+/// `anyarray` pseudo-type (`pg_type_d.h`, oid 2277).
+pub const ANYARRAYOID: Oid = 2277;
+/// `any` pseudo-type (`pg_type_d.h`, oid 2276).
+pub const ANYOID: Oid = 2276;
+/// `anycompatiblearray` pseudo-type (`pg_type_d.h`, oid 5078).
+pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+/// `anyelement` pseudo-type (`pg_type_d.h`, oid 2283).
+pub const ANYELEMENTOID: Oid = 2283;
+/// `anynonarray` pseudo-type (`pg_type_d.h`, oid 2776).
+pub const ANYNONARRAYOID: Oid = 2776;
+/// `anyenum` pseudo-type (`pg_type_d.h`, oid 3500).
+pub const ANYENUMOID: Oid = 3500;
+/// `anyrange` pseudo-type (`pg_type_d.h`, oid 3831).
+pub const ANYRANGEOID: Oid = 3831;
+/// `anymultirange` pseudo-type (`pg_type_d.h`, oid 4537).
+pub const ANYMULTIRANGEOID: Oid = 4537;
+/// `anycompatible` pseudo-type (`pg_type_d.h`, oid 5077).
+pub const ANYCOMPATIBLEOID: Oid = 5077;
+/// `anycompatiblenonarray` pseudo-type (`pg_type_d.h`, oid 5079).
+pub const ANYCOMPATIBLENONARRAYOID: Oid = 5079;
+/// `anycompatiblerange` pseudo-type (`pg_type_d.h`, oid 5080).
+pub const ANYCOMPATIBLERANGEOID: Oid = 5080;
+/// `anycompatiblemultirange` pseudo-type (`pg_type_d.h`, oid 4538).
+pub const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 
 /// Default array element delimiter (`','`, `catalog/pg_type.h`).
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;
@@ -68,6 +110,34 @@ pub const TYPSTORAGE_EXTERNAL: i8 = b'e' as i8;
 pub const TYPSTORAGE_MAIN: i8 = b'm' as i8;
 pub const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 pub const InvalidCompressionMethod: i8 = 0;
+
+/// `DEFAULT_COLLATION_OID` (`pg_collation.dat` oid 100) — the database default
+/// collation.
+pub const DEFAULT_COLLATION_OID: Oid = 100;
+
+// `CompactAttribute.attnullability` values (`access/tupdesc.h`).
+/// `ATTNULLABLE_UNRESTRICTED` — no not-null constraint exists (`'f'`).
+pub const ATTNULLABLE_UNRESTRICTED: i8 = b'f' as i8;
+/// `ATTNULLABLE_UNKNOWN` — a not-null constraint exists but its validity is
+/// unknown (`'u'`).
+pub const ATTNULLABLE_UNKNOWN: i8 = b'u' as i8;
+/// `ATTNULLABLE_VALID` — a valid not-null constraint exists (`'v'`).
+pub const ATTNULLABLE_VALID: i8 = b'v' as i8;
+/// `ATTNULLABLE_INVALID` — a not-null constraint exists but is marked invalid
+/// (`'i'`).
+pub const ATTNULLABLE_INVALID: i8 = b'i' as i8;
+
+/// `PG_INT16_MAX` (`c.h`).
+pub const PG_INT16_MAX: i32 = i16::MAX as i32;
+
+// `pg_config.h` alignment macros for the standard 64-bit build target;
+// `populate_compact_attribute_internal` maps `pg_type.typalign` chars to these.
+/// `pg_config.h`: `ALIGNOF_SHORT`.
+pub const ALIGNOF_SHORT: u8 = 2;
+/// `pg_config.h`: `ALIGNOF_INT`.
+pub const ALIGNOF_INT: u8 = 4;
+/// `pg_config.h`: `ALIGNOF_DOUBLE`.
+pub const ALIGNOF_DOUBLE: u8 = 8;
 
 pub const MaxTupleAttributeNumber: i32 = 1664;
 pub const MaxHeapAttributeNumber: i32 = 1600;
@@ -117,6 +187,11 @@ const _: () = assert!(FirstLowInvalidHeapAttributeNumber == -7);
 pub const VARHDRSZ: usize = core::mem::size_of::<i32>();
 pub const HIGHBIT: i32 = 0x80;
 pub const MINIMAL_TUPLE_OFFSET: usize = 8;
+/// `ATTRIBUTE_FIXED_PART_SIZE` (access/tupdesc.h): the on-disk size of the
+/// fixed-width part of `FormData_pg_attribute`, i.e. through `attcollation`.
+/// The C macro computes `offsetof(FormData_pg_attribute, attcollation) +
+/// sizeof(Oid)`; on the catalog ABI this is a fixed 100 bytes.
+pub const ATTRIBUTE_FIXED_PART_SIZE: usize = 100;
 pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;
@@ -138,6 +213,18 @@ impl NameData {
             .position(|&b| b == 0)
             .unwrap_or(self.data.len());
         &self.data[..len]
+    }
+
+    /// `namestrcpy(name, str)` (`backend/utils/adt/name.c`) — copy a C string
+    /// into a fixed-size `Name`, NUL-terminating and zero-padding. The source
+    /// is truncated to `NAMEDATALEN - 1` bytes (C copies up to the limit and
+    /// always leaves a trailing NUL within the fixed buffer).
+    pub fn namestrcpy(&mut self, src: &str) {
+        self.data.fill(0);
+        let bytes = src.as_bytes();
+        let limit = types_core::NAMEDATALEN as usize - 1;
+        let len = bytes.len().min(limit);
+        self.data[..len].copy_from_slice(&bytes[..len]);
     }
 }
 
@@ -209,6 +296,19 @@ impl ItemPointerData {
             ip_posid: offset_number,
         }
     }
+}
+
+/// `InvalidOffsetNumber` (`storage/off.h`): `((OffsetNumber) 0)`.
+pub const INVALID_OFFSET_NUMBER: OffsetNumber = 0;
+/// `FirstOffsetNumber` (`storage/off.h`): `((OffsetNumber) 1)`.
+pub const FIRST_OFFSET_NUMBER: OffsetNumber = 1;
+
+/// `ItemPointerIsValid(pointer)` (`storage/itemptr.h`): a TID is valid iff its
+/// offset number is not the invalid sentinel. (The C macro also null-checks the
+/// pointer; the owned `&` makes that unnecessary.)
+#[inline]
+pub fn item_pointer_is_valid(pointer: &ItemPointerData) -> bool {
+    pointer.ip_posid != INVALID_OFFSET_NUMBER
 }
 
 /// Was a C `union` of `t_heap` / `t_datum`; rewritten as a Rust enum.
@@ -290,6 +390,69 @@ impl MinimalTupleData<'_> {
             t_infomask: self.t_infomask,
             t_hoff: self.t_hoff,
             t_bits: slice_in(mcx, &self.t_bits)?,
+        })
+    }
+
+    /// Serialize the full minimal tuple to bytes for a temp-file spill (the C
+    /// hash-join batch file records `tuple` of `tuple->t_len` bytes). The byte
+    /// stream is the carried header fields followed by a length-prefixed
+    /// `t_bits`; the leading 4 bytes are `t_len` so a reader can length its
+    /// read exactly as the C `BufFileReadExact(file, ..., t_len - 4)` does.
+    pub fn to_minimal_bytes(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(&self.t_len.to_ne_bytes());
+        for b in self.mt_padding.iter() {
+            out.push(*b as u8);
+        }
+        out.extend_from_slice(&self.t_infomask2.to_ne_bytes());
+        out.extend_from_slice(&self.t_infomask.to_ne_bytes());
+        out.push(self.t_hoff);
+        out.extend_from_slice(&(self.t_bits.len() as u32).to_ne_bytes());
+        out.extend_from_slice(&self.t_bits);
+        out
+    }
+
+    /// Reconstruct from the spilled record's `t_len` word plus the body bytes
+    /// (everything after the leading `t_len` word — `body.len() == t_len - 4`
+    /// in the C layout). Allocates the rebuilt tuple in `mcx`.
+    pub fn from_minimal_parts<'b>(
+        mcx: Mcx<'b>,
+        t_len: uint32,
+        body: &[u8],
+    ) -> PgResult<MinimalTupleData<'b>> {
+        // body layout: mt_padding[6], t_infomask2(2), t_infomask(2), t_hoff(1),
+        // t_bits_len(4), t_bits[...].
+        let mut p = 0usize;
+        let read = |p: &mut usize, n: usize| -> &[u8] {
+            let s = &body[*p..*p + n];
+            *p += n;
+            s
+        };
+        let mut mt_padding = [0i8; 6];
+        for (i, b) in read(&mut p, 6).iter().enumerate() {
+            mt_padding[i] = *b as i8;
+        }
+        let t_infomask2 = {
+            let s = read(&mut p, 2);
+            uint16::from_ne_bytes([s[0], s[1]])
+        };
+        let t_infomask = {
+            let s = read(&mut p, 2);
+            uint16::from_ne_bytes([s[0], s[1]])
+        };
+        let t_hoff = read(&mut p, 1)[0];
+        let bits_len = {
+            let s = read(&mut p, 4);
+            u32::from_ne_bytes([s[0], s[1], s[2], s[3]]) as usize
+        };
+        let bits = read(&mut p, bits_len);
+        Ok(MinimalTupleData {
+            t_len,
+            mt_padding,
+            t_infomask2,
+            t_infomask,
+            t_hoff,
+            t_bits: slice_in(mcx, bits)?,
         })
     }
 }
