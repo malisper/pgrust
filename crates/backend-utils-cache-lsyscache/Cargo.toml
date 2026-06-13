@@ -19,3 +19,6 @@ types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Per-owner seams this family routes SearchSysCache / isTempNamespace through.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }

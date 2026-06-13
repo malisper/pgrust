@@ -7115,7 +7115,9 @@ dependencies = [
 name = "backend-utils-cache-lsyscache"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-namespace-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
  "mcx",
  "seam-core",
  "types-array",

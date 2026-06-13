@@ -19,6 +19,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `isTempNamespace(namespaceId)` (namespace.c): whether the given
+    /// namespace OID is this backend's temporary-schema namespace
+    /// (`namespaceId == myTempNamespace && OidIsValid(myTempNamespace)`). No
+    /// catalog access, so infallible; `Err` is reserved for the per-owner
+    /// error channel only. Consumed by lsyscache.c's
+    /// `get_namespace_name_or_temp`.
+    pub fn is_temp_namespace(namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
     /// text-search configuration given its possibly-qualified name list.
     /// With `missing_ok = false` a missing configuration raises
