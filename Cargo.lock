@@ -6041,6 +6041,7 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-stringinfo",
+ "types-tuple",
 ]
 
 [[package]]
