@@ -152,8 +152,9 @@ seam_core::seam!(
     /// `InitStandaloneProcess(argv0)` (miscinit.c): set up the fake-shared
     /// state a standalone (non-postmaster) backend needs — `MyProcPid`,
     /// `MyStartTime`, shared-memory disposition, fake `LocalProcessControl`.
-    /// Backend-local writes; infallible.
-    pub fn init_standalone_process(argv0: &str)
+    /// `elog(FATAL)`s if the executable path cannot be located
+    /// (`find_my_exec` failure), so `Err` carries that failure.
+    pub fn init_standalone_process(argv0: &str) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -193,9 +194,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `bool has_rolreplication(Oid roleid)` (`utils/adt/acl.c`) — whether the
-    /// role has the REPLICATION attribute.
-    pub fn has_rolreplication(roleid: types_core::Oid) -> bool
+    /// `bool has_rolreplication(Oid roleid)` (`miscinit.c:739`) — whether the
+    /// role has the REPLICATION attribute. Superusers bypass the check; the
+    /// non-superuser path does an `AUTHOID` syscache lookup, so it takes an
+    /// `Mcx` and returns `PgResult` (the lookup / `superuser_arg` can
+    /// `ereport(ERROR)`).
+    pub fn has_rolreplication(mcx: mcx::Mcx<'_>, roleid: types_core::Oid) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -220,8 +224,10 @@ seam_core::seam!(
     /// `superuser()` (superuser.c) — true if the *current* user
     /// (`GetUserId()`) has superuser privilege. Used by
     /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when
-    /// applying a function's `proconfig` SET items. Reads the catalog cache.
-    pub fn superuser() -> bool
+    /// applying a function's `proconfig` SET items. Equals
+    /// `superuser_arg(GetUserId())`; reads the catalog cache, so it takes an
+    /// `Mcx` and returns `PgResult` (the syscache read can `ereport(ERROR)`).
+    pub fn superuser(mcx: mcx::Mcx<'_>) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

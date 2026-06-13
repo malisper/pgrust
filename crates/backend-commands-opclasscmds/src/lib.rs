@@ -420,7 +420,7 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
     /* XXX Should we make any privilege check against the AM? */
 
     /* Currently, we require superuser privileges to create an opclass. */
-    if !superuser_arg::call(get_user_id::call()) {
+    if !superuser_arg::call(get_user_id::call())? {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("must be superuser to create an operator class")
@@ -773,7 +773,7 @@ pub fn DefineOpFamily(mcx: Mcx<'_>, stmt: &CreateOpFamilyStmt) -> PgResult<Objec
     /* XXX Should we make any privilege check against the AM? */
 
     /* Currently, we require superuser privileges to create an opfamily. */
-    if !superuser_arg::call(get_user_id::call()) {
+    if !superuser_arg::call(get_user_id::call())? {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("must be superuser to create an operator family")
@@ -809,7 +809,7 @@ pub fn AlterOpFamily(mcx: Mcx<'_>, stmt: &AlterOpFamilyStmt) -> PgResult<Oid> {
     let opfamilyoid = get_opfamily_oid(mcx, amoid, &stmt.opfamilyname, false)?;
 
     /* Currently, we require superuser privileges to alter an opfamily. */
-    if !superuser_arg::call(get_user_id::call()) {
+    if !superuser_arg::call(get_user_id::call())? {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("must be superuser to alter an operator family")

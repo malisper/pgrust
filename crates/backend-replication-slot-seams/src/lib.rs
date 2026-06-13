@@ -129,8 +129,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `void CheckSlotPermissions(void)` (slot.c:1546). `user_id` is
-    /// `GetUserId()`.
-    pub fn check_slot_permissions(user_id: Oid) -> PgResult<()>
+    /// `GetUserId()`. Threads an `Mcx` for the `has_rolreplication` AUTHOID
+    /// syscache lookup; the permission check can `ereport(ERROR)`.
+    pub fn check_slot_permissions(mcx: mcx::Mcx<'_>, user_id: Oid) -> PgResult<()>
 );
 
 seam_core::seam!(

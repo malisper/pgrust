@@ -2392,6 +2392,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-common-exec-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-common-link-canary-seams"
 version = "0.0.0"
 dependencies = [
@@ -3178,6 +3186,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-net",
+ "types-storage",
 ]
 
 [[package]]
@@ -3432,10 +3441,19 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-port-path-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-port-sysv-shmem-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3559,6 +3577,14 @@ dependencies = [
  "libc",
  "types-error",
  "types-guc",
+]
+
+[[package]]
+name = "backend-postmaster-interrupt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -4131,6 +4157,7 @@ dependencies = [
 name = "backend-replication-slot-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -4342,6 +4369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-fileperm-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-file-seams"
 version = "0.0.0"
 dependencies = [
@@ -4454,6 +4489,7 @@ name = "backend-storage-ipc-pmsignal-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -5861,6 +5897,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-cache",
  "types-cluster",
  "types-core",
  "types-error",
@@ -6076,6 +6113,41 @@ name = "backend-utils-hash-small-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-init-miscinit"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-common-exec-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-port-path-seams",
+ "backend-port-sysv-shmem-seams",
+ "backend-postmaster-interrupt-seams",
+ "backend-storage-file-fileperm-seams",
+ "backend-storage-ipc-latch",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-superuser-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -6300,6 +6372,15 @@ name = "backend-utils-misc-stack-depth-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-misc-superuser-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -6803,7 +6884,6 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
- "backend-executor-nodeAppend",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
@@ -6824,7 +6904,6 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
- "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -6841,6 +6920,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-init-miscinit",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",

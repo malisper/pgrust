@@ -375,6 +375,14 @@ fn superuser_arg(roleid: Oid) -> PgResult<bool> {
     backend_utils_misc_superuser_seams::superuser_arg::call(roleid)
 }
 
+/// `superuser()` (`superuser.c`) — does the *current* user (`GetUserId()`) have
+/// superuser privileges? `superuser() == superuser_arg(GetUserId())`. The
+/// catalog read happens inside `superuser_arg`'s owner; the `Mcx` here mirrors
+/// the C catalog-lookup surface.
+fn superuser(_mcx: Mcx<'_>) -> PgResult<bool> {
+    superuser_arg(GetUserId())
+}
+
 /// `InitializeSessionUserId(rolename, roleid, bypass_login_check)`
 /// (`miscinit.c:760`) — initialize the user identity during normal backend
 /// startup.
@@ -839,6 +847,13 @@ pub fn init_seams() {
         )
     });
     s::superuser_arg::set(superuser_arg);
+
+    // The three owned seams whose declarations now mirror the C failure
+    // surface (PgResult; Mcx for the catalog-lookup paths). Each delegates to
+    // this crate's own function.
+    s::init_standalone_process::set(crate::process::InitStandaloneProcess);
+    s::has_rolreplication::set(has_rolreplication);
+    s::superuser::set(superuser);
 }
 
 #[cfg(test)]

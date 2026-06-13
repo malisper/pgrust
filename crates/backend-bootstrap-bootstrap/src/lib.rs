@@ -286,7 +286,7 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
 
     debug_assert!(!is_under_postmaster());
 
-    backend_utils_init_miscinit_seams::init_standalone_process::call(&argv[0]);
+    backend_utils_init_miscinit_seams::init_standalone_process::call(&argv[0])?;
 
     /* Set defaults, to be overridden by explicit options below */
     backend_utils_misc_guc_seams::initialize_guc_options::call()?;

@@ -1432,8 +1432,8 @@ pub fn CheckSlotRequirements(wal_level: i32) -> PgResult<()> {
 }
 
 /// `void CheckSlotPermissions(void)` (slot.c:1546). `user_id` is `GetUserId()`.
-pub fn CheckSlotPermissions(user_id: Oid) -> PgResult<()> {
-    if !miscinit::has_rolreplication::call(user_id) {
+pub fn CheckSlotPermissions(mcx: mcx::Mcx<'_>, user_id: Oid) -> PgResult<()> {
+    if !miscinit::has_rolreplication::call(mcx, user_id)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("permission denied to use replication slots")
