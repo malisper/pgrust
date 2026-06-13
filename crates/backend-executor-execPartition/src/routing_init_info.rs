@@ -29,13 +29,16 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
     // ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
     //
     // The `ModifyTable` *plan* node (nodeModifyTable.h) — distinct from the
-    // ported `ModifyTableState` — is not in `types-nodes` yet, so the only field
-    // of `node` reachable here is `onConflictAction`, exposed by the owner's
-    // `exec_get_on_conflict_action` seam (which returns `ONCONFLICT_NONE` when
-    // the plan pointer is the C `NULL`). Every other field the conditional tail
-    // reads (operation, withCheckOptionLists, returningLists, onConflictSet/
-    // Cols/Where, mergeActionLists, mergeJoinConditions) has no representation
-    // until the plan node lands; see the gated block below.
+    // ported `ModifyTableState` — is the unported neighbor's type. Each field of
+    // `node` this function reads is exposed by a nodeModifyTable seam: a plain
+    // read (`exec_get_on_conflict_action` for the `CheckValidResultRel` argument
+    // below) for the scalar fields, and one cohesive per-command leg seam for
+    // each list-driven block of the tail (WITH CHECK OPTION / RETURNING / ON
+    // CONFLICT / MERGE — those read the plan node's lists and the
+    // `OnConflictSetState` / `WithCheckOption` / `MergeAction` node types and
+    // write the leaf `ResultRelInfo`'s per-command fields, all nodeModifyTable's).
+    // execPartition keeps its own prologue + block ordering here; the seams
+    // panic until nodeModifyTable lands.
     let on_conflict_action =
         backend_executor_nodeModifyTable_seams::exec_get_on_conflict_action::call(mtstate);
 
@@ -56,12 +59,12 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
     // reference for the WCO / RETURNING / ON CONFLICT / MERGE Var translation.
     // Read them up front exactly as the C prologue does (before any branch).
     let first_rri_id = mtstate.resultRelInfo[0];
-    let _first_varno = estate.result_rel(first_rri_id).ri_RangeTableIndex;
-    let _first_result_rel = estate
-        .result_rel(first_rri_id)
-        .ri_RelationDesc
-        .as_ref()
-        .map(|r| r.alias());
+    let first_varno = estate.result_rel(first_rri_id).ri_RangeTableIndex;
+    // `firstResultRel` is `resultRelInfo[0].ri_RelationDesc`; the per-command
+    // legs that need it (build_attrmap_by_name against the first rel's tupdesc)
+    // take the first result rel by its EState-pool id so they can read the live
+    // relation themselves.
+    let first_result_rel = first_rri_id;
 
     // oldcxt = MemoryContextSwitchTo(proute->memcxt);
     //
@@ -118,10 +121,60 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
     //                     (node != NULL &&
     //                      node->onConflictAction != ONCONFLICT_NONE));
     //
-    // `relhasindex` is not carried on the trimmed FormData_pg_class and no
-    // `exec_open_indices` seam is authored, so this conditional cannot run yet;
-    // the conditional per-command tail below (which the missing ModifyTable plan
-    // node blocks outright) covers the rest of the body.
+    // The `relhasindex` read off the partition's pg_class form and the
+    // `ExecOpenIndices` callee (execIndexing.c) are the unported owner's; the
+    // gating and the `speculative` argument computation live with nodeModifyTable's
+    // view of its plan node, so route the whole leg through its seam (panics until
+    // nodeModifyTable + execIndexing land).
+    backend_executor_nodeModifyTable_seams::exec_open_partition_indices::call(
+        mcx,
+        mtstate,
+        estate,
+        leaf_part_rri_id,
+    )?;
+
+    // Build WITH CHECK OPTION constraints for the partition.  Note that we
+    // didn't build the withCheckOptionList for partitions within the planner,
+    // but simple translation of varattnos will suffice.  This only occurs for
+    // the INSERT case or in the case of UPDATE/MERGE tuple routing where we
+    // didn't find a result rel to reuse.
+    //
+    // if (node && node->withCheckOptionLists != NIL) { ... }
+    //
+    // The block reads the `ModifyTable` plan node's `withCheckOptionLists` and
+    // builds `WithCheckOption` exprs into `leaf_part_rri->ri_WithCheckOptions` /
+    // `ri_WithCheckOptionExprs` — both the plan-node list and the per-command
+    // ResultRelInfo fields are nodeModifyTable's, so the leg is its seam (a no-op
+    // when the plan has no WCO lists).
+    backend_executor_nodeModifyTable_seams::exec_init_partition_with_check_options::call(
+        mcx,
+        mtstate,
+        estate,
+        leaf_part_rri_id,
+        first_varno,
+        first_result_rel,
+    )?;
+
+    // Build the RETURNING projection for the partition.  Note that we didn't
+    // build the returningList for partitions within the planner, but simple
+    // translation of varattnos will suffice.  This only occurs for the INSERT
+    // case or in the case of UPDATE/MERGE tuple routing where we didn't find a
+    // result rel to reuse.
+    //
+    // if (node && node->returningLists != NIL) { ... }
+    //
+    // Reads the plan node's `returningLists` and builds `ri_returningList` /
+    // `ri_projectReturning` (using mtstate->ps's result slot + expr context) —
+    // nodeModifyTable's plan node and per-command fields, so its seam (a no-op
+    // when the plan has no RETURNING lists).
+    backend_executor_nodeModifyTable_seams::exec_init_partition_returning::call(
+        mcx,
+        mtstate,
+        estate,
+        leaf_part_rri_id,
+        first_varno,
+        first_result_rel,
+    )?;
 
     // Set up information needed for routing tuples to the partition.
     //
@@ -138,8 +191,31 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
         false,
     )?;
 
+    // If there is an ON CONFLICT clause, initialize state for it.
+    //
+    // if (node && node->onConflictAction != ONCONFLICT_NONE) { ... }
+    //
+    // Maps the root's arbiter index list to the partition's, checks the
+    // `elog(ERROR, "invalid arbiter index list")` invariant, stores
+    // `ri_onConflictArbiterIndexes`, and (for ONCONFLICT_UPDATE) builds the
+    // `OnConflictSetState` — all driven off the plan node and ResultRelInfo
+    // per-command fields, so nodeModifyTable's seam (a no-op when no ON CONFLICT
+    // clause).
+    backend_executor_nodeModifyTable_seams::exec_init_partition_on_conflict::call(
+        mcx,
+        mtstate,
+        estate,
+        leaf_part_rri_id,
+        root_result_rel_info,
+        first_varno,
+        first_result_rel,
+    )?;
+
     // Since we've just initialized this ResultRelInfo, it's not in any list
     // attached to the estate as yet.  Add it, so that it can be found later.
+    //
+    // Note that the entries in this list appear in no predetermined order,
+    // because partition result rels are initialized as and when they're needed.
     //
     // MemoryContextSwitchTo(estate->es_query_cxt);
     // estate->es_tuple_routing_result_relations =
@@ -153,40 +229,29 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
         .es_tuple_routing_result_relations
         .push(leaf_part_rri_id);
 
-    // The remaining per-command setup — building the WITH CHECK OPTION exprs,
-    // the RETURNING projection, the ON CONFLICT (arbiter index mapping + DO
-    // UPDATE SET projection / WHERE), and the MERGE action states — all branch
-    // on the `ModifyTable` *plan* node's lists (`node->withCheckOptionLists`,
-    // `node->returningLists`, `node->onConflictAction`, `node->operation ==
-    // CMD_MERGE`) and write them into `ResultRelInfo` per-command fields
-    // (ri_WithCheckOptions, ri_returningList, ri_projectReturning, ri_onConflict,
-    // ri_MergeActions, ri_MergeJoinCondition, ri_newTupleSlot,
-    // ri_projectNewInfoValid) that the trimmed executor type does not carry,
-    // plus owner functions with no seam authored (map_variable_attnos,
-    // build_attrmap_by_name, ExecBuildProjectionInfo on a returning list,
-    // ExecBuildUpdateProjection, ExecInitMergeTupleSlots, RelationGetIndexList).
+    // Initialize information about this partition that's needed to handle MERGE.
+    // We take the "first" result relation's mergeActionList as reference and make
+    // a copy for this relation, converting stuff that references attribute
+    // numbers to match this relation's.
     //
-    // The ModifyTable plan node is the unported neighbor's type; not one of its
-    // gating lists can be read here, so the port cannot even decide whether each
-    // conditional block fires — silently treating them as NIL would diverge from
-    // C on any partitioned INSERT/UPDATE/MERGE carrying WCO / RETURNING / ON
-    // CONFLICT / MERGE clauses. Per the mirror-PG-and-panic discipline, route the
-    // whole tail through a loud panic until nodeModifyTable lands its plan-node
-    // type and the per-command seams, rather than restructure around it or stub
-    // it out.
-    let _ = &partrel;
-    panic!(
-        "ExecInitPartitionInfo: per-command tail (WITH CHECK OPTION / RETURNING / \
-         ON CONFLICT / MERGE) needs the ModifyTable plan node, the trimmed \
-         ResultRelInfo's per-command fields, and owners (map_variable_attnos, \
-         build_attrmap_by_name, ExecBuildUpdateProjection, ExecInitMergeTupleSlots, \
-         RelationGetIndexList) that have not landed"
-    );
+    // if (node && node->operation == CMD_MERGE) { ... }
+    //
+    // Reads the plan node's `mergeActionLists` / `mergeJoinConditions` and builds
+    // the partition's `MergeActionState`s, `ri_MergeJoinCondition`, and (when
+    // `!ri_projectNewInfoValid`) the merge tuple slots — all nodeModifyTable's
+    // plan node and per-command fields, so its seam (a no-op when not MERGE).
+    backend_executor_nodeModifyTable_seams::exec_init_partition_merge::call(
+        mcx,
+        mtstate,
+        estate,
+        leaf_part_rri_id,
+        first_varno,
+        first_result_rel,
+    )?;
 
     // MemoryContextSwitchTo(oldcxt);  -- no ambient context to restore.
 
     // return leaf_part_rri;
-    // (unreachable until the per-command tail above is portable)
-    #[allow(unreachable_code)]
+    let _ = &partrel;
     Ok(leaf_part_rri_id)
 }

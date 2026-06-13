@@ -31,3 +31,107 @@ seam_core::seam!(
         mtstate: &types_nodes::ModifyTableState<'mcx>,
     ) -> types_nodes::nodes::OnConflictAction
 );
+
+seam_core::seam!(
+    /// The `relhasindex`-gated `ExecOpenIndices` leg of `ExecInitPartitionInfo`
+    /// (execPartition.c L543-547): when the partition relation has indexes and
+    /// `leaf_part_rri->ri_IndexRelationDescs == NULL`, open the partition's
+    /// indices into the leaf `ResultRelInfo` (id into the EState pool), passing
+    /// `speculative = (node != NULL && node->onConflictAction != ONCONFLICT_NONE)`
+    /// so ExecInsert can perform speculative insertions. A no-op when the
+    /// partition has no indexes or they are already open. `relhasindex` and the
+    /// `ExecOpenIndices` callee (execIndexing.c) are the unported owner's; `Err`
+    /// carries index-open failure and OOM.
+    pub fn exec_open_partition_indices<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The WITH CHECK OPTION leg of `ExecInitPartitionInfo` (execPartition.c
+    /// L549-614): when `node && node->withCheckOptionLists != NIL`, take the
+    /// first plan's WCO list as reference, `build_attrmap_by_name` +
+    /// `map_variable_attnos` it into the partition `partrel`'s attribute
+    /// numbers (relative to `first_varno` / the first result rel), `ExecInitQual`
+    /// each `WithCheckOption.qual`, and store `ri_WithCheckOptions` /
+    /// `ri_WithCheckOptionExprs` on the leaf `ResultRelInfo` (id into the EState
+    /// pool). A no-op when the plan carries no WCO lists. Reads the unported
+    /// `ModifyTable` plan node and `WithCheckOption` node type; `Err` carries
+    /// the expression-init errors and OOM.
+    pub fn exec_init_partition_with_check_options<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        first_result_rel: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The RETURNING leg of `ExecInitPartitionInfo` (execPartition.c L616-679):
+    /// when `node && node->returningLists != NIL`, take the first plan's
+    /// RETURNING list as reference, `build_attrmap_by_name` +
+    /// `map_variable_attnos` it into the partition's attribute numbers, store
+    /// `ri_returningList`, and build `ri_projectReturning` via
+    /// `ExecBuildProjectionInfo` using `mtstate->ps.ps_ResultTupleSlot` /
+    /// `ps_ExprContext`. A no-op when the plan carries no RETURNING lists.
+    /// Reads the unported `ModifyTable` plan node; `Err` carries the
+    /// projection-build errors and OOM.
+    pub fn exec_init_partition_returning<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        first_result_rel: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The ON CONFLICT leg of `ExecInitPartitionInfo` (execPartition.c
+    /// L685-862): when `node && node->onConflictAction != ONCONFLICT_NONE`, map
+    /// the root's arbiter index list to the partition's (scanning the
+    /// partition's index list and matching `get_partition_ancestors`), checking
+    /// the `elog(ERROR, "invalid arbiter index list")` length invariant, store
+    /// `ri_onConflictArbiterIndexes`, and for `ONCONFLICT_UPDATE` build the
+    /// `OnConflictSetState` (existing/proj slots, DO UPDATE SET projection and
+    /// WHERE clause, reusing the root's state when the root→child tuple map is
+    /// `NULL`). A no-op when the plan has no ON CONFLICT clause. Reads the
+    /// unported `ModifyTable` plan node and `OnConflictSetState`; `Err` carries
+    /// the arbiter-list `elog`, projection-build errors, and OOM.
+    pub fn exec_init_partition_on_conflict<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        root_result_rel_info: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        first_result_rel: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The MERGE leg of `ExecInitPartitionInfo` (execPartition.c L877-981):
+    /// when `node && node->operation == CMD_MERGE`, take the first plan's
+    /// `mergeActionList` as reference, build a per-partition copy converting
+    /// attribute numbers (`build_attrmap_by_name`, `map_variable_attnos`,
+    /// `adjust_partition_colnos_using_map`), initialize the merge tuple slots
+    /// (`ExecInitMergeTupleSlots`) when `!ri_projectNewInfoValid`, build the
+    /// join-condition `ExprState` (`ri_MergeJoinCondition`), and for each
+    /// action build its `MergeActionState` (INSERT/UPDATE projections, WHEN
+    /// qual). A no-op when the operation is not MERGE. Reads the unported
+    /// `ModifyTable` plan node and `MergeAction`/`MergeActionState` types;
+    /// `Err` carries the `elog`s, projection-build errors, and OOM.
+    pub fn exec_init_partition_merge<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        first_result_rel: types_nodes::RriId,
+    ) -> types_error::PgResult<()>
+);

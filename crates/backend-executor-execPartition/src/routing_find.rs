@@ -396,7 +396,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
         if keycol != 0 {
             // Plain column; get the value directly from the heap tuple.
             let (d, n) = backend_executor_execTuples_seams::slot_getattr::call(
-                estate.slot(slot),
+                estate.slot_mut(slot),
                 keycol,
             )?;
             datum = d;

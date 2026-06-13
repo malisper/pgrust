@@ -55,22 +55,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h, via execTuples.c's
-    /// `slot_getsomeattrs`): fetch the value of the `attnum`th (1-based)
-    /// attribute of the slot's current tuple as `(datum, isnull)`. Deforming
-    /// can detoast/allocate, so the call is fallible.
-    ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no descriptor/values payload), so this contract cannot yet be
-    /// implemented as promised. It must be re-signed when the slot payload
-    /// model lands (same caveat as `slot_getallattrs`).
-    pub fn slot_getattr(
-        slot: &types_nodes::TupleTableSlot,
-        attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
-);
-
-seam_core::seam!(
     /// `ExecInitResultTupleSlotTL(planstate, tts_ops)` (execTuples.c):
     /// initialize the node's result tuple type (from the plan's targetlist)
     /// and create its result slot in the `EState` slot pool, storing the id in

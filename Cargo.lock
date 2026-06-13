@@ -213,6 +213,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tupconvert-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-tupdesc-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2009,6 +2019,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execPartition"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-next-seams",
+ "backend-access-common-relation-seams",
+ "backend-access-common-tupconvert-seams",
+ "backend-access-table-tableam",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-partition-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeModifyTable-seams",
+ "backend-nodes-core-seams",
+ "backend-partitioning-core-seams",
+ "backend-partitioning-partbounds-seams",
+ "backend-partitioning-partprune-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-more-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execPartition-seams"
 version = "0.0.0"
 dependencies = [
@@ -2097,6 +2149,7 @@ dependencies = [
 name = "backend-executor-execUtils-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -2327,7 +2380,9 @@ dependencies = [
 name = "backend-executor-nodeModifyTable-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
 ]
@@ -2743,7 +2798,11 @@ dependencies = [
 name = "backend-partitioning-core-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -2753,9 +2812,20 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
+]
+
+[[package]]
+name = "backend-partitioning-partprune-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -4437,6 +4507,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -4644,6 +4715,17 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-partcache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -5107,6 +5189,9 @@ name = "backend-utils-misc-more-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -5537,6 +5622,7 @@ dependencies = [
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
+ "backend-executor-execPartition",
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",

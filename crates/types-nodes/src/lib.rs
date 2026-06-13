@@ -54,7 +54,7 @@ pub use jointype::{
     JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
 };
 pub use nodemergeappend::{
-    BinaryHeap, MergeAppend, MergeAppendStateData, PartitionPruneState, T_MergeAppend,
+    BinaryHeap, MergeAppend, MergeAppendStateData, T_MergeAppend,
     T_MergeAppendState,
 };
 pub use nodelimit::{
