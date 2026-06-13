@@ -12,10 +12,11 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::{PgError, PgResult};
-use types_error::error::ERRCODE_INVALID_TEXT_REPRESENTATION;
+use types_error::error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION};
 use types_rangetypes::{MultirangeType, MultirangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL};
 
 use backend_access_common_detoast::pg_detoast_datum;
+use backend_utils_adt_format_type_seams as format_type_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_typcache_seams as typcache_seams;
 use backend_utils_adt_rangetypes_seams as rangetypes_seams;
@@ -89,7 +90,7 @@ fn at(bytes: &[u8], i: usize) -> u8 {
 pub fn multirange_get_typcache(mltrngtypid: Oid) -> PgResult<TypeCacheEntry> {
     // typcache = lookup_type_cache(mltrngtypid, TYPECACHE_MULTIRANGE_INFO);
     let typcache =
-        typcache_seams::lookup_type_cache_range::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
+        typcache_seams::lookup_type_cache_entry::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
     // if (typcache->rngtype == NULL) elog(ERROR, "type %u is not a multirange type", ...);
     if typcache.rngtype.is_none() {
         return Err(PgError::error(format!(
@@ -112,7 +113,7 @@ pub fn get_multirange_io_data(
 ) -> PgResult<MultirangeIOData> {
     // cache->typcache = lookup_type_cache(mltrngtypid, TYPECACHE_MULTIRANGE_INFO);
     let typcache =
-        typcache_seams::lookup_type_cache_range::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
+        typcache_seams::lookup_type_cache_entry::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
     // if (cache->typcache->rngtype == NULL) elog(ERROR, "type %u is not a multirange type", ...);
     let rngtype = match typcache.rngtype.as_deref() {
         Some(r) => r,
@@ -137,15 +138,27 @@ pub fn get_multirange_io_data(
 
     // if (!OidIsValid(typiofunc)) -- can only happen for receive or send.
     if io.func == 0 {
+        // C: ereport(ERROR, errcode(ERRCODE_UNDEFINED_FUNCTION),
+        //            errmsg("no binary {input,output} function available for
+        //            type %s", format_type_be(rngtype->type_id))).
+        // `format_type_be` needs a context for the palloc'd name; a transient
+        // context suffices and is dropped with this builder.
         let rngtype_oid = rngtype.type_id;
+        let cx = mcx::MemoryContext::new("get_multirange_io_data error");
+        let name = match format_type_seams::format_type_be::call(cx.mcx(), rngtype_oid) {
+            Ok(s) => s.as_str().to_string(),
+            Err(_) => rngtype_oid.to_string(),
+        };
         if func == IOFuncSelector::Receive {
             return Err(PgError::error(format!(
-                "no binary input function available for type {rngtype_oid}"
-            )));
+                "no binary input function available for type {name}"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
         } else {
             return Err(PgError::error(format!(
-                "no binary output function available for type {rngtype_oid}"
-            )));
+                "no binary output function available for type {name}"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
         }
     }
 

@@ -128,11 +128,13 @@ pub fn init_all() {
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
+    backend_utils_adt_numeric::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_varlena::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_catcache::init_seams();
