@@ -8152,6 +8152,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
+ "backend-storage-smgr-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-relmapper-seams",
  "backend-utils-cache-syscache-seams",
