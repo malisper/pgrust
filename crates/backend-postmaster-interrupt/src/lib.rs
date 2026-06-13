@@ -66,7 +66,10 @@ pub fn ProcessMainLoopInterrupts() -> PgResult<()> {
     }
 
     if ShutdownRequestPending() {
-        backend_storage_ipc_seams::proc_exit::call(0);
+        backend_storage_ipc_seams::proc_exit::call(
+            0,
+            backend_utils_init_small_seams::my_proc_pid::call(),
+        );
     }
 
     // Perform logging of memory contexts of this process

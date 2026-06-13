@@ -268,15 +268,16 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
     backend_storage_ipc_seams::on_shmem_exit::call(
         CleanupProcSignalState,
         types_datum::Datum::from_usize(0),
-    );
+    )?;
 
     Ok(())
 }
 
 /// `CleanupProcSignalState(int status, Datum arg)` — remove current process
 /// from the ProcSignal mechanism. Called via `on_shmem_exit()` during
-/// backend shutdown.
-fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
+/// backend shutdown. Never errors itself; the `PgResult` is the
+/// `pg_on_exit_callback` surface.
+fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) -> types_error::PgResult<()> {
     // Clear MyProcSignalSlot, so that a SIGUSR1 received after this point
     // won't try to access it after it's no longer ours.
     let slot_index = MY_PROC_SIGNAL_SLOT
@@ -303,7 +304,7 @@ fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
                 my_proc_pid, slot_index, old_pid as i32
             ),
         );
-        return; /* XXX better to zero the slot anyway? */
+        return Ok(()); /* XXX better to zero the slot anyway? */
     }
 
     // Mark the slot as unused
@@ -319,6 +320,7 @@ fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
     backend_storage_lmgr_condition_variable_seams::condition_variable_broadcast::call(
         &slot.pss_barrierCV,
     );
+    Ok(())
 }
 
 /// `SendProcSignal(pid, reason, procNumber)` — send a signal to a Postgres

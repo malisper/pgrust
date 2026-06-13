@@ -38,4 +38,6 @@ pub mod ipc;
 /// Install this crate's implementations into the seam crates it owns.
 pub fn init_seams() {
     backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
+    backend_storage_ipc_seams::on_proc_exit::set(ipc::on_proc_exit);
+    backend_storage_ipc_seams::on_shmem_exit::set(ipc::on_shmem_exit);
 }

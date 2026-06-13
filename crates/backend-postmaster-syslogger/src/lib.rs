@@ -541,7 +541,10 @@ pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
             // allow for the possibility of elog messages being generated
             // inside proc_exit. Regular exit() will take care of flushing and
             // closing stdio channels.
-            backend_storage_ipc_seams::proc_exit::call(0);
+            backend_storage_ipc_seams::proc_exit::call(
+                0,
+                backend_utils_init_small_seams::my_proc_pid::call(),
+            );
         }
     }
 }

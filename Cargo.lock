@@ -617,6 +617,7 @@ dependencies = [
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procsignal-seams",
  "backend-storage-ipc-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
  "backend-utils-mmgr-mcxt-seams",
  "libc",
@@ -715,17 +716,19 @@ dependencies = [
  "backend-storage-file-seams",
  "backend-storage-ipc-seams",
  "backend-storage-ipc-shmem-seams",
- "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-lwlock",
  "backend-tcop-postgres-seams",
  "backend-utils-activity-waitevent-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-mmgr-freepage-seams",
  "libc",
+ "mcx",
  "pg-prng",
  "types-core",
  "types-datum",
  "types-error",
+ "types-freepage",
  "types-guc",
  "types-storage",
 ]
@@ -778,6 +781,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-datum",
+ "types-error",
 ]
 
 [[package]]
@@ -1228,6 +1232,7 @@ dependencies = [
  "backend-utils-activity-pgstat-seams",
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
+ "backend-utils-init-small-seams",
  "libc",
  "types-dest",
  "types-error",
@@ -1357,6 +1362,7 @@ name = "backend-utils-mmgr-freepage-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-freepage",
 ]
 
 [[package]]
@@ -1616,6 +1622,13 @@ version = "0.0.0"
 [[package]]
 name = "types-error"
 version = "0.0.0"
+
+[[package]]
+name = "types-freepage"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-guc"

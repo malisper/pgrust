@@ -4,10 +4,16 @@
 //! Shared state — the control segment (`dsm_control_header` + its
 //! `dsm_control_item[]`) and the preallocated main-region pages — lives in
 //! real shared memory and is touched through raw pointers while holding
-//! `DynamicSharedMemoryControlLock`, exactly as in C.
+//! `DynamicSharedMemoryControlLock` (always via a [`MainLWLockGuard`], so an
+//! `ereport(ERROR)` under the lock releases it on unwind).
 //!
 //! Backend-local state — the attached-segment list and the control-segment
-//! globals each process inherits at fork — is `thread_local`.
+//! globals each process inherits at fork — is `thread_local`. The descriptor
+//! and on-detach callback records that C `MemoryContextAlloc`s in
+//! `TopMemoryContext` are allocated through a caller-provided `Mcx<'static>`
+//! (the TopMemoryContext-equivalent handle: descriptors live for the
+//! backend's life in thread-local state, so the context must be
+//! backend-lifetime too).
 //!
 //! The C `dsm_segment *` maps to two things: a [`DsmSegmentId`] (stable
 //! identity; ids are never reused, so a stale id traps loudly where the C
@@ -18,15 +24,18 @@
 
 use std::cell::{Cell, RefCell};
 
+use backend_storage_lmgr_lwlock::{LWLockAcquireMain, MainLWLockGuard};
 use backend_utils_error::{elog, ereport};
+use mcx::{Mcx, PgVec};
 use types_core::Size;
 use types_datum::Datum;
 use types_error::{
-    ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES,
-    ERRCODE_OUT_OF_MEMORY, ERROR, LOG, WARNING,
+    ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, ERROR, LOG, WARNING,
 };
+use types_freepage::{FreePageManager, FPM_PAGE_SIZE};
 use types_storage::{
     dsm_handle, PGShmemHeader, DSM_HANDLE_INVALID, DYNAMIC_SHARED_MEMORY_CONTROL_LOCK,
+    LW_EXCLUSIVE,
 };
 
 use crate::dsm_impl::{
@@ -36,12 +45,9 @@ use crate::dsm_impl::{
 };
 use crate::ipc::on_shmem_exit;
 
-use backend_storage_lmgr_lwlock_seams::{lwlock_acquire_main, lwlock_release_main};
 use backend_utils_mmgr_freepage_seams::{
     free_page_manager_get, free_page_manager_initialize, free_page_manager_put,
-    free_page_manager_size,
 };
-use types_storage::LW_EXCLUSIVE;
 
 pub const PG_DYNSHMEM_CONTROL_MAGIC: u32 = 0x9a50_3d32;
 
@@ -53,9 +59,6 @@ pub const INVALID_CONTROL_SLOT: u32 = u32::MAX;
 
 /// `DSM_CREATE_NULL_IF_MAXSEGMENTS` (`storage/dsm.h`).
 pub const DSM_CREATE_NULL_IF_MAXSEGMENTS: i32 = 0x0001;
-
-/// `FPM_PAGE_SIZE` (`utils/freepage.h`).
-pub const FPM_PAGE_SIZE: Size = 4096;
 
 fn loc(funcname: &str) -> ErrorLocation {
     ErrorLocation::new("dsm.c", 0, funcname)
@@ -127,7 +130,7 @@ struct DsmSegmentDesc {
     /// `Size mapped_size`.
     mapped_size: usize,
     /// `slist_head on_detach` — LIFO: newest at the back of the Vec.
-    on_detach: Vec<DetachCallback>,
+    on_detach: PgVec<'static, DetachCallback>,
 }
 
 thread_local! {
@@ -137,8 +140,13 @@ thread_local! {
     /// (doubles as the `FreePageManager *`, as in C).
     static DSM_MAIN_SPACE_BEGIN: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
     /// `dsm_segment_list` — segments attached by this backend; the C dlist
-    /// head is the *back* of this Vec (`dlist_push_head` == `push`).
-    static DSM_SEGMENT_LIST: RefCell<Vec<DsmSegmentDesc>> = const { RefCell::new(Vec::new()) };
+    /// head is the *back* of this Vec (`dlist_push_head` == `push`). `None`
+    /// until the first descriptor is created (the storage is allocated in
+    /// the TopMemoryContext-equivalent context passed to
+    /// [`dsm_create_descriptor`], as C `MemoryContextAlloc`s descriptors in
+    /// `TopMemoryContext`).
+    static DSM_SEGMENT_LIST: RefCell<Option<PgVec<'static, DsmSegmentDesc>>> =
+        const { RefCell::new(None) };
     /// Monotonic id mint for [`DsmSegmentId`]; starts at 1 so 0 never names a
     /// live segment.
     static DSM_NEXT_ID: Cell<u64> = const { Cell::new(1) };
@@ -185,14 +193,26 @@ impl DsmSegment {
 
 impl Drop for DsmSegment {
     /// `ResOwnerReleaseDSM` — detach at owner release. A no-op if the segment
-    /// was already detached through another path; an `ereport(ERROR)` from a
-    /// detach callback cannot propagate out of `Drop` and is discarded (C
-    /// relies on the surrounding abort machinery for the same case).
+    /// was already detached through another path. An `ereport(ERROR)` from a
+    /// detach callback cannot propagate out of `Drop` (C re-enters error
+    /// recovery here); it is demoted to a WARNING rather than discarded,
+    /// pending elog's error-during-error machinery.
     fn drop(&mut self) {
-        let live = DSM_SEGMENT_LIST
-            .with(|list| list.borrow().iter().any(|desc| desc.id == self.id));
+        let live = DSM_SEGMENT_LIST.with(|list| {
+            list.borrow()
+                .as_ref()
+                .is_some_and(|l| l.iter().any(|desc| desc.id == self.id))
+        });
         if live {
-            let _ = dsm_detach(self.id);
+            if let Err(e) = dsm_detach(self.id) {
+                let _ = elog(
+                    WARNING,
+                    format!(
+                        "error ignored while detaching dynamic shared memory segment: {}",
+                        e.message()
+                    ),
+                );
+            }
         }
     }
 }
@@ -211,8 +231,8 @@ fn with_desc<R>(id: DsmSegmentId, f: impl FnOnce(&mut DsmSegmentDesc) -> R) -> R
     DSM_SEGMENT_LIST.with(|list| {
         let mut list = list.borrow_mut();
         let desc = list
-            .iter_mut()
-            .find(|desc| desc.id == id)
+            .as_mut()
+            .and_then(|l| l.iter_mut().find(|desc| desc.id == id))
             .expect("dsm: use of unknown or detached segment id");
         f(desc)
     })
@@ -220,6 +240,17 @@ fn with_desc<R>(id: DsmSegmentId, f: impl FnOnce(&mut DsmSegmentDesc) -> R) -> R
 
 fn control() -> *mut dsm_control_header {
     DSM_CONTROL.with(|c| c.get())
+}
+
+/// `LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE)` — guard
+/// scope, so the lock can never leak across an error return.
+fn acquire_control_lock() -> PgResult<MainLWLockGuard> {
+    LWLockAcquireMain(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)
+}
+
+/// `dsm_main_space_begin` viewed as the region's `FreePageManager *`, as in C.
+fn main_space_fpm() -> *mut FreePageManager {
+    DSM_MAIN_SPACE_BEGIN.with(|c| c.get()) as *mut FreePageManager
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +314,10 @@ fn dsm_control_segment_sane(control: *mut dsm_control_header, mapped_size: usize
 
 /// `dsm_postmaster_startup(PGShmemHeader *shim)` — start the dynamic shared
 /// memory system: called once per cluster lifetime at postmaster startup,
-/// creating and initializing the control segment.
-pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader) -> PgResult<()> {
+/// creating and initializing the control segment. `max_backends` is the
+/// caller's `MaxBackends` (globals.c), passed explicitly per the
+/// no-ambient-global rule.
+pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader, max_backends: i32) -> PgResult<()> {
     // Assert(!IsUnderPostmaster).
 
     // If we're using the mmap implementation, clean up any leftovers; for
@@ -295,9 +328,8 @@ pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader) -> PgResult<()> {
     }
 
     // Determine size for new control segment.
-    let maxitems = (PG_DYNSHMEM_FIXED_SLOTS
-        + PG_DYNSHMEM_SLOTS_PER_BACKEND
-            * backend_utils_init_small_seams::max_backends::call()) as u32;
+    let maxitems =
+        (PG_DYNSHMEM_FIXED_SLOTS + PG_DYNSHMEM_SLOTS_PER_BACKEND * max_backends) as u32;
     elog(
         DEBUG2,
         format!("dynamic shared memory system will support {maxitems} segments"),
@@ -454,12 +486,10 @@ pub fn dsm_cleanup_using_control_segment(old_control_handle: dsm_handle) -> PgRe
 /// current; instead scan `pg_dynshmem` and blow away everything that
 /// shouldn't be there.
 fn dsm_cleanup_for_mmap() -> PgResult<()> {
-    use backend_storage_file_seams::{allocate_dir, free_dir, read_dir};
-
     // Scan the directory for something with a name of the correct format.
-    let dir = allocate_dir::call(PG_DYNSHMEM_DIR)?;
-
-    while let Some(d_name) = read_dir::call(dir, PG_DYNSHMEM_DIR)? {
+    // The seam owns the AllocateDir/ReadDir/FreeDir bracket: the directory
+    // is closed on every path, including the ereport(ERROR) below.
+    backend_storage_file_seams::with_allocated_dir::call(PG_DYNSHMEM_DIR, &mut |d_name| {
         if d_name.starts_with(PG_DYNSHMEM_MMAP_FILE_PREFIX) {
             let buf = format!("{PG_DYNSHMEM_DIR}/{d_name}");
 
@@ -477,11 +507,10 @@ fn dsm_cleanup_for_mmap() -> PgResult<()> {
                     .finish(loc("dsm_cleanup_for_mmap"))?;
             }
         }
-    }
+        Ok(())
+    })
 
     // Cleanup complete.
-    free_dir::call(dir);
-    Ok(())
 }
 
 /// `dsm_postmaster_shutdown(int code, Datum arg)` — at shutdown, iterate the
@@ -589,11 +618,11 @@ pub fn dsm_shmem_init() -> PgResult<()> {
         backend_storage_ipc_shmem_seams::shmem_init_struct::call("Preallocated DSM", size)?;
     DSM_MAIN_SPACE_BEGIN.with(|c| c.set(begin));
     if !found {
-        let fpm = begin;
+        let fpm = begin as *mut FreePageManager;
         let mut first_page: usize = 0;
 
         // Reserve space for the FreePageManager.
-        while first_page * FPM_PAGE_SIZE < free_page_manager_size::call() {
+        while first_page * FPM_PAGE_SIZE < std::mem::size_of::<FreePageManager>() {
             first_page += 1;
         }
 
@@ -610,14 +639,15 @@ pub fn dsm_shmem_init() -> PgResult<()> {
 // ---------------------------------------------------------------------------
 
 /// `dsm_create(Size size, int flags)` — create a new dynamic shared memory
-/// segment.
+/// segment. `mcx` is the TopMemoryContext-equivalent handle the descriptor
+/// is allocated in (C: `dsm_create_descriptor`'s `MemoryContextAlloc`).
 ///
 /// Returns `Ok(None)` only when `flags & DSM_CREATE_NULL_IF_MAXSEGMENTS` and
 /// the control segment is full. The returned guard is the resource-owner
 /// association: drop it (or let `?` drop it) and the segment detaches; call
 /// [`dsm_pin_mapping`] for session lifetime (the C NULL-CurrentResourceOwner
 /// behavior).
-pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
+pub fn dsm_create(size: Size, flags: i32, mcx: Mcx<'static>) -> PgResult<Option<DsmSegment>> {
     // Assert(IsUnderPostmaster || !IsPostmasterEnvironment) — unsafe in
     // postmaster, allowed in single-user mode.
 
@@ -626,27 +656,30 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
     }
 
     // Create a new segment descriptor.
-    let seg = dsm_create_descriptor()?;
+    let seg = dsm_create_descriptor(mcx)?;
     let id = seg.id();
 
-    let dsm_main_space_fpm = DSM_MAIN_SPACE_BEGIN.with(|c| c.get());
+    let dsm_main_space_fpm = main_space_fpm();
     let mut npages: usize = 0;
     let mut first_page: usize = 0;
     let mut using_main_dsm_region = false;
 
     // Lock the control segment while we try to allocate from the main shared
     // memory area, if configured.
+    let mut control_lock: Option<MainLWLockGuard> = None;
     if !dsm_main_space_fpm.is_null() {
         npages = size / FPM_PAGE_SIZE;
         if size % FPM_PAGE_SIZE > 0 {
             npages += 1;
         }
 
-        lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+        control_lock = Some(acquire_control_lock()?);
         if let Some(fp) = free_page_manager_get::call(dsm_main_space_fpm, npages) {
             // We can carve out a piece of the main shared memory segment.
             first_page = fp;
-            let address = unsafe { dsm_main_space_fpm.add(first_page * FPM_PAGE_SIZE) };
+            let address = unsafe {
+                (dsm_main_space_fpm as *mut u8).add(first_page * FPM_PAGE_SIZE)
+            };
             with_desc(id, |desc| {
                 desc.mapped_address = address;
                 desc.mapped_size = npages * FPM_PAGE_SIZE;
@@ -659,8 +692,8 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
     if !using_main_dsm_region {
         // We need to create a new memory segment; loop until we find an
         // unused segment identifier.
-        if !dsm_main_space_fpm.is_null() {
-            lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+        if let Some(guard) = control_lock.take() {
+            guard.release()?;
         }
         loop {
             // Use even numbers only.
@@ -690,8 +723,9 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
                 break;
             }
         }
-        lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+        control_lock = Some(acquire_control_lock()?);
     }
+    let control_lock = control_lock.expect("DynamicSharedMemoryControlLock must be held here");
 
     // Search the control segment for an unused slot.
     let control = control();
@@ -719,7 +753,7 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
                 (*item).pinned = false;
             }
             with_desc(id, |d| d.control_slot = i);
-            lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+            control_lock.release()?;
             return Ok(Some(seg));
         }
     }
@@ -730,7 +764,7 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
         if using_main_dsm_region {
             free_page_manager_put::call(dsm_main_space_fpm, first_page, npages);
         }
-        lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+        control_lock.release()?;
         if !using_main_dsm_region {
             let (handle, mut ip, mut ma, mut ms) = with_desc(id, |d| {
                 (d.handle, d.impl_private, d.mapped_address, d.mapped_size)
@@ -785,16 +819,18 @@ pub fn dsm_create(size: Size, flags: i32) -> PgResult<Option<DsmSegment>> {
         (*control).nitems += 1;
     }
     with_desc(id, |d| d.control_slot = nitems);
-    lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+    control_lock.release()?;
 
     Ok(Some(seg))
 }
 
 /// `dsm_attach(dsm_handle h)` — attach a dynamic shared memory segment.
+/// `mcx` is the TopMemoryContext-equivalent handle the descriptor is
+/// allocated in.
 ///
 /// Returns `Ok(None)` if the segment isn't known to the system (everyone
 /// else, including the creator, detached it before we got here).
-pub fn dsm_attach(h: dsm_handle) -> PgResult<Option<DsmSegment>> {
+pub fn dsm_attach(h: dsm_handle, mcx: Mcx<'static>) -> PgResult<Option<DsmSegment>> {
     // Assert(IsUnderPostmaster).
 
     if !DSM_INIT_DONE.with(|c| c.get()) {
@@ -803,19 +839,22 @@ pub fn dsm_attach(h: dsm_handle) -> PgResult<Option<DsmSegment>> {
 
     // Debugging cross-check: the same segment must not be attached twice;
     // use dsm_find_mapping first if unsure.
-    let already = DSM_SEGMENT_LIST
-        .with(|list| list.borrow().iter().any(|desc| desc.handle == h));
+    let already = DSM_SEGMENT_LIST.with(|list| {
+        list.borrow()
+            .as_ref()
+            .is_some_and(|l| l.iter().any(|desc| desc.handle == h))
+    });
     if already {
         elog(ERROR, "can't attach the same segment more than once")?;
     }
 
     // Create a new segment descriptor.
-    let seg = dsm_create_descriptor()?;
+    let seg = dsm_create_descriptor(mcx)?;
     let id = seg.id();
     with_desc(id, |d| d.handle = h);
 
     // Bump reference count for this segment in shared memory.
-    lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+    let control_lock = acquire_control_lock()?;
     let control = control();
     let nitems = unsafe { (*control).nitems };
     for i in 0..nitems {
@@ -849,7 +888,7 @@ pub fn dsm_attach(h: dsm_handle) -> PgResult<Option<DsmSegment>> {
         }
         break;
     }
-    lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+    control_lock.release()?;
 
     // If we didn't find the handle, it probably means that everyone else who
     // had it mapped died before we got here; up to the caller what to do.
@@ -884,7 +923,8 @@ pub fn dsm_attach(h: dsm_handle) -> PgResult<Option<DsmSegment>> {
 pub fn dsm_backend_shutdown() -> PgResult<()> {
     loop {
         // dlist head = newest = back of the Vec.
-        let head = DSM_SEGMENT_LIST.with(|list| list.borrow().last().map(|d| d.id));
+        let head = DSM_SEGMENT_LIST
+            .with(|list| list.borrow().as_ref().and_then(|l| l.last().map(|d| d.id)));
         match head {
             Some(id) => dsm_detach(id)?,
             None => break,
@@ -900,7 +940,8 @@ pub fn dsm_detach_all() -> PgResult<()> {
     let control_address = control() as *mut u8;
 
     loop {
-        let head = DSM_SEGMENT_LIST.with(|list| list.borrow().last().map(|d| d.id));
+        let head = DSM_SEGMENT_LIST
+            .with(|list| list.borrow().as_ref().and_then(|l| l.last().map(|d| d.id)));
         match head {
             Some(id) => dsm_detach(id)?,
             None => break,
@@ -982,7 +1023,7 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
     // Reduce reference count, if we previously increased it.
     let control_slot = with_desc(seg, |d| d.control_slot);
     if control_slot != INVALID_CONTROL_SLOT {
-        lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+        let control_lock = acquire_control_lock()?;
         let control = control();
         // Assert(item.handle == seg->handle); Assert(item.refcnt > 1).
         let refcnt = unsafe {
@@ -991,7 +1032,7 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
             (*item).refcnt
         };
         with_desc(seg, |d| d.control_slot = INVALID_CONTROL_SLOT);
-        lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+        control_lock.release()?;
 
         // If new reference count is 1, try to destroy the segment. If we
         // fail (or are killed first) the count stays 1 and nobody else can
@@ -1022,12 +1063,12 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
                 destroyed.unwrap_or(false)
             };
             if destroyed {
-                lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+                let control_lock = acquire_control_lock()?;
                 unsafe {
                     let item = control_item(control, control_slot);
                     if is_main_region_dsm_handle(handle) {
                         free_page_manager_put::call(
-                            DSM_MAIN_SPACE_BEGIN.with(|c| c.get()),
+                            main_space_fpm(),
                             (*item).first_page,
                             (*item).npages,
                         );
@@ -1035,7 +1076,7 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
                     // Assert(item.handle == seg->handle && item.refcnt == 1).
                     (*item).refcnt = 0;
                 }
-                lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+                control_lock.release()?;
             }
         }
     }
@@ -1075,9 +1116,10 @@ pub fn dsm_pin_segment(seg: DsmSegmentId) -> PgResult<()> {
         with_desc(seg, |d| (d.handle, d.control_slot, d.impl_private));
 
     // Bump the reference count in shared memory, so the segment survives
-    // even with no attached session. (On error the control lock stays held,
-    // as in C, where error recovery's LWLockReleaseAll takes care of it.)
-    lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+    // even with no attached session. (On the ERROR path the guard's drop
+    // releases the control lock — where C leaves it for error recovery's
+    // LWLockReleaseAll.)
+    let control_lock = acquire_control_lock()?;
     let control = control();
     let item = unsafe { control_item(control, control_slot) };
     if unsafe { (*item).pinned } {
@@ -1093,7 +1135,7 @@ pub fn dsm_pin_segment(seg: DsmSegmentId) -> PgResult<()> {
         (*item).refcnt += 1;
         (*item).impl_private_pm_handle = pm_handle;
     }
-    lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+    control_lock.release()?;
     Ok(())
 }
 
@@ -1105,7 +1147,7 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
     let mut destroy = false;
 
     // Find the control slot for the given handle.
-    lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+    let control_lock = acquire_control_lock()?;
     let control = control();
     let nitems = unsafe { (*control).nitems };
     for i in 0..nitems {
@@ -1124,8 +1166,9 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
     }
 
     // We should have found the slot, and it should not already be going
-    // away, because this is only called on a pinned segment. (As in C, the
-    // control lock is left for error recovery on these ERROR paths.)
+    // away, because this is only called on a pinned segment. (On these ERROR
+    // paths the guard's drop releases the control lock — where C leaves it
+    // for error recovery.)
     if control_slot == INVALID_CONTROL_SLOT {
         elog(ERROR, "cannot unpin unknown segment handle")?;
     }
@@ -1153,7 +1196,7 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
     }
 
     // Now we can release the lock.
-    lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+    control_lock.release()?;
 
     // Clean up resources if that was the last reference. The current
     // process certainly has no mapping (the count would still exceed 1
@@ -1178,12 +1221,12 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
             .unwrap_or(false)
         };
         if destroyed {
-            lwlock_acquire_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)?;
+            let control_lock = acquire_control_lock()?;
             unsafe {
                 let item = control_item(control, control_slot);
                 if is_main_region_dsm_handle(handle) {
                     free_page_manager_put::call(
-                        DSM_MAIN_SPACE_BEGIN.with(|c| c.get()),
+                        main_space_fpm(),
                         (*item).first_page,
                         (*item).npages,
                     );
@@ -1191,7 +1234,7 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
                 // Assert(item.handle == handle && item.refcnt == 1).
                 (*item).refcnt = 0;
             }
-            lwlock_release_main::call(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK)?;
+            control_lock.release()?;
         }
     }
     Ok(())
@@ -1206,9 +1249,8 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
 pub fn dsm_find_mapping(handle: dsm_handle) -> Option<DsmSegmentId> {
     DSM_SEGMENT_LIST.with(|list| {
         list.borrow()
-            .iter()
-            .find(|desc| desc.handle == handle)
-            .map(|desc| desc.id)
+            .as_ref()
+            .and_then(|l| l.iter().find(|desc| desc.handle == handle).map(|desc| desc.id))
     })
 }
 
@@ -1240,17 +1282,18 @@ pub fn dsm_segment_handle(seg: DsmSegmentId) -> dsm_handle {
 // ---------------------------------------------------------------------------
 
 /// `on_dsm_detach(seg, function, arg)` — register an on-detach callback.
-/// (The C callback record is `MemoryContextAlloc`'d in `TopMemoryContext`;
-/// the `Err` is that allocation's OOM surface.)
+/// The C callback record is `MemoryContextAlloc`'d in `TopMemoryContext`;
+/// `mcx` is that handle, and the `Err` is the allocation's OOM surface.
 pub fn on_dsm_detach(
     seg: DsmSegmentId,
     function: OnDsmDetachCallback,
     arg: Datum,
+    mcx: Mcx<'static>,
 ) -> PgResult<()> {
     with_desc(seg, |d| {
         d.on_detach
             .try_reserve(1)
-            .map_err(|_| out_of_memory("on_dsm_detach"))?;
+            .map_err(|_| mcx.oom(std::mem::size_of::<DetachCallback>()))?;
         // slist_push_head — newest at the back of the Vec.
         d.on_detach.push(DetachCallback { function, arg });
         Ok(())
@@ -1278,12 +1321,14 @@ pub fn cancel_on_dsm_detach(seg: DsmSegmentId, function: OnDsmDetachCallback, ar
 /// action). Called after fork via `on_exit_reset`.
 pub fn reset_on_dsm_detach() {
     DSM_SEGMENT_LIST.with(|list| {
-        for desc in list.borrow_mut().iter_mut() {
-            // Throw away explicit on-detach actions.
-            desc.on_detach.clear();
-            // Decrementing the reference count is a sort of implicit
-            // on-detach action; don't do that either.
-            desc.control_slot = INVALID_CONTROL_SLOT;
+        if let Some(l) = list.borrow_mut().as_mut() {
+            for desc in l.iter_mut() {
+                // Throw away explicit on-detach actions.
+                desc.on_detach.clear();
+                // Decrementing the reference count is a sort of implicit
+                // on-detach action; don't do that either.
+                desc.control_slot = INVALID_CONTROL_SLOT;
+            }
         }
     });
 }
@@ -1292,23 +1337,17 @@ pub fn reset_on_dsm_detach() {
 // Descriptor lifecycle.
 // ---------------------------------------------------------------------------
 
-fn out_of_memory(funcname: &str) -> types_error::PgError {
-    ereport(ERROR)
-        .errcode(ERRCODE_OUT_OF_MEMORY)
-        .errmsg("out of memory")
-        .into_error()
-        .with_error_location(loc(funcname))
-}
-
 /// `dsm_create_descriptor` — allocate and link a new backend-local segment
-/// descriptor. The returned guard is the resource-owner association
-/// (`ResourceOwnerRememberDSM`); the `Err` is the C `MemoryContextAlloc`
-/// OOM surface.
-fn dsm_create_descriptor() -> PgResult<DsmSegment> {
+/// descriptor in `mcx` (C: `MemoryContextAlloc(TopMemoryContext,
+/// sizeof(dsm_segment))`). The returned guard is the resource-owner
+/// association (`ResourceOwnerRememberDSM`); the `Err` is that allocation's
+/// OOM surface, produced by `mcx.oom`.
+fn dsm_create_descriptor(mcx: Mcx<'static>) -> PgResult<DsmSegment> {
     DSM_SEGMENT_LIST.with(|list| {
         let mut list = list.borrow_mut();
+        let list = list.get_or_insert_with(|| PgVec::new_in(mcx));
         list.try_reserve(1)
-            .map_err(|_| out_of_memory("dsm_create_descriptor"))?;
+            .map_err(|_| mcx.oom(std::mem::size_of::<DsmSegmentDesc>()))?;
 
         let id = DSM_NEXT_ID.with(|c| {
             let id = c.get();
@@ -1325,7 +1364,7 @@ fn dsm_create_descriptor() -> PgResult<DsmSegment> {
             impl_private: DsmImplPrivate::None,
             mapped_address: std::ptr::null_mut(),
             mapped_size: 0,
-            on_detach: Vec::new(),
+            on_detach: PgVec::new_in(mcx),
         });
 
         Ok(DsmSegment { id })
@@ -1336,8 +1375,10 @@ fn dsm_create_descriptor() -> PgResult<DsmSegment> {
 fn remove_descriptor(seg: DsmSegmentId) {
     DSM_SEGMENT_LIST.with(|list| {
         let mut list = list.borrow_mut();
-        if let Some(pos) = list.iter().position(|desc| desc.id == seg) {
-            list.remove(pos);
+        if let Some(l) = list.as_mut() {
+            if let Some(pos) = l.iter().position(|desc| desc.id == seg) {
+                l.remove(pos);
+            }
         }
     });
 }

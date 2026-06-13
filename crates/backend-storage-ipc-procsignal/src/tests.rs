@@ -30,7 +30,12 @@ pub(crate) struct Env {
     smgr_release_result: Cell<Option<bool>>, // None => Err
     smgr_release_calls: Cell<u32>,
     cv_broadcasts: Cell<u32>,
-    shmem_exit_callback: Cell<Option<(fn(i32, types_datum::Datum), types_datum::Datum)>>,
+    shmem_exit_callback: Cell<
+        Option<(
+            fn(i32, types_datum::Datum) -> types_error::PgResult<()>,
+            types_datum::Datum,
+        )>,
+    >,
 }
 
 fn install_seams_once() {
@@ -49,7 +54,8 @@ fn install_seams_once() {
         backend_storage_ipc_shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
 
         backend_storage_ipc_seams::on_shmem_exit::set(|f, arg| {
-            ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))))
+            ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))));
+            Ok(())
         });
 
         backend_storage_ipc_latch_seams::set_latch_my_latch::set(|| {
@@ -136,7 +142,7 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
 /// shmem_exit would.
 fn teardown() {
     let (f, arg) = ENV.with(|e| e.shmem_exit_callback.get()).unwrap();
-    f(0, arg);
+    f(0, arg).unwrap();
 }
 
 /// A fake pid no real process can have (macOS caps pids at 99998; Linux
