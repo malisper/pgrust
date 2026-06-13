@@ -17,5 +17,9 @@ types-error = { path = "../types-error" }
 types-cache = { path = "../types-cache" }
 types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
+types-tuple = { path = "../types-tuple" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# syscache owner's seams: SearchSysCache(TYPEOID/RANGETYPE/RANGEMULTIRANGE)
+# + GetSysCacheHashValue1(TYPEOID). Panic until the syscache unit lands.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
