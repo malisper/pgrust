@@ -21,6 +21,20 @@ use types_cache::AuthIdRow;
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(
+    /// `SearchSysCache2(ATTNAME, ObjectIdGetDatum(relid),
+    /// CStringGetDatum(colname))` projected to the attribute's
+    /// `(attnum, attisdropped)` (`Form_pg_attribute`). `Ok(None)` on a cache
+    /// miss (`!HeapTupleIsValid`), distinguishing "no such pg_attribute row"
+    /// from a present-but-dropped column (`Some((_, true))`); the installer
+    /// owns the `ReleaseSysCache`. acl.c's `convert_column_name` consumes this
+    /// to treat dropped columns differently from missing ones.
+    pub fn search_attname_attnum(
+        relid: Oid,
+        colname: &str,
+    ) -> PgResult<Option<(types_core::AttrNumber, bool)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` projected to the
     /// `pg_authid` fields role-identity callers read. `Ok(None)` on cache miss.
     pub fn lookup_authid_by_oid<'mcx>(

@@ -1566,6 +1566,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -1860,6 +1861,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-catalog-pg-largeobject-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -2472,6 +2483,15 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-proclang-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -6182,13 +6202,31 @@ dependencies = [
 name = "backend-utils-adt-acl"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-proclang-seams",
+ "backend-commands-tablespace-seams",
+ "backend-foreign-foreign-seams",
  "backend-utils-adt-acl-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
+ "port-pgstrcasecmp",
  "types-acl",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7101,6 +7139,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-ri-triggers",
  "types-tuple",
 ]

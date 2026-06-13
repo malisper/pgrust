@@ -24,3 +24,14 @@ seam_core::seam!(
         spc_oid: types_core::Oid,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `get_tablespace_oid(tablespacename, missing_ok)` (tablespace.c): the
+    /// tablespace's OID. With `missing_ok = false` a missing tablespace raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
+    /// `Ok(InvalidOid)`.
+    pub fn get_tablespace_oid(
+        tablespacename: &str,
+        missing_ok: bool,
+    ) -> types_error::PgResult<types_core::Oid>
+);
