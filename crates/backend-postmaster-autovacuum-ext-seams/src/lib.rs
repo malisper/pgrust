@@ -28,7 +28,9 @@ use seam_core::seam;
 use types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
 use types_error::PgResult;
 use types_vacuum::{BufferStrategyHandle, VacuumParams};
-use types_autovacuum::{AvwDbase, DbStatEntry, PgClassScanRow, RecheckClassRow, TabStatEntry};
+use types_autovacuum::{
+    AvwDbase, DbStatEntry, OrphanClassRow, PgClassScanRow, RecheckClassRow, TabStatEntry,
+};
 
 seam!(pub fn autovacuum_shmem_init(worker_slots: i32) -> PgResult<()>);
 seam!(pub fn get_launcher_pid() -> i32);
@@ -99,7 +101,16 @@ seam!(pub fn pgstat_report_autovac(dbid: Oid));
 seam!(pub fn pgstat_report_activity_running(activity: alloc::string::String));
 seam!(pub fn my_database_id() -> Oid);
 seam!(pub fn temp_namespace_is_idle(namespace: Oid) -> PgResult<bool>);
-seam!(pub fn drop_orphan_temp_table(relid: Oid) -> PgResult<()>);
+// Orphan-temp-table drop leaf operations.  The recheck/decision control flow
+// (predicates, LOG decision) is ported in-crate (`worker::do_autovacuum`);
+// these are the genuinely-foreign lock-manager / catalog / deletion /
+// transaction leaves it drives.
+seam!(pub fn conditional_lock_relation_oid_exclusive(relid: Oid) -> bool);
+seam!(pub fn unlock_relation_oid_exclusive(relid: Oid));
+seam!(pub fn orphan_recheck_fetch_class_row(relid: Oid) -> Option<OrphanClassRow>);
+seam!(pub fn conditional_lock_namespace_object_share(namespace: Oid) -> bool);
+seam!(pub fn get_namespace_name(namespace: Oid) -> Option<alloc::string::String>);
+seam!(pub fn perform_deletion_orphan_temp_table(relid: Oid) -> PgResult<()>);
 seam!(pub fn syscache_rel_isshared(relid: Oid) -> Option<bool>);
 seam!(pub fn get_rel_name(relid: Oid) -> Option<alloc::string::String>);
 seam!(pub fn get_rel_namespace_name(relid: Oid) -> Option<alloc::string::String>);
@@ -119,6 +130,15 @@ seam!(pub fn autovacuum_do_vac_analyze(
     bstrategy: BufferStrategyHandle,
 ) -> PgResult<()>);
 seam!(pub fn perform_brin_summarize_range(relation: Oid, blkno: BlockNumber) -> PgResult<()>);
+seam!(pub fn set_query_cancel_pending(v: bool));
+// The PG_CATCH body when a per-table vacuum/analyze errors out: HOLD_INTERRUPTS,
+// EmitErrorReport (of the passed-in error, which the caller has already adorned
+// with autovacuum's `errcontext("automatic {vacuum,analyze} of table ...")`),
+// AbortOutOfAnyTransaction, FlushErrorState, MemoryContextReset(PortalContext),
+// StartTransactionCommand, RESUME_INTERRUPTS.  All foreign error/xact
+// machinery; the errcontext text and the catch-and-continue control flow are
+// ported in-crate.
+seam!(pub fn emit_report_and_restart_after_table_error(err: types_error::PgError));
 seam!(pub fn vac_update_datfrozenxid() -> PgResult<()>);
 seam!(pub fn set_vacuum_cost_delay(v: f64));
 seam!(pub fn vacuum_cost_delay() -> f64);

@@ -178,6 +178,54 @@ fn work_mem_clamp() {
 }
 
 #[test]
+fn extract_autovac_opts_projects_autovacuum_subfield() {
+    use types_reloptions::StdRdOptions;
+
+    // C: relopts == NULL -> NULL.
+    assert_eq!(core::extract_autovac_opts(RELKIND_RELATION, None), None);
+
+    // C: memcpy(av, &((StdRdOptions *) relopts)->autovacuum, ...) — only the
+    // .autovacuum sub-struct is projected out, not the surrounding fields.
+    let av = AutoVacOpts {
+        enabled: false,
+        vacuum_threshold: 42,
+        vacuum_cost_delay: 7.5,
+        ..AutoVacOpts::default()
+    };
+    let opts = StdRdOptions {
+        fillfactor: 90,
+        autovacuum: av,
+        ..StdRdOptions::default()
+    };
+    assert_eq!(
+        core::extract_autovac_opts(RELKIND_RELATION, Some(opts)),
+        Some(av)
+    );
+}
+
+#[test]
+fn snprintf_append_bounds_total_like_c() {
+    use crate::schedule::{snprintf_append, MAX_AUTOVAC_ACTIV_LEN};
+
+    // Suffix fits within cap-1: appended verbatim.
+    let mut s = alloc::string::String::from("abc");
+    snprintf_append(&mut s, 8, " def");
+    assert_eq!(s, "abc def");
+
+    // Total would exceed cap-1: suffix is truncated so len == cap-1.
+    let mut s = alloc::string::String::from("abc");
+    snprintf_append(&mut s, 6, " defghi");
+    assert_eq!(s, "abc d"); // 5 bytes == cap (6) - 1
+
+    // The autovac_report_workitem prefix never overflows the real cap; a long
+    // nsp.rel suffix gets bounded to MAX_AUTOVAC_ACTIV_LEN - 1.
+    let mut s = alloc::string::String::from("autovacuum: BRIN summarize");
+    let long = alloc::format!(" {}.{} 0", "n".repeat(200), "r".repeat(200));
+    snprintf_append(&mut s, MAX_AUTOVAC_ACTIV_LEN, &long);
+    assert_eq!(s.len(), MAX_AUTOVAC_ACTIV_LEN - 1);
+}
+
+#[test]
 fn autovacuuming_active_requires_both_gucs() {
     core::set_autovacuum_start_daemon(false);
     core::set_pgstat_track_counts(false);

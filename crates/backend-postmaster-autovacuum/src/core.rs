@@ -175,6 +175,37 @@ pub const RELPERSISTENCE_TEMP: u8 = b't';
 /// with `pg_statistic`.
 pub const StatisticRelationId: Oid = 2619;
 
+/// `static AutoVacOpts *extract_autovac_opts(HeapTuple tup, TupleDesc
+/// pg_class_desc)` (`autovacuum.c` lines 2718-2737).
+///
+/// Given a pg_class tuple, return the AutoVacOpts portion of reloptions, if set;
+/// otherwise return `None`.
+///
+/// The `extractRelOptions(tup, pg_class_desc, NULL)` parse is foreign (the
+/// reloptions parser), so it is performed by the catalog-reader seam, which
+/// hands us its `StdRdOptions` result (`relopts`).  This function performs
+/// autovacuum's own part: the relkind assertion and the `memcpy(av,
+/// &((StdRdOptions *) relopts)->autovacuum, sizeof(AutoVacOpts))` projection.
+pub fn extract_autovac_opts(
+    relkind: u8,
+    relopts: Option<types_reloptions::StdRdOptions>,
+) -> Option<types_reloptions::AutoVacOpts> {
+    debug_assert!(
+        relkind == RELKIND_RELATION
+            || relkind == RELKIND_MATVIEW
+            || relkind == RELKIND_TOASTVALUE
+    );
+
+    /* C: if (relopts == NULL) return NULL; */
+    let relopts = relopts?;
+
+    /*
+     * C: av = palloc(sizeof(AutoVacOpts));
+     *    memcpy(av, &(((StdRdOptions *) relopts)->autovacuum), sizeof(AutoVacOpts));
+     */
+    Some(relopts.autovacuum)
+}
+
 /// `BlockNumberIsValid(blockNumber)` — `blockNumber != InvalidBlockNumber`.
 #[inline]
 pub const fn BlockNumberIsValid(block_number: types_core::BlockNumber) -> bool {

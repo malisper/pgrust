@@ -47,7 +47,8 @@ pub fn table_recheck_autovac(
      * Get the applicable reloptions.  If it is a TOAST table, try to get the
      * main table reloptions if the toast table itself doesn't have.
      */
-    let mut avopts: Option<AutoVacOpts> = class_row.relopts;
+    let mut avopts: Option<AutoVacOpts> =
+        core::extract_autovac_opts(class_row.relkind, class_row.relopts);
     if avopts.is_none() && class_row.relkind == RELKIND_TOASTVALUE {
         if let Some(hentry) = table_toast_map.iter().find(|h| h.ar_toastrelid == relid) {
             if hentry.ar_hasrelopts {
@@ -443,7 +444,7 @@ pub fn perform_work_item(i: i32) -> PgResult<()> {
 
 /// `MAX_AUTOVAC_ACTIV_LEN` (`autovacuum.c` line 3215) — `NAMEDATALEN * 2 + 56`.
 const NAMEDATALEN: usize = 64;
-const MAX_AUTOVAC_ACTIV_LEN: usize = NAMEDATALEN * 2 + 56;
+pub(crate) const MAX_AUTOVAC_ACTIV_LEN: usize = NAMEDATALEN * 2 + 56;
 
 /// `static void autovac_report_activity(autovac_table *tab)` (`autovacuum.c`
 /// lines 3212-3241).
@@ -465,20 +466,27 @@ pub fn autovac_report_activity(tab: &AutovacTable) {
         String::from("autovacuum: ANALYZE")
     };
 
-    /* Report the qualified name of the relation. */
-    let nspname = tab.at_nspname.as_deref().unwrap_or("");
-    let relname = tab.at_relname.as_deref().unwrap_or("");
-    activity.push_str(&format!(
-        " {}.{}{}",
-        nspname,
-        relname,
-        if tab.at_params.is_wraparound {
-            " (to prevent wraparound)"
-        } else {
-            ""
-        }
-    ));
-    truncate_activity(&mut activity, MAX_AUTOVAC_ACTIV_LEN);
+    /*
+     * Report the qualified name of the relation.
+     *
+     * C does `snprintf(activity + len, MAX_AUTOVAC_ACTIV_LEN - len, ...)`, so
+     * the suffix is bounded to keep the whole string within
+     * `MAX_AUTOVAC_ACTIV_LEN - 1` (the trailing NUL).
+     */
+    snprintf_append(
+        &mut activity,
+        MAX_AUTOVAC_ACTIV_LEN,
+        &format!(
+            " {}.{}{}",
+            tab.at_nspname.as_deref().unwrap_or(""),
+            tab.at_relname.as_deref().unwrap_or(""),
+            if tab.at_params.is_wraparound {
+                " (to prevent wraparound)"
+            } else {
+                ""
+            }
+        ),
+    );
 
     /* Set statement_timestamp() to current time, then report (via the seam). */
     seam::pgstat_report_activity_running::call(activity);
@@ -504,22 +512,43 @@ pub fn autovac_report_workitem(i: i32, nspname: &str, relname: &str) {
         String::new()
     };
 
-    truncate_activity(&mut activity, MAX_AUTOVAC_ACTIV_LEN);
-    activity.push_str(&format!(" {nspname}.{relname}{blk}"));
+    /*
+     * C does `snprintf(activity + len, MAX_AUTOVAC_ACTIV_LEN - len, ...)`: the
+     * prefix is first capped to MAX (via its own snprintf), then the suffix is
+     * bounded to keep the total within `MAX_AUTOVAC_ACTIV_LEN - 1`.  The
+     * oversized `activity[MAX + 12 + 2]` buffer never matters because the
+     * second snprintf's capacity is `MAX - len`.
+     */
+    snprintf_append(&mut activity, MAX_AUTOVAC_ACTIV_LEN, &format!(" {nspname}.{relname}{blk}"));
 
     /* Set statement_timestamp() to current time, then report (via the seam). */
     seam::pgstat_report_activity_running::call(activity);
 }
 
-/// Truncate `s` to at most `cap` bytes on a char boundary (the C
-/// `snprintf`-into-fixed-buffer behavior).
-fn truncate_activity(s: &mut String, cap: usize) {
-    if s.len() <= cap {
+/// Mirror C's `snprintf(activity + len, cap - len, "%s...", suffix)`: append
+/// `suffix` to `s`, but bound the total length so that the C buffer of `cap`
+/// bytes (including its trailing NUL) would not overflow.  C stores at most
+/// `cap - 1` content bytes, so the result is truncated to `cap - 1` bytes (on a
+/// char boundary).  If `s` is already at/over the bound, nothing is appended.
+pub(crate) fn snprintf_append(s: &mut String, cap: usize, suffix: &str) {
+    let limit = cap.saturating_sub(1);
+    if s.len() >= limit {
+        s.truncate(char_boundary_floor(s, limit));
         return;
     }
-    let mut end = cap;
+    let room = limit - s.len();
+    if suffix.len() <= room {
+        s.push_str(suffix);
+    } else {
+        s.push_str(&suffix[..char_boundary_floor(suffix, room)]);
+    }
+}
+
+/// Largest index `<= n` that is a char boundary of `s`.
+fn char_boundary_floor(s: &str, n: usize) -> usize {
+    let mut end = n.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    s.truncate(end);
+    end
 }

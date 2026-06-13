@@ -6,10 +6,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use backend_utils_error::{elog, PgResult};
-use types_error::WARNING;
+use types_error::{LOG, WARNING};
 
 use types_core::{InvalidOid, Oid};
 use types_reloptions::AutoVacOpts;
+use types_vacuum::VACOPT_VACUUM;
 
 use crate::core::{
     self, AutovacTable, AvRelation, OidIsValid, AutoVacRebalance, RELKIND_MATVIEW,
@@ -199,7 +200,8 @@ pub fn do_autovacuum() -> PgResult<()> {
             continue;
         }
 
-        let relopts = class_form.relopts;
+        /* Fetch reloptions and the pgstat entry for this table */
+        let relopts = core::extract_autovac_opts(class_form.relkind, class_form.relopts);
         let tabentry = seam::pgstat_fetch_stat_tabentry::call(class_form.relisshared, relid);
 
         /* Check if it needs vacuum or analyze */
@@ -255,7 +257,7 @@ pub fn do_autovacuum() -> PgResult<()> {
          * fetch reloptions -- if this toast table does not have them, try the
          * main rel
          */
-        let mut relopts = class_form.relopts;
+        let mut relopts = core::extract_autovac_opts(class_form.relkind, class_form.relopts);
         if relopts.is_none() {
             if let Some(hentry) = table_toast_map.iter().find(|h| h.ar_toastrelid == relid) {
                 if hentry.ar_hasrelopts {
@@ -291,10 +293,93 @@ pub fn do_autovacuum() -> PgResult<()> {
      * Recheck orphan temporary tables, and if they still seem orphaned, drop
      * them.  We'll eat a transaction per dropped table.
      */
+    let my_database_id = seam::my_database_id::call();
     for relid in orphan_oids {
         /* Check for user-requested abort. */
         seam::check_for_interrupts::call()?;
-        seam::drop_orphan_temp_table::call(relid)?;
+
+        /*
+         * Try to lock the table.  If we can't get the lock immediately,
+         * somebody else is using (or dropping) the table, so it's not our
+         * concern anymore.  Having the lock prevents race conditions below.
+         */
+        if !seam::conditional_lock_relation_oid_exclusive::call(relid) {
+            continue;
+        }
+
+        /*
+         * Re-fetch the pg_class tuple and re-check whether it still seems to be
+         * an orphaned temp table.  If it's not there or no longer the same
+         * relation, ignore it.
+         */
+        let class_form = match seam::orphan_recheck_fetch_class_row::call(relid) {
+            Some(c) => c,
+            None => {
+                /* be sure to drop useless lock so we don't bloat lock table */
+                seam::unlock_relation_oid_exclusive::call(relid);
+                continue;
+            }
+        };
+
+        /*
+         * Make all the same tests made in the loop above.  In event of OID
+         * counter wraparound, the pg_class entry we have now might be
+         * completely unrelated to the one we saw before.
+         */
+        if !((class_form.relkind == RELKIND_RELATION || class_form.relkind == RELKIND_MATVIEW)
+            && class_form.relpersistence == RELPERSISTENCE_TEMP)
+        {
+            seam::unlock_relation_oid_exclusive::call(relid);
+            continue;
+        }
+
+        if !seam::temp_namespace_is_idle::call(class_form.relnamespace)? {
+            seam::unlock_relation_oid_exclusive::call(relid);
+            continue;
+        }
+
+        /*
+         * Try to lock the temp namespace, too.  Even though we have lock on the
+         * table itself, there's a risk of deadlock against an incoming backend
+         * trying to clean out the temp namespace.  If we can get
+         * AccessShareLock on the namespace, that's sufficient to ensure we're
+         * not running concurrently with RemoveTempRelations.  If we can't, back
+         * off and let RemoveTempRelations do its thing.
+         */
+        if !seam::conditional_lock_namespace_object_share::call(class_form.relnamespace) {
+            seam::unlock_relation_oid_exclusive::call(relid);
+            continue;
+        }
+
+        /* OK, let's delete it */
+        elog(
+            LOG,
+            alloc::format!(
+                "autovacuum: dropping orphan temp table \"{}.{}.{}\"",
+                seam::get_database_name::call(my_database_id).unwrap_or_default(),
+                seam::get_namespace_name::call(class_form.relnamespace).unwrap_or_default(),
+                class_form.relname
+            ),
+        )
+        .ok();
+
+        /*
+         * Deletion might involve TOAST table access, so ensure we have a valid
+         * snapshot.  The performDeletion (DROP_CASCADE | INTERNAL | QUIETLY |
+         * SKIP_EXTENSIONS) and the per-table commit/start are the foreign
+         * leaves.
+         */
+        seam::push_active_snapshot::call()?;
+        seam::perform_deletion_orphan_temp_table::call(relid)?;
+
+        /*
+         * To commit the deletion, end current transaction and start a new one.
+         * Note this also releases the locks we took.
+         */
+        seam::pop_active_snapshot::call()?;
+        seam::commit_transaction_command::call()?;
+        seam::start_transaction_command::call()?;
+
         /* StartTransactionCommand changed current memory context */
         seam::switch_to_autovac_mem_cxt::call();
     }
@@ -426,15 +511,54 @@ pub fn do_autovacuum() -> PgResult<()> {
         if tab.at_relname.is_some() && tab.at_nspname.is_some() && tab.at_datname.is_some() {
             /*
              * We will abort vacuuming the current table if something errors
-             * out, and continue with the next one in schedule.
+             * out, and continue with the next one in schedule; in particular,
+             * this happens if we are interrupted with SIGINT.
              */
-            seam::autovacuum_do_vac_analyze::call(
+            match seam::autovacuum_do_vac_analyze::call(
                 tab.at_relid,
                 tab.at_nspname.clone().unwrap(),
                 tab.at_relname.clone().unwrap(),
                 tab.at_params,
                 bstrategy,
-            )?;
+            ) {
+                Ok(()) => {
+                    /*
+                     * Clear a possible query-cancel signal, to avoid a late
+                     * reaction to an automatically-sent signal because of
+                     * vacuuming the current table (we're done with it, so it
+                     * would make no sense to cancel at this point.)
+                     */
+                    seam::set_query_cancel_pending::call(false);
+                }
+                Err(mut err) => {
+                    /*
+                     * Abort the transaction, start a new one, and proceed with
+                     * the next table in our list.
+                     *
+                     * The HOLD_INTERRUPTS/EmitErrorReport/AbortOutOfAnyTransaction/
+                     * FlushErrorState/MemoryContextReset(PortalContext)/
+                     * StartTransactionCommand/RESUME_INTERRUPTS sequence is the
+                     * foreign PG_CATCH body; here we adorn the in-flight error
+                     * with autovacuum's own errcontext line first.
+                     */
+                    if tab.at_params.options & VACOPT_VACUUM != 0 {
+                        err.add_context_line(alloc::format!(
+                            "automatic vacuum of table \"{}.{}.{}\"",
+                            tab.at_datname.as_deref().unwrap(),
+                            tab.at_nspname.as_deref().unwrap(),
+                            tab.at_relname.as_deref().unwrap()
+                        ));
+                    } else {
+                        err.add_context_line(alloc::format!(
+                            "automatic analyze of table \"{}.{}.{}\"",
+                            tab.at_datname.as_deref().unwrap(),
+                            tab.at_nspname.as_deref().unwrap(),
+                            tab.at_relname.as_deref().unwrap()
+                        ));
+                    }
+                    seam::emit_report_and_restart_after_table_error::call(err);
+                }
+            }
 
             /* Make sure we're back in AutovacMemCxt */
             seam::switch_to_autovac_mem_cxt::call();

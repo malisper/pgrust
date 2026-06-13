@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{MultiXactId, Oid, TimestampTz, TransactionId};
-use types_reloptions::AutoVacOpts;
+use types_reloptions::{AutoVacOpts, StdRdOptions};
 use types_vacuum::VacuumParams;
 
 /// `struct avl_dbase` (`autovacuum.c`) — a database in the launcher's
@@ -110,8 +110,10 @@ pub struct PgClassScanRow {
     pub relallfrozen: i32,
     /// `NameStr(classForm->relname)` (for DEBUG logging).
     pub relname: String,
-    /// The parsed `AutoVacOpts` from `extract_autovac_opts(tuple)`, or `None`.
-    pub relopts: Option<AutoVacOpts>,
+    /// The parsed reloptions from `extractRelOptions(tuple, pg_class_desc, NULL)`,
+    /// cast to `StdRdOptions`, or `None` when the row has no reloptions.  The
+    /// `.autovacuum` projection (`extract_autovac_opts`) is done in-crate.
+    pub relopts: Option<StdRdOptions>,
 }
 
 /// The `PgStat_StatTabEntry` fields `relation_needs_vacanalyze` reads. `None`
@@ -124,6 +126,22 @@ pub struct TabStatEntry {
     pub ins_since_vacuum: f32,
     /// `tabentry->mod_since_analyze`.
     pub mod_since_analyze: f32,
+}
+
+/// A `pg_class` row re-fetched (`SearchSysCacheCopy1(RELOID, ...)`) in
+/// `do_autovacuum`'s orphan-temp recheck loop.  Carries exactly the fields the
+/// in-crate recheck predicates and LOG message consume; `None` from the seam
+/// models the C "tuple not found / no longer the same relation" case.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrphanClassRow {
+    /// `classForm->relkind`.
+    pub relkind: u8,
+    /// `classForm->relpersistence`.
+    pub relpersistence: u8,
+    /// `classForm->relnamespace`.
+    pub relnamespace: Oid,
+    /// `NameStr(classForm->relname)`.
+    pub relname: String,
 }
 
 /// A `pg_class` row re-fetched from the syscache in `table_recheck_autovac`.
@@ -145,6 +163,8 @@ pub struct RecheckClassRow {
     pub relallfrozen: i32,
     /// `NameStr(classForm->relname)`.
     pub relname: String,
-    /// `extract_autovac_opts(classTup)`, or `None`.
-    pub relopts: Option<AutoVacOpts>,
+    /// The parsed reloptions from `extractRelOptions(classTup, pg_class_desc,
+    /// NULL)`, cast to `StdRdOptions`, or `None`.  The `.autovacuum` projection
+    /// (`extract_autovac_opts`) is done in-crate.
+    pub relopts: Option<StdRdOptions>,
 }

@@ -361,11 +361,19 @@ pub fn rebuild_database_list(newdb: Oid) -> PgResult<()> {
         /* sort the array by score */
         dbary.sort_by(|a, b| db_comparator(a, b));
 
-        /* Determine the time interval between databases in the schedule. */
-        let mut millis_increment: f64 =
-            1000.0 * core::autovacuum_naptime() as f64 / nelems as f64;
-        if millis_increment <= MIN_AUTOVAC_SLEEPTIME {
-            millis_increment = MIN_AUTOVAC_SLEEPTIME * 1.1;
+        /*
+         * Determine the time interval between databases in the schedule.
+         *
+         * C declares `int millis_increment`, so the float quotient is
+         * truncated to an int *before* the `<= MIN_AUTOVAC_SLEEPTIME` compare
+         * (the int is promoted back to double for that compare), and the
+         * `MIN_AUTOVAC_SLEEPTIME * 1.1` (= 110.0) is likewise truncated to 110
+         * on store.  Mirror that with an explicit `as i32`.
+         */
+        let mut millis_increment: i32 =
+            (1000.0 * core::autovacuum_naptime() as f64 / nelems as f64) as i32;
+        if (millis_increment as f64) <= MIN_AUTOVAC_SLEEPTIME {
+            millis_increment = (MIN_AUTOVAC_SLEEPTIME * 1.1) as i32;
         }
 
         let mut current_time = seam::get_current_timestamp::call();
