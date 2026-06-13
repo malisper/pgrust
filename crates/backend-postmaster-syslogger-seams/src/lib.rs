@@ -15,3 +15,11 @@ seam_core::seam!(
     /// point invoked by `postmaster_child_launch`; never returns.
     pub fn sys_logger_main(startup_data: &types_startup::StartupData) -> !
 );
+
+seam_core::seam!(
+    /// `Logging_collector` (`postmaster/syslogger.c`) — the GUC controlling
+    /// whether the syslogger process is collecting log output. `signalfuncs.c`'s
+    /// `pg_rotate_logfile` consults it before requesting a rotation. Pure global
+    /// read; cannot `ereport`.
+    pub fn logging_collector() -> bool
+);

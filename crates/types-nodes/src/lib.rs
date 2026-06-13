@@ -35,6 +35,7 @@ pub mod nodelimit;
 pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
+pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodes;
 pub mod nodeseqscan;
@@ -101,6 +102,7 @@ pub use nodeagg::{
     AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
 pub use nodesort::{
     SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
     TuplesortMethod, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,

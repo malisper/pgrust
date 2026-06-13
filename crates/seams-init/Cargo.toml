@@ -35,6 +35,7 @@ backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlog
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
 backend-backup-sink = { path = "../backend-backup-sink" }
+backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
@@ -61,10 +62,12 @@ backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
+backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
 backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
@@ -98,6 +101,7 @@ backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
+backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
@@ -117,9 +121,11 @@ backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
 backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
@@ -170,3 +176,4 @@ interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal
 port-crc32c = { path = "../port-crc32c" }
 port-pgsleep = { path = "../port-pgsleep" }
 port-pqsignal = { path = "../port-pqsignal" }
+probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }

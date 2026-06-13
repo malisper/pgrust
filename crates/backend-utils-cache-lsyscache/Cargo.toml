@@ -24,6 +24,10 @@ types-tuple = { path = "../types-tuple" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 # Owner seam crates this unit's lookups route through until those owners land.
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+# get_type_io_data's IsBootstrapProcessingMode() branch -> bootstrap.c's
+# boot_get_type_io_data, reached across the bootstrap<->lsyscache cycle.
+backend-bootstrap-bootstrap-seams = { path = "../backend-bootstrap-bootstrap-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }

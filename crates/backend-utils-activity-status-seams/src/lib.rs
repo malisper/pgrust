@@ -103,3 +103,13 @@ seam_core::seam!(
     /// `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn backend_status_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `pgstat_get_backend_type_by_proc_number(procNumber)` (backend_status.c):
+    /// the `BackendType` advertised by the backend status entry at `procNumber`.
+    /// Used by `signalfuncs.c` to recognize autovacuum workers (which do not
+    /// advertise a role). Pure read of the shared status array; cannot `ereport`.
+    pub fn pgstat_get_backend_type_by_proc_number(
+        proc_number: types_core::ProcNumber,
+    ) -> types_core::init::BackendType
+);

@@ -327,4 +327,7 @@ pub fn init_seams() {
     // exectype_tupoutput family (no pool-payload / Plan-model dependency), so
     // its seam is installed here.
     seams::exec_type_from_tl::set(crate::exectype_tupoutput::ExecTypeFromTL);
+    // ExecTypeFromExprList is likewise fully owned + implemented in this crate's
+    // exectype_tupoutput family, so its seam is installed here.
+    seams::exec_type_from_expr_list::set(crate::exectype_tupoutput::ExecTypeFromExprList);
 }
