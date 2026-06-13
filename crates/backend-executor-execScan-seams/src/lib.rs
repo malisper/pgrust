@@ -105,3 +105,38 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+// --- Subquery-scan-specialized entry point --------------------------------
+// Same `execScan.c` driver, specialized to the subquery scan node (its own
+// in-crate `SubqueryNext`/`SubqueryRecheck` access/recheck functions).
+//
+// Unlike the relation-scan nodes, `SubqueryNext` returns the *subplan's* own
+// result slot directly (the C avoids `ExecCopySlot`; the node's own
+// `ss_ScanTupleSlot` is used only for EvalPlanQual rechecks), so the access
+// method yields the produced `SlotId` rather than a `bool`-into-scan-slot.
+
+use types_nodes::SubqueryScanState;
+
+/// `ExecScanAccessMtd`, specialized to a subquery scan node — returns the
+/// produced tuple's `SlotId` (the subplan's result slot), `None` at
+/// end-of-scan (the C `TupleTableSlot *` / `NULL`).
+pub type SubqueryScanAccessMtd =
+    for<'mcx> fn(&mut SubqueryScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>;
+
+/// `ExecScanRecheckMtd`, specialized to a subquery scan node.
+pub type SubqueryScanRecheckMtd =
+    for<'mcx> fn(&mut SubqueryScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — fetch via `access`, qual-filter, project, with EPQ
+    /// handling — for a subquery scan node. Returns the result slot id, or
+    /// `None` at end of scan. `Err` carries qual/projection `ereport(ERROR)`s
+    /// and OOM. The node passes its own `SubqueryNext`/`SubqueryRecheck`.
+    pub fn exec_scan_subquery(
+        node: &mut SubqueryScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: SubqueryScanAccessMtd,
+        recheck: SubqueryScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);

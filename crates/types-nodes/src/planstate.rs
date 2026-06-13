@@ -57,6 +57,8 @@ pub enum PlanStateNode<'mcx> {
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
     /// `T_SeqScanState`.
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
+    /// `T_SubqueryScanState`.
+    SubqueryScan(PgBox<'mcx, crate::execnodes::SubqueryScanState<'mcx>>),
     /// `T_ForeignScanState`.
     ForeignScan(PgBox<'mcx, crate::nodeforeigncustom::ForeignScanState<'mcx>>),
     /// `T_HashState` — the inner Hash node of a hash join.
@@ -81,6 +83,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
+            PlanStateNode::SubqueryScan(_) => crate::nodes::T_SubqueryScanState,
             PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
             PlanStateNode::Hash(_) => T_HashState,
         }
@@ -104,6 +107,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
+            PlanStateNode::SubqueryScan(s) => &s.ss.ps,
             PlanStateNode::ForeignScan(f) => &f.ss.ps,
             PlanStateNode::Hash(h) => &h.ps,
         }
@@ -126,6 +130,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
+            PlanStateNode::SubqueryScan(s) => &mut s.ss.ps,
             PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
             PlanStateNode::Hash(h) => &mut h.ps,
         }
@@ -142,6 +147,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
+            // `SubqueryScanState` begins with a `ScanState`.
+            PlanStateNode::SubqueryScan(s) => Some(&s.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.

@@ -4182,6 +4182,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSubqueryscan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeTableFuncscan"
 version = "0.0.0"
 dependencies = [
@@ -9871,6 +9887,7 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
+ "backend-executor-nodeSubqueryscan",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
