@@ -344,7 +344,12 @@ fn exec_create_expr_setup_steps_tlist<'mcx>(
 }
 
 /// `ExecCreateExprSetupSteps(state, (Node *) list)` over a qual list.
-fn exec_create_expr_setup_steps_list<'mcx>(
+///
+/// `pub(crate)` so the hash/equality builders in `execExpr_domain_agg`
+/// (`ExecBuildHash32Expr`) can run the same FETCHSOME-deform prescan the C
+/// runs via `ExecCreateExprSetupSteps(state, (Node *) hash_exprs)` — exactly the
+/// sibling-spine sharing already used for [`exec_init_expr_rec`].
+pub(crate) fn exec_create_expr_setup_steps_list<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
     nodes: &[Expr],

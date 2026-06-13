@@ -9,17 +9,20 @@
 //! builders, so its seams land here.
 
 use mcx::{Mcx, PgBox, PgVec};
+use types_core::catalog::PROCEDURE_RELATION_ID;
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
+use types_datum::datum::NullableDatum;
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,
-    ResultCellId, EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
+    ResultCellId, VarReturningType, EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
 };
 use types_nodes::execexpr::SubPlanState;
 use types_nodes::executor::TupleSlotKind;
 use types_nodes::nodeagg::{do_aggsplit_combine, AggStateData, AggStrategy, Aggref};
+use types_nodes::parsenodes::OBJECT_FUNCTION;
 use types_nodes::primnodes::{Expr, OpExpr, AND_EXPR};
 use types_nodes::EStateData;
 use types_tuple::heaptuple::TupleDescData;
@@ -31,8 +34,13 @@ const INNER_VAR: i32 = -1;
 const OUTER_VAR: i32 = -2;
 
 use crate::execExpr_core as core;
+use backend_catalog_aclchk_seams as aclchk;
+use backend_catalog_objectaccess_seams as objectaccess;
 use backend_executor_execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_fmgr_fmgr_seams as fmgr_seam;
+use backend_utils_init_miscinit_seams as miscinit;
+use types_acl::{ACLCHECK_OK, ACL_EXECUTE};
 
 // ===========================================================================
 // Spine primitives — local mirrors of the `execExpr_core` arena helpers.
@@ -833,14 +841,15 @@ pub fn exec_build_agg_trans_call<'mcx>(
 /// The final column's result lands in the state's `resvalue`; intermediate
 /// results land in an `iresult` `NullableDatum`.
 ///
-/// The per-column `FmgrInfo`/`FunctionCallInfo` are supplied by the caller
-/// (`hashfunctions[i]`, already `fmgr_info`'d) and `InitFunctionCallInfoData`'d
-/// here. In the owned model the `HashDatum` payload carries `finfo`/`fcinfo_data`
-/// as owned boxes; the inner-Var output target is the fcinfo's arg-0 cell. The
-/// owned `HashDatum` variant has **no** arg-cell vector and `FunctionCallInfo`
-/// in this crate's `types-nodes` view is trimmed (no `args[]`), so the
-/// `&fcinfo->args[0]` aliasing target the `EEOP_INNER_VAR` writes cannot be
-/// expressed here — that fcinfo-arg cell wiring is a keystone-type gap.
+/// The per-column `FmgrInfo` are supplied by the caller (`hashfunctions[i]`,
+/// already `fmgr_info`'d). In the owned model the `HashDatum` payload carries
+/// `finfo`/`fcinfo_data` as owned boxes plus the single `arg_cell`
+/// [`ResultCellId`] standing in for the C `&fcinfo->args[0]` aliasing target
+/// (the F0 shared model added this field): the `EEOP_INNER_VAR` step writes that
+/// arena cell, and the interpreter gathers it into `fcinfo->args[0]` immediately
+/// before the hash call. The running hash flows through `resvalue` (the
+/// intermediate arena cell for non-final steps, the state result for the last);
+/// `iresult` is the per-step intermediate `NullableDatum` workspace.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_build_hash32_from_attrs<'mcx>(
     mcx: Mcx<'mcx>,
@@ -856,7 +865,15 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
     let mut state = make_expr_state(mcx)?;
 
     // We need an intermediate hash slot only if more than one value is combined.
+    // The C `iresult = palloc(sizeof(NullableDatum))`; the owned running-hash
+    // location is a dedicated arena cell (the cell `resvalue` of the non-final
+    // steps points at).
     let need_iresult = (num_cols as i64) + ((init_value != 0) as i64) > 1;
+    let iresult_cell = if need_iresult {
+        Some(new_result_cell(mcx, &mut state)?)
+    } else {
+        None
+    };
 
     // find the highest attnum so we deform the tuple to that point
     let mut last_attnum: AttrNumber = 0;
@@ -877,38 +894,95 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
     // init_value handling: with no initial value the first column uses
     // HASHDATUM_FIRST; otherwise a SET_INITVAL step seeds the intermediate (or
     // the state result if no columns) and the first column uses NEXT32.
-    let mut _opcode = ExprEvalOp::EEOP_HASHDATUM_FIRST;
+    let mut opcode = ExprEvalOp::EEOP_HASHDATUM_FIRST;
     if init_value != 0 {
+        // resvalue = numCols>0 ? &iresult->value : &state->resvalue
+        let (resv, resn) = if num_cols > 0 {
+            let c = iresult_cell.expect("init_value with numCols>0 needs iresult");
+            (c, c)
+        } else {
+            (STATE_RESULT_CELL, STATE_RESULT_CELL)
+        };
         let initstep = ExprEvalStep {
             opcode: ExprEvalOp::EEOP_HASHDATUM_SET_INITVAL,
-            // resvalue = numCols>0 ? &iresult->value : &state->resvalue
-            resvalue: STATE_RESULT_CELL,
-            resnull: STATE_RESULT_CELL,
+            resvalue: resv,
+            resnull: resn,
             d: ExprEvalStepData::HashDatumInitValue {
                 // UInt32GetDatum(init_value)
                 init_value: Datum::from_u32(init_value),
             },
         };
-        let _ = need_iresult;
         core::expr_eval_push_step(mcx, &mut state, initstep)?;
-        _opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
+        // When using an initial value use the NEXT32 ops as the FIRST ops would
+        // overwrite the stored initial value.
+        opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
     }
 
-    // The per-column loop emits, for each column: EEOP_INNER_VAR writing
-    // &fcinfo->args[0], then the HASHDATUM_FIRST/NEXT32 call reading that arg.
-    // The owned HashDatum payload has finfo/fcinfo_data but no arg-cell vector,
-    // and types-nodes' FunctionCallInfoBaseData is trimmed (no args[]), so the
-    // EEOP_INNER_VAR -> &fcinfo->args[0] aliasing target cannot be expressed.
-    let _ = (hashfunctions, collations);
-    panic!(
-        "execExpr-domain-agg: ExecBuildHash32FromAttrs's per-column loop emits EEOP_INNER_VAR \
-         into &fcinfo->args[0] then EEOP_HASHDATUM_FIRST/NEXT32 reading it. The owned HashDatum \
-         step carries finfo/fcinfo_data but no per-arg ResultCellId, and this crate's trimmed \
-         FunctionCallInfoBaseData has no args[] — so the inner-Var output cell that feeds the hash \
-         fcinfo cannot be wired (a keystone-type gap, like the parked Func.arg_cells path). The \
-         FETCHSOME deform, SET_INITVAL seeding, FIRST->NEXT32 progression, and final-vs- \
-         intermediate result placement are mirrored above once the fcinfo-arg cell lands."
-    );
+    for i in 0..num_cols as usize {
+        let inputcollid = collations[i];
+        let attnum = (key_col_idx[i] as i32) - 1;
+
+        // finfo = &hashfunctions[i]; fcinfo = palloc0(SizeForFunctionCallInfo(1));
+        // InitFunctionCallInfoData(*fcinfo, finfo, 1, inputcollid, NULL, NULL);
+        let finfo = mcx::alloc_in(mcx, hashfunctions[i].clone())?;
+        let fcinfo = init_fcinfo(mcx, inputcollid)?;
+
+        // Fetch inner Var for this attnum and store it in the 1st arg of the
+        // hash func — the owned `arg_cell` stands in for `&fcinfo->args[0]`.
+        let arg_cell = new_result_cell(mcx, &mut state)?;
+        let varstep = ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_INNER_VAR,
+            resvalue: arg_cell,
+            resnull: arg_cell,
+            d: ExprEvalStepData::Var {
+                attnum,
+                vartype: desc.attr(attnum as usize).atttypid,
+                varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            },
+        };
+        core::expr_eval_push_step(mcx, &mut state, varstep)?;
+
+        // Call the hash function. The final column's result lands in the
+        // ExprState; intermediate values land in the iresult arena cell.
+        let (resv, resn) = if i == (num_cols as usize) - 1 {
+            (STATE_RESULT_CELL, STATE_RESULT_CELL)
+        } else {
+            let c = iresult_cell.expect("intermediate hash column needs iresult");
+            (c, c)
+        };
+        // NEXT32 opcodes need the intermediate result; set it for all ops
+        // (FIRSTs won't look at it). The owned `iresult` is the per-step
+        // NullableDatum workspace; present exactly when combining is needed.
+        let iresult = if need_iresult {
+            Some(mcx::alloc_in(mcx, NullableDatum::default())?)
+        } else {
+            None
+        };
+        let hashstep = ExprEvalStep {
+            opcode,
+            resvalue: resv,
+            resnull: resn,
+            d: ExprEvalStepData::HashDatum {
+                finfo: Some(finfo),
+                fcinfo_data: Some(fcinfo),
+                // The owned model re-resolves the function at call time from
+                // finfo.fn_oid (the fmgr seam returns no typed PGFunction); the
+                // typed fn_addr stays None.
+                fn_addr: None,
+                arg_cell,
+                jumpdone: -1,
+                iresult,
+            },
+        };
+        core::expr_eval_push_step(mcx, &mut state, hashstep)?;
+
+        // subsequent attnums must be combined with the previous
+        opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
+    }
+
+    push_done_return(mcx, &mut state)?;
+    exec_ready_expr(&mut state)?;
+    Ok(mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -924,11 +998,11 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 /// and emits the strict/non-strict `HASHDATUM_FIRST`/`_NEXT32` call, finally
 /// fixing up the null-skip jumps.
 ///
-/// Blocked on the same surfaces as the other hash builders plus the recursion:
-///   * `ExecCreateExprSetupSteps` + `ExecInitExprRec` — core-owned (private).
-///   * `fmgr_info(hashfunc_oids[i], finfo)` — fmgr; the hash fcinfo arg-0 cell
-///     wiring (`&fcinfo->args[0]`) is the same keystone gap as
-///     [`exec_build_hash32_from_attrs`].
+/// The hash-arg cell (`&fcinfo->args[0]`) is the F0-modeled `HashDatum.arg_cell`
+/// the per-expr recursion evaluates into; `ExecCreateExprSetupSteps` /
+/// `ExecInitExprRec` are the sibling-shared `execExpr_core` spine
+/// (`exec_create_expr_setup_steps_list` / `exec_init_expr_rec`), and
+/// `fmgr_info(hashfunc_oids[i])` crosses the fmgr seam.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_build_hash32_expr<'mcx>(
     mcx: Mcx<'mcx>,
@@ -941,20 +1015,119 @@ pub fn exec_build_hash32_expr<'mcx>(
     init_value: u32,
     keep_nulls: bool,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let _ = (desc, ops, hashfunc_oids, collations, opstrict, init_value, keep_nulls);
+    let _ = (desc, ops);
     let num_exprs = hash_exprs.len() as i32;
     debug_assert_eq!(num_exprs as usize, collations.len());
 
     let mut state = make_expr_state(mcx)?;
-    let _ = &mut state;
-    panic!(
-        "execExpr-domain-agg: ExecBuildHash32Expr needs ExecCreateExprSetupSteps + ExecInitExprRec \
-         (core-owned, private) to compile each hash_expr, fmgr_info(hashfunc_oids[i]) (fmgr), and \
-         the &fcinfo->args[0] hash-arg cell (the keystone gap shared with ExecBuildHash32FromAttrs: \
-         HashDatum has no arg-cell vector and FunctionCallInfoBaseData is trimmed). The SET_INITVAL \
-         seeding, strict/non-strict FIRST->NEXT32 selection per opstrict[i]/keep_nulls, and the \
-         null-skip jumpdone fixups are mirrored once those land."
-    );
+
+    // Insert setup steps as needed: ExecCreateExprSetupSteps(state, (Node *)
+    // hash_exprs) — the FETCHSOME deform prescan over the expression list (the
+    // core-owned expr_setup_walker spine, shared with ExecInitQual).
+    core::exec_create_expr_setup_steps_list(mcx, &mut state, hash_exprs)?;
+
+    // Intermediate hash slot, needed only when more than one value is combined.
+    let need_iresult = (num_exprs as i64) + ((init_value != 0) as i64) > 1;
+    let iresult_cell = if need_iresult {
+        Some(new_result_cell(mcx, &mut state)?)
+    } else {
+        None
+    };
+
+    // init_value handling: choose the FIRST[_STRICT] vs NEXT32[_STRICT] base
+    // opcodes (NEXT32 when seeded, so the SET_INITVAL is not overwritten).
+    let mut strict_opcode = ExprEvalOp::EEOP_HASHDATUM_FIRST_STRICT;
+    let mut opcode = ExprEvalOp::EEOP_HASHDATUM_FIRST;
+    if init_value != 0 {
+        let (resv, resn) = if num_exprs > 0 {
+            let c = iresult_cell.expect("init_value with num_exprs>0 needs iresult");
+            (c, c)
+        } else {
+            (STATE_RESULT_CELL, STATE_RESULT_CELL)
+        };
+        let initstep = ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_HASHDATUM_SET_INITVAL,
+            resvalue: resv,
+            resnull: resn,
+            d: ExprEvalStepData::HashDatumInitValue {
+                init_value: Datum::from_u32(init_value),
+            },
+        };
+        core::expr_eval_push_step(mcx, &mut state, initstep)?;
+        strict_opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32_STRICT;
+        opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
+    }
+
+    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
+        mcx::vec_with_capacity_in(mcx, num_exprs.max(0) as usize)?;
+
+    for (i, expr) in hash_exprs.iter().enumerate() {
+        let inputcollid = collations[i];
+        let funcid = hashfunc_oids[i];
+
+        // finfo = palloc0(sizeof(FmgrInfo)); fmgr_info(funcid, finfo).
+        let finfo = mcx::alloc_in(mcx, fmgr_seam::fmgr_info::call(mcx, funcid)?)?;
+        let fcinfo = init_fcinfo(mcx, inputcollid)?;
+
+        // Build the steps to evaluate the hash function's argument so the value
+        // is stored in the 0th argument of the hash func (owned `arg_cell`).
+        let arg_cell = new_result_cell(mcx, &mut state)?;
+        core::exec_init_expr_rec(mcx, expr, &mut state, arg_cell)?;
+
+        // Final expr's result lands in the state; intermediate ones in iresult.
+        let (resv, resn) = if i == (num_exprs as usize) - 1 {
+            (STATE_RESULT_CELL, STATE_RESULT_CELL)
+        } else {
+            let c = iresult_cell.expect("intermediate hash expr needs iresult");
+            (c, c)
+        };
+        let iresult = if need_iresult {
+            Some(mcx::alloc_in(mcx, NullableDatum::default())?)
+        } else {
+            None
+        };
+
+        // strict opcode iff the hash func is strict and we are not keeping NULLs.
+        let step_opcode = if opstrict[i] && !keep_nulls {
+            strict_opcode
+        } else {
+            opcode
+        };
+        let hashstep = ExprEvalStep {
+            opcode: step_opcode,
+            resvalue: resv,
+            resnull: resn,
+            d: ExprEvalStepData::HashDatum {
+                finfo: Some(finfo),
+                fcinfo_data: Some(fcinfo),
+                fn_addr: None,
+                arg_cell,
+                jumpdone: -1,
+                iresult,
+            },
+        };
+        core::expr_eval_push_step(mcx, &mut state, hashstep)?;
+        adjust_jumps.push((state.steps_len - 1) as usize);
+
+        // For subsequent keys combine with the previous hashes.
+        strict_opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32_STRICT;
+        opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
+    }
+
+    // adjust jump targets: each FIRST/NEXT32[_STRICT] step jumps past the end.
+    let jump_target = state.steps_len;
+    if let Some(steps) = state.steps.as_mut() {
+        for &j in adjust_jumps.iter() {
+            if let ExprEvalStepData::HashDatum { jumpdone, .. } = &mut steps[j].d {
+                debug_assert_eq!(*jumpdone, -1);
+                *jumpdone = jump_target;
+            }
+        }
+    }
+
+    push_done_return(mcx, &mut state)?;
+    exec_ready_expr(&mut state)?;
+    Ok(mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -1030,21 +1203,41 @@ pub fn exec_build_grouping_equal<'mcx>(
         rops,
     )?;
 
-    // Per-column comparison (from the last/least-significant key backward).
-    // Each column needs the equality function looked up (object_aclcheck +
-    // fmgr_info), the inner/outer Var steps writing &fcinfo->args[0]/[1], the
-    // NOT_DISTINCT call, and a QUAL short-circuit step.
-    let _ = (eqfunctions, collations);
-    let _ = &mut state;
-    panic!(
-        "execExpr-domain-agg: ExecBuildGroupingEqual's per-column body needs object_aclcheck \
-         (catalog ACL) + fmgr_info(eqfunctions[natt]) (fmgr) and the 2-arg fcinfo whose \
-         args[0]/args[1] the EEOP_INNER_VAR/EEOP_OUTER_VAR steps write — but this crate's trimmed \
-         FunctionCallInfoBaseData has no args[], so those arg cells (the EEOP_NOT_DISTINCT step's \
-         Func.fcinfo_data + arg_cells) cannot be wired. The numCols==0 NULL, the inner/outer \
-         FETCHSOME deforms, the per-column NOT_DISTINCT + QUAL emission order, the QUAL jumpdone \
-         fixups, and the trailing DONE_RETURN are mirrored once fmgr + the fcinfo args[] land."
-    );
+    // Per-column comparison (from the last/least-significant key backward —
+    // most likely to differ for sorted input). Each column looks up the
+    // equality function (ACL_EXECUTE + fmgr_info), emits the inner/outer Var
+    // steps writing fcinfo args[0]/[1] (owned arena cells), a NOT_DISTINCT call,
+    // and a QUAL short-circuit.
+    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
+        mcx::vec_with_capacity_in(mcx, num_cols.max(0) as usize)?;
+    let mut natt = num_cols;
+    while {
+        natt -= 1;
+        natt >= 0
+    } {
+        let attno = key_col_idx[natt as usize] as i32;
+        let latt_typid = ldesc.attr((attno - 1) as usize).atttypid;
+        let ratt_typid = rdesc.attr((attno - 1) as usize).atttypid;
+        let foid = eqfunctions[natt as usize];
+        let collid = collations[natt as usize];
+
+        emit_eq_column(
+            mcx,
+            &mut state,
+            foid,
+            collid,
+            attno - 1,
+            latt_typid,
+            attno - 1,
+            ratt_typid,
+            &mut adjust_jumps,
+        )?;
+    }
+
+    fixup_qual_jumps(&mut state, &adjust_jumps);
+    push_done_return(mcx, &mut state)?;
+    exec_ready_expr(&mut state)?;
+    Ok(Some(mcx::alloc_in(mcx, state)?))
 }
 
 // ===========================================================================
@@ -1096,17 +1289,33 @@ pub fn exec_build_param_set_equal<'mcx>(
         rops,
     )?;
 
-    let _ = (eqfunctions, collations);
-    let _ = &mut state;
-    panic!(
-        "execExpr-domain-agg: ExecBuildParamSetEqual's per-column body needs object_aclcheck + \
-         fmgr_info(eqfunctions[attno]) (catalog/fmgr) and the 2-arg fcinfo args[0]/args[1] written \
-         by EEOP_INNER_VAR/EEOP_OUTER_VAR — unavailable against this crate's trimmed \
-         FunctionCallInfoBaseData. The EEO_FLAG_IS_QUAL setup, the inner/outer FETCHSOME deforms, \
-         the per-column NOT_DISTINCT + QUAL emission, the QUAL jumpdone fixups, and the trailing \
-         DONE_RETURN are mirrored once fmgr + the fcinfo args[] land (identical to \
-         ExecBuildGroupingEqual but front-to-back over every attno and never returning NULL)."
-    );
+    // Per-column comparison, front-to-back over every attno (one per param
+    // expr). Same per-column body as ExecBuildGroupingEqual; both Var steps read
+    // the same `desc` attribute (inner vs outer slot).
+    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
+        mcx::vec_with_capacity_in(mcx, maxatt.max(0) as usize)?;
+    for attno in 0..maxatt as i32 {
+        let att_typid = desc.attr(attno as usize).atttypid;
+        let foid = eqfunctions[attno as usize];
+        let collid = collations[attno as usize];
+
+        emit_eq_column(
+            mcx,
+            &mut state,
+            foid,
+            collid,
+            attno,
+            att_typid,
+            attno,
+            att_typid,
+            &mut adjust_jumps,
+        )?;
+    }
+
+    fixup_qual_jumps(&mut state, &adjust_jumps);
+    push_done_return(mcx, &mut state)?;
+    exec_ready_expr(&mut state)?;
+    Ok(mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -1333,6 +1542,166 @@ fn clone_step<'mcx>(s: &ExprEvalStep<'mcx>) -> ExprEvalStep<'mcx> {
     }
 }
 
+/// `fcinfo = palloc0(SizeForFunctionCallInfo(nargs));
+/// InitFunctionCallInfoData(*fcinfo, finfo, nargs, inputcollid, NULL, NULL)`.
+/// This crate's `FunctionCallInfoBaseData` is trimmed (the per-arg cells the C
+/// `args[]` aliases are modeled as the step payload's `arg_cell`/`arg_cells`
+/// arena ids, gathered by the interpreter), so the call frame carries only its
+/// `resultinfo` (NULL here). The collation is threaded by the owner at call
+/// time alongside the re-resolved `finfo`.
+fn init_fcinfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    _inputcollid: Oid,
+) -> PgResult<PgBox<'mcx, types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>>> {
+    mcx::alloc_in(
+        mcx,
+        types_nodes::fmgr::FunctionCallInfoBaseData::default(),
+    )
+}
+
+/// Push the terminating `EEOP_DONE_RETURN` step (C: `scratch.resvalue = NULL;
+/// scratch.resnull = NULL; scratch.opcode = EEOP_DONE_RETURN`). The owned NULL
+/// result target is the (unused) `STATE_RESULT_CELL`.
+fn push_done_return<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<()> {
+    let step = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_DONE_RETURN,
+        resvalue: STATE_RESULT_CELL,
+        resnull: STATE_RESULT_CELL,
+        d: ExprEvalStepData::NoPayload,
+    };
+    core::expr_eval_push_step(mcx, state, step)
+}
+
+/// Per-column ACL_EXECUTE check the two equality builders run before
+/// `fmgr_info` (execExpr.c:4536-4542 / 4694-4700):
+///   aclresult = object_aclcheck(ProcedureRelationId, foid, GetUserId(), ACL_EXECUTE);
+///   if (aclresult != ACLCHECK_OK) aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(foid));
+///   InvokeFunctionExecuteHook(foid);
+/// then `fmgr_info(foid)` returning the populated `FmgrInfo`.
+fn aclcheck_and_fmgr_info<'mcx>(mcx: Mcx<'mcx>, foid: Oid) -> PgResult<FmgrInfo> {
+    let aclresult =
+        aclchk::object_aclcheck::call(PROCEDURE_RELATION_ID, foid, miscinit::get_user_id::call(), ACL_EXECUTE)?;
+    if aclresult != ACLCHECK_OK {
+        let name = lsyscache::get_func_name::call(mcx, foid)?.map(|s| s.to_string());
+        aclchk::aclcheck_error::call(aclresult, OBJECT_FUNCTION, name)?;
+    }
+
+    // InvokeFunctionExecuteHook(foid) — fires only when an object_access_hook is
+    // installed. The general OAT_FUNCTION_EXECUTE invocation is owned by
+    // objectaccess and has no seam exported yet; mirror-PG-and-panic on the
+    // (rare) hook-present path, no-op otherwise.
+    if objectaccess::object_access_hook_present::call() {
+        panic!(
+            "execExpr-domain-agg: InvokeFunctionExecuteHook(foid) (OAT_FUNCTION_EXECUTE \
+             object-access hook, owned by backend-catalog-objectaccess) has no seam exported; \
+             reached only when an object_access_hook is installed"
+        );
+    }
+
+    // finfo = palloc0(sizeof(FmgrInfo)); fmgr_info(foid, finfo);
+    // fmgr_info_set_expr(NULL, finfo);
+    fmgr_seam::fmgr_info::call(mcx, foid)
+}
+
+/// One column of `ExecBuildGroupingEqual` / `ExecBuildParamSetEqual`
+/// (execExpr.c:4530-4588 / 4688-4746): ACL_EXECUTE + `fmgr_info(foid)`, a 2-arg
+/// `InitFunctionCallInfoData`, then the
+///   EEOP_INNER_VAR -> &fcinfo->args[0],  EEOP_OUTER_VAR -> &fcinfo->args[1],
+///   EEOP_NOT_DISTINCT (the eq-func call),  EEOP_QUAL (short-circuit)
+/// steps; records the QUAL step index in `adjust_jumps` for later fixup. The
+/// owned `Func.arg_cells` are the two arena cells the Var steps write (the C
+/// `&fcinfo->args[0]/[1]`), gathered by the interpreter before the call.
+#[allow(clippy::too_many_arguments)]
+fn emit_eq_column<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut ExprState<'mcx>,
+    foid: Oid,
+    collid: Oid,
+    left_attnum: i32,
+    left_vartype: Oid,
+    right_attnum: i32,
+    right_vartype: Oid,
+    adjust_jumps: &mut mcx::PgVec<'mcx, usize>,
+) -> PgResult<()> {
+    // Check permission to call function + look it up.
+    let finfo = mcx::alloc_in(mcx, aclcheck_and_fmgr_info(mcx, foid)?)?;
+    let fcinfo = init_fcinfo(mcx, collid)?;
+
+    // left arg: EEOP_INNER_VAR -> &fcinfo->args[0]
+    let arg0 = new_result_cell(mcx, state)?;
+    let leftstep = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_INNER_VAR,
+        resvalue: arg0,
+        resnull: arg0,
+        d: ExprEvalStepData::Var {
+            attnum: left_attnum,
+            vartype: left_vartype,
+            varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+        },
+    };
+    core::expr_eval_push_step(mcx, state, leftstep)?;
+
+    // right arg: EEOP_OUTER_VAR -> &fcinfo->args[1]
+    let arg1 = new_result_cell(mcx, state)?;
+    let rightstep = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_OUTER_VAR,
+        resvalue: arg1,
+        resnull: arg1,
+        d: ExprEvalStepData::Var {
+            attnum: right_attnum,
+            vartype: right_vartype,
+            varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+        },
+    };
+    core::expr_eval_push_step(mcx, state, rightstep)?;
+
+    // evaluate distinctness: EEOP_NOT_DISTINCT, result into state->resvalue.
+    let mut arg_cells: mcx::PgVec<'mcx, ResultCellId> = mcx::vec_with_capacity_in(mcx, 2)?;
+    arg_cells.push(arg0);
+    arg_cells.push(arg1);
+    let ndstep = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_NOT_DISTINCT,
+        resvalue: STATE_RESULT_CELL,
+        resnull: STATE_RESULT_CELL,
+        d: ExprEvalStepData::Func {
+            finfo: Some(finfo),
+            fcinfo_data: Some(fcinfo),
+            arg_cells: Some(arg_cells),
+            // re-resolved at call time from finfo.fn_oid (no typed PGFunction).
+            fn_addr: None,
+            nargs: 2,
+            make_ro: false,
+        },
+    };
+    core::expr_eval_push_step(mcx, state, ndstep)?;
+
+    // then emit EEOP_QUAL to detect if result is false (or null).
+    let qualstep = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_QUAL,
+        resvalue: STATE_RESULT_CELL,
+        resnull: STATE_RESULT_CELL,
+        d: ExprEvalStepData::QualExpr { jumpdone: -1 },
+    };
+    core::expr_eval_push_step(mcx, state, qualstep)?;
+    adjust_jumps.push((state.steps_len - 1) as usize);
+    Ok(())
+}
+
+/// Resolve every recorded `EEOP_QUAL` step's `jumpdone` to the end of the
+/// program (execExpr.c: the `foreach(lc, adjust_jumps)` fixup).
+fn fixup_qual_jumps<'mcx>(state: &mut ExprState<'mcx>, adjust_jumps: &[usize]) {
+    let jump_target = state.steps_len;
+    if let Some(steps) = state.steps.as_mut() {
+        for &j in adjust_jumps {
+            debug_assert!(matches!(steps[j].opcode, ExprEvalOp::EEOP_QUAL));
+            if let ExprEvalStepData::QualExpr { jumpdone } = &mut steps[j].d {
+                debug_assert_eq!(*jumpdone, -1);
+                *jumpdone = jump_target;
+            }
+        }
+    }
+}
+
 /// `get_typlen(typid)` (lsyscache) — placeholder for the typcache/lsyscache
 /// lookup used by the domain MAKE_READONLY decision. No `get_typlen` seam is
 /// exported to this crate yet.
@@ -1479,15 +1848,24 @@ pub fn build_hash_projections_and_exprs<'mcx>(
     cross_eq_funcoids: &[Oid],
 ) -> PgResult<()> {
     let _ = (&node, &estate, lhs_hash_funcs, cross_eq_funcoids);
-    // The lefttlist/righttlist assembly + ExecTypeFromTL + ExecBuildProjectionInfo
-    // depend on the execExpr_core projection spine (ExecBuildProjectionInfo is
-    // still a panic stub: it needs the owned target-list / result-slot wiring).
-    // The ExecBuildHash32FromAttrs / ExecBuildGroupingEqual calls additionally
-    // need the fcinfo-arg cell wiring (see those builders). Mirror PG and panic
-    // until that spine lands rather than emit an approximate program.
+    // The hash/equality leaf builders this assembles are now landed
+    // (ExecBuildHash32FromAttrs / ExecBuildGroupingEqual above;
+    // ExecBuildProjectionInfo in execExpr_core). What remains is the
+    // nodeSubplan-owned glue: per-OpExpr lefttlist/righttlist assembly via
+    // makeTargetEntry (backend-nodes makeFuncs), ExecTypeFromTL +
+    // ExecInitExtraTupleSlot with &TTSOpsVirtual / &TTSOpsMinimalTuple
+    // (execTuples), and writing the results into the SubPlanState fields
+    // (projLeft/projRight, descRight, lhs_hash_expr, cur_eq_comp,
+    // tab_eq_funcoids/keyColIdx/tab_collations/cur_eq_funcs/tab_hash_funcs) plus
+    // its innerecontext — all owned by nodeSubplan / execTuples, not this hash
+    // family. Mirror PG and panic until that owner glue lands rather than emit
+    // an approximate program.
     panic!(
-        "build_hash_projections_and_exprs: needs ExecBuildProjectionInfo (execExpr_core, still a \
-         panic stub pending the owned target-list / result-slot wiring) plus ExecBuildHash32FromAttrs \
-         / ExecBuildGroupingEqual (this family — blocked on the fcinfo-arg cell keystone gap)"
+        "build_hash_projections_and_exprs: the leaf builders are landed \
+         (ExecBuildHash32FromAttrs / ExecBuildGroupingEqual / ExecBuildProjectionInfo); the \
+         remaining wiring is nodeSubplan/execTuples-owned: makeTargetEntry (backend-nodes), \
+         ExecTypeFromTL + ExecInitExtraTupleSlot with TTSOpsVirtual/TTSOpsMinimalTuple \
+         (execTuples), and populating the SubPlanState proj/desc/expr/funcoid fields + \
+         innerecontext — outside this family's module"
     )
 }

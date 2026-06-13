@@ -16,6 +16,9 @@ types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+# ACL vocabulary (AclResult / ACL_EXECUTE) the per-column ACL_EXECUTE check in
+# the grouping/param equality builders compares against.
+types-acl = { path = "../types-acl" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 # Outward seams routed through owner crates (panic until the owner lands):
@@ -44,10 +47,15 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 # ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
 # GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
-# (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner).
+# (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner). The same
+# ACL+hook gate is run per-column by ExecBuildGroupingEqual / ExecBuildParamSetEqual
+# (domain_agg) — func_subscript uses the full objectaccess crate
+# (invoke_function_execute_hook), domain_agg uses the objectaccess-seams gate
+# (object_access_hook_present).
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 # types_acl (AclMode/AclResult/ACL_EXECUTE), the ProcedureRelationId catalog OID
 # and OBJECT_FUNCTION object type for the ACL check, and pgstat_track_functions /
 # TRACK_FUNC_* for the strict×fusage opcode selection.
