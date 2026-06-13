@@ -40,8 +40,8 @@ use types_applyparallel::{
     DsmSetupResult, FileSet, ParallelTransState, PartialFileSetState, ShmMqResult,
 };
 use types_core::{
-    InvalidTransactionId, InvalidXLogRecPtr, Oid, Size, TimestampTz, TransactionId, XLogRecPtr,
-    INVALID_PROC_NUMBER,
+    InvalidOid, InvalidTransactionId, InvalidXLogRecPtr, Oid, Size, TimestampTz, TransactionId,
+    XLogRecPtr, INVALID_PROC_NUMBER,
 };
 use types_error::{ErrorLocation, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, LOG};
 use types_guc::PGC_SIGHUP;
@@ -53,6 +53,7 @@ use types_storage::lock::{AccessExclusiveLock, AccessShareLock, LOCKMODE};
 use types_storage::ProcSignalReason;
 
 use backend_replication_logical_worker_seams as worker;
+use backend_replication_logical_launcher_seams as launcher;
 
 pub use backend_storage_ipc_procsignal::SendProcSignal;
 
@@ -471,11 +472,18 @@ fn pa_launch_parallel_worker() -> PgResult<Option<WorkerHandle>> {
 
     let handle = worker::dsm_segment_handle::call(dsm_seg)?;
 
-    let launched = worker::logicalrep_worker_launch_parallel_apply::call(
+    /*
+     * launched = logicalrep_worker_launch(WORKERTYPE_PARALLEL_APPLY, dbid,
+     *   oid, name, userid, InvalidOid, dsm_segment_handle(winfo->dsm_seg));
+     * (C 438-444) — launcher.c owns the launch path.
+     */
+    let launched = launcher::logicalrep_worker_launch::call(
+        types_replication_launcher::LogicalRepWorkerType::ParallelApply,
         worker::my_worker_dbid::call(),
         worker::my_subscription_oid::call(),
         &worker::my_subscription_name::call(),
         worker::my_worker_userid::call(),
+        InvalidOid,
         handle,
     )?;
 
@@ -618,25 +626,16 @@ fn pa_free_worker(winfo_index: WorkerHandle) -> PgResult<()> {
         || pool_len > (worker::max_parallel_apply_workers_per_subscription::call() / 2)
     {
         /*
-         * logicalrep_pa_worker_stop reads winfo->shared->{generation,slot_no}
-         * (under the in-crate mutex), detaches and NULLs winfo->error_mq_handle
-         * (launcher.c 661-665), then runs the launcher-owned LWLock stop
-         * sequence (LWLock + generation/proc check + SIGUSR2).
+         * logicalrep_pa_worker_stop(winfo) (launcher.c) reads
+         * winfo->shared->{generation,slot_no} (under the shared spinlock),
+         * detaches and NULLs winfo->error_mq_handle (launcher.c 661-665), then
+         * runs the launcher-owned LWLock stop sequence (LWLock + generation/proc
+         * check + SIGUSR2). The launcher reaches back into this crate's
+         * pa_read_winfo_slot / pa_winfo_has_error_mq / pa_winfo_detach_error_mq
+         * seams (which resolve the owning pool slot from the shared identity).
          */
-        let (generation, slot_no) = {
-            let s = shared.locked.lock().unwrap();
-            (s.logicalrep_worker_generation, s.logicalrep_worker_slot_no)
-        };
-        let error_mq_handle = winfo_or_err(winfo_index, "pa_free_worker")?.error_mq_handle;
-        if error_mq_handle != 0 {
-            worker::shm_mq_detach_error::call(error_mq_handle)?;
-            with_globals(|g| {
-                if let Some(w) = g.pool[winfo_index].as_mut() {
-                    w.error_mq_handle = 0;
-                }
-            });
-        }
-        worker::logicalrep_pa_worker_stop::call(generation, slot_no)?;
+        let mut pub_winfo = pub_winfo_snapshot(winfo_index)?;
+        launcher::logicalrep_pa_worker_stop::call(&mut pub_winfo)?;
         pa_free_worker_info(winfo_index)?;
         return Ok(());
     }
@@ -1656,11 +1655,116 @@ fn errloc(funcname: &'static str) -> ErrorLocation {
     )
 }
 
+// ===========================================================================
+// Owned inward seams the launcher's `logicalrep_pa_worker_stop(winfo)` reaches
+// back into. The launcher receives the public `ParallelApplyWorkerInfo` value
+// snapshot built by `pub_winfo_snapshot`; these seams operate on the in-crate
+// pool, resolving the owning slot from the shared (generation, slot_no, xid)
+// identity carried in the snapshot.
+// ===========================================================================
+
+/// Build the launcher-facing `ParallelApplyWorkerInfo` value snapshot for a pool
+/// slot. Mirrors handing the launcher a `ParallelApplyWorkerInfo *` in C.
+fn pub_winfo_snapshot(
+    winfo_index: WorkerHandle,
+) -> PgResult<types_replication_applyparallel::ParallelApplyWorkerInfo> {
+    let w = winfo_or_err(winfo_index, "logicalrep_pa_worker_stop")?;
+    let shared = w
+        .shared
+        .as_ref()
+        .ok_or_else(|| elog_error("logicalrep_pa_worker_stop: winfo->shared is NULL"))?;
+    let s = shared.locked.lock().unwrap();
+    Ok(types_replication_applyparallel::ParallelApplyWorkerInfo {
+        has_error_mq_handle: w.error_mq_handle != 0,
+        in_use: w.in_use,
+        shared: types_replication_applyparallel::ParallelApplyWorkerShared {
+            xid: s.xid,
+            xact_state: match s.xact_state {
+                ParallelTransState::PARALLEL_TRANS_UNKNOWN => {
+                    types_replication_applyparallel::ParallelTransState::Unknown
+                }
+                ParallelTransState::PARALLEL_TRANS_STARTED => {
+                    types_replication_applyparallel::ParallelTransState::Started
+                }
+                ParallelTransState::PARALLEL_TRANS_FINISHED => {
+                    types_replication_applyparallel::ParallelTransState::Finished
+                }
+            },
+            logicalrep_worker_generation: s.logicalrep_worker_generation,
+            logicalrep_worker_slot_no: s.logicalrep_worker_slot_no,
+            last_commit_end: s.last_commit_end,
+        },
+    })
+}
+
+/// Find the in-crate pool slot owning `winfo` by matching the shared
+/// (generation, slot_no, xid) identity its snapshot carries. Exactly one in-use
+/// slot matches a live winfo.
+fn pool_slot_for_pub_winfo(
+    winfo: &types_replication_applyparallel::ParallelApplyWorkerInfo,
+) -> Option<WorkerHandle> {
+    with_globals(|g| {
+        g.pool.iter().enumerate().find_map(|(i, slot)| {
+            let w = slot.as_ref()?;
+            let shared = w.shared.as_ref()?;
+            let s = shared.locked.lock().unwrap();
+            (s.logicalrep_worker_generation == winfo.shared.logicalrep_worker_generation
+                && s.logicalrep_worker_slot_no == winfo.shared.logicalrep_worker_slot_no
+                && s.xid == winfo.shared.xid)
+                .then_some(i)
+        })
+    })
+}
+
+/// `SpinLockAcquire(&winfo->shared->mutex); generation/slot_no;
+/// SpinLockRelease(...)` (launcher.c, via this crate's owned shared header).
+fn pa_read_winfo_slot(
+    winfo: &types_replication_applyparallel::ParallelApplyWorkerInfo,
+) -> PgResult<(u16, i32)> {
+    Ok((
+        winfo.shared.logicalrep_worker_generation,
+        winfo.shared.logicalrep_worker_slot_no,
+    ))
+}
+
+/// `winfo->error_mq_handle != NULL`.
+fn pa_winfo_has_error_mq(
+    winfo: &types_replication_applyparallel::ParallelApplyWorkerInfo,
+) -> PgResult<bool> {
+    Ok(winfo.has_error_mq_handle)
+}
+
+/// `shm_mq_detach(winfo->error_mq_handle); winfo->error_mq_handle = NULL;`
+/// (launcher.c 661-665). Detaches the real queue the coordinator owns and clears
+/// the handle in both the pool slot and the launcher's value snapshot.
+fn pa_winfo_detach_error_mq(
+    winfo: &mut types_replication_applyparallel::ParallelApplyWorkerInfo,
+) -> PgResult<()> {
+    let idx = pool_slot_for_pub_winfo(winfo)
+        .ok_or_else(|| elog_error("pa_winfo_detach_error_mq: winfo not found in pool"))?;
+    let error_mq_handle = with_globals(|g| g.pool[idx].as_ref().map(|w| w.error_mq_handle));
+    if let Some(h) = error_mq_handle {
+        if h != 0 {
+            worker::shm_mq_detach_error::call(h)?;
+            with_globals(|g| {
+                if let Some(w) = g.pool[idx].as_mut() {
+                    w.error_mq_handle = 0;
+                }
+            });
+        }
+    }
+    winfo.has_error_mq_handle = false;
+    Ok(())
+}
+
 /// Install every seam this crate owns. Called once at startup by `seams-init`.
 pub fn init_seams() {
-    backend_replication_logical_applyparallelworker_seams::handle_parallel_apply_message_interrupt::set(
-        HandleParallelApplyMessageInterrupt,
-    );
+    use backend_replication_logical_applyparallelworker_seams as s;
+    s::handle_parallel_apply_message_interrupt::set(HandleParallelApplyMessageInterrupt);
+    s::pa_detach_all_error_mq::set(pa_detach_all_error_mq);
+    s::pa_read_winfo_slot::set(pa_read_winfo_slot);
+    s::pa_winfo_has_error_mq::set(pa_winfo_has_error_mq);
+    s::pa_winfo_detach_error_mq::set(pa_winfo_detach_error_mq);
 }
 
 #[cfg(test)]

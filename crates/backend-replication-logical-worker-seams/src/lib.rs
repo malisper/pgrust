@@ -54,17 +54,10 @@ seam_core::seam!(pub fn stream_cleanup_files(subid: Oid, xid: TransactionId) -> 
 seam_core::seam!(pub fn store_flush_position(remote_lsn: XLogRecPtr, local_lsn: XLogRecPtr) -> PgResult<()>);
 
 // --- launcher: parallel-apply worker launch / stop ------------------------
-seam_core::seam!(pub fn logicalrep_worker_launch_parallel_apply(
-    dbid: Oid,
-    subid: Oid,
-    subname: &str,
-    userid: Oid,
-    subworker_dsm: u32,
-) -> PgResult<bool>);
-// The leader reads `winfo->shared->{generation,slot_no}` (now an in-crate
-// header) and passes them in; the launcher-owned stop sequence (LWLock +
-// generation/proc check + SIGUSR2) lives in launcher.c.
-seam_core::seam!(pub fn logicalrep_pa_worker_stop(generation: u16, slot_no: i32) -> PgResult<()>);
+// NOTE: launch (`logicalrep_worker_launch(WORKERTYPE_PARALLEL_APPLY, ...)`) and
+// stop (`logicalrep_pa_worker_stop(winfo)`) are owned by launcher.c and reached
+// through `backend-replication-logical-launcher-seams`, not here — the coordinator
+// must not re-fork the launcher's contract.
 
 // --- parallel-apply DSM segment + shm_mq glue -----------------------------
 // The DSM segment, `shm_toc`, and the two `shm_mq`s are owned by the DSM/shm_mq

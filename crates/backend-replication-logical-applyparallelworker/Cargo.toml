@@ -16,6 +16,8 @@ types-guc = { path = "../types-guc" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 types-applyparallel = { path = "../types-applyparallel" }
+types-replication-applyparallel = { path = "../types-replication-applyparallel" }
+types-replication-launcher = { path = "../types-replication-launcher" }
 backend-utils-error = { path = "../backend-utils-error" }
 
 # Own seams (installed by init_seams).
@@ -27,6 +29,7 @@ backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 
 # Outward seams (calls into not-yet-ported owners, or owners across a cycle).
 backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }
+backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
 backend-replication-logical-tablesync-seams = { path = "../backend-replication-logical-tablesync-seams" }
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

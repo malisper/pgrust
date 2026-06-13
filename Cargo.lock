@@ -3287,6 +3287,7 @@ dependencies = [
  "backend-libpq-pqmq-seams",
  "backend-postmaster-interrupt",
  "backend-replication-logical-applyparallelworker-seams",
+ "backend-replication-logical-launcher-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-logical-tablesync-seams",
  "backend-replication-logical-worker-seams",
@@ -3306,6 +3307,8 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-pgstat",
+ "types-replication-applyparallel",
+ "types-replication-launcher",
  "types-storage",
 ]
 
