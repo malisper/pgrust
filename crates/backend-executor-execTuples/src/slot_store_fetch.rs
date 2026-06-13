@@ -316,7 +316,7 @@ pub fn ExecFetchSlotHeapTuple<'mcx>(
             Ok((tup, true))
         }
         SlotData::Heap(hslot) => {
-            let tup = tts_heap_get_heap_tuple(hslot)?;
+            let tup = tts_heap_get_heap_tuple(mcx, hslot)?;
             Ok((tup, false))
         }
         SlotData::BufferHeap(bslot) => {
