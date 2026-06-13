@@ -14,6 +14,12 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }
 
+# Outward seams into genuinely-unported / cross-unit owners reached by the
+# `domains` family: the typcache domain constraint engine (typcache, not yet
+# ported) and the base type's fmgr I/O functions.
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+
 # Inward seam crate this unit owns (expandeddatum EOH surface consumed by
 # backend-access-common-heaptuple). The keystone installs these from
 # init_seams().

@@ -2935,6 +2935,8 @@ name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
  "backend-utils-adt-misc2-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-datum",
  "types-error",
@@ -3299,6 +3301,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-rel",
  "types-tuple",
