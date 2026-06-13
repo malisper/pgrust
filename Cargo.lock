@@ -6546,6 +6546,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-arrayfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-arrayutils-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-array",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-utils-adt-arrayfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -6556,6 +6578,14 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-arrayutils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -7087,6 +7117,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-array",
  "types-cache",
  "types-core",
  "types-datum",
@@ -7481,6 +7512,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-array",
  "types-bgworker",
  "types-cache",
  "types-core",
@@ -8511,10 +8543,13 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-regex-core",
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-storage-file-buffile",
  "backend-storage-file-fd",
+ "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -8530,8 +8565,12 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-acl",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
+ "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
@@ -8542,6 +8581,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
@@ -8603,6 +8643,14 @@ name = "types-applyparallel"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-array"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
 ]
 
 [[package]]

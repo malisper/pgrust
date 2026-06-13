@@ -9,6 +9,7 @@ use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
+use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
 
 seam_core::seam!(
     /// `get_commutator(opno)` (lsyscache.c): the commutator operator of `opno`,
@@ -421,4 +422,41 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
     pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
+);
+
+// ---------------------------------------------------------------------------
+// Element-type metadata seams driven by `utils/adt/arrayfuncs.c`
+// (backend-utils-adt-arrayfuncs). All are lsyscache.c lookups.
+// ---------------------------------------------------------------------------
+
+// NOTE: `get_typlenbyvalalign` is already declared above (returns
+// `TypLenByValAlign`); arrayfuncs reuses that seam rather than redeclaring it.
+
+seam_core::seam!(
+    /// `get_element_type(array_type)` (lsyscache.c): the element type OID of a
+    /// true array type, or `None` (C `InvalidOid`) if `array_type` is not an
+    /// array.
+    pub fn get_element_type(array_type: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `get_array_type(input_type)` (lsyscache.c): the `typarray` of
+    /// `input_type`, or `None` (C `InvalidOid`) if it has no array type.
+    pub fn get_array_type(input_type: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `get_type_io_data(typid, which, &typlen, &typbyval, &typalign,
+    /// &typdelim, &typioparam, &func)` (lsyscache.c): the element type's
+    /// storage metadata plus the OID of its selected I/O function (input /
+    /// output / receive / send per `which`).
+    ///
+    /// Array-element-typed projection of the same `get_type_io_data` C entry
+    /// point used by arrayfuncs.c; named distinctly from the canonical
+    /// [`get_type_io_data`] seam above (which other callers consume with the
+    /// `IOFuncSelector` / `TypeIoData` shape) to keep one symbol per decl.
+    pub fn get_array_element_io_data(
+        element_type: Oid,
+        which: ArrayIoFuncSelector,
+    ) -> PgResult<ArrayElementIoData>
 );

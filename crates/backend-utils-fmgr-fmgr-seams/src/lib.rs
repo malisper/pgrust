@@ -13,6 +13,7 @@ use types_core::{AttrNumber, Oid};
 use types_datum::varlena::Bytea;
 use types_datum::Datum;
 use types_error::PgResult;
+use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 seam_core::seam!(
@@ -266,4 +267,123 @@ seam_core::seam!(
         slot: types_ri_triggers::TupleTableSlotRef,
         attnums: &[i16],
     ) -> PgResult<mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>>
+);
+
+// ---------------------------------------------------------------------------
+// Element-type I/O and comparison/hash seams driven by
+// `utils/adt/arrayfuncs.c` (backend-utils-adt-arrayfuncs). The array functions
+// are element-type polymorphic: an element value crosses as the safe
+// `ArrayElementDatum` (by-value Datum or on-disk bytes) so the fmgr owner can
+// build the real `FunctionCallInfo` without aliasing the array buffer.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,
+    /// &result)` (fmgr.c) as `array_in` drives it: call the element type's
+    /// input function on the NUL-excluded element substring `str_`. Returns
+    /// `Ok(Some(datum))` on success, `Ok(None)` when the soft-error context
+    /// caught a conversion error (C: returns `false`), or `Err` for a hard
+    /// `ereport(ERROR)`.
+    pub fn input_function_call_safe(
+        function_id: Oid,
+        str_: &str,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Option<Datum>>
+);
+
+seam_core::seam!(
+    /// `OutputFunctionCall(&outputproc, value)` (fmgr.c) as `array_out` drives
+    /// it: call the element type's text output function on a materialized
+    /// element value, returning the printable bytes (NUL excluded) in `mcx`.
+    /// `Err` carries the strict-null `elog` and whatever the output function
+    /// raises. (Array-element form; distinct from the `TupleValue`-based
+    /// `output_function_call` above.)
+    pub fn array_output_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        value: ArrayElementDatum<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `ReceiveFunctionCall(&receiveproc, buf, typioparam, typmod)` (fmgr.c) as
+    /// `array_recv` drives it: call the element type's binary receive function
+    /// on the element's wire bytes, returning the element `Datum`. `Err`
+    /// carries whatever the receive function raises.
+    pub fn array_receive_function_call(
+        function_id: Oid,
+        buf: &[u8],
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `SendFunctionCall(&sendproc, value)` (fmgr.c) as `array_send` drives it:
+    /// call the element type's binary send function on a materialized element
+    /// value, returning the `bytea` payload (varlena header stripped) in
+    /// `mcx`. `Err` carries the strict-null `elog` and whatever the send
+    /// function raises. (Array-element form.)
+    pub fn array_send_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        value: ArrayElementDatum<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// The element equality dispatch `array_eq` / `arrayoverlap` /
+    /// `array_contain_compare` use: `FunctionCall2Coll(typentry->eq_opr_finfo,
+    /// collation, a, b)` (the cached equality operator finfo from
+    /// `lookup_type_cache(elmtype, TYPECACHE_EQ_OPR_FINFO)`). Returns the
+    /// boolean result. `function_id` is the resolved `eq_opr` proc OID. `Err`
+    /// carries whatever the comparator raises.
+    pub fn element_eq(
+        function_id: Oid,
+        collation: Oid,
+        a: ArrayElementDatum<'_>,
+        b: ArrayElementDatum<'_>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// The element comparison dispatch `array_cmp` / `btarraycmp` use:
+    /// `FunctionCall2Coll(typentry->cmp_proc_finfo, collation, a, b)` (the
+    /// cached btree comparison proc from `lookup_type_cache(elmtype,
+    /// TYPECACHE_CMP_PROC_FINFO)`). Returns the 3-way `int32` result. `Err`
+    /// carries whatever the comparator raises.
+    pub fn element_cmp(
+        function_id: Oid,
+        collation: Oid,
+        a: ArrayElementDatum<'_>,
+        b: ArrayElementDatum<'_>,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// The element hash dispatch `hash_array` uses:
+    /// `FunctionCall1Coll(typentry->hash_proc_finfo, collation, elt)` (the
+    /// cached hash proc from `lookup_type_cache(elmtype,
+    /// TYPECACHE_HASH_PROC_FINFO)`). Returns the `uint32` hash. `Err` carries
+    /// whatever the hash function raises.
+    pub fn element_hash(
+        function_id: Oid,
+        collation: Oid,
+        value: ArrayElementDatum<'_>,
+    ) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// The element extended-hash dispatch `hash_array_extended` uses:
+    /// `FunctionCall2Coll(typentry->hash_extended_proc_finfo, collation, elt,
+    /// seed)` (the cached extended hash proc from `lookup_type_cache(elmtype,
+    /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)`). Returns the `uint64` hash. `Err`
+    /// carries whatever the hash function raises.
+    pub fn element_hash_extended(
+        function_id: Oid,
+        collation: Oid,
+        value: ArrayElementDatum<'_>,
+        seed: u64,
+    ) -> PgResult<u64>
 );

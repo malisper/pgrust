@@ -16,3 +16,4 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-selfuncs = { path = "../types-selfuncs" }
+types-array = { path = "../types-array" }

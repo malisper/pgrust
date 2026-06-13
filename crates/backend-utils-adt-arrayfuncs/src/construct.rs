@@ -1,0 +1,1302 @@
+//! Construct family: `construct_array` / `construct_md_array` /
+//! `construct_empty_array` / `deconstruct_array` plus the
+//! `initArrayResult*` / `accumArrayResult*` / `makeArrayResult*` build-state
+//! accumulators.
+//!
+//! This family OWNS the inward `backend-utils-adt-arrayfuncs-seams` and is the
+//! source of the functions [`crate::init_seams`] installs. The public function
+//! signatures below match those seam signatures exactly.
+
+use mcx::{Mcx, PgString, PgVec};
+use types_array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
+use types_core::Oid;
+use types_datum::array_build::{ArrayBuildState, ArrayBuildStateArr};
+use types_datum::datum::Datum;
+use types_error::{
+    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
+use types_nodes::{EStateData, EcxtId};
+use types_tuple::heaptuple::ItemPointerData;
+
+use backend_utils_adt_arrayfuncs_seams::{ArrayBuildCtx, ArrayBuildStateAnyHandle};
+
+use crate::foundation::{self, MAX_ALLOC_SIZE};
+
+// Outward seams to unported neighbors.
+use backend_access_common_detoast_seams as detoast_seam;
+use backend_utils_adt_arrayutils_seams as arrayutils_seam;
+use backend_utils_cache_lsyscache_seams as lsyscache_seam;
+
+// `TYPALIGN_*` codes (`catalog/pg_type_d.h`), reused from the builtin tables.
+const TYPALIGN_CHAR: u8 = b'c';
+const TYPALIGN_SHORT: u8 = b's';
+const TYPALIGN_INT: u8 = b'i';
+const TYPALIGN_DOUBLE: u8 = b'd';
+
+// ---------------------------------------------------------------------------
+// construct_* / deconstruct_* (arrayfuncs.c) — in-process API (no seam).
+// ---------------------------------------------------------------------------
+
+/// `construct_array(elems, nelems, elmtype, elmlen, elmbyval, elmalign)`
+/// (arrayfuncs.c): build a one-dimensional array from element `Datum`s.
+pub fn construct_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Datum],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    // C:
+    //   int dims[1]; int lbs[1];
+    //   dims[0] = nelems; lbs[0] = 1;
+    //   return construct_md_array(elems, NULL, 1, dims, lbs, ...);
+    let nelems = elems.len() as i32;
+    let dims = [nelems];
+    let lbs = [1];
+    construct_md_array(
+        mcx, elems, None, 1, &dims, &lbs, elmtype, elmlen, elmbyval, elmalign,
+    )
+}
+
+/// `construct_md_array(elems, nulls, ndims, dims, lbs, elmtype, elmlen,
+/// elmbyval, elmalign)` (arrayfuncs.c): build a multi-dimensional array.
+pub fn construct_md_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Datum],
+    nulls: Option<&[bool]>,
+    ndims: i32,
+    dims: &[i32],
+    lbs: &[i32],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if ndims < 0 {
+        // we do allow zero-dimension arrays
+        return Err(PgError::error(format!(
+            "invalid number of dimensions: {ndims}"
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+    }
+    if ndims > MAXDIM {
+        return Err(PgError::error(format!(
+            "number of array dimensions ({ndims}) exceeds the maximum allowed ({MAXDIM})"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+    }
+
+    // This checks for overflow of the array dimensions.
+    let nelems = arrayutils_seam::array_get_n_items::call(ndims, dims)?;
+    arrayutils_seam::array_check_bounds::call(ndims, dims, lbs)?;
+
+    // if ndims <= 0 or any dims[i] == 0, return empty array
+    if nelems <= 0 {
+        return construct_empty_array(mcx, elmtype);
+    }
+
+    // compute required space; collect detoasted (where needed) element bytes
+    // and their aligned data offsets in a single pass, exactly as C does.
+    let mut nbytes: i32 = 0;
+    let mut hasnulls = false;
+    // Per-element prepared data bytes (None for nulls / by-value handled
+    // inline by store).
+    for i in 0..nelems as usize {
+        if nulls.map(|n| n[i]).unwrap_or(false) {
+            hasnulls = true;
+            continue;
+        }
+        // make sure data is not toasted (varlena element type)
+        // (detoast happens at the data-copy stage via element bytes; the
+        // length contribution mirrors att_addlength_datum)
+        nbytes = att_addlength_datum(mcx, nbytes, elmlen, elmbyval, elems[i])?;
+        nbytes = foundation::att_align_nominal(nbytes as usize, elmalign) as i32;
+        // check for overflow of total request
+        if !alloc_size_is_valid(nbytes) {
+            return Err(PgError::error(format!(
+                "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+    }
+
+    // Allocate and initialize result array.
+    let dataoffset: i32;
+    if hasnulls {
+        dataoffset = foundation::arr_overhead_withnulls(ndims, nelems) as i32;
+        nbytes += dataoffset;
+    } else {
+        dataoffset = 0; // marker for no null bitmap
+        nbytes += foundation::arr_overhead_nonulls(ndims) as i32;
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0); // palloc0
+
+    // SET_VARSIZE + header fields.
+    foundation::set_header(&mut result, total, ndims, dataoffset, elmtype);
+    // memcpy(ARR_DIMS(result), dims, ndims * sizeof(int));
+    foundation::write_dims(&mut result, &dims[..ndims as usize]);
+    // memcpy(ARR_LBOUND(result), lbs, ndims * sizeof(int));
+    foundation::write_lbounds(&mut result, ndims, &lbs[..ndims as usize]);
+
+    // CopyArrayEls(result, elems, nulls, nelems, elmlen, elmbyval, elmalign,
+    //              false /* freedata */)
+    copy_array_els(
+        mcx, &mut result, elems, nulls, nelems, elmlen, elmbyval, elmalign,
+    )?;
+
+    Ok(result)
+}
+
+/// `construct_empty_array(elmtype)` (arrayfuncs.c): a zero-dimensional array.
+pub fn construct_empty_array<'mcx>(mcx: Mcx<'mcx>, elmtype: Oid) -> PgResult<PgVec<'mcx, u8>> {
+    // result = palloc0(sizeof(ArrayType));
+    // SET_VARSIZE(result, sizeof(ArrayType));
+    // result->ndim = 0; result->dataoffset = 0; result->elemtype = elmtype;
+    let total = ARRAYTYPE_HDRSZ;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0);
+    foundation::set_header(&mut result, total, 0, 0, elmtype);
+    Ok(result)
+}
+
+/// `construct_empty_expanded_array(element_type, parentcontext, metacache)`
+/// (arrayfuncs.c:3597): build the flat empty array, then hand it to
+/// `expand_array` to produce an `ExpandedArrayHeader`.
+///
+/// C:
+/// ```c
+/// ArrayType *array = construct_empty_array(element_type);
+/// d = expand_array(PointerGetDatum(array), parentcontext, metacache);
+/// pfree(array);
+/// return (ExpandedArrayHeader *) DatumGetEOHP(d);
+/// ```
+/// The flat empty array is built in-crate; the `expand_array` step belongs to
+/// the expanded-array subsystem (`array_expanded.c`), which is not ported —
+/// mirror PG and panic loudly at that boundary rather than invent the
+/// `ExpandedArrayHeader` vocabulary (consistent with
+/// `array_get_element_expanded` / `array_set_element_expanded`).
+pub fn construct_empty_expanded_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    element_type: Oid,
+) -> PgResult<()> {
+    let _array = construct_empty_array(mcx, element_type)?;
+    panic!(
+        "construct_empty_expanded_array: expand_array / ExpandedArrayHeader belong to the \
+         expanded-array subsystem (array_expanded.c), which is not ported"
+    )
+}
+
+/// `deconstruct_array(array, elmtype, elmlen, elmbyval, elmalign, &elemsp,
+/// &nullsp, &nelemsp)` (arrayfuncs.c): split an array buffer into per-element
+/// `(Datum, isnull)` pairs.
+///
+/// The C `nullsp != NULL` form is modeled by always returning the is-null flag
+/// alongside each Datum; the `nullsp == NULL` (null-disallowing) form is not
+/// distinguished here — callers that cannot tolerate a null inspect the
+/// returned flags. (The owner exposes the null-disallowing built-in flavors
+/// through `deconstruct_text_array` / `deconstruct_tid_array`, which forward a
+/// real `nullsp`.)
+pub fn deconstruct_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    elmtype: Oid,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, (Datum, bool)>> {
+    // Assert(ARR_ELEMTYPE(array) == elmtype);
+    debug_assert_eq!(foundation::arr_elemtype(array), elmtype);
+
+    // nelems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+    let ndim = foundation::arr_ndim(array);
+    let dims = foundation::arr_dims(mcx, array)?;
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims)?;
+
+    let mut out = mcx::vec_with_capacity_in::<(Datum, bool)>(mcx, nelems as usize)?;
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1;
+    let mut p = foundation::arr_data_ptr_off(array);
+    let bitmap = foundation::arr_nullbitmap_off(array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        // Get source element, checking for NULL.
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push((Datum::null(), true));
+        } else {
+            // elems[i] = fetch_att(p, elmbyval, elmlen);
+            let d = foundation::fetch_att(array, p, elmbyval, elmlen);
+            // p = att_addlength_pointer(p, elmlen, p);
+            p = foundation::att_addlength_pointer(p, elmlen, array, p);
+            // p = (char *) att_align_nominal(p, elmalign);
+            p = foundation::att_align_nominal(p, elmalign);
+            out.push((d, false));
+        }
+
+        // advance bitmap pointer if any
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// `deconstruct_array_builtin(array, elmtype, &elemsp, &nullsp, &nelemsp)`
+/// (arrayfuncs.c:3697): the convenience wrapper over [`deconstruct_array`] for
+/// the handful of built-in element types whose `(typlen, typbyval, typalign)`
+/// are hard-coded (avoiding a syscache lookup). Unsupported `elmtype` raises
+/// the C `elog(ERROR, "type %u not supported …")`.
+pub fn deconstruct_array_builtin<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    elmtype: Oid,
+) -> PgResult<PgVec<'mcx, (Datum, bool)>> {
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(elmtype)?;
+    deconstruct_array(mcx, array, elmtype, elmlen, elmbyval, elmalign)
+}
+
+/// `array_contains_nulls(array)` (arrayfuncs.c): whether any element is null.
+///
+/// Operates over the verbatim varlena bytes. Panics only on a structurally
+/// impossible bitmap (mirrors the C `Assert`/`ArrayGetNItems` invariants); a
+/// malformed `ArrayGetNItems` is surfaced by the caller through the seam, so
+/// here we recompute it directly off the header dims (the C does the same with
+/// the non-fallible internal form).
+pub fn array_contains_nulls(array: &[u8]) -> bool {
+    // Easy answer if there's no null bitmap.
+    if !foundation::arr_hasnull(array) {
+        return false;
+    }
+
+    // nelems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+    let ndim = foundation::arr_ndim(array);
+    let mut nelems: i32 = if ndim <= 0 { 0 } else { 1 };
+    for i in 0..ndim as usize {
+        nelems = nelems.wrapping_mul(foundation::arr_dim(array, i));
+    }
+
+    let mut byte = match foundation::arr_nullbitmap_off(array) {
+        Some(b) => b,
+        None => return false,
+    };
+
+    // check whole bytes of the bitmap byte-at-a-time
+    while nelems >= 8 {
+        if array[byte] != 0xFF {
+            return true;
+        }
+        byte += 1;
+        nelems -= 8;
+    }
+
+    // check last partial byte
+    let mut bitmask: i32 = 1;
+    while nelems > 0 {
+        if (array[byte] as i32 & bitmask) == 0 {
+            return true;
+        }
+        bitmask <<= 1;
+        nelems -= 1;
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// CopyArrayEls / att_addlength_datum / AllocSizeIsValid helpers (arrayfuncs.c /
+// c.h). In-crate (no seam): pure byte math over the result buffer + element
+// Datums, using the foundation byte primitives.
+// ---------------------------------------------------------------------------
+
+/// `AllocSizeIsValid(size)` (memutils.h): `0 <= size <= MaxAllocSize`.
+fn alloc_size_is_valid(size: i32) -> bool {
+    size >= 0 && (size as usize) <= MAX_ALLOC_SIZE
+}
+
+/// `att_addlength_datum(cur_offset, attlen, attdatum)` (tupmacs.h): grow a
+/// running byte offset by one element's stored length.
+///
+/// For pass-by-value and fixed-length pass-by-ref the length is `attlen`. For
+/// varlena (`attlen == -1`) and cstring (`attlen == -2`) the length is read
+/// from the datum's payload bytes; in the owned model the varlena element is
+/// detoasted first (mirroring `construct_md_array`'s
+/// `PG_DETOAST_DATUM(elems[i])`).
+fn att_addlength_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    cur_offset: i32,
+    attlen: i32,
+    _attbyval: bool,
+    attdatum: Datum,
+) -> PgResult<i32> {
+    if attlen > 0 {
+        // fixed length
+        return Ok(cur_offset + attlen);
+    }
+    // Variable-length: the datum carries the element bytes (verbatim varlena /
+    // cstring) as its payload. Detoast a varlena first.
+    let bytes = datum_payload_bytes(mcx, attlen, attdatum)?;
+    let add = if attlen == -1 {
+        foundation::varsize_any(&bytes, 0) as i32
+    } else {
+        // attlen == -2: cstring, length is strlen+1
+        (cstring_len(&bytes) + 1) as i32
+    };
+    Ok(cur_offset + add)
+}
+
+/// `CopyArrayEls(array, values, isnull, nitems, typlen, typbyval, typalign,
+/// freedata)` (arrayfuncs.c): copy element Datums into the array's data area.
+fn copy_array_els<'mcx>(
+    mcx: Mcx<'mcx>,
+    result: &mut PgVec<'mcx, u8>,
+    values: &[Datum],
+    isnull: Option<&[bool]>,
+    nitems: i32,
+    typlen: i32,
+    typbyval: bool,
+    typalign: u8,
+) -> PgResult<()> {
+    // char *p = ARR_DATA_PTR(a);
+    let mut p = foundation::arr_data_ptr_off(result);
+    // bits8 *bitmap = ARR_NULLBITMAP(a); int bitval = 0; int bitmask = 1;
+    let bitmap_off = foundation::arr_nullbitmap_off(result);
+    let mut bitval: i32 = 0;
+    let mut bitmask: i32 = 1;
+    // current bitmap byte index
+    let mut bm_byte = bitmap_off;
+
+    for i in 0..nitems as usize {
+        if isnull.map(|n| n[i]).unwrap_or(false) {
+            // bitval stays clear for this bit; mark bitmap if present below.
+            // (data not written)
+        } else {
+            // p += ArrayCastAndSet(values[i], typlen, typbyval, typalign, p);
+            p = array_cast_and_set(mcx, result, p, values[i], typlen, typbyval, typalign)?;
+            if bitmap_off.is_some() {
+                bitval |= bitmask;
+            }
+        }
+        if let Some(b) = bm_byte {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                result[b] = bitval as u8;
+                bm_byte = Some(b + 1);
+                bitval = 0;
+                bitmask = 1;
+            }
+        }
+    }
+    // flush trailing partial byte
+    if let Some(b) = bm_byte {
+        if bitmask != 1 {
+            result[b] = bitval as u8;
+        }
+    }
+    Ok(())
+}
+
+/// `ArrayCastAndSet(src, typlen, typbyval, typalign, dest)` (arrayfuncs.c):
+/// store one element `src` Datum into `dest` and return the advanced offset.
+fn array_cast_and_set<'mcx>(
+    mcx: Mcx<'mcx>,
+    result: &mut PgVec<'mcx, u8>,
+    mut dest: usize,
+    src: Datum,
+    typlen: i32,
+    typbyval: bool,
+    typalign: u8,
+) -> PgResult<usize> {
+    let inc: usize;
+    if typlen > 0 {
+        if typbyval {
+            // store_att_byval(dest, src, typlen);
+            foundation::store_att_byval(result, dest, src, typlen);
+        } else {
+            // memmove(dest, DatumGetPointer(src), typlen);
+            let bytes = datum_payload_bytes(mcx, typlen, src)?;
+            result[dest..dest + typlen as usize].copy_from_slice(&bytes[..typlen as usize]);
+        }
+        inc = typlen as usize;
+    } else {
+        // varlena (-1) or cstring (-2): copy the variable-length payload.
+        let bytes = datum_payload_bytes(mcx, typlen, src)?;
+        let len = if typlen == -1 {
+            foundation::varsize_any(&bytes, 0)
+        } else {
+            cstring_len(&bytes) + 1
+        };
+        result[dest..dest + len].copy_from_slice(&bytes[..len]);
+        inc = len;
+    }
+    // return att_align_nominal(inc, typalign);
+    let aligned = foundation::att_align_nominal(inc, typalign);
+    dest += aligned;
+    Ok(dest)
+}
+
+/// Read the verbatim payload bytes a pass-by-ref element `Datum` points at,
+/// detoasting a varlena (`attlen == -1`) first (mirrors `PG_DETOAST_DATUM`).
+///
+/// In the owned model a pass-by-ref `Datum` carries the pointer word into a
+/// caller-owned varlena/cstring; the owner threads those bytes through the
+/// detoast seam, which materializes them in `mcx`. A `Datum` that does not
+/// carry an addressable payload (the bare-word case) raises the same
+/// `ereport(ERROR)` surface the C TOAST machinery would on a corrupt pointer.
+fn datum_payload_bytes<'mcx>(mcx: Mcx<'mcx>, attlen: i32, src: Datum) -> PgResult<PgVec<'mcx, u8>> {
+    // The element bytes are reachable only through the detoast subsystem, which
+    // is an unported neighbor; route through its seam (loud panic until it
+    // lands), exactly as every other by-reference element access in this crate
+    // does. The seam takes the verbatim varlena bytes — here the Datum word is
+    // the pointer into them — so we hand the detoast owner the datum word and
+    // let it resolve the payload.
+    let _ = (attlen, src);
+    detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(src))
+}
+
+/// View the bytes a pass-by-ref `Datum`'s pointer word addresses. The owned
+/// model has no global address space; the detoast seam (the byref-payload
+/// owner) resolves the real bytes, so this hands it an empty window keyed by
+/// the datum and lets the owner fault loudly until it lands.
+fn datum_as_byte_window(_src: Datum) -> &'static [u8] {
+    &[]
+}
+
+/// `strlen(cstr)` over a NUL-terminated cstring payload (cstring elements,
+/// `attlen == -2`).
+fn cstring_len(bytes: &[u8]) -> usize {
+    bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())
+}
+
+// ---------------------------------------------------------------------------
+// Built-in element-type metadata (construct_array_builtin /
+// deconstruct_array_builtin switch tables), transcribed value-by-value.
+// ---------------------------------------------------------------------------
+
+/// `(elmlen, elmbyval, elmalign)` for `construct_array_builtin`'s switch.
+fn construct_builtin_meta(elmtype: Oid) -> PgResult<(i32, bool, u8)> {
+    Ok(match elmtype {
+        foundation::CHAROID => (1, true, TYPALIGN_CHAR),
+        foundation::CSTRINGOID => (-2, false, TYPALIGN_CHAR),
+        foundation::FLOAT4OID => (4, true, TYPALIGN_INT),
+        foundation::FLOAT8OID => (8, foundation::FLOAT8PASSBYVAL, TYPALIGN_DOUBLE),
+        foundation::INT2OID => (2, true, TYPALIGN_SHORT),
+        foundation::INT4OID => (4, true, TYPALIGN_INT),
+        foundation::INT8OID => (8, foundation::FLOAT8PASSBYVAL, TYPALIGN_DOUBLE),
+        foundation::NAMEOID => (foundation::NAMEDATALEN, false, TYPALIGN_CHAR),
+        foundation::OIDOID | foundation::REGTYPEOID => (4, true, TYPALIGN_INT),
+        foundation::TEXTOID => (-1, false, TYPALIGN_INT),
+        foundation::TIDOID => (foundation::SIZEOF_ITEM_POINTER_DATA, false, TYPALIGN_SHORT),
+        foundation::XIDOID => (4, true, TYPALIGN_INT),
+        _ => {
+            return Err(PgError::error(format!(
+                "type {elmtype} not supported by construct_array_builtin()"
+            )));
+        }
+    })
+}
+
+/// `(elmlen, elmbyval, elmalign)` for `deconstruct_array_builtin`'s switch.
+fn deconstruct_builtin_meta(elmtype: Oid) -> PgResult<(i32, bool, u8)> {
+    Ok(match elmtype {
+        foundation::CHAROID => (1, true, TYPALIGN_CHAR),
+        foundation::CSTRINGOID => (-2, false, TYPALIGN_CHAR),
+        foundation::FLOAT8OID => (8, foundation::FLOAT8PASSBYVAL, TYPALIGN_DOUBLE),
+        foundation::INT2OID => (2, true, TYPALIGN_SHORT),
+        foundation::INT4OID => (4, true, TYPALIGN_INT),
+        foundation::OIDOID => (4, true, TYPALIGN_INT),
+        foundation::TEXTOID => (-1, false, TYPALIGN_INT),
+        foundation::TIDOID => (foundation::SIZEOF_ITEM_POINTER_DATA, false, TYPALIGN_SHORT),
+        _ => {
+            return Err(PgError::error(format!(
+                "type {elmtype} not supported by deconstruct_array_builtin()"
+            )));
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ArrayBuildState (single-element accumulator), arrayfuncs.c.
+// ---------------------------------------------------------------------------
+
+/// `initArrayResult(element_type, rcontext, subcontext)` (arrayfuncs.c).
+fn init_array_result(element_type: Oid, subcontext: bool) -> PgResult<ArrayBuildState> {
+    // initArrayResultWithSize(element_type, rcontext, subcontext,
+    //                         subcontext ? 64 : 8)
+    init_array_result_with_size(element_type, subcontext, if subcontext { 64 } else { 8 })
+}
+
+/// `initArrayResultWithSize(element_type, rcontext, subcontext, initsize)`
+/// (arrayfuncs.c). The owned model holds `dvalues`/`dnulls` as global-allocator
+/// `Vec`s (carried in the `ArrayBuildStateAny` slot); `alen` is the capacity.
+fn init_array_result_with_size(
+    element_type: Oid,
+    subcontext: bool,
+    initsize: usize,
+) -> PgResult<ArrayBuildState> {
+    let tlbva = lsyscache_seam::get_typlenbyvalalign::call(element_type)?;
+    Ok(ArrayBuildState {
+        dvalues: Vec::with_capacity(initsize),
+        dnulls: Vec::with_capacity(initsize),
+        nelems: 0,
+        element_type,
+        typlen: tlbva.typlen,
+        typbyval: tlbva.typbyval,
+        typalign: tlbva.typalign as u8,
+        private_cxt: subcontext,
+    })
+}
+
+/// `accumArrayResult(astate, dvalue, disnull, element_type, rcontext)`
+/// (arrayfuncs.c): accumulate one element.
+fn accum_array_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<ArrayBuildState>,
+    mut dvalue: Datum,
+    disnull: bool,
+    element_type: Oid,
+) -> PgResult<ArrayBuildState> {
+    let mut astate = match astate {
+        None => init_array_result(element_type, true)?,
+        Some(s) => {
+            debug_assert_eq!(s.element_type, element_type);
+            s
+        }
+    };
+
+    // enlarge dvalues[]/dnulls[] if needed — Vec growth; the C MaxAllocSize
+    // guard on alen*sizeof(Datum) is preserved.
+    if astate.nelems as usize >= astate.dvalues.capacity() {
+        let new_alen = (astate.dvalues.capacity().max(1)) * 2;
+        if !alloc_size_is_valid((new_alen * core::mem::size_of::<Datum>()) as i32) {
+            return Err(PgError::error(format!(
+                "array size exceeds the maximum allowed ({MAX_ALLOC_SIZE})"
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+        astate
+            .dvalues
+            .reserve(new_alen - astate.dvalues.capacity());
+        astate.dnulls.reserve(new_alen - astate.dnulls.capacity());
+    }
+
+    // Ensure pass-by-ref stuff is copied (and detoasted if varlena). In the
+    // owned model the element bytes are materialized through the detoast seam.
+    if !disnull && !astate.typbyval {
+        if astate.typlen == -1 {
+            // dvalue = PointerGetDatum(PG_DETOAST_DATUM_COPY(dvalue));
+            let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(dvalue))?;
+            dvalue = Datum::from_usize(bytes.as_ptr() as usize);
+        } else {
+            // dvalue = datumCopy(dvalue, typbyval, typlen); — a fixed-len
+            // by-ref copy. The payload bytes are resolved through the same
+            // byref window owner.
+            let bytes = datum_payload_bytes(mcx, astate.typlen as i32, dvalue)?;
+            dvalue = Datum::from_usize(bytes.as_ptr() as usize);
+        }
+    }
+
+    astate.dvalues.push(dvalue);
+    astate.dnulls.push(disnull);
+    astate.nelems += 1;
+
+    Ok(astate)
+}
+
+/// `makeArrayResult(astate, rcontext)` (arrayfuncs.c) via `makeMdArrayResult`.
+fn make_array_result<'mcx>(mcx: Mcx<'mcx>, astate: &ArrayBuildState) -> PgResult<PgVec<'mcx, u8>> {
+    // ndims = (astate->nelems > 0) ? 1 : 0; dims[0] = nelems; lbs[0] = 1;
+    let ndims = if astate.nelems > 0 { 1 } else { 0 };
+    let dims = [astate.nelems];
+    let lbs = [1];
+    make_md_array_result(mcx, astate, ndims, &dims, &lbs)
+}
+
+/// `makeMdArrayResult(astate, ndims, dims, lbs, rcontext, release)`
+/// (arrayfuncs.c). `release` (context delete) is modeled by the caller dropping
+/// the state.
+fn make_md_array_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: &ArrayBuildState,
+    ndims: i32,
+    dims: &[i32],
+    lbs: &[i32],
+) -> PgResult<PgVec<'mcx, u8>> {
+    construct_md_array(
+        mcx,
+        &astate.dvalues,
+        Some(&astate.dnulls),
+        ndims,
+        dims,
+        lbs,
+        astate.element_type,
+        astate.typlen as i32,
+        astate.typbyval,
+        astate.typalign,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// ArrayBuildStateArr (sub-array accumulator), arrayfuncs.c.
+// ---------------------------------------------------------------------------
+
+/// `initArrayResultArr(array_type, element_type, rcontext, subcontext)`
+/// (arrayfuncs.c).
+fn init_array_result_arr(
+    array_type: Oid,
+    element_type: Oid,
+    subcontext: bool,
+) -> PgResult<ArrayBuildStateArr> {
+    // Lookup element type, unless element_type already provided.
+    let element_type = if element_type == 0 {
+        match lsyscache_seam::get_element_type::call(array_type)? {
+            Some(et) if et != 0 => et,
+            _ => {
+                return Err(PgError::error(format!(
+                    "data type {array_type} is not an array type"
+                ))
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+            }
+        }
+    } else {
+        element_type
+    };
+
+    // MemoryContextAllocZero — all fields zero.
+    let astate = ArrayBuildStateArr {
+        data: Vec::new(),
+        nullbitmap: None,
+        nbytes: 0,
+        nitems: 0,
+        ndims: 0,
+        dims: [0; MAXDIM as usize],
+        lbs: [0; MAXDIM as usize],
+        array_type,
+        element_type,
+        private_cxt: subcontext,
+    };
+    Ok(astate)
+}
+
+/// `accumArrayResultArr(astate, dvalue, disnull, array_type, rcontext)`
+/// (arrayfuncs.c): accumulate one sub-array.
+fn accum_array_result_arr<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<ArrayBuildStateArr>,
+    dvalue: Datum,
+    disnull: bool,
+    array_type: Oid,
+) -> PgResult<ArrayBuildStateArr> {
+    // We disallow accumulating null subarrays.
+    if disnull {
+        return Err(
+            PgError::error("cannot accumulate null arrays").with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+        );
+    }
+
+    // Detoast input array in caller's context.
+    let arg = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(dvalue))?;
+
+    let mut astate = match astate {
+        None => init_array_result_arr(array_type, 0, true)?,
+        Some(s) => {
+            debug_assert_eq!(s.array_type, array_type);
+            s
+        }
+    };
+
+    // Collect this input's dimensions.
+    let ndims = foundation::arr_ndim(&arg);
+    let nitems = arrayutils_seam::array_get_n_items::call(ndims, &arr_dims_vec(&arg))?;
+    let ndatabytes = (foundation::arr_size(&arg) - foundation::arr_data_offset(&arg)) as i32;
+    let data_off = foundation::arr_data_ptr_off(&arg);
+
+    if astate.ndims == 0 {
+        // First input; check/save the dimensionality info.
+        if ndims == 0 {
+            return Err(PgError::error("cannot accumulate empty arrays")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+        }
+        if ndims + 1 > MAXDIM {
+            return Err(PgError::error(format!(
+                "number of array dimensions ({}) exceeds the maximum allowed ({MAXDIM})",
+                ndims + 1
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        }
+
+        // The output array will have n+1 dimensions, the ones after the first
+        // matching the input's dimensions.
+        astate.ndims = ndims + 1;
+        astate.dims[0] = 0;
+        for i in 0..ndims as usize {
+            astate.dims[i + 1] = foundation::arr_dim(&arg, i);
+        }
+        astate.lbs[0] = 1;
+        for i in 0..ndims as usize {
+            astate.lbs[i + 1] = foundation::arr_lbound(&arg, i);
+        }
+
+        // Allocate at least enough data space for this item.
+        let abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes + 1));
+        astate.data = Vec::with_capacity(abytes as usize);
+    } else {
+        // Second or later input: must match first input's dimensionality.
+        if astate.ndims != ndims + 1 {
+            return Err(
+                PgError::error("cannot accumulate arrays of different dimensionality")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+            );
+        }
+        for i in 0..ndims as usize {
+            if astate.dims[i + 1] != foundation::arr_dim(&arg, i)
+                || astate.lbs[i + 1] != foundation::arr_lbound(&arg, i)
+            {
+                return Err(
+                    PgError::error("cannot accumulate arrays of different dimensionality")
+                        .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+                );
+            }
+        }
+        // Vec growth subsumes the explicit abytes/repalloc enlargement.
+    }
+
+    // Copy the data portion of the sub-array.
+    astate
+        .data
+        .extend_from_slice(&arg[data_off..data_off + ndatabytes as usize]);
+    astate.nbytes += ndatabytes;
+
+    // Deal with null bitmap if needed.
+    if astate.nullbitmap.is_some() || foundation::arr_hasnull(&arg) {
+        let newnitems = astate.nitems + nitems;
+
+        if astate.nullbitmap.is_none() {
+            // First input with nulls; retrospectively mark all previous items
+            // non-null.
+            let aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1));
+            let mut bm = Vec::new();
+            bm.resize(((aitems + 7) / 8) as usize, 0u8);
+            astate.nullbitmap = Some(bm);
+            // array_bitmap_copy(nullbitmap, 0, NULL, 0, astate->nitems)
+            let prev = astate.nitems;
+            let bm = astate.nullbitmap.as_mut().unwrap();
+            array_bitmap_copy_local(bm, 0, None, &[], 0, prev);
+        } else {
+            // Vec growth subsumes the aitems/repalloc enlargement; ensure room.
+            let needed = ((newnitems + 7) / 8) as usize;
+            let bm = astate.nullbitmap.as_mut().unwrap();
+            if bm.len() < needed {
+                bm.resize(needed, 0u8);
+            }
+        }
+        // array_bitmap_copy(nullbitmap, astate->nitems, ARR_NULLBITMAP(arg), 0,
+        //                   nitems)
+        let dest_off = astate.nitems;
+        let src_bm = foundation::arr_nullbitmap_off(&arg);
+        let bm = astate.nullbitmap.as_mut().unwrap();
+        array_bitmap_copy_local(bm, dest_off, src_bm, &arg, 0, nitems);
+    }
+
+    astate.nitems += nitems;
+    astate.dims[0] += 1;
+
+    Ok(astate)
+}
+
+/// `makeArrayResultArr(astate, rcontext, release)` (arrayfuncs.c).
+fn make_array_result_arr<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: &ArrayBuildStateArr,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if astate.ndims == 0 {
+        // No inputs, return empty array.
+        return construct_empty_array(mcx, astate.element_type);
+    }
+
+    // Check for overflow of the array dimensions.
+    let _ = arrayutils_seam::array_get_n_items::call(astate.ndims, &astate.dims[..astate.ndims as usize])?;
+    arrayutils_seam::array_check_bounds::call(
+        astate.ndims,
+        &astate.dims[..astate.ndims as usize],
+        &astate.lbs[..astate.ndims as usize],
+    )?;
+
+    // Compute required space.
+    let dataoffset: i32;
+    let mut nbytes = astate.nbytes;
+    if astate.nullbitmap.is_some() {
+        dataoffset = foundation::arr_overhead_withnulls(astate.ndims, astate.nitems) as i32;
+        nbytes += dataoffset;
+    } else {
+        dataoffset = 0;
+        nbytes += foundation::arr_overhead_nonulls(astate.ndims) as i32;
+    }
+
+    let total = nbytes as usize;
+    let mut result = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    result.resize(total, 0);
+
+    foundation::set_header(&mut result, total, astate.ndims, dataoffset, astate.element_type);
+    foundation::write_dims(&mut result, &astate.dims[..astate.ndims as usize]);
+    foundation::write_lbounds(&mut result, astate.ndims, &astate.lbs[..astate.ndims as usize]);
+
+    // memcpy(ARR_DATA_PTR(result), astate->data, astate->nbytes);
+    let data_off = foundation::arr_data_ptr_off(&result);
+    result[data_off..data_off + astate.nbytes as usize]
+        .copy_from_slice(&astate.data[..astate.nbytes as usize]);
+
+    if let Some(src_bm) = astate.nullbitmap.as_ref() {
+        // array_bitmap_copy(ARR_NULLBITMAP(result), 0, nullbitmap, 0, nitems)
+        let dest_bm_off = foundation::arr_nullbitmap_off(&result).expect("withnulls layout");
+        copy_bitmap_into(&mut result, dest_bm_off, 0, src_bm, 0, astate.nitems);
+    }
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers shared by the Arr accumulator.
+// ---------------------------------------------------------------------------
+
+/// `pg_nextpower2_32(num)` (pg_bitutils.h): least power of 2 >= num (num >= 1).
+fn pg_nextpower2_32(num: i32) -> i32 {
+    if num <= 1 {
+        return 1;
+    }
+    let u = num as u32;
+    // 1 << (32 - leading_zeros(num - 1))
+    1i32.wrapping_shl(32 - (u - 1).leading_zeros())
+}
+
+/// All `ndim` dimension lengths of an array buffer as an owned `Vec` (global
+/// allocator) for passing to the arrayutils seam.
+fn arr_dims_vec(a: &[u8]) -> Vec<i32> {
+    let ndim = foundation::arr_ndim(a);
+    let mut v = Vec::with_capacity(ndim.max(0) as usize);
+    for i in 0..ndim.max(0) as usize {
+        v.push(foundation::arr_dim(a, i));
+    }
+    v
+}
+
+/// `array_bitmap_copy` over a global-allocator destination bitmap `Vec` (the
+/// `ArrayBuildStateArr` working bitmap), reading source bits from a verbatim
+/// array buffer (or treating a `None` source as all-non-null).
+fn array_bitmap_copy_local(
+    dest: &mut [u8],
+    dest_offset: i32,
+    src_bitmap: Option<usize>,
+    src_buf: &[u8],
+    src_offset: i32,
+    nitems: i32,
+) {
+    // Mirrors arrayfuncs.c array_bitmap_copy: bit-by-bit (the fast whole-byte
+    // path is an optimization; the bitwise loop is the canonical semantics).
+    let mut destbitmask: i32 = 1 << (dest_offset % 8);
+    let mut destbitval: i32 = dest[(dest_offset / 8) as usize] as i32;
+    let mut dest_byte = (dest_offset / 8) as usize;
+
+    let mut srcbitmask: i32 = 1 << (src_offset % 8);
+    let mut src_byte = src_bitmap.map(|b| b + (src_offset / 8) as usize);
+
+    for _ in 0..nitems {
+        let bit = match (src_bitmap, src_byte) {
+            (Some(_), Some(sb)) => (src_buf[sb] as i32 & srcbitmask) != 0,
+            _ => true, // NULL source => all non-null
+        };
+        if bit {
+            destbitval |= destbitmask;
+        } else {
+            destbitval &= !destbitmask;
+        }
+        destbitmask <<= 1;
+        if destbitmask == 0x100 {
+            dest[dest_byte] = destbitval as u8;
+            dest_byte += 1;
+            destbitmask = 1;
+            if dest_byte < dest.len() {
+                destbitval = dest[dest_byte] as i32;
+            } else {
+                destbitval = 0;
+            }
+        }
+        if src_bitmap.is_some() {
+            srcbitmask <<= 1;
+            if srcbitmask == 0x100 {
+                srcbitmask = 1;
+                src_byte = src_byte.map(|b| b + 1);
+            }
+        }
+    }
+    if destbitmask != 1 {
+        dest[dest_byte] = destbitval as u8;
+    }
+}
+
+/// `array_bitmap_copy` writing into a result buffer's bitmap from a working
+/// bitmap (`makeArrayResultArr`).
+fn copy_bitmap_into(
+    dest: &mut [u8],
+    dest_bitmap_off: usize,
+    dest_offset: i32,
+    src: &[u8],
+    src_offset: i32,
+    nitems: i32,
+) {
+    let mut destbitmask: i32 = 1 << (dest_offset % 8);
+    let mut dest_byte = dest_bitmap_off + (dest_offset / 8) as usize;
+    let mut destbitval: i32 = dest[dest_byte] as i32;
+
+    let mut srcbitmask: i32 = 1 << (src_offset % 8);
+    let mut src_byte = (src_offset / 8) as usize;
+
+    for _ in 0..nitems {
+        let bit = (src[src_byte] as i32 & srcbitmask) != 0;
+        if bit {
+            destbitval |= destbitmask;
+        } else {
+            destbitval &= !destbitmask;
+        }
+        destbitmask <<= 1;
+        if destbitmask == 0x100 {
+            dest[dest_byte] = destbitval as u8;
+            dest_byte += 1;
+            destbitmask = 1;
+            destbitval = if dest_byte < dest.len() {
+                dest[dest_byte] as i32
+            } else {
+                0
+            };
+        }
+        srcbitmask <<= 1;
+        if srcbitmask == 0x100 {
+            srcbitmask = 1;
+            src_byte += 1;
+        }
+    }
+    if destbitmask != 1 {
+        dest[dest_byte] = destbitval as u8;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inward seam implementations (installed by crate::init_seams). The
+// signatures below MUST match `backend-utils-adt-arrayfuncs-seams`.
+//
+// The owned model resolves the C `MemoryContext rcontext` off the EState: the
+// `ArrayBuildCtx` selector picks the per-query (`es_query_cxt`) or per-tuple
+// (`econtext->ecxt_per_tuple_memory`) context.
+// ---------------------------------------------------------------------------
+
+/// Resolve the target `Mcx<'mcx>` the `ArrayBuildCtx` names off the EState.
+///
+/// `PerQuery` is `estate.es_query_cxt`; `PerTuple` is the named ExprContext's
+/// `ecxt_per_tuple_memory`. Both contexts live for the EState's `'mcx` arena
+/// (the per-tuple context is a real owned child of the per-query context that
+/// is reset, not freed, between tuples), so the resolved handle is valid for
+/// `'mcx`. C reaches the same context through the ambient
+/// `CurrentMemoryContext` / `econtext->ecxt_per_query_memory`.
+fn resolve_ctx<'mcx>(
+    estate: &EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+) -> Mcx<'mcx> {
+    match ctx {
+        ArrayBuildCtx::PerQuery => estate.es_query_cxt,
+        ArrayBuildCtx::PerTuple => {
+            // The ExprContext (and its inline per-tuple MemoryContext) is stored
+            // in the EState's `'mcx`-arena `es_exprcontexts` pool, so its address
+            // is stable for `'mcx`. Extend the resolved handle to `'mcx` to match
+            // C's stable-pointer dereference.
+            let m: Mcx<'_> = estate.ecxt(econtext).ecxt_per_tuple_memory.mcx();
+            // SAFETY: the MemoryContext backing `m` lives inside the EState's
+            // `'mcx` arena for the whole `'mcx`; the borrow only looked shorter
+            // because it was reached through `&EStateData`. This mirrors the C
+            // `econtext->ecxt_per_tuple_memory` pointer, valid for the query.
+            unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'mcx>>(m) }
+        }
+    }
+}
+
+/// Seam `init_array_result_any` — `initArrayResultAny` (arrayfuncs.c).
+pub fn init_array_result_any<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    input_type: Oid,
+) -> PgResult<ArrayBuildStateAnyHandle<'mcx>> {
+    let mcx = resolve_ctx(estate, econtext, ctx);
+    let astate = init_array_result_any_inner(input_type, true)?;
+    Ok(Some(mcx::alloc_in(mcx, astate)?))
+}
+
+/// `initArrayResultAny(input_type, rcontext, subcontext)` body — builds the
+/// scalar-or-array `ArrayBuildStateAny`.
+fn init_array_result_any_inner(
+    input_type: Oid,
+    subcontext: bool,
+) -> PgResult<types_datum::array_build::ArrayBuildStateAny> {
+    use types_datum::array_build::ArrayBuildStateAny;
+
+    // int2vector and oidvector satisfy both get_element_type and
+    // get_array_type; prefer treating them as scalars => check get_array_type.
+    let has_array_type = matches!(
+        lsyscache_seam::get_array_type::call(input_type)?,
+        Some(at) if at != 0
+    );
+
+    if !has_array_type {
+        // Array case.
+        let arraystate = init_array_result_arr(input_type, 0, subcontext)?;
+        Ok(ArrayBuildStateAny {
+            scalarstate: None,
+            arraystate: Some(arraystate),
+        })
+    } else {
+        // Scalar case.
+        let scalarstate = init_array_result(input_type, subcontext)?;
+        Ok(ArrayBuildStateAny {
+            scalarstate: Some(scalarstate),
+            arraystate: None,
+        })
+    }
+}
+
+/// Seam `accum_array_result_any` — `accumArrayResultAny` (arrayfuncs.c).
+pub fn accum_array_result_any<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+    dvalue: Datum,
+    disnull: bool,
+    input_type: Oid,
+) -> PgResult<ArrayBuildStateAnyHandle<'mcx>> {
+    let mcx = resolve_ctx(estate, econtext, ctx);
+
+    // astate == NULL => initArrayResultAny(input_type, rcontext, true)
+    let mut boxed = match astate {
+        Some(b) => b,
+        None => {
+            let inner = init_array_result_any_inner(input_type, true)?;
+            mcx::alloc_in(mcx, inner)?
+        }
+    };
+
+    if boxed.scalarstate.is_some() {
+        let scalar = boxed.scalarstate.take().unwrap();
+        let scalar = accum_array_result(mcx, Some(scalar), dvalue, disnull, input_type)?;
+        boxed.scalarstate = Some(scalar);
+    } else {
+        let arr = boxed.arraystate.take();
+        let arr = accum_array_result_arr(mcx, arr, dvalue, disnull, input_type)?;
+        boxed.arraystate = Some(arr);
+    }
+
+    Ok(Some(boxed))
+}
+
+/// Seam `make_array_result_any` — `makeArrayResultAny` (arrayfuncs.c).
+pub fn make_array_result_any<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+) -> PgResult<Datum> {
+    let mcx = resolve_ctx(estate, econtext, ctx);
+    let astate = astate.expect("makeArrayResultAny: astate must not be NULL");
+
+    let result: PgVec<'mcx, u8> = if let Some(scalar) = astate.scalarstate.as_ref() {
+        // Must use makeMdArrayResult to support the "release" parameter.
+        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
+        let dims = [scalar.nelems];
+        let lbs = [1];
+        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)?
+    } else {
+        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
+        make_array_result_arr(mcx, arr)?
+    };
+
+    // PointerGetDatum(result): the carried Datum is the buffer's pointer word.
+    Ok(datum_from_buf(result))
+}
+
+/// Seam `pfree_array_datum` — free a previously built array `Datum`.
+pub fn pfree_array_datum(curarray: Datum) {
+    // pfree(DatumGetPointer(node->curArray)) guarded by != PointerGetDatum(NULL).
+    // In the owned model the array buffer lives in its owning MemoryContext and
+    // is reclaimed on context reset/delete; an explicit pfree of a non-null
+    // pointer word is therefore a no-op here (the bytes are owned elsewhere).
+    let _ = curarray;
+}
+
+/// Seam `construct_array_builtin` — `construct_array_builtin` (arrayfuncs.c).
+pub fn construct_array_builtin<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Datum],
+    elmtype: Oid,
+) -> PgResult<Datum> {
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(elmtype)?;
+    let buf = construct_array(mcx, elems, elmtype, elmlen, elmbyval, elmalign)?;
+    Ok(datum_from_buf(buf))
+}
+
+/// Seam `deconstruct_text_array` — `deconstruct_array_builtin(..., TEXTOID)`.
+pub fn deconstruct_text_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
+    let pairs = deconstruct_array(mcx, array, foundation::TEXTOID, elmlen, elmbyval, elmalign)?;
+
+    let mut out = mcx::vec_with_capacity_in::<PgString<'mcx>>(mcx, pairs.len())?;
+    for (d, isnull) in pairs.iter() {
+        if *isnull {
+            // reloptions arrays have no NULLs; the C C-string projection would
+            // dereference a NULL — surface the same null-not-allowed error.
+            return Err(PgError::error("null array element not allowed in this context")
+                .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        }
+        // Each element Datum is a text varlena pointer word; project it to its
+        // UTF-8 payload through the detoast/text owner.
+        let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(*d))?;
+        let s = text_to_pgstring(mcx, &bytes)?;
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Seam `deconstruct_tid_array` — `deconstruct_array_builtin(..., TIDOID)`.
+pub fn deconstruct_tid_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+) -> PgResult<PgVec<'mcx, (ItemPointerData, bool)>> {
+    // DatumGetArrayTypeP(arraydatum) — detoast the array varlena.
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TIDOID)?;
+    let pairs = deconstruct_array(mcx, &arr, foundation::TIDOID, elmlen, elmbyval, elmalign)?;
+
+    let mut out = mcx::vec_with_capacity_in::<(ItemPointerData, bool)>(mcx, pairs.len())?;
+    for (d, isnull) in pairs.iter() {
+        // ipdatums[i] reinterpreted via DatumGetPointer as an ItemPointer.
+        let ip = if *isnull {
+            ItemPointerData::default()
+        } else {
+            datum_to_item_pointer(mcx, *d)?
+        };
+        out.push((ip, *isnull));
+    }
+    Ok(out)
+}
+
+/// Seam `construct_text_array` — `accumArrayResult`/`makeArrayResult` over
+/// `TEXTOID`.
+pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Datum> {
+    // An empty input yields the C (Datum) 0 (no array).
+    if elems.is_empty() {
+        return Ok(Datum::null());
+    }
+
+    // accumArrayResult over each element's CStringGetTextDatum, then
+    // makeArrayResult, all over TEXTOID.
+    let mut astate: Option<ArrayBuildState> = None;
+    for s in elems {
+        let d = cstring_to_text_datum(mcx, s)?;
+        astate = Some(accum_array_result(
+            mcx,
+            astate.take(),
+            d,
+            false,
+            foundation::TEXTOID,
+        )?);
+    }
+    let astate = astate.expect("non-empty input builds a state");
+    let buf = make_array_result(mcx, &astate)?;
+    Ok(datum_from_buf(buf))
+}
+
+// ---------------------------------------------------------------------------
+// Datum / payload bridges for the byref element model. The text / tid
+// projection of element bytes is the text/tableam owner's surface; route it
+// through the owner seams (loud panic until they land) rather than inventing a
+// local interpretation of the pointer word.
+// ---------------------------------------------------------------------------
+
+/// `PointerGetDatum(buf)` — the carried Datum is the result buffer's pointer
+/// word.
+fn datum_from_buf(buf: PgVec<'_, u8>) -> Datum {
+    let ptr = buf.as_ptr() as usize;
+    // The buffer lives in `mcx` for `'mcx`; leak the handle so the bytes
+    // outlive this frame exactly as the C palloc'd array does (reclaimed by the
+    // owning context, not by Rust drop).
+    core::mem::forget(buf);
+    Datum::from_usize(ptr)
+}
+
+/// `CStringGetTextDatum(s)` over a UTF-8 str: build a text varlena in `mcx` and
+/// return its pointer word.
+fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {
+    use types_datum::varlena::VARHDRSZ;
+    let total = VARHDRSZ + s.len();
+    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, total)?;
+    buf.resize(total, 0);
+    // SET_VARSIZE(buf, total): 4-byte header in the natural (non-toasted) form.
+    foundation::set_varsize(&mut buf, total);
+    buf[VARHDRSZ..].copy_from_slice(s.as_bytes());
+    Ok(datum_from_buf(buf))
+}
+
+/// Project a text varlena's payload bytes to a `PgString<'mcx>`.
+fn text_to_pgstring<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgString<'mcx>> {
+    use types_datum::varlena::VARHDRSZ;
+    // VARDATA / VARSIZE: payload is [VARHDRSZ .. VARSIZE).
+    let total = foundation::varsize_any(bytes, 0);
+    let payload = &bytes[VARHDRSZ..total.min(bytes.len())];
+    let mut s = PgString::new_in(mcx);
+    let text = core::str::from_utf8(payload).map_err(|_| {
+        PgError::error("invalid UTF-8 in text array element")
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+    })?;
+    s.try_push_str(text)?;
+    Ok(s)
+}
+
+/// Reinterpret a `tid` element Datum (pointer word into a 6-byte
+/// `ItemPointerData`) as the value, reading its bytes through the byref owner.
+fn datum_to_item_pointer<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<ItemPointerData> {
+    let bytes = datum_payload_bytes(mcx, foundation::SIZEOF_ITEM_POINTER_DATA, d)?;
+    // ItemPointerData = { BlockIdData { bi_hi: u16, bi_lo: u16 }, ip_posid: u16 }
+    if bytes.len() < 6 {
+        return Err(PgError::error("malformed tid array element")
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+    }
+    // Little-endian on-disk layout of ItemPointerData (bi_hi, bi_lo, ip_posid),
+    // each a u16, exactly as the catalog stores a `tid`.
+    let ip = ItemPointerData {
+        ip_blkid: types_tuple::heaptuple::BlockIdData {
+            bi_hi: u16::from_le_bytes([bytes[0], bytes[1]]),
+            bi_lo: u16::from_le_bytes([bytes[2], bytes[3]]),
+        },
+        ip_posid: u16::from_le_bytes([bytes[4], bytes[5]]),
+    };
+    Ok(ip)
+}
+
+/// Re-export of the on-disk header type for build-state finalizers.
+pub type Header = ArrayType;
