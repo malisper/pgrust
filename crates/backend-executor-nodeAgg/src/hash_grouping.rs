@@ -290,13 +290,15 @@ pub fn initialize_hash_entry<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     hashtable: TupleHashTableHandle,
     entry: TupleHashEntryHandle,
-    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate_mcx(estate);
+
     // aggstate->hash_ngroups_current++;
     aggstate.hash_ngroups_current += 1;
 
     // hash_agg_check_limits(aggstate);
-    crate::spill::hash_agg_check_limits(aggstate)?;
+    crate::spill::hash_agg_check_limits(aggstate, estate, mcx)?;
 
     // no need to allocate or initialize per-group state
     if aggstate.numtrans == 0 {
@@ -364,7 +366,7 @@ pub fn lookup_hash_entries<'mcx>(
                 )?;
             // creation allowed → entry is always non-NULL
             if isnew {
-                initialize_hash_entry(aggstate, hashtable, entry, estate_mcx(estate))?;
+                initialize_hash_entry(aggstate, hashtable, entry, estate)?;
             }
             // pergroup[setno] = TupleHashEntryGetAdditional(hashtable, entry);
             //
