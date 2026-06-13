@@ -106,6 +106,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-indextuple"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple-seams",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-common-tupdesc",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-indextuple-seams"
 version = "0.0.0"
 dependencies = [
@@ -9815,6 +9834,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tidstore",
