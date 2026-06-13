@@ -4665,6 +4665,7 @@ name = "backend-postmaster-postmaster-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -5727,6 +5728,39 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-pmsignal"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-pmchild-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-storage-ipc-barrier-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-pgstat",
+ "types-signal",
  "types-storage",
 ]
 
@@ -9024,6 +9058,7 @@ dependencies = [
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
+ "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",

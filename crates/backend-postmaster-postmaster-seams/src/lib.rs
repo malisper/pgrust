@@ -70,3 +70,24 @@ seam_core::seam!(
     /// limits log-message visibility during authentication.
     pub fn set_client_auth_in_progress(value: bool)
 );
+
+// --- backend-storage-ipc-pmsignal consumers (postmaster death watch) ---
+
+seam_core::seam!(
+    /// `read(postmaster_alive_fds[POSTMASTER_FD_WATCH], &c, 1)`
+    /// (`PostmasterIsAliveInternal`, pmsignal.c). `postmaster_alive_fds` is the
+    /// death-watch pipe set up by postmaster.c (which owns those fds), so the
+    /// raw non-blocking `read` lives behind this seam. Returns `(rc, errno)`:
+    /// `rc < 0` with `errno == EAGAIN/EWOULDBLOCK` means the postmaster is still
+    /// alive; `rc == 0` means EOF (postmaster gone); `rc > 0` is unexpected data.
+    pub fn read_postmaster_death_watch() -> (isize, i32)
+);
+
+seam_core::seam!(
+    /// Request a signal on parent (postmaster) death:
+    /// `prctl(PR_SET_PDEATHSIG, signum)` / `procctl(PROC_PDEATHSIG_CTL, &signum)`
+    /// (`PostmasterDeathSignalInit`, pmsignal.c). The platform mechanism is the
+    /// OS boundary; the owner performs it. `Err` carries the C
+    /// `elog(ERROR, "could not request parent death signal: %m")`.
+    pub fn request_parent_death_signal(signum: i32) -> types_error::PgResult<()>
+);

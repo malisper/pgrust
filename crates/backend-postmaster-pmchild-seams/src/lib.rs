@@ -12,3 +12,12 @@ seam_core::seam!(
     /// bootstrap/single-process mode too (sizing only); infallible.
     pub fn init_postmaster_child_slots()
 );
+
+seam_core::seam!(
+    /// `MaxLivePostmasterChildren()` (pmchild.c): the maximum number of live
+    /// postmaster child processes, i.e. the length of pmsignal.c's
+    /// `PMChildFlags[]` per-child slot array. Sum of the configured
+    /// backend/worker/aux counts; fixed at postmaster startup. Pure read;
+    /// cannot `ereport`.
+    pub fn max_live_postmaster_children() -> i32
+);
