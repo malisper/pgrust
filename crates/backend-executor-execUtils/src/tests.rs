@@ -329,8 +329,10 @@ fn relation_is_target_relation() {
                 mcx,
                 types_nodes::nodeindexscan::PlannedStmt {
                     resultRelations: Some(rels),
+                    relationOids: None,
                     planTree: None,
                     rowMarks: None,
+                    canSetTag: false,
                 },
             )
             .unwrap(),

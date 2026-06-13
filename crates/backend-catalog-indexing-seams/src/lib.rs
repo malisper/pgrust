@@ -52,6 +52,50 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `reltup = SearchSysCacheCopy1(RELOID, rel_oid)`; if the tuple is found,
+    /// write `((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid`
+    /// and `CatalogTupleUpdate(class_rel, &reltup->t_self, reltup)`, then
+    /// `heap_freetuple(reltup)` (toasting.c `create_toast_table`, normal path).
+    /// The genuine unported callees only: the syscache copy, the `Form_pg_class`
+    /// GETSTRUCT field write, and the transactional `CatalogTupleUpdate`. The
+    /// returned `bool` is `HeapTupleIsValid(reltup)` — the caller raises the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` when it is `false`,
+    /// and the GETSTRUCT write / `CatalogTupleUpdate` run only when it is
+    /// `true`, matching the C control flow. (pg_class's `Form_pg_class` is a
+    /// trimmed projection that cannot losslessly reform the on-disk tuple, so
+    /// the field write must happen on the owner's full syscache copy in place.)
+    /// The open pg_class relation (opened RowExclusiveLock by the caller)
+    /// crosses by reference. `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn set_pg_class_reltoastrelid(
+        class_rel: &RelationData<'_>,
+        rel_oid: Oid,
+        toast_relid: Oid,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `systable_inplace_update_begin(class_rel, ClassOidIndexId, true, NULL,
+    /// key[oid = rel_oid], &reltup, &state)`; if the tuple is found, write
+    /// `((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid` and
+    /// `systable_inplace_update_finish(state, reltup)` (toasting.c
+    /// `create_toast_table`, bootstrap path, where UPDATE is not possible). The
+    /// genuine unported callees only: the inplace-update begin/finish and the
+    /// `Form_pg_class` GETSTRUCT field write. The returned `bool` is
+    /// `HeapTupleIsValid(reltup)` — the caller raises the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` when it is `false`,
+    /// and the GETSTRUCT write / `systable_inplace_update_finish` run only when
+    /// it is `true`, matching the C control flow. The open pg_class relation
+    /// (opened RowExclusiveLock by the caller) crosses by reference. `Err`
+    /// carries the heap-mutation `ereport(ERROR)`s.
+    pub fn set_pg_class_reltoastrelid_inplace(
+        class_rel: &RelationData<'_>,
+        rel_oid: Oid,
+        toast_relid: Oid,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `CatalogTupleInsert(rel, tup)` (catalog/indexing.c) for a pg_shdepend
     /// row: `simple_heap_insert` plus `CatalogIndexInsert` index maintenance.
     /// The new tuple crosses as its deformed form; the owner forms the heap
@@ -86,6 +130,50 @@ seam_core::seam!(
         rel: &RelationData<'_>,
         forms: &[FormData_pg_shdepend],
     ) -> PgResult<()>
+);
+
+/* ---- CLUSTER pg_class / pg_index row updates (backend-commands-cluster) --- */
+
+seam_core::seam!(
+    /// `CatalogTupleUpdate(pg_class_rel, &tup->t_self, tup)` after reforming
+    /// the mutated `PgClassForm` (indexing.c).
+    pub fn catalog_tuple_update_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgClassForm,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogTupleUpdate(pg_index_rel, &tup->t_self, tup)` after reforming
+    /// the mutated `PgIndexForm` (indexing.c).
+    pub fn catalog_tuple_update_pg_index<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgIndexForm,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogOpenIndexes(rel)` (indexing.c).
+    pub fn catalog_open_indexes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+    ) -> PgResult<types_cluster::CatalogIndexStateToken>
+);
+seam_core::seam!(
+    /// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`.
+    pub fn catalog_tuple_update_with_info_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgClassForm,
+        indstate: &types_cluster::CatalogIndexStateToken,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogCloseIndexes(indstate)` (indexing.c).
+    pub fn catalog_close_indexes(indstate: types_cluster::CatalogIndexStateToken) -> PgResult<()>
 );
 
 seam_core::seam!(

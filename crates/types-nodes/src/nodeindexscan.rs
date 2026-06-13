@@ -134,12 +134,19 @@ pub struct PlannedStmt<'mcx> {
     /// `List *resultRelations` — integer list of RT indexes of the query's
     /// target relations (`None` = the C `NIL`).
     pub resultRelations: Option<PgVec<'mcx, i32>>,
+    /// `List *relationOids` — OIDs of relations the plan depends on, used by
+    /// COPY-(query)-TO's RLS double-check (`None` = the C `NIL`).
+    pub relationOids: Option<PgVec<'mcx, types_core::Oid>>,
     /// `struct Plan *planTree` — tree of `Plan` nodes (`None` = the C `NULL`).
     pub planTree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `List *rowMarks` — a list of `PlanRowMark` nodes (`None` = the C `NIL`).
     /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
     /// planner port.
     pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `bool canSetTag` — do we set the command result tag/es_processed?
+    /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
+    /// the first stmt with this set.
+    pub canSetTag: bool,
 }
 
 impl PlannedStmt<'_> {
@@ -166,13 +173,25 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let relationOids = match &self.relationOids {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             resultRelations,
+            relationOids,
             planTree: match &self.planTree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
             },
             rowMarks,
+            canSetTag: self.canSetTag,
         })
     }
 }
