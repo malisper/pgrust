@@ -56,3 +56,11 @@ seam_core::seam!(
     /// `hash_seq_term`.
     pub fn hash_seq_search(status: &mut HASH_SEQ_STATUS) -> PgResult<*mut u8>
 );
+
+seam_core::seam!(
+    /// `AtEOXact_HashTables(isCommit)` (dynahash.c) — at transaction end, free
+    /// any hash tables created in the (sub)transaction memory context. Called
+    /// from auxiliary-process error recovery with `isCommit = false`. Pure
+    /// bookkeeping; infallible.
+    pub fn at_eoxact_hash_tables(is_commit: bool)
+);

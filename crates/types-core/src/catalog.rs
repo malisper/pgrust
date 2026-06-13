@@ -11,6 +11,12 @@ pub const NAMESPACE_RELATION_ID: Oid = 2615;
 pub const RELATION_RELATION_ID: Oid = 1259;
 /// `DatabaseRelationId` (`catalog/pg_database.h`) — pg_database's OID.
 pub const DATABASE_RELATION_ID: Oid = 1262;
+/// `AttributeRelationId` (`catalog/pg_attribute.h`) — pg_attribute's OID.
+pub const ATTRIBUTE_RELATION_ID: Oid = 1249;
+/// `IndexRelationId` (`catalog/pg_index.h`) — pg_index's OID.
+pub const INDEX_RELATION_ID: Oid = 2610;
+/// `ConstraintRelationId` (`catalog/pg_constraint.h`) — pg_constraint's OID.
+pub const CONSTRAINT_RELATION_ID: Oid = 2606;
 
 /// `PG_CATALOG_NAMESPACE` (`catalog/pg_namespace_d.h`) — OID of the
 /// `pg_catalog` namespace.
