@@ -308,7 +308,7 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
     })?;
 
     // set up process-exit hook to close the socket
-    backend_storage_ipc_seams::on_proc_exit::call(socket_close, Datum::from_usize(0));
+    backend_storage_ipc_seams::on_proc_exit::call(socket_close, Datum::from_usize(0))?;
 
     // In backends (as soon as forked) we operate the underlying socket in
     // nonblocking mode and use latches to implement blocking semantics if
@@ -386,7 +386,7 @@ fn socket_comm_reset() {
 /// `socket_close(code, arg)` — shutdown libpq at backend exit (the
 /// `on_proc_exit` callback registered by [`pq_init`]). Must be safe to run at
 /// any instant.
-fn socket_close(_code: i32, _arg: Datum) {
+fn socket_close(_code: i32, _arg: Datum) -> PgResult<()> {
     // Nothing to do in a standalone backend, where MyProcPort is NULL.
     with_my_proc_port(&mut |port| {
         if let Some(port) = port {
@@ -400,6 +400,7 @@ fn socket_close(_code: i32, _arg: Datum) {
             port.sock = PGINVALID_SOCKET;
         }
     });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

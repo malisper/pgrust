@@ -14,7 +14,7 @@
 //!   recursive (`shmem_exit` hard-codes a call to `dsm_backend_shutdown`;
 //!   `dsm_postmaster_startup` registers itself with `on_shmem_exit`), and
 //!   because this unit installs the pending `backend-storage-ipc-seams`
-//!   declarations (`proc_exit`).
+//!   declarations (`proc_exit`, `on_proc_exit`, `on_shmem_exit`).
 //!
 //! The C `dsm_segment *` becomes a stable [`dsm::DsmSegmentId`] naming a
 //! descriptor in a backend-local (`thread_local`) list, plus a
@@ -38,4 +38,6 @@ pub mod ipc;
 /// Install this crate's implementations into the seam crates it owns.
 pub fn init_seams() {
     backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
+    backend_storage_ipc_seams::on_proc_exit::set(ipc::on_proc_exit);
+    backend_storage_ipc_seams::on_shmem_exit::set(ipc::on_shmem_exit);
 }
