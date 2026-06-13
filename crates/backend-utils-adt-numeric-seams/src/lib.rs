@@ -54,3 +54,15 @@ seam_core::seam!(
     /// only calls it; the sort-support/HLL owner installs it.
     pub fn numeric_abbrev_add_sample(tmp: u32)
 );
+
+seam_core::seam!(
+    /// `estimateHyperLogLog(&nss->abbr_card)` (numeric.c:2241, the body of
+    /// `numeric_abbrev_abort`). Reads the running cardinality estimate off the
+    /// sort's `hyperLogLogState` (attached to `SortSupport.ssup_extra` by the
+    /// genuinely-unported `numeric_sortsupport` setup). The abort *decision*
+    /// (the 10k/100k thresholds + `estimating` toggle) lives in the numeric
+    /// unit; only the HLL counter read is behind this seam. Pure read; never
+    /// ereports. OUTBOUND: this unit only calls it; the sort-support/HLL owner
+    /// installs it.
+    pub fn numeric_abbrev_estimate() -> f64
+);

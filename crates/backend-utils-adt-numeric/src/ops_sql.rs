@@ -1166,6 +1166,153 @@ pub fn numeric_trim_scale<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'m
     make_result(mcx, &result)
 }
 
+/// `numeric_normalize(num)` (numeric.c:1026): produce the canonical decimal
+/// string for `num`, stripping trailing fractional zeroes (and a now-dangling
+/// decimal point). Used by hash-partition pruning. `num` is the whole on-disk
+/// byte image. Pure computation; no error path.
+pub fn numeric_normalize(num: &[u8]) -> alloc::string::String {
+    use alloc::string::ToString;
+
+    // Handle NaN and infinities.
+    if numeric_is_special(num) {
+        if numeric_is_pinf(num) {
+            return "Infinity".to_string();
+        } else if numeric_is_ninf(num) {
+            return "-Infinity".to_string();
+        } else {
+            return "NaN".to_string();
+        }
+    }
+
+    let ctx = mcx::MemoryContext::new("numeric_normalize scratch");
+    let mcx = ctx.mcx();
+    let x = set_var_from_num(mcx, num).expect("decode finite numeric");
+    let mut str = crate::io::get_str_from_var(&x);
+
+    // If there's no decimal point, there's certainly nothing to remove.
+    if str.contains('.') {
+        let bytes = str.as_bytes();
+        // Back up over trailing fractional zeroes. Since there is a decimal
+        // point, this loop terminates safely.
+        let mut last = bytes.len() - 1;
+        while bytes[last] == b'0' {
+            last -= 1;
+        }
+        // We want to get rid of the decimal point too, if it's now last.
+        if bytes[last] == b'.' {
+            last -= 1;
+        }
+        // Delete whatever we backed up over.
+        str.truncate(last + 1);
+    }
+
+    str
+}
+
+/// `in_range_numeric_numeric(val, base, offset, sub, less)` (numeric.c:2681):
+/// the window-function `RANGE` offset predicate over `numeric`. `val`/`base`/
+/// `offset` are whole on-disk byte images. `Err` carries the
+/// `ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE` ereport for a negative/NaN
+/// offset.
+pub fn in_range_numeric_numeric(
+    val: &[u8],
+    base: &[u8],
+    offset: &[u8],
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
+    // Reject negative (including -Inf) or NaN offset.
+    if numeric_is_nan(offset)
+        || numeric_is_ninf(offset)
+        || numeric_sign_word(offset) == NUMERIC_NEG
+    {
+        return Err(PgError::error(
+            "invalid preceding or following size in window function",
+        )
+        .with_sqlstate(types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE));
+    }
+
+    let result;
+    // Deal with cases where val and/or base is NaN (NaN sorts after non-NaN).
+    if numeric_is_nan(val) {
+        if numeric_is_nan(base) {
+            result = true; // NAN = NAN
+        } else {
+            result = !less; // NAN > non-NAN
+        }
+    } else if numeric_is_nan(base) {
+        result = less; // non-NAN < NAN
+    }
+    // Deal with infinite offset (necessarily +Inf, at this point).
+    else if numeric_is_special(offset) {
+        debug_assert!(numeric_is_pinf(offset));
+        if if sub {
+            numeric_is_pinf(base)
+        } else {
+            numeric_is_ninf(base)
+        } {
+            // base +/- offset would produce NaN, so return true for any val.
+            result = true;
+        } else if sub {
+            // base - offset must be -inf
+            if less {
+                result = numeric_is_ninf(val); // only -inf is <= sum
+            } else {
+                result = true; // any val is >= sum
+            }
+        } else {
+            // base + offset must be +inf
+            if less {
+                result = true; // any val is <= sum
+            } else {
+                result = numeric_is_pinf(val); // only +inf is >= sum
+            }
+        }
+    }
+    // Deal with cases where val and/or base is infinite (offset now finite).
+    else if numeric_is_special(val) {
+        if numeric_is_pinf(val) {
+            if numeric_is_pinf(base) {
+                result = true; // PINF = PINF
+            } else {
+                result = !less; // PINF > any other non-NAN
+            }
+        } else {
+            // val must be NINF
+            if numeric_is_ninf(base) {
+                result = true; // NINF = NINF
+            } else {
+                result = less; // NINF < anything else
+            }
+        }
+    } else if numeric_is_special(base) {
+        if numeric_is_ninf(base) {
+            result = !less; // normal > NINF
+        } else {
+            result = less; // normal < PINF
+        }
+    } else {
+        // Otherwise compute base +/- offset and compare against val.
+        let ctx = mcx::MemoryContext::new("in_range_numeric scratch");
+        let mcx = ctx.mcx();
+        let valv = set_var_from_num(mcx, val)?;
+        let basev = set_var_from_num(mcx, base)?;
+        let offsetv = set_var_from_num(mcx, offset)?;
+        let sum = if sub {
+            sub_var(mcx, &basev, &offsetv)?
+        } else {
+            add_var(mcx, &basev, &offsetv)?
+        };
+        if less {
+            result = cmp_var(&valv, &sum) != core::cmp::Ordering::Greater;
+        } else {
+            result = cmp_var(&valv, &sum) != core::cmp::Ordering::Less;
+        }
+    }
+
+    Ok(result)
+}
+
 pub fn numeric_scale(num: &[u8]) -> PgResult<i32> {
     // numeric_scale (numeric.c:4241): special -> NULL (caller's concern); here
     // return the display scale. C returns NULL for specials; we mirror by

@@ -921,6 +921,50 @@ pub fn numeric_fast_cmp(a: &[u8], b: &[u8]) -> i32 {
     }
 }
 
+/// `numeric_cmp_abbrev(x, y)` (numeric.c:2322): compare two abbreviated keys.
+/// NOTE WELL: intentionally backwards, because the abbreviation is negated
+/// relative to the original value (to handle NaN/infinity cases). Pure i64
+/// compare; infallible.
+pub fn numeric_cmp_abbrev(x: i64, y: i64) -> i32 {
+    if x < y {
+        1
+    } else if x > y {
+        -1
+    } else {
+        0
+    }
+}
+
+/// `numeric_abbrev_abort(memtupcount, ssup)` (numeric.c:2233): decide whether
+/// to abort abbreviation. The HyperLogLog cardinality read is behind the
+/// `numeric_abbrev_estimate` seam (its state lives in the sort's `ssup_extra`);
+/// the threshold logic and the `estimating` toggle are in-crate. Returns
+/// `true` if abbreviation should be aborted. Pure decision; never ereports.
+///
+/// `trace_sort` LOG `elog`s in the C are diagnostics with no SQL-visible
+/// effect and are elided.
+pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupport) -> bool {
+    if memtupcount < 10000 || nss.input_count < 10000 || !nss.estimating {
+        return false;
+    }
+
+    let abbr_card = backend_utils_adt_numeric_seams::numeric_abbrev_estimate::call();
+
+    // If we have >100k distinct values, stop even counting at that point.
+    if abbr_card > 100000.0 {
+        nss.estimating = false;
+        return false;
+    }
+
+    // Target minimum cardinality is 1 per ~10k of non-null inputs, with a 0.5
+    // row fudge factor.
+    if abbr_card < nss.input_count as f64 / 10000.0 + 0.5 {
+        return true;
+    }
+
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Hashing (numeric.c hash_numeric/hash_numeric_extended).
 // ---------------------------------------------------------------------------
