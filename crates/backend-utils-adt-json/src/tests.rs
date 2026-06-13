@@ -184,6 +184,10 @@ fn install_catalog() {
         backend_utils_adt_jsonfuncs_seams::output_function_call::set(|_oid, val: Datum| {
             Ok(alloc::format!("{}", val.as_i32()).into_bytes())
         });
+        // datum_to_json_internal (post-audit) guards recursion with
+        // check_stack_depth; install a no-op so the builder paths under test
+        // do not panic on the uninstalled seam.
+        backend_utils_misc_stack_depth_seams::check_stack_depth::set(|| Ok(()));
     });
 }
 
