@@ -14,4 +14,5 @@ types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
 mcx = { path = "../mcx" }

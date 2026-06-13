@@ -3,8 +3,14 @@
 //! and therefore all field reads on an open `Relation`.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly. Open relations cross as their `Oid`; the
-//! relcache resolves the OID back to the live entry.
+//! then a call panics loudly.
+//!
+//! Relation *opens* return an owned `types_tuple::rel::RelationData` carrier
+//! (see the relation/table seam crates); these by-`Oid` field reads remain
+//! only for consumers whose state still keys relations by OID (the executor's
+//! `es_relations`/`ri_RelationDesc` web and the tableam vtable) — a ledgered
+//! residual (DESIGN_DEBT.md), to be collapsed into carrier field reads as the
+//! relcache owner lands.
 
 seam_core::seam!(
     /// `relation->rd_att` (`RelationGetDescr(relation)`, utils/rel.h): the

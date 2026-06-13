@@ -40,14 +40,11 @@ use backend_utils_mb_mbutils_seams::{pg_client_to_server, pg_server_to_client};
 /// growth cap.
 const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 
-/// Install this crate's seam implementations (every declaration in
-/// `backend-libpq-pqformat-seams`).
-pub fn init_seams() {
-    backend_libpq_pqformat_seams::pq_beginmessage::set(pq_beginmessage);
-    backend_libpq_pqformat_seams::pq_sendint32::set(pq_sendint32);
-    backend_libpq_pqformat_seams::pq_sendint64::set(pq_sendint64);
-    backend_libpq_pqformat_seams::pq_endmessage::set(pq_endmessage);
-}
+/// Install this crate's seam implementations. This unit owns no seams:
+/// message assembly is caller-side `StringInfo` building (callable directly
+/// — no dependency cycle), and the completed message crosses to pqcomm via
+/// its own `pq_putmessage` seam.
+pub fn init_seams() {}
 
 // ===========================================================================
 // StringInfo growth (the stringinfo.c pieces pqformat depends on)

@@ -36,3 +36,4 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-jit-jit-seams = { path = "../backend-jit-jit-seams" }
+types-storage = { path = "../types-storage" }

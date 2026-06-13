@@ -138,13 +138,13 @@ fn AtEOXact_PgStat_DroppedStats(isCommit: bool) -> PgResult<()> {
         if isCommit && !pending.is_create {
             // Transaction that dropped an object committed. Drop the stats
             // too.
-            if !shmem_seams::pgstat_drop_entry::call(it.kind as PgStat_Kind, it.dboid, it.objid)? {
+            if !shmem_seams::pgstat_drop_entry::call(PgStat_Kind(it.kind as u32), it.dboid, it.objid)? {
                 not_freed_count += 1;
             }
         } else if !isCommit && pending.is_create {
             // Transaction that created an object aborted. Drop the stats
             // associated with the object.
-            if !shmem_seams::pgstat_drop_entry::call(it.kind as PgStat_Kind, it.dboid, it.objid)? {
+            if !shmem_seams::pgstat_drop_entry::call(PgStat_Kind(it.kind as u32), it.dboid, it.objid)? {
                 not_freed_count += 1;
             }
         }
@@ -209,7 +209,7 @@ fn AtEOSubXact_PgStat_DroppedStats(
         if !isCommit && pending.is_create {
             // Subtransaction creating a new stats object aborted. Drop the
             // stats object.
-            if !shmem_seams::pgstat_drop_entry::call(it.kind as PgStat_Kind, it.dboid, it.objid)? {
+            if !shmem_seams::pgstat_drop_entry::call(PgStat_Kind(it.kind as u32), it.dboid, it.objid)? {
                 not_freed_count += 1;
             }
             // pfree(pending)
@@ -379,7 +379,7 @@ pub fn pgstat_execute_transactional_drops(
     }
 
     for it in items {
-        if !shmem_seams::pgstat_drop_entry::call(it.kind as PgStat_Kind, it.dboid, it.objid)? {
+        if !shmem_seams::pgstat_drop_entry::call(PgStat_Kind(it.kind as u32), it.dboid, it.objid)? {
             not_freed_count += 1;
         }
     }
@@ -401,7 +401,7 @@ fn create_drop_transactional_internal(
     let drop = PgStat_PendingDroppedStatsItem {
         is_create,
         item: XlXactStatsItem {
-            kind: kind as i32,
+            kind: kind.0 as i32,
             dboid,
             objid,
         },

@@ -335,15 +335,12 @@ pub fn heap_compute_data_size(
             // adjust length and don't count any alignment
             data_length += varatt_converted_short_size(val.as_ref_bytes());
         } else if atti.attlen == -1 && varatt_is_external_expanded(val.as_ref_bytes()) {
-            // C: data_length = att_nominal_alignby(...) + EOH_get_flat_size(
-            // DatumGetEOHP(val)). An expanded datum is a raw
-            // ExpandedObjectHeader pointer; unrepresentable here (see module
-            // docs) until the expandeddatum.c owner lands.
-            panic!(
-                "heap_compute_data_size: VARATT_IS_EXTERNAL_EXPANDED datum — \
-                 expanded TOAST objects (utils/adt/expandeddatum.c) are unported \
-                 and have no owned representation in the byte model"
-            );
+            // we want to flatten the expanded value so that the constructed
+            // tuple doesn't depend on it
+            data_length = att_nominal_alignby(data_length, atti.attalignby);
+            data_length += backend_utils_adt_misc2_seams::eoh_get_flat_size::call(
+                types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val.as_ref_bytes()),
+            )?;
         } else {
             // att_datum_alignby(data_length, attalignby, attlen, val)
             data_length = att_datum_alignby(data_length, atti.attalignby, atti.attlen, val);
@@ -460,15 +457,14 @@ fn fill_val(
         *infomask |= HEAP_HASVARWIDTH;
         if varatt_is_external(val) {
             if varatt_is_external_expanded(val) {
-                // C: EOH_get_flat_size + EOH_flatten_into to flatten the
-                // expanded value so the tuple doesn't depend on it. An expanded
-                // datum is a raw ExpandedObjectHeader pointer; unrepresentable
-                // here (see module docs) until the expandeddatum.c owner lands.
-                panic!(
-                    "fill_val: VARATT_IS_EXTERNAL_EXPANDED datum — expanded \
-                     TOAST objects (utils/adt/expandeddatum.c) are unported and \
-                     have no owned representation in the byte model"
-                );
+                // flatten the expanded value so the tuple doesn't depend on it
+                off = att_nominal_alignby(off, att.attalignby);
+                let eoh = types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val);
+                data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(eoh)?;
+                backend_utils_adt_misc2_seams::eoh_flatten_into::call(
+                    eoh,
+                    &mut data[off..off + data_length],
+                )?;
             } else {
                 *infomask |= HEAP_HASEXTERNAL;
                 // no alignment, since it's short by definition

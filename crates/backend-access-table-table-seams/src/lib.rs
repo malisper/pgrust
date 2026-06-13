@@ -1,33 +1,34 @@
 //! Seam declarations for the `backend-access-table-table` unit
 //! (`access/table/table.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
-//!
-//! The C `Relation` (`struct RelationData *`) crosses these seams as the
-//! relation's `Oid`: the relcache store owns the open-relation state and
-//! re-resolves the OID; field reads go through the relcache owner's seams.
+//! The owner (`backend-access-table-table`) installs these from its
+//! `init_seams()`. The C `Relation` crosses as an owned
+//! [`types_tuple::rel::RelationData`] carrier: `table_open` copies the
+//! consumed relcache fields into the caller's `mcx`; `table_close` consumes
+//! the carrier (the C pointer is dead after close).
 
 seam_core::seam!(
     /// `table_open(relationId, lockmode)` (access/table/table.c): open a table
     /// relation by OID — `relation_open` plus a check that the relation is not
-    /// an index nor a composite type. `Err` carries the C `ereport(ERROR)`s:
-    /// a relation that cannot be opened (`could not open relation with OID
-    /// %u`), a wrong relation kind, or a lock-acquisition error.
-    pub fn table_open(
+    /// an index nor a composite type. The returned carrier is allocated in
+    /// `mcx`. `Err` carries the C `ereport(ERROR)`s: a relation that cannot
+    /// be opened (`could not open relation with OID %u`), a wrong relation
+    /// kind, a lock-acquisition error, or OOM copying the entry.
+    pub fn table_open<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         relation_id: types_core::primitive::Oid,
-        lockmode: types_tuple::access::LOCKMODE,
-    ) -> types_error::PgResult<types_core::primitive::Oid>
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> types_error::PgResult<types_tuple::rel::RelationData<'mcx>>
 );
 
 seam_core::seam!(
     /// `table_close(relation, lockmode)` (access/table/table.c): close a table
-    /// previously opened with `table_open`. If `lockmode` is not `NoLock`, the
-    /// specified lock is then released; `LockRelease` can `elog(ERROR)`
-    /// (`unrecognized lock mode`, `failed to re-find shared lock object`),
-    /// carried on `Err`.
+    /// previously opened with `table_open`, consuming the carrier. If
+    /// `lockmode` is not `NoLock`, the specified lock is then released;
+    /// `LockRelease` can `elog(ERROR)` (`unrecognized lock mode`, `failed to
+    /// re-find shared lock object`), carried on `Err`.
     pub fn table_close(
-        relation: types_core::primitive::Oid,
-        lockmode: types_tuple::access::LOCKMODE,
+        relation: types_tuple::rel::RelationData<'_>,
+        lockmode: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<()>
 );

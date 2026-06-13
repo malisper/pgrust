@@ -24,11 +24,11 @@ extern crate alloc;
 use mcx::{Mcx, PgBox};
 use types_core::primitive::InvalidOid;
 use types_error::PgResult;
-use types_tuple::access::{
-    EphemeralNamedRelationData, EphemeralNamedRelationMetadataData, NoLock,
+use types_nodes::queryenvironment::{
+    EphemeralNamedRelationData, EphemeralNamedRelationMetadataData, QueryEnvironment,
 };
+use types_storage::lock::NoLock;
 use types_tuple::heaptuple::TupleDescData;
-use types_tuple::parse::QueryEnvironment;
 
 /// Install this crate's seam implementations. This unit owns no seams.
 pub fn init_seams() {}
@@ -162,8 +162,9 @@ pub fn ENRMetadataGetTupDesc<'e, 'mcx>(
         // relation = table_open(enrmd->reliddesc, NoLock);
         // tupdesc = relation->rd_att;
         // table_close(relation, NoLock);
-        let relation = backend_access_table_table_seams::table_open::call(enrmd.reliddesc, NoLock)?;
-        let tupdesc = backend_utils_cache_relcache_seams::relation_rd_att::call(mcx, relation)?;
+        let mut relation =
+            backend_access_table_table_seams::table_open::call(mcx, enrmd.reliddesc, NoLock)?;
+        let tupdesc = relation.rd_att.take();
         backend_access_table_table_seams::table_close::call(relation, NoLock)?;
         Ok(tupdesc.map(EnrTupleDesc::Owned))
     }

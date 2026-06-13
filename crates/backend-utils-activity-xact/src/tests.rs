@@ -263,8 +263,8 @@ fn execute_transactional_drops_drops_all() {
     install_seams();
 
     let items = vec![
-        XlXactStatsItem { kind: REL as i32, dboid: 5, objid: 1 },
-        XlXactStatsItem { kind: REL as i32, dboid: 5, objid: 2 },
+        XlXactStatsItem { kind: REL.0 as i32, dboid: 5, objid: 1 },
+        XlXactStatsItem { kind: REL.0 as i32, dboid: 5, objid: 2 },
     ];
     pgstat_execute_transactional_drops(&items, true).unwrap();
 

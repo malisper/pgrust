@@ -75,7 +75,7 @@ use types_nodes::nodes::{CmdType, CMD_UPDATE};
 use types_nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
-use types_tuple::access::{AccessShareLock, NoLock};
+use types_storage::lock::{AccessShareLock, NoLock};
 use types_tuple::backend_access_common_heaptuple::{DeformedColumn, FormedTuple, TupleValue};
 use types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderGetDatumLength, HeapTupleHeaderGetNatts,
@@ -703,7 +703,7 @@ pub fn ExecInitRangeTable<'mcx>(
     // and stored here as needed.
     let mcx = estate.es_query_cxt;
     let mut relations = vec_with_capacity_in(mcx, estate.es_range_table_size)?;
-    relations.resize(estate.es_range_table_size, None);
+    relations.resize_with(estate.es_range_table_size, || None);
     estate.es_relations = relations;
 
     // es_result_relations and es_rowmarks are also parallel to
@@ -748,6 +748,9 @@ pub fn ExecGetRangeTableRelation(
         let rte = exec_rt_fetch(rti, estate);
         debug_assert_eq!(rte.rtekind, RTE_RELATION);
         let (relid, rellockmode) = (rte.relid, rte.rellockmode);
+        // The opened carrier lives in the per-query context, owned by the
+        // EState (C: es_relations holds the Relation pointers).
+        let mcx = estate.es_query_cxt;
 
         let rel = if !parallel_seams::is_parallel_worker::call() {
             // In a normal query, we should already have the appropriate
@@ -755,23 +758,28 @@ pub fn ExecGetRangeTableRelation(
             // an Assert inside table_open that insists on holding some lock,
             // it seems sufficient to check this only when rellockmode is
             // higher than the minimum.
-            let rel = table_seams::table_open::call(relid, NoLock)?;
+            let rel = table_seams::table_open::call(mcx, relid, NoLock)?;
             debug_assert!(
                 rellockmode == AccessShareLock
-                    || lmgr_seams::check_relation_locked_by_me::call(rel, rellockmode, false)
+                    || lmgr_seams::check_relation_locked_by_me::call(
+                        rel.rd_id, rellockmode, false
+                    )
             );
             rel
         } else {
             // If we are a parallel worker, we need to obtain our own local
             // lock on the relation. This ensures sane behavior in case the
             // parent process exits before we do.
-            table_seams::table_open::call(relid, rellockmode)?
+            table_seams::table_open::call(mcx, relid, rellockmode)?
         };
 
         estate.es_relations[idx] = Some(rel);
     }
 
-    Ok(estate.es_relations[idx].expect("just opened above"))
+    Ok(estate.es_relations[idx]
+        .as_ref()
+        .expect("just opened above")
+        .rd_id)
 }
 
 /// `ExecInitResultRelation` — open the relation given by the passed-in RT

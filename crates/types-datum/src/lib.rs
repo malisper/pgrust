@@ -8,5 +8,7 @@
 extern crate alloc;
 
 pub mod datum;
+pub mod expandeddatum;
 
 pub use datum::*;
+pub use expandeddatum::ExpandedObjectRef;

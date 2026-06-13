@@ -260,9 +260,11 @@ pub struct EStateData<'mcx> {
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
     pub es_range_table_size: usize,
-    /// `Relation *es_relations` — array of per-RTE open relations (by OID),
-    /// `None` until opened. Parallel to `es_range_table`.
-    pub es_relations: PgVec<'mcx, Option<Oid>>,
+    /// `Relation *es_relations` — array of per-RTE open relations (the owned
+    /// `RelationData` carriers returned by `table_open`), `None` until
+    /// opened. Parallel to `es_range_table`. The EState owns the open
+    /// state, as in C.
+    pub es_relations: PgVec<'mcx, Option<types_tuple::rel::RelationData<'mcx>>>,
     /// `struct ExecRowMark **es_rowmarks` — per-RTE row marks (owner: the
     /// row-marking units). Empty = the C `NULL` array pointer.
     pub es_rowmarks: PgVec<'mcx, Opaque>,

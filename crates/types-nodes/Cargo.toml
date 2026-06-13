@@ -15,3 +15,4 @@ types-scan = { path = "../types-scan" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+types-storage = { path = "../types-storage" }

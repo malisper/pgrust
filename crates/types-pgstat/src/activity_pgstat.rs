@@ -11,27 +11,64 @@ use core::sync::atomic::AtomicU32;
 use types_core::primitive::TimestampTz;
 use types_storage::LWLock;
 
-/// `PgStat_Kind` (`pgstat_kind.h`): `typedef uint32 PgStat_Kind;` — the id of
-/// a cumulative-statistics kind (builtin or custom).
-pub type PgStat_Kind = u32;
+/// `PgStat_Kind` (`utils/pgstat_kind.h`): `typedef uint32 PgStat_Kind;` — the
+/// id of a cumulative-statistics kind (builtin or custom). A newtype rather
+/// than a bare `u32` so kind ids cannot be confused with other counters; the
+/// full builtin id table lives below, values per `pgstat_kind.h`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PgStat_Kind(pub u32);
 
-// The statistics-kind id table (`utils/pgstat_kind.h`).
-/// use 0 for INVALID, to catch zero-initialized data
-pub const PGSTAT_KIND_INVALID: PgStat_Kind = 0;
-// stats for variable-numbered objects
-pub const PGSTAT_KIND_DATABASE: PgStat_Kind = 1;
-pub const PGSTAT_KIND_RELATION: PgStat_Kind = 2;
-pub const PGSTAT_KIND_FUNCTION: PgStat_Kind = 3;
-pub const PGSTAT_KIND_REPLSLOT: PgStat_Kind = 4;
-pub const PGSTAT_KIND_SUBSCRIPTION: PgStat_Kind = 5;
-pub const PGSTAT_KIND_BACKEND: PgStat_Kind = 6;
-// stats for fixed-numbered objects
-pub const PGSTAT_KIND_ARCHIVER: PgStat_Kind = 7;
-pub const PGSTAT_KIND_BGWRITER: PgStat_Kind = 8;
-pub const PGSTAT_KIND_CHECKPOINTER: PgStat_Kind = 9;
-pub const PGSTAT_KIND_IO: PgStat_Kind = 10;
-pub const PGSTAT_KIND_SLRU: PgStat_Kind = 11;
-pub const PGSTAT_KIND_WAL: PgStat_Kind = 12;
+/// `PGSTAT_KIND_MIN` — minimum ID allowed.
+pub const PGSTAT_KIND_MIN: PgStat_Kind = PgStat_Kind(1);
+/// `PGSTAT_KIND_MAX` — maximum ID allowed.
+pub const PGSTAT_KIND_MAX: PgStat_Kind = PgStat_Kind(32);
+/// `PGSTAT_KIND_INVALID` — must be 0 for `pgstat_register_kind` initialization.
+pub const PGSTAT_KIND_INVALID: PgStat_Kind = PgStat_Kind(0);
+
+// Stats with variable number of entries.
+/// `PGSTAT_KIND_DATABASE` — database-wide statistics.
+pub const PGSTAT_KIND_DATABASE: PgStat_Kind = PgStat_Kind(1);
+/// `PGSTAT_KIND_RELATION` — per-table statistics.
+pub const PGSTAT_KIND_RELATION: PgStat_Kind = PgStat_Kind(2);
+/// `PGSTAT_KIND_FUNCTION` — per-function statistics.
+pub const PGSTAT_KIND_FUNCTION: PgStat_Kind = PgStat_Kind(3);
+/// `PGSTAT_KIND_REPLSLOT` — per-slot statistics.
+pub const PGSTAT_KIND_REPLSLOT: PgStat_Kind = PgStat_Kind(4);
+/// `PGSTAT_KIND_SUBSCRIPTION` — per-subscription statistics.
+pub const PGSTAT_KIND_SUBSCRIPTION: PgStat_Kind = PgStat_Kind(5);
+/// `PGSTAT_KIND_BACKEND` — per-backend statistics.
+pub const PGSTAT_KIND_BACKEND: PgStat_Kind = PgStat_Kind(6);
+
+// Stats with a fixed number of entries.
+pub const PGSTAT_KIND_ARCHIVER: PgStat_Kind = PgStat_Kind(7);
+pub const PGSTAT_KIND_BGWRITER: PgStat_Kind = PgStat_Kind(8);
+pub const PGSTAT_KIND_CHECKPOINTER: PgStat_Kind = PgStat_Kind(9);
+pub const PGSTAT_KIND_IO: PgStat_Kind = PgStat_Kind(10);
+pub const PGSTAT_KIND_SLRU: PgStat_Kind = PgStat_Kind(11);
+pub const PGSTAT_KIND_WAL: PgStat_Kind = PgStat_Kind(12);
+
+pub const PGSTAT_KIND_BUILTIN_MIN: PgStat_Kind = PGSTAT_KIND_DATABASE;
+pub const PGSTAT_KIND_BUILTIN_MAX: PgStat_Kind = PGSTAT_KIND_WAL;
+/// `PGSTAT_KIND_BUILTIN_SIZE`.
+pub const PGSTAT_KIND_BUILTIN_SIZE: usize = PGSTAT_KIND_BUILTIN_MAX.0 as usize + 1;
+
+/// `PGSTAT_KIND_CUSTOM_MIN` — custom stats kinds allotted to extensions.
+pub const PGSTAT_KIND_CUSTOM_MIN: PgStat_Kind = PgStat_Kind(24);
+pub const PGSTAT_KIND_CUSTOM_MAX: PgStat_Kind = PGSTAT_KIND_MAX;
+pub const PGSTAT_KIND_CUSTOM_SIZE: usize =
+    (PGSTAT_KIND_CUSTOM_MAX.0 - PGSTAT_KIND_CUSTOM_MIN.0 + 1) as usize;
+
+impl PgStat_Kind {
+    /// `pgstat_is_kind_builtin(kind)` (`pgstat_kind.h` inline).
+    pub const fn is_builtin(self) -> bool {
+        self.0 >= PGSTAT_KIND_BUILTIN_MIN.0 && self.0 <= PGSTAT_KIND_BUILTIN_MAX.0
+    }
+
+    /// `pgstat_is_kind_custom(kind)` (`pgstat_kind.h` inline).
+    pub const fn is_custom(self) -> bool {
+        self.0 >= PGSTAT_KIND_CUSTOM_MIN.0 && self.0 <= PGSTAT_KIND_CUSTOM_MAX.0
+    }
+}
 
 /// `PgStat_Counter` (`pgstat.h`): `typedef int64 PgStat_Counter;`.
 pub type PgStat_Counter = i64;

@@ -17,7 +17,7 @@ use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
     pgstat_end_changecount_write,
 };
-use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize, lwlock_release};
+use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use backend_utils_activity_pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_checkpointer,
     with_snapshot_checkpointer,
@@ -25,7 +25,9 @@ use backend_utils_activity_pgstat_seams::{
 use backend_utils_activity_stat_seams::pgstat_flush_io;
 use types_core::TimestampTz;
 use types_error::PgResult;
-use types_pgstat::activity_pgstat::{PgStatShared_Checkpointer, PgStat_CheckpointerStats};
+use types_pgstat::activity_pgstat::{
+    PgStatShared_Checkpointer, PgStat_CheckpointerStats,
+};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 pub use types_pgstat::activity_pgstat::PGSTAT_KIND_CHECKPOINTER;
@@ -133,7 +135,7 @@ pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
         res = (|| {
             // see explanation above PgStatShared_Checkpointer for the reset protocol
-            lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
+            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -147,7 +149,7 @@ pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
                 pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
             }
             stats_shmem.stats.stat_reset_timestamp = ts;
-            lwlock_release::call(&stats_shmem.lock)
+            guard.release()
         })();
     });
     res
@@ -171,10 +173,10 @@ pub fn pgstat_checkpointer_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
+            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
-            lwlock_release::call(&stats_shmem.lock)?;
+            guard.release()?;
 
             Ok(reset)
         })();

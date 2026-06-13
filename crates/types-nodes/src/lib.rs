@@ -26,6 +26,7 @@ pub mod parsenodes;
 pub mod pathnodes;
 pub mod planstate;
 pub mod primnodes;
+pub mod queryenvironment;
 
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
@@ -42,3 +43,8 @@ pub use nodeforeigncustom::{Material, MaterialState};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};
+pub use queryenvironment::{
+    EphemeralNameRelationType, EphemeralNamedRelation, EphemeralNamedRelationData,
+    EphemeralNamedRelationMetadata, EphemeralNamedRelationMetadataData, QueryEnvironment,
+    ENR_NAMED_TUPLESTORE,
+};

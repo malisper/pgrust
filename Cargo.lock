@@ -34,6 +34,7 @@ name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
+ "backend-utils-adt-misc2-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -56,9 +57,11 @@ dependencies = [
 name = "backend-access-common-relation-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -182,9 +185,10 @@ dependencies = [
  "backend-access-common-relation-seams",
  "backend-access-table-table-seams",
  "backend-catalog-pg-class-seams",
- "backend-utils-cache-relcache-seams",
+ "mcx",
  "types-core",
  "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -192,9 +196,11 @@ dependencies = [
 name = "backend-access-table-table-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -422,6 +428,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -540,7 +547,6 @@ name = "backend-libpq-pqformat"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqcomm-seams",
- "backend-libpq-pqformat-seams",
  "backend-utils-mb-mbutils-seams",
  "mcx",
  "types-error",
@@ -821,7 +827,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-tuple",
+ "types-storage",
 ]
 
 [[package]]
@@ -946,6 +952,7 @@ name = "backend-utils-activity-small"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-seams",
+ "backend-libpq-pqcomm-seams",
  "backend-libpq-pqformat-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-pgstat-seams",
@@ -957,7 +964,6 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
- "types-stringinfo",
 ]
 
 [[package]]
@@ -1007,6 +1013,15 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-misc2-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-datum",
  "types-error",
 ]
 
@@ -1330,10 +1345,11 @@ name = "backend-utils-misc-queryenvironment"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table-seams",
- "backend-utils-cache-relcache-seams",
  "mcx",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -1637,6 +1653,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-scan",
+ "types-storage",
  "types-tuple",
 ]
 
