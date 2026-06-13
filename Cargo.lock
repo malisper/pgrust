@@ -5950,6 +5950,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-spell"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-spell-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-regex",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-tsearch-spell-seams"
 version = "0.0.0"
 dependencies = [
@@ -7959,7 +7978,6 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
- "backend-catalog-objectaccess",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
@@ -7995,9 +8013,9 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
+ "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
- "backend-utils-adt-format-type",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
@@ -8010,15 +8028,12 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
- "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
- "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
- "port-pqsignal",
 ]
 
 [[package]]
