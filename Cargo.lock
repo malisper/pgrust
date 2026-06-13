@@ -231,6 +231,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-vacuumlazy"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-vacuum",
+]
+
+[[package]]
+name = "backend-access-heap-vacuumlazy-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-access-index-amapi-seams"
 version = "0.0.0"
 dependencies = [
@@ -3533,6 +3555,7 @@ dependencies = [
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-heap-vacuumlazy",
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
@@ -3866,6 +3889,14 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "types-vacuum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]
