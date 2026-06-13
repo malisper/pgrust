@@ -57,6 +57,8 @@ pub type pid_t = i32;
 pub type sig_atomic_t = i32;
 
 pub const BLCKSZ: usize = 8192;
+/// `BITS_PER_BYTE` (`c.h`).
+pub const BITS_PER_BYTE: i32 = 8;
 pub const InvalidOid: Oid = 0;
 pub const INVALID_OID: Oid = InvalidOid;
 
