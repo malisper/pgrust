@@ -2034,8 +2034,79 @@ fn oid_function_call_1_deflist(
     null_check(&fcinfo, result, &oid.to_string())
 }
 
+/// Marshal a tuple-attribute [`TupleValue`] into the boundary [`FmgrArg`] an
+/// output/send function expects: a by-value scalar stays a `Datum` word; a
+/// by-reference attribute's owned byte image is its `Varlena` referent (the
+/// already-detoasted `struct varlena *` C would have passed).
+fn tuple_value_to_arg(
+    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+) -> (Datum, Option<RefPayload>) {
+    use types_tuple::backend_access_common_heaptuple::TupleValue;
+    match val {
+        TupleValue::ByVal(d) => (*d, None),
+        TupleValue::ByRef(b) => (
+            Datum::null(),
+            Some(RefPayload::Varlena(b.as_slice().to_vec())),
+        ),
+    }
+}
+
+/// Copy a `&[u8]` into a fresh `mcx`-charged `PgVec<u8>` (the seam returns its
+/// result allocated in the caller's context, as C `pstrdup`/`palloc` would).
+fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
+    for &byte in src {
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+/// `OidSendFunctionCall(functionId, val)` seam installer (C: `fmgr_info` +
+/// `SendFunctionCall`, returning a `bytea *`). Marshals the attribute value into
+/// the typed boundary, runs the one-shot lookup + send call, and returns the
+/// `bytea` PAYLOAD bytes (`VARSIZE - VARHDRSZ`, header stripped) charged to `mcx`.
+fn oid_send_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (datum, ref_arg) = tuple_value_to_arg(val);
+    let resolved = fmgr_info(mcx, function_id)?;
+    let arg = match &ref_arg {
+        Some(p) => FmgrArg::Ref(p),
+        None => FmgrArg::ByVal(datum),
+    };
+    // C: SendFunctionCall -> DatumGetByteaP(FunctionCall1(...)), a full bytea.
+    let image = send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
+    // The seam contract strips the 4-byte varlena header to the payload the wire
+    // protocol carries (proto.c reads VARSIZE - VARHDRSZ / VARDATA).
+    let payload = image.get(types_datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    bytes_into(mcx, payload)
+}
+
+/// `OidOutputFunctionCall(functionId, val)` seam installer (C: `fmgr_info` +
+/// `OutputFunctionCall`, returning a `char *`). Marshals the attribute value into
+/// the typed boundary and returns the output cstring's bytes (no terminating NUL)
+/// charged to `mcx`.
+fn oid_output_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let (datum, ref_arg) = tuple_value_to_arg(val);
+    let resolved = fmgr_info(mcx, function_id)?;
+    let arg = match &ref_arg {
+        Some(p) => FmgrArg::Ref(p),
+        None => FmgrArg::ByVal(datum),
+    };
+    let s = output_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
+    bytes_into(mcx, s.as_bytes())
+}
+
 /// Install every seam in `backend-utils-fmgr-fmgr-seams`.
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
+    backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);
 }
