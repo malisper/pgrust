@@ -19,3 +19,4 @@ pub use deflist::*;
 pub use inval::*;
 pub use skey::*;
 pub use syscache::*;
+pub use typcache::TypeCacheEntry;
