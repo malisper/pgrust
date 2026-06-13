@@ -5,6 +5,7 @@
 //! then a call panics loudly.
 
 use types_acl::{AclMaskHow, AclMode, AclResult};
+use types_array::ArrayType;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::ObjectType;
@@ -181,5 +182,33 @@ seam_core::seam!(
         classid: Oid,
         objid: Oid,
         objsubid: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_user_default_acl(objtype, ownerId, nsp_oid)` (aclchk.c): the
+    /// default ACL (`Acl *`) for a newly-created object of `objtype` owned by
+    /// `ownerId` in namespace `nsp_oid`, or `None` when the C returns `NULL`
+    /// (no applicable `pg_default_acl` entry — the common case). The `Acl` is
+    /// a varlena `aclitem[]` array (`ArrayType`). Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn get_user_default_acl(
+        objtype: ObjectType,
+        owner_id: Oid,
+        nsp_oid: Oid,
+    ) -> PgResult<Option<ArrayType>>
+);
+
+seam_core::seam!(
+    /// `recordDependencyOnNewAcl(classId, objectId, objsubId, ownerId, acl)`
+    /// (aclchk.c): record `pg_shdepend` dependencies on every role mentioned
+    /// in a freshly-created object's ACL. `acl == None` is the C `acl == NULL`
+    /// fast path (nothing to record). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn record_dependency_on_new_acl(
+        class_id: Oid,
+        object_id: Oid,
+        objsub_id: i32,
+        owner_id: Oid,
+        acl: Option<ArrayType>,
     ) -> PgResult<()>
 );

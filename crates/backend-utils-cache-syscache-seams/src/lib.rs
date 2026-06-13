@@ -99,6 +99,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists1(NAMESPACENAME, PointerGetDatum(nspName))`
+    /// (utils/cache/syscache.c): does a `pg_namespace` row with this name
+    /// exist? pg_namespace.c's `NamespaceCreate` uses it for the duplicate-name
+    /// check. `Err` carries the catcache lookup's own error surface.
+    pub fn namespace_name_exists(nsp_name: &str) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the
     /// `Form_pg_opclass` fields the hash validator reads, copied into `mcx`.
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).

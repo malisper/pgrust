@@ -37,6 +37,7 @@ pub fn init_all() {
     backend_catalog_objectaccess::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_copyto::init_seams();

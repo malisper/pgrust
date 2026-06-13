@@ -1641,6 +1641,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-acl",
+ "types-array",
  "types-core",
  "types-error",
  "types-nodes",
@@ -1746,6 +1747,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-array",
  "types-catalog",
  "types-cluster",
  "types-core",
@@ -2001,6 +2003,28 @@ dependencies = [
  "types-core",
  "types-error",
  "types-snapshot",
+]
+
+[[package]]
+name = "backend-catalog-pg-namespace"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-namespace-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
 ]
 
 [[package]]
@@ -9429,6 +9453,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
+ "backend-catalog-pg-namespace",
  "backend-catalog-pg-shdepend",
  "backend-commands-cluster",
  "backend-commands-copyto",
