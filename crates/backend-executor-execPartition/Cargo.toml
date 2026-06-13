@@ -19,6 +19,7 @@ types-tuple = { path = "../types-tuple" }
 
 # Seam crates for the unported owners this unit calls (bodies dispatch through
 # these; they panic until the owner lands).
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-partitioning-core-seams = { path = "../backend-partitioning-core-seams" }
 backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 backend-partitioning-partprune-seams = { path = "../backend-partitioning-partprune-seams" }

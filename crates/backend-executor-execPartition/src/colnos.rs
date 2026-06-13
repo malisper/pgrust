@@ -2,7 +2,8 @@
 //! `adjust_partition_colnos_using_map`.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use types_core::primitive::AttrNumber;
+use types_error::{PgError, PgResult};
 use types_nodes::{EStateData, RriId};
 use types_tuple::attmap::AttrMap;
 
@@ -17,8 +18,14 @@ pub(crate) fn adjust_partition_colnos<'mcx>(
     colnos: &[i32],
     leaf_part_rri: RriId,
 ) -> PgResult<PgVec<'mcx, i32>> {
-    let _ = (mcx, estate, colnos, leaf_part_rri);
-    todo!("decomp")
+    // TupleConversionMap *map = ExecGetChildToRootMap(leaf_part_rri);
+    let map = backend_executor_execUtils::ExecGetChildToRootMap(estate, leaf_part_rri)?;
+
+    // Assert(map != NULL);
+    let map = map.expect("adjust_partition_colnos: child-to-root map is NULL");
+
+    // return adjust_partition_colnos_using_map(colnos, map->attrMap);
+    adjust_partition_colnos_using_map(mcx, colnos, &map.attrMap)
 }
 
 /// `adjust_partition_colnos_using_map(colnos, attrMap)` — like
@@ -30,6 +37,27 @@ pub(crate) fn adjust_partition_colnos_using_map<'mcx>(
     colnos: &[i32],
     attr_map: &AttrMap<'mcx>,
 ) -> PgResult<PgVec<'mcx, i32>> {
-    let _ = (mcx, colnos, attr_map);
-    todo!("decomp")
+    // Assert(attrMap != NULL); — the parameter is a reference, so non-NULL by
+    // construction.
+    let attnums: &[AttrNumber] = &attr_map.attnums;
+    let maplen = attnums.len() as i32;
+
+    // List *new_colnos = NIL; built up one entry per input colno (lappend_int).
+    let mut new_colnos: PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, colnos.len())?;
+
+    for &parentattrno in colnos {
+        if parentattrno <= 0
+            || parentattrno > maplen
+            || attnums[(parentattrno - 1) as usize] == 0
+        {
+            return Err(PgError::error(format!(
+                "unexpected attno {} in target column list",
+                parentattrno
+            )));
+        }
+        // new_colnos = lappend_int(new_colnos, attrMap->attnums[parentattrno - 1]);
+        new_colnos.push(attnums[(parentattrno - 1) as usize] as i32);
+    }
+
+    Ok(new_colnos)
 }
