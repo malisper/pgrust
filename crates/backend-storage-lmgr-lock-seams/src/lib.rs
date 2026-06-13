@@ -220,3 +220,14 @@ seam_core::seam!(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// locks this backend holds in the given lock method. Used by the logical
+    /// apply worker on exit to drop session-level locks; can `ereport` on a
+    /// corrupt lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
