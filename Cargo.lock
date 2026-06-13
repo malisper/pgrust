@@ -1786,6 +1786,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-nodeFuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
@@ -3038,6 +3047,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-fmgr",
  "types-hash",
  "types-namespace",
 ]
@@ -3112,6 +3122,39 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-fmgr-core"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-file-seams",
+ "mcx",
+ "types-acl",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-guc",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-fmgr-dfmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-fmgr",
 ]
 
 [[package]]
@@ -3204,6 +3247,7 @@ name = "backend-utils-misc-guc-file-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-guc",
 ]
@@ -3581,6 +3625,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -3689,6 +3734,16 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-fmgr"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-tuple",
 ]
 
 [[package]]

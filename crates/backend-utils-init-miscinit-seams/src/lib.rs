@@ -108,3 +108,11 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `superuser()` (superuser.c) — true if the *current* user
+    /// (`GetUserId()`) has superuser privilege. Used by
+    /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when
+    /// applying a function's `proconfig` SET items. Reads the catalog cache.
+    pub fn superuser() -> bool
+);
