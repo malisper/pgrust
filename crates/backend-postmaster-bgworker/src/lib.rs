@@ -1476,6 +1476,16 @@ fn ascii_safe_strlcpy<const N: usize>(src: &[u8; N], destsiz: usize) -> [u8; N] 
 pub fn init_seams() {
     backend_postmaster_bgworker_seams::background_worker_main::set(background_worker_main_seam);
     backend_postmaster_bgworker_seams::get_background_worker_pid::set(get_background_worker_pid_seam);
+    backend_postmaster_bgworker_seams::register_background_worker::set(register_background_worker_seam);
+    backend_postmaster_bgworker_seams::register_dynamic_background_worker::set(
+        register_dynamic_background_worker_seam,
+    );
+    backend_postmaster_bgworker_seams::background_worker_initialize_connection::set(
+        background_worker_initialize_connection_seam,
+    );
+    backend_postmaster_bgworker_seams::background_worker_unblock_signals::set(
+        background_worker_unblock_signals_seam,
+    );
 }
 
 /// Marshal for the `background_worker_main` inward seam.
@@ -1486,4 +1496,30 @@ fn background_worker_main_seam(startup_data: &StartupData) -> ! {
 /// Marshal for the `get_background_worker_pid` inward seam.
 fn get_background_worker_pid_seam(handle: BackgroundWorkerHandle) -> (BgwHandleStatus, i32) {
     GetBackgroundWorkerPid(&handle)
+}
+
+/// Marshal for the `register_background_worker` inward seam.
+fn register_background_worker_seam(worker: &BackgroundWorker) -> PgResult<()> {
+    RegisterBackgroundWorker(worker)
+}
+
+/// Marshal for the `register_dynamic_background_worker` inward seam.
+fn register_dynamic_background_worker_seam(
+    worker: &BackgroundWorker,
+) -> PgResult<Option<BackgroundWorkerHandle>> {
+    RegisterDynamicBackgroundWorker(worker)
+}
+
+/// Marshal for the `background_worker_initialize_connection` inward seam.
+fn background_worker_initialize_connection_seam(
+    dbname: Option<&str>,
+    username: Option<&str>,
+    flags: u32,
+) -> PgResult<()> {
+    BackgroundWorkerInitializeConnection(dbname, username, flags)
+}
+
+/// Marshal for the `background_worker_unblock_signals` inward seam.
+fn background_worker_unblock_signals_seam() {
+    BackgroundWorkerUnblockSignals()
 }
