@@ -458,6 +458,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-small"
 version = "0.0.0"
 dependencies = [
+ "backend-rmgrdesc-small-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -745,6 +746,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-clog-seams",
  "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam-seams",
  "backend-utils-error",
  "types-core",
  "types-error",
@@ -1985,6 +1987,7 @@ dependencies = [
  "backend-postmaster-bgwriter-seams",
  "backend-postmaster-checkpointer-seams",
  "backend-postmaster-fork-process-seams",
+ "backend-postmaster-launch-backend-seams",
  "backend-postmaster-pgarch-seams",
  "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
@@ -2536,6 +2539,7 @@ version = "0.0.0"
 dependencies = [
  "backend-libpq-pqsignal",
  "backend-storage-file-seams",
+ "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
@@ -3070,11 +3074,13 @@ dependencies = [
  "backend-utils-activity-pgstat-seams",
  "backend-utils-activity-shmem-seams",
  "backend-utils-activity-stat-seams",
+ "backend-utils-activity-xact-seams",
  "backend-utils-error",
  "mcx",
  "types-core",
  "types-error",
  "types-pgstat",
+ "types-wal",
 ]
 
 [[package]]
@@ -3987,6 +3993,7 @@ dependencies = [
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-transam",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",

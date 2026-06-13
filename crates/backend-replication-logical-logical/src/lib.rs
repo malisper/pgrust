@@ -2301,6 +2301,9 @@ pub fn dispatch_reorderbuffer_callback(
 
 /// Install this crate's inward seams.
 pub fn init_seams() {
+    backend_replication_logical_logical_seams::reset_logical_streaming_state::set(
+        ResetLogicalStreamingState,
+    );
     // The reorderbuffer trampolines pass the live `&mut ctx` (rb->private_data)
     // in; the inward seam's signature carries only the callback variant, so the
     // installer adapts once the reorderbuffer owner lands. Until then this seam

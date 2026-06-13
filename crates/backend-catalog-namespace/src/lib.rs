@@ -49,7 +49,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use backend_utils_error::ereport;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgString, PgVec};
+use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_acl::{AclResult, ACLCHECK_NOT_OWNER, ACL_CREATE, ACL_CREATE_TEMP, ACL_USAGE};
 use types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, OidIsValid, ProcNumber, SubTransactionId,
@@ -115,6 +115,38 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_namespace_oid::set(crate::get_namespace_oid);
     backend_catalog_namespace_seams::range_var_get_relid::set(crate::RangeVarGetRelid);
     backend_catalog_namespace_seams::lookup_explicit_namespace::set(crate::LookupExplicitNamespace);
+    backend_catalog_namespace_seams::at_eoxact_namespace::set(seam_at_eoxact_namespace);
+    backend_catalog_namespace_seams::at_eosubxact_namespace::set(seam_at_eosubxact_namespace);
+    backend_catalog_namespace_seams::get_ts_config_oid::set(seam_get_ts_config_oid);
+}
+
+/// Seam shim: the seam declares `fn(bool, bool)` (infallible surface); the
+/// implementation returns `PgResult<()>` because `before_shmem_exit` can
+/// ereport on OOM. OOM during transaction-end cleanup is always fatal, so
+/// `.expect` is the correct escalation here.
+fn seam_at_eoxact_namespace(is_commit: bool, parallel: bool) {
+    crate::AtEOXact_Namespace(is_commit, parallel)
+        .expect("AtEOXact_Namespace: before_shmem_exit OOM");
+}
+
+/// Seam shim: same pattern as `seam_at_eoxact_namespace`.
+fn seam_at_eosubxact_namespace(
+    is_commit: bool,
+    my_subid: types_core::SubTransactionId,
+    parent_subid: types_core::SubTransactionId,
+) {
+    crate::AtEOSubXact_Namespace(is_commit, my_subid, parent_subid)
+        .expect("AtEOSubXact_Namespace");
+}
+
+/// Seam shim: the seam accepts `&[&str]` (name parts already extracted by
+/// the consumer); the implementation expects `NameList` (`&[Option<String>]`)
+/// plus an `Mcx` for the cross-database check in the 3-part case. Convert
+/// here and use a scratch memory context.
+fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> types_error::PgResult<types_core::Oid> {
+    let names_owned: Vec<Option<String>> = names.iter().map(|s| Some(s.to_string())).collect();
+    let scratch = MemoryContext::new("get_ts_config_oid seam");
+    crate::get_ts_config_oid(scratch.mcx(), &names_owned, missing_ok)
 }
 
 /// `FUNC_PARAM_IN` / `FUNC_PARAM_INOUT` / `FUNC_PARAM_VARIADIC`
