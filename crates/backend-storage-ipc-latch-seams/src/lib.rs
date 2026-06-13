@@ -7,14 +7,15 @@
 seam_core::seam!(
     /// `SetLatch(MyLatch)`: set this backend's own process latch. `MyLatch`
     /// is the per-backend latch pointer (globals.c); the latch crate resolves
-    /// it when installing, so signal-handler callers need no `Latch` handle.
-    /// Async-signal-safe and infallible in C.
+    /// it when installing, so signal-handler callers (which cannot carry a
+    /// `LatchHandle`) need no parameter. Async-signal-safe and infallible in
+    /// C.
     pub fn set_latch_my_latch()
 );
 
 seam_core::seam!(
-    /// `ResetLatch(MyLatch)`: clear this backend's own process latch. As
-    /// with [`set_latch_my_latch`], the latch crate resolves `MyLatch` when
-    /// installing. Infallible in C.
-    pub fn reset_latch_my_latch()
+    /// `ResetLatch(latch)`: clear the given latch. C call sites that pass
+    /// `MyLatch` translate to an explicit handle the caller holds.
+    /// Infallible in C.
+    pub fn reset_latch(latch: types_storage::latch::LatchHandle)
 );

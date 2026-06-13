@@ -517,6 +517,7 @@ version = "0.0.0"
 dependencies = [
  "backend-libpq-be-secure-seams",
  "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-seams",
  "backend-storage-ipc-waiteventset-seams",
@@ -525,6 +526,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "common-ip-seams",
  "libc",
+ "mcx",
  "port-noblock-seams",
  "port-pgsleep-seams",
  "types-core",
@@ -532,6 +534,7 @@ dependencies = [
  "types-error",
  "types-net",
  "types-storage",
+ "types-stringinfo",
 ]
 
 [[package]]
@@ -741,6 +744,7 @@ name = "backend-storage-ipc-latch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-storage",
 ]
 
 [[package]]

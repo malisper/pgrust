@@ -36,11 +36,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `MaxConnections` (globals.c): the `max_connections` GUC.
-    pub fn max_connections() -> i32
-);
-
-seam_core::seam!(
     /// `MyProcPort` (globals.c): run `f` with mutable access to this
     /// backend's connection `Port`, or `None` when there is no client
     /// connection (`MyProcPort == NULL`). Callback shape per the seam rules:

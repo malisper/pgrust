@@ -61,6 +61,7 @@ use types_error::{
 };
 use types_pgstat::wait_event::WAIT_EVENT_SYSLOGGER_MAIN;
 use types_signal::SigHandler;
+use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE};
 
 pub mod config;
@@ -245,7 +246,12 @@ fn cstring(s: &str) -> CString {
 /// `backend-storage-ipc-seams` seam, which never returns); an
 /// `ereport(ERROR)` from a callee — impossible to catch here in C without a
 /// handler, hence promoted — surfaces as the `Err` return.
-pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
+///
+/// `my_latch` is C's `MyLatch` (globals.c), registered in the wait set and
+/// reset each loop iteration — an explicit parameter per the
+/// no-ambient-global rule. (The SIGUSR1 handler still sets the latch through
+/// the `set_latch_my_latch` seam, the signal-safe shape.)
+pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()> {
     let mut logbuffer = [0u8; READ_BUF_SIZE];
     let mut bytes_in_logbuffer: usize = 0;
 
@@ -355,13 +361,13 @@ pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
         wes,
         WL_LATCH_SET,
         PGINVALID_SOCKET,
-        true,
+        Some(my_latch),
     )?;
     backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
         wes,
         WL_SOCKET_READABLE,
         config::syslog_pipe()[0],
-        false,
+        None,
     )?;
 
     // main worker loop
@@ -371,7 +377,7 @@ pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
         let cur_timeout: i64;
 
         // Clear any already-pending wakeups.
-        backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
+        backend_storage_ipc_latch_seams::reset_latch::call(my_latch);
 
         // Process any requests or signals received recently.
         if ConfigReloadPending() {
