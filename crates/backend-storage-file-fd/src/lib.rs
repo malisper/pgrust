@@ -5,9 +5,10 @@
 // trips `clippy::result_large_err`. The un-boxed return is the project's error
 // contract, so accept the lint crate-wide.
 #![allow(clippy::result_large_err)]
-// SCAFFOLD STAGE: private LRU/free-list/desc-table helpers are declared with
-// `todo!()` bodies ahead of the public entry points that will call them; they
-// are intentionally unused until the families' logic lands.
+// Some private LRU/free-list/desc-table helpers and platform-conditional paths
+// (e.g. the non-Linux `do_syncfs` fall-through) are unreferenced on a given
+// build configuration; allow dead_code crate-wide so the full fd.c surface stays
+// present without per-item cfg gating.
 #![allow(dead_code)]
 
 //! `backend-storage-file-fd` — port of `src/backend/storage/file/fd.c`.
