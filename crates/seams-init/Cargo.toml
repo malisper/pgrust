@@ -38,6 +38,7 @@ backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
+backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }

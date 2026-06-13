@@ -1225,6 +1225,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-subscription-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-replication-launcher",
+]
+
+[[package]]
 name = "backend-catalog-storage-seams"
 version = "0.0.0"
 dependencies = [
@@ -1933,6 +1943,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-bgworker",
+ "types-error",
  "types-startup",
 ]
 
@@ -2150,6 +2161,8 @@ name = "backend-replication-logical-applyparallelworker-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-replication-applyparallel",
 ]
 
 [[package]]
@@ -2193,10 +2206,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-launcher"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-subscription-seams",
+ "backend-lib-dshash-seams",
+ "backend-postmaster-bgworker-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-logical-applyparallelworker-seams",
+ "backend-replication-logical-launcher-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-replication-logical-worker-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "interfaces-libpq-legacy-pqsignal",
+ "libc",
+ "mcx",
+ "types-bgworker",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-pgstat",
+ "types-replication-applyparallel",
+ "types-replication-launcher",
+ "types-signal",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-logical-launcher-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-replication-applyparallel",
+ "types-replication-launcher",
 ]
 
 [[package]]
@@ -2310,6 +2368,7 @@ name = "backend-replication-logical-worker-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3941,6 +4000,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-replication-logical-conflict",
+ "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
  "backend-storage-ipc-dsm-core",
@@ -4184,6 +4244,20 @@ version = "0.0.0"
 [[package]]
 name = "types-replication"
 version = "0.0.0"
+
+[[package]]
+name = "types-replication-applyparallel"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-replication-launcher"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-scan"

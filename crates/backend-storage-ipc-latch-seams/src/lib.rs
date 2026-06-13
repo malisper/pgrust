@@ -80,3 +80,12 @@ seam_core::seam!(
         wait_event_info: types_core::uint32
     ) -> i32
 );
+
+seam_core::seam!(
+    /// `SetLatch(&proc->procLatch)` for the backend whose PID is `pid`: wake
+    /// another backend by its shared `PGPROC` latch. The launcher names the
+    /// target by PID (it reads `proc->pid` from the worker slot); the latch
+    /// unit maps the PID to that backend's shared latch. Async-signal-safe and
+    /// infallible in C.
+    pub fn set_latch_for_proc_pid(pid: i32)
+);

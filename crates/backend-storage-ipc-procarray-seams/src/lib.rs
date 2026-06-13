@@ -172,3 +172,10 @@ seam_core::seam!(
     /// oldest xmins to advertise via hot-standby feedback.
     pub fn get_replication_horizons() -> (TransactionId, TransactionId)
 );
+
+seam_core::seam!(
+    /// `IsBackendPid(pid)` (procarray.c) — is `pid` the PID of a live backend
+    /// (`BackendPidGetProc(pid) != NULL`)? Shared-memory scan; cannot
+    /// `ereport`.
+    pub fn is_backend_pid(pid: i32) -> bool
+);

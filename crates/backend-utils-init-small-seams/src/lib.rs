@@ -155,3 +155,11 @@ seam_core::seam!(
     /// Process-identity read, same class as `my_proc_pid`.
     pub fn my_backend_type() -> types_core::init::BackendType
 );
+
+seam_core::seam!(
+    /// `IsBinaryUpgrade` (globals.c / miscadmin.h): true during a
+    /// `pg_upgrade`-driven binary upgrade. The launcher refuses to register the
+    /// logical-replication launcher in this mode. Pure read of backend-local
+    /// state.
+    pub fn is_binary_upgrade() -> bool
+);

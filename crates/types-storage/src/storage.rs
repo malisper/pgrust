@@ -347,16 +347,21 @@ pub struct DshashTable {
 /// Which built-in key-handling helper set a [`DshashParameters`] selects. The C
 /// `dshash_parameters` carries raw `compare`/`hash`/`copy` function pointers,
 /// but "function pointers can't be shared between backends" (`dshash.h`), so
-/// every backend supplies the same set by value; the only set the DSM registry
-/// uses is the NUL-terminated-string helpers (`dshash_strcmp`/`dshash_strhash`/
-/// `dshash_strcpy`), which `dshash.c` owns. This selector names that set
-/// without crossing the seam with the foreign function pointers.
+/// every backend supplies the same set by value; the two built-in sets
+/// `dshash.c` owns are the NUL-terminated-string helpers and the fixed-width
+/// `memcmp`/`hash_bytes`/`memcpy` helpers. This selector names the set without
+/// crossing the seam with the foreign function pointers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DshashKeyKind {
     /// `dshash_strcmp` / `dshash_strhash` / `dshash_strcpy` — fixed-width
     /// NUL-terminated string keys occupying the first `key_size` bytes of the
     /// entry.
     String,
+    /// `dshash_memcmp` / `dshash_memhash` / `dshash_memcpy` — fixed-width binary
+    /// keys (the first `key_size` bytes of the entry compared/hashed/copied as
+    /// raw bytes). Used e.g. by the logical-replication launcher's
+    /// `last_start_times` table keyed by `sizeof(Oid)`.
+    Binary,
 }
 
 /// `dshash_parameters` (`lib/dshash.h`) — the parameters to create or attach a
