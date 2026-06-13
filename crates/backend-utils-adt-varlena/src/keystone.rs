@@ -66,6 +66,8 @@ pub const TEXTBUFLEN: usize = 1024;
 /// ([`types_locale::PgLocale`]); the skip table is the 256-entry BMH table.
 #[derive(Debug)]
 pub struct TextPositionState<'a> {
+    /// `locale` — collation used for substring matching.
+    pub locale: types_locale::PgLocale<'a>,
     /// `is_multibyte_char_in_char` — need to check char boundaries?
     pub is_multibyte_char_in_char: bool,
     /// `greedy` — find the longest possible (nondeterministic) match?
