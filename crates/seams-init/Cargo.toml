@@ -138,6 +138,7 @@ backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-fmgr-dfmgr = { path = "../backend-utils-fmgr-dfmgr" }
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }

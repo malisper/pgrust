@@ -134,6 +134,7 @@ pub fn init_all() {
     backend_utils_error::init_seams();
     backend_utils_fmgr_core::init_seams();
     backend_utils_fmgr_dfmgr::init_seams();
+    backend_utils_fmgr_funcapi::init_seams();
     backend_utils_hash_dynahash::init_seams();
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
