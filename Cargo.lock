@@ -8463,6 +8463,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-keywords"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
 name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
