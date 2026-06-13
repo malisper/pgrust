@@ -301,6 +301,56 @@ fn with_globals<R>(f: impl FnOnce(&mut ParallelGlobals) -> R) -> R {
 }
 
 // ===========================================================================
+// Worker-side DSM/shm_toc attach registry (family `worker-attach`).
+//
+// `ParallelWorkerMain` (parallel.c:1351-1360) genuinely crosses into a segment
+// the *leader* created: `dsm_attach` then `shm_toc_attach(PARALLEL_MAGIC,
+// dsm_segment_address(seg))`. Unlike the leader, the worker has no
+// `ParallelContext` to own these — and the C comment at parallel.c:1346-1349 is
+// explicit that the worker keeps no ResourceOwner, so its DSM mapping "survives
+// until process exit". We mirror that by holding the real [`DsmSegment`] RAII
+// guard and the real attached [`ShmToc`] in this process-global registry, keyed
+// by the segment's real base address (the value the worker threads onward as its
+// `ExecShmToc`). The guard is never dropped on the success path — that is the C
+// "survives until process exit" semantics, not a leak.
+// ===========================================================================
+
+/// One worker-attached segment: the real RAII guard (keeps the mapping live) and
+/// the real `ShmToc` built over its base by `ShmToc::attach`.
+struct WorkerAttached {
+    /// Real base address of the mapped segment (`dsm_segment_address(seg)`); the
+    /// registry key and the worker's `ExecShmToc` payload.
+    base: usize,
+    /// The real `DsmSegment` — held so the mapping outlives the worker call
+    /// (C: no ResourceOwner, mapping survives to process exit).
+    _seg_guard: DsmSegment,
+    /// The real `shm_toc` attached over `base` (`shm_toc_attach`).
+    toc: ShmToc,
+}
+
+thread_local! {
+    /// Live worker-attached segments for this process. A worker normally has one;
+    /// the test harness drives several sequentially, so this is a small `Vec`.
+    static WORKER_ATTACHED: RefCell<Vec<WorkerAttached>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `shm_toc_lookup(toc, key, no_error)` on the worker-attached segment. Resolves
+/// the registered real `ShmToc` for `base` and performs a real in-segment lookup,
+/// returning the chunk's real address (`0` when absent and `no_error`). Panics if
+/// `base` is not a worker-attached segment (a programming error: the worker only
+/// ever looks up the segment it just attached).
+fn worker_with_toc<R>(base: usize, f: impl FnOnce(&ShmToc) -> R) -> R {
+    WORKER_ATTACHED.with(|w| {
+        let w = w.borrow();
+        let entry = w
+            .iter()
+            .find(|e| e.base == base)
+            .expect("worker shm_toc lookup on a segment that was not attached");
+        f(&entry.toc)
+    })
+}
+
+// ===========================================================================
 // Cursor / address model (family `shm-toc-address`): a `SerializeCursor` is now
 // the *real* chunk address — the raw pointer `shm_toc_allocate`/`shm_toc_lookup`
 // hands back, reinterpreted as `usize`. The typed handles (FixedStateHandle,
@@ -1717,25 +1767,61 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     // Set up a memory context to work in.
     rt::worker_create_memory_context::call()?;
 
-    // Attach to the DSM segment and find its TOC. The worker side genuinely
-    // crosses processes (the hard core); the DSM/shm_toc attach lives in the
-    // owning subsystem behind the rt seams.
-    let seg = rt::dsm_attach::call(datum_as_u32(main_arg) as dsm_handle)?;
-    if seg.is_null() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("could not map dynamic shared memory segment")
-            .into_error());
-    }
-    let toc_base = rt::shm_toc_attach::call(rt::dsm_segment_address::call(seg)?)?;
-    if toc_base == 0 {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("invalid magic number in dynamic shared memory segment")
-            .into_error());
-    }
-    // The worker-side toc lookups address the attached segment buffer; the
-    // worker uses a context-less toc handle derived from the attach base.
+    // Attach to the dynamic shared memory segment for the parallel query, and
+    // find its table of contents. The worker side genuinely crosses processes
+    // into the segment the leader created (the hard core): real `dsm_attach`
+    // returns a real `DsmSegment`, and a real `ShmToc::attach(PARALLEL_MAGIC,
+    // base)` reads the in-segment header the leader wrote.
+    //
+    // Note: at this point we have not created any ResourceOwner in this process,
+    // so our DSM mapping survives until process exit (C: parallel.c:1346-1349).
+    // We model that by parking the `DsmSegment` guard in the process-global
+    // worker registry and never dropping it on the success path.
+    let seg = worker_attach_segment(datum_as_u32(main_arg) as dsm_handle)?;
+    // C: seg == NULL -> "could not map dynamic shared memory segment".
+    let seg = match seg {
+        Some(seg) => seg,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("could not map dynamic shared memory segment")
+                .into_error());
+        }
+    };
+    let id = seg.id();
+    let base = dsm_segment_address(id);
+    debug_assert!(!base.is_null(), "dsm_segment_address returned NULL");
+    let base_nn = NonNull::new(base).expect("dsm segment base is non-null");
+    // C: toc = shm_toc_attach(PARALLEL_MAGIC, dsm_segment_address(seg));
+    //    toc == NULL (magic mismatch) -> "invalid magic number ...".
+    // SAFETY: `base_nn` points at the live, mapped segment header; the segment
+    // outlives the toc because we hold the `DsmSegment` guard for process life.
+    let real_toc = match unsafe { ShmToc::attach(PARALLEL_MAGIC, base_nn) } {
+        Some(t) => t,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("invalid magic number in dynamic shared memory segment")
+                .into_error());
+        }
+    };
+    let toc_base = base as usize;
+    // Park the real guard + real toc so the mapping survives the call (C: no
+    // ResourceOwner; mapping survives to process exit) and the worker lookups can
+    // recover the real `ShmToc` by base.
+    WORKER_ATTACHED.with(|w| {
+        w.borrow_mut().push(WorkerAttached {
+            base: toc_base,
+            _seg_guard: seg,
+            toc: real_toc,
+        })
+    });
+    // The execParallel-visible segment handle carries the real `DsmSegmentId`
+    // (opacity-inherited), exactly like the leader side.
+    let seg = seg_handle_of(id);
+    // The worker-side toc lookups address the attached segment buffer; the worker
+    // threads the segment's real base as its toc handle (so `invoke_entrypoint`
+    // hands the entrypoint the real `shm_toc` base).
     let toc = ExecShmToc(toc_base);
 
     // Look up fixed parallel state.
@@ -1882,16 +1968,38 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     Ok(())
 }
 
-/// `shm_toc_lookup(toc, key, false)` on the worker-attached segment. The base
-/// address of the chunk is what the worker threads onward. The worker side
-/// genuinely crosses into the attached DSM segment, so the lookup is a seam.
-fn worker_lookup(toc: ExecShmToc, key: u64) -> PgResult<usize> {
-    rt::worker_toc_lookup::call(toc.0, key, false)
+/// `dsm_attach(handle)` on the worker side — the real `dsm-core` attach.
+/// `Ok(None)` when the segment is unknown (everyone, including the creator,
+/// detached before we got here): C returns NULL and the caller `ereport(ERROR)`s.
+/// The descriptor is allocated in `TopMemoryContext` (C global), matching the
+/// leader's `dsm_create` so the mapping outlives the (short-lived) caller.
+fn worker_attach_segment(handle: dsm_handle) -> PgResult<Option<DsmSegment>> {
+    let top = rt::top_memory_context::call();
+    backend_storage_ipc_dsm_core::dsm::dsm_attach(handle, top)
 }
 
-/// `shm_toc_lookup(toc, key, true)` — 0 when absent.
+/// `shm_toc_lookup(toc, key, false)` on the worker-attached segment — a real
+/// in-segment lookup against the leader-written TOC. The chunk's *real address*
+/// is what the worker threads onward (family `shm-toc-address`). `shm_toc_lookup`
+/// `elog(ERROR)`s on a missing required key; the leader writes every required key
+/// before launching, so a miss is corruption — propagate the error.
+fn worker_lookup(toc: ExecShmToc, key: u64) -> PgResult<usize> {
+    worker_with_toc(toc.0, |real| {
+        let found = real.lookup(key, false)?;
+        Ok(found
+            .expect("shm_toc_lookup on missing required key")
+            .as_ptr() as usize)
+    })
+}
+
+/// `shm_toc_lookup(toc, key, true)` — 0 when absent (real in-segment lookup).
 fn worker_lookup_opt(toc: ExecShmToc, key: u64) -> usize {
-    rt::worker_toc_lookup::call(toc.0, key, true).unwrap_or(0)
+    worker_with_toc(toc.0, |real| {
+        real.lookup(key, true)
+            .ok()
+            .flatten()
+            .map_or(0, |p| p.as_ptr() as usize)
+    })
 }
 
 // Convert a `Datum` carrying a `uint32` back to that u32 (UInt32GetDatum inverse).
@@ -2329,5 +2437,105 @@ mod dsm_substrate_tests {
         }
 
         drop_test_context(pcxt, top);
+    }
+
+    /// Family `worker-attach`: a worker genuinely attaches to a segment a
+    /// *leader* created and resolves a real chunk address through the worker-side
+    /// `ShmToc`. This drives the converted `ParallelWorkerMain` attach core
+    /// (`worker_attach_segment` -> real `dsm_attach`; `ShmToc::attach` over
+    /// `dsm_segment_address`; `worker_lookup`/`worker_lookup_opt` -> real
+    /// in-segment lookups) — no emulation tokens, no fabricated ids.
+    #[test]
+    fn worker_attaches_to_leader_segment_and_resolves_real_chunk() {
+        use backend_storage_ipc_dsm_core::dsm::{
+            dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
+        };
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        // --- LEADER: create a real DSM segment, lay a real shm_toc over it,
+        // allocate + insert a chunk, and write a recognizable value into it. ---
+        const SIZE: usize = 8192;
+        let leader_seg = dsm_create(SIZE, 0, top)
+            .expect("dsm_create errored")
+            .expect("dsm_create returned None");
+        let id = leader_seg.id();
+        let handle = dsm_segment_handle(id);
+        let leader_base = dsm_segment_address(id);
+        assert!(!leader_base.is_null());
+        let leader_base_nn = NonNull::new(leader_base).unwrap();
+        // SAFETY: freshly created, page-aligned, SIZE-byte writable segment.
+        let leader_toc = unsafe { ShmToc::create(PARALLEL_MAGIC, leader_base_nn, SIZE) };
+        const TEST_KEY: u64 = PARALLEL_KEY_FIXED;
+        const SENTINEL: u8 = 0xC7;
+        let chunk = leader_toc.allocate(64).expect("leader allocate");
+        // SAFETY: chunk is a real in-segment address from this segment.
+        unsafe { chunk.as_ptr().write(SENTINEL) };
+        let chunk_off = chunk.as_ptr() as usize - leader_base as usize;
+        // SAFETY: chunk addresses live shared memory in the segment.
+        unsafe { leader_toc.insert(TEST_KEY, chunk).expect("leader insert") };
+
+        // Pin the segment so it survives with no mapping, then detach the leader's
+        // mapping — exactly the state a freshly-started worker backend sees.
+        dsm_pin_segment(id).expect("dsm_pin_segment");
+        dsm_detach(leader_seg.into_id()).expect("dsm_detach (leader)");
+
+        // --- WORKER: the converted attach core. ---
+        let seg = worker_attach_segment(handle)
+            .expect("worker_attach_segment errored")
+            .expect("worker_attach_segment returned None for a live (pinned) segment");
+        let wid = seg.id();
+        let wbase = dsm_segment_address(wid);
+        assert!(!wbase.is_null());
+        let wbase_nn = NonNull::new(wbase).unwrap();
+        // Real shm_toc_attach over the worker's mapping: the magic the leader
+        // wrote must match.
+        // SAFETY: wbase addresses the worker's live mapping of the same segment.
+        let real_toc = unsafe { ShmToc::attach(PARALLEL_MAGIC, wbase_nn) }
+            .expect("ShmToc::attach: magic must match the leader's");
+        let toc_base = wbase as usize;
+        WORKER_ATTACHED.with(|w| {
+            w.borrow_mut().push(WorkerAttached {
+                base: toc_base,
+                _seg_guard: seg,
+                toc: real_toc,
+            })
+        });
+        let toc = ExecShmToc(toc_base);
+
+        // The worker resolves the leader's chunk to a REAL in-segment address
+        // (not the leader's address — a different mapping of the same object) and
+        // reads back the leader's sentinel through it.
+        let found = worker_lookup(toc, TEST_KEY).expect("worker_lookup");
+        assert!(
+            found >= toc_base && found < toc_base + SIZE,
+            "resolved chunk must be a real address inside the worker's mapping"
+        );
+        assert_eq!(
+            found - toc_base,
+            chunk_off,
+            "the worker resolves the same chunk offset the leader inserted"
+        );
+        // SAFETY: `found` is a real, mapped, in-segment address.
+        assert_eq!(
+            unsafe { (found as *const u8).read() },
+            SENTINEL,
+            "the worker reads the leader's bytes back across the unmap/remap"
+        );
+
+        // A missing key with no_error returns 0 (real shm_toc_lookup, noError).
+        assert_eq!(worker_lookup_opt(toc, PARALLEL_KEY_GUC), 0);
+
+        // --- teardown: drop the worker guard (detach), unpin the segment. ---
+        let guard_seg = WORKER_ATTACHED.with(|w| {
+            let mut w = w.borrow_mut();
+            let pos = w.iter().position(|e| e.base == toc_base).unwrap();
+            w.remove(pos)
+        });
+        dsm_detach(guard_seg._seg_guard.into_id()).expect("dsm_detach (worker)");
+        dsm_unpin_segment(handle).expect("dsm_unpin_segment");
+        let _ = top;
     }
 }

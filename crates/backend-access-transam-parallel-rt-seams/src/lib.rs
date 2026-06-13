@@ -59,9 +59,13 @@ seam_core::seam!(pub fn get_session_dsm_handle() -> PgResult<dsm_handle>);
 // `dsm-core` `dsm_create` is called directly (family `dsm-substrate-convert`).
 // `top_memory_context()` (above) supplies the `Mcx<'static>` its descriptor
 // needs. The retired `dsm_create_null_if_maxsegments` seam is gone.
-seam_core::seam!(pub fn dsm_attach(handle: dsm_handle) -> PgResult<DsmSegmentHandle>);
+// NOTE (family `worker-attach`): the worker-side `dsm_attach` and
+// `dsm_segment_address` seams are retired — `ParallelWorkerMain` now calls the
+// merged `dsm-core` `dsm_attach` / `dsm_segment_address` directly (mirroring the
+// leader's direct `dsm_create`), holding the real `DsmSegment` guard in the
+// crate's worker registry. The retired `dsm_attach -> DsmSegmentHandle` and
+// `dsm_segment_address(seg) -> usize` seams are gone.
 seam_core::seam!(pub fn dsm_detach(seg: DsmSegmentHandle) -> PgResult<()>);
-seam_core::seam!(pub fn dsm_segment_address(seg: DsmSegmentHandle) -> PgResult<usize>);
 seam_core::seam!(pub fn dsm_segment_handle(seg: DsmSegmentHandle) -> PgResult<dsm_handle>);
 seam_core::seam!(pub fn dsm_detach_handle(seg: DsmSegmentHandle) -> PgResult<()>);
 seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum) -> PgResult<DsmSegmentHandle>);
@@ -166,10 +170,12 @@ seam_core::seam!(pub fn set_initializing_parallel_worker(value: bool) -> PgResul
 seam_core::seam!(pub fn worker_install_signal_handlers() -> PgResult<()>);
 seam_core::seam!(pub fn worker_number_from_bgw_extra() -> PgResult<i32>);
 seam_core::seam!(pub fn worker_create_memory_context() -> PgResult<()>);
-seam_core::seam!(pub fn shm_toc_attach(address: usize) -> PgResult<usize>);
-/// `shm_toc_lookup(toc, key, noError)` on the worker-attached segment: returns
-/// the chunk base address, `Ok(0)` when absent and `noError`.
-seam_core::seam!(pub fn worker_toc_lookup(toc: usize, key: u64, no_error: bool) -> PgResult<usize>);
+// NOTE (family `worker-attach`): the worker-side `shm_toc_attach(address)` and
+// `worker_toc_lookup(toc, key, no_error)` seams are retired — `ParallelWorkerMain`
+// now builds the real `ShmToc` via `ShmToc::attach(PARALLEL_MAGIC, base)` over the
+// `dsm_segment_address` of the attached segment and does real in-segment chunk
+// lookups (mirroring the leader's real `shm_toc` over the real base), parking the
+// real toc in the crate's worker registry. Both retired seams are gone.
 seam_core::seam!(pub fn set_my_fixed_parallel_state(base: usize) -> PgResult<()>);
 seam_core::seam!(pub fn set_parallel_leader_proc_number(procno: ProcNumber) -> PgResult<()>);
 seam_core::seam!(pub fn pq_redirect_to_shm_mq(seg: DsmSegmentHandle, mqh: ShmMqHandleHandle) -> PgResult<()>);
