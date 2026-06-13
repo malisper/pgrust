@@ -210,6 +210,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReScanExprContext(econtext)` (executor.h / execUtils.c): fire the
+    /// expression context's registered shutdown callbacks
+    /// (`ShutdownExprContext(econtext, true)`, LIFO, each once) and then reset
+    /// its per-tuple memory (`MemoryContextReset(ecxt_per_tuple_memory)`).
+    /// Unlike [`reset_per_tuple_expr_context`] (memory only), this also runs the
+    /// callbacks — `ValuesNext` needs that between VALUES rows. The econtext is
+    /// addressed by its EState-pool id. Fallible: a shutdown callback can
+    /// `ereport(ERROR)`.
+    pub fn re_scan_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        econtext: types_nodes::EcxtId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecGetUpdatedCols(relinfo, estate)` (execUtils.c): the set of columns
     /// updated by an UPDATE on this result relation, computed from the target
     /// RTE's `updatedCols` shifted by `FirstLowInvalidHeapAttributeNumber`.

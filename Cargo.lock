@@ -4268,6 +4268,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeValuesscan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-core-seams",
+ "backend-optimizer-util-clauses-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-misc2-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
@@ -4752,6 +4774,15 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-clauses-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-nodes",
 ]
@@ -7623,6 +7654,7 @@ dependencies = [
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-datum",
  "types-error",
@@ -9871,6 +9903,7 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
+ "backend-executor-nodeValuesscan",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",

@@ -29,3 +29,19 @@ seam_core::seam!(
         dest: &mut [u8],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MakeExpandedObjectReadOnlyInternal(d)` (utils/adt/expandeddatum.c): if
+    /// `d` is a read-write expanded-object pointer, return the object's
+    /// built-in read-only pointer (`EOHPGetRODatum`, same `eohptr` payload with
+    /// the R/O `va_tag`); any other datum is returned verbatim. Reached only on
+    /// the non-null, `typlen == -1` branch of the `MakeExpandedObjectReadOnly`
+    /// macro (the null / non-varlena short-circuit is the caller's). The
+    /// dereference of the `Datum` pointer word is the expandeddatum owner's, so
+    /// the transform crosses here rather than in the node. Allocates the R/O
+    /// pointer copy in `mcx`; fallible on OOM.
+    pub fn make_expanded_object_read_only_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        d: types_datum::Datum,
+    ) -> types_error::PgResult<types_datum::Datum>
+);
