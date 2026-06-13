@@ -15,8 +15,108 @@
 //! resources"). C returns a `HeapTuple` owned by the scan (valid until the
 //! next call); the owned model copies each result tuple out into `mcx`.
 
+use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_scan::genam::SysScanDescData;
+
+/* ==========================================================================
+ * High-level relcache catalog-scan seams.
+ *
+ * `RelationGetIndexList`/`RelationGetStatExtList`/`RelationGetFKeyList`/
+ * `RelationGetExclusionInfo` (relcache.c) each open a system catalog,
+ * `systable_beginscan` it under the conrelid/indrelid/stxrelid key, and
+ * `GETSTRUCT`/`heap_getattr`-decode every matching tuple. The whole scan +
+ * per-row decode is genam-owned catalog vocabulary; the relcache caller only
+ * consumes the decoded rows. These seams package the scan-and-decode that the
+ * genam owner performs, returning plain owner-vocabulary rows (no relcache
+ * types — the relcache caller marshals them into its owned entry fields).
+ * Panic until the genam owner installs them.
+ * ======================================================================== */
+
+/// One decoded `pg_index` row as `RelationGetIndexList` consumes it: the
+/// `Form_pg_index` flags + `int2vector indkey` it needs, plus whether the
+/// `indpred` attribute is null (`heap_attisnull(Anum_pg_index_indpred)`).
+#[derive(Clone, Debug)]
+pub struct ScannedPgIndex {
+    pub indexrelid: Oid,
+    pub indnatts: i16,
+    pub indnkeyatts: i16,
+    pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
+    pub indisprimary: bool,
+    pub indisexclusion: bool,
+    pub indimmediate: bool,
+    pub indisclustered: bool,
+    pub indisvalid: bool,
+    pub indcheckxmin: bool,
+    pub indisready: bool,
+    pub indislive: bool,
+    pub indisreplident: bool,
+    /// `int2vector indkey` — table column numbers of the index columns.
+    pub indkey: Vec<AttrNumber>,
+    /// `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`.
+    pub indpred_isnull: bool,
+}
+
+/// One decoded `pg_constraint` foreign-key row as `RelationGetFKeyList`
+/// consumes it (the `ForeignKeyCacheInfo` payload built by
+/// `DeconstructFkConstraintRow`). Opaque to the relcache caller (it only caches
+/// the list and the presence flag), so only the constraint OID is exposed.
+#[derive(Clone, Debug)]
+pub struct ScannedFkInfo {
+    pub conoid: Oid,
+}
+
+/// One key column's resolved exclusion info as `RelationGetExclusionInfo`
+/// consumes it: the operator OID (`conexclop`), its underlying procedure OID
+/// (`get_opcode`), and its opfamily strategy number
+/// (`get_op_opfamily_strategy`).
+#[derive(Clone, Copy, Debug)]
+pub struct ExclusionKeyInfo {
+    pub op: Oid,
+    pub proc: Oid,
+    pub strat: u16,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexList`'s scan (relcache.c): `systable_beginscan(pg_index,
+    /// IndexIndrelidIndexId, indrelid = relid)` then `systable_getnext` +
+    /// `GETSTRUCT(Form_pg_index)` for each row. Returns every matching decoded
+    /// row. Can `ereport(ERROR)` (catalog read failure), carried on `Err`.
+    pub fn relcache_scan_pg_index(relid: Oid) -> PgResult<Vec<ScannedPgIndex>>
+);
+
+seam_core::seam!(
+    /// `RelationGetStatExtList`'s scan (relcache.c):
+    /// `systable_beginscan(pg_statistic_ext, StatisticExtRelidIndexId,
+    /// stxrelid = relid)` then `systable_getnext`, collecting each object OID.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relcache_scan_pg_statistic_ext(relid: Oid) -> PgResult<Vec<Oid>>
+);
+
+seam_core::seam!(
+    /// `RelationGetFKeyList`'s scan (relcache.c):
+    /// `systable_beginscan(pg_constraint, conrelid = relid)`, keeping the
+    /// foreign keys, then `DeconstructFkConstraintRow` to build each
+    /// `ForeignKeyCacheInfo`. Returns the assembled rows. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relcache_scan_pg_constraint_fkeys(relid: Oid) -> PgResult<Vec<ScannedFkInfo>>
+);
+
+seam_core::seam!(
+    /// `RelationGetExclusionInfo`'s scan (relcache.c):
+    /// `systable_beginscan(pg_constraint, conrelid = indrelid)`, matching the
+    /// constraint whose `conindid` is `index_relid` and decoding its
+    /// `conexclop` array, then `get_opcode`/`get_op_opfamily_strategy` per key
+    /// column (lsyscache). Returns one [`ExclusionKeyInfo`] per key column
+    /// (`indnkeyatts` long, in column order). Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn relcache_exclusion_info(
+        index_relid: Oid,
+        indrelid: Oid,
+        indnkeyatts: usize,
+    ) -> PgResult<Vec<ExclusionKeyInfo>>
+);
 
 seam_core::seam!(
     /// `systable_beginscan(heapRelation, indexId, indexOK, snapshot, nkeys,
