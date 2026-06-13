@@ -1581,6 +1581,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-bootstrap-bootparse-seams",
+ "backend-bootstrap-bootstrap-seams",
  "backend-catalog-index-seams",
  "backend-common-link-canary-seams",
  "backend-main-main-seams",
@@ -1608,6 +1609,15 @@ dependencies = [
  "types-startup",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-bootstrap-bootstrap-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -7427,6 +7437,7 @@ name = "backend-utils-cache-lsyscache"
 version = "0.0.0"
 dependencies = [
  "backend-access-index-amapi-seams",
+ "backend-bootstrap-bootstrap-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-pg-opclass-seams",
  "backend-nodes-copyfuncs-pc-seams",
@@ -7438,6 +7449,7 @@ dependencies = [
  "backend-utils-cache-syscache-seams",
  "backend-utils-cache-typcache-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
  "mcx",
  "seam-core",
  "types-array",
@@ -9045,6 +9057,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-backup-sink",
+ "backend-bootstrap-bootstrap",
  "backend-catalog-catalog",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
