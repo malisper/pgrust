@@ -8146,12 +8146,14 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
+ "backend-access-index-genam-seams",
  "backend-access-table-tableam-seams",
  "backend-access-transam-parallel-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
+ "backend-utils-cache-relcache-nodexform-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-relmapper-seams",
  "backend-utils-cache-syscache-seams",
@@ -8173,6 +8175,15 @@ dependencies = [
  "types-tableam",
  "types-tuple",
  "types-wal",
+]
+
+[[package]]
+name = "backend-utils-cache-relcache-nodexform-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]

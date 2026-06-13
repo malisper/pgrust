@@ -59,3 +59,12 @@ backend-access-transam-parallel-seams = { path = "../backend-access-transam-para
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
+# Genuine cross-unit primitives the derived family routes through their owners
+# (panic until each owner installs them): the genam catalog scans
+# (RelationGetIndexList/StatExtList/FKeyList/ExclusionInfo) and the raw
+# rd_indextuple node-tree transforms (index expressions/predicate/dummy-Consts,
+# attribute-bitmap index_open + pull_varattnos, publication/rule build,
+# opclass per-column index options).
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
