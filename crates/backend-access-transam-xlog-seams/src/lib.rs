@@ -27,6 +27,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogArchiveLibrary` (xlog.c GUC string): the configured archive
+    /// library name, "" when unset. Returns an owned copy of the current
+    /// value (the C bare read is a `char *` global; pgarch copies it via
+    /// `pstrdup` before reload). Infallible.
+    pub fn xlog_archive_library() -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `XLogArchiveCommand` (xlog.c GUC string): the configured archive shell
+    /// command, "" when unset. Returns an owned copy of the current value.
+    /// Infallible.
+    pub fn xlog_archive_command() -> alloc::string::String
+);
+
+seam_core::seam!(
     /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
 );

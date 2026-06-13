@@ -22,7 +22,11 @@
 
 use std::cell::RefCell;
 
+use backend_access_common_heaptuple::heap_deform_tuple;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
+use backend_access_index_indexam_seams as indexam_seams;
+use backend_access_table_table::{table_close, table_open};
 use backend_access_transam_xact_seams as xact_seams;
 use backend_catalog_namespace_seams as namespace_seams;
 use backend_commands_tsearchcmds_seams as tsearchcmds_seams;
@@ -35,11 +39,15 @@ use backend_utils_error_seams as error_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use backend_utils_init_small_seams as init_small_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
-use types_cache::{BTEqualStrategyNumber, ScanKeyInit, SysCacheKey, F_OIDEQ};
+use types_cache::SysCacheKey;
+use types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, NOTICE};
 use types_guc::{GucSource, PGC_S_TEST};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_scan::sdir::ForwardScanDirection;
+use types_storage::lock::AccessShareLock;
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 
 /// `MAXTOKENTYPE` / `MAXDICTSPERTT` — arbitrary limits on the workspace size
@@ -667,27 +675,29 @@ pub fn lookup_ts_config_cache<'mcx>(
         // Because the index is on (mapcfg, maptokentype, mapseqno), we will
         // see the entries in maptokentype order, and in mapseqno order for
         // each token type, even though we didn't explicitly ask for that.
-        let mapskey = [ScanKeyInit {
-            sk_attno: Anum_pg_ts_config_map_mapcfg as i16,
-            sk_strategy: BTEqualStrategyNumber,
-            sk_procedure: F_OIDEQ,
-            sk_argument: Datum::from_oid(cfgId),
-            sk_subtype: InvalidOid,
-            sk_collation: InvalidOid,
-        }];
-        let rows = genam_seams::systable_scan_ordered::call(
-            smcx,
-            TSConfigMapRelationId,
-            TSConfigMapIndexId,
-            &mapskey,
+        let mut mapskey = [ScanKeyData::empty()];
+        ScanKeyInit(
+            &mut mapskey[0],
+            Anum_pg_ts_config_map_mapcfg as i16,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(cfgId),
         )?;
+        let maprel = table_open(smcx, TSConfigMapRelationId, AccessShareLock)?;
+        let mapidx =
+            indexam_seams::index_open::call(smcx, TSConfigMapIndexId, AccessShareLock)?;
+        let mut mapscan =
+            genam_seams::systable_beginscan_ordered::call(&maprel, &mapidx, None, &mapskey)?;
 
         // maplists[MAXTOKENTYPE + 1] (zeroed), mapdicts[MAXDICTSPERTT].
         let mut maplists: Vec<Vec<Oid>> = (0..=MAXTOKENTYPE).map(|_| Vec::new()).collect();
         let mut mapdicts: Vec<Oid> = Vec::with_capacity(MAXDICTSPERTT);
         let mut maxtokentype: usize = 0;
 
-        for row in &rows {
+        while let Some(maptup) =
+            genam_seams::systable_getnext_ordered::call(smcx, mapscan.desc_mut(), ForwardScanDirection)?
+        {
+            let row = heap_deform_tuple(smcx, &maptup.tuple, &maprel.rd_att, &maptup.data)?;
             let toktype = match &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0 {
                 TupleValue::ByVal(d) => d.as_i32(),
                 TupleValue::ByRef(_) => {
@@ -724,6 +734,10 @@ pub fn lookup_ts_config_cache<'mcx>(
                 mapdicts.push(mapdict);
             }
         }
+
+        mapscan.end()?;
+        mapidx.close(AccessShareLock)?;
+        table_close(maprel, AccessShareLock)?;
         (cfgparser, maplists, mapdicts, maxtokentype)
         };
         let (mut maplists, mut mapdicts) = (maplists, mapdicts);
