@@ -2,6 +2,8 @@
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
     /// transaction's locks at recovery startup (slot `TWOPHASE_RM_LOCK_ID` of
@@ -136,10 +138,15 @@ impl Drop for LockGuard {
 /// available (`LOCKACQUIRE_NOT_AVAIL`), the returned guard holds nothing —
 /// check [`LockGuard::result`].
 pub fn lock_acquire(
+
     locktag: &types_storage::lock::LOCKTAG,
+
     lockmode: types_storage::lock::LOCKMODE,
+
     session_lock: bool,
+
     dont_wait: bool,
+
 ) -> types_error::PgResult<LockGuard> {
     let result = lock_acquire_impl::call(locktag, lockmode, session_lock, dont_wait)?;
     Ok(LockGuard {
@@ -177,17 +184,6 @@ seam_core::seam!(
     /// of the given lock method (used by `pg_advisory_unlock_all` with
     /// `USER_LOCKMETHOD`). The C is infallible (no `ereport`).
     pub fn lock_release_session(lockmethodid: types_core::primitive::uint8)
-);
-
-seam_core::seam!(
-    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the static lock-mode
-    /// name string for the `pg_locks.mode` column. Infallible (constant table
-    /// entry). The string is copied into `mcx`.
-    pub fn get_lockmode_name<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        lockmethodid: types_core::primitive::uint8,
-        mode: types_storage::LOCKMODE,
-    ) -> mcx::PgString<'mcx>
 );
 
 seam_core::seam!(
@@ -270,6 +266,66 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LockAcquireExtended(locktag, lockmode, sessionLock, dontWait,
+    /// reportMemoryError, &locallock, logLockFailure)` (lock.c). lmgr.c always
+    /// passes `reportMemoryError = true`, so OOM is modeled by the `Err` leg
+    /// rather than a parameter; the `LOCALLOCK*` out-parameter is internal to
+    /// lock.c and re-keyed by [`mark_lock_clear`] on the (tag, mode) pair.
+    /// `Err` carries the C `ereport(ERROR)` surface (deadlock detected, out of
+    /// shared memory, unrecognized lock mode).
+    pub fn lock_acquire_extended(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+        dont_wait: bool,
+        log_lock_failure: bool,
+    ) -> types_error::PgResult<types_storage::lock::LockAcquireResult>
+);
+
+seam_core::seam!(
+    /// `MarkLockClear(locallock)` (lock.c) — mark that the just-acquired lock
+    /// has finished absorbing invalidation messages. Re-keyed on the
+    /// (tag, mode) pair identifying the locallock the preceding
+    /// `lock_acquire_extended` returned. Infallible.
+    pub fn mark_lock_clear(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `LockHeldByMe(locktag, lockmode, orstronger)` (lock.c) — whether the
+    /// current transaction holds `lockmode` (or, with `orstronger`, a
+    /// numerically-higher mode) on `locktag`. Pure local lock-table lookup,
+    /// infallible.
+    pub fn lock_held_by_me(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        orstronger: bool,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `LockHasWaiters(locktag, lockmode, sessionLock)` (lock.c) — whether
+    /// anyone is waiting on a lock we hold. `Err` carries the C
+    /// `elog(ERROR, "unrecognized lock mode")` / lock-table corruption surface.
+    pub fn lock_has_waiters(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `LockWaiterCount(locktag)` (lock.c) — number of processes waiting for
+    /// `locktag`. `Err` carries the C lock-table corruption `elog(ERROR)`
+    /// surface.
+    pub fn lock_waiter_count(
+        locktag: &types_storage::lock::LOCKTAG,
+    ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
     /// `AtPrepare_Locks()` — collect lock data for the 2PC state file;
     /// errors out for cases 2PC cannot handle (e.g. session locks).
     pub fn at_prepare_locks() -> types_error::PgResult<()>
@@ -281,4 +337,239 @@ seam_core::seam!(
     pub fn post_prepare_locks(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
+);
+
+// --- low-level lock.c slots used by proc.c's wait-queue machinery ----------
+//
+// proc.c (JoinWaitQueue / ProcSleep / ProcWakeup / ProcLockWakeup /
+// CheckDeadLock / LockErrorCleanup / GetLockHoldersAndWaiters) reaches into the
+// shmem LOCK / PROCLOCK hash tables and the per-mode conflict table, all owned
+// by lock.c.  A LOCK is identified by its LOCKTAG, a PROCLOCK holder by the
+// owning backend's ProcNumber; the queue / list iteration is lock.c-owned data
+// so the owner provides it as snapshots / decisions.
+
+seam_core::seam!(
+    /// `lockMethodTable->conflictTab[mode]` — the conflict bitmask for a lock
+    /// mode under a given lock method.
+    pub fn conflict_tab(
+        lockmethodid: u8,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `LockCheckConflicts(lockMethodTable, lockmode, lock, proclock)` — does
+    /// the requested mode conflict with already-granted locks (excluding the
+    /// requester's own holdings)?
+    pub fn lock_check_conflicts(
+        lockmethodid: u8,
+        lockmode: types_storage::lock::LOCKMODE,
+        lock: types_storage::lock::LOCKTAG,
+        proclock_holder: types_core::ProcNumber,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GrantLock(lock, proclock, lockmode)` — record an immediate grant of
+    /// `lockmode` to the holder's PROCLOCK on `lock`.
+    pub fn grant_lock(
+        lock: types_storage::lock::LOCKTAG,
+        proclock_holder: types_core::ProcNumber,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `RemoveFromWaitQueue(proc, hashcode)` — pull a proc off the lock's wait
+    /// queue and clean up its accounting; sets the proc's waitStatus to
+    /// `PROC_WAIT_STATUS_ERROR`.
+    pub fn remove_from_wait_queue(
+        procno: types_core::ProcNumber,
+        hashcode: u32,
+    )
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` — the human-readable lock mode
+    /// name.
+    pub fn get_lockmode_name(
+        lockmethodid: types_storage::lock::LOCKMETHODID,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// of this backend's locks for the given method. Used by the logical apply
+    /// worker on exit to drop session-level locks; can `ereport` on a corrupt
+    /// lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockTagHashCode(locktag)` — the hash value of a LOCKTAG.
+    pub fn lock_tag_hash_code(
+        locktag: types_storage::lock::LOCKTAG,
+    ) -> u32
+);
+
+seam_core::seam!(
+    /// `AbortStrongLockAcquire()` — revert a strong-lock-count acquisition for
+    /// a lock being acquired (called from LockErrorCleanup).
+    pub fn abort_strong_lock_acquire()
+);
+
+seam_core::seam!(
+    /// `GetAwaitedLock()` — the hashcode of the LOCALLOCK this backend is
+    /// currently waiting on, or `-1` (`lockAwaited == NULL`).
+    pub fn get_awaited_lock_hashcode() -> i64
+);
+
+seam_core::seam!(
+    /// `GrantAwaitedLock()` — record in the local lock table that the awaited
+    /// lock was granted.
+    pub fn grant_awaited_lock()
+);
+
+seam_core::seam!(
+    /// `ResetAwaitedLock()` — clear the `lockAwaited` pointer.
+    pub fn reset_awaited_lock()
+);
+
+seam_core::seam!(
+    /// `lock->procLocks` group-locking scan: OR together the holdMask of every
+    /// PROCLOCK on `lock` whose groupLeader is `leader` (JoinWaitQueue's
+    /// `myHeldLocks` augmentation).
+    pub fn lock_group_held_locks(
+        lock: types_storage::lock::LOCKTAG,
+        leader: types_core::ProcNumber,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `proclock->holdMask` for the PROCLOCK held by `holder` on `lock`.
+    pub fn proclock_hold_mask(
+        lock: types_storage::lock::LOCKTAG,
+        holder: types_core::ProcNumber,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `dclist_is_empty(&lock->waitProcs)`.
+    pub fn lock_wait_queue_is_empty(lock: types_storage::lock::LOCKTAG) -> bool
+);
+
+seam_core::seam!(
+    /// `dclist_insert_before(&lock->waitProcs, &insert_before->links,
+    /// &MyProc->links)`.
+    pub fn lock_wait_queue_insert_before(
+        lock: types_storage::lock::LOCKTAG,
+        insert_before: types_core::ProcNumber,
+        myproc: types_core::ProcNumber,
+    )
+);
+
+seam_core::seam!(
+    /// `dclist_push_tail(&lock->waitProcs, &MyProc->links)`.
+    pub fn lock_wait_queue_push_tail(
+        lock: types_storage::lock::LOCKTAG,
+        myproc: types_core::ProcNumber,
+    )
+);
+
+seam_core::seam!(
+    /// `lock->waitMask |= LOCKBIT_ON(lockmode)`.
+    pub fn lock_set_wait_mask_bit(
+        lock: types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `dclist_delete_from_thoroughly(&proc->waitLock->waitProcs,
+    /// &proc->links)` — remove a granted/aborted waiter from its lock's queue.
+    pub fn lock_wait_queue_delete(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// A front-to-back snapshot of the ProcNumbers in `lock->waitProcs`, for
+    /// `ProcLockWakeup`'s `dclist_foreach_modify`.
+    pub fn lock_wait_queue_waiters_snapshot(
+        lock: types_storage::lock::LOCKTAG,
+    ) -> alloc::vec::Vec<types_core::ProcNumber>
+);
+
+/// PID lists + holder count built from `lock->procLocks` by
+/// [`get_lock_holders_and_waiters`].
+#[derive(Clone, Debug, Default)]
+pub struct LockHoldersAndWaiters {
+    /// Comma-separated PIDs of processes holding the lock.
+    pub holders: alloc::string::String,
+    /// Comma-separated PIDs of processes waiting for the lock.
+    pub waiters: alloc::string::String,
+    /// Number of lock holders.
+    pub holders_num: i32,
+}
+
+seam_core::seam!(
+    /// `GetLockHoldersAndWaiters` inner walk over `lock->procLocks`: returns the
+    /// holder / waiter PID strings and the holder count.
+    pub fn get_lock_holders_and_waiters(
+        lock: types_storage::lock::LOCKTAG,
+    ) -> LockHoldersAndWaiters
+);
+
+seam_core::seam!(
+    /// `DescribeLockTag(buf, tag)` — the human-readable description of a
+    /// LOCKTAG (e.g. `relation 1234 of database 5`), as a string.
+    pub fn describe_lock_tag(
+        tag: types_storage::lock::LOCKTAG,
+    ) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
+);
+
+// --- backend-utils-init-postinit consumers (lock.c) ---
+
+seam_core::seam!(
+    /// `InitLockManagerAccess()` (lock.c): initialize the backend-local lock
+    /// manager structures (LOCALLOCK hashtable). `Err` carries its OOM surface.
+    pub fn init_lock_manager_access() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(USER_LOCKMETHOD, true)` (lock.c): release all
+    /// user (advisory) locks held by this backend. `Err` carries its `ereport`
+    /// surface.
+    pub fn lock_release_all_user() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `max_locks_per_xact` (lock.c GUC `max_locks_per_transaction`).
+    pub fn max_locks_per_xact() -> i32
+);
+
+seam_core::seam!(
+    /// `LockManagerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn lock_manager_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `LockManagerShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn lock_manager_shmem_init() -> types_error::PgResult<()>
 );

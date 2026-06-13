@@ -742,11 +742,15 @@ pub fn CreateRestartPoint(flags: i32) -> bool {
     panic!("xlog driver not ported (xlog-driver debt): CreateRestartPoint process-singleton requires the XLogCtl shmem substrate; use checkpoint::CreateRestartPoint with an owned CheckpointState")
 }
 
-/// This crate exposes no inward seams its consumers call across a cycle on the
-/// current frontier; `init_seams()` is therefore a no-op. (When a ported
-/// consumer needs an xlog function across a cycle, declare it in
-/// `backend-access-transam-xlog-seams` and install it here.)
-pub fn init_seams() {}
+/// Install this crate's inward seams. `xlog_redo` is the `rm_redo` callback the
+/// rmgr table (backend-access-transam-rmgr) installs across the access cycle;
+/// it must be `set()` here or the recovery dispatch panics on the first XLOG
+/// record. The remaining declarations in `backend-access-transam-xlog-seams`
+/// front the still-deferred XLogCtl shmem driver and are installed as their
+/// legs land.
+pub fn init_seams() {
+    backend_access_transam_xlog_seams::xlog_redo::set(redo::xlog_redo);
+}
 
 #[cfg(test)]
 mod tests;

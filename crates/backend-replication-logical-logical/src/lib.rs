@@ -51,6 +51,7 @@ use backend_replication_logical_decode_seams as decode;
 use backend_replication_logical_reorderbuffer_seams as reorder;
 use backend_replication_logical_snapbuild_seams as snapbuild;
 use backend_replication_slot_seams as slot;
+use backend_replication_logical_slotsync_seams as slotsync;
 use backend_replication_walsender_seams as walsender;
 use backend_storage_ipc_procarray_seams as procarray;
 use backend_tcop_postgres_seams as tcop;
@@ -61,9 +62,6 @@ use backend_utils_resowner_resowner_seams as resowner;
 
 /// `InvalidXLogRecPtr` (`xlogdefs.h`).
 const InvalidXLogRecPtr: XLogRecPtr = 0;
-
-/// `RS_INVAL_NONE` (`replication/slot.h`) — slot is valid.
-pub const RS_INVAL_NONE: i32 = 0;
 
 /// `SnapBuildState` (`replication/snapbuild.h`).
 pub type SnapBuildState = i32;
@@ -249,7 +247,7 @@ fn TransactionIdPrecedesOrEquals(id1: TransactionId, id2: TransactionId) -> bool
 /// `SlotIsPhysical(slot)` — `(slot)->data.database == InvalidOid` (`slot.h`).
 #[inline]
 fn SlotIsPhysical() -> bool {
-    slot::SlotIsPhysical::call()
+    slot::slot_is_physical::call()
 }
 
 /// `LSN_FORMAT_ARGS(lsn)` rendered into the `%X/%X` string (`xlogdefs.h`).
@@ -264,7 +262,7 @@ fn lsn_str(lsn: XLogRecPtr) -> String {
 
 /// `CheckLogicalDecodingRequirements` (logical.c:111).
 pub fn CheckLogicalDecodingRequirements(wal_level: WalLevel, my_database_id: Oid) -> PgResult<()> {
-    slot::CheckSlotRequirements::call()?;
+    slot::check_slot_requirements::call(wal_level.0)?;
 
     /*
      * NB: Adding a new requirement likely means that RestoreSlotFromDisk()
@@ -285,7 +283,7 @@ pub fn CheckLogicalDecodingRequirements(wal_level: WalLevel, my_database_id: Oid
             .into_error());
     }
 
-    if xlog::RecoveryInProgress::call() {
+    if xlog::recovery_in_progress::call() {
         /*
          * This check may have race conditions, but whenever
          * XLOG_PARAMETER_CHANGE indicates that wal_level has changed, we
@@ -316,7 +314,7 @@ fn StartupDecodingContext(
     update_progress: bool,
     wal_segment_size: i32,
 ) -> PgResult<Box<LogicalDecodingContext>> {
-    let _slot = slot::MyReplicationSlot_is_set::call();
+    let _slot = slot::my_replication_slot_is_set::call();
 
     let context = mcxt::create_logical_decoding_context_memcxt::call();
     let old_context = mcxt::MemoryContextSwitchTo::call(context);
@@ -464,7 +462,7 @@ pub fn CreateInitDecodingContext(
      */
     CheckLogicalDecodingRequirements(wal_level, my_database_id)?;
 
-    let slot_set = slot::MyReplicationSlot_is_set::call();
+    let slot_set = slot::my_replication_slot_is_set::call();
 
     /* first some sanity checks that are unlikely to be violated */
     if !slot_set {
@@ -518,7 +516,7 @@ pub fn CreateInitDecodingContext(
     slot::slot_mutex_release::call();
 
     if XLogRecPtrIsInvalid(restart_lsn) {
-        slot::ReplicationSlotReserveWal::call()?;
+        slot::replication_slot_reserve_wal::call()?;
     } else {
         slot::slot_mutex_acquire::call();
         slot::slot_set_restart_lsn::call(restart_lsn);
@@ -535,7 +533,7 @@ pub fn CreateInitDecodingContext(
      * limit. Once that's done both locks can be released.
      * ----
      */
-    slot::ReplicationSlotControlLock_acquire_exclusive::call();
+    slot::replication_slot_control_lock_acquire_exclusive::call();
     procarray_lock_exclusive();
 
     xmin_horizon = procarray::GetOldestSafeDecodingTransactionId::call(!need_full_snapshot);
@@ -548,13 +546,13 @@ pub fn CreateInitDecodingContext(
     }
     slot::slot_mutex_release::call();
 
-    slot::ReplicationSlotsComputeRequiredXmin::call(true);
+    slot::replication_slots_compute_required_xmin::call(true)?;
 
     procarray::ProcArrayLock_release::call();
-    slot::ReplicationSlotControlLock_release::call();
+    slot::replication_slot_control_lock_release::call();
 
-    slot::ReplicationSlotMarkDirty::call();
-    slot::ReplicationSlotSave::call()?;
+    slot::replication_slot_mark_dirty::call();
+    slot::replication_slot_save::call()?;
 
     let mut ctx = StartupDecodingContext(
         OutputPluginOptionsHandle::default(),
@@ -604,7 +602,7 @@ pub fn CreateDecodingContext(
     wal_segment_size: i32,
     my_database_id: Oid,
 ) -> PgResult<Box<LogicalDecodingContext>> {
-    let slot_set = slot::MyReplicationSlot_is_set::call();
+    let slot_set = slot::my_replication_slot_is_set::call();
 
     /* first some sanity checks that are unlikely to be violated */
     if !slot_set {
@@ -641,9 +639,9 @@ pub fn CreateDecodingContext(
      * they are used after failover. However, we do allow advancing the LSNs
      * during the synchronization of slots.
      */
-    if xlog::RecoveryInProgress::call()
+    if xlog::recovery_in_progress::call()
         && slot::slot_synced::call()
-        && !slot::IsSyncingReplicationSlots::call()
+        && !slotsync::is_syncing_replication_slots::call()
     {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
@@ -657,7 +655,10 @@ pub fn CreateDecodingContext(
     }
 
     /* slot must be valid to allow decoding */
-    debug_assert_eq!(slot::slot_invalidated::call(), RS_INVAL_NONE);
+    debug_assert_eq!(
+        slot::slot_invalidated::call(),
+        types_replication_slot::ReplicationSlotInvalidationCause::RS_INVAL_NONE
+    );
     debug_assert!(slot::slot_restart_lsn::call() != InvalidXLogRecPtr);
 
     if start_lsn == InvalidXLogRecPtr {
@@ -716,8 +717,8 @@ pub fn CreateDecodingContext(
         slot::slot_set_two_phase::call(true);
         slot::slot_set_two_phase_at::call(start_lsn);
         slot::slot_mutex_release::call();
-        slot::ReplicationSlotMarkDirty::call();
-        slot::ReplicationSlotSave::call()?;
+        slot::replication_slot_mark_dirty::call();
+        slot::replication_slot_save::call()?;
         snapbuild::SnapBuildSetTwoPhaseAt::call(ctx.snapshot_builder, start_lsn);
     }
 
@@ -1613,7 +1614,7 @@ pub fn LogicalIncreaseXminForSlot(current_lsn: XLogRecPtr, xmin: TransactionId) 
     let mut updated_xmin = false;
     let mut got_new_xmin = false;
 
-    debug_assert!(slot::MyReplicationSlot_is_set::call());
+    debug_assert!(slot::my_replication_slot_is_set::call());
 
     slot::slot_mutex_acquire::call();
 
@@ -1667,7 +1668,7 @@ pub fn LogicalIncreaseRestartDecodingForSlot(
 ) -> PgResult<()> {
     let mut updated_lsn = false;
 
-    debug_assert!(slot::MyReplicationSlot_is_set::call());
+    debug_assert!(slot::my_replication_slot_is_set::call());
     debug_assert!(restart_lsn != InvalidXLogRecPtr);
     debug_assert!(current_lsn != InvalidXLogRecPtr);
 
@@ -1796,8 +1797,8 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
                 slot::slot_restart_lsn::call(),
             );
 
-            slot::ReplicationSlotMarkDirty::call();
-            slot::ReplicationSlotSave::call()?;
+            slot::replication_slot_mark_dirty::call();
+            slot::replication_slot_save::call()?;
             backend_utils_error::elog(
                 DEBUG1,
                 format!(
@@ -1816,8 +1817,8 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
             slot::slot_set_effective_catalog_xmin::call(slot::slot_catalog_xmin::call());
             slot::slot_mutex_release::call();
 
-            slot::ReplicationSlotsComputeRequiredXmin::call(false);
-            slot::ReplicationSlotsComputeRequiredLSN::call();
+            slot::replication_slots_compute_required_xmin::call(false)?;
+            slot::replication_slots_compute_required_lsn::call()?;
         }
     } else {
         slot::slot_mutex_acquire::call();
@@ -1880,7 +1881,7 @@ pub fn LogicalReplicationSlotHasPendingWal(
 ) -> PgResult<bool> {
     let mut has_pending_wal = false;
 
-    debug_assert!(slot::MyReplicationSlot_is_set::call());
+    debug_assert!(slot::my_replication_slot_is_set::call());
 
     // PG_TRY:
     let body = (|| -> PgResult<()> {
@@ -2049,7 +2050,7 @@ pub fn LogicalSlotAdvanceAndCheckSnapState(
              * their own start positions, so dirty the slot so it is written
              * out at the next checkpoint.
              */
-            slot::ReplicationSlotMarkDirty::call();
+            slot::replication_slot_mark_dirty::call();
         }
 
         let retlsn = slot::slot_confirmed_flush::call();
@@ -2300,6 +2301,9 @@ pub fn dispatch_reorderbuffer_callback(
 
 /// Install this crate's inward seams.
 pub fn init_seams() {
+    backend_replication_logical_logical_seams::reset_logical_streaming_state::set(
+        ResetLogicalStreamingState,
+    );
     // The reorderbuffer trampolines pass the live `&mut ctx` (rb->private_data)
     // in; the inward seam's signature carries only the callback variant, so the
     // installer adapts once the reorderbuffer owner lands. Until then this seam
@@ -2308,6 +2312,16 @@ pub fn init_seams() {
     // the real adapter is installed when reorderbuffer is ported.
     backend_replication_logical_logical_seams::dispatch_reorderbuffer_callback::set(
         dispatch_reorderbuffer_callback_seam,
+    );
+    backend_replication_logical_logical_seams::logical_slot_advance_and_check_snap_state::set(
+        |moveto, found_consistent_snapshot, wal_segment_size, my_database_id| {
+            LogicalSlotAdvanceAndCheckSnapState(
+                moveto,
+                found_consistent_snapshot,
+                wal_segment_size,
+                my_database_id,
+            )
+        },
     );
 }
 

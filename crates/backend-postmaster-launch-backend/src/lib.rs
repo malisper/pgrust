@@ -228,8 +228,10 @@ pub fn postmaster_child_launch(
             child_type == BackendType::Logger,
         );
 
-        // Detangle from postmaster.
-        backend_utils_init_miscinit_seams::init_postmaster_child::call();
+        // Detangle from postmaster. A FATAL here aborts this freshly-forked
+        // child, matching C's proc_exit on the InitPostmasterChild failure path.
+        backend_utils_init_miscinit_seams::init_postmaster_child::call()
+            .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
 
         // Detach shared memory if not needed.
         if !CHILD_PROCESS_KINDS[child_type as usize].shmem_attach {
@@ -263,9 +265,34 @@ pub fn postmaster_child_launch(
     pid
 }
 
-/// This crate declares no inward seams; kept for the uniform `seams-init`
-/// startup convention.
-pub fn init_seams() {}
+/// Adapter from the `&[u8]` seam interface to the typed `&mut StartupData`
+/// implementation. The seam was declared with a simplified signature covering
+/// non-backend children (syslogger and similar auxiliary processes) for which
+/// C always passes `startup_data == NULL, startup_data_len == 0`; those map to
+/// [`types_startup::StartupData::None`]. A non-empty slice cannot be decoded
+/// through this seam (the seam lacks the `BackendStartupData` fields) and
+/// panics loudly so that the caller upgrades the seam declaration instead of
+/// silently receiving wrong data.
+fn postmaster_child_launch_seam_adapter(
+    child_type: types_core::init::BackendType,
+    child_slot: i32,
+    startup_data: &[u8],
+) -> i32 {
+    assert!(
+        startup_data.is_empty(),
+        "postmaster_child_launch seam: non-empty &[u8] startup_data cannot \
+         be decoded; extend the seam declaration to carry BackendStartupData"
+    );
+    let mut sd = types_startup::StartupData::None;
+    postmaster_child_launch(child_type, child_slot, &mut sd, None)
+}
+
+/// Install this crate's seam implementations.
+pub fn init_seams() {
+    backend_postmaster_launch_backend_seams::postmaster_child_launch::set(
+        postmaster_child_launch_seam_adapter,
+    );
+}
 
 #[cfg(test)]
 mod tests;

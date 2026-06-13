@@ -1,0 +1,30 @@
+[package]
+name = "backend-utils-cache-plancache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_plancache"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-cache-plancache-seams = { path = "../backend-utils-cache-plancache-seams" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-plancache = { path = "../types-plancache" }
+backend-utils-mmgr-mcxt-pc-seams = { path = "../backend-utils-mmgr-mcxt-pc-seams" }
+backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
+backend-parser-analyze-pc-seams = { path = "../backend-parser-analyze-pc-seams" }
+backend-rewrite-rewriteHandler-pc-seams = { path = "../backend-rewrite-rewriteHandler-pc-seams" }
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
+backend-tcop-pquery-pc-seams = { path = "../backend-tcop-pquery-pc-seams" }
+backend-tcop-utility-pc-seams = { path = "../backend-tcop-utility-pc-seams" }
+backend-access-common-tupdesc-pc-seams = { path = "../backend-access-common-tupdesc-pc-seams" }
+backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
+backend-storage-lmgr-lmgr-pc-seams = { path = "../backend-storage-lmgr-lmgr-pc-seams" }
+backend-catalog-namespace-pc-seams = { path = "../backend-catalog-namespace-pc-seams" }
+backend-utils-cache-inval-pc-seams = { path = "../backend-utils-cache-inval-pc-seams" }
+backend-utils-cache-syscache-pc-seams = { path = "../backend-utils-cache-syscache-pc-seams" }
+backend-utils-resowner-pc-seams = { path = "../backend-utils-resowner-pc-seams" }
+backend-utils-misc-backendstate-pc-seams = { path = "../backend-utils-misc-backendstate-pc-seams" }

@@ -77,6 +77,19 @@ impl BackendType {
 /// `BACKEND_NUM_TYPES` (`miscadmin.h`): `B_LOGGER + 1`.
 pub const BACKEND_NUM_TYPES: usize = BackendType::Logger as usize + 1;
 
+/// `typedef enum ProcessingMode` (`miscadmin.h`): the three valid values of the
+/// `Mode` global owned by `miscinit.c`.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ProcessingMode {
+    /// `BootstrapProcessing` — bootstrap creation of template database.
+    BootstrapProcessing = 0,
+    /// `InitProcessing` — initializing system.
+    InitProcessing,
+    /// `NormalProcessing` — normal processing.
+    NormalProcessing,
+}
+
 use crate::primitive::{InvalidOid, Oid};
 
 /// `SECURITY_LOCAL_USERID_CHANGE` (`miscadmin.h`).

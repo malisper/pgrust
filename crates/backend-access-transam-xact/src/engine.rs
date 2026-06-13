@@ -39,6 +39,7 @@ use backend_utils_init_miscinit_seams as miscinit_seams;
 use backend_utils_init_small_seams as globals_seams;
 use backend_utils_misc_more2_seams as timeout_seams;
 use backend_utils_mmgr_portalmem_seams as portal_seams;
+use backend_utils_time_snapmgr_pc_seams as snapmgr_pc_seams;
 
 use types_core::VirtualTransactionId;
 use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
@@ -220,7 +221,10 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
     }
 
     // Check that we haven't aborted halfway through RecordTransactionCommit.
-    if transam_seams::transaction_id_did_commit::call(xid)? {
+    // C reads the TransactionXmin global inside TransactionIdDidCommit; here it
+    // is threaded explicitly, so source it from snapmgr.
+    let transaction_xmin = snapmgr_pc_seams::transaction_xmin::call()?;
+    if transam_seams::transaction_id_did_commit::call(xid, transaction_xmin)? {
         return Err(PgError::new(
             types_error::PANIC,
             format!("cannot abort transaction {xid}, it was already committed"),
@@ -380,7 +384,10 @@ fn StartTransaction() -> PgResult<()> {
         proc_number: globals_seams::my_proc_number::call(),
         local_transaction_id: sinval_seams::get_next_local_transaction_id::call(),
     };
-    lmgr_seams::virtual_xact_lock_table_insert::call(vxid)?;
+    lock_seams::virtual_xact_lock_table_insert::call(types_storage::VirtualTransactionId {
+        procNumber: vxid.proc_number,
+        localTransactionId: vxid.local_transaction_id,
+    })?;
     proc_seams::set_my_proc_lxid::call(vxid.local_transaction_id);
 
     // set transaction_timestamp() (a/k/a now()): normally the same as the
@@ -685,17 +692,50 @@ fn PrepareTransaction() -> PgResult<()> {
     // Reserve the GID for this transaction (fails if invalid or in use).
     let gid = xs(|s| s.prepare_gid.take())
         .ok_or_else(|| PgError::error("PrepareTransaction: no prepared-transaction GID set"))?;
+    let databaseid = globals_seams::my_database_id::call();
     twophase_seams::mark_as_preparing::call(
         xid,
         &gid,
         prepared_at,
         miscinit_seams::get_user_id::call(),
-        globals_seams::my_database_id::call(),
+        databaseid,
     )?;
 
-    // Collect data for the 2PC state file; replay order at COMMIT/ROLLBACK
-    // PREPARED must match the order of these calls.
-    twophase_seams::start_prepare::call()?;
+    // Collect data for the 2PC state file (C `StartPrepare` reads these from
+    // the current backend transaction); the order of the file segments — and
+    // thus the replay order at COMMIT/ROLLBACK PREPARED — must match the calls
+    // that follow. Allocated in a local workspace (C: palloc in the caller's
+    // context).
+    let prep_ws = MemoryContext::new("StartPrepare");
+    let prep_mcx = prep_ws.mcx();
+    let commitrels = storage_seams::smgr_get_pending_deletes::call(prep_mcx, true)?;
+    let abortrels = storage_seams::smgr_get_pending_deletes::call(prep_mcx, false)?;
+    let children = xactGetCommittedChildren()?;
+    let commitstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, true)?;
+    let abortstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, false)?;
+    let (invalmsgs, initfileinval) =
+        inval_seams::xact_get_committed_invalidation_messages::call(prep_mcx)?;
+
+    let start_args = twophase_seams::StartPrepareArgs {
+        xid,
+        gid: gid.clone(),
+        prepared_at,
+        owner: miscinit_seams::get_user_id::call(),
+        databaseid,
+        children,
+        ncommitrels: commitrels.len() as i32,
+        commitrels: crate::wal::rels_bytes(&commitrels)?,
+        nabortrels: abortrels.len() as i32,
+        abortrels: crate::wal::rels_bytes(&abortrels)?,
+        ncommitstats: commitstats.len() as i32,
+        commitstats: crate::wal::stats_bytes(&commitstats)?,
+        nabortstats: abortstats.len() as i32,
+        abortstats: crate::wal::stats_bytes(&abortstats)?,
+        ninvalmsgs: invalmsgs.len() as i32,
+        invalmsgs: crate::wal::inval_msgs_bytes(&invalmsgs)?,
+        initfileinval,
+    };
+    twophase_seams::start_prepare::call(&start_args)?;
 
     async_seams::at_prepare_notify::call()?;
     lock_seams::at_prepare_locks::call()?;

@@ -287,7 +287,10 @@ pub fn GetNamedDSMSegment(
 
     // entry = dshash_find_or_insert(dsm_registry_table, name, found);
     let table = DSM_REGISTRY_TABLE.with(Cell::get);
-    let entry_guard = dshash::dshash_find_or_insert::call(table, name)?;
+    // The key is the `const void *key` byte image dshash hashes/compares; for
+    // the registry's `DshashKeyKind::String` helper set that is the name's
+    // bytes (NUL-padded into the `key_size`-wide field by `dshash_strcpy`).
+    let entry_guard = dshash::dshash_find_or_insert::call(table, name.as_bytes())?;
     *found = entry_guard.found;
     let entry = entry_guard.entry_ptr() as *mut DSMRegistryEntry;
 

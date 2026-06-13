@@ -49,7 +49,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use backend_utils_error::ereport;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgString, PgVec};
+use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_acl::{AclResult, ACLCHECK_NOT_OWNER, ACL_CREATE, ACL_CREATE_TEMP, ACL_USAGE};
 use types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, OidIsValid, ProcNumber, SubTransactionId,
@@ -127,6 +127,9 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::collation_is_visible::set(crate::CollationIsVisible);
     backend_catalog_namespace_seams::ts_config_is_visible::set(crate::TSConfigIsVisible);
     backend_catalog_namespace_seams::ts_dictionary_is_visible::set(crate::TSDictionaryIsVisible);
+    backend_catalog_namespace_seams::at_eoxact_namespace::set(seam_at_eoxact_namespace);
+    backend_catalog_namespace_seams::at_eosubxact_namespace::set(seam_at_eosubxact_namespace);
+    backend_catalog_namespace_seams::get_ts_config_oid::set(seam_get_ts_config_oid);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
@@ -192,6 +195,35 @@ fn seam_get_ts_dict_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgRes
 fn seam_make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar> {
     let owned = name_list_owned(names);
     makeRangeVarFromNameList(&owned)
+}
+
+/// Seam shim: the seam declares `fn(bool, bool)` (infallible surface); the
+/// implementation returns `PgResult<()>` because `before_shmem_exit` can
+/// ereport on OOM. OOM during transaction-end cleanup is always fatal, so
+/// `.expect` is the correct escalation here.
+fn seam_at_eoxact_namespace(is_commit: bool, parallel: bool) {
+    crate::AtEOXact_Namespace(is_commit, parallel)
+        .expect("AtEOXact_Namespace: before_shmem_exit OOM");
+}
+
+/// Seam shim: same pattern as `seam_at_eoxact_namespace`.
+fn seam_at_eosubxact_namespace(
+    is_commit: bool,
+    my_subid: types_core::SubTransactionId,
+    parent_subid: types_core::SubTransactionId,
+) {
+    crate::AtEOSubXact_Namespace(is_commit, my_subid, parent_subid)
+        .expect("AtEOSubXact_Namespace");
+}
+
+/// Seam shim: the seam accepts `&[&str]` (name parts already extracted by
+/// the consumer); the implementation expects `NameList` (`&[Option<String>]`)
+/// plus an `Mcx` for the cross-database check in the 3-part case. Convert
+/// here and use a scratch memory context.
+fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> types_error::PgResult<types_core::Oid> {
+    let names_owned: Vec<Option<String>> = names.iter().map(|s| Some(s.to_string())).collect();
+    let scratch = MemoryContext::new("get_ts_config_oid seam");
+    crate::get_ts_config_oid(scratch.mcx(), &names_owned, missing_ok)
 }
 
 /// `FUNC_PARAM_IN` / `FUNC_PARAM_INOUT` / `FUNC_PARAM_VARIADIC`
@@ -3468,7 +3500,7 @@ fn preprocessNamespacePath(
     roleid: Oid,
 ) -> PgResult<(Vec<Oid>, bool)> {
     /* Parse string into list of identifiers */
-    let namelist = match varlena_seams::split_identifier_string::call(mcx, searchPath)? {
+    let namelist = match varlena_seams::split_identifier_string::call(mcx, searchPath, ',')? {
         Some(l) => l,
         None => {
             /* syntax error in name list */
@@ -4061,7 +4093,7 @@ pub fn check_search_path(mcx: Mcx<'_>, newval: &str) -> PgResult<bool> {
      * Ensure validity check succeeds before creating cache entry.
      */
     /* Parse string into list of identifiers */
-    if varlena_seams::split_identifier_string::call(mcx, searchPath)?.is_none() {
+    if varlena_seams::split_identifier_string::call(mcx, searchPath, ',')?.is_none() {
         /* syntax error in name list */
         guc_seams::guc_check_errdetail::call("List syntax is invalid.".to_string());
         return Ok(false);

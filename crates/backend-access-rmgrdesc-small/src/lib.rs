@@ -51,9 +51,31 @@ pub use rmgrdesc_utils::{array_desc, offset_elem_desc, oid_elem_desc, redirect_e
 pub use seqdesc::{seq_desc, seq_identify, XLOG_SEQ_LOG};
 pub use tblspcdesc::{tblspc_desc, tblspc_identify, XLOG_TBLSPC_CREATE, XLOG_TBLSPC_DROP};
 
-/// No seams to install: every function here is a leaf consumers can depend on
-/// directly.
-pub fn init_seams() {}
+/// Install all seam slots owned by this crate.
+pub fn init_seams() {
+    use backend_rmgrdesc_small_seams as seams;
+    seams::array_desc::set(rmgrdesc_utils::array_desc_seam);
+    seams::offset_elem_desc::set(rmgrdesc_utils::offset_elem_desc_seam);
+    seams::redirect_elem_desc::set(rmgrdesc_utils::redirect_elem_desc_seam);
+    seams::oid_elem_desc::set(rmgrdesc_utils::oid_elem_desc_seam);
+
+    backend_access_rmgrdesc_clogdesc_seams::clog_desc::set(clogdesc::clog_desc_seam);
+    backend_access_rmgrdesc_clogdesc_seams::clog_identify::set(clogdesc::clog_identify);
+    backend_access_rmgrdesc_committsdesc_seams::commit_ts_desc::set(committsdesc::commit_ts_desc_seam);
+    backend_access_rmgrdesc_committsdesc_seams::commit_ts_identify::set(committsdesc::commit_ts_identify);
+    backend_access_rmgrdesc_dbasedesc_seams::dbase_desc::set(dbasedesc::dbase_desc_seam);
+    backend_access_rmgrdesc_dbasedesc_seams::dbase_identify::set(dbasedesc::dbase_identify);
+    backend_access_rmgrdesc_genericdesc_seams::generic_desc::set(genericdesc::generic_desc_seam);
+    backend_access_rmgrdesc_genericdesc_seams::generic_identify::set(genericdesc::generic_identify);
+    backend_access_rmgrdesc_logicalmsgdesc_seams::logicalmsg_desc::set(logicalmsgdesc::logicalmsg_desc_seam);
+    backend_access_rmgrdesc_logicalmsgdesc_seams::logicalmsg_identify::set(logicalmsgdesc::logicalmsg_identify);
+    backend_access_rmgrdesc_relmapdesc_seams::relmap_desc::set(relmapdesc::relmap_desc_seam);
+    backend_access_rmgrdesc_relmapdesc_seams::relmap_identify::set(relmapdesc::relmap_identify);
+    backend_access_rmgrdesc_seqdesc_seams::seq_desc::set(seqdesc::seq_desc_seam);
+    backend_access_rmgrdesc_seqdesc_seams::seq_identify::set(seqdesc::seq_identify);
+    backend_access_rmgrdesc_tblspcdesc_seams::tblspc_desc::set(tblspcdesc::tblspc_desc_seam);
+    backend_access_rmgrdesc_tblspcdesc_seams::tblspc_identify::set(tblspcdesc::tblspc_identify);
+}
 
 #[cfg(test)]
 mod tests;

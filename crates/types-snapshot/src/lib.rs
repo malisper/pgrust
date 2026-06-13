@@ -1,13 +1,14 @@
-//! Snapshot vocabulary (`utils/snapshot.h`), trimmed.
+//! Snapshot vocabulary (`utils/snapshot.h`).
 //!
-//! Ports so far consume only the snapshot's type tag (the `IsMVCCSnapshot`
-//! test and the `SnapshotAny` identity); the payload model grows when the
-//! snapshot-owning unit (`utils/time/snapmgr.c`) lands.
+//! Carries the snapshot type tag plus the MVCC payload and snapshot-manager
+//! bookkeeping the `utils/time/snapmgr.c` owner consumes.
 
 #![no_std]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+extern crate alloc;
 
 pub mod snapshot;
 

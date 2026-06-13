@@ -1,5 +1,6 @@
 //! Seam declarations for the genuinely-unported `libpq/hba.c` authentication
-//! file parser, as consumed by `hbafuncs.c`'s SQL views.
+//! file parser, as consumed by `hbafuncs.c`'s SQL views and by the connection's
+//! authentication-method name.
 //!
 //! `hbafuncs.c` (`pg_hba_file_rules` / `pg_ident_file_mappings`) is a thin
 //! materialized-SRF wrapper that reads the parsed `HbaLine` / `IdentLine` token
@@ -12,6 +13,7 @@
 //! installs these from its `init_seams()` when it lands; until then a call
 //! panics loudly.
 
+use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::funcapi::ReturnSetInfo;
 
@@ -29,4 +31,12 @@ seam_core::seam!(
     /// tuplestore. `Err` carries the `could not open pg_ident.conf`
     /// `ereport(ERROR)` and OOM.
     pub fn fill_ident_view<'mcx>(rsinfo: &mut ReturnSetInfo<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `hba_authname(MyClientConnectionInfo.auth_method)` (hba.c): the printable
+    /// name of the authentication method that authenticated this connection.
+    /// hba.c owns the `UserAuthName[]` table and reads the ambient
+    /// `MyClientConnectionInfo.auth_method`. Result copied into `mcx`.
+    pub fn hba_authname<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgString<'mcx>>
 );

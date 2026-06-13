@@ -7,6 +7,33 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_nodes::nodes::Node;
+use types_rel::RelationData;
+
+seam_core::seam!(
+    /// `get_partition_parent(relid, even_if_detached)` (catalog/partition.c):
+    /// the OID of the given partition's parent table. With `even_if_detached`
+    /// true (partcache passes true) a partition mid-detach still reports its
+    /// parent. `Err` carries the `elog(ERROR, "could not find tuple for
+    /// parent of relation %u")` and the pg_inherits scan errors.
+    pub fn get_partition_parent(relid: Oid, even_if_detached: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `map_partition_varattnos(expr, fromrel_varno, to_rel, from_rel)`
+    /// (catalog/partition.c): rewrite every `Var` in the qual list `exprs` to
+    /// bear `to_rel`'s attnos instead of `from_rel`'s (matching by column
+    /// name), with the source varno `fromrel_varno` (partcache passes 1). The
+    /// rewritten list is allocated in `mcx`. `Err` carries the
+    /// `build_attrmap_by_name` mismatch errors and OOM.
+    pub fn map_partition_varattnos<'mcx, 'r>(
+        mcx: Mcx<'mcx>,
+        exprs: PgVec<'mcx, Node<'mcx>>,
+        fromrel_varno: i32,
+        to_rel: &RelationData<'r>,
+        from_rel: &RelationData<'r>,
+    ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
+);
 
 seam_core::seam!(
     /// `find_all_inheritors(parentrelId, lockmode, numparents)`

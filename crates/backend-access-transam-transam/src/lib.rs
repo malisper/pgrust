@@ -328,5 +328,24 @@ pub fn TransactionIdGetCommitLSN(xid: TransactionId) -> PgResult<XLogRecPtr> {
     Ok(result)
 }
 
+/// Wire this crate's implementations into the seam slots declared by
+/// `backend-access-transam-transam-seams`.
+pub fn init_seams() {
+    use backend_access_transam_transam_seams as seams;
+    seams::transaction_id_did_commit::set(|xid, transaction_xmin| {
+        TransactionIdDidCommit(xid, transaction_xmin)
+    });
+    seams::transaction_id_did_abort::set(|xid, transaction_xmin| {
+        TransactionIdDidAbort(xid, transaction_xmin)
+    });
+    seams::transaction_id_precedes::set(|id1, id2| TransactionIdPrecedes(id1, id2));
+    seams::transaction_id_commit_tree::set(|xid, children| TransactionIdCommitTree(xid, children));
+    seams::transaction_id_async_commit_tree::set(|xid, children, lsn| {
+        TransactionIdAsyncCommitTree(xid, children, lsn)
+    });
+    seams::transaction_id_abort_tree::set(|xid, children| TransactionIdAbortTree(xid, children));
+    seams::transaction_id_latest::set(|main_xid, children| TransactionIdLatest(main_xid, children));
+}
+
 #[cfg(test)]
 mod tests;

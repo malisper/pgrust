@@ -482,6 +482,7 @@ pub fn ExecInitParallelPlan<'mcx>(
 
     // Create a parallel context.
     let pcxt = parallel::create_parallel_context::call(
+        mcx,
         String::from("postgres"),
         String::from("ParallelQueryMain"),
         nworkers,
@@ -569,7 +570,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     debug_assert!(sup::es_snapshot::call(estate) == Some(sup::get_active_snapshot::call()));
 
     // Everyone's had a chance to ask for space, so now create the DSM.
-    parallel::initialize_parallel_dsm::call(pcxt)?;
+    parallel::initialize_parallel_dsm::call(mcx, pcxt)?;
 
     let toc = parallel::pcxt_toc::call(pcxt);
     let seg = parallel::pcxt_seg::call(pcxt);
@@ -630,7 +631,6 @@ pub fn ExecInitParallelPlan<'mcx>(
                 instrument_offset,
                 num_workers: nworkers,
                 num_plan_nodes: e.nnodes,
-                plan_node_id: Vec::new(),
             },
         );
         for i in 0..(nworkers * e.nnodes) {

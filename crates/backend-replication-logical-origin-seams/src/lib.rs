@@ -17,6 +17,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `replorigin_session_origin_lsn = lsn` (origin.c session-state global):
+    /// record the remote LSN the current session's replication origin has
+    /// reached, so streaming can restart from the right place after a crash.
+    /// Plain backend-local write; infallible.
+    pub fn set_replorigin_session_origin_lsn(lsn: types_core::XLogRecPtr)
+);
+
+seam_core::seam!(
     /// Read `replorigin_session_origin`.
     pub fn replorigin_session_origin() -> RepOriginId
 );
@@ -75,4 +83,25 @@ seam_core::seam!(
         roident: types_core::primitive::RepOriginId,
         missing_ok: bool,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `max_active_replication_origins` (origin.c GUC): the number of
+    /// replication-origin slots configured. Zero means replication origins are
+    /// disabled, which the launcher checks before starting apply workers.
+    pub fn max_active_replication_origins() -> i32
+);
+
+seam_core::seam!(
+    /// `ReplicationOriginShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn replication_origin_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `ReplicationOriginShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn replication_origin_shmem_init() -> types_error::PgResult<()>
 );

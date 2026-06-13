@@ -483,6 +483,14 @@ pub fn init_seams() {
     cv_seams::condition_variable_timed_sleep::set(ConditionVariableTimedSleep);
     cv_seams::condition_variable_cancel_sleep::set(ConditionVariableCancelSleep);
     cv_seams::condition_variable_broadcast::set(ConditionVariableBroadcast);
+    // The seam declares `cv: &mut ConditionVariable` (its shmem/DSM callers
+    // hold a mutable borrow); the ported body only needs `&` (SpinLockInit +
+    // proclist_init operate through interior mutability). A thin adapter
+    // reborrows shared without touching the body. opacity-inherited.
+    cv_seams::condition_variable_init::set(|cv| ConditionVariableInit(cv));
+    cv_seams::condition_variable_sleep::set(ConditionVariableSleep);
+    cv_seams::condition_variable_signal::set(ConditionVariableSignal);
+    cv_seams::condition_variable_prepare_to_sleep::set(ConditionVariablePrepareToSleep);
 }
 
 #[cfg(test)]

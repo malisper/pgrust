@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetLWLockIdentifier(uint32 classId, uint16 eventId)` — the tranche name
+    /// for an LWLock wait event. Returns a `'static` tranche name owned by
+    /// `lwlock.c`'s built-in/registered tranche tables.
+    pub fn get_lwlock_identifier(class_id: types_core::uint32, event_id: types_core::uint16) -> &'static str
+);
+
+seam_core::seam!(
     /// `LWLockAcquire(LWLock *lock, LWLockMode mode)` — acquire the lock,
     /// returning a guard that releases it on drop (`was_free` carries the C
     /// return value: true if the lock was free, false if it had to wait).
@@ -164,6 +171,29 @@ seam_core::seam!(
     /// `LWLockAcquire(TwoPhaseStateLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
     pub fn lock_twophase_state(exclusive: bool) -> PgResult<()>
 );
+
+// ---- RelationMappingLock (the named LWLock interlocking pg_filenode.map) ----
+//
+// relmapper.c acquires `RelationMappingLock` in LW_SHARED (read) or
+// LW_EXCLUSIVE (write/checkpoint) and releases it mid-function at points C
+// chooses. The lock lives in `MainLWLockArray` owned by lwlock.c. As with
+// `TwoPhaseStateLock`, a guard form is preferred per AGENTS.md "Locks and held
+// resources"; until lwlock.c hands back a guard for the named locks, the
+// explicit acquire/release pair is recorded in DESIGN_DEBT.
+
+seam_core::seam!(
+    /// `LWLockAcquire(RelationMappingLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
+    pub fn lock_relation_mapping(exclusive: bool) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockRelease(RelationMappingLock)`.
+    pub fn unlock_relation_mapping() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(RelationMappingLock, LW_EXCLUSIVE)` — the
+    /// assertion predicate at the top of `write_relmap_file`. Pure read.
+    pub fn relation_mapping_lock_held_by_me_exclusive() -> bool
+);
 seam_core::seam!(
     /// `LWLockRelease(TwoPhaseStateLock)`.
     pub fn unlock_twophase_state() -> PgResult<()>
@@ -172,4 +202,46 @@ seam_core::seam!(
     /// `LWLockHeldByMeInMode(TwoPhaseStateLock, LW_EXCLUSIVE)` — the assertion
     /// predicate guarding the redo/scan entry points. Pure read.
     pub fn twophase_state_held_exclusive() -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, mode)` — acquire the built-in ProcArrayLock
+    /// (its `MainLWLockArray` offset is owned by lwlock; the named slot avoids
+    /// transcribing the individual-lock offset here). `Err` carries the C
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_proc_array(mode: LWLockMode) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn lwlock_release_proc_array() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
+    /// hold the built-in lock at `lock_offset` (in any mode)? Used in
+    /// `Assert`s; the lock is named by offset since `MainLWLockArray` is
+    /// lwlock.c-owned shared memory.
+    pub fn lwlock_held_by_me_main(lock_offset: usize) -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(&MainLWLockArray[lock_offset].lock, mode)` — does
+    /// this backend hold the built-in lock at `lock_offset` in exactly `mode`?
+    pub fn lwlock_held_by_me_in_mode_main(lock_offset: usize, mode: LWLockMode) -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockShmemSize()` (`storage/lmgr/lwlock.c`) — shared-memory bytes for
+    /// the LWLock arrays/tranches; summed by ipci.c `CalculateShmemSize`.
+    /// `Err` carries the `add_size`/`mul_size` overflow `ereport`. Owner
+    /// unported; scaffolded slot.
+    pub fn lwlock_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CreateLWLocks()` (lwlock.c) — allocate the LWLocks (must run first in
+    /// `CreateOrAttachShmemStructs`, before `InitShmemIndex`). `Err` carries
+    /// the out-of-shmem `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn create_lwlocks() -> types_error::PgResult<()>
 );

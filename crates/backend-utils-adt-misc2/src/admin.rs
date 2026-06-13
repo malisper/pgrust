@@ -668,7 +668,7 @@ fn fill_lock_row<'mcx>(
     } else {
         nulls[11] = true;
     }
-    let modename = lock::get_lockmode_name::call(mcx, tag.locktag_lockmethodid, mode);
+    let modename = lock::get_lockmode_name::call(tag.locktag_lockmethodid as u16, mode);
     values[12] = text_datum(mcx, modename.as_str())?;
     values[13] = Datum::from_bool(granted);
     values[14] = Datum::from_bool(instance.fastpath);

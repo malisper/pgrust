@@ -27,9 +27,14 @@
 //! `lookup_type_cache` + `FunctionCallInvoke` -> typcache-seams
 //! (`record_column_{cmp,eq,hash,hash_extended}`); `getType*Info` + the
 //! input/output/receive/send fmgr calls -> fmgr-seams
-//! (`record_column_{input,receive,output,send}`); `datum_image_eq` and the
-//! byte-image element comparison -> datum-seams
-//! (`datum_image_{eq,cmp}`); `format_type_be` -> format-type-seams;
+//! (`record_column_{input,receive,output,send}`); the per-column byte-image
+//! equality (`record_image_eq`) goes through datum.c's canonical
+//! `datum_image_eq(Datum, Datum, typByVal, typLen)` -> datum-seams. The
+//! per-column byte-image three-way comparison of `record_image_cmp` is inlined
+//! here exactly as rowtypes.c does it (datum.c owns no `datum_image_cmp` — none
+//! exists in PostgreSQL): a by-value word compare, a fixed-length `memcmp`, or a
+//! varlena `VARDATA`/length compare over the already-detoasted column image.
+//! `format_type_be` -> format-type-seams;
 //! `check_stack_depth` -> stack-depth-seams. Tuple form/deform is the real
 //! `backend-access-common-heaptuple` unit; the protocol message helpers are the
 //! real `backend-libpq-pqformat` unit.
@@ -41,6 +46,8 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::Oid;
+use types_datum::varlena::VARHDRSZ;
+use types_datum::Datum;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
@@ -56,7 +63,7 @@ use backend_access_common_heaptuple::{heap_deform_tuple, heap_form_tuple};
 use backend_libpq_pqformat::{
     pq_begintypsend, pq_endtypsend, pq_getmsgbytes, pq_getmsgint, pq_sendbytes, pq_sendint32,
 };
-use backend_utils_adt_datum_seams::{datum_image_cmp, datum_image_eq};
+use backend_utils_adt_datum_seams::datum_image_eq;
 use backend_utils_adt_format_type_seams::format_type_be;
 use backend_utils_cache_typcache_seams::{
     lookup_rowtype_tupdesc, record_column_cmp, record_column_eq, record_column_hash,
@@ -852,9 +859,10 @@ pub fn record_image_cmp<'mcx>(
                 break;
             }
 
-            // Compare the pair of elements byte-image-wise (datum.c semantics,
-            // incl. the elog(ERROR, "unexpected attlen") for any other length).
-            let cmpresult = datum_image_cmp::call(v1, v2, att1.attbyval, att1.attlen)?;
+            // Compare the pair of elements byte-image-wise, inlined exactly as
+            // rowtypes.c does (incl. the elog(ERROR, "unexpected attlen") for
+            // any other length). Uses att1's storage, as C does.
+            let cmpresult = column_image_cmp(v1, v2, att1.attbyval, att1.attlen)?;
             if cmpresult < 0 {
                 result = -1;
                 break;
@@ -934,8 +942,15 @@ pub fn record_image_eq<'mcx>(
                 break;
             }
 
-            // Compare the pair of elements (datum_image_eq).
-            result = datum_image_eq::call(v1, v2, att1.attbyval, att2.attlen)?;
+            // Compare the pair of elements via datum.c's canonical
+            // `datum_image_eq(Datum, Datum, typByVal, typLen)` over att1's
+            // storage, exactly as rowtypes.c does.
+            result = datum_image_eq::call(
+                tuple_value_as_datum(v1),
+                tuple_value_as_datum(v2),
+                att1.attbyval,
+                att1.attlen,
+            )?;
             if !result {
                 break;
             }
@@ -1143,4 +1158,85 @@ fn form_tuple<'mcx>(
 /// Copy a borrowed byte slice into an `mcx`-allocated `PgVec`.
 fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
     mcx::slice_in(mcx, src)
+}
+
+/// View a deformed column value as the raw `Datum` datum.c's `datum_image_eq`
+/// expects (`postgres.h`): a by-value column is its scalar word; a
+/// by-reference column is the pointer to its (already-detoasted) on-disk image.
+///
+/// In C `heap_deform_tuple` hands `record_image_eq` exactly such a `Datum` per
+/// column — for a by-ref type a pointer into the tuple's data buffer. The owned
+/// deform splits that into [`TupleValue::ByRef`] holding the column's image in
+/// the call's `mcx`; this re-derives the pointer-shaped `Datum` over those
+/// bytes (the same `PointerGetDatum(&owned_bytes)` bridge arrayfuncs uses when
+/// re-crossing a `Datum`-typed seam). The image stays alive in `mcx` for the
+/// whole call, exactly as C's tuple buffer does.
+fn tuple_value_as_datum(value: &TupleValue<'_>) -> Datum {
+    match value {
+        TupleValue::ByVal(d) => *d,
+        TupleValue::ByRef(bytes) => Datum::from_usize(bytes.as_ptr() as usize),
+    }
+}
+
+/// The byte-image three-way comparison of two non-null column values, inlined
+/// exactly as `record_image_cmp` (rowtypes.c) does it. datum.c owns no
+/// `datum_image_cmp` (PostgreSQL has none), so the per-type dispatch lives here:
+///
+/// * pass-by-value (`attbyval`): compare the raw `Datum` words as unsigned
+///   integers, as C does (`values1[i1] != values2[i2]` then `<`).
+/// * fixed-length pass-by-reference (`attlen > 0`): `memcmp` of `attlen` bytes.
+/// * varlena (`attlen == -1`): compare `VARDATA` over `Min(payload lengths)`,
+///   breaking ties by total length. The column image is already detoasted
+///   (`TupleValue::ByRef`), so this reads it directly.
+/// * any other `attlen`: the C `elog(ERROR, "unexpected attlen: %d")`.
+fn column_image_cmp(
+    v1: &TupleValue<'_>,
+    v2: &TupleValue<'_>,
+    attbyval: bool,
+    attlen: i16,
+) -> PgResult<i32> {
+    if attbyval {
+        let (w1, w2) = match (v1, v2) {
+            (TupleValue::ByVal(a), TupleValue::ByVal(b)) => (a.as_usize(), b.as_usize()),
+            _ => panic!("record_image_cmp: by-value attribute deformed as by-reference"),
+        };
+        Ok(match w1.cmp(&w2) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        })
+    } else if attlen > 0 {
+        let b1 = v1.as_ref_bytes();
+        let b2 = v2.as_ref_bytes();
+        let n = attlen as usize;
+        Ok(memcmp_sign(&b1[..n], &b2[..n]))
+    } else if attlen == -1 {
+        // Both images are already-detoasted 4-byte-header varlenas.
+        let b1 = v1.as_ref_bytes();
+        let b2 = v2.as_ref_bytes();
+        let data1 = &b1[VARHDRSZ..];
+        let data2 = &b2[VARHDRSZ..];
+        let min = core::cmp::min(data1.len(), data2.len());
+        let mut cmpresult = memcmp_sign(&data1[..min], &data2[..min]);
+        if cmpresult == 0 {
+            // Tie-break on total image length (C compares VARSIZE_ANY).
+            cmpresult = match b1.len().cmp(&b2.len()) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Equal => 0,
+                core::cmp::Ordering::Greater => 1,
+            };
+        }
+        Ok(cmpresult)
+    } else {
+        Err(PgError::error(format!("unexpected attlen: {attlen}")))
+    }
+}
+
+/// `memcmp` returning a normalized sign (-1/0/1), as the C comparison sites use.
+fn memcmp_sign(a: &[u8], b: &[u8]) -> i32 {
+    match a.cmp(b) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    }
 }

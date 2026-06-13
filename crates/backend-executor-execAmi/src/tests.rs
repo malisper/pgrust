@@ -143,6 +143,7 @@ fn exec_re_scan_walks_params_and_dispatches() {
             )
             .unwrap(),
         ),
+        ..Default::default()
     };
     let mut init_plan = vec_with_capacity_in(mcx, 1).unwrap();
     init_plan.push(init_state);
@@ -155,6 +156,8 @@ fn exec_re_scan_walks_params_and_dispatches() {
         ecxt_scantuple: None,
         ecxt_innertuple: None,
         ecxt_outertuple: None,
+        ecxt_oldtuple: None,
+        ecxt_newtuple: None,
         ecxt_per_query_memory: estate.es_query_cxt,
         ecxt_per_tuple_memory: estate.es_query_cxt.context().new_child("ExprContext"),
         ecxt_aggvalues: PgVec::new_in(estate.es_query_cxt),

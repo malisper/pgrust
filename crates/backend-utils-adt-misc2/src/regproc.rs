@@ -1173,7 +1173,7 @@ pub fn stringToQualifiedNameList(
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<Vec<String>>> {
     /* C pstrdup's a modifiable copy; SplitIdentifierString does that itself. */
-    let namelist = backend_utils_adt_varlena_seams::split_identifier_string::call(mcx, string)?;
+    let namelist = backend_utils_adt_varlena_seams::split_identifier_string::call(mcx, string, '.')?;
 
     let namelist = match namelist {
         Some(list) => list,

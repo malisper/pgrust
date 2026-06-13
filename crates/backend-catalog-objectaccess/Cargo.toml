@@ -1,0 +1,15 @@
+[package]
+name = "backend-catalog-objectaccess"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_catalog_objectaccess"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-catalog = { path = "../types-catalog" }
+types-error = { path = "../types-error" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }

@@ -12,9 +12,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `TimestampDifference(start_time, stop_time, *secs, *microsecs)` —
-    /// the difference split into seconds and microseconds, clamped to zero
-    /// when `stop_time <= start_time`.
+    /// `void TimestampDifference(TimestampTz start, TimestampTz stop,
+    /// long *secs, int *microsecs)` (`timestamp.c`) — returns `(secs, usecs)`
+    /// of `stop - start`, clamped to 0 when negative.
     pub fn timestamp_difference(start_time: TimestampTz, stop_time: TimestampTz) -> (i64, i32)
 );
 
@@ -36,4 +36,39 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         t: TimestampTz,
     ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `bool TimestampDifferenceExceedsSeconds(TimestampTz start,
+    /// TimestampTz stop, int threshold_sec)` (`timestamp.c`).
+    pub fn timestamp_difference_exceeds_seconds(
+        start_time: TimestampTz,
+        stop_time: TimestampTz,
+        threshold_sec: i32,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `TimestampDifferenceMilliseconds(start_time, stop_time)` — the
+    /// difference in milliseconds, clamped to the `[0, INT_MAX]` range.
+    pub fn timestamp_difference_milliseconds(
+        start_time: TimestampTz,
+        stop_time: TimestampTz
+    ) -> i64
+);
+
+seam_core::seam!(
+    /// `JsonEncodeDateTime(buf, value, typid, tzp)` (json.c:309) — encode a
+    /// date/time `Datum` into ISO format (forcing XSD date style), returning the
+    /// formatted string. `tzp`, if `Some`, is the time-zone offset in seconds
+    /// for `timestamptz`. The body is entirely the
+    /// `backend/utils/adt/{date,time,timestamp}.c` field conversions
+    /// (`j2date`/`time2tm`/`timetz2tm`/`timestamp2tm`) plus the `Encode*`
+    /// routines, so the whole operation is owned by the datetime subsystem.
+    /// `Err` carries the C `DTERR_*` → `ereport(ERROR, "... out of range")`.
+    pub fn json_encode_datetime(
+        value: types_datum::Datum,
+        typid: types_core::Oid,
+        tzp: Option<i32>,
+    ) -> types_error::PgResult<String>
 );
