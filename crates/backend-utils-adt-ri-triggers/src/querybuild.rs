@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 
 use crate::RelSide;
 
@@ -112,7 +112,14 @@ pub(crate) fn ri_generate_qual_collation(
     let (nspname, collname) =
         match backend_utils_cache_syscache_seams::collation_qualified_name::call(mcx, collation)? {
             Some((n, c)) => (n.to_vec(), c.to_vec()),
-            None => return Ok(()),
+            // C: `if (!HeapTupleIsValid(tp)) elog(ERROR, "cache lookup failed
+            // for collation %u", collation);` — a valid OID with no syscache
+            // tuple is a hard error, not a silent skip.
+            None => {
+                return Err(PgError::error(alloc::format!(
+                    "cache lookup failed for collation {collation}"
+                )));
+            }
         };
     try_extend(mcx, buf, b" COLLATE ")?;
     append_quoted_name(mcx, buf, &nspname)?;

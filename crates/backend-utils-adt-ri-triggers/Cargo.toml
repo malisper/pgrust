@@ -37,3 +37,6 @@ backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-ri-triggers-seams = { path = "../backend-utils-adt-ri-triggers-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+types-acl = { path = "../types-acl" }

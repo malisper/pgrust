@@ -2185,6 +2185,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
  "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
  "backend-catalog-pg-constraint-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execMain-seams",
@@ -2199,8 +2200,10 @@ dependencies = [
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-more-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
+ "types-acl",
  "types-catalog",
  "types-core",
  "types-datum",
@@ -2566,6 +2569,9 @@ name = "backend-utils-misc-more-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]

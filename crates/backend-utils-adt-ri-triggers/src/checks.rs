@@ -401,18 +401,46 @@ pub fn ri_report_violation(
     Err(attach_table_constraint(mcx, err, fk_rel, riinfo)?)
 }
 
-/// Permission probe for `ri_ReportViolation`'s `has_perm` decision (table-level
-/// or column-level `ACL_SELECT`, denied under RLS). Routes through the
-/// ExecCheckPermissions seam with the single relation's selected columns.
+/// Permission probe for `ri_ReportViolation`'s `has_perm` decision
+/// (`ri_triggers.c` lines 2723-2761, the non-`partgone` branch). If the user
+/// can't view the key columns we omit the `Key (...)=(...)` detail.
+///
+/// C: check RLS first — if `check_enable_rls(rel_oid, InvalidOid, true) ==
+/// RLS_ENABLED` we return `false` (don't leak data under RLS); otherwise check
+/// table-level `pg_class_aclcheck(ACL_SELECT)`, and failing that the per-column
+/// `pg_attribute_aclcheck(ACL_SELECT)` loop (any denied column → `false`). All
+/// checks use `GetUserId()`.
 fn report_has_perm(rel_oid: Oid, key_attnums: &[i16]) -> PgResult<bool> {
-    // C builds an RTE+perminfo for `rel_oid` requiring ACL_SELECT on the key
-    // columns and runs aclcheck (no ereport on violation), then falls back to
-    // table-level then column-level checks; the executor permission check
-    // captures that. relkind is read by the owner from the relcache.
-    backend_executor_execMain_seams::exec_check_permissions_select::call(
-        &[(rel_oid, 0u8, key_attnums)],
-        false,
-    )
+    use types_acl::{ACLCHECK_OK, ACL_SELECT, RLS_ENABLED};
+
+    if backend_utils_misc_more_seams::check_enable_rls::call(rel_oid, InvalidOid, true)?
+        != RLS_ENABLED
+    {
+        let userid = backend_utils_init_miscinit_seams::get_user_id::call();
+        let aclresult = backend_catalog_aclchk_seams::pg_class_aclcheck::call(
+            rel_oid,
+            userid,
+            ACL_SELECT,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            // Try for column-level permissions.
+            for &attnum in key_attnums {
+                let aclresult = backend_catalog_aclchk_seams::pg_attribute_aclcheck::call(
+                    rel_oid,
+                    attnum,
+                    userid,
+                    ACL_SELECT,
+                )?;
+                if aclresult != ACLCHECK_OK {
+                    // No access to the key.
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// `errtableconstraint(rel, NameStr(riinfo->conname))` — attach the
