@@ -1244,6 +1244,22 @@ pub fn decode_rels(buf: &[u8], base: usize, n: usize) -> Vec<RelFileLocator> {
     v
 }
 
+/// Decode an `xl_xact_stats_item[]` segment (16 bytes each:
+/// `{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`) from `bytes`.
+fn decode_stats_items(bytes: &[u8], n: usize) -> Vec<types_core::xact::XlXactStatsItem> {
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        let o = i * SIZEOF_XL_XACT_STATS_ITEM;
+        let kind = i32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        let dboid = u32::from_le_bytes(bytes[o + 4..o + 8].try_into().unwrap());
+        let objid_lo = u32::from_le_bytes(bytes[o + 8..o + 12].try_into().unwrap());
+        let objid_hi = u32::from_le_bytes(bytes[o + 12..o + 16].try_into().unwrap());
+        let objid = ((objid_hi as u64) << 32) | objid_lo as u64;
+        v.push(types_core::xact::XlXactStatsItem { kind, dboid, objid });
+    }
+    v
+}
+
 fn decode_gid(buf: &[u8], layout: &BufferLayout, hdr: &TwoPhaseFileHeader) -> PgResult<String> {
     let g = &buf[layout.gid..layout.gid + hdr.gidlen as usize];
     let end = g.iter().position(|&b| b == 0).unwrap_or(g.len());
@@ -1272,6 +1288,16 @@ pub struct FinishContext {
     /// `TransactionXmin` (snapmgr.c) — needed by `TransactionIdDidCommit`'s
     /// subtrans recursion; read by the caller off its snapshot state.
     pub transaction_xmin: TransactionId,
+    /// `MyXactFlags` (xact.c) — the committing backend's accumulated xact
+    /// flags, OR'd with `XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK` into the 2nd
+    /// phase commit/abort record (an ambient global threaded as a param).
+    pub my_xact_flags: i32,
+    /// `MyDatabaseTableSpace` (globals.c) — written into the commit record's
+    /// `xl_xact_dbinfo` when the record carries inval messages or logical info.
+    pub my_database_table_space: Oid,
+    /// `XLogLogicalInfoActive()` — whether logical decoding info is being
+    /// emitted (affects `xinfo`/`HAS_GID`); read by the caller.
+    pub xlog_logical_info_active: bool,
 }
 
 /// `FinishPreparedTransaction` — execute COMMIT PREPARED or ROLLBACK PREPARED.
@@ -1337,22 +1363,21 @@ pub fn finish_prepared_transaction(
             xid,
             &children,
             &commitrels,
+            decode_stats_items(commitstats, hdr.ncommitstats as usize),
             invalmsgs,
             hdr.ninvalmsgs,
             hdr.initfileinval,
             gid,
-            ctx.repl,
-            ctx.current_timestamp,
+            ctx,
         )?;
     } else {
         record_transaction_abort_prepared(
             xid,
             &children,
             &abortrels,
+            decode_stats_items(abortstats, hdr.nabortstats as usize),
             gid,
-            ctx.repl,
-            ctx.current_timestamp,
-            ctx.transaction_xmin,
+            ctx,
         )?;
     }
 
@@ -1452,13 +1477,15 @@ fn record_transaction_commit_prepared(
     xid: TransactionId,
     children: &[TransactionId],
     rels: &[RelFileLocator],
-    _invalmsgs_bytes: &[u8],
+    dropped_stats: Vec<types_core::xact::XlXactStatsItem>,
+    invalmsgs_bytes: &[u8],
     ninvalmsgs: i32,
     initfileinval: bool,
     gid: &str,
-    repl: ReplOriginSession,
-    committs: TimestampTz,
+    ctx: FinishContext,
 ) -> PgResult<()> {
+    let repl = ctx.repl;
+    let committs = ctx.current_timestamp;
     let replorigin = repl.active();
     let mut origin_ts = repl.origin_timestamp;
 
@@ -1469,18 +1496,18 @@ fn record_transaction_commit_prepared(
         commit_time: committs,
         subxacts: children.to_vec(),
         rels: rels.to_vec(),
-        dropped_stats: Vec::new(),
-        msgs: Vec::new(),
+        dropped_stats,
+        msgs: invalmsgs_bytes.to_vec(),
         nmsgs: ninvalmsgs,
         relcache_inval: initfileinval,
-        xactflags: XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
+        xactflags: ctx.my_xact_flags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
         twophase_xid: xid,
         twophase_gid: Some(String::from(gid)),
         force_sync_commit: false,
         synchronous_commit: 0,
-        xlog_logical_info_active: false,
-        my_database_id: 0,
-        my_database_table_space: 0,
+        xlog_logical_info_active: ctx.xlog_logical_info_active,
+        my_database_id: ctx.my_database_id,
+        my_database_table_space: ctx.my_database_table_space,
         replorigin_session_origin: repl.origin,
         origin: if replorigin {
             Some(XlXactOrigin {
@@ -1519,11 +1546,13 @@ fn record_transaction_abort_prepared(
     xid: TransactionId,
     children: &[TransactionId],
     rels: &[RelFileLocator],
+    dropped_stats: Vec<types_core::xact::XlXactStatsItem>,
     gid: &str,
-    repl: ReplOriginSession,
-    abort_time: TimestampTz,
-    transaction_xmin: TransactionId,
+    ctx: FinishContext,
 ) -> PgResult<()> {
+    let repl = ctx.repl;
+    let abort_time = ctx.current_timestamp;
+    let transaction_xmin = ctx.transaction_xmin;
     let replorigin = repl.active();
 
     // Catch the abort-after-commit scenario.
@@ -1540,13 +1569,13 @@ fn record_transaction_abort_prepared(
         abort_time,
         subxacts: children.to_vec(),
         rels: rels.to_vec(),
-        dropped_stats: Vec::new(),
-        xactflags: XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
+        dropped_stats,
+        xactflags: ctx.my_xact_flags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
         twophase_xid: xid,
         twophase_gid: Some(String::from(gid)),
-        xlog_logical_info_active: false,
-        my_database_id: 0,
-        my_database_table_space: 0,
+        xlog_logical_info_active: ctx.xlog_logical_info_active,
+        my_database_id: ctx.my_database_id,
+        my_database_table_space: ctx.my_database_table_space,
         replorigin_session_origin: repl.origin,
         origin: if replorigin {
             Some(XlXactOrigin {
@@ -1799,6 +1828,12 @@ pub fn prescan_prepared_transactions(
 
     lwlock::lock_twophase_state::call(true)?;
     let inner = (|| -> PgResult<()> {
+        // C iterates `for (i = 0; i < numPrepXacts; i++)` with a plain `i++`
+        // after each entry. When ProcessTwoPhaseBuffer removes the current
+        // entry (PrepareRedoRemove swap-removes index i and decrements
+        // numPrepXacts), the entry swapped into slot i is left UNscanned and
+        // the loop terminates one earlier — we must reproduce that exactly,
+        // so always advance `i` regardless of whether a removal happened.
         let mut i = 0;
         while i < state.num_prep_xacts() {
             let (xid, start_lsn, ondisk) = {
@@ -1806,20 +1841,14 @@ pub fn prescan_prepared_transactions(
                 debug_assert!(g.inredo);
                 (g.xid, g.prepare_start_lsn, g.ondisk)
             };
-            let before = state.num_prep_xacts();
             let buf =
                 process_two_phase_buffer(state, xid, start_lsn, ondisk, false, true, orig_next_xid, transaction_xmin)?;
-            if buf.is_none() {
-                if state.num_prep_xacts() < before {
-                    continue; // i now holds a swapped-in entry
+            if buf.is_some() {
+                if transaction_id_precedes(xid, result) {
+                    result = xid;
                 }
-                i += 1;
-                continue;
+                xids.push(xid);
             }
-            if transaction_id_precedes(xid, result) {
-                result = xid;
-            }
-            xids.push(xid);
             i += 1;
         }
         Ok(())
@@ -1838,6 +1867,8 @@ pub fn standby_recover_prepared_transactions(
 ) -> PgResult<()> {
     lwlock::lock_twophase_state::call(true)?;
     let inner = (|| -> PgResult<()> {
+        // Plain `i++` per entry, matching C's `for (i; i < numPrepXacts; i++)`:
+        // a swap-removed entry leaves its replacement unscanned this pass.
         let mut i = 0;
         while i < state.num_prep_xacts() {
             let (xid, start_lsn, ondisk) = {
@@ -1845,12 +1876,8 @@ pub fn standby_recover_prepared_transactions(
                 debug_assert!(g.inredo);
                 (g.xid, g.prepare_start_lsn, g.ondisk)
             };
-            let before = state.num_prep_xacts();
-            let buf =
+            let _buf =
                 process_two_phase_buffer(state, xid, start_lsn, ondisk, true, false, orig_next_xid, transaction_xmin)?;
-            if buf.is_none() && state.num_prep_xacts() < before {
-                continue;
-            }
             i += 1;
         }
         Ok(())
@@ -1870,13 +1897,14 @@ pub fn recover_prepared_transactions(
 ) -> PgResult<()> {
     lwlock::lock_twophase_state::call(true)?;
     let inner = (|| -> PgResult<()> {
+        // Plain `i++` per entry per C's `for (i; i < numPrepXacts; i++)`: a
+        // swap-removed entry leaves its replacement unscanned this pass.
         let mut i = 0;
         while i < state.num_prep_xacts() {
             let (xid, start_lsn, ondisk) = {
                 let g = state.prep_xact(i);
                 (g.xid, g.prepare_start_lsn, g.ondisk)
             };
-            let before = state.num_prep_xacts();
             let buf = match process_two_phase_buffer(
                 state,
                 xid,
@@ -1888,9 +1916,6 @@ pub fn recover_prepared_transactions(
                 transaction_xmin,
             )? {
                 None => {
-                    if state.num_prep_xacts() < before {
-                        continue;
-                    }
                     i += 1;
                     continue;
                 }
