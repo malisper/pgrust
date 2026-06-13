@@ -45,3 +45,4 @@ backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+backend-utils-adt-quote-seams = { path = "../backend-utils-adt-quote-seams" }

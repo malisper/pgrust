@@ -73,6 +73,7 @@ use backend_utils_misc_guc_seams as guc;
 use backend_utils_adt_timestamp_seams as timestamp;
 use backend_tcop_postgres_seams as postgres;
 use backend_utils_error_seams as elog;
+use backend_utils_adt_quote_seams as quote;
 
 // ===========================================================================
 // Compile-time constants (slotsync.c file scope).
@@ -267,32 +268,6 @@ fn emit_log(level: i32, msg: &str, detail: Option<&str>, hint: Option<&str>) {
     }
     // At LOG/DEBUG, ereport emits and returns Ok(()); we discard the unit.
     let _ = elog::ereport::call(err);
-}
-
-/// `quote_literal_cstr(s)` (utils/builtins.h) — SQL-quote a literal string.
-fn quote_literal_cstr(rawstr: &str) -> String {
-    let mut num_quotes = 0usize;
-    let mut num_backslashes = 0usize;
-    for ch in rawstr.bytes() {
-        if ch == b'\'' {
-            num_quotes += 1;
-        } else if ch == b'\\' {
-            num_backslashes += 1;
-        }
-    }
-    let mut result = String::with_capacity(rawstr.len() + num_quotes + num_backslashes + 3);
-    if num_backslashes > 0 {
-        result.push('E');
-    }
-    result.push('\'');
-    for ch in rawstr.chars() {
-        if ch == '\'' || ch == '\\' {
-            result.push(ch);
-        }
-        result.push(ch);
-    }
-    result.push('\'');
-    result
 }
 
 // ===========================================================================
@@ -913,7 +888,7 @@ fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
     let primary_slot_name = xlogrecovery::primary_slot_name::call().unwrap_or_default();
     let cmd = format!(
         "SELECT pg_is_in_recovery(), count(*) = 1 FROM pg_catalog.pg_replication_slots WHERE slot_type='physical' AND slot_name={}",
-        quote_literal_cstr(&primary_slot_name)
+        quote::quote_literal_cstr::call(&primary_slot_name)
     );
 
     if !xact::is_transaction_state::call() {

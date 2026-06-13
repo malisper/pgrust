@@ -1314,6 +1314,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
+ "backend-utils-adt-quote-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error-seams",
  "backend-utils-init-miscinit-seams",
@@ -1792,6 +1793,13 @@ name = "backend-utils-adt-numutils"
 version = "0.0.0"
 dependencies = [
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-quote-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
