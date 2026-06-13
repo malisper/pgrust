@@ -19,6 +19,8 @@ pub const BTGreaterStrategyNumber: StrategyNumber = 5;
 pub const SK_ISNULL: i32 = 0x0001;
 /// `SK_SEARCHNULL` — scankey represents "col IS NULL".
 pub const SK_SEARCHNULL: i32 = 0x0040;
+/// `SK_SEARCHNOTNULL` — scankey represents "col IS NOT NULL".
+pub const SK_SEARCHNOTNULL: i32 = 0x0080;
 
 // nbtree-private `sk_flags` bits (`access/nbtree.h`).
 /// `SK_BT_SKIP` — skip array on a column without an input `=` condition.

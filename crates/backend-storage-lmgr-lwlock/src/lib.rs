@@ -1747,6 +1747,7 @@ pub fn init_seams() {
     );
     backend_storage_lmgr_lwlock_seams::lwlock_shmem_size::set(LWLockShmemSize);
     backend_storage_lmgr_lwlock_seams::create_lwlocks::set(create_lwlocks_seam);
+    backend_storage_lmgr_lwlock_seams::init_lwlock_access::set(InitLWLockAccess);
 }
 
 #[cfg(test)]
