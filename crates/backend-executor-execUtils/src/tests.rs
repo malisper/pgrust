@@ -331,6 +331,7 @@ fn relation_is_target_relation() {
                     resultRelations: Some(rels),
                     planTree: None,
                     rowMarks: None,
+                    canSetTag: false,
                 },
             )
             .unwrap(),
