@@ -48,6 +48,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitExprList(nodes, parent)` (execExpr.c): compile a list of
+    /// expressions into a list of `ExprState`s (`lappend(ExecInitExpr(e))`).
+    /// A `None` element (the C NULL `Expr *`) compiles to a `None` cell (the
+    /// C NULL `ExprState *`), preserving positional correspondence. Allocated
+    /// in the per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_init_expr_list<'mcx>(
+        nodes: &[Option<&types_nodes::primnodes::Expr>],
+        parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ExprState>>>
+);
+
+seam_core::seam!(
     /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h):
     /// evaluate a compiled `ExprState` in the given expression context (id into
     /// the EState pool), returning the result `Datum` and its is-null flag. The
@@ -104,6 +117,18 @@ seam_core::seam!(
     pub fn exec_hashjoin_qual<'mcx>(
         node: &mut types_nodes::nodehashjoin::HashJoinState<'mcx>,
         joinqual: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecQualAndReset(state, econtext)` (executor.h): evaluate a compiled
+    /// boolean qual `ExprState` over the econtext (id into the EState pool),
+    /// then reset the econtext's per-tuple memory (`ResetExprContext`). Returns
+    /// whether the qual passed. Fallible on `ereport(ERROR)`.
+    pub fn exec_qual_and_reset<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
 );

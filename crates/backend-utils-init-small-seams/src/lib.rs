@@ -135,6 +135,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `*MyClientSocket` (`globals.c` global): the inherited accepted client
+    /// socket, copied out. `None` when `MyClientSocket == NULL`. Pure read of
+    /// process-identity state.
+    pub fn my_client_socket() -> Option<types_net::ClientSocket>
+);
+
+seam_core::seam!(
     /// `START_CRIT_SECTION()` — increment `CritSectionCount` (globals.c);
     /// while non-zero any ERROR escalates to PANIC.
     pub fn start_critical_section()

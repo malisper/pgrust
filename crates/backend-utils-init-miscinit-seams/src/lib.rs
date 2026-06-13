@@ -103,18 +103,22 @@ seam_core::seam!(
     /// counter write.
     pub fn start_crit_section()
 );
+
 seam_core::seam!(
     /// `END_CRIT_SECTION()` — decrement `CritSectionCount`.
     pub fn end_crit_section()
 );
+
 seam_core::seam!(
     /// `HOLD_INTERRUPTS()` — increment `InterruptHoldoffCount`.
     pub fn hold_interrupts()
 );
+
 seam_core::seam!(
     /// `RESUME_INTERRUPTS()` — decrement `InterruptHoldoffCount`.
     pub fn resume_interrupts()
 );
+
 seam_core::seam!(
     /// `superuser_arg(roleid)` (superuser.c, reached via miscinit) — true if
     /// `roleid` has superuser privilege. Reads the catalog cache; pure for the
@@ -183,4 +187,19 @@ seam_core::seam!(
     /// `bool IsBinaryUpgrade` (globals.c) — running a `pg_upgrade` binary
     /// upgrade.
     pub fn is_binary_upgrade() -> bool
+);
+
+seam_core::seam!(
+    /// `InSecurityRestrictedOperation()` (miscinit.c) — true while a
+    /// SECURITY_RESTRICTED_OPERATION context is in effect (e.g. inside an
+    /// index expression). Pure read of `SecurityRestrictionContext`.
+    pub fn in_security_restricted_operation() -> bool
+);
+
+seam_core::seam!(
+    /// `superuser()` (superuser.c) — true if the *current* user
+    /// (`GetUserId()`) has superuser privilege. Used by
+    /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when
+    /// applying a function's `proconfig` SET items. Reads the catalog cache.
+    pub fn superuser() -> bool
 );

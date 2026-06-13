@@ -146,11 +146,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `wal_segment_size` (xlog.c GUC) — bytes per WAL segment file.
-    pub fn wal_segment_size() -> i32
-);
-
-seam_core::seam!(
     /// `XLogRecPtr GetRedoRecPtr(void)` (xlog.c) — the current redo pointer.
     pub fn get_redo_rec_ptr() -> XLogRecPtr
 );

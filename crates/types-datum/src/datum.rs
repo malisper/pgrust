@@ -183,6 +183,34 @@ impl Datum {
     }
 }
 
+/// `NullableDatum` (`postgres.h`) — a `Datum` paired with its SQL-NULL flag.
+/// C bundles these into the `args[]` flexible array of `FunctionCallInfoBaseData`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct NullableDatum {
+    /// `Datum value`.
+    pub value: Datum,
+    /// `bool isnull`.
+    pub isnull: bool,
+}
+
+impl NullableDatum {
+    /// A non-NULL value (`{ value, isnull = false }`).
+    pub const fn value(value: Datum) -> Self {
+        Self {
+            value,
+            isnull: false,
+        }
+    }
+
+    /// A SQL NULL (`{ value = 0, isnull = true }`).
+    pub const fn null() -> Self {
+        Self {
+            value: Datum::null(),
+            isnull: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

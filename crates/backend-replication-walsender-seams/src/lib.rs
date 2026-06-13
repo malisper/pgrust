@@ -16,6 +16,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `am_db_walsender` (walsender.c global) — true in a database-connected
+    /// (logical-replication) WAL sender. Pure read.
+    pub fn am_db_walsender() -> bool
+);
+
+seam_core::seam!(
+    /// `am_walsender = value` (walsender.c global) — set by the startup-packet
+    /// `replication` parameter handling.
+    pub fn set_am_walsender(value: bool)
+);
+
+seam_core::seam!(
+    /// `am_db_walsender = value` (walsender.c global).
+    pub fn set_am_db_walsender(value: bool)
+);
+
+seam_core::seam!(
     /// `WaitForStandbyConfirmation(moveto)` (walsender.c): wait for the
     /// synchronous standbys to confirm `moveto`. Can `ereport(ERROR)` on
     /// interrupt, carried on `Err`.

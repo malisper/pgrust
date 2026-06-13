@@ -347,3 +347,31 @@ seam_core::seam!(
     /// role as a non-superuser; the installer owns the `ReleaseSysCache`.
     pub fn search_authid_rolsuper(roleid: Oid) -> PgResult<Option<bool>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(functionId))` projected to the
+    /// catalog facts the function manager reads (`fmgr_info_cxt_security` /
+    /// `fmgr_symbol` / `fmgr_security_definer` / `CheckFunctionValidatorAccess`):
+    /// `pronargs`/`proisstrict`/`proretset`/`prolang`/`prosrc`/`probin`/
+    /// `prosecdef`/`proowner`/`proname` and the `TransformGUCArray`'d `proconfig`
+    /// names+values, plus the folded `prosecdef || proconfig-not-null` predicate.
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`) — the caller raises
+    /// `cache lookup failed for function %u`, as in C. The projected strings are
+    /// copied into the caller's `Mcx`; `Err` includes OOM from the copy.
+    pub fn lookup_proc<'mcx>(
+        mcx: Mcx<'mcx>,
+        function_id: Oid,
+    ) -> PgResult<Option<types_fmgr::ProcInfo<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(LANGOID, ObjectIdGetDatum(language))` projected to
+    /// `lanplcallfoid`/`lanvalidator`/`NameStr(lanname)`
+    /// (`fmgr_info_other_lang` / `CheckFunctionValidatorAccess`). `Ok(None)` on a
+    /// cache miss — the caller raises `cache lookup failed for language %u`. The
+    /// `lanname` copy is charged to the caller's `Mcx`.
+    pub fn lookup_language<'mcx>(
+        mcx: Mcx<'mcx>,
+        language_id: Oid,
+    ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
+);

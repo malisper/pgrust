@@ -9,6 +9,32 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): build the node's
+    /// result tuple descriptor from its plan's target list
+    /// (`ExecTypeFromTL`) and store it in `planstate.ps_ResultTupleDesc`.
+    /// Allocates the descriptor in the per-query context (fallible on OOM).
+    pub fn exec_init_result_type_tl<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `scanstate->ss_ScanTupleSlot->tts_tupleDescriptor` (tuptable.h): the
+    /// scan slot's tuple descriptor, copied into `mcx` (C reads the shared
+    /// pointer). The slot payload model is not yet landed, so the owning unit
+    /// installs this when the slot carries a descriptor.
+    ///
+    /// PROVISIONAL: re-sign when the slot payload model lands (the descriptor
+    /// will then be lent, not copied).
+    pub fn exec_scan_slot_descriptor<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scanstate: &types_nodes::execnodes::ScanStateData<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `slot_getallattrs(slot)` (tuptable.h, via execTuples.c's
     /// `slot_getsomeattrs`) plus the subsequent `slot->tts_values[i]` /
     /// `slot->tts_isnull[i]` reads: fully deconstruct the slot and return its
@@ -46,6 +72,31 @@ seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h): clear the slot's contents
     /// (`slot->tts_ops->clear`).
     pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `slot_getsomeattrs(slot, attnum)` then `(slot->tts_values[attnum-1],
+    /// slot->tts_isnull[attnum-1])` (tuptable.h, via execTuples.c): ensure the
+    /// first `attnum` columns are extracted and return the `(value, isnull)` of
+    /// the 1-based `attnum`th. nodeSort's Datum sort reads attribute 1.
+    /// Deforming can detoast/allocate, so the call is fallible.
+    pub fn slot_getsomeattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: i32,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecClearTuple(slot); slot->tts_values[0] = val; slot->tts_isnull[0] =
+    /// isnull; ExecStoreVirtualTuple(slot)` (tuptable.h, via execTuples.c):
+    /// store a single-Datum virtual tuple in the (single-column) result slot.
+    /// nodeSort's Datum-sort output path. Storing can allocate, fallible.
+    pub fn exec_store_first_datum<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        val: types_datum::Datum,
+        is_null: bool,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -154,6 +205,21 @@ seam_core::seam!(
     /// carried on `Err`.
     pub fn slot_getsysattr(
         slot: &types_nodes::TupleTableSlot,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch a regular
+    /// (positive) attribute `attnum` (1-based) of the slot's current tuple as
+    /// `(datum, isnull)`, deforming up to `attnum` first via
+    /// `slot_getsomeattrs`/`slot_getsomeattrs_int` (`slot->tts_ops->getsomeattrs`
+    /// dispatch). The slot is borrowed mutably because deforming populates the
+    /// slot's `tts_values`/`tts_isnull`/`tts_nvalid`; deforming can
+    /// detoast/allocate, so the call is fallible. System (non-positive) attnums
+    /// take the `slot_getsysattr` path instead and are never passed here.
+    pub fn slot_getattr(
+        slot: &mut types_nodes::TupleTableSlot,
         attnum: types_core::AttrNumber,
     ) -> types_error::PgResult<(types_datum::Datum, bool)>
 );

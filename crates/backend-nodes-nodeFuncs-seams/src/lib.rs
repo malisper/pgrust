@@ -21,6 +21,7 @@ pub struct ExprTypeInfo {
     /// `exprCollation(expr)`.
     pub collation: Oid,
 }
+use types_fmgr::ExternalFnExpr;
 
 seam_core::seam!(
     /// `exprType(expr)` / `exprTypmod(expr)` / `exprCollation(expr)`
@@ -30,4 +31,32 @@ seam_core::seam!(
     /// all three from one call. `Err` carries the C `elog(ERROR, "unrecognized
     /// node type")` for an unexpected tag.
     pub fn expr_type_info(expr: &Expr) -> PgResult<ExprTypeInfo>
+);
+
+seam_core::seam!(
+    /// `exprType(node)` (nodeFuncs.c) — the result type Oid of an expression
+    /// node. Used by `get_fn_expr_rettype`. Pure read; returns `InvalidOid` for
+    /// an unhandled node kind, as C falls through.
+    pub fn expr_type(expr: ExternalFnExpr) -> Oid
+);
+
+seam_core::seam!(
+    /// `get_call_expr_argtype(expr, argnum)` (fmgr.c) — the declared type of the
+    /// `argnum`'th argument of a call expression (the `IsA` dispatch over
+    /// `FuncExpr`/`OpExpr`/`DistinctExpr`/`ScalarArrayOpExpr`/`NullIfExpr`/
+    /// `WindowFunc`, `exprType(list_nth(args, argnum))` with range guard and the
+    /// `ScalarArrayOpExpr` element-type hack). Returns `InvalidOid` out of range.
+    pub fn call_expr_argtype(expr: ExternalFnExpr, argnum: i32) -> Oid
+);
+
+seam_core::seam!(
+    /// `get_call_expr_arg_stable(expr, argnum)` (fmgr.c) — true iff the indexed
+    /// argument is a `Const` or an external `Param` (the same `IsA` dispatch).
+    pub fn call_expr_arg_stable(expr: ExternalFnExpr, argnum: i32) -> bool
+);
+
+seam_core::seam!(
+    /// `get_fn_expr_variadic` body: `IsA(expr, FuncExpr) ?
+    /// ((FuncExpr *) expr)->funcvariadic : false` (fmgr.c).
+    pub fn expr_variadic(expr: ExternalFnExpr) -> bool
 );
