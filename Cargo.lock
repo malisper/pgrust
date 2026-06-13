@@ -873,6 +873,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-s-lock"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "pg-prng",
+ "port-pgsleep-seams",
+ "types-error",
+ "types-pgstat",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -1530,6 +1542,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",

@@ -1,0 +1,17 @@
+[package]
+name = "backend-storage-lmgr-s-lock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_lmgr_s_lock"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+pg-prng = { path = "../pg-prng" }
+port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+types-error = { path = "../types-error" }
+types-pgstat = { path = "../types-pgstat" }

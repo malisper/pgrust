@@ -23,3 +23,8 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// REPLICATION_SLOTSYNC_MAIN, REPLICATION_SLOTSYNC_SHUTDOWN,
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
+
+/// `WAIT_EVENT_SPIN_DELAY` — "Waiting while acquiring a contended spinlock."
+/// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
+/// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
+pub const WAIT_EVENT_SPIN_DELAY: u32 = PG_WAIT_TIMEOUT | 6;

@@ -24,6 +24,7 @@ pub fn init_all() {
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
+    backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_activity_xact::init_seams();
