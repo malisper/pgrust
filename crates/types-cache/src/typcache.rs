@@ -27,6 +27,9 @@ pub struct TypeCacheEntry {
     pub rng_collation: Oid,
     /// `rng_cmp_proc_finfo` -- the subtype's `cmp` support function.
     pub rng_cmp_proc_finfo: FmgrInfo,
+    /// `rng_canonical_finfo` -- the range type's optional canonicalization
+    /// function (`fn_oid == InvalidOid` when absent, i.e. a continuous subtype).
+    pub rng_canonical_finfo: FmgrInfo,
     /// `rng_subdiff_finfo` -- the subtype's optional `subdiff` support function
     /// (`fn_oid == InvalidOid` when absent).
     pub rng_subdiff_finfo: FmgrInfo,
