@@ -203,14 +203,39 @@ pub fn ExecCteScan<'mcx>(
     execScan::exec_scan_cte::call(node, estate, CteScanNext, CteScanRecheck)
 }
 
+/// The `PlanState.ExecProcNode` callback installed by [`ExecInitCteScan`]:
+/// `castNode(CteScanState, pstate)` then run [`ExecCteScan`].
+fn exec_cte_scan_node<'mcx>(
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let node = match pstate {
+        types_nodes::PlanStateNode::CteScan(node) => node,
+        other => panic!("castNode(CteScanState, pstate) failed: {other:?}"),
+    };
+    ExecCteScan(node, estate)
+}
+
 /// `ExecInitCteScan(node, estate, eflags)` — create and initialize a CteScan
 /// node.
+///
+/// Takes the enclosing plan-tree [`Node`](types_nodes::nodes::Node); the
+/// state's `ps.plan` back-link aliases the shared, read-only plan tree exactly
+/// as C's `scanstate->ss.ps.plan = (Plan *) node`. Panics if the node is not a
+/// `CteScan` (the C `castNode`).
 pub fn ExecInitCteScan<'mcx>(
-    plan: &CteScan<'mcx>,
+    node: &'mcx types_nodes::nodes::Node<'mcx>,
     mut eflags: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, CteScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
+
+    // CteScan *node — the enclosing plan-tree node (the C `CteScan *` is the
+    // same pointer, via struct embedding). Panics if it is not a `CteScan`.
+    let plan: &'mcx CteScan<'mcx> = match node {
+        types_nodes::nodes::Node::CteScan(c) => c,
+        other => panic!("castNode(CteScan, node) failed: {other:?}"),
+    };
 
     // check for unsupported flags
     //   Assert(!(eflags & EXEC_FLAG_MARK));
@@ -236,6 +261,8 @@ pub fn ExecInitCteScan<'mcx>(
     //   scanstate->cte_table = NULL;
     //   scanstate->eof_cte = false;
     let mut scanstate = mcx::alloc_in(mcx, CteScanState::new_in(mcx))?;
+    scanstate.ss.ps.plan = Some(node);
+    scanstate.ss.ps.ExecProcNode = Some(exec_cte_scan_node);
     scanstate.eflags = eflags;
     scanstate.cte_table = None;
     scanstate.eof_cte = false;

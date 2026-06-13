@@ -51,6 +51,8 @@ pub enum PlanStateNode<'mcx> {
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
+    /// `T_CteScanState`.
+    CteScan(PgBox<'mcx, crate::nodectescan::CteScanState<'mcx>>),
     /// `T_NestLoopState`.
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
@@ -78,6 +80,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
+            PlanStateNode::CteScan(_) => crate::nodectescan::T_CteScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
@@ -101,6 +104,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
+            PlanStateNode::CteScan(c) => &c.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
@@ -123,6 +127,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
+            PlanStateNode::CteScan(c) => &mut c.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,

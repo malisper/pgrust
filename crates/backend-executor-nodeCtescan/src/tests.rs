@@ -304,13 +304,17 @@ fn init_leader_path_creates_shared_store_and_runs_setup() {
     setup();
     IS_LEADER.with(|c| c.set(true));
     let ctx = MemoryContext::new("per-query");
+    let node_plan = mcx::alloc_in(
+        ctx.mcx(),
+        types_nodes::nodes::Node::CteScan(CteScan {
+            ctePlanId: 1,
+            cteParam: 0,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
     let mut estate = estate(ctx.mcx());
-    let plan = CteScan {
-        ctePlanId: 1,
-        cteParam: 0,
-        ..Default::default()
-    };
-    let node = ExecInitCteScan(&plan, 0, &mut estate).unwrap();
+    let node = ExecInitCteScan(&node_plan, 0, &mut estate).unwrap();
     assert_eq!(node.eflags, EXEC_FLAG_REWIND);
     assert_eq!(node.readptr, 0);
     log_eq(&[
@@ -330,13 +334,17 @@ fn init_follower_path_allocs_own_read_pointer() {
     setup();
     IS_LEADER.with(|c| c.set(false));
     let ctx = MemoryContext::new("per-query");
+    let node_plan = mcx::alloc_in(
+        ctx.mcx(),
+        types_nodes::nodes::Node::CteScan(CteScan {
+            ctePlanId: 1,
+            cteParam: 0,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
     let mut estate = estate(ctx.mcx());
-    let plan = CteScan {
-        ctePlanId: 1,
-        cteParam: 0,
-        ..Default::default()
-    };
-    let _node = ExecInitCteScan(&plan, 0, &mut estate).unwrap();
+    let _node = ExecInitCteScan(&node_plan, 0, &mut estate).unwrap();
     log_eq(&[
         "link_cte_plan_state",
         "resolve_cte_leader",
