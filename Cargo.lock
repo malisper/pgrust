@@ -118,6 +118,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-scankey"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-fmgr-fmgr-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-scan",
+]
+
+[[package]]
 name = "backend-access-common-syncscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -2058,6 +2069,7 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-signal",
+ "types-startup",
  "types-timeout",
  "types-wal",
 ]
@@ -2412,6 +2424,15 @@ dependencies = [
 name = "backend-rmgrdesc-next"
 version = "0.0.0"
 dependencies = [
+ "backend-access-rmgrdesc-brindesc-seams",
+ "backend-access-rmgrdesc-gindesc-seams",
+ "backend-access-rmgrdesc-gistdesc-seams",
+ "backend-access-rmgrdesc-hashdesc-seams",
+ "backend-access-rmgrdesc-heapdesc-seams",
+ "backend-access-rmgrdesc-mxactdesc-seams",
+ "backend-access-rmgrdesc-nbtdesc-seams",
+ "backend-access-rmgrdesc-spgdesc-seams",
+ "backend-access-rmgrdesc-standbydesc-seams",
  "backend-rmgrdesc-small-seams",
  "mcx",
  "types-core",
@@ -2911,6 +2932,7 @@ dependencies = [
 name = "backend-timezone-strftime"
 version = "0.0.0"
 dependencies = [
+ "backend-timezone-strftime-seams",
  "types-pgtime",
 ]
 
@@ -3950,6 +3972,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-rmgrdesc-next",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -4031,6 +4054,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-scan",
 ]
 
 [[package]]
@@ -4198,6 +4222,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+ "types-snapshot",
  "types-tuple",
 ]
 

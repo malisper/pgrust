@@ -24,6 +24,11 @@ pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
 /// `OIDOID` (`catalog/pg_type_d.h`) — the OID of the `oid` type.
 pub const OIDOID: Oid = 26;
 
+/// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation. The
+/// `ScanKeyInit` shorthand always stamps this into `sk_collation` (correct
+/// for all collation-aware catalog columns, ignored for the rest).
+pub const C_COLLATION_OID: Oid = 950;
+
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
 /// `RELPERSISTENCE_UNLOGGED` (`catalog/pg_class.h`) — unlogged permanent table.
