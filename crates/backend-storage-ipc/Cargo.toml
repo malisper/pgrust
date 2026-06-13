@@ -14,6 +14,11 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
 types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+# shmem index sizing type/constant (no cycle: shmem.c does not call ipci.c)
+backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
+# IsUnderPostmaster (globals.c) — the !IsUnderPostmaster InitProcGlobal gate
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 
 # ipci-core boundary owners
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
@@ -63,5 +68,6 @@ backend-replication-logical-launcher-seams = { path = "../backend-replication-lo
 backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-injection-point-seams" }

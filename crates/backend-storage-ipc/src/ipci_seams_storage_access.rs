@@ -53,6 +53,16 @@ pub fn proc_array_shmem_init() -> PgResult<()> {
     backend_storage_ipc_procarray_seams::proc_array_shmem_init::call()
 }
 
+/// `BackendStatusShmemSize`/`Init` — owner `backend-utils-activity-status`
+/// (`utils/activity/backend_status.c`); routed here because the per-backend
+/// status array is sized/initialized adjacent to the process table in ipci.c.
+pub fn backend_status_shmem_size() -> PgResult<Size> {
+    backend_utils_activity_status_seams::backend_status_shmem_size::call()
+}
+pub fn backend_status_shmem_init() -> PgResult<()> {
+    backend_utils_activity_status_seams::backend_status_shmem_init::call()
+}
+
 pub fn shared_inval_shmem_size() -> PgResult<Size> {
     backend_storage_ipc_sinval_seams::shared_inval_shmem_size::call()
 }
