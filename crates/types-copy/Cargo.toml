@@ -12,3 +12,4 @@ path = "src/lib.rs"
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-rel = { path = "../types-rel" }
+mcx = { path = "../mcx" }
