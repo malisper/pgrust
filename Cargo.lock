@@ -907,6 +907,7 @@ dependencies = [
 name = "backend-access-transam-xlog"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
  "backend-utils-error",
  "mcx",
  "types-control",
