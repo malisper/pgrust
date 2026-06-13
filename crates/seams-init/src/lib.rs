@@ -520,6 +520,7 @@ mod recurrence_guard {
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_cache_typcache", "domain_check_input"),
+        ("backend_utils_cache_typcache", "lookup_type_cache_entry"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "load_file"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
