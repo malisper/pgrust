@@ -9,7 +9,9 @@ use backend_utils_misc_stack_depth_seams as stack_depth;
 use mcx::{Mcx, PgBox};
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::Node;
-use types_nodes::{EStateData, PlanStateNode};
+use types_nodes::{EStateData, ExecProcNodeMtd, PlanStateNode};
+
+use crate::execProcnode_run_end::exec_proc_node_first;
 
 /// `ExecInitNode(node, estate, eflags)` (execProcnode.c).
 ///
@@ -221,14 +223,11 @@ pub fn exec_init_node<'mcx>(
 
     // ExecSetExecProcNode(result, result->ExecProcNode);
     //
-    // In the owned model `PlanStateData` carries no `ExecProcNodeReal` field
-    // and there is no separate `ExecProcNodeFirst` function-pointer to swap in:
-    // each `ExecInit*` routine stores the node's real next-tuple callback
-    // directly in `result->ExecProcNode`, and the wrapper machinery
-    // (stack-depth check + instrumentation) lives in
-    // `execProcnode_run_end::exec_proc_node`, which reads `ExecProcNode`
-    // directly. So arming the C `ExecProcNodeFirst` wrapper is a no-op here.
-    ExecSetExecProcNode(&mut result);
+    // The owning `ExecInit*` routine has already stored the node's real
+    // next-tuple callback in `result->ExecProcNode`; pass it through, exactly as
+    // C does.
+    let function = result.ps_head().ExecProcNode;
+    ExecSetExecProcNode(&mut result, function);
 
     // Initialize any initPlans present in this node.  The planner put them in
     // a separate list for us.
@@ -304,21 +303,16 @@ fn node_has_init_plan(_node: &Node<'_>) -> bool {
 /// `ExecSetExecProcNode(node, function)` (execProcnode.c).
 ///
 /// Install a node's `ExecProcNode` callback behind the first-call wrapper:
-/// C sets `node->ExecProcNodeReal = function` and `node->ExecProcNode =
-/// ExecProcNodeFirst`.
-///
-/// In the owned model `PlanStateData` carries no `ExecProcNodeReal` field and
-/// there is no separate `ExecProcNodeFirst` function-pointer slot: each node's
-/// `ExecInit*` routine stores its real next-tuple callback directly in
-/// `node.ps_head().ExecProcNode`, and the wrapper duties (the C
-/// `ExecProcNodeFirst` stack-depth check, and the `ExecProcNodeInstr`
-/// instrumentation bracket) live in `execProcnode_run_end::exec_proc_node`,
-/// which dispatches through `ExecProcNode` directly. There is therefore
-/// nothing to re-install: arming the wrapper is a no-op.
-pub fn ExecSetExecProcNode<'mcx>(node: &mut PlanStateNode<'mcx>) {
-    // node->ExecProcNodeReal = function;  -- no ExecProcNodeReal field
-    // node->ExecProcNode = ExecProcNodeFirst;  -- the run/teardown family's
-    //   exec_proc_node is the always-installed wrapper, reading ExecProcNode
-    //   directly; nothing to swap.
-    let _ = node;
+/// C records the per-node "real" routine in `node->ExecProcNodeReal` and arms
+/// `node->ExecProcNode` with the `ExecProcNodeFirst` wrapper, so the first
+/// `ExecProcNode` call runs the one-time stack-depth check and (if the node is
+/// instrumented) swaps in the `ExecProcNodeInstr` bracket.
+pub fn ExecSetExecProcNode<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    function: ExecProcNodeMtd<'mcx>,
+) {
+    // node->ExecProcNodeReal = function;
+    node.ps_head_mut().ExecProcNodeReal = function;
+    // node->ExecProcNode = ExecProcNodeFirst;
+    node.ps_head_mut().ExecProcNode = Some(exec_proc_node_first);
 }

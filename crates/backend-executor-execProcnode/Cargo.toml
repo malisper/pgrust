@@ -12,6 +12,9 @@ path = "src/lib.rs"
 seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+# MultiExecProcNode's owned seam returns a TIDBitmap (the lone landed multiexec
+# consumer, nodeBitmapHeapscan, always demands one).
+types-tidbitmap = { path = "../types-tidbitmap" }
 mcx = { path = "../mcx" }
 # check_stack_depth() seam (utils/misc/stack_depth.c), unported owner.
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }

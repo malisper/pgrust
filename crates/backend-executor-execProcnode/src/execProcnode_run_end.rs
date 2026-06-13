@@ -15,7 +15,6 @@ use alloc::format;
 
 use mcx::PgBox;
 use types_error::{PgError, PgResult};
-use types_nodes::nodes::Node;
 use types_nodes::{EStateData, PlanStateNode, SlotId};
 
 use backend_executor_execAmi_seams as execAmi;
@@ -130,10 +129,17 @@ pub fn exec_proc_node_instr<'mcx>(
 /// `CHECK_FOR_INTERRUPTS()`, an `ExecReScan` if `chgParam` changed, then the
 /// 4-way `MultiExec*` dispatch. Returns the produced result `Node`; an
 /// unrecognized tag is `elog(ERROR)`.
+///
+/// C returns the bare `Node *` and the caller does `IsA(result, TIDBitmap)`;
+/// the lone landed multiexec consumer (`nodeBitmapHeapscan`) always demands a
+/// `TIDBitmap`, so this unit's owned seam fixes the return at
+/// [`TIDBitmap`](types_tidbitmap::TIDBitmap), folding that caller-side `IsA`
+/// guard into the seam type. No reachable arm produces a value today (every
+/// `MultiExec*` owner is unported), so the narrowing is behaviourally inert.
 pub fn multi_exec_proc_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
+) -> PgResult<PgBox<'mcx, types_tidbitmap::TIDBitmap>> {
     // check_stack_depth();
     tcop_postgres::check_stack_depth::call()?;
 
@@ -296,6 +302,86 @@ pub fn exec_end_node<'mcx>(
             other.tag().0 as i32
         ))),
     }
+}
+
+/// `ExecSetTupleBound(tuples_needed, child_node)` (execProcnode.c).
+///
+/// Inform a node — and, where it is safe to do so, applicable descendants —
+/// that no more than `tuples_needed` tuples will be demanded from it. A
+/// negative bound means "no limit". Mirrors the C cascade of `IsA(child_node,
+/// …)` tests:
+///   * `SortState`/`IncrementalSortState`: set/clear `bounded`/`bound`;
+///   * `AppendState`/`MergeAppendState`: push the bound to every child input;
+///   * projecting `ResultState`: push to its outer child (if any);
+///   * `SubqueryScanState` with no qual: push to its subplan;
+///   * `GatherState`/`GatherMergeState`: record `tuples_needed` and push to the
+///     local copy of the child plan.
+/// Any other node type stops propagation (no descent), the C fall-through.
+///
+/// Only the node-state variants whose executor units have landed
+/// (`SortState`/`AppendState`/`MergeAppendState`) are present in the
+/// `#[non_exhaustive]` `PlanStateNode` enum, so the remaining C `IsA` arms
+/// (`IncrementalSortState`/`ResultState`/`SubqueryScanState`/`GatherState`/
+/// `GatherMergeState`) cannot occur yet; they are added here as their units
+/// land. Every other tag is the C final fall-through (a no-op).
+pub fn exec_set_tuple_bound<'mcx>(
+    tuples_needed: i64,
+    child_node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Since this function recurses, in principle we should check stack depth
+    // here.  In practice, it's probably pointless since the earlier node
+    // initialization tree traversal would surely have consumed more stack.
+    match child_node {
+        // if (IsA(child_node, SortState))
+        PlanStateNode::Sort(sort_state) => {
+            if tuples_needed < 0 {
+                // make sure flag gets reset if needed upon rescan
+                sort_state.bounded = false;
+            } else {
+                sort_state.bounded = true;
+                sort_state.bound = tuples_needed;
+            }
+        }
+        // else if (IsA(child_node, AppendState))
+        PlanStateNode::Append(append_state) => {
+            // for (i = 0; i < aState->as_nplans; i++)
+            //     ExecSetTupleBound(tuples_needed, aState->appendplans[i]);
+            let n = append_state.as_nplans as usize;
+            for i in 0..n {
+                let child = append_state.appendplans[i]
+                    .as_mut()
+                    .expect("ExecSetTupleBound: AppendState.appendplans slot is NULL");
+                exec_set_tuple_bound(tuples_needed, child, estate)?;
+            }
+        }
+        // else if (IsA(child_node, MergeAppendState))
+        PlanStateNode::MergeAppend(ma_state) => {
+            // for (i = 0; i < maState->ms_nplans; i++)
+            //     ExecSetTupleBound(tuples_needed, maState->mergeplans[i]);
+            let n = ma_state.ms_nplans as usize;
+            for i in 0..n {
+                let child = ma_state.mergeplans[i]
+                    .as_mut()
+                    .expect("ExecSetTupleBound: MergeAppendState.mergeplans slot is NULL");
+                exec_set_tuple_bound(tuples_needed, child, estate)?;
+            }
+        }
+        // The remaining C `IsA` arms — IncrementalSortState, the projecting
+        // ResultState (descend through outerPlanState), SubqueryScanState with a
+        // NULL qual (descend through ss.subplan), GatherState and
+        // GatherMergeState (record tuples_needed + descend through
+        // outerPlanState) — operate on node-state variants not yet present in
+        // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot
+        // occur. Each adds its arm here as its executor unit lands.
+        //
+        // Otherwise, on seeing a node that can discard or combine input rows we
+        // can't propagate the bound any further; do nothing (the C
+        // fall-through).
+        _ => {}
+    }
+
+    Ok(())
 }
 
 /// `ExecShutdownNode(node)` (execProcnode.c).

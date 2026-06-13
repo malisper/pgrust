@@ -2963,6 +2963,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-tidbitmap",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 // contract, so accept the lint crate-wide.
 #![allow(clippy::result_large_err)]
 // SCAFFOLD STAGE: the dispatch arms route to per-node-owner seams that are not
-// all ported yet; the family bodies are `todo!()` until those owners land.
+// all ported yet; the unported-owner arms loud-panic until those owners land.
 #![allow(dead_code)]
 #![allow(unused_variables)]
 // Until the per-node `ExecInit*` owners land, every `ExecInitNode` dispatch
@@ -44,15 +44,30 @@
 pub mod execProcnode_init;
 pub mod execProcnode_run_end;
 
-/// Install every seam this unit owns.
+/// Install every seam this unit owns that corresponds to an `execProcnode.c`
+/// function.
 ///
-/// The unit owns one seam crate (by C-source coverage of `execProcnode.c`):
-/// `backend-executor-execProcnode-seams`. Every declaration in it is installed
-/// here, exactly once.
+/// The unit owns `backend-executor-execProcnode-seams`. The declarations that
+/// map to an `execProcnode.c` C function are installed here, exactly once:
+/// `exec_init_node` (`ExecInitNode`), `exec_proc_node` (`ExecProcNode`),
+/// `exec_end_node` (`ExecEndNode`), `multi_exec_proc_node`
+/// (`MultiExecProcNode`) and `exec_set_tuple_bound` (`ExecSetTupleBound`).
+///
+/// The remaining declarations in that crate
+/// (`mark_param_execplan_pending`/`clear_param_execplan`/
+/// `param_execplan_pending`/`exec_set_param_plan_for_pending`/
+/// `link_subplan_planstate`) are *not* `execProcnode.c` functions: the
+/// `nodeSubplan` port parked these executor PARAM_EXEC / `es_subplanstates`
+/// plumbing seams in this crate. Their bodies operate on the `ParamExecData`
+/// `execPlan` link (not modeled on the trimmed struct) and `es_subplanstates`,
+/// which belong to the executor's param/initplan machinery (execMain), not to
+/// the node-dispatch layer; they stay uninstalled here pending that owner.
 pub fn init_seams() {
     use backend_executor_execProcnode_seams as seams;
 
     seams::exec_init_node::set(execProcnode_init::exec_init_node);
     seams::exec_proc_node::set(execProcnode_run_end::exec_proc_node);
     seams::exec_end_node::set(execProcnode_run_end::exec_end_node);
+    seams::multi_exec_proc_node::set(execProcnode_run_end::multi_exec_proc_node);
+    seams::exec_set_tuple_bound::set(execProcnode_run_end::exec_set_tuple_bound);
 }
