@@ -32,6 +32,14 @@ pub const ACLITEM_ALL_PRIV_BITS: AclMode = 0xFFFF_FFFF;
 /// `ACLITEM_ALL_GOPTION_BITS` (`utils/acl.h`) — `(AclMode) 0xFFFFFFFF << 32`.
 pub const ACLITEM_ALL_GOPTION_BITS: AclMode = 0xFFFF_FFFF << 32;
 
+/// `ACL_GRANT_OPTION_FOR(privs)` (`utils/acl.h`) —
+/// `(((AclMode) (privs) & 0xFFFFFFFF) << 32)`: the grant-option bits
+/// corresponding to the given privilege bits.
+#[inline]
+pub const fn acl_grant_option_for(privs: AclMode) -> AclMode {
+    (privs & 0xFFFF_FFFF) << 32
+}
+
 /// `AclItem` (`utils/acl.h`). Must be a fixed 16-byte layout on every platform
 /// (the size is hardcoded in `pg_type.h`); the upper 32 bits of `ai_privs` are
 /// the grant-option bits, the lower 32 the privilege bits.

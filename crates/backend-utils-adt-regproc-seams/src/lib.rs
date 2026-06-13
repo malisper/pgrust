@@ -28,6 +28,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `regprocedurein(signature)` (regproc.c) via the
+    /// `DirectFunctionCall1(regprocedurein, CStringGetDatum(...))` shape:
+    /// parse a function signature (e.g. `int4pl(int4,int4)`) to its
+    /// `pg_proc` OID. A bad/ambiguous/unknown signature raises (`Err`);
+    /// an unmatched-but-syntactically-valid signature yields `InvalidOid`.
+    pub fn regprocedurein(signature: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `regtypein(typename)` (regproc.c) via the
+    /// `DirectFunctionCall1(regtypein, CStringGetDatum(...))` shape: parse a
+    /// type name to its `pg_type` OID. Bad syntax raises (`Err`); an
+    /// unmatched-but-valid name yields `InvalidOid`.
+    pub fn regtypein(typename: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `stringToQualifiedNameList(string, escontext)` (regproc.c): parse a
     /// possibly-qualified SQL identifier into its name parts, allocated in
     /// `mcx`. With `soft = false` (C: `escontext == NULL`) bad syntax raises

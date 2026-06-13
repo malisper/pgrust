@@ -26,12 +26,35 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::result_large_err)]
+
+extern crate alloc;
+
+use types_acl::AclMode;
+use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 pub mod acl_ops;
 pub mod acldefault;
 pub mod aclitem_io;
 pub mod has_privilege;
 pub mod role_membership;
+
+/// `FunctionCallInfo` (`fmgr.h`): the call frame an fmgr-callable
+/// (`PG_FUNCTION_ARGS`) function receives. C passes
+/// `FunctionCallInfoBaseData *`; the owned model passes the frame by mutable
+/// reference. The argument decoding (`PG_GETARG_*`) and result encoding
+/// (`PG_RETURN_*`) happen inside each function against this frame, routed
+/// through the fmgr owner's seams.
+pub type FunctionCallInfo<'a, 'mcx> = &'a mut FunctionCallInfoBaseData<'mcx>;
+
+/// C: `typedef struct { const char *name; AclMode value; } priv_map` —
+/// one entry of a privilege-name → privilege-bit table.
+pub struct PrivMap {
+    /// `name` — the SQL privilege keyword (e.g. `"SELECT"`).
+    pub name: &'static str,
+    /// `value` — the corresponding [`AclMode`] bit(s).
+    pub value: AclMode,
+}
 
 /// Install this unit's seams (`backend-utils-adt-acl-seams`).
 pub fn init_seams() {

@@ -1,17 +1,15 @@
 [package]
-name = "backend-catalog-aclchk-seams"
+name = "backend-catalog-pg-largeobject-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_catalog_aclchk_seams"
+name = "backend_catalog_pg_largeobject_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-acl = { path = "../types-acl" }
-types-nodes = { path = "../types-nodes" }
 types-snapshot = { path = "../types-snapshot" }
