@@ -3,8 +3,9 @@ use types_core::{
     uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, OffsetNumber, Oid, Size,
     TransactionId,
 };
-use types_datum::Datum;
 use types_error::PgResult;
+
+use crate::backend_access_common_heaptuple::TupleValue;
 
 pub type bits8 = uint8;
 // In C these are bare pointers to palloc'd structs; here the box allocates in
@@ -389,26 +390,6 @@ pub struct HeapTupleData<'mcx> {
     pub t_self: ItemPointerData,
     pub t_tableOid: Oid,
     pub t_data: HeapTupleHeader<'mcx>,
-    /// The post-`t_hoff` user-data (column) bytes of the tuple, when this
-    /// `HeapTupleData` is one freshly formed by `heap_form_tuple` and intended
-    /// to be serialized back onto a page.
-    ///
-    /// In C, the header (`t_data`, including `t_bits`), optional alignment pad,
-    /// and the column bytes are one contiguous `palloc` chunk reached through
-    /// the `t_data` pointer.  The idiomatic owned model splits the *header*
-    /// (here `t_data`: the fixed `HeapTupleHeaderData` + its `t_bits` null
-    /// bitmap) from the *column bytes*; this side-channel carries the latter so
-    /// the whole tuple (header + columns) can cross the page-write seam
-    /// (`page_add_item` / `relation_put_heap_tuple`) and be laid down on disk by
-    /// [`crate::backend_access_common_heaptuple`]-side
-    /// `heap_tuple_to_disk_image`.
-    ///
-    /// `None` for a *page-resident* / decoded-header tuple (the scan, fetch,
-    /// freeze, prune, and visibility paths): those tuples are header-only by
-    /// design and are never re-serialized through the page-write seam.  Adding
-    /// the field is purely additive — every existing construction site keeps
-    /// `None`.
-    pub t_user_data: Option<PgVec<'mcx, u8>>,
 }
 
 impl HeapTupleData<'_> {
@@ -421,10 +402,6 @@ impl HeapTupleData<'_> {
             t_tableOid: self.t_tableOid,
             t_data: match &self.t_data {
                 Some(hdr) => Some(alloc_in(mcx, hdr.clone_in(mcx)?)?),
-                None => None,
-            },
-            t_user_data: match &self.t_user_data {
-                Some(d) => Some(slice_in(mcx, d)?),
                 None => None,
             },
         })
@@ -489,7 +466,7 @@ fn clone_opt_string_in<'b>(s: &Option<PgString<'_>>, mcx: Mcx<'b>) -> PgResult<O
 pub struct TupleConstr<'mcx> {
     pub defval: PgVec<'mcx, AttrDefault<'mcx>>,
     pub check: PgVec<'mcx, ConstrCheck<'mcx>>,
-    pub missing: PgVec<'mcx, AttrMissing>,
+    pub missing: PgVec<'mcx, AttrMissing<'mcx>>,
     pub num_defval: uint16,
     pub num_check: uint16,
     pub has_not_null: bool,
@@ -507,10 +484,14 @@ impl TupleConstr<'_> {
         for c in &self.check {
             check.push(c.clone_in(mcx)?);
         }
+        let mut missing = mcx::vec_with_capacity_in(mcx, self.missing.len())?;
+        for m in &self.missing {
+            missing.push(m.clone_in(mcx)?);
+        }
         Ok(TupleConstr {
             defval,
             check,
-            missing: slice_in(mcx, &self.missing)?,
+            missing,
             num_defval: self.num_defval,
             num_check: self.num_check,
             has_not_null: self.has_not_null,
@@ -520,10 +501,29 @@ impl TupleConstr<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AttrMissing {
+/// `AttrMissing` (`access/tupdesc.h`): one attribute's missing-value default.
+///
+/// C stores `am_value` as a bare `Datum`; for a pass-by-reference attribute
+/// that Datum is a pointer whose pointee heaptuple.c keeps alive via its
+/// file-static missing-values cache (`missing_hash`/`missing_match`/
+/// `init_missing_cache` + `datumCopy` into `TopMemoryContext`). In the owned
+/// model the value *is* its payload ([`TupleValue`]: a `ByVal` word or the
+/// `ByRef` bytes), so the lifetime-extension cache dissolves
+/// (`docs/mctx-design.md`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttrMissing<'mcx> {
     pub am_present: bool,
-    pub am_value: Datum,
+    pub am_value: TupleValue<'mcx>,
+}
+
+impl AttrMissing<'_> {
+    /// Deep copy into `mcx`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AttrMissing<'b>> {
+        Ok(AttrMissing {
+            am_present: self.am_present,
+            am_value: self.am_value.clone_in(mcx)?,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

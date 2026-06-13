@@ -971,7 +971,7 @@ fn heap_getattr<'r>(
     if attnum > 0 {
         if attnum > HeapTupleHeaderGetNatts(header) as i32 {
             // attribute beyond what's stored: missing-value default
-            Ok(getmissingattr(tuple_desc, attnum))
+            getmissingattr(mcx, tuple_desc, attnum)
         } else {
             // fastgetattr(tup, attnum, tupleDesc, isnull):
             //   HeapTupleNoNulls || !att_isnull -> fetch; else NULL.
@@ -1008,7 +1008,6 @@ fn tmptup_from_composite<'r>(
         t_tableOid: InvalidOid,
         // tmptup.t_data = tuple; (the owned model copies the small header)
         t_data: Some(alloc_in(mcx, header.clone_in(mcx)?)?),
-        t_user_data: None,
     })
 }
 

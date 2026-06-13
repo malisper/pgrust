@@ -42,6 +42,7 @@ fn make_header<'mcx>(
 
 #[test]
 fn get_cmin_cmax_without_combocid_returns_raw() {
+    install_fake_xact_seam();
     let top = MemoryContext::new("TopTransactionContext");
     let state = ComboCidState::new(top.mcx());
     let tup = make_header(top.mcx(), MY_XID, 0, 42);
