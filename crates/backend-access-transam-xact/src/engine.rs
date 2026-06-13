@@ -688,17 +688,50 @@ fn PrepareTransaction() -> PgResult<()> {
     // Reserve the GID for this transaction (fails if invalid or in use).
     let gid = xs(|s| s.prepare_gid.take())
         .ok_or_else(|| PgError::error("PrepareTransaction: no prepared-transaction GID set"))?;
+    let databaseid = globals_seams::my_database_id::call();
     twophase_seams::mark_as_preparing::call(
         xid,
         &gid,
         prepared_at,
         miscinit_seams::get_user_id::call(),
-        globals_seams::my_database_id::call(),
+        databaseid,
     )?;
 
-    // Collect data for the 2PC state file; replay order at COMMIT/ROLLBACK
-    // PREPARED must match the order of these calls.
-    twophase_seams::start_prepare::call()?;
+    // Collect data for the 2PC state file (C `StartPrepare` reads these from
+    // the current backend transaction); the order of the file segments — and
+    // thus the replay order at COMMIT/ROLLBACK PREPARED — must match the calls
+    // that follow. Allocated in a local workspace (C: palloc in the caller's
+    // context).
+    let prep_ws = MemoryContext::new("StartPrepare");
+    let prep_mcx = prep_ws.mcx();
+    let commitrels = storage_seams::smgr_get_pending_deletes::call(prep_mcx, true)?;
+    let abortrels = storage_seams::smgr_get_pending_deletes::call(prep_mcx, false)?;
+    let children = xactGetCommittedChildren()?;
+    let commitstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, true)?;
+    let abortstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, false)?;
+    let (invalmsgs, initfileinval) =
+        inval_seams::xact_get_committed_invalidation_messages::call(prep_mcx)?;
+
+    let start_args = twophase_seams::StartPrepareArgs {
+        xid,
+        gid: gid.clone(),
+        prepared_at,
+        owner: miscinit_seams::get_user_id::call(),
+        databaseid,
+        children,
+        ncommitrels: commitrels.len() as i32,
+        commitrels: crate::wal::rels_bytes(&commitrels)?,
+        nabortrels: abortrels.len() as i32,
+        abortrels: crate::wal::rels_bytes(&abortrels)?,
+        ncommitstats: commitstats.len() as i32,
+        commitstats: crate::wal::stats_bytes(&commitstats)?,
+        nabortstats: abortstats.len() as i32,
+        abortstats: crate::wal::stats_bytes(&abortstats)?,
+        ninvalmsgs: invalmsgs.len() as i32,
+        invalmsgs: crate::wal::inval_msgs_bytes(&invalmsgs)?,
+        initfileinval,
+    };
+    twophase_seams::start_prepare::call(&start_args)?;
 
     async_seams::at_prepare_notify::call()?;
     lock_seams::at_prepare_locks::call()?;

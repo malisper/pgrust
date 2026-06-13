@@ -73,6 +73,7 @@ backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }
 backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
@@ -98,6 +99,7 @@ backend-storage-file-fd = { path = "../backend-storage-file-fd" }
 backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
+backend-storage-ipc-pmsignal = { path = "../backend-storage-ipc-pmsignal" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
@@ -108,6 +110,7 @@ backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-storage-page = { path = "../backend-storage-page" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
@@ -116,9 +119,11 @@ backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
 backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
@@ -161,9 +166,12 @@ backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }
+common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
+common-string = { path = "../common-string" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }
 port-pgsleep = { path = "../port-pgsleep" }
 port-pqsignal = { path = "../port-pqsignal" }
+probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }

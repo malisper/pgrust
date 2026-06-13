@@ -340,6 +340,10 @@ pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
 /// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
 pub const SHMEM_INDEX_LOCK: usize = 1;
 
+/// `WaitEventCustomLock` (`lwlocklist.h`, `PG_LWLOCK(48, WaitEventCustom)`):
+/// offset of the custom-wait-event lock in `MainLWLockArray`.
+pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
+
 /// Possible values for `huge_pages` and `huge_pages_status`
 /// (`storage/pg_shmem.h`).
 #[repr(i32)]

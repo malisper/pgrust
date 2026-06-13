@@ -69,6 +69,7 @@ pub fn init_all() {
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
+    backend_nodes_extensible::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
@@ -94,6 +95,7 @@ pub fn init_all() {
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_latch::init_seams();
+    backend_storage_ipc_pmsignal::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();
@@ -104,6 +106,7 @@ pub fn init_all() {
     backend_storage_lmgr_lmgr::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
+    backend_storage_page::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_storage_sync::init_seams();
     backend_tcop_backend_startup::init_seams();
@@ -112,9 +115,11 @@ pub fn init_all() {
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
     backend_utils_activity_small::init_seams();
+    backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
+    backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
@@ -157,12 +162,15 @@ pub fn init_all() {
     backend_utils_time_combocid::init_seams();
     backend_utils_time_snapmgr::init_seams();
     common_checksum_helper::init_seams();
+    common_hashfn::init_seams();
     common_ip::init_seams();
     common_pglz::init_seams();
+    common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();
     port_pgsleep::init_seams();
     port_pqsignal::init_seams();
+    probe_adt_scalar_bool::init_seams();
 }
 
 #[cfg(test)]

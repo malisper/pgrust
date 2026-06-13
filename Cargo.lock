@@ -1251,8 +1251,11 @@ dependencies = [
  "backend-catalog-storage-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-syncrep-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-ipc-standby-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-predicate-seams",
@@ -1261,6 +1264,7 @@ dependencies = [
  "backend-utils-cache-inval-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
+ "libc",
  "port-crc32c-seams",
  "types-core",
  "types-datum",
@@ -1297,6 +1301,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
 ]
 
 [[package]]
@@ -4136,6 +4141,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-extensible"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-nodes-extensible-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-extensible",
+ "types-hash",
+]
+
+[[package]]
+name = "backend-nodes-extensible-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-extensible",
+]
+
+[[package]]
 name = "backend-nodes-makefuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -4670,6 +4699,7 @@ name = "backend-postmaster-postmaster-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -5639,6 +5669,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-freepage-seams",
  "libc",
  "mcx",
@@ -5732,6 +5763,39 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-pmsignal"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-pmchild-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-storage-ipc-barrier-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-pgstat",
+ "types-signal",
  "types-storage",
 ]
 
@@ -6179,6 +6243,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-page"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-page-checksum",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -6594,6 +6672,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-waitevent"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-activity-waitevent-seams"
 version = "0.0.0"
 dependencies = [
@@ -6730,6 +6827,21 @@ dependencies = [
  "types-namespace",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-arrayutils"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayutils-seams",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
 ]
 
 [[package]]
@@ -8630,6 +8742,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn"
+version = "0.0.0"
+dependencies = [
+ "common-hashfn-seams",
+]
+
+[[package]]
 name = "common-hashfn-seams"
 version = "0.0.0"
 dependencies = [
@@ -8661,6 +8780,13 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-json",
+]
+
+[[package]]
+name = "common-keywords"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
@@ -8697,6 +8823,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-string"
+version = "0.0.0"
+dependencies = [
+ "common-string-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-string-seams"
 version = "0.0.0"
 dependencies = [
@@ -8712,6 +8847,13 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "common-wchar"
+version = "0.0.0"
+dependencies = [
  "types-wchar",
 ]
 
@@ -8872,6 +9014,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-adt-scalar-bool"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-varlena-seams",
+ "common-hashfn",
+ "mcx",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8960,6 +9115,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-nodes-extensible",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
@@ -8985,6 +9141,7 @@ dependencies = [
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
+ "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
@@ -8995,6 +9152,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
+ "backend-storage-page",
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
@@ -9003,9 +9161,11 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
  "backend-utils-activity-small",
+ "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayutils",
  "backend-utils-adt-format-type",
  "backend-utils-adt-json",
  "backend-utils-adt-multirangetypes",
@@ -9048,12 +9208,15 @@ dependencies = [
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
  "common-checksum-helper",
+ "common-hashfn",
  "common-ip",
  "common-pglz",
+ "common-string",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",
  "port-pgsleep",
  "port-pqsignal",
+ "probe-adt-scalar-bool",
 ]
 
 [[package]]
@@ -9271,6 +9434,13 @@ name = "types-explain"
 version = "0.0.0"
 dependencies = [
  "mcx",
+]
+
+[[package]]
+name = "types-extensible"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
