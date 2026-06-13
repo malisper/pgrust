@@ -4920,6 +4920,7 @@ name = "backend-utils-fmgr-dfmgr"
 version = "0.0.0"
 dependencies = [
  "backend-storage-file-fd-seams",
+ "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-small",
  "common-path-seams",
  "mcx",
@@ -4928,6 +4929,8 @@ dependencies = [
  "types-core",
  "types-dfmgr",
  "types-error",
+ "types-fmgr",
+ "types-logical",
 ]
 
 [[package]]
@@ -5479,6 +5482,8 @@ dependencies = [
  "seam-core",
  "types-dfmgr",
  "types-error",
+ "types-fmgr",
+ "types-logical",
 ]
 
 [[package]]

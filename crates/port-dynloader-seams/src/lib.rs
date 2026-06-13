@@ -10,6 +10,8 @@
 
 use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
 use types_error::PgResult;
+use types_fmgr::LoadedExternalFunc;
+use types_logical::CallbackInvocation;
 
 seam_core::seam!(
     /// `stat(libname, &stat_buf)` — the device/inode identity used by
@@ -55,4 +57,35 @@ seam_core::seam!(
     /// re-resolves the symbol through its own subsystem's seam once it knows
     /// the signature.
     pub fn function_exists(handle: LibraryHandle, funcname: &str) -> bool
+);
+
+seam_core::seam!(
+    /// `fetch_finfo_record(handle, prosrc)` (`fmgr.c`) — resolve `prosrc` in the
+    /// already-loaded library `handle` and read its `Pg_finfo_record`,
+    /// returning the `(user_fn, api_version)` the function manager caches. The
+    /// symbol resolution and info-function call are OS-loader interaction; a
+    /// missing symbol or info record `ereport(ERROR)`s, surfaced on `Err`. Used
+    /// by `backend-utils-fmgr-dfmgr`'s installer of the `load_external_function`
+    /// inward seam to compose dfmgr's library load with the fmgr finfo read.
+    pub fn fetch_finfo_record(handle: LibraryHandle, prosrc: &str) -> PgResult<LoadedExternalFunc>
+);
+
+seam_core::seam!(
+    /// `dlsym(handle, "_PG_output_plugin_init")` + `plugin_init(&callbacks)`
+    /// (logical decoding's plugin contract) — invoke the loaded plugin's init
+    /// vtable hook and return the callback-presence bitmask (one bit per
+    /// `OutputPluginCallbacks` field, LSB = `startup_cb`). `ereport`s if
+    /// `_PG_output_plugin_init` is missing. The function-pointer table the
+    /// plugin fills lives in the OS-loaded library, so this is loader runtime,
+    /// not dfmgr logic.
+    pub fn plugin_init(handle: LibraryHandle) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// Invoke a loaded output plugin's callback (the function pointer the plugin
+    /// registered in its `OutputPluginCallbacks` vtable) with the ctx output
+    /// state the wrapper prepared. Returns the bool the two filter callbacks
+    /// produce (ignored otherwise). The callback can `ereport`. Pure
+    /// loaded-symbol dispatch — OS-loader runtime, not dfmgr logic.
+    pub fn invoke_output_plugin_callback(inv: CallbackInvocation) -> PgResult<bool>
 );

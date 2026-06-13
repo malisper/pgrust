@@ -767,19 +767,60 @@ pub fn fmgr_abi_extra() -> String {
 }
 
 /* =========================================================================
- * Seam installation.
+ * Inward seam installers — `backend-utils-fmgr-dfmgr-seams`.
  *
- * This unit installs no seams of its own: the OS dynamic loader
- * (port-dynloader-seams), common/path.c (common-path-seams), and
- * storage/file/fd.c (backend-storage-file-fd-seams) are owned by other (not-
- * yet-ported) units, and `Dynamic_library_path` is a backend-local accessor,
- * not a cross-cycle seam. No ported crate calls into dfmgr yet, so there is no
- * `backend-utils-fmgr-dfmgr-seams` crate.
+ * This unit owns `crates/backend-utils-fmgr-dfmgr-seams` (X = the dfmgr unit,
+ * maps to dfmgr.c). Its three declarations compose this crate's own
+ * `load_external_function` with the OS-loader runtime for the parts that live
+ * in a dlopen'd library (fmgr.c's `fetch_finfo_record`, a plugin's
+ * `_PG_output_plugin_init` vtable, and a plugin's registered callback function
+ * pointers). Each installer is a thin marshal+delegate: it runs dfmgr's own
+ * load and hands the loaded-symbol work to `port-dynloader-seams`.
  * ========================================================================= */
 
-/// Install this crate's seams. There are none yet; kept for the `seams-init`
-/// aggregator contract.
-pub fn init_seams() {}
+/// Installer for `backend_utils_fmgr_dfmgr_seams::load_external_function`:
+/// `load_external_function(probin, prosrc, true, &handle)` (dfmgr.c) then
+/// `fetch_finfo_record(handle, prosrc)` (fmgr.c, via the loader runtime).
+fn install_load_external_function(
+    probin: &str,
+    prosrc: &str,
+    _function_id: types_core::Oid,
+) -> PgResult<types_fmgr::LoadedExternalFunc> {
+    let ctx = mcx::MemoryContext::new("load_external_function");
+    // C: user_fn = load_external_function(filename, funcname, true, &libraryhandle);
+    let handle = load_external_function(ctx.mcx(), probin, prosrc, true)?;
+    // C: inforec = fetch_finfo_record(libraryhandle, prosrc);
+    loader::fetch_finfo_record::call(handle, prosrc)
+}
+
+/// Installer for `backend_utils_fmgr_dfmgr_seams::load_output_plugin`:
+/// `load_file`-shaped library load of the plugin, then the plugin's
+/// `_PG_output_plugin_init` vtable hook (loader runtime), returning the
+/// callback-presence bitmask.
+fn install_load_output_plugin(plugin: String) -> PgResult<u32> {
+    let ctx = mcx::MemoryContext::new("load_output_plugin");
+    // C (LoadOutputPlugin): load_external_function(plugin, "_PG_output_plugin_init",
+    //    false, NULL) loads the library; the symbol+vtable init is loader runtime.
+    let handle = load_external_function(ctx.mcx(), &plugin, "_PG_output_plugin_init", false)?;
+    loader::plugin_init::call(handle)
+}
+
+/// Installer for `backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback`:
+/// pure loaded-symbol dispatch, delegated wholly to the loader runtime.
+fn install_invoke_output_plugin_callback(
+    inv: types_logical::CallbackInvocation,
+) -> PgResult<bool> {
+    loader::invoke_output_plugin_callback::call(inv)
+}
+
+/// Install this crate's owned inward seams (`backend-utils-fmgr-dfmgr-seams`).
+pub fn init_seams() {
+    backend_utils_fmgr_dfmgr_seams::load_external_function::set(install_load_external_function);
+    backend_utils_fmgr_dfmgr_seams::load_output_plugin::set(install_load_output_plugin);
+    backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback::set(
+        install_invoke_output_plugin_callback,
+    );
+}
 
 #[cfg(test)]
 mod tests;
