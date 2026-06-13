@@ -497,6 +497,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` projected to the
+    /// `pg_proc` facts `internal_get_result_type` (funcapi.c) reads to classify
+    /// a function's result type: `prorettype`/`proretset`/`pronargs`/
+    /// `proargtypes` (the declared input-type `oidvector`) and `NameStr(proname)`
+    /// for the error message. `Ok(None)` on a cache miss (`!HeapTupleIsValid`) —
+    /// the caller raises `cache lookup failed for function %u`, as in C. The
+    /// `proargtypes` vector and `proname` are copied into the caller's `Mcx`;
+    /// `Err` includes OOM from the copy.
+    pub fn lookup_proc_result_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<types_fmgr::ProcResultInfo<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(LANGOID, ObjectIdGetDatum(language))` projected to
     /// `lanplcallfoid`/`lanvalidator`/`NameStr(lanname)`
     /// (`fmgr_info_other_lang` / `CheckFunctionValidatorAccess`). `Ok(None)` on a

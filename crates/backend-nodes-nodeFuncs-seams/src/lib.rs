@@ -60,3 +60,20 @@ seam_core::seam!(
     /// ((FuncExpr *) expr)->funcvariadic : false` (fmgr.c).
     pub fn expr_variadic(expr: ExternalFnExpr) -> bool
 );
+
+seam_core::seam!(
+    /// The non-`FuncExpr`/`OpExpr` arms of `get_expr_result_type` (funcapi.c):
+    /// the `IsA` dispatch over `RowExpr`/`Const`/generic expression that
+    /// inspects the expression node's tag and per-variant fields (`row_typeid`,
+    /// `args`/`colnames`, the RECORD `Const` datum) and runs `exprType` /
+    /// `CreateTemplateTupleDesc` / `BlessTupleDesc` / `lookup_rowtype_tupdesc_copy`
+    /// / `get_type_func_class` over them. The expression-node tree is owned by
+    /// the nodeFuncs/parser side; the funcapi unit cannot read its fields, so the
+    /// arm is seamed here. `expr == None` is the C `NULL` (generic `exprType`
+    /// path on a NULL node, i.e. `InvalidOid` / `TYPEFUNC_OTHER`). `Err` carries
+    /// the lookup/`assign_record_type_typmod` `ereport(ERROR)` surface.
+    pub fn get_expr_result_type_node<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<types_nodes::funcapi::ResolvedResultType<'mcx>>
+);

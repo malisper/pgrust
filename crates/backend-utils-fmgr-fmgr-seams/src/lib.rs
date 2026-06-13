@@ -17,6 +17,19 @@ use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 seam_core::seam!(
+    /// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID
+    /// and call-expression node `get_call_result_type` (funcapi.c) hands to
+    /// `internal_get_result_type`. Both live on the `FmgrInfo` frame the fmgr
+    /// owner widens (the trimmed `FunctionCallInfoBaseData` here has no
+    /// `flinfo`), so the read is seamed. `fn_expr` is `None` for the C `NULL`
+    /// (no call expression — polymorphics then unresolvable); the borrow lives
+    /// in the call's context. Pure read, no allocation.
+    pub fn fn_oid_and_expr<'mcx>(
+        fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
+    ) -> (types_core::Oid, Option<&'mcx types_nodes::nodes::Node<'mcx>>)
+);
+
+seam_core::seam!(
     /// The call's current memory context (C: `CurrentMemoryContext` at fmgr
     /// dispatch). `convert_*` helpers behind the `has_*_privilege` family
     /// allocate their transient name-list / `RangeVar` / pstrdup'd outputs in
