@@ -30,6 +30,7 @@ backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
