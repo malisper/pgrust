@@ -10,7 +10,8 @@ use core::any::Any;
 use core::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, Oid};
+use types_core::primitive::{BlockNumber, InvalidBlockNumber};
+use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
 
@@ -46,12 +47,12 @@ pub const SO_TEMP_SNAPSHOT: u32 = 1 << 9;
 /// `TableScanDescData` (`access/relscan.h`) — the generic table-scan
 /// descriptor, the base class the AM's concrete scan state extends
 /// (`HeapScanDescData` embeds it as its first member; here the AM extension
-/// rides in `am_private`). The open relation crosses as its `Oid` per the
-/// repo's relation convention; the scan-type-specific union (`st`) lands
-/// with its first consumer.
-pub struct TableScanDescData {
-    /// `rs_rd` — the relation the scan was opened on (as its OID).
-    pub rs_rd: Oid,
+/// rides in `am_private`). `rs_rd` is an alias handle of the open relation
+/// (the C pointer alias); the scan-type-specific union (`st`) lands with its
+/// first consumer.
+pub struct TableScanDescData<'mcx> {
+    /// `rs_rd` — the relation the scan was opened on.
+    pub rs_rd: Relation<'mcx>,
     /// `rs_snapshot` — snapshot to see; `None` is the C `SnapshotAny`.
     pub rs_snapshot: Option<SnapshotData>,
     /// `rs_nkeys` — number of scan keys.
@@ -68,7 +69,7 @@ pub struct TableScanDescData {
 }
 
 /// `TableScanDesc` — `TableScanDescData *`.
-pub type TableScanDesc = std::boxed::Box<TableScanDescData>;
+pub type TableScanDesc<'mcx> = std::boxed::Box<TableScanDescData<'mcx>>;
 
 /* ----------------------------------------------------------------
  * access/relscan.h: parallel scan descriptors

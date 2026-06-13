@@ -9,31 +9,45 @@ use types_core::{NodeTag, PgResult};
 
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
-pub const T_Result: NodeTag = 331;
-pub const T_Append: NodeTag = 334;
-pub const T_MergeAppend: NodeTag = 335;
-pub const T_IndexScan: NodeTag = 341;
-pub const T_IndexOnlyScan: NodeTag = 342;
-pub const T_FunctionScan: NodeTag = 348;
-pub const T_TableFuncScan: NodeTag = 350;
-pub const T_CteScan: NodeTag = 351;
-pub const T_NamedTuplestoreScan: NodeTag = 352;
-pub const T_WorkTableScan: NodeTag = 353;
-pub const T_CustomScan: NodeTag = 355;
-pub const T_Material: NodeTag = 360;
-pub const T_Sort: NodeTag = 362;
+pub const T_Result: NodeTag = NodeTag(331);
+pub const T_Append: NodeTag = NodeTag(334);
+pub const T_MergeAppend: NodeTag = NodeTag(335);
+pub const T_IndexScan: NodeTag = NodeTag(341);
+pub const T_IndexOnlyScan: NodeTag = NodeTag(342);
+pub const T_FunctionScan: NodeTag = NodeTag(348);
+pub const T_TableFuncScan: NodeTag = NodeTag(350);
+pub const T_CteScan: NodeTag = NodeTag(351);
+pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
+pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_CustomScan: NodeTag = NodeTag(355);
+pub const T_Material: NodeTag = NodeTag(360);
+pub const T_Sort: NodeTag = NodeTag(362);
 
-/// `CmdType` (nodes/nodes.h).
-pub type CmdType = u32;
+/// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum CmdType {
+    CMD_UNKNOWN = 0,
+    /// select stmt
+    CMD_SELECT = 1,
+    /// update stmt
+    CMD_UPDATE = 2,
+    /// insert stmt
+    CMD_INSERT = 3,
+    /// delete stmt
+    CMD_DELETE = 4,
+    /// merge stmt
+    CMD_MERGE = 5,
+    /// cmds like create, destroy, copy, vacuum, etc.
+    CMD_UTILITY = 6,
+    /// dummy command for instead nothing rules with qual
+    CMD_NOTHING = 7,
+}
 
-pub const CMD_UNKNOWN: CmdType = 0;
-pub const CMD_SELECT: CmdType = 1;
-pub const CMD_UPDATE: CmdType = 2;
-pub const CMD_INSERT: CmdType = 3;
-pub const CMD_DELETE: CmdType = 4;
-pub const CMD_MERGE: CmdType = 5;
-pub const CMD_UTILITY: CmdType = 6;
-pub const CMD_NOTHING: CmdType = 7;
+pub use CmdType::{
+    CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_NOTHING, CMD_SELECT, CMD_UNKNOWN, CMD_UPDATE,
+    CMD_UTILITY,
+};
 
 /// A plan-tree node (`Plan *` in C). The `NodeTag` is the enum discriminant.
 /// Carries the allocator lifetime of the context the plan tree lives in;

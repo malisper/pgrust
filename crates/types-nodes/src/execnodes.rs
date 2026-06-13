@@ -23,7 +23,7 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
+use types_core::primitive::Index;
 use types_core::xact::CommandId;
 use types_core::PgResult;
 use types_datum::Datum;
@@ -41,25 +41,12 @@ use types_core::NodeTag;
 
 /// `T_MaterialState` (nodes/nodetags.h) — the executor-state node tag for a
 /// Material node.
-pub const T_MaterialState: NodeTag = 424;
+pub const T_MaterialState: NodeTag = NodeTag(424);
 
-/// `ScanDirection` (access/sdir.h). Kept as the raw C scale so direction
-/// comparisons read like the original.
-pub type ScanDirection = i32;
-
-pub const BackwardScanDirection: ScanDirection = -1;
-pub const NoMovementScanDirection: ScanDirection = 0;
-pub const ForwardScanDirection: ScanDirection = 1;
-
-/// `ScanDirectionIsForward(direction)` (sdir.h).
-pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
-    direction == ForwardScanDirection
-}
-
-/// `ScanDirectionIsBackward(direction)` (sdir.h).
-pub const fn ScanDirectionIsBackward(direction: ScanDirection) -> bool {
-    direction == BackwardScanDirection
-}
+pub use types_scan::sdir::{
+    BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
+    ScanDirectionIsBackward, ScanDirectionIsForward,
+};
 
 /// `TupleTableSlot *` in the owned model: a `Copy` index into the owning
 /// [`EStateData::es_tupleTable`] slot pool.
@@ -78,11 +65,10 @@ pub struct EcxtId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
 
-/// An opaque handle to a subsystem-owned object the executor only stores and
-/// hands back (`Snapshot`, `JunkFilter`, `ParamListInfo`, `QueryEnvironment`,
-/// `JitContext`, `PartitionDirectory`, ...). The owning unit downcasts with a
-/// loud panic on mismatch; the executor never inspects the payload. `None` is
-/// the C `NULL`.
+/// An opaque handle to a genuinely AM/extension-opaque object the executor
+/// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
+/// itself leaves opaque). The owning unit downcasts with a loud panic on
+/// mismatch; the executor never inspects the payload. `None` is the C `NULL`.
 #[derive(Default)]
 pub struct Opaque(pub Option<alloc::boxed::Box<dyn core::any::Any>>);
 
@@ -95,9 +81,13 @@ impl core::fmt::Debug for Opaque {
     }
 }
 
-/// `ExprContextCallbackFunction` (execnodes.h):
-/// `void (*)(Datum arg)`.
-pub type ExprContextCallbackFunction = fn(Datum);
+/// `ExprContextCallbackFunction` (execnodes.h): `void (*)(Datum arg)`.
+///
+/// In C the callbacks run in ereport-capable code, inside the ExprContext's
+/// `ecxt_per_tuple_memory`; the Rust shape carries both halves of that
+/// surface — the per-tuple context handle is passed in, and failure is
+/// `Err(PgError)`.
+pub type ExprContextCallbackFunction = fn(Mcx<'_>, Datum) -> PgResult<()>;
 
 /// `ExprContext_CB` (execnodes.h) — one registered shutdown callback. The
 /// chain nodes are allocated in the context's per-query memory
@@ -164,9 +154,11 @@ pub struct ResultRelInfo<'mcx> {
     /// `Index ri_RangeTableIndex` — the rangetable index, or 0 for a
     /// trigger-only target relation not in the range table.
     pub ri_RangeTableIndex: Index,
-    /// `Relation ri_RelationDesc` — the open target relation (relations cross
-    /// the owned model as their OID; the relcache owns the entry).
-    pub ri_RelationDesc: Option<Oid>,
+    /// `Relation ri_RelationDesc` — the open target relation. In C this
+    /// aliases the relation `es_relations` (or the trigger-target list) owns;
+    /// here it is a [`types_rel::Relation::alias`] of that handle (shared
+    /// data, no release authority).
+    pub ri_RelationDesc: Option<types_rel::Relation<'mcx>>,
     /// `TupleTableSlot *ri_TrigOldSlot` — for trigger OLD tuples.
     pub ri_TrigOldSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_TrigNewSlot` — for trigger NEW tuples.
@@ -257,34 +249,28 @@ pub struct ScanStateData<'mcx> {
 }
 
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
-/// trimmed to the fields ports consume. Subsystem pointers whose owners are
-/// unported cross as [`Opaque`] handles; `Relation`s cross as their OID.
+/// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
+/// `es_crosscheck_snapshot`, `es_rowmarks`, `es_junkFilter`,
+/// `es_param_list_info`, `es_queryEnv` — are trimmed outright and land with
+/// their first consumer, per docs/types.md rule 3).
 #[derive(Debug)]
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
-    /// `Snapshot es_snapshot` — time qual to use (snapmgr-owned).
-    pub es_snapshot: Opaque,
-    /// `Snapshot es_crosscheck_snapshot` — RI crosscheck time qual.
-    pub es_crosscheck_snapshot: Opaque,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
     pub es_range_table_size: usize,
-    /// `Relation *es_relations` — array of per-RTE open relations (by OID),
-    /// `None` until opened. Parallel to `es_range_table`.
-    pub es_relations: PgVec<'mcx, Option<Oid>>,
-    /// `struct ExecRowMark **es_rowmarks` — per-RTE row marks (owner: the
-    /// row-marking units). Empty = the C `NULL` array pointer.
-    pub es_rowmarks: PgVec<'mcx, Opaque>,
+    /// `Relation *es_relations` — array of per-RTE open relations, `None`
+    /// until opened. Parallel to `es_range_table`. These handles own the
+    /// opens: EState teardown (or abort-path drop) releases them.
+    pub es_relations: PgVec<'mcx, Option<types_rel::Relation<'mcx>>>,
     /// `List *es_rteperminfos` — the query's RTEPermissionInfos.
     pub es_rteperminfos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
     /// `PlannedStmt *es_plannedstmt` — link to the top of the plan tree.
     pub es_plannedstmt: Option<PgBox<'mcx, PlannedStmt<'mcx>>>,
     /// `List *es_part_prune_infos` — `PlannedStmt.partPruneInfos`.
     pub es_part_prune_infos: PgVec<'mcx, Opaque>,
-    /// `JunkFilter *es_junkFilter` — top-level junk filter, if any.
-    pub es_junkFilter: Opaque,
     /// `CommandId es_output_cid` — the inserted/updated tuples' cmin/cmax.
     pub es_output_cid: CommandId,
     /// `ResultRelInfo **es_result_relations` — per-RTE result-rel info (ids
@@ -300,13 +286,9 @@ pub struct EStateData<'mcx> {
     pub es_insert_pending_result_relations: PgVec<'mcx, RriId>,
     /// `List *es_insert_pending_modifytables` — their ModifyTableStates.
     pub es_insert_pending_modifytables: PgVec<'mcx, Opaque>,
-    /// `ParamListInfo es_param_list_info` — values of external params.
-    pub es_param_list_info: Opaque,
     /// `ParamExecData *es_param_exec_vals` — values of internal params.
     /// Empty = the C `NULL`.
     pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
-    /// `QueryEnvironment *es_queryEnv` — query environment.
-    pub es_queryEnv: Opaque,
     /// `MemoryContext es_query_cxt` — the per-query context the executor
     /// allocates in (C: the context `CreateExecutorState` made the `EState`
     /// in, current while nodes init and run).
@@ -364,22 +346,16 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
-            // es_snapshot / es_crosscheck_snapshot = InvalidSnapshot;
-            es_snapshot: Opaque(None),
-            es_crosscheck_snapshot: Opaque(None),
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
-            // es_relations = NULL; es_rowmarks = NULL;
+            // es_relations = NULL;
             es_relations: PgVec::new_in(mcx),
-            es_rowmarks: PgVec::new_in(mcx),
             // es_rteperminfos = NIL; es_plannedstmt = NULL;
             es_rteperminfos: PgVec::new_in(mcx),
             es_plannedstmt: None,
             // es_part_prune_infos = NIL;
             es_part_prune_infos: PgVec::new_in(mcx),
-            // es_junkFilter = NULL;
-            es_junkFilter: Opaque(None),
             // es_output_cid = (CommandId) 0;
             es_output_cid: 0,
             // es_result_relations = NULL; the relation lists = NIL;
@@ -390,11 +366,8 @@ impl<'mcx> EStateData<'mcx> {
             // es_insert_pending_* = NIL;
             es_insert_pending_result_relations: PgVec::new_in(mcx),
             es_insert_pending_modifytables: PgVec::new_in(mcx),
-            // es_param_list_info = NULL; es_param_exec_vals = NULL;
-            es_param_list_info: Opaque(None),
+            // es_param_exec_vals = NULL;
             es_param_exec_vals: PgVec::new_in(mcx),
-            // es_queryEnv = NULL;
-            es_queryEnv: Opaque(None),
             // es_query_cxt = qcontext;
             es_query_cxt: mcx,
             // es_tupleTable = NIL;

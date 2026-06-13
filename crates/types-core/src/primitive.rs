@@ -21,7 +21,21 @@ pub type fsec_t = i32;
 pub type DateADT = i32;
 pub type TimeADT = i64;
 pub type Size = usize;
-pub type NodeTag = u32;
+
+/// `NodeTag` (`nodes/nodes.h`) — the generated node-type enumeration. The
+/// full enum has ~480 generated members; rather than transcribe them all, the
+/// tag is a newtype over the generated numeric value, with named `T_*`
+/// constants defined where ports consume them (values verified against the
+/// PostgreSQL 18.3 generated `nodetags.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NodeTag(pub u32);
+
+impl core::fmt::Display for NodeTag {
+    /// C prints tags as their integer value (`(int) nodeTag(node)`).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 pub type AttrNumber = i16;
 /// `Index` (`c.h`) — index into an array (e.g. a range-table index).
 pub type Index = u32;

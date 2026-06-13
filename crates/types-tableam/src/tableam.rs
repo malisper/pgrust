@@ -8,11 +8,11 @@ use std::boxed::Box;
 use std::sync::Arc;
 use std::vec::Vec;
 
-use types_core::primitive::Oid;
 use types_core::xact::CommandId;
 use types_core::TransactionId;
 use types_error::PgResult;
 use types_nodes::{TupleSlotKind, TupleTableSlot};
+use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -75,12 +75,12 @@ pub enum TU_UpdateIndexes {
 }
 
 /// `IndexFetchTableData` (`access/tableam.h`) — the AM-private per-index-scan
-/// working state. The base member `rel` crosses as the relation's `Oid`; the
-/// AM-specific tail (heap's `IndexFetchHeapData`) rides opaquely in
-/// `am_private`.
-pub struct IndexFetchTableData {
+/// working state. The base member `rel` is an alias handle of the open
+/// relation the fetch was begun on; the AM-specific tail (heap's
+/// `IndexFetchHeapData`) rides opaquely in `am_private`.
+pub struct IndexFetchTableData<'mcx> {
     /// `rel` — the relation the fetch was begun on.
-    pub rel: Oid,
+    pub rel: Relation<'mcx>,
     /// The AM-private payload, owned by the access method that created it.
     pub am_private: Option<Box<dyn Any>>,
 }
@@ -96,49 +96,50 @@ pub struct BulkInsertStateData {
 /// vtable, trimmed to the callbacks the dispatch unit (`tableam.c` and the
 /// `tableam.h` wrappers it itself uses) invokes. All of these are required
 /// callbacks in C (`GetTableAmRoutine` validates them non-NULL), so the
-/// fields are plain `fn` pointers. The relation receiver crosses as its
-/// `Oid`; failure surfaces mirror the heap implementations (every one of
+/// fields are plain `fn` pointers. The relation receiver is the open
+/// relation's handle; failure surfaces mirror the heap implementations (every one of
 /// these can `ereport(ERROR)` except `slot_callbacks` and
 /// `parallelscan_estimate`).
 #[derive(Clone, Copy)]
 pub struct TableAmRoutine {
     /// `slot_callbacks(rel)` — slot implementation suitable for the AM.
-    pub slot_callbacks: fn(rel: Oid) -> TupleSlotKind,
+    pub slot_callbacks: fn(rel: &Relation<'_>) -> TupleSlotKind,
 
     /// `scan_begin(rel, snapshot, nkeys, key, pscan, flags)` — start a scan.
-    pub scan_begin: fn(
-        rel: Oid,
+    pub scan_begin: for<'mcx> fn(
+        rel: &Relation<'mcx>,
         snapshot: Snapshot,
         nkeys: i32,
         key: Vec<ScanKeyData>,
         pscan: Option<Arc<ParallelTableScanDescData>>,
         flags: u32,
-    ) -> PgResult<TableScanDesc>,
+    ) -> PgResult<TableScanDesc<'mcx>>,
 
     /// `parallelscan_estimate(rel)` — DSM space needed for the AM's shared
     /// parallel-scan state.
-    pub parallelscan_estimate: fn(rel: Oid) -> usize,
+    pub parallelscan_estimate: fn(rel: &Relation<'_>) -> usize,
 
     /// `parallelscan_initialize(rel, pscan)` — initialize the shared
     /// descriptor; returns the size needed (same as the estimate).
     pub parallelscan_initialize:
-        fn(rel: Oid, pscan: &mut ParallelTableScanDescData) -> PgResult<usize>,
+        fn(rel: &Relation<'_>, pscan: &mut ParallelTableScanDescData) -> PgResult<usize>,
 
     /// `parallelscan_reinitialize(rel, pscan)` — reinitialize for a rescan.
     pub parallelscan_reinitialize:
-        fn(rel: Oid, pscan: &ParallelTableScanDescData) -> PgResult<()>,
+        fn(rel: &Relation<'_>, pscan: &ParallelTableScanDescData) -> PgResult<()>,
 
     /// `index_fetch_begin(rel)` — set up index-fetch state.
-    pub index_fetch_begin: fn(rel: Oid) -> PgResult<Box<IndexFetchTableData>>,
+    pub index_fetch_begin:
+        for<'mcx> fn(rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
 
     /// `index_fetch_end(scan)` — release index-fetch resources.
-    pub index_fetch_end: fn(scan: Box<IndexFetchTableData>) -> PgResult<()>,
+    pub index_fetch_end: fn(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>,
 
     /// `index_fetch_tuple(scan, tid, snapshot, slot, call_again, all_dead)`
     /// — fetch the tuple at `tid` into `slot`, returning true on a
     /// snapshot-visible match.
     pub index_fetch_tuple: fn(
-        scan: &mut IndexFetchTableData,
+        scan: &mut IndexFetchTableData<'_>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
         slot: &mut TupleTableSlot,
@@ -149,16 +150,16 @@ pub struct TableAmRoutine {
     /// `tuple_tid_valid(scan, tid)` — is `tid` potentially valid (within the
     /// relation's current size)?
     pub tuple_tid_valid:
-        fn(scan: &mut TableScanDescData, tid: &ItemPointerData) -> PgResult<bool>,
+        fn(scan: &mut TableScanDescData<'_>, tid: &ItemPointerData) -> PgResult<bool>,
 
     /// `tuple_get_latest_tid(scan, tid)` — chase the latest row version of
     /// the chain starting at `tid`.
     pub tuple_get_latest_tid:
-        fn(scan: &mut TableScanDescData, tid: &mut ItemPointerData) -> PgResult<()>,
+        fn(scan: &mut TableScanDescData<'_>, tid: &mut ItemPointerData) -> PgResult<()>,
 
     /// `tuple_insert(rel, slot, cid, options, bistate)`.
     pub tuple_insert: fn(
-        rel: Oid,
+        rel: &Relation<'_>,
         slot: &mut TupleTableSlot,
         cid: CommandId,
         options: i32,
@@ -168,7 +169,7 @@ pub struct TableAmRoutine {
     /// `tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
     /// changingPart)`.
     pub tuple_delete: fn(
-        rel: Oid,
+        rel: &Relation<'_>,
         tid: &ItemPointerData,
         cid: CommandId,
         snapshot: &Snapshot,
@@ -181,7 +182,7 @@ pub struct TableAmRoutine {
     /// `tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait, tmfd,
     /// lockmode, update_indexes)`.
     pub tuple_update: fn(
-        rel: Oid,
+        rel: &Relation<'_>,
         otid: &ItemPointerData,
         slot: &mut TupleTableSlot,
         cid: CommandId,

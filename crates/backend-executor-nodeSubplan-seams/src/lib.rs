@@ -7,19 +7,6 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
-    /// `UpdateChangedParamSet(node, newchg)` (nodeSubplan.c): add the changed
-    /// parameters in `newchg` that the node's plan depends on
-    /// (`plan->allParam`) to `node->chgParam`. `mcx` is the per-query context
-    /// the set storage grows in (C: `bms_intersect`/`bms_join` palloc in
-    /// `CurrentMemoryContext`); fallible on OOM.
-    pub fn update_changed_param_set<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        node: &mut types_nodes::PlanStateNode<'mcx>,
-        newchg: &types_nodes::Bitmapset<'mcx>,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `ExecReScanSetParamPlan(node, parent)` (nodeSubplan.c): mark an
     /// InitPlan's output params as needing recalculation (set `execPlan` in
     /// the estate's param array, add the params to the parent's `chgParam`).

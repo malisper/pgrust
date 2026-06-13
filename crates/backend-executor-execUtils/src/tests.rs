@@ -8,11 +8,14 @@ thread_local! {
     static CALLBACK_LOG: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-fn log_cb(arg: Datum) {
+fn log_cb(_mcx: Mcx<'_>, arg: Datum) -> PgResult<()> {
     CALLBACK_LOG.with(|l| l.borrow_mut().push(arg.as_usize()));
+    Ok(())
 }
 
-fn other_cb(_arg: Datum) {}
+fn other_cb(_mcx: Mcx<'_>, _arg: Datum) -> PgResult<()> {
+    Ok(())
+}
 
 #[test]
 fn prevpower2() {
@@ -32,7 +35,7 @@ fn executor_state_create_and_free() {
     estate.with(|s| assert_eq!(s.es_direction, types_nodes::execnodes::ForwardScanDirection));
     estate.with(|s| assert!(s.es_exprcontexts.is_empty()));
     estate.with(|s| assert_eq!(s.es_processed, 0));
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -52,11 +55,11 @@ fn expr_context_create_free_and_per_tuple() {
         assert_eq!(estate.es_exprcontexts.len(), 3);
 
         // FreeExprContext tombstones without disturbing other ids.
-        FreeExprContext(estate, a, true);
+        FreeExprContext(estate, a, true).unwrap();
         assert!(estate.es_exprcontexts[a.0 as usize].is_none());
         let _ = estate.ecxt(b); // still resolvable
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -71,7 +74,7 @@ fn callbacks_run_in_reverse_order_and_only_on_commit() {
         RegisterExprContextCallback(ec, log_cb, Datum::from_usize(3)).unwrap();
 
         CALLBACK_LOG.with(|l| l.borrow_mut().clear());
-        ReScanExprContext(estate.ecxt_mut(id));
+        ReScanExprContext(estate.ecxt_mut(id)).unwrap();
         // reverse registration order
         CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![3, 2, 1]));
         // list was emptied
@@ -81,10 +84,10 @@ fn callbacks_run_in_reverse_order_and_only_on_commit() {
         let ec = estate.ecxt_mut(id);
         RegisterExprContextCallback(ec, log_cb, Datum::from_usize(9)).unwrap();
         CALLBACK_LOG.with(|l| l.borrow_mut().clear());
-        FreeExprContext(estate, id, false);
+        FreeExprContext(estate, id, false).unwrap();
         CALLBACK_LOG.with(|l| assert!(l.borrow().is_empty()));
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -103,10 +106,10 @@ fn unregister_removes_matching_entries_only() {
         UnregisterExprContextCallback(ec, log_cb, Datum::from_usize(1));
 
         CALLBACK_LOG.with(|l| l.borrow_mut().clear());
-        ShutdownExprContext(ec, true);
+        ShutdownExprContext(ec, true).unwrap();
         CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![2]));
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -120,7 +123,7 @@ fn free_executor_state_runs_remaining_callbacks() {
         RegisterExprContextCallback(estate.ecxt_mut(b), log_cb, Datum::from_usize(20)).unwrap();
     });
     CALLBACK_LOG.with(|l| l.borrow_mut().clear());
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
     // newest context first (the C lcons order)
     CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![20, 10]));
 }
@@ -132,7 +135,7 @@ fn standalone_expr_context() {
     assert!(ec.caseValue_isNull && ec.domainValue_isNull);
     RegisterExprContextCallback(&mut ec, log_cb, Datum::from_usize(7)).unwrap();
     CALLBACK_LOG.with(|l| l.borrow_mut().clear());
-    FreeStandaloneExprContext(ec, true);
+    FreeStandaloneExprContext(ec, true).unwrap();
     CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![7]));
 }
 
@@ -309,7 +312,7 @@ fn result_slot_ops_fallbacks() {
             Some(TupleSlotKind::Virtual)
         );
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -333,7 +336,7 @@ fn relation_is_target_relation() {
         assert!(ExecRelationIsTargetRelation(estate, 2));
         assert!(!ExecRelationIsTargetRelation(estate, 3));
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -345,7 +348,7 @@ fn errposition_noop_paths() {
     estate.with(|s| assert_eq!(executor_errposition(Some(s), -1).unwrap(), 0));
     // Source text unavailable: no-op.
     estate.with(|s| assert_eq!(executor_errposition(Some(s), 5).unwrap(), 0));
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }
 
 #[test]
@@ -370,5 +373,5 @@ fn init_range_table_sets_arrays() {
         assert!(estate.es_result_relations.is_empty());
         assert_eq!(exec_rt_fetch(1, estate).relid, 16384);
     });
-    FreeExecutorState(estate);
+    FreeExecutorState(estate).unwrap();
 }

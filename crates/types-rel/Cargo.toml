@@ -1,15 +1,16 @@
 [package]
-name = "backend-access-tableam-seams"
+name = "types-rel"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_access_tableam_seams"
+name = "types_rel"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }

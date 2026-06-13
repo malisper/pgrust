@@ -15,6 +15,7 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
@@ -24,15 +25,12 @@ backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" 
 backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModifyTable-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
-backend-access-tableam-seams = { path = "../backend-access-tableam-seams" }
-backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
-backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-table-table = { path = "../backend-access-table-table" }
 backend-parser-relation-seams = { path = "../backend-parser-relation-seams" }
 backend-partitioning-core-seams = { path = "../backend-partitioning-core-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
-backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
-backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-jit-jit-seams = { path = "../backend-jit-jit-seams" }

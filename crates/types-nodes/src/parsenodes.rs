@@ -6,19 +6,37 @@ use types_tuple::access::LOCKMODE;
 
 use crate::bitmapset::Bitmapset;
 
-/// `RTEKind` (nodes/parsenodes.h).
-pub type RTEKind = u32;
+/// `RTEKind` (nodes/parsenodes.h) — values verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RTEKind {
+    /// ordinary relation reference
+    #[default]
+    RTE_RELATION = 0,
+    /// subquery in FROM
+    RTE_SUBQUERY = 1,
+    /// join
+    RTE_JOIN = 2,
+    /// function in FROM
+    RTE_FUNCTION = 3,
+    /// TableFunc(.., column list)
+    RTE_TABLEFUNC = 4,
+    /// VALUES (<exprlist>), (<exprlist>), ...
+    RTE_VALUES = 5,
+    /// common table expr (WITH list element)
+    RTE_CTE = 6,
+    /// tuplestore, e.g. for AFTER triggers
+    RTE_NAMEDTUPLESTORE = 7,
+    /// RTE represents an empty FROM clause (added by the planner)
+    RTE_RESULT = 8,
+    /// the grouping step
+    RTE_GROUP = 9,
+}
 
-pub const RTE_RELATION: RTEKind = 0;
-pub const RTE_SUBQUERY: RTEKind = 1;
-pub const RTE_JOIN: RTEKind = 2;
-pub const RTE_FUNCTION: RTEKind = 3;
-pub const RTE_TABLEFUNC: RTEKind = 4;
-pub const RTE_VALUES: RTEKind = 5;
-pub const RTE_CTE: RTEKind = 6;
-pub const RTE_NAMEDTUPLESTORE: RTEKind = 7;
-pub const RTE_RESULT: RTEKind = 8;
-pub const RTE_GROUP: RTEKind = 9;
+pub use RTEKind::{
+    RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION, RTE_RESULT,
+    RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
+};
 
 /// `RangeTblEntry` (nodes/parsenodes.h), trimmed to the fields ports consume.
 #[derive(Clone, Copy, Debug, Default)]
