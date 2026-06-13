@@ -68,6 +68,26 @@ pub struct ProcInfo<'mcx> {
     pub tid: ItemPointerData,
 }
 
+/// The `pg_proc` facts `internal_get_result_type` (funcapi.c) reads to classify
+/// a function's result type: `prorettype`, `proretset`, `pronargs`, and the
+/// declared `proargtypes` vector (the OID-vector the polymorphic-tupdesc
+/// resolver substitutes against). Copied out of the catcache into the caller's
+/// `Mcx`, so it carries that allocation lifetime.
+#[derive(Debug)]
+pub struct ProcResultInfo<'mcx> {
+    /// C: `prorettype` — the function's declared result type OID.
+    pub prorettype: Oid,
+    /// C: `proretset` — whether the function returns a set.
+    pub proretset: bool,
+    /// C: `pronargs` — the number of declared (input) arguments.
+    pub pronargs: i16,
+    /// C: `proargtypes` (the `oidvector` of declared input-argument types).
+    pub proargtypes: PgVec<'mcx, Oid>,
+    /// C: `NameStr(proname)` — used in the "could not determine actual result
+    /// type" error message.
+    pub proname: PgString<'mcx>,
+}
+
 /// The catalog facts a `pg_language` lookup returns (read by
 /// `fmgr_info_other_lang` / `CheckFunctionValidatorAccess`).
 #[derive(Debug)]

@@ -16,6 +16,13 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-namespace = { path = "../types-namespace" }
 types-tuple = { path = "../types-tuple" }
+types-fmgr = { path = "../types-fmgr" }
 backend-utils-error = { path = "../backend-utils-error" }
 # Inward seam crate this unit OWNS and installs from init_seams().
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# Per-owner seam crates for unported neighbors the result_type family routes through.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }

@@ -23,5 +23,5 @@ pub use fmgr::{
 };
 pub use resolution::{
     AclObjectType, BuiltinFunction, FmgrHookEventType, FmgrResolution, LangInfo, LoadedCFunc,
-    LoadedExternalFunc, ProcInfo, ProcLanguage, ResolvedFmgrInfo,
+    LoadedExternalFunc, ProcInfo, ProcLanguage, ProcResultInfo, ResolvedFmgrInfo,
 };
