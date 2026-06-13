@@ -8,21 +8,27 @@
 //! `build_hash_projections_and_exprs`) is built on the grouping-equal + hash
 //! builders, so its seams land here.
 
-use mcx::{Mcx, PgBox};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::{
-    ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, ResultCell, ResultCellId,
-    EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
+    ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,
+    ResultCellId, EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
 };
 use types_nodes::execexpr::SubPlanState;
 use types_nodes::executor::TupleSlotKind;
-use types_nodes::nodeagg::{do_aggsplit_combine, AggStateData};
+use types_nodes::nodeagg::{do_aggsplit_combine, AggStateData, AggStrategy, Aggref};
 use types_nodes::primnodes::{Expr, OpExpr, AND_EXPR};
 use types_nodes::EStateData;
 use types_tuple::heaptuple::TupleDescData;
+
+/// `#define INNER_VAR (-1)` (primnodes.h special varnos) — local mirror (the
+/// core constant is module-private); used by the agg setup walker.
+const INNER_VAR: i32 = -1;
+/// `#define OUTER_VAR (-2)`.
+const OUTER_VAR: i32 = -2;
 
 use crate::execExpr_core as core;
 use backend_executor_execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
@@ -317,31 +323,379 @@ pub fn exec_build_agg_trans<'mcx>(
     nullcheck: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let _ = (do_sort, do_hash, nullcheck, estate, phase);
+    let _ = estate;
 
     // state = makeNode(ExprState); state->expr = (Expr *) aggstate;
     // state->parent = &aggstate->ss.ps;  scratch.resvalue=&state->resvalue.
+    //
+    // The C `state->expr = (Expr *) aggstate` is a debug back-link only; the
+    // owned ExprState.expr is an `Option<PgBox<Expr>>` and an AggState is not an
+    // Expr node, so the back-link is left unset (it is never dereferenced during
+    // evaluation). `state->parent = &aggstate->ss.ps` is likewise a back-pointer
+    // only — left as the default (None); the agg program never recurses into a
+    // SubPlan that would require `state->parent`.
     let mut state = make_expr_state(mcx)?;
-    let _is_combine = do_aggsplit_combine(aggstate.aggsplit);
+    let is_combine = do_aggsplit_combine(aggstate.aggsplit);
 
-    // First prescan: expr_setup_walker over every pertrans aggref's
-    // aggdirectargs/args/aggorder/aggdistinct/aggfilter, then
-    // ExecPushExprSetupSteps(state, &deform). The walker + push live in
-    // execExpr_core (private); the FETCHSOME deform prefix is part of that
-    // spine.
-    let _ = &mut state;
-    panic!(
-        "execExpr-domain-agg: ExecBuildAggTrans needs (1) the core-owned expr_setup_walker + \
-         ExecPushExprSetupSteps prescan and ExecInitExprRec recursion (private to execExpr_core) \
-         to compile each aggref arg/filter, and (2) the ability to target the externally-owned \
-         trans_fcinfo->args[] / sortslot->tts_values[] cells (nodeAgg-owned) as recursion outputs \
-         — the owned ResultCellArena only names cells internal to this ExprState, and the \
-         AggTrans/AggStrictInputCheck/AggDeserialize payloads carry pertrans/fcinfo as parked \
-         addresses with no arg-cell vector. The full per-trans stepping (filter jump, combine / \
-         non-sorted / single- and multi-col sort input paths, strict-input null check, presorted \
-         DISTINCT check, per-grouping-set ExecBuildAggTransCall, and the early-bailout jump \
-         fixups) is mirrored in exec_build_agg_trans_call and the C below once those land."
-    );
+    // The C reusable `scratch` step lives on the stack and is byte-copied into
+    // the program by ExprEvalPushStep; here each push builds its own owned step
+    // (the owned step payload is moved per push). `scratch.resvalue`/`resnull`
+    // default to STATE_RESULT_CELL (the C `&state->resvalue`/`&state->resnull`).
+
+    // -----------------------------------------------------------------------
+    // First figure out which slots, and how many columns from each, we're going
+    // to need (expr_setup_walker over each pertrans aggref's aggdirectargs /
+    // args / aggorder / aggdistinct / aggfilter), then ExecPushExprSetupSteps.
+    //
+    // `expr_setup_walker` / `ExecPushExprSetupSteps` are private to
+    // `execExpr_core`; this family restates the small accumulator
+    // (`agg_setup_walker`, mirroring the core walker's child-link descent) and
+    // emits the FETCHSOME deform prefix with the local `push_fetchsome` (the
+    // file-level mirror of the core spine helper). The aggorder/aggdistinct
+    // SortGroupClause lists are not modeled on `Aggref` (they reference the
+    // `args` columns by position and carry no Vars of their own), so walking
+    // `aggdirectargs` + `args` (TargetEntry exprs) + `aggfilter` covers every
+    // attribute the deform must reach — matching the C walk.
+    // -----------------------------------------------------------------------
+    let num_trans = aggstate.numtrans;
+    let mut deform = LastAttnumInfo::default();
+    {
+        let pertrans_vec = aggstate
+            .pertrans
+            .as_ref()
+            .expect("ExecBuildAggTrans: aggstate->pertrans is NULL");
+        for transno in 0..num_trans as usize {
+            let pertrans = &pertrans_vec[transno];
+            let aggref = pertrans
+                .aggref
+                .as_ref()
+                .expect("ExecBuildAggTrans: pertrans->aggref is NULL");
+            if let Some(directargs) = aggref.aggdirectargs.as_ref() {
+                for e in directargs.iter() {
+                    agg_setup_walker(e, &mut deform);
+                }
+            }
+            if let Some(args) = aggref.args.as_ref() {
+                for tle in args.iter() {
+                    if let Some(e) = tle.expr.as_deref() {
+                        agg_setup_walker(e, &mut deform);
+                    }
+                }
+            }
+            if let Some(f) = aggref.aggfilter.as_deref() {
+                agg_setup_walker(f, &mut deform);
+            }
+        }
+    }
+    push_setup_steps(mcx, &mut state, &deform)?;
+
+    // -----------------------------------------------------------------------
+    // Emit instructions for each transition value / grouping set combination.
+    // -----------------------------------------------------------------------
+    for transno in 0..num_trans as usize {
+        // Read the per-trans predicates we need up front (the borrow of
+        // `aggstate.pertrans` cannot be held across the &mut state pushes /
+        // the &aggstate ExecBuildAggTransCall call, so snapshot the scalar
+        // fields and the transfn strictness here).
+        let p = pertrans_pred(aggstate, transno);
+
+        // List of step indices whose early-bailout jump must be pointed past the
+        // whole trans (the C `adjust_bailout`).
+        let mut adjust_bailout: PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, 4)?;
+
+        // strictnulls / strictargs selection (C locals): for the strict-input
+        // check, either a `nulls` array (sorted paths) or the per-arg cells
+        // (`args + 1`). In the owned model the per-arg cells are arena
+        // ResultCellIds; `strict_arg_cells` collects them for the ARGS variant,
+        // `strict_uses_nulls` marks the NULLS variant.
+        let mut strict_arg_cells: Option<PgVec<'mcx, ResultCellId>> = None;
+        let mut strict_uses_nulls = false;
+
+        // ---- filter (before evaluating input; skipped when combining) ----
+        if p.has_aggfilter && !is_combine {
+            // evaluate filter expression into &state->resvalue/&state->resnull.
+            // The aggref subtree is borrowed read-only from aggstate; clone the
+            // small filter Expr so the borrow does not collide with the &mut
+            // state recursion (the C uses the node in place — read-only).
+            let aggfilter = aggref_of(aggstate, transno)
+                .aggfilter
+                .as_deref()
+                .expect("ExecBuildAggTrans: aggfilter present but NULL")
+                .clone();
+            core::exec_init_expr_rec(mcx, &aggfilter, &mut state, STATE_RESULT_CELL)?;
+            // and jump out if false
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_JUMP_IF_NOT_TRUE,
+                resvalue: STATE_RESULT_CELL,
+                resnull: STATE_RESULT_CELL,
+                d: ExprEvalStepData::Jump { jumpdone: -1 }, // adjust later
+            };
+            core::expr_eval_push_step(mcx, &mut state, scratch)?;
+            adjust_bailout.push(state.steps_len - 1);
+        }
+
+        // ---- evaluate arguments to aggregate/combine function ----
+        let mut argno: i32 = 0;
+        if is_combine {
+            // Combining two aggregate transition values. The input is a,
+            // potentially deserialized, transition value rather than a tuple.
+            debug_assert_eq!(p.num_sort_cols, 0);
+            debug_assert_eq!(p.aggref_args_len, 1);
+
+            // source_tle = linitial(pertrans->aggref->args). Clone the (single)
+            // source Expr so the read-only borrow does not collide with the
+            // &mut state recursion (C uses the node in place).
+            let source_expr = arg_tle_expr_clone(aggstate, transno, 0);
+
+            if !p.deserialfn_valid {
+                // No deserialization: recurse the source straight into the
+                // transfn input arg cell (&trans_fcinfo->args[argno + 1]).
+                let arg_cell = new_result_cell(mcx, &mut state)?;
+                core::exec_init_expr_rec(mcx, &source_expr, &mut state, arg_cell)?;
+                strict_arg_cells = Some(single_cell_vec(mcx, arg_cell)?);
+            } else {
+                // deserialfn_oid set: the AGG[_STRICT]_DESERIALIZE step's
+                // `fcinfo_data` payload must carry `pertrans->deserialfn_fcinfo`
+                // — the nodeAgg-owned, pre-initialized deserialize
+                // FunctionCallInfo (with its bound flinfo/collation). That
+                // FunctionCallInfo is owned by nodeAgg (it lives on
+                // AggStatePerTransData and is reused at execution time); the
+                // owned model has no way to hand the step a shared reference to
+                // it (the payload wants an owned `PgBox`, and the trimmed
+                // FunctionCallInfoBaseData cannot reconstruct the bound
+                // flinfo/args). Threading the nodeAgg-owned ds_fcinfo into the
+                // step is a cross-owner ownership change beyond this family's
+                // module.
+                let _ = &source_expr;
+                panic!(
+                    "execExpr-domain-agg: ExecBuildAggTrans combine-with-deserialization path \
+                     emits EEOP_AGG[_STRICT]_DESERIALIZE whose fcinfo_data payload must carry \
+                     pertrans->deserialfn_fcinfo — the nodeAgg-owned, pre-initialized deserialize \
+                     FunctionCallInfo. The owned AggDeserialize.fcinfo_data is an owned PgBox and \
+                     the trimmed FunctionCallInfoBaseData cannot hold the bound flinfo/args, so the \
+                     nodeAgg-owned ds_fcinfo cannot be handed to the step from here. The \
+                     non-deserialize combine, presorted/non-sorted, and single-column-sort input \
+                     paths are fully emitted."
+                );
+            }
+            argno += 1;
+            debug_assert_eq!(p.num_inputs, argno);
+        } else if !p.aggsortrequired {
+            // Normal transition function without ORDER BY / DISTINCT, or with
+            // ORDER BY / DISTINCT but presorted input. strictargs =
+            // trans_fcinfo->args + 1.
+            let mut cells: PgVec<'mcx, ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
+            let nargs = p.aggref_args_len;
+            for i in 0..nargs {
+                // Don't initialize args for any ORDER BY clause that might exist
+                // in a presorted aggregate.
+                if argno == p.num_trans_inputs {
+                    break;
+                }
+                let arg = arg_tle_expr_clone(aggstate, transno, i);
+                // Recurse into &trans_fcinfo->args[argno + 1].
+                let arg_cell = new_result_cell(mcx, &mut state)?;
+                core::exec_init_expr_rec(mcx, &arg, &mut state, arg_cell)?;
+                cells.push(arg_cell);
+                argno += 1;
+            }
+            debug_assert_eq!(p.num_trans_inputs, argno);
+            strict_arg_cells = Some(cells);
+        } else if p.num_inputs == 1 {
+            // Non-presorted DISTINCT and/or ORDER BY case, single sort column.
+            debug_assert_eq!(p.aggref_args_len, 1);
+            let arg = arg_tle_expr_clone(aggstate, transno, 0);
+            // Recurse into &state->resvalue / &state->resnull.
+            core::exec_init_expr_rec(mcx, &arg, &mut state, STATE_RESULT_CELL)?;
+            // strictnulls = &state->resnull
+            strict_uses_nulls = true;
+            argno += 1;
+            debug_assert_eq!(p.num_inputs, argno);
+        } else {
+            // Non-presorted DISTINCT and/or ORDER BY case, multiple sort
+            // columns. The C recurses each input into
+            // &pertrans->sortslot->tts_values[argno] / tts_isnull[argno] — the
+            // value/null cells of the nodeAgg-owned input TupleTableSlot. Those
+            // slot cells are not arena ResultCellIds: the owned-model
+            // TupleTableSlot does not expose its tts_values/tts_isnull as
+            // addressable per-attribute result cells (the execTuples slot model
+            // expansion — task #113, Bucket C — is required to name them as
+            // recursion outputs). strictnulls then points at
+            // sortslot->tts_isnull, the same un-nameable cells.
+            let _ = argno;
+            panic!(
+                "execExpr-domain-agg: ExecBuildAggTrans multi-column non-presorted ORDER BY/DISTINCT \
+                 path recurses each transition input into &pertrans->sortslot->tts_values[i] / \
+                 tts_isnull[i] (the nodeAgg-owned input TupleTableSlot's per-attribute cells) and \
+                 sets strictnulls = sortslot->tts_isnull. The owned TupleTableSlot (execTuples, \
+                 task #113 Bucket C decomp) does not yet expose tts_values/tts_isnull as \
+                 addressable ResultCell targets, so these recursion outputs cannot be named. The \
+                 single-column sort, presorted/non-sorted, and combine paths above are fully \
+                 emitted."
+            );
+        }
+
+        // ---- strict-input null check ----
+        //
+        // For a strict transfn, nothing happens on a NULL input; keep the prior
+        // transValue. True for both plain and sorted/distinct aggregates.
+        if p.transfn_strict && p.num_trans_inputs > 0 {
+            let opcode = if strict_uses_nulls {
+                ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_NULLS
+            } else if strict_arg_cells.is_some() && p.num_trans_inputs == 1 {
+                ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1
+            } else {
+                ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_ARGS
+            };
+            // scratch.d.agg_strict_input_check = { nulls, args, jumpnull, nargs }
+            //
+            // NULLS variant: C sets `nulls = strictnulls`. The only reachable
+            // NULLS emission here is the single-column non-presorted sort path,
+            // where `strictnulls = &state->resnull` — i.e. the well-known
+            // STATE_RESULT_CELL (cell 0), into which that path's single input was
+            // just evaluated. The interpreter reads STATE_RESULT_CELL's is-null
+            // for the (single) strict check, so no per-cell `nulls`/`arg_cells`
+            // vector is needed (the multi-column sort path, whose strictnulls is
+            // the nodeAgg-owned sortslot->tts_isnull, panics above). `nulls` /
+            // `args` stay None (they are the C owned-workspace copies, not the
+            // aliasing source).
+            //
+            // ARGS variants: name the per-arg cells the transfn input
+            // sub-expressions evaluated into (strict_arg_cells), the
+            // owned-model replacement for the C `args = trans_fcinfo->args + 1`.
+            let arg_cells = if strict_uses_nulls {
+                None
+            } else {
+                strict_arg_cells.take()
+            };
+            let scratch = ExprEvalStep {
+                opcode,
+                resvalue: STATE_RESULT_CELL,
+                resnull: STATE_RESULT_CELL,
+                d: ExprEvalStepData::AggStrictInputCheck {
+                    args: None,
+                    nulls: None,
+                    arg_cells,
+                    nargs: p.num_trans_inputs,
+                    jumpnull: -1, // adjust later
+                },
+            };
+            core::expr_eval_push_step(mcx, &mut state, scratch)?;
+            adjust_bailout.push(state.steps_len - 1);
+        }
+
+        // ---- DISTINCT aggregates with pre-sorted input ----
+        if p.num_distinct_cols > 0 && !p.aggsortrequired {
+            let opcode = if p.num_distinct_cols > 1 {
+                ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_MULTI
+            } else {
+                ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_SINGLE
+            };
+            // scratch.d.agg_presorted_distinctcheck.pertrans = pertrans;
+            // The AggStatePerTrans back-pointer is nodeAgg-owned; carried as a
+            // parked address (opaque usize) in the payload, like the C pointer.
+            let scratch = ExprEvalStep {
+                opcode,
+                resvalue: STATE_RESULT_CELL,
+                resnull: STATE_RESULT_CELL,
+                d: ExprEvalStepData::AggPresortedDistinctCheck {
+                    pertrans: transno,
+                    aggcontext: 0,
+                    jumpdistinct: -1, // adjust later
+                },
+            };
+            core::expr_eval_push_step(mcx, &mut state, scratch)?;
+            adjust_bailout.push(state.steps_len - 1);
+        }
+
+        // ---- call transition function (once per concurrently-evaluated set) ----
+        if do_sort {
+            let process_grouping_sets = phase_numsets(aggstate, phase).max(1);
+            let mut setoff: i32 = 0;
+            for setno in 0..process_grouping_sets {
+                exec_build_agg_trans_call(
+                    mcx, &mut state, aggstate, transno, transno as i32, setno, setoff, false,
+                    nullcheck,
+                )?;
+                setoff += 1;
+            }
+        }
+
+        if do_hash {
+            let num_hashes = aggstate.num_hashes;
+            // In MIXED mode, there'll be preceding transition values.
+            let mut setoff: i32 = if aggstate.aggstrategy != AggStrategy::AggHashed {
+                aggstate.maxsets
+            } else {
+                0
+            };
+            for setno in 0..num_hashes {
+                exec_build_agg_trans_call(
+                    mcx, &mut state, aggstate, transno, transno as i32, setno, setoff, true,
+                    nullcheck,
+                )?;
+                setoff += 1;
+            }
+        }
+
+        // ---- adjust early bail-out jump target(s) ----
+        for bail in adjust_bailout.iter().copied() {
+            let target = state.steps_len;
+            let steps = state
+                .steps
+                .as_mut()
+                .expect("ExecBuildAggTrans: steps array is NULL during jump fixup");
+            let as_step = &mut steps[bail as usize];
+            match &mut as_step.d {
+                ExprEvalStepData::Jump { jumpdone }
+                    if as_step.opcode == ExprEvalOp::EEOP_JUMP_IF_NOT_TRUE =>
+                {
+                    debug_assert_eq!(*jumpdone, -1);
+                    *jumpdone = target;
+                }
+                ExprEvalStepData::AggStrictInputCheck { jumpnull, .. } => {
+                    debug_assert!(matches!(
+                        as_step.opcode,
+                        ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_ARGS
+                            | ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1
+                            | ExprEvalOp::EEOP_AGG_STRICT_INPUT_CHECK_NULLS
+                    ));
+                    debug_assert_eq!(*jumpnull, -1);
+                    *jumpnull = target;
+                }
+                ExprEvalStepData::AggDeserialize { jumpnull, .. } => {
+                    debug_assert_eq!(as_step.opcode, ExprEvalOp::EEOP_AGG_STRICT_DESERIALIZE);
+                    debug_assert_eq!(*jumpnull, -1);
+                    *jumpnull = target;
+                }
+                ExprEvalStepData::AggPresortedDistinctCheck { jumpdistinct, .. } => {
+                    debug_assert!(matches!(
+                        as_step.opcode,
+                        ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_SINGLE
+                            | ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_MULTI
+                    ));
+                    debug_assert_eq!(*jumpdistinct, -1);
+                    *jumpdistinct = target;
+                }
+                _ => debug_assert!(false, "unexpected bail-out step opcode"),
+            }
+        }
+    }
+
+    // scratch.resvalue = NULL; scratch.resnull = NULL;
+    // scratch.opcode = EEOP_DONE_NO_RETURN; ExprEvalPushStep.
+    let done = ExprEvalStep {
+        opcode: ExprEvalOp::EEOP_DONE_NO_RETURN,
+        resvalue: STATE_RESULT_CELL,
+        resnull: STATE_RESULT_CELL,
+        d: ExprEvalStepData::NoPayload,
+    };
+    core::expr_eval_push_step(mcx, &mut state, done)?;
+
+    exec_ready_expr(&mut state)?;
+
+    mcx::alloc_in(mcx, state)
 }
 
 /// `ExecBuildAggTransCall(state, aggstate, scratch, fcinfo, pertrans, transno,
@@ -359,14 +713,10 @@ pub fn exec_build_agg_trans<'mcx>(
 /// own logic; the `AggStatePerTrans` back-pointer and the `aggcontext` id are
 /// genuine nodeAgg-owned products carried as parked addresses.
 #[allow(clippy::too_many_arguments)]
-// `adjust_jumpnull` is assigned then read in the faithful continuation below the
-// blocker panic (currently unreachable), mirroring the C jumpnull fixup.
-#[allow(unused_assignments)]
 pub fn exec_build_agg_trans_call<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
     aggstate: &AggStateData<'mcx>,
-    scratch: &mut ExprEvalStep<'mcx>,
     pertrans: usize,
     transno: i32,
     setno: i32,
@@ -375,73 +725,95 @@ pub fn exec_build_agg_trans_call<'mcx>(
     nullcheck: bool,
 ) -> PgResult<()> {
     // aggcontext = ishash ? aggstate->hashcontext : aggstate->aggcontexts[setno];
-    // In the owned model the ExprContext is an EState pool id threaded by
-    // nodeAgg; carried as a parked address in the AggTrans/nullcheck payloads.
-    let _ = aggstate;
+    // In the owned model the ExprContext is a nodeAgg-owned product; carried as
+    // a parked address (opaque usize) in the AggTrans payload, exactly as the C
+    // ExprContext* pointer is. (The owned ExprContext has no stable address word
+    // until nodeAgg threads its EState pool id; 0 is the parked sentinel, matched
+    // by the interpreter resolving the context via aggstate.)
+    let _ = (aggstate, ishash, setno);
     let aggcontext_addr: usize = 0;
 
     let mut adjust_jumpnull: i32 = -1;
 
     // add check for NULL pointer?
     if nullcheck {
-        scratch.opcode = ExprEvalOp::EEOP_AGG_PLAIN_PERGROUP_NULLCHECK;
-        scratch.d = ExprEvalStepData::AggPlainPergroupNullcheck {
-            setoff,
-            jumpnull: -1, // adjust later
+        let scratch = ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_AGG_PLAIN_PERGROUP_NULLCHECK,
+            resvalue: STATE_RESULT_CELL,
+            resnull: STATE_RESULT_CELL,
+            d: ExprEvalStepData::AggPlainPergroupNullcheck {
+                setoff,
+                jumpnull: -1, // adjust later
+            },
         };
-        core::expr_eval_push_step(mcx, state, clone_step(scratch))?;
+        core::expr_eval_push_step(mcx, state, scratch)?;
         adjust_jumpnull = state.steps_len - 1;
     }
 
-    // Determine appropriate transition implementation.
-    //
-    // For non-ordered aggregates and presorted ORDER BY/DISTINCT: pick BYVAL vs
-    // BYREF, and within each, INIT_STRICT (strict + no initial value) vs STRICT
-    // (strict + has initial value) vs plain. For ordered aggregates: DATUM
+    // Determine appropriate transition implementation (see the C banner): for
+    // non-ordered aggregates and presorted ORDER BY/DISTINCT, pick BYVAL vs
+    // BYREF and within each INIT_STRICT (strict + no initial value) vs STRICT
+    // (strict + has initial value) vs plain; for ordered aggregates, DATUM
     // (single input) vs TUPLE (multiple).
-    //
-    // The strict / init-value / byval / aggsortrequired / numInputs predicates
-    // are read off the AggStatePerTrans (nodeAgg-owned). The pertrans index is
-    // carried; resolving its fields requires the AggStatePerTrans surface, which
-    // this routine does not borrow (the caller — ExecBuildAggTrans — owns it and
-    // selects the opcode). Until ExecBuildAggTrans threads the resolved
-    // predicates, the opcode-selection inputs are unavailable here.
-    let _ = (transno, setno, setoff, ishash, aggcontext_addr, pertrans);
-    panic!(
-        "execExpr-domain-agg: ExecBuildAggTransCall's opcode selection reads \
-         pertrans->{{transtypeByVal, aggsortrequired, numInputs, initValueIsNull}} and \
-         fcinfo->flinfo->fn_strict off the nodeAgg-owned AggStatePerTrans / FunctionCallInfo, \
-         which are threaded by ExecBuildAggTrans (itself blocked on the core recursion spine + \
-         external-cell targeting). The PERGROUP_NULLCHECK emission + jumpnull fixup and the \
-         BYVAL/BYREF × strict × init / ORDERED_TRANS opcode table are mirrored above/below once \
-         that caller lands."
-    );
+    let p = pertrans_pred(aggstate, pertrans);
+    let opcode = if !p.aggsortrequired {
+        if p.transtype_by_val {
+            if p.transfn_strict && p.init_value_is_null {
+                ExprEvalOp::EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL
+            } else if p.transfn_strict {
+                ExprEvalOp::EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL
+            } else {
+                ExprEvalOp::EEOP_AGG_PLAIN_TRANS_BYVAL
+            }
+        } else if p.transfn_strict && p.init_value_is_null {
+            ExprEvalOp::EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF
+        } else if p.transfn_strict {
+            ExprEvalOp::EEOP_AGG_PLAIN_TRANS_STRICT_BYREF
+        } else {
+            ExprEvalOp::EEOP_AGG_PLAIN_TRANS_BYREF
+        }
+    } else if p.num_inputs == 1 {
+        ExprEvalOp::EEOP_AGG_ORDERED_TRANS_DATUM
+    } else {
+        ExprEvalOp::EEOP_AGG_ORDERED_TRANS_TUPLE
+    };
 
-    // ----- faithful continuation (unreachable until the caller threads predicates) -----
-    #[allow(unreachable_code)]
-    {
-        // scratch->d.agg_trans = { pertrans, setno, setoff, transno, aggcontext };
-        scratch.d = ExprEvalStepData::AggTrans {
+    // scratch->d.agg_trans = { pertrans, setno, setoff, transno, aggcontext };
+    let scratch = ExprEvalStep {
+        opcode,
+        resvalue: STATE_RESULT_CELL,
+        resnull: STATE_RESULT_CELL,
+        d: ExprEvalStepData::AggTrans {
             pertrans,
             aggcontext: aggcontext_addr,
             setno,
             transno,
             setoff,
-        };
-        core::expr_eval_push_step(mcx, state, clone_step(scratch))?;
+        },
+    };
+    core::expr_eval_push_step(mcx, state, scratch)?;
 
-        // fix up jumpnull
-        if adjust_jumpnull != -1 {
-            if let Some(steps) = state.steps.as_mut() {
-                if let ExprEvalStepData::AggPlainPergroupNullcheck { jumpnull, .. } =
-                    &mut steps[adjust_jumpnull as usize].d
-                {
-                    *jumpnull = state.steps_len;
-                }
+    // fix up jumpnull
+    if adjust_jumpnull != -1 {
+        let target = state.steps_len;
+        let steps = state
+            .steps
+            .as_mut()
+            .expect("ExecBuildAggTransCall: steps array is NULL during jumpnull fixup");
+        let as_step = &mut steps[adjust_jumpnull as usize];
+        match &mut as_step.d {
+            ExprEvalStepData::AggPlainPergroupNullcheck { jumpnull, .. } => {
+                debug_assert_eq!(
+                    as_step.opcode,
+                    ExprEvalOp::EEOP_AGG_PLAIN_PERGROUP_NULLCHECK
+                );
+                debug_assert_eq!(*jumpnull, -1);
+                *jumpnull = target;
             }
+            _ => debug_assert!(false, "jumpnull fixup target is not a PERGROUP_NULLCHECK"),
         }
-        Ok(())
     }
+    Ok(())
 }
 
 // ===========================================================================
@@ -735,6 +1107,214 @@ pub fn exec_build_param_set_equal<'mcx>(
          DONE_RETURN are mirrored once fmgr + the fcinfo args[] land (identical to \
          ExecBuildGroupingEqual but front-to-back over every attno and never returning NULL)."
     );
+}
+
+// ===========================================================================
+// ExecBuildAggTrans / ExecBuildAggTransCall local helpers
+// ===========================================================================
+
+/// `expr_setup_walker(node, info)` restricted to the attnum accumulation the
+/// agg-trans deform prefix needs (mirror of `execExpr_core::expr_setup_walker`'s
+/// child-link descent; that walker is module-private to core). Descends the same
+/// modeled `Expr` child links and records the highest inner/outer/scan attnum;
+/// Aggref/WindowFunc/GroupingFunc argument lists are NOT descended (their args
+/// are compiled separately), matching C.
+fn agg_setup_walker(node: &Expr, info: &mut LastAttnumInfo) {
+    match node {
+        Expr::Var(variable) => {
+            let attnum = variable.varattno;
+            match variable.varno {
+                INNER_VAR => info.last_inner = info.last_inner.max(attnum),
+                OUTER_VAR => info.last_outer = info.last_outer.max(attnum),
+                _ => info.last_scan = info.last_scan.max(attnum),
+            }
+        }
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::CaseTestExpr(_)
+        | Expr::CoerceToDomainValue(_)
+        | Expr::SetToDefault(_)
+        | Expr::CurrentOfExpr(_)
+        | Expr::NextValueExpr(_)
+        | Expr::SQLValueFunction(_)
+        | Expr::Aggref(_)
+        | Expr::GroupingFunc(_)
+        | Expr::WindowFunc(_)
+        | Expr::MergeSupportFunc(_) => {}
+        Expr::RelabelType(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::CollateExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::CoerceViaIO(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::ConvertRowtypeExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::FieldSelect(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::NamedArgExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::NullTest(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::BooleanTest(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::CoerceToDomain(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::ArrayCoerceExpr(e) => agg_descend_opt(e.arg.as_deref(), info),
+        Expr::FuncExpr(e) => agg_descend_list(&e.args, info),
+        Expr::OpExpr(e) | Expr::DistinctExpr(e) | Expr::NullIfExpr(e) => {
+            agg_descend_list(&e.args, info)
+        }
+        Expr::BoolExpr(e) => agg_descend_list(&e.args, info),
+        Expr::CoalesceExpr(e) => agg_descend_list(&e.args, info),
+        Expr::MinMaxExpr(e) => agg_descend_list(&e.args, info),
+        Expr::ArrayExpr(e) => agg_descend_list(&e.elements, info),
+        Expr::CaseExpr(e) => {
+            agg_descend_opt(e.arg.as_deref(), info);
+            for w in &e.args {
+                agg_descend_opt(w.expr.as_deref(), info);
+                agg_descend_opt(w.result.as_deref(), info);
+            }
+            agg_descend_opt(e.defresult.as_deref(), info);
+        }
+        _ => {}
+    }
+}
+
+fn agg_descend_opt(node: Option<&Expr>, info: &mut LastAttnumInfo) {
+    if let Some(n) = node {
+        agg_setup_walker(n, info);
+    }
+}
+
+fn agg_descend_list(list: &[Expr], info: &mut LastAttnumInfo) {
+    for n in list {
+        agg_setup_walker(n, info);
+    }
+}
+
+/// `ExecPushExprSetupSteps(state, info)` for the agg-trans prefix — emit one
+/// `EEOP_{INNER,OUTER,SCAN}_FETCHSOME` deform step per referenced input slot
+/// (mirror of `execExpr_core::exec_push_expr_setup_steps`; that function is
+/// module-private to core). The agg-trans deform never references the
+/// MULTIEXPR-subplan setup list, so only the three slot deforms are emitted.
+fn push_setup_steps<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut ExprState<'mcx>,
+    info: &LastAttnumInfo,
+) -> PgResult<()> {
+    for (opcode, last_var) in [
+        (ExprEvalOp::EEOP_INNER_FETCHSOME, info.last_inner),
+        (ExprEvalOp::EEOP_OUTER_FETCHSOME, info.last_outer),
+        (ExprEvalOp::EEOP_SCAN_FETCHSOME, info.last_scan),
+    ] {
+        if last_var > 0 {
+            // No known descriptor here (the agg input slot's tupdesc is not
+            // threaded into this builder), so the deform stays non-fixed,
+            // matching C's `!parent`-shaped ExecComputeSlotInfo path. Built
+            // inline (mirror of execExpr_core::exec_push_expr_setup_steps) with
+            // `known_desc: None, kind: None`, then run through the file-local
+            // `exec_compute_slot_info` which keeps the (non-fixed) step.
+            let mut scratch = ExprEvalStep {
+                opcode,
+                resvalue: STATE_RESULT_CELL,
+                resnull: STATE_RESULT_CELL,
+                d: ExprEvalStepData::Fetch {
+                    last_var: last_var as i32,
+                    fixed: false,
+                    known_desc: None,
+                    kind: None,
+                },
+            };
+            if exec_compute_slot_info(state, &mut scratch) {
+                core::expr_eval_push_step(mcx, state, scratch)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Borrow the `Aggref` of `aggstate->pertrans[transno]`.
+fn aggref_of<'a, 'mcx>(aggstate: &'a AggStateData<'mcx>, transno: usize) -> &'a Aggref<'mcx> {
+    aggstate
+        .pertrans
+        .as_ref()
+        .expect("ExecBuildAggTrans: aggstate->pertrans is NULL")[transno]
+        .aggref
+        .as_ref()
+        .expect("ExecBuildAggTrans: pertrans->aggref is NULL")
+}
+
+/// Clone `pertrans->aggref->args[i]->expr` (the i-th aggregated-argument source
+/// expression). The C uses the node in place (read-only); cloning the small
+/// plan-node subtree sidesteps the read-borrow-vs-`&mut state` conflict in the
+/// recursion.
+fn arg_tle_expr_clone<'mcx>(aggstate: &AggStateData<'mcx>, transno: usize, i: usize) -> Expr {
+    let aggref = aggref_of(aggstate, transno);
+    let args = aggref
+        .args
+        .as_ref()
+        .expect("ExecBuildAggTrans: pertrans->aggref->args is NULL");
+    args[i]
+        .expr
+        .as_deref()
+        .expect("ExecBuildAggTrans: aggregated-arg TargetEntry.expr is NULL")
+        .clone()
+}
+
+/// Allocate a single-element `PgVec<ResultCellId>` (the strict-input-check's
+/// `arg_cells` for a one-argument transition function).
+fn single_cell_vec<'mcx>(mcx: Mcx<'mcx>, cell: ResultCellId) -> PgResult<PgVec<'mcx, ResultCellId>> {
+    let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+    v.push(cell);
+    Ok(v)
+}
+
+/// `phase->numsets` for the `phase` index into `aggstate->phases`.
+fn phase_numsets(aggstate: &AggStateData<'_>, phase: i32) -> i32 {
+    aggstate
+        .phases
+        .as_ref()
+        .expect("ExecBuildAggTrans: aggstate->phases is NULL")[phase as usize]
+        .numsets
+}
+
+/// The per-trans scalar predicates `ExecBuildAggTrans` / `ExecBuildAggTransCall`
+/// read off the nodeAgg-owned `AggStatePerTransData` (snapshotted so the borrow
+/// is not held across the `&mut state` pushes). `transfn_strict` /
+/// `deserialfn_strict` are `fcinfo->flinfo->fn_strict` for the transfn /
+/// deserialfn (the FmgrInfo bound on the pertrans).
+struct PertransPred {
+    has_aggfilter: bool,
+    aggsortrequired: bool,
+    num_inputs: i32,
+    num_trans_inputs: i32,
+    num_sort_cols: i32,
+    num_distinct_cols: i32,
+    aggref_args_len: usize,
+    deserialfn_valid: bool,
+    deserialfn_strict: bool,
+    transfn_strict: bool,
+    transtype_by_val: bool,
+    init_value_is_null: bool,
+}
+
+/// Snapshot the [`PertransPred`] for `aggstate->pertrans[transno]`.
+fn pertrans_pred(aggstate: &AggStateData<'_>, transno: usize) -> PertransPred {
+    let pt = &aggstate
+        .pertrans
+        .as_ref()
+        .expect("ExecBuildAggTrans: aggstate->pertrans is NULL")[transno];
+    let aggref = pt
+        .aggref
+        .as_ref()
+        .expect("ExecBuildAggTrans: pertrans->aggref is NULL");
+    PertransPred {
+        has_aggfilter: aggref.aggfilter.is_some(),
+        aggsortrequired: pt.aggsortrequired,
+        num_inputs: pt.num_inputs,
+        num_trans_inputs: pt.num_trans_inputs,
+        num_sort_cols: pt.num_sort_cols,
+        num_distinct_cols: pt.num_distinct_cols,
+        aggref_args_len: aggref.args.as_ref().map(|a| a.len()).unwrap_or(0),
+        // OidIsValid(pertrans->deserialfn_oid)
+        deserialfn_valid: pt.deserialfn_oid != types_core::InvalidOid,
+        deserialfn_strict: pt.deserialfn.fn_strict,
+        // trans_fcinfo->flinfo->fn_strict
+        transfn_strict: pt.transfn.fn_strict,
+        transtype_by_val: pt.transtype_by_val,
+        init_value_is_null: pt.init_value_is_null,
+    }
 }
 
 // ===========================================================================
