@@ -170,6 +170,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
+    /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
+    /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
+    pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, am_oid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_func_signature(funcid, &argtypes, &nargs)` (lsyscache.c): the
+    /// function's argument type OIDs (length `nargs`), palloc'd in `mcx`. A
+    /// missing pg_proc row is the C `elog(ERROR, "cache lookup failed for
+    /// function %u")`, carried on `Err` (also OOM from the copy).
+    pub fn get_func_signature<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `op_input_types(opno, &lefttype, &righttype)` (lsyscache.c): the
+    /// operator's input type OIDs. A missing pg_operator row is the C
+    /// `elog(ERROR, "cache lookup failed for operator %u")`, carried on `Err`.
+    pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)>
+);
+
+seam_core::seam!(
     /// `get_op_opfamily_properties(opno, opfamily, missing_ok, &strategy,
     /// &lefttype, &righttype)` (lsyscache.c): look up the operator's membership
     /// in the opfamily, returning its `(strategy, op_lefttype, op_righttype)`.
