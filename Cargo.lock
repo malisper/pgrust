@@ -623,6 +623,14 @@ dependencies = [
 name = "backend-access-rmgrdesc-small"
 version = "0.0.0"
 dependencies = [
+ "backend-access-rmgrdesc-clogdesc-seams",
+ "backend-access-rmgrdesc-committsdesc-seams",
+ "backend-access-rmgrdesc-dbasedesc-seams",
+ "backend-access-rmgrdesc-genericdesc-seams",
+ "backend-access-rmgrdesc-logicalmsgdesc-seams",
+ "backend-access-rmgrdesc-relmapdesc-seams",
+ "backend-access-rmgrdesc-seqdesc-seams",
+ "backend-access-rmgrdesc-tblspcdesc-seams",
  "backend-rmgrdesc-small-seams",
  "mcx",
  "types-core",
@@ -5552,6 +5560,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-replication-walreceiver",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
