@@ -36,3 +36,19 @@ pub use AclResult::{
     AclcheckNoPriv as ACLCHECK_NO_PRIV, AclcheckNotOwner as ACLCHECK_NOT_OWNER,
     AclcheckOk as ACLCHECK_OK,
 };
+
+/// `CheckEnableRlsResult` (`utils/rls.h`) — outcome of `check_enable_rls`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CheckEnableRlsResult {
+    /// `RLS_NONE` — RLS is not enabled for this query.
+    RlsNone = 0,
+    /// `RLS_NONE_ENV` — RLS disabled now, but could enable if env changes.
+    RlsNoneEnv = 1,
+    /// `RLS_ENABLED` — RLS applies; row-security quals must be added.
+    RlsEnabled = 2,
+}
+
+pub use CheckEnableRlsResult::{
+    RlsEnabled as RLS_ENABLED, RlsNone as RLS_NONE, RlsNoneEnv as RLS_NONE_ENV,
+};
