@@ -74,3 +74,26 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+/* ---- CLUSTER target resolution (used by backend-commands-cluster) -------- */
+
+seam_core::seam!(
+    /// `RangeVarGetRelidExtended(relation, AccessExclusiveLock, 0,
+    /// RangeVarCallbackMaintainsTable, NULL)` (namespace.c): resolve+lock the
+    /// CLUSTER target, running the maintains-table permission callback.
+    pub fn range_var_get_relid_maintains_table<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &RangeVar,
+        lockmode: LOCKMODE,
+    ) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `LookupCreationNamespace(nspname)` (namespace.c): OID of the namespace
+    /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
+    pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>
+);
+seam_core::seam!(
+    /// `RestrictSearchPath()` (namespace.c): set search_path to a safe value
+    /// for a security-restricted operation.
+    pub fn restrict_search_path() -> PgResult<()>
+);

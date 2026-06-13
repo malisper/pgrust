@@ -332,6 +332,7 @@ fn relation_is_target_relation() {
                     relationOids: None,
                     planTree: None,
                     rowMarks: None,
+                    canSetTag: false,
                 },
             )
             .unwrap(),

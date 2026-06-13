@@ -48,6 +48,11 @@ pub const INTERNALOID: Oid = 2281;
 /// `BTREE_AM_OID` (`catalog/pg_am_d.h`) — the OID of the btree access method.
 pub const BTREE_AM_OID: Oid = 403;
 
+/// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation. The
+/// `ScanKeyInit` shorthand always stamps this into `sk_collation` (correct
+/// for all collation-aware catalog columns, ignored for the rest).
+pub const C_COLLATION_OID: Oid = 950;
+
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
 /// `RELPERSISTENCE_UNLOGGED` (`catalog/pg_class.h`) — unlogged permanent table.

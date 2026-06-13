@@ -26,6 +26,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InvokeObjectPostAlterHookArg(classId, objectId, subId, auxObjId,
+    /// is_internal)` (objectaccess.h): fire the post-alter object-access hook.
+    pub fn invoke_object_post_alter_hook_arg(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        aux_obj_id: Oid,
+        is_internal: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `RunObjectPostCreateHook(classId, objectId, subId, is_internal)`
     /// (objectaccess.c) — the post-create object-access hook body. The
     /// `InvokeObjectPostCreateHook` macro's `if (object_access_hook)` guard is
