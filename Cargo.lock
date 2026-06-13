@@ -1363,10 +1363,11 @@ dependencies = [
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-utils-activity-waitevent-seams",
  "backend-utils-error",
- "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
+ "mcx",
  "types-core",
  "types-error",
  "types-pgstat",
@@ -1378,6 +1379,7 @@ name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-storage",
 ]
@@ -1503,6 +1505,7 @@ dependencies = [
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
  "mcx",
  "types-core",
  "types-error",

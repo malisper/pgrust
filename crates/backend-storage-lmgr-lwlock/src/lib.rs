@@ -18,9 +18,12 @@
 //!
 //! Everything genuinely outside lwlock.c — shmem sizing (`add_size` /
 //! `mul_size`), the `ShmemLock` spinlock, the PGPROC array fields and process
-//! wait semaphores, interrupt holdoff, `IsUnderPostmaster` /
-//! `process_shmem_requests_in_progress`, and wait-event reporting — is reached
-//! through the owning units' seam crates.
+//! wait semaphores, interrupt holdoff, spin-delay backoff (s_lock.c), and
+//! wait-event reporting — is reached through the owning units' crates or
+//! seam crates. Foreign per-backend globals C reads ambiently
+//! (`MyProcNumber`, `IsUnderPostmaster`,
+//! `process_shmem_requests_in_progress`) are explicit parameters of the
+//! entry points that need them (AGENTS.md "No ambient-global seams").
 //!
 //! Compiled-out C surface (`LWLOCK_STATS`, `LOCK_DEBUG`, dtrace probes) is not
 //! ported, matching the default build.
@@ -31,10 +34,11 @@ use core::sync::atomic::{fence, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use backend_storage_ipc_shmem_seams as shmem;
 use backend_storage_lmgr_proc_seams as proc_s;
+use backend_storage_lmgr_s_lock as s_lock;
 use backend_utils_activity_waitevent_seams as waitevent;
 use backend_utils_error::{elog, PgError, PgResult};
+use mcx::Mcx;
 use types_error::{ERROR, FATAL, PANIC};
-use backend_utils_init_miscinit_seams as miscinit;
 use backend_utils_init_small_seams as globals;
 use types_core::{uint16, uint32, ProcNumber, Size, INVALID_PROC_NUMBER, NAMEDATALEN};
 use types_pgstat::wait_event::PG_WAIT_LWLOCK;
@@ -139,13 +143,12 @@ pub struct NamedLWLockTrancheRange {
 }
 
 /// `LWLockHandle` (lwlock.c) — one entry of the backend-local
-/// `held_lwlocks[]` array. The lock is identified by its address (the same
-/// identity C's `LWLock *` carries); the owned-tree surface never hands the
-/// raw pointer back out.
+/// `held_lwlocks[]` array, carrying the same typed `LWLock *` C stores. The
+/// pointee is alive for as long as the entry exists: a backend may only
+/// record a lock it acquired, and shmem-resident locks outlive the backend.
 #[derive(Clone, Copy)]
 struct LWLockHandle {
-    /// Identity of the held lock: its address as a `usize`.
-    addr: usize,
+    lock: *const LWLock,
     mode: LWLockMode,
 }
 
@@ -160,7 +163,10 @@ struct HeldLWLocks {
 impl HeldLWLocks {
     const fn new() -> Self {
         Self {
-            locks: [LWLockHandle { addr: 0, mode: LW_EXCLUSIVE }; MAX_SIMUL_LWLOCKS],
+            locks: [LWLockHandle {
+                lock: core::ptr::null(),
+                mode: LW_EXCLUSIVE,
+            }; MAX_SIMUL_LWLOCKS],
             num_held: 0,
         }
     }
@@ -169,17 +175,17 @@ impl HeldLWLocks {
         self.num_held < MAX_SIMUL_LWLOCKS
     }
 
-    fn push(&mut self, addr: usize, mode: LWLockMode) {
+    fn push(&mut self, lock: *const LWLock, mode: LWLockMode) {
         debug_assert!(self.num_held < MAX_SIMUL_LWLOCKS);
-        self.locks[self.num_held] = LWLockHandle { addr, mode };
+        self.locks[self.num_held] = LWLockHandle { lock, mode };
         self.num_held += 1;
     }
 
     /// `LWLockDisownInternal`'s search-backwards + shift-down removal.
-    fn disown(&mut self, addr: usize) -> Option<LWLockMode> {
+    fn disown(&mut self, lock: *const LWLock) -> Option<LWLockMode> {
         let i = self.locks[..self.num_held]
             .iter()
-            .rposition(|held| held.addr == addr)?;
+            .rposition(|held| core::ptr::eq(held.lock, lock))?;
         let mode = self.locks[i].mode;
         self.num_held -= 1;
         for j in i..self.num_held {
@@ -188,22 +194,22 @@ impl HeldLWLocks {
         Some(mode)
     }
 
-    fn last_addr(&self) -> Option<usize> {
+    fn last(&self) -> Option<*const LWLock> {
         self.num_held
             .checked_sub(1)
-            .map(|i| self.locks[i].addr)
+            .map(|i| self.locks[i].lock)
     }
 
-    fn contains(&self, addr: usize) -> bool {
+    fn contains(&self, lock: *const LWLock) -> bool {
         self.locks[..self.num_held]
             .iter()
-            .any(|held| held.addr == addr)
+            .any(|held| core::ptr::eq(held.lock, lock))
     }
 
-    fn contains_in_mode(&self, addr: usize, mode: LWLockMode) -> bool {
+    fn contains_in_mode(&self, lock: *const LWLock, mode: LWLockMode) -> bool {
         self.locks[..self.num_held]
             .iter()
-            .any(|held| held.addr == addr && held.mode == mode)
+            .any(|held| core::ptr::eq(held.lock, lock) && held.mode == mode)
     }
 }
 
@@ -229,10 +235,6 @@ thread_local! {
 /// the exclusion, exactly as in C).
 static LWLOCK_COUNTER: AtomicI32 = AtomicI32::new(LWTRANCHE_FIRST_USER_DEFINED);
 
-fn lock_addr(lock: &LWLock) -> usize {
-    lock as *const LWLock as usize
-}
-
 // The shared lock state is a real atomic (`pg_atomic_uint32` wraps
 // `AtomicU32`); these are plain field reads.
 
@@ -244,18 +246,16 @@ fn atomic_var(valptr: &pg_atomic_uint64) -> &AtomicU64 {
     &valptr.value
 }
 
-fn waiters_mut(lock: &LWLock) -> &mut proclist_head {
-    // SAFETY: in PostgreSQL many backends hold a pointer to the same LWLock
-    // concurrently, so the port takes shared `&LWLock` handles. The `waiters`
-    // head/tail are mutated ONLY while the wait-list spinlock bit
-    // (`LW_FLAG_LOCKED`) is held: `LWLockWaitListLock` is the acquire fence,
-    // `LWLockWaitListUnlock` the release fence, and every caller of the
-    // proclist helpers brackets its `waiters_mut` use between the two. The
-    // spinlock guarantees this is the unique mutable access at any instant.
-    #[allow(invalid_reference_casting)]
-    unsafe {
-        &mut *(core::ptr::addr_of!(lock.waiters) as *mut proclist_head)
-    }
+/// Exclusive view of the wait list (through its `UnsafeCell`).
+///
+/// # Safety
+///
+/// The caller must hold the lock's wait-list spinlock bit (`LW_FLAG_LOCKED`,
+/// taken by [`LWLockWaitListLock`] and dropped by [`LWLockWaitListUnlock`]),
+/// which is what serializes wait-list access between backends, exactly as in
+/// C; the returned borrow must not outlive that critical section.
+unsafe fn waiters_mut(lock: &LWLock) -> &mut proclist_head {
+    unsafe { &mut *lock.waiters.ptr() }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,10 +412,6 @@ impl LWLockTable {
         &self.locks
     }
 
-    pub fn locks_mut(&mut self) -> &mut [LWLockPadded] {
-        &mut self.locks
-    }
-
     pub fn named_tranches(&self) -> &[NamedLWLockTrancheRange] {
         &self.named_tranches
     }
@@ -423,50 +419,24 @@ impl LWLockTable {
     pub fn lock(&self, index: usize) -> Option<&LWLock> {
         self.locks.get(index).map(|slot| &slot.lock)
     }
-
-    pub fn lock_mut(&mut self, index: usize) -> Option<&mut LWLock> {
-        self.locks.get_mut(index).map(|slot| &mut slot.lock)
-    }
 }
 
-/// The published `MainLWLockArray` global (lwlock.c). The array lives in main
-/// shared memory, which in the threaded-server model is process memory shared
-/// by every backend thread — legitimately cross-thread state.
-///
-/// SAFETY of `Sync`: after publication the table is never structurally
-/// mutated; the `LWLock` state words are manipulated only through their
-/// atomics, and the `waiters` proclists only under the `LW_FLAG_LOCKED`
-/// wait-list spinlock — the same shared-access contract every `LWLock` in
-/// this crate already relies on.
-struct PublishedMainLWLocks(LWLockTable);
-unsafe impl Sync for PublishedMainLWLocks {}
-
-static MAIN_LWLOCKS: std::sync::OnceLock<PublishedMainLWLocks> = std::sync::OnceLock::new();
-
-/// `MainLWLockArray = ...` — publish the table built by [`CreateLWLocks`] as
-/// the process's main LWLock array, making the built-in individual locks
-/// reachable by their `lwlocklist.h` offsets (e.g.
-/// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). Called once at
-/// shared-memory creation (ipci.c's `CreateOrAttachShmemStructs` path when it
-/// lands); publishing twice panics, like a duplicate seam install.
-pub fn PublishMainLWLocks(table: LWLockTable) {
-    if MAIN_LWLOCKS.set(PublishedMainLWLocks(table)).is_err() {
-        panic!("MainLWLockArray published twice");
-    }
-}
+/// The published `MainLWLockArray` global (lwlock.c) plus the named-tranche
+/// placement metadata. The array lives in main shared memory, which in the
+/// threaded-server model is process memory shared by every backend thread —
+/// legitimately cross-thread state. (`LWLockTable` is `Sync`: the lock state
+/// words are atomics and the `waiters` proclists are `UnsafeCell`s guarded by
+/// the `LW_FLAG_LOCKED` wait-list spinlock.)
+static MAIN_LWLOCKS: std::sync::OnceLock<LWLockTable> = std::sync::OnceLock::new();
 
 /// `&MainLWLockArray[offset].lock` — panics loudly (like an uninstalled seam)
-/// if the array has not been published yet.
-fn main_lock_ptr(offset: usize) -> *mut LWLock {
-    let table = MAIN_LWLOCKS
+/// if the array has not been created yet.
+fn main_lock(offset: usize) -> &'static LWLock {
+    MAIN_LWLOCKS
         .get()
-        .expect("MainLWLockArray not published (CreateLWLocks has not run)");
-    let slot = table
-        .0
-        .locks
-        .get(offset)
-        .expect("main LWLock offset out of range");
-    &slot.lock as *const LWLock as *mut LWLock
+        .expect("MainLWLockArray not published (CreateLWLocks has not run)")
+        .lock(offset)
+        .expect("main LWLock offset out of range")
 }
 
 /// RAII hold on one of the built-in main-array locks, returned by
@@ -474,28 +444,25 @@ fn main_lock_ptr(offset: usize) -> *mut LWLock {
 /// error recovery's `LWLockReleaseAll`); the success path calls
 /// [`MainLWLockGuard::release`] where C calls `LWLockRelease`.
 pub struct MainLWLockGuard {
-    offset: usize,
-    armed: bool,
+    lock: Option<&'static LWLock>,
 }
 
 impl MainLWLockGuard {
     /// `LWLockRelease(&MainLWLockArray[offset].lock)` — explicit release,
     /// surfacing the C `elog(ERROR, "lock ... is not held")`.
     pub fn release(mut self) -> PgResult<()> {
-        self.armed = false;
-        // SAFETY: see `LWLockAcquireMain`.
-        LWLockRelease(unsafe { &mut *main_lock_ptr(self.offset) })
+        let lock = self.lock.take().expect("MainLWLockGuard released twice");
+        LWLockRelease(lock)
     }
 }
 
 impl Drop for MainLWLockGuard {
     fn drop(&mut self) {
-        if self.armed {
+        if let Some(lock) = self.lock.take() {
             // Unwind-path release. If something already swept the lock away
             // (LWLockReleaseAll during shmem exit), the not-held error is
             // exactly the situation; ignore it.
-            // SAFETY: see `LWLockAcquireMain`.
-            let _ = LWLockRelease(unsafe { &mut *main_lock_ptr(self.offset) });
+            let _ = LWLockRelease(lock);
         }
     }
 }
@@ -503,40 +470,38 @@ impl Drop for MainLWLockGuard {
 /// `LWLockAcquire(&MainLWLockArray[offset].lock, mode)` — acquire a built-in
 /// individual lock by its `lwlocklist.h` offset, returning a guard so the
 /// hold can never leak across a `?` (AGENTS.md "Locks and held resources").
-pub fn LWLockAcquireMain(offset: usize, mode: LWLockMode) -> PgResult<MainLWLockGuard> {
-    // SAFETY: the published array is structurally immutable and every
-    // concurrent accessor follows the LWLock shared-access protocol
-    // (atomics + wait-list spinlock), so materializing `&mut LWLock` for the
-    // acquire/release protocol is the crate's established shared-memory
-    // contract (see `release_held_by_addr`).
-    let lock = unsafe { &mut *main_lock_ptr(offset) };
-    LWLockAcquire(lock, mode)?;
-    Ok(MainLWLockGuard {
-        offset,
-        armed: true,
-    })
+/// `my_proc_number` is the caller's `MyProcNumber` (explicit parameter for
+/// the C ambient per-backend global).
+pub fn LWLockAcquireMain(
+    offset: usize,
+    mode: LWLockMode,
+    my_proc_number: ProcNumber,
+) -> PgResult<MainLWLockGuard> {
+    let lock = main_lock(offset);
+    LWLockAcquire(lock, mode, my_proc_number)?;
+    Ok(MainLWLockGuard { lock: Some(lock) })
 }
 
 /// `CreateLWLocks` (lwlock.c:472) — allocate the main LWLock array, initialize
-/// it (postmaster only), and register named extension tranches in the current
-/// process. `!IsUnderPostmaster` ALLOCATES + INITIALIZES (and resets the
-/// dynamic tranche counter); a forked backend ATTACHES. In the owned-tree
-/// model the array storage is owned by the returned [`LWLockTable`] rather
-/// than carved out of a raw shmem byte region.
-pub fn CreateLWLocks() -> PgResult<LWLockTable> {
-    let total_locks = (NUM_FIXED_LWLOCKS + NumLWLocksForNamedTranches()) as usize;
+/// it (postmaster only), publish it as the process's `MainLWLockArray`, and
+/// register named extension tranches in the current process.
+/// `!is_under_postmaster` (the caller's `IsUnderPostmaster`) ALLOCATES +
+/// INITIALIZES (and resets the dynamic tranche counter); a forked backend
+/// ATTACHES to the postmaster-built table (in C the pointer is inherited
+/// across fork). Allocation failures carry `mcx`'s OOM error (C:
+/// `ShmemAlloc`); creating twice panics, like a duplicate seam install.
+pub fn CreateLWLocks(mcx: Mcx<'_>, is_under_postmaster: bool) -> PgResult<&'static LWLockTable> {
+    let table = if !is_under_postmaster {
+        let total_locks = (NUM_FIXED_LWLOCKS + NumLWLocksForNamedTranches()) as usize;
 
-    let mut locks: Vec<LWLockPadded> = Vec::new();
-    let mut named_tranches: Vec<NamedLWLockTrancheRange>;
-
-    if !globals::is_under_postmaster::call() {
         // Validate the shmem reservation math (C: ShmemAlloc(LWLockShmemSize())).
         let _space_locks = LWLockShmemSize()?;
 
         // Allocate space.
+        let mut locks: Vec<LWLockPadded> = Vec::new();
         locks
             .try_reserve_exact(total_locks)
-            .map_err(|_| PgError::error("out of memory allocating MainLWLockArray"))?;
+            .map_err(|_| mcx.oom(total_locks * core::mem::size_of::<LWLockPadded>()))?;
         locks.resize_with(total_locks, LWLockPadded::default);
 
         // Initialize the dynamic-allocation counter for tranches, which in C
@@ -545,53 +510,41 @@ pub fn CreateLWLocks() -> PgResult<LWLockTable> {
         LWLOCK_COUNTER.store(LWTRANCHE_FIRST_USER_DEFINED, Ordering::Relaxed);
 
         // Initialize all LWLocks.
-        named_tranches = InitializeLWLocks(&mut locks)?;
-    } else {
-        // A forked backend attaches to the postmaster-initialized array. The
-        // owned model has no shared segment to map, so the array is re-built
-        // and the placement ranges re-derived: the postmaster assigned the
-        // named tranche IDs sequentially from LWTRANCHE_FIRST_USER_DEFINED in
-        // request order (InitializeLWLocks's LWLockNewTrancheId calls).
-        locks
-            .try_reserve_exact(total_locks)
-            .map_err(|_| PgError::error("out of memory allocating MainLWLockArray"))?;
-        locks.resize_with(total_locks, LWLockPadded::default);
+        let named_tranches = InitializeLWLocks(mcx, &mut locks)?;
 
-        named_tranches = Vec::new();
-        NAMED_LWLOCK_TRANCHE_REQUESTS.with(|reqs| {
-            let reqs = reqs.borrow();
-            named_tranches
-                .try_reserve_exact(reqs.len())
-                .map_err(|_| PgError::error("out of memory recording named tranche ranges"))?;
-            let mut next_lock = NUM_FIXED_LWLOCKS as usize;
-            for (i, request) in reqs.iter().enumerate() {
-                named_tranches.push(NamedLWLockTrancheRange {
-                    tranche_name: request.tranche_name.clone(),
-                    tranche_id: LWTRANCHE_FIRST_USER_DEFINED + i as i32,
-                    start: next_lock,
-                    len: request.num_lwlocks as usize,
-                });
-                next_lock += request.num_lwlocks as usize;
-            }
-            Ok(())
-        })?;
-    }
+        // Publish the table: this is the shmem segment backends attach to.
+        if MAIN_LWLOCKS
+            .set(LWLockTable {
+                locks,
+                named_tranches,
+            })
+            .is_err()
+        {
+            panic!("MainLWLockArray published twice");
+        }
+        MAIN_LWLOCKS.get().expect("just published")
+    } else {
+        // A forked backend attaches to the postmaster-initialized array.
+        MAIN_LWLOCKS.get().expect(
+            "CreateLWLocks(is_under_postmaster) before the postmaster created MainLWLockArray",
+        )
+    };
 
     // Register named extension LWLock tranches in the current process.
-    for range in &named_tranches {
-        LWLockRegisterTranche(range.tranche_id, &range.tranche_name)?;
+    for range in table.named_tranches() {
+        LWLockRegisterTranche(mcx, range.tranche_id, &range.tranche_name)?;
     }
 
-    Ok(LWLockTable {
-        locks,
-        named_tranches,
-    })
+    Ok(table)
 }
 
 /// `InitializeLWLocks` (lwlock.c:512) — initialize LWLocks that are fixed and
 /// those belonging to named tranches; returns the named-tranche placement
 /// metadata (the owned stand-in for filling `NamedLWLockTrancheArray`).
-fn InitializeLWLocks(locks: &mut [LWLockPadded]) -> PgResult<Vec<NamedLWLockTrancheRange>> {
+fn InitializeLWLocks(
+    mcx: Mcx<'_>,
+    locks: &mut [LWLockPadded],
+) -> PgResult<Vec<NamedLWLockTrancheRange>> {
     // Initialize all individual LWLocks in main array.
     for id in 0..NUM_INDIVIDUAL_LWLOCKS {
         LWLockInitialize(&mut locks[id as usize].lock, id);
@@ -627,7 +580,7 @@ fn InitializeLWLocks(locks: &mut [LWLockPadded]) -> PgResult<Vec<NamedLWLockTran
     let mut named_tranches: Vec<NamedLWLockTrancheRange> = Vec::new();
     named_tranches
         .try_reserve_exact(requests.len())
-        .map_err(|_| PgError::error("out of memory recording named tranche ranges"))?;
+        .map_err(|_| mcx.oom(requests.len() * core::mem::size_of::<NamedLWLockTrancheRange>()))?;
 
     let mut next_lock = NUM_FIXED_LWLOCKS as usize;
     for request in &requests {
@@ -655,9 +608,9 @@ pub fn InitLWLockAccess() {}
 /// tranche `tranche_name` (C returns the base address; callers index the
 /// requested number of locks from it).
 pub fn GetNamedLWLockTranche<'a>(
-    table: &'a mut LWLockTable,
+    table: &'a LWLockTable,
     tranche_name: &str,
-) -> PgResult<&'a mut [LWLockPadded]> {
+) -> PgResult<&'a [LWLockPadded]> {
     let range = table
         .named_tranches
         .iter()
@@ -665,7 +618,7 @@ pub fn GetNamedLWLockTranche<'a>(
     match range {
         Some(range) => {
             let (start, len) = (range.start, range.len);
-            Ok(&mut table.locks[start..start + len])
+            Ok(&table.locks[start..start + len])
         }
         None => {
             elog(ERROR, "requested tranche is not registered")?;
@@ -689,8 +642,9 @@ pub fn LWLockNewTrancheId() -> i32 {
 /// the lookup table of the current process. C stores the caller's pointer
 /// (which must be backend-lifetime); the owned port stores a copy, removing
 /// that lifetime obligation. `Err` is the allocation failure surface of C's
-/// `MemoryContextAllocZero`/`repalloc0_array` growth.
-pub fn LWLockRegisterTranche(tranche_id: i32, tranche_name: &str) -> PgResult<()> {
+/// `MemoryContextAllocZero`/`repalloc0_array` growth in `TopMemoryContext`;
+/// `mcx` is that target context's handle.
+pub fn LWLockRegisterTranche(mcx: Mcx<'_>, tranche_id: i32, tranche_name: &str) -> PgResult<()> {
     // This should only be called for user-defined tranches.
     if tranche_id < LWTRANCHE_FIRST_USER_DEFINED {
         return Ok(());
@@ -708,7 +662,7 @@ pub fn LWLockRegisterTranche(tranche_id: i32, tranche_name: &str) -> PgResult<()
             let extra = newalloc - names.len();
             names
                 .try_reserve(extra)
-                .map_err(|_| PgError::error("out of memory enlarging LWLockTrancheNames"))?;
+                .map_err(|_| mcx.oom(extra * core::mem::size_of::<Option<String>>()))?;
             names.resize(newalloc, None);
         }
         names[index] = Some(tranche_name.to_owned());
@@ -719,8 +673,15 @@ pub fn LWLockRegisterTranche(tranche_id: i32, tranche_name: &str) -> PgResult<()
 /// `RequestNamedLWLockTranche` (lwlock.c:692) — request that extra LWLocks be
 /// allocated during postmaster startup. May only be called from a
 /// `shmem_request_hook`; calls from elsewhere `elog(FATAL)`.
-pub fn RequestNamedLWLockTranche(tranche_name: &str, num_lwlocks: i32) -> PgResult<()> {
-    if !miscinit::process_shmem_requests_in_progress::call() {
+/// `process_shmem_requests_in_progress` is the caller's view of miscinit.c's
+/// flag of that name (explicit parameter per the no-ambient-seams rule).
+pub fn RequestNamedLWLockTranche(
+    mcx: Mcx<'_>,
+    tranche_name: &str,
+    num_lwlocks: i32,
+    process_shmem_requests_in_progress: bool,
+) -> PgResult<()> {
+    if !process_shmem_requests_in_progress {
         elog(
             FATAL,
             "cannot request additional LWLocks outside shmem_request_hook",
@@ -742,7 +703,7 @@ pub fn RequestNamedLWLockTranche(tranche_name: &str, num_lwlocks: i32) -> PgResu
     NAMED_LWLOCK_TRANCHE_REQUESTS.with(|reqs| {
         let mut reqs = reqs.borrow_mut();
         reqs.try_reserve(1)
-            .map_err(|_| PgError::error("out of memory recording named LWLock tranche"))?;
+            .map_err(|_| mcx.oom(core::mem::size_of::<NamedLWLockTrancheRequest>()))?;
         reqs.push(NamedLWLockTrancheRequest {
             tranche_name: clamped,
             num_lwlocks,
@@ -762,7 +723,7 @@ pub fn LWLockInitialize(lock: &mut LWLock, tranche_id: i32) {
     // pg_atomic_init_u32(&lock->state, LW_FLAG_RELEASE_OK)
     lock.state = pg_atomic_uint32::new(LW_FLAG_RELEASE_OK);
     lock.tranche = tranche_id as uint16;
-    proclist_init(&mut lock.waiters);
+    proclist_init(lock.waiters.get_mut());
 }
 
 /// `LWLockReportWaitStart` (lwlock.c:747).
@@ -869,15 +830,18 @@ fn LWLockWaitListLock(lock: &LWLock) {
             break; // got lock
         }
 
-        // and then spin without atomic operations until lock is released.
-        // (C runs s_lock.c's perform_spin_delay here; the backoff/abort
-        // machinery belongs to the unported s_lock unit, so this uses the
-        // plain CPU spin hint until that lands.)
+        // and then spin without atomic operations until lock is released
+        let mut delay_status = s_lock::init_spin_delay(
+            Some(file!()),
+            line!() as i32,
+            Some("LWLockWaitListLock"),
+        );
         let mut old_state = old_state;
         while old_state & LW_FLAG_LOCKED != 0 {
-            core::hint::spin_loop();
+            s_lock::perform_spin_delay(&mut delay_status);
             old_state = state.load(Ordering::Relaxed);
         }
+        s_lock::finish_spin_delay(&delay_status);
 
         // Retry; the lock might already be re-acquired by now.
     }
@@ -903,7 +867,9 @@ fn LWLockWakeup(lock: &LWLock) {
     // lock wait list while collecting backends to wake up
     LWLockWaitListLock(lock);
 
-    let waiters = waiters_mut(lock);
+    // SAFETY: LW_FLAG_LOCKED is held until the flag-clearing CAS below (the
+    // wait-list unlock fused with the flag updates).
+    let waiters = unsafe { waiters_mut(lock) };
     proclist_foreach_modify(waiters.head, |cur| {
         let wait_mode = proc_s::proc_lw_wait_mode::call(cur);
 
@@ -990,22 +956,18 @@ fn LWLockWakeup(lock: &LWLock) {
 // ---------------------------------------------------------------------------
 
 /// `LWLockQueueSelf` (lwlock.c:1058) — add ourselves to the end of the queue.
-/// NB: mode can be `LW_WAIT_UNTIL_FREE` here. The C PANIC paths abort the
-/// process (per this repo's elog port), so this is infallible to callers.
-fn LWLockQueueSelf(lock: &LWLock, mode: LWLockMode) {
-    let my_proc_number = globals::my_proc_number::call();
-
+/// NB: mode can be `LW_WAIT_UNTIL_FREE` here. The C `elog(PANIC)` paths are
+/// `Err(PgError)` at PANIC level, like every other severity.
+fn LWLockQueueSelf(lock: &LWLock, mode: LWLockMode, my_proc_number: ProcNumber) -> PgResult<()> {
     // If we don't have a PGPROC structure, there's no way to wait. This
     // should never occur, since MyProc should only be null during shared
     // memory initialization.
     if my_proc_number == INVALID_PROC_NUMBER {
-        let _ = elog(PANIC, "cannot wait without a PGPROC structure");
-        unreachable!("elog(PANIC) aborts");
+        elog(PANIC, "cannot wait without a PGPROC structure")?;
     }
 
     if proc_s::proc_lw_waiting::call(my_proc_number) != LW_WS_NOT_WAITING {
-        let _ = elog(PANIC, "queueing for lock while waiting on another one");
-        unreachable!("elog(PANIC) aborts");
+        elog(PANIC, "queueing for lock while waiting on another one")?;
     }
 
     LWLockWaitListLock(lock);
@@ -1017,7 +979,8 @@ fn LWLockQueueSelf(lock: &LWLock, mode: LWLockMode) {
     proc_s::set_proc_lw_wait_mode::call(my_proc_number, mode);
 
     // LW_WAIT_UNTIL_FREE waiters are always at the front of the queue
-    let waiters = waiters_mut(lock);
+    // SAFETY: LW_FLAG_LOCKED is held until LWLockWaitListUnlock below.
+    let waiters = unsafe { waiters_mut(lock) };
     if mode == LW_WAIT_UNTIL_FREE {
         proclist_push_head(waiters, my_proc_number);
     } else {
@@ -1026,23 +989,24 @@ fn LWLockQueueSelf(lock: &LWLock, mode: LWLockMode) {
 
     // Can release the mutex now
     LWLockWaitListUnlock(lock);
+    Ok(())
 }
 
 /// `LWLockDequeueSelf` (lwlock.c:1101) — remove ourselves from the waitlist;
 /// used when we queued ourselves but discovered we don't need to sleep.
-fn LWLockDequeueSelf(lock: &LWLock) {
-    let my_proc_number = globals::my_proc_number::call();
-
+fn LWLockDequeueSelf(lock: &LWLock, my_proc_number: ProcNumber) {
     LWLockWaitListLock(lock);
 
     // Remove ourselves from the waitlist, unless we've already been removed.
     // The removal happens with the wait list lock held, so there's no race.
     let on_waitlist = proc_s::proc_lw_waiting::call(my_proc_number) == LW_WS_WAITING;
     if on_waitlist {
-        proclist_delete(waiters_mut(lock), my_proc_number);
+        // SAFETY: LW_FLAG_LOCKED is held until LWLockWaitListUnlock below.
+        proclist_delete(unsafe { waiters_mut(lock) }, my_proc_number);
     }
 
-    if proclist_is_empty(&lock.waiters)
+    // SAFETY: as above — the wait-list spinlock is still held.
+    if proclist_is_empty(unsafe { waiters_mut(lock) })
         && (atomic_state(lock).load(Ordering::Relaxed) & LW_FLAG_HAS_WAITERS) != 0
     {
         atomic_state(lock).fetch_and(!LW_FLAG_HAS_WAITERS, Ordering::AcqRel);
@@ -1104,8 +1068,15 @@ fn wait_until_awakened(my_proc_number: ProcNumber) -> i32 {
 /// specified mode; if not available, sleep until it is. Returns `true` if the
 /// lock was available immediately, `false` if we had to sleep.
 ///
+/// `my_proc_number` is the caller's `MyProcNumber` (C reads the globals.c
+/// per-backend global ambiently; here it is an explicit parameter).
+///
 /// Side effect: cancel/die interrupts are held off until lock release.
-pub fn LWLockAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
+pub fn LWLockAcquire(
+    lock: &LWLock,
+    mode: LWLockMode,
+    my_proc_number: ProcNumber,
+) -> PgResult<bool> {
     let mut result = true;
     let mut extra_waits = 0_i32;
 
@@ -1137,21 +1108,21 @@ pub fn LWLockAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
         // and try to grab the lock again. If we succeed we need to revert the
         // queuing; otherwise the other locker will see our queue entry when
         // releasing, since it existed before we checked for the lock.
-        LWLockQueueSelf(lock, mode);
+        LWLockQueueSelf(lock, mode, my_proc_number)?;
 
         // we're now guaranteed to be woken up if necessary
         let mustwait = LWLockAttemptLock(lock, mode);
 
         // ok, grabbed the lock the second time round, need to undo queueing
         if !mustwait {
-            LWLockDequeueSelf(lock);
+            LWLockDequeueSelf(lock, my_proc_number);
             break;
         }
 
         // Wait until awakened. We can get awakened for a reason other than
         // being signaled by LWLockRelease; if so, loop back and wait again.
         LWLockReportWaitStart(lock);
-        extra_waits += wait_until_awakened(globals::my_proc_number::call());
+        extra_waits += wait_until_awakened(my_proc_number);
 
         // Retrying, allow LWLockRelease to release waiters again.
         atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::AcqRel);
@@ -1168,7 +1139,7 @@ pub fn LWLockAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
     // Fix the process wait semaphore's count for any absorbed wakeups.
     while extra_waits > 0 {
         extra_waits -= 1;
-        proc_s::pg_semaphore_unlock::call(globals::my_proc_number::call());
+        proc_s::pg_semaphore_unlock::call(my_proc_number);
     }
 
     Ok(result)
@@ -1208,7 +1179,11 @@ pub fn LWLockConditionalAcquire(lock: &LWLock, mode: LWLockMode) -> PgResult<boo
 /// acquiring it. Used for WALWriteLock: a backend flushing WAL flushes many
 /// other backends' commit records as a side effect, so those backends only
 /// need to wait for the flush to finish, not acquire the lock.
-pub fn LWLockAcquireOrWait(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
+pub fn LWLockAcquireOrWait(
+    lock: &LWLock,
+    mode: LWLockMode,
+    my_proc_number: ProcNumber,
+) -> PgResult<bool> {
     let mut extra_waits = 0_i32;
 
     debug_assert!(mode == LW_SHARED || mode == LW_EXCLUSIVE);
@@ -1226,7 +1201,7 @@ pub fn LWLockAcquireOrWait(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
     let mut mustwait = LWLockAttemptLock(lock, mode);
 
     if mustwait {
-        LWLockQueueSelf(lock, LW_WAIT_UNTIL_FREE);
+        LWLockQueueSelf(lock, LW_WAIT_UNTIL_FREE, my_proc_number)?;
 
         mustwait = LWLockAttemptLock(lock, mode);
 
@@ -1234,21 +1209,21 @@ pub fn LWLockAcquireOrWait(lock: &LWLock, mode: LWLockMode) -> PgResult<bool> {
             // Wait until awakened. Like in LWLockAcquire, be prepared for
             // bogus wakeups.
             LWLockReportWaitStart(lock);
-            extra_waits += wait_until_awakened(globals::my_proc_number::call());
+            extra_waits += wait_until_awakened(my_proc_number);
             LWLockReportWaitEnd();
         } else {
             // Got lock in the second attempt, undo queueing. We need to
             // treat this as having successfully acquired the lock, otherwise
             // we'd not necessarily wake up people we've prevented from
             // acquiring the lock.
-            LWLockDequeueSelf(lock);
+            LWLockDequeueSelf(lock, my_proc_number);
         }
     }
 
     // Fix the process wait semaphore's count for any absorbed wakeups.
     while extra_waits > 0 {
         extra_waits -= 1;
-        proc_s::pg_semaphore_unlock::call(globals::my_proc_number::call());
+        proc_s::pg_semaphore_unlock::call(my_proc_number);
     }
 
     if mustwait {
@@ -1308,6 +1283,7 @@ pub fn LWLockWaitForVar(
     valptr: &pg_atomic_uint64,
     oldval: u64,
     newval: &mut u64,
+    my_proc_number: ProcNumber,
 ) -> PgResult<bool> {
     let mut extra_waits = 0_i32;
     let mut result;
@@ -1329,7 +1305,7 @@ pub fn LWLockWaitForVar(
         // Add myself to wait queue. This is racy (somebody else could wake up
         // before we're finished queuing) — the same twice-in-a-row protocol
         // as LWLockAcquire, except we also check the variable's value.
-        LWLockQueueSelf(lock, LW_WAIT_UNTIL_FREE);
+        LWLockQueueSelf(lock, LW_WAIT_UNTIL_FREE, my_proc_number)?;
 
         // Set RELEASE_OK flag, to make sure we get woken up as soon as the
         // lock is released.
@@ -1342,13 +1318,13 @@ pub fn LWLockWaitForVar(
 
         // Ok, no conflict after we queued ourselves. Undo queueing.
         if !mustwait {
-            LWLockDequeueSelf(lock);
+            LWLockDequeueSelf(lock, my_proc_number);
             break;
         }
 
         // Wait until awakened; be prepared for bogus wakeups.
         LWLockReportWaitStart(lock);
-        extra_waits += wait_until_awakened(globals::my_proc_number::call());
+        extra_waits += wait_until_awakened(my_proc_number);
         LWLockReportWaitEnd();
 
         // Now loop back and check the status of the lock again.
@@ -1357,7 +1333,7 @@ pub fn LWLockWaitForVar(
     // Fix the process wait semaphore's count for any absorbed wakeups.
     while extra_waits > 0 {
         extra_waits -= 1;
-        proc_s::pg_semaphore_unlock::call(globals::my_proc_number::call());
+        proc_s::pg_semaphore_unlock::call(my_proc_number);
     }
 
     // Now okay to allow cancel/die interrupts.
@@ -1385,7 +1361,8 @@ pub fn LWLockUpdateVar(lock: &LWLock, valptr: &pg_atomic_uint64, val: u64) {
 
     // See if there are any LW_WAIT_UNTIL_FREE waiters that need to be woken
     // up. They are always in the front of the queue.
-    let waiters = waiters_mut(lock);
+    // SAFETY: LW_FLAG_LOCKED is held until LWLockWaitListUnlock below.
+    let waiters = unsafe { waiters_mut(lock) };
     proclist_foreach_modify(waiters.head, |cur| {
         if proc_s::proc_lw_wait_mode::call(cur) != LW_WAIT_UNTIL_FREE {
             return ControlFlow::Break(());
@@ -1424,8 +1401,7 @@ pub fn LWLockUpdateVar(lock: &LWLock, valptr: &pg_atomic_uint64, val: u64) {
 fn LWLockDisownInternal(lock: &LWLock) -> PgResult<LWLockMode> {
     // Remove lock from list of locks held. Usually, but not always, it will
     // be the latest-acquired lock; so search array backwards.
-    let addr = lock_addr(lock);
-    match HELD_LWLOCKS.with(|held| held.borrow_mut().disown(addr)) {
+    match HELD_LWLOCKS.with(|held| held.borrow_mut().disown(lock)) {
         Some(mode) => Ok(mode),
         None => {
             elog(ERROR, format!("lock {} is not held", t_name(lock)))?;
@@ -1510,10 +1486,10 @@ pub fn LWLockReleaseClearVar(
 /// each iteration re-HOLDs to balance the RESUME inside `LWLockRelease`. Safe
 /// to call before the LWLock subsystem is initialized (no locks held → no-op).
 pub fn LWLockReleaseAll() -> PgResult<()> {
-    while let Some(addr) = last_held_lock_addr() {
+    while let Some(lock) = last_held_lock() {
         globals::hold_interrupts::call(); // match the upcoming RESUME_INTERRUPTS
 
-        release_held_by_addr(addr)?;
+        release_held(lock)?;
     }
     Ok(())
 }
@@ -1521,28 +1497,28 @@ pub fn LWLockReleaseAll() -> PgResult<()> {
 /// `ForEachLWLockHeldByMe` (lwlock.c:1984) — run a callback for each held
 /// lock. Debug support only.
 ///
-/// The callback receives the held lock's identity (its address as `usize`,
-/// the key the held-lock table stores) and its mode, instead of C's
-/// `(LWLock *, LWLockMode, void *context)`: the owned-tree surface cannot
-/// synthesize a `&mut LWLock` from a stored address, and the `void *context`
+/// The callback receives `(&LWLock, LWLockMode)` for C's
+/// `(LWLock *, LWLockMode, void *context)`; the `void *context`
 /// out-parameter is subsumed by the closure's captures. The table is
 /// snapshotted to a fixed-size stack copy first so the callback may re-enter
 /// the held-lock table; like C, this allocates nothing.
-pub fn ForEachLWLockHeldByMe(mut callback: impl FnMut(usize, LWLockMode)) {
+pub fn ForEachLWLockHeldByMe(mut callback: impl FnMut(&LWLock, LWLockMode)) {
     let (snapshot, n) = HELD_LWLOCKS.with(|held| {
         let held = held.borrow();
         (held.locks, held.num_held)
     });
     for held in &snapshot[..n] {
-        callback(held.addr, held.mode);
+        // SAFETY: every held entry was recorded from a live `&LWLock` this
+        // backend acquired and must keep alive until release (PostgreSQL's
+        // shared-memory contract).
+        callback(unsafe { &*held.lock }, held.mode);
     }
 }
 
 /// `LWLockHeldByMe` (lwlock.c:1999) — does my process hold `lock` in any
 /// mode? Debug support only.
 pub fn LWLockHeldByMe(lock: &LWLock) -> bool {
-    let addr = lock_addr(lock);
-    HELD_LWLOCKS.with(|held| held.borrow().contains(addr))
+    HELD_LWLOCKS.with(|held| held.borrow().contains(lock))
 }
 
 /// `LWLockAnyHeldByMe` (lwlock.c:2017) — does my process hold any of an array
@@ -1555,15 +1531,14 @@ pub fn LWLockHeldByMe(lock: &LWLock) -> bool {
 pub fn LWLockAnyHeldByMe(locks: &[LWLockPadded]) -> bool {
     HELD_LWLOCKS.with(|held| {
         let held = held.borrow();
-        locks.iter().any(|slot| held.contains(lock_addr(&slot.lock)))
+        locks.iter().any(|slot| held.contains(&slot.lock))
     })
 }
 
 /// `LWLockHeldByMeInMode` (lwlock.c:2043) — does my process hold `lock` in
 /// the given mode? Debug support only.
 pub fn LWLockHeldByMeInMode(lock: &LWLock, mode: LWLockMode) -> bool {
-    let addr = lock_addr(lock);
-    HELD_LWLOCKS.with(|held| held.borrow().contains_in_mode(addr, mode))
+    HELD_LWLOCKS.with(|held| held.borrow().contains_in_mode(lock, mode))
 }
 
 // ---------------------------------------------------------------------------
@@ -1579,25 +1554,23 @@ fn held_has_room() -> bool {
 /// `held_lwlocks[num_held_lwlocks++] = ...` — infallible once the room check
 /// has passed, exactly like appending to C's fixed stack array.
 fn record_held_lock(lock: &LWLock, mode: LWLockMode) {
-    let addr = lock_addr(lock);
-    HELD_LWLOCKS.with(|held| held.borrow_mut().push(addr, mode));
+    HELD_LWLOCKS.with(|held| held.borrow_mut().push(lock, mode));
 }
 
-fn last_held_lock_addr() -> Option<usize> {
-    HELD_LWLOCKS.with(|held| held.borrow().last_addr())
+fn last_held_lock() -> Option<*const LWLock> {
+    HELD_LWLOCKS.with(|held| held.borrow().last())
 }
 
 /// `LWLockRelease(held_lwlocks[num_held_lwlocks - 1].lock)` for the
-/// `LWLockReleaseAll` loop: release the held lock identified by `addr`.
-fn release_held_by_addr(addr: usize) -> PgResult<()> {
+/// `LWLockReleaseAll` loop: release the given held lock.
+fn release_held(lock: *const LWLock) -> PgResult<()> {
     let mode = HELD_LWLOCKS
-        .with(|held| held.borrow_mut().disown(addr))
+        .with(|held| held.borrow_mut().disown(lock))
         .ok_or_else(|| PgError::error("held LWLock vanished during release"))?;
-    // SAFETY: `addr` was recorded from a live `&LWLock` the current backend
-    // acquired and must keep alive until release (PostgreSQL shared-memory
-    // contract). Reconstruct the shared reference to run the release protocol
-    // on its state word.
-    let lock: &LWLock = unsafe { &*(addr as *const LWLock) };
+    // SAFETY: the held-lock table only carries pointers recorded from live
+    // `&LWLock`s the current backend acquired and must keep alive until
+    // release (PostgreSQL shared-memory contract).
+    let lock: &LWLock = unsafe { &*lock };
     LWLockReleaseInternal(lock, mode);
     globals::resume_interrupts::call();
     Ok(())
@@ -1611,10 +1584,11 @@ fn release_held_by_addr(addr: usize) -> PgResult<()> {
 /// the still-borrowed lock (Drop = release, the C `LWLockReleaseAll`
 /// error-recovery backstop).
 fn lwlock_acquire_guard<'l>(
-    lock: &'l types_storage::LWLock,
-    mode: types_storage::LWLockMode,
-) -> types_error::PgResult<backend_storage_lmgr_lwlock_seams::LWLockGuard<'l>> {
-    let was_free = LWLockAcquire(lock, mode)?;
+    lock: &'l LWLock,
+    mode: LWLockMode,
+    my_proc_number: ProcNumber,
+) -> PgResult<backend_storage_lmgr_lwlock_seams::LWLockGuard<'l>> {
+    let was_free = LWLockAcquire(lock, mode, my_proc_number)?;
     Ok(backend_storage_lmgr_lwlock_seams::LWLockGuard::new(
         lock, was_free,
     ))
