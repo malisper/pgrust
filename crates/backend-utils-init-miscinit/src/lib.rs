@@ -788,6 +788,31 @@ pub fn init_seams() {
     s::init_postmaster_child::set(InitPostmasterChild);
     s::get_user_id::set(GetUserId);
 
+    // Remaining miscinit.c-owned declarations (added by later consumers). Each
+    // delegates to this crate's own function so the seam is no longer an
+    // uninstalled panic.
+    s::process_shared_preload_libraries_in_progress::set(
+        process_shared_preload_libraries_in_progress,
+    );
+    s::in_no_force_rls_operation::set(InNoForceRLSOperation);
+    s::in_security_restricted_operation::set(InSecurityRestrictedOperation);
+    s::get_backend_type_desc::set(GetBackendTypeDesc);
+    s::check_data_dir::set(crate::process::checkDataDir);
+    s::change_to_data_dir::set(crate::process::ChangeToDataDir);
+    s::create_data_dir_lock_file::set(crate::lockfile::create_data_dir_lock_file);
+    s::set_processing_mode_bootstrap::set(|| {
+        SetProcessingMode(ProcessingMode::BootstrapProcessing)
+    });
+    s::set_processing_mode_normal::set(|| SetProcessingMode(ProcessingMode::NormalProcessing));
+    s::set_ignore_system_indexes::set(SetIgnoreSystemIndexes);
+    // MyBackendType lives in globals.c, but miscinit owns the accessor used by
+    // the C macro; install the in-crate getter.
+    s::my_backend_type::set(GetMyBackendType);
+    // IsBinaryUpgrade lives in globals.c (init-small); bridge to its value until
+    // that owner installs its own seam (same disposition as the crit/interrupt
+    // brackets below).
+    s::is_binary_upgrade::set(backend_utils_init_small::globals::IsBinaryUpgrade);
+
     // Non-miscinit seams an earlier consumer declared here. Until their real
     // owners (globals.c counters, superuser.c) land in this repo, install thin
     // delegations to the owners' values so the existing call sites keep working.

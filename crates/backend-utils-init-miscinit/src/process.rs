@@ -141,17 +141,23 @@ pub fn checkDataDir() -> PgResult<()> {
     let stat_buf = match std::fs::metadata(&data_dir) {
         Ok(m) => m,
         Err(e) => {
+            // Both C exits carry errcode_for_file_access() (miscinit.c:357/362).
+            let sqlstate = backend_utils_error::errno::sqlstate_for_file_access(
+                e.raw_os_error().unwrap_or(0),
+            );
             if e.raw_os_error() == Some(2) {
                 // ENOENT
                 return Err(PgError::new(
                     FATAL,
                     format!("data directory \"{data_dir}\" does not exist"),
-                ));
+                )
+                .with_sqlstate(sqlstate));
             }
             return Err(PgError::new(
                 FATAL,
                 format!("could not read permissions of directory \"{data_dir}\": {e}"),
-            ));
+            )
+            .with_sqlstate(sqlstate));
         }
     };
 
@@ -211,10 +217,14 @@ pub fn ChangeToDataDir() -> PgResult<()> {
     let data_dir = backend_utils_init_small::globals::DataDir().expect("DataDir set");
     if std::env::set_current_dir(&data_dir).is_err() {
         let e = std::io::Error::last_os_error();
+        // C carries errcode_for_file_access() (miscinit.c:465).
         return Err(PgError::new(
             FATAL,
             format!("could not change directory to \"{data_dir}\": {e}"),
-        ));
+        )
+        .with_sqlstate(backend_utils_error::errno::sqlstate_for_file_access(
+            e.raw_os_error().unwrap_or(0),
+        )));
     }
     Ok(())
 }
@@ -239,10 +249,14 @@ pub fn ValidatePgVersion(path: &str) -> PgResult<()> {
                 )
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
+            // Non-ENOENT open error carries errcode_for_file_access() (miscinit.c:1795).
             return Err(PgError::new(
                 FATAL,
                 format!("could not open file \"{full_path}\": {e}"),
-            ));
+            )
+            .with_sqlstate(backend_utils_error::errno::sqlstate_for_file_access(
+                e.raw_os_error().unwrap_or(0),
+            )));
         }
     };
 
