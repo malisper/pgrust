@@ -6,9 +6,12 @@
 //! [`LWLock`] from C's `PgStatShared_Common` header; the ported
 //! `LWLockInitialize`/`LWLockAcquire`/`LWLockRelease` operate on it directly.
 
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::sync::atomic::AtomicU32;
 
 use types_core::primitive::TimestampTz;
+use types_core::xact::XlXactStatsItem;
 use types_storage::LWLock;
 
 /// `PgStat_Kind` (`utils/pgstat_kind.h`): `typedef uint32 PgStat_Kind;` — the
@@ -72,6 +75,62 @@ impl PgStat_Kind {
 
 /// `PgStat_Counter` (`pgstat.h`): `typedef int64 PgStat_Counter;`.
 pub type PgStat_Counter = i64;
+
+/// `PgStat_PendingDroppedStatsItem` (`pgstat_xact.c`): one stats-entry
+/// create/drop scheduled by a (sub)transaction. The C `dlist_node` link is
+/// the containing [`PgStat_SubXactStatus::pending_drops`] deque.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PgStat_PendingDroppedStatsItem {
+    pub item: XlXactStatsItem,
+    pub is_create: bool,
+}
+
+/// `PgStat_TableXactStatus` (`pgstat.h`) — per-table transactional status
+/// for one (sub)transaction nesting level, trimmed to its scalar fields.
+///
+/// The C `upper`/`next` links and the `parent` back-pointer into
+/// `PgStat_TableStatus` are intrusive-list/per-table mechanics owned by
+/// `pgstat_relation.c`; the same-level `next` chain is the containing
+/// [`PgStat_SubXactStatus::first`] vec, and the `upper`/`parent` references
+/// are populated (in the owner's shape) when that unit lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PgStat_TableXactStatus {
+    /// tuples inserted in (sub)xact
+    pub tuples_inserted: PgStat_Counter,
+    /// tuples updated in (sub)xact
+    pub tuples_updated: PgStat_Counter,
+    /// tuples deleted in (sub)xact
+    pub tuples_deleted: PgStat_Counter,
+    /// relation truncated/dropped in this (sub)xact
+    pub truncdropped: bool,
+    /// tuples i/u/d prior to truncate/drop
+    pub inserted_pre_truncdrop: PgStat_Counter,
+    pub updated_pre_truncdrop: PgStat_Counter,
+    pub deleted_pre_truncdrop: PgStat_Counter,
+    /// subtransaction nest level
+    pub nest_level: i32,
+}
+
+/// `PgStat_SubXactStatus` (`utils/pgstat_internal.h`) — one node of the
+/// per-backend `pgStatXactStack`, carrying everything transactional the
+/// cumulative stats system tracks for one (sub)transaction nesting level.
+/// The C `prev` link is the containing stack's order.
+///
+/// Shared so exactly one stack exists: `pgstat_xact.c` owns the stack and
+/// the `pending_drops` schedule; `pgstat_relation.c` links its per-relation
+/// nodes into the same level node via [`first`](Self::first), as in C.
+#[derive(Debug, Default)]
+pub struct PgStat_SubXactStatus {
+    /// subtransaction nest level
+    pub nest_level: i32,
+    /// `pending_drops` dclist: stats objects created/dropped in this
+    /// (sub)transaction (owned by `pgstat_xact.c`).
+    pub pending_drops: VecDeque<PgStat_PendingDroppedStatsItem>,
+    /// `first`: head of the per-relation `PgStat_TableXactStatus` chain for
+    /// this level — the C same-level `next` links are this vec's order
+    /// (owned by `pgstat_relation.c`).
+    pub first: Vec<PgStat_TableXactStatus>,
+}
 
 /// `MAX_XFN_CHARS` (`postmaster/pgarch.h`): max length of an XLOG filename.
 pub const MAX_XFN_CHARS: usize = 40;

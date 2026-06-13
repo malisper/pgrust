@@ -19,5 +19,5 @@ backend-utils-error-small-seams = { path = "../backend-utils-error-small-seams" 
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
 backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
-backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
 libc = "0.2"

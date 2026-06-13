@@ -23,8 +23,11 @@ struct Recorder {
     gc_requests: u32,
     clear_snapshots: u32,
     db_hooks: Vec<(bool, bool)>,
-    rel_eoxact: Vec<bool>,
-    rel_eosubxact: Vec<(bool, i32)>,
+    /// (xact_state.nest_level, isCommit) of each AtEOXact_PgStat_Relations call.
+    rel_eoxact: Vec<(i32, bool)>,
+    /// (xact_state.nest_level, isCommit, nestDepth) of each
+    /// AtEOSubXact_PgStat_Relations call.
+    rel_eosubxact: Vec<(i32, bool, i32)>,
     prepare_rel: u32,
     postprepare_rel: u32,
     resets: Vec<(PgStat_Kind, Oid, u64)>,
@@ -88,18 +91,26 @@ fn install_seams() {
         stat_seams::at_eoxact_pgstat_database::set(|c, p| {
             REC.with(|r| r.borrow_mut().db_hooks.push((c, p)))
         });
-        stat_seams::at_eoxact_pgstat_relations::set(|c| {
-            REC.with(|r| r.borrow_mut().rel_eoxact.push(c))
+        stat_seams::at_eoxact_pgstat_relations::set(|xact_state, c| {
+            REC.with(|r| {
+                r.borrow_mut()
+                    .rel_eoxact
+                    .push((xact_state.nest_level, c))
+            })
         });
-        stat_seams::at_eosubxact_pgstat_relations::set(|c, n| {
-            REC.with(|r| r.borrow_mut().rel_eosubxact.push((c, n)));
+        stat_seams::at_eosubxact_pgstat_relations::set(|xact_state, c, n| {
+            REC.with(|r| {
+                r.borrow_mut()
+                    .rel_eosubxact
+                    .push((xact_state.nest_level, c, n))
+            });
             Ok(())
         });
-        stat_seams::at_prepare_pgstat_relations::set(|| {
+        stat_seams::at_prepare_pgstat_relations::set(|_xact_state| {
             REC.with(|r| r.borrow_mut().prepare_rel += 1);
             Ok(())
         });
-        stat_seams::post_prepare_pgstat_relations::set(|| {
+        stat_seams::post_prepare_pgstat_relations::set(|_xact_state| {
             REC.with(|r| r.borrow_mut().postprepare_rel += 1)
         });
         xact_seams::get_current_transaction_nest_level::set(|| {
@@ -134,7 +145,7 @@ fn commit_drops_dropped_objects_only() {
         let r = r.borrow();
         // db hook ran with (isCommit, parallel).
         assert_eq!(r.db_hooks, vec![(true, false)]);
-        assert_eq!(r.rel_eoxact, vec![true]);
+        assert_eq!(r.rel_eoxact, vec![(1, true)]);
         // Only the dropped object's stats entry is dropped on commit.
         assert_eq!(r.drops, vec![(REL, 5, 100)]);
         assert_eq!(r.gc_requests, 0);
@@ -203,7 +214,7 @@ fn subxact_abort_drops_created_object() {
 
     REC.with(|r| {
         let r = r.borrow();
-        assert_eq!(r.rel_eosubxact, vec![(false, 2)]);
+        assert_eq!(r.rel_eosubxact, vec![(2, false, 2)]);
         // created object stats dropped on subxact abort
         assert_eq!(r.drops, vec![(REL, 5, 400)]);
     });
@@ -227,7 +238,7 @@ fn subxact_commit_passes_drop_to_parent() {
 
     REC.with(|r| {
         let r = r.borrow();
-        assert_eq!(r.rel_eosubxact, vec![(true, 2)]);
+        assert_eq!(r.rel_eosubxact, vec![(2, true, 2)]);
         // No stats entry dropped at subxact commit.
         assert!(r.drops.is_empty());
     });

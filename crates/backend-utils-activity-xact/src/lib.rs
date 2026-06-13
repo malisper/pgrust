@@ -20,11 +20,11 @@
 //!   (`AtEOXact_PgStat`, `AtEOSubXact_PgStat`, `PostPrepare_PgStat`) free
 //!   them. Growth goes through `try_reserve`, surfacing C's
 //!   `MemoryContextAlloc` out-of-memory `ereport(ERROR)` as `Err(PgError)`.
-//! * The C `PgStat_SubXactStatus` also carries the `first` chain of
-//!   per-relation `PgStat_TableXactStatus` nodes; that chain belongs to
-//!   `pgstat_relation.c` (which models it in its own per-level state), so the
-//!   relation/database hooks cross as scalar-only seams and this crate never
-//!   touches `first`.
+//! * The level-node type [`PgStat_SubXactStatus`] lives in `types-pgstat` so
+//!   exactly one stack exists: this crate owns the stack and the
+//!   `pending_drops` schedule; the node's `first` chain belongs to
+//!   `pgstat_relation.c`, whose hooks receive the level node by `&mut`
+//!   through the `stat-seams` crate, as in C.
 //! * `xl_xact_stats_item`'s split `objid_lo`/`objid_hi` words are the single
 //!   `u64` of [`XlXactStatsItem`]; the `((uint64) objid_hi) << 32 | objid_lo`
 //!   recombinations at the C call sites are plain field reads.
@@ -33,7 +33,6 @@
 #![allow(non_camel_case_types)]
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 
 use backend_access_transam_xact_seams as xact_seams;
 use backend_utils_activity_pgstat_seams as pgstat_seams;
@@ -43,30 +42,15 @@ use backend_utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_core::xact::XlXactStatsItem;
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_OUT_OF_MEMORY, WARNING};
-pub use types_pgstat::activity_pgstat::PgStat_Kind;
+use types_error::{ErrorLocation, PgError, PgResult, WARNING};
+pub use types_pgstat::activity_pgstat::{
+    PgStat_Kind, PgStat_PendingDroppedStatsItem, PgStat_SubXactStatus,
+};
 
 /// Install this crate's seam implementations. This unit's functions have no
 /// seam crate yet (no cyclic consumer has needed one), so there is nothing to
 /// install.
 pub fn init_seams() {}
-
-/// `PgStat_PendingDroppedStatsItem` (pgstat_xact.c): one scheduled
-/// create/drop. The C `dlist_node` link is the containing deque.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PgStat_PendingDroppedStatsItem {
-    item: XlXactStatsItem,
-    is_create: bool,
-}
-
-/// The parts of `PgStat_SubXactStatus` (`pgstat.h`) this file owns: the
-/// nesting level and the `pending_drops` dclist. The `prev` link is the
-/// containing stack's order; the `first` per-relation chain belongs to
-/// `pgstat_relation.c` (see the crate doc).
-struct PgStat_SubXactStatus {
-    nest_level: i32,
-    pending_drops: VecDeque<PgStat_PendingDroppedStatsItem>,
-}
 
 thread_local! {
     /// `static PgStat_SubXactStatus *pgStatXactStack = NULL;` — the top of the
@@ -79,11 +63,7 @@ thread_local! {
 /// `MemoryContextAlloc(TopTransactionContext, ...)`'s out-of-memory
 /// `ereport(ERROR)` for the thread-local stack's growth.
 fn oom(request: usize) -> PgError {
-    PgError::error("out of memory")
-        .with_sqlstate(ERRCODE_OUT_OF_MEMORY)
-        .with_detail(format!(
-            "Failed on request of size {request} in memory context \"TopTransactionContext\"."
-        ))
+    mcx::oom_named("TopTransactionContext", request)
 }
 
 /// Called from access/transam/xact.c at top-level transaction commit/abort.
@@ -92,18 +72,18 @@ pub fn AtEOXact_PgStat(isCommit: bool, parallel: bool) -> PgResult<()> {
 
     // handle transactional stats information
     let have_xact_state = PG_STAT_XACT_STACK.with(|cell| {
-        let stack = cell.borrow();
-        match stack.last() {
+        let mut stack = cell.borrow_mut();
+        debug_assert!(stack.len() <= 1); // xact_state->prev == NULL
+        match stack.last_mut() {
             Some(top) => {
                 debug_assert_eq!(top.nest_level, 1);
-                debug_assert_eq!(stack.len(), 1); // xact_state->prev == NULL
+                stat_seams::at_eoxact_pgstat_relations::call(top, isCommit);
                 true
             }
             None => false,
         }
     });
     if have_xact_state {
-        stat_seams::at_eoxact_pgstat_relations::call(isCommit);
         AtEOXact_PgStat_DroppedStats(isCommit)?;
     }
     // pgStatXactStack = NULL;
@@ -175,8 +155,8 @@ pub fn AtEOSubXact_PgStat(isCommit: bool, nestDepth: i32) -> PgResult<()> {
             _ => None,
         }
     });
-    if let Some(xact_state) = xact_state {
-        stat_seams::at_eosubxact_pgstat_relations::call(isCommit, nestDepth)?;
+    if let Some(mut xact_state) = xact_state {
+        stat_seams::at_eosubxact_pgstat_relations::call(&mut xact_state, isCommit, nestDepth)?;
         AtEOSubXact_PgStat_DroppedStats(xact_state, isCommit, nestDepth)?;
         // pfree(xact_state): the popped level drops here.
     }
@@ -199,7 +179,7 @@ fn AtEOSubXact_PgStat_DroppedStats(
     // parent_xact_state = pgstat_get_xact_stack_level(nestDepth - 1): the
     // caller already delinked xact_state, so the parent (created here if
     // missing) is the stack top for the pushes below.
-    ensure_xact_stack_level(nestDepth - 1)?;
+    pgstat_get_xact_stack_level(nestDepth - 1, |_parent| ())?;
 
     // dclist_foreach_modify with dclist_delete_from at the top of each
     // iteration: drain front-to-back.
@@ -239,21 +219,17 @@ fn AtEOSubXact_PgStat_DroppedStats(
 
 /// Save the transactional stats state at 2PC transaction prepare.
 pub fn AtPrepare_PgStat() -> PgResult<()> {
-    let have_xact_state = PG_STAT_XACT_STACK.with(|cell| {
-        let stack = cell.borrow();
-        match stack.last() {
+    PG_STAT_XACT_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        debug_assert!(stack.len() <= 1); // xact_state->prev == NULL
+        match stack.last_mut() {
             Some(top) => {
                 debug_assert_eq!(top.nest_level, 1);
-                debug_assert_eq!(stack.len(), 1); // xact_state->prev == NULL
-                true
+                stat_seams::at_prepare_pgstat_relations::call(top)
             }
-            None => false,
+            None => Ok(()),
         }
-    });
-    if have_xact_state {
-        stat_seams::at_prepare_pgstat_relations::call()?;
-    }
-    Ok(())
+    })
 }
 
 /// Clean up after successful PREPARE.
@@ -262,58 +238,59 @@ pub fn AtPrepare_PgStat() -> PgResult<()> {
 pub fn PostPrepare_PgStat() {
     // We don't bother to free any of the transactional state, since it's all
     // in TopTransactionContext and will go away anyway.
-    let have_xact_state = PG_STAT_XACT_STACK.with(|cell| {
-        let stack = cell.borrow();
-        match stack.last() {
-            Some(top) => {
-                debug_assert_eq!(top.nest_level, 1);
-                debug_assert_eq!(stack.len(), 1); // xact_state->prev == NULL
-                true
-            }
-            None => false,
+    PG_STAT_XACT_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        debug_assert!(stack.len() <= 1); // xact_state->prev == NULL
+        if let Some(top) = stack.last_mut() {
+            debug_assert_eq!(top.nest_level, 1);
+            stat_seams::post_prepare_pgstat_relations::call(top);
         }
+        // pgStatXactStack = NULL;
+        stack.clear();
     });
-    if have_xact_state {
-        stat_seams::post_prepare_pgstat_relations::call();
-    }
-    // pgStatXactStack = NULL;
-    PG_STAT_XACT_STACK.with(|cell| cell.borrow_mut().clear());
 
     // Make sure any stats snapshot is thrown away
     pgstat_seams::pgstat_clear_snapshot::call();
 }
 
 /// Ensure (sub)transaction stack entry for the given nest_level exists, adding
-/// it if needed.
+/// it if needed, and run `f` on it.
 ///
-/// The C returns the node pointer; the stack is crate-private here, so the
-/// public entry point ensures existence (in-crate callers address the stack
-/// top afterwards, which is the node the C would have returned).
-pub fn pgstat_get_xact_stack_level(nest_level: i32) -> PgResult<()> {
-    ensure_xact_stack_level(nest_level)
-}
-
-fn ensure_xact_stack_level(nest_level: i32) -> PgResult<()> {
+/// The C returns the node pointer; the with-callback is the borrowed shape of
+/// that return (the node stays owned by the thread-local stack). `Err` is the
+/// `MemoryContextAlloc(TopTransactionContext, ...)` out-of-memory path.
+pub fn pgstat_get_xact_stack_level<R>(
+    nest_level: i32,
+    f: impl FnOnce(&mut PgStat_SubXactStatus) -> R,
+) -> PgResult<R> {
     PG_STAT_XACT_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        // C checks only the current top node.
-        let need_new = match stack.last() {
-            Some(top) => top.nest_level != nest_level,
-            None => true,
-        };
-        if need_new {
-            // MemoryContextAlloc(TopTransactionContext,
-            //                    sizeof(PgStat_SubXactStatus))
-            stack
-                .try_reserve(1)
-                .map_err(|_| oom(core::mem::size_of::<PgStat_SubXactStatus>()))?;
-            stack.push(PgStat_SubXactStatus {
-                nest_level,
-                pending_drops: VecDeque::new(),
-            });
-        }
-        Ok(())
+        ensure_xact_stack_level(&mut stack, nest_level)?;
+        Ok(f(stack.last_mut().expect("stack level ensured above")))
     })
+}
+
+fn ensure_xact_stack_level(
+    stack: &mut Vec<PgStat_SubXactStatus>,
+    nest_level: i32,
+) -> PgResult<()> {
+    // C checks only the current top node.
+    let need_new = match stack.last() {
+        Some(top) => top.nest_level != nest_level,
+        None => true,
+    };
+    if need_new {
+        // MemoryContextAlloc(TopTransactionContext,
+        //                    sizeof(PgStat_SubXactStatus))
+        stack
+            .try_reserve(1)
+            .map_err(|_| oom(core::mem::size_of::<PgStat_SubXactStatus>()))?;
+        stack.push(PgStat_SubXactStatus {
+            nest_level,
+            ..PgStat_SubXactStatus::default()
+        });
+    }
+    Ok(())
 }
 
 /// Get stat items that need to be dropped at commit / abort.
@@ -407,10 +384,7 @@ fn create_drop_transactional_internal(
         },
     };
 
-    ensure_xact_stack_level(nest_level)?;
-    PG_STAT_XACT_STACK.with(|cell| {
-        let mut stack = cell.borrow_mut();
-        let xact_state = stack.last_mut().expect("stack level ensured above");
+    pgstat_get_xact_stack_level(nest_level, |xact_state| {
         // MemoryContextAlloc(TopTransactionContext,
         //                    sizeof(PgStat_PendingDroppedStatsItem))
         xact_state
@@ -420,7 +394,7 @@ fn create_drop_transactional_internal(
         // dclist_push_tail(&xact_state->pending_drops, &drop->node);
         xact_state.pending_drops.push_back(drop);
         Ok(())
-    })
+    })?
 }
 
 /// Create a stats entry for a newly created database object in a

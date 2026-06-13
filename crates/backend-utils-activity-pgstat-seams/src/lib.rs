@@ -102,15 +102,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// elog.c's FATAL path lets the cumulative stats system know the session
-    /// terminated abnormally: `if (pgStatSessionEndCause == DISCONNECT_NORMAL)
-    /// pgStatSessionEndCause = DISCONNECT_FATAL;` (the global lives in
-    /// `pgstat.c`). Only marks the session as terminated by fatal error if
-    /// there is no other known cause.
-    pub fn pgstat_set_session_end_cause_fatal()
-);
-
-seam_core::seam!(
     /// `pgstat_report_stat(force)` (pgstat.c) — flush pending stats; returns
     /// the soonest time another flush could be useful (0 if idle).
     pub fn pgstat_report_stat(force: bool) -> types_error::PgResult<i64>
