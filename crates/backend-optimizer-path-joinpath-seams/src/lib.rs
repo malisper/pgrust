@@ -34,7 +34,10 @@ use types_nodes::nodes::NodeTag;
 use types_pathnodes::optimizer_plan::{
     CostSelector, JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors,
 };
-use types_pathnodes::{JoinType, PathId, PathKey, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
+use types_pathnodes::{
+    JoinType, NodeId, PathId, PathKey, PhInfoId, PlannerInfo, RelId, Relids, RinfoId,
+    SpecialJoinInfo,
+};
 
 /* ======================================================================
  * nodes/bitmapset.c — the `bms_difference` op the relnode seam set does not
@@ -44,6 +47,14 @@ use types_pathnodes::{JoinType, PathId, PathKey, PlannerInfo, RelId, Relids, Rin
 seam_core::seam!(
     /// `bms_difference(a, b)` — fresh set `a - b`.
     pub fn bms_difference(a: &Relids, b: &Relids) -> Relids
+);
+seam_core::seam!(
+    /// `bms_equal(a, b)` — true iff the two sets have exactly the same members.
+    pub fn bms_equal(a: &Relids, b: &Relids) -> bool
+);
+seam_core::seam!(
+    /// `bms_membership(a) == BMS_MULTIPLE` — true iff `a` has two or more members.
+    pub fn bms_membership_is_multiple(a: &Relids) -> bool
 );
 
 /* ======================================================================
@@ -374,6 +385,16 @@ seam_core::seam!(
     /// hash/merge-joinable clause (known to be an `OpExpr`).
     pub fn clause_opexpr_opno(root: &PlannerInfo, rinfo: RinfoId) -> Oid
 );
+seam_core::seam!(
+    /// `IsA(rinfo->clause, OpExpr) && list_length(opexpr->args) == 2` — the
+    /// paraminfo cache-key form check.
+    pub fn clause_is_opexpr_with_two_args(root: &PlannerInfo, rinfo: RinfoId) -> bool
+);
+seam_core::seam!(
+    /// `list_nth(castNode(OpExpr, rinfo->clause)->args, n)` — the n-th argument
+    /// expression of a 2-arg `OpExpr` clause, as a node handle.
+    pub fn opexpr_arg(root: &PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId
+);
 
 /* ======================================================================
  * utils/cache/lsyscache.c — get_commutator (syscache lookup; ereport-capable).
@@ -394,24 +415,76 @@ seam_core::seam!(
 );
 
 /* ======================================================================
- * get_memoize_path bundle (clauses.c / nodeFuncs.c / typcache.c +
- * pathnode.c create_memoize_path). The whole cache-key analysis walks node
- * payloads and the type cache, so it crosses as one seam returning the new
- * Memoize `PathId` or `None`.
+ * get_memoize_path callees. The memoize cache-key *orchestration* lives in
+ * the joinpath crate (the C `get_memoize_path` /
+ * `extract_lateral_vars_from_PHVs` / `paraminfo_get_equal_hashops`); only the
+ * genuine cross-subsystem callees — node-payload walks (clauses.c / var.c /
+ * placeholder.c / nodeFuncs.c / typcache.c) and the `create_memoize_path`
+ * constructor (pathnode.c) — cross here, each as a thin marshal+delegate.
+ * Expression nodes are `NodeId` handles into the optimizer/parse arena.
  * ==================================================================== */
 
 seam_core::seam!(
-    /// `get_memoize_path(...)` — if a Memoize node atop `inner_path` is possible,
-    /// allocate it into the arena and return its handle; else `None`.
-    pub fn get_memoize_path(
+    /// `contain_volatile_functions((Node *) expr)` (clauses.c) for an expr node.
+    pub fn contain_volatile_functions_node(root: &PlannerInfo, node: NodeId) -> bool
+);
+seam_core::seam!(
+    /// `contain_volatile_functions((Node *) reltarget)` (clauses.c) — the rel's
+    /// PathTarget expression list.
+    pub fn contain_volatile_functions_reltarget(root: &PlannerInfo, rel: RelId) -> bool
+);
+seam_core::seam!(
+    /// `contain_volatile_functions((Node *) rinfo)` (clauses.c) — a RestrictInfo's
+    /// clause tree.
+    pub fn contain_volatile_functions_rinfo(root: &PlannerInfo, rinfo: RinfoId) -> bool
+);
+seam_core::seam!(
+    /// `pull_varnos(root, (Node *) expr)` (var.c) — relids referenced by `expr`.
+    pub fn pull_varnos(root: &PlannerInfo, node: NodeId) -> Relids
+);
+seam_core::seam!(
+    /// `pull_vars_of_level((Node *) expr, 0)` (var.c) — the level-0 Vars/PHVs in
+    /// `expr`, as a fresh list of node handles (allocates).
+    pub fn pull_vars_of_level(root: &mut PlannerInfo, node: NodeId, levelsup: i32)
+        -> PgResult<alloc::vec::Vec<NodeId>>
+);
+seam_core::seam!(
+    /// `IsA(node, Var)` — true iff `node` is a `Var`.
+    pub fn node_is_var(root: &PlannerInfo, node: NodeId) -> bool
+);
+seam_core::seam!(
+    /// `IsA(node, PlaceHolderVar)` — true iff `node` is a `PlaceHolderVar`.
+    pub fn node_is_placeholdervar(root: &PlannerInfo, node: NodeId) -> bool
+);
+seam_core::seam!(
+    /// `((Var *) node)->varno` — the range-table index of a `Var` node.
+    pub fn var_varno(root: &PlannerInfo, node: NodeId) -> i32
+);
+seam_core::seam!(
+    /// `find_placeholder_info(root, (PlaceHolderVar *) node)` (placeholder.c) —
+    /// the PlaceHolderInfo for a `PlaceHolderVar` node.
+    pub fn find_placeholder_info(root: &mut PlannerInfo, node: NodeId) -> PhInfoId
+);
+seam_core::seam!(
+    /// `lookup_type_cache(exprType((Node*) expr), TYPECACHE_HASH_PROC |
+    /// TYPECACHE_EQ_OPR)` (nodeFuncs.c + typcache.c) — returns `Some(eq_opr)`
+    /// when both `hash_proc` and `eq_opr` are valid OIDs, else `None`.
+    pub fn expr_hash_eq_operator(root: &PlannerInfo, node: NodeId) -> Option<Oid>
+);
+seam_core::seam!(
+    /// `create_memoize_path(...)` (pathnode.c) — allocate the Memoize `Path` atop
+    /// `inner_path` and return its handle. `param_exprs` are the cache-key expr
+    /// handles, `hash_operators` their hash equality operators (parallel lists).
+    pub fn create_memoize_path(
         root: &mut PlannerInfo,
-        innerrel: RelId,
-        outerrel: RelId,
-        inner_path: PathId,
-        outer_path: PathId,
-        jointype: JoinType,
-        extra: &JoinPathExtraData,
-    ) -> PgResult<Option<PathId>>
+        rel: RelId,
+        subpath: PathId,
+        param_exprs: &[NodeId],
+        hash_operators: &[Oid],
+        singlerow: bool,
+        binary_mode: bool,
+        calls: f64,
+    ) -> PgResult<PathId>
 );
 
 /* ======================================================================

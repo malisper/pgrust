@@ -142,6 +142,23 @@ pub struct RinfoId(pub u32);
 #[repr(transparent)]
 pub struct EcId(pub u32);
 
+/// Handle for an expression `Node *` living in the optimizer/parse arena (a
+/// `Var`/`PlaceHolderVar`/`OpExpr` arg/PathTarget expr). The join-path
+/// enumerator only ever compares these by identity (the C `list_member`
+/// pointer-equality on cache-key expressions) and passes them to the
+/// node-walking seams (`contain_volatile_functions`/`pull_varnos`/…); it never
+/// inspects the payload, so an opaque handle is the faithful model of the C
+/// `Node *`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct NodeId(pub u32);
+
+/// Handle into [`PlannerInfo::placeholder_list`] — the analogue of a
+/// `PlaceHolderInfo *`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct PhInfoId(pub u32);
+
 impl RelId {
     #[inline]
     pub fn index(self) -> usize {
@@ -161,6 +178,13 @@ impl RinfoId {
     }
 }
 impl EcId {
+    #[inline]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl PhInfoId {
     #[inline]
     pub fn index(self) -> usize {
         self.0 as usize
@@ -199,6 +223,9 @@ pub struct ParamPathInfo {
     pub ppi_rows: Cardinality,
     /// join clauses available from outer rels — handles into `rinfo_arena`.
     pub ppi_clauses: Vec<RinfoId>,
+    /// set of rinfo_serials of the parameterization's clauses (the C
+    /// `Bitmapset *ppi_serials`); read by the memoize inner_unique guard.
+    pub ppi_serials: Relids,
 }
 
 /* ==========================================================================
@@ -341,6 +368,14 @@ pub struct RestrictInfo {
     pub right_ec: Option<EcId>,
     pub outer_is_left: bool,
     pub hashjoinoperator: Oid,
+    /// per-clause serial (unique within a planner run); the memoize
+    /// inner_unique guard tests membership in `ppi_serials`.
+    pub rinfo_serial: i32,
+    /// hash equality operator for the "outer op inner" form (clause's left
+    /// arg is the outer side) — `OpExpr` payload cached on the rinfo.
+    pub left_hasheqoperator: Oid,
+    /// hash equality operator for the "inner op outer" form.
+    pub right_hasheqoperator: Oid,
 }
 
 /* ==========================================================================
@@ -383,6 +418,24 @@ pub struct SpecialJoinInfo {
 }
 
 /* ==========================================================================
+ * PlaceHolderInfo (pathnodes.h) — trimmed to the fields the memoize cache-key
+ * analysis (`extract_lateral_vars_from_PHVs`) reads.
+ * ======================================================================== */
+
+/// `PlaceHolderInfo` — planner bookkeeping for a `PlaceHolderVar`. Trimmed to
+/// the `Relids`/expr-handle fields the join-path enumerator reads; the full
+/// node tree is owned by the placeholder.c crate.
+#[derive(Clone, Debug, Default)]
+pub struct PlaceHolderInfo {
+    /// `ph_var->phexpr` — the represented expression (an expr `Node *`).
+    pub ph_var_phexpr: NodeId,
+    /// lowest level we can evaluate the value at.
+    pub ph_eval_at: Relids,
+    /// relids of contained lateral refs, if any (NULL/empty if none).
+    pub ph_lateral: Relids,
+}
+
+/* ==========================================================================
  * RelOptInfo (pathnodes.h)
  * ======================================================================== */
 
@@ -410,6 +463,9 @@ pub struct RelOptInfo {
     pub cheapest_parameterized_paths: Vec<PathId>,
     pub direct_lateral_relids: Relids,
     pub lateral_relids: Relids,
+    /// lateral references this rel must supply — expr `Node *` handles; the
+    /// memoize cache-key analysis folds these into the cache keys.
+    pub lateral_vars: Vec<NodeId>,
     pub relid: Index,
     pub reltablespace: Oid,
     pub rtekind: RTEKind,
@@ -456,6 +512,12 @@ pub struct PlannerInfo {
     /// list of SpecialJoinInfos.
     pub join_info_list: Vec<SpecialJoinInfo>,
     pub last_rinfo_serial: i32,
+    /// true if any RTE is a LATERAL subquery (the C `hasLateralRTEs`); the
+    /// memoize PHV scan early-outs when false.
+    #[allow(non_snake_case)]
+    pub hasLateralRTEs: bool,
+    /// list of PlaceHolderInfos — handles into `ph_info_arena`.
+    pub placeholder_list: Vec<PhInfoId>,
 
     /* Arenas (owned-tree arena + handle model — not in the C struct). */
     /// Backing store for every [`RelOptInfo`]; a [`RelId`] indexes here.
@@ -466,6 +528,8 @@ pub struct PlannerInfo {
     pub rinfo_arena: Vec<RestrictInfo>,
     /// Backing store for every [`EquivalenceClass`]; an [`EcId`] indexes here.
     pub eq_classes: Vec<EquivalenceClass>,
+    /// Backing store for every [`PlaceHolderInfo`]; a [`PhInfoId`] indexes here.
+    pub ph_info_arena: Vec<PlaceHolderInfo>,
 }
 
 impl PlannerInfo {
@@ -503,6 +567,11 @@ impl PlannerInfo {
     #[inline]
     pub fn ec(&self, id: EcId) -> &EquivalenceClass {
         &self.eq_classes[id.index()]
+    }
+    /// Resolve a [`PhInfoId`] to its [`PlaceHolderInfo`].
+    #[inline]
+    pub fn phinfo(&self, id: PhInfoId) -> &PlaceHolderInfo {
+        &self.ph_info_arena[id.index()]
     }
 
     /// Push a [`RelOptInfo`] into the arena, returning its [`RelId`].

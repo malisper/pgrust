@@ -44,23 +44,27 @@ use backend_optimizer_util_relnode_seams as bms;
 
 use types_pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
 use types_pathnodes::{
-    JoinType, PathId, PathKey, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId, SpecialJoinInfo,
-    JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI,
-    JOIN_SEMI, JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_OTHER_JOINREL,
+    JoinType, NodeId, PathId, PathKey, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
+    SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI, JOIN_SEMI, JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_OTHER_JOINREL,
 };
 
+use types_core::primitive::{InvalidOid, Oid};
+
 /// The join-method enable GUCs (`optimizer/cost.h`: `enable_mergejoin`,
-/// `enable_hashjoin`, `enable_material`, `enable_parallel_hash`), passed in by
-/// value. Per the no-ambient-global-seams rule these per-backend planner knobs
-/// are explicit parameters, not zero-arg getter seams; the join-search driver
-/// reads them off its own facet and hands them down. (`enable_memoize` is read
-/// inside `get_memoize_path`, which crosses as one seam, so it is not here.)
+/// `enable_hashjoin`, `enable_material`, `enable_parallel_hash`,
+/// `enable_memoize`), passed in by value. Per the no-ambient-global-seams rule
+/// these per-backend planner knobs are explicit parameters, not zero-arg getter
+/// seams; the join-search driver reads them off its own facet and hands them
+/// down. `enable_memoize` is read by `get_memoize_path` (now in-crate), so it
+/// rides along here too.
 #[derive(Clone, Copy, Debug)]
 pub struct JoinEnableFlags {
     pub enable_mergejoin: bool,
     pub enable_hashjoin: bool,
     pub enable_material: bool,
     pub enable_parallel_hash: bool,
+    pub enable_memoize: bool,
 }
 
 /// `IS_OUTER_JOIN(jointype)` (nodes.h) — LEFT/FULL/RIGHT/ANTI/RIGHT_ANTI.
@@ -369,6 +373,322 @@ fn have_unsafe_outer_join_ref(
         }
     }
     result
+}
+
+/* ==========================================================================
+ * paraminfo_get_equal_hashops (joinpath.c:438)
+ *
+ * Determine whether all of `param_info`'s join clauses plus the inner rel's
+ * lateral Vars (and any PHV-derived lateral vars in `ph_lateral_vars`) can be
+ * used as memoize cache keys; if so, build the parallel `param_exprs` /
+ * `operators` lists and the `binary_mode` flag. Returns `false` (with the
+ * outputs cleared) the moment any key is unusable.
+ *
+ * The node-payload reads (`IsA(clause, OpExpr)` with two args, the
+ * left/right hasheqoperator, expr identity for `list_member`, the
+ * type-cache hash/eq lookup, volatility) cross the clauses.c/typcache.c
+ * boundary as thin seams; the orchestration is faithful to the C.
+ * ======================================================================== */
+
+#[allow(clippy::type_complexity)]
+fn paraminfo_get_equal_hashops<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    param_info: Option<&ParamPathInfoKeys>,
+    outerrel: RelId,
+    innerrel: RelId,
+    ph_lateral_vars: &[NodeId],
+) -> PgResult<Option<(PgVec<'mcx, NodeId>, PgVec<'mcx, Oid>, bool)>> {
+    let mut param_exprs: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut operators: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut binary_mode = false;
+
+    let outer_relids = clone_relids(&root.rel(outerrel).relids);
+    let inner_relids = clone_relids(&root.rel(innerrel).relids);
+
+    // Add join clauses from param_info to the hash key.
+    if let Some(pi) = param_info {
+        for &rinfo in pi.ppi_clauses.iter() {
+            // Need a join OpExpr with 2 args, and the clause must match the join.
+            //
+            // `clause_sides_match_join` also sets `rinfo->outer_is_left`, hence the
+            // &mut root.
+            if !jp::clause_is_opexpr_with_two_args::call(root, rinfo)
+                || !jp::clause_sides_match_join::call(root, rinfo, &outer_relids, &inner_relids)
+            {
+                return Ok(None);
+            }
+
+            let (expr, hasheqoperator) = {
+                let ri = root.rinfo(rinfo);
+                if ri.outer_is_left {
+                    (
+                        jp::opexpr_arg::call(root, rinfo, 0),
+                        root.rinfo(rinfo).left_hasheqoperator,
+                    )
+                } else {
+                    (
+                        jp::opexpr_arg::call(root, rinfo, 1),
+                        root.rinfo(rinfo).right_hasheqoperator,
+                    )
+                }
+            };
+
+            // Can't do memoize if we can't hash the outer type.
+            if hasheqoperator == InvalidOid {
+                return Ok(None);
+            }
+
+            // 'expr' may already be a parameter; if not, add it.
+            if !param_exprs.contains(&expr) {
+                charged_push(mcx, &mut operators, hasheqoperator)?;
+                charged_push(mcx, &mut param_exprs, expr)?;
+            }
+
+            // Non-hashable join operator forces binary comparison mode.
+            if root.rinfo(rinfo).hashjoinoperator == InvalidOid {
+                binary_mode = true;
+            }
+        }
+    }
+
+    // Now add any lateral vars to the cache key too. C: list_concat of
+    // ph_lateral_vars and innerrel->lateral_vars (in that order).
+    let inner_lateral = mcx::slice_in(mcx, &root.rel(innerrel).lateral_vars)?;
+    let lateral_iter = ph_lateral_vars.iter().chain(inner_lateral.iter());
+    for &expr in lateral_iter {
+        // Reject if there are any volatile functions in lateral vars.
+        if jp::contain_volatile_functions_node::call(root, expr) {
+            return Ok(None);
+        }
+
+        // Need a valid hash proc + equality operator for the expr's type.
+        let eq_opr = match jp::expr_hash_eq_operator::call(root, expr) {
+            Some(op) => op,
+            None => return Ok(None),
+        };
+
+        if !param_exprs.contains(&expr) {
+            charged_push(mcx, &mut operators, eq_opr)?;
+            charged_push(mcx, &mut param_exprs, expr)?;
+        }
+
+        // Lateral vars always force binary comparison mode.
+        binary_mode = true;
+    }
+
+    Ok(Some((param_exprs, operators, binary_mode)))
+}
+
+/// The fields of a `ParamPathInfo` the memoize cache-key analysis reads. Cloned
+/// out of the arena so the analysis needn't hold an immutable borrow of `root`
+/// across the `&mut root` clause-side seam.
+struct ParamPathInfoKeys {
+    ppi_clauses: Vec<RinfoId>,
+    ppi_serials: Relids,
+}
+
+/* ==========================================================================
+ * extract_lateral_vars_from_PHVs (joinpath.c:583)
+ *
+ * Extract lateral references within PlaceHolderVars that are due to be
+ * evaluated at `innerrelids`, returning them as cache-key expr handles.
+ * ======================================================================== */
+
+fn extract_lateral_vars_from_PHVs<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    innerrelids: &Relids,
+) -> PgResult<PgVec<'mcx, NodeId>> {
+    let mut ph_lateral_vars: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+    // Nothing to find if the query has no LATERAL RTEs.
+    if !root.hasLateralRTEs {
+        return Ok(ph_lateral_vars);
+    }
+
+    // No PHVs evaluated at joinrels — we never memoize atop joinrel paths.
+    if jp::bms_membership_is_multiple::call(innerrelids) {
+        return Ok(ph_lateral_vars);
+    }
+
+    let placeholders = mcx::slice_in(mcx, &root.placeholder_list)?;
+    for &phid in placeholders.iter() {
+        let (ph_lateral, ph_eval_at, phexpr) = {
+            let phinfo = root.phinfo(phid);
+            (
+                clone_relids(&phinfo.ph_lateral),
+                clone_relids(&phinfo.ph_eval_at),
+                phinfo.ph_var_phexpr,
+            )
+        };
+
+        // PHV uninteresting if no lateral refs.
+        if bms::relids_is_empty::call(&ph_lateral) {
+            continue;
+        }
+        // PHV uninteresting if not evaluated at innerrelids.
+        if !jp::bms_equal::call(&ph_eval_at, innerrelids) {
+            continue;
+        }
+
+        // If the PHV references no rels in innerrelids, use its contained
+        // expression as a cache key directly.
+        if !bms::relids_overlap::call(&jp::pull_varnos::call(root, phexpr), innerrelids) {
+            charged_push(mcx, &mut ph_lateral_vars, phexpr)?;
+            continue;
+        }
+
+        // Otherwise fetch the level-0 Vars/PHVs of the contained expression.
+        let vars = jp::pull_vars_of_level::call(root, phexpr, 0)?;
+        for &node in vars.iter() {
+            if jp::node_is_var::call(root, node) {
+                // Assert(var->varlevelsup == 0) in C.
+                let varno = jp::var_varno::call(root, node);
+                if bms::relids_is_member::call(varno, &ph_lateral) {
+                    charged_push(mcx, &mut ph_lateral_vars, node)?;
+                }
+            } else if jp::node_is_placeholdervar::call(root, node) {
+                // Assert(phv->phlevelsup == 0) in C.
+                let inner_phid = jp::find_placeholder_info::call(root, node);
+                let inner_eval_at = clone_relids(&root.phinfo(inner_phid).ph_eval_at);
+                if bms::relids_is_subset::call(&inner_eval_at, &ph_lateral) {
+                    charged_push(mcx, &mut ph_lateral_vars, node)?;
+                }
+            }
+            // else: Assert(false) in C — neither a Var nor PHV; skip.
+        }
+    }
+
+    Ok(ph_lateral_vars)
+}
+
+/* ==========================================================================
+ * get_memoize_path (joinpath.c:674)
+ *
+ * If possible, make and return a Memoize path atop `inner_path`; else `None`.
+ * ======================================================================== */
+
+fn get_memoize_path<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    innerrel: RelId,
+    outerrel: RelId,
+    inner_path: PathId,
+    outer_path: PathId,
+    jointype: JoinType,
+    extra: &JoinPathExtra,
+    enable_memoize: bool,
+) -> PgResult<Option<PathId>> {
+    // Obviously not if it's disabled.
+    if !enable_memoize {
+        return Ok(None);
+    }
+
+    // Not worth it unless we expect more than one inner scan (first is a miss).
+    {
+        let outer_parent = root.path(outer_path).base().parent;
+        if root.rel(outer_parent).rows < 2.0 {
+            return Ok(None);
+        }
+    }
+
+    // Extract lateral Vars/PHVs evaluated at innerrel, usable as cache keys.
+    let innerrelids = clone_relids(&root.rel(innerrel).relids);
+    let ph_lateral_vars = extract_lateral_vars_from_PHVs(mcx, root, &innerrelids)?;
+
+    // Need some cache key: parameterized clauses or lateral Vars.
+    let (inner_has_param_clauses, inner_param_keys) = match &root.path(inner_path).base().param_info
+    {
+        Some(pi) => (
+            !pi.ppi_clauses.is_empty(),
+            Some(ParamPathInfoKeys {
+                ppi_clauses: pi.ppi_clauses.clone(),
+                ppi_serials: clone_relids(&pi.ppi_serials),
+            }),
+        ),
+        None => (false, None),
+    };
+    if !inner_has_param_clauses
+        && root.rel(innerrel).lateral_vars.is_empty()
+        && ph_lateral_vars.is_empty()
+    {
+        return Ok(None);
+    }
+
+    // No memoize for non-unique SEMI/ANTI (inner not scanned to completion).
+    if !extra.inner_unique && (jointype == JOIN_SEMI || jointype == JOIN_ANTI) {
+        return Ok(None);
+    }
+
+    // For unique joins the whole join condition must be parameterized, i.e.
+    // every restrictlist rinfo's serial must be in the inner param's ppi_serials.
+    if extra.inner_unique {
+        let ppi_serials = match &inner_param_keys {
+            // inner_path->param_info == NULL → bail.
+            None => return Ok(None),
+            Some(k) => clone_relids(&k.ppi_serials),
+        };
+        for &rinfo in extra.restrictlist.iter() {
+            let serial = root.rinfo(rinfo).rinfo_serial;
+            if !bms::relids_is_member::call(serial, &ppi_serials) {
+                return Ok(None);
+            }
+        }
+    }
+
+    // No memoize if there are volatile functions in the inner rel's target list.
+    if jp::contain_volatile_functions_reltarget::call(root, innerrel) {
+        return Ok(None);
+    }
+    // …nor in any of its base restrict clauses.
+    {
+        let baserestrict = mcx::slice_in(mcx, &root.rel(innerrel).baserestrictinfo)?;
+        for &rinfo in baserestrict.iter() {
+            if jp::contain_volatile_functions_rinfo::call(root, rinfo) {
+                return Ok(None);
+            }
+        }
+    }
+    // …nor in the parameterized path's restrict clauses.
+    if let Some(k) = &inner_param_keys {
+        let clauses = mcx::slice_in(mcx, &k.ppi_clauses)?;
+        for &rinfo in clauses.iter() {
+            if jp::contain_volatile_functions_rinfo::call(root, rinfo) {
+                return Ok(None);
+            }
+        }
+    }
+
+    // Check we have hash ops for each cache-key parameter. Use the outer rel's
+    // top_parent if it has one.
+    let hashops_outerrel = root.rel(outerrel).top_parent.unwrap_or(outerrel);
+    let hashops = paraminfo_get_equal_hashops(
+        mcx,
+        root,
+        inner_param_keys.as_ref(),
+        hashops_outerrel,
+        innerrel,
+        &ph_lateral_vars,
+    )?;
+
+    if let Some((param_exprs, hash_operators, binary_mode)) = hashops {
+        let calls = root.path(outer_path).base().rows;
+        let singlerow = extra.inner_unique;
+        let p = jp::create_memoize_path::call(
+            root,
+            innerrel,
+            inner_path,
+            &param_exprs,
+            &hash_operators,
+            singlerow,
+            binary_mode,
+            calls,
+        )?;
+        return Ok(Some(p));
+    }
+
+    Ok(None)
 }
 
 /* ==========================================================================
@@ -1357,9 +1677,9 @@ fn match_unsorted_outer<'mcx>(
                 )?;
 
                 // Try a memoize path atop the nested loop.
-                let owned = extra.materialize(root);
-                let mpath = jp::get_memoize_path::call(
-                    root, innerrel, outerrel, innerpath, outerpath, jointype, &owned,
+                let mpath = get_memoize_path(
+                    mcx, root, innerrel, outerrel, innerpath, outerpath, jointype, extra,
+                    enable.enable_memoize,
                 )?;
                 if let Some(mpath) = mpath {
                     try_nestloop_path(
@@ -1555,9 +1875,9 @@ fn consider_parallel_nestloop<'mcx>(
             try_partial_nestloop_path(root, joinrel, outerpath, innerpath, &pathkeys, jointype, extra)?;
 
             // Try a memoize path.
-            let owned = extra.materialize(root);
-            let mpath = jp::get_memoize_path::call(
-                root, innerrel, outerrel, innerpath, outerpath, jointype, &owned,
+            let mpath = get_memoize_path(
+                mcx, root, innerrel, outerrel, innerpath, outerpath, jointype, extra,
+                enable.enable_memoize,
             )?;
             if let Some(mpath) = mpath {
                 try_partial_nestloop_path(root, joinrel, outerpath, mpath, &pathkeys, jointype, extra)?;

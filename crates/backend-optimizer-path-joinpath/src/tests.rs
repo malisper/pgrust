@@ -119,8 +119,9 @@ fn install_join_seams() {
     });
     jp::add_path_precheck::set(|_root, _pr, _dn, _su, _tot, _pk, _ro| true);
 
-    // memoize: never (so the only nestloop is over the parameterized inner).
-    jp::get_memoize_path::set(|_r, _ir, _or, _ip, _op, _jt, _e| Ok(None));
+    // memoize: get_memoize_path is now in-crate; with enable_memoize=false in
+    // the test flags it short-circuits to None before reaching any seam, so no
+    // memoize callee seams need installing for this gate.
 
     // The two pathnode.c constructors this branch reaches: build a real
     // NestPath and add it to the joinrel pathlist (the C `add_path`).
@@ -193,6 +194,7 @@ fn add_paths_to_joinrel_adds_nestloop_for_inner_join() {
         enable_hashjoin: false,
         enable_material: false,
         enable_parallel_hash: false,
+        enable_memoize: false,
     };
 
     add_paths_to_joinrel(
