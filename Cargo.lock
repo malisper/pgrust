@@ -1005,6 +1005,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-commit-ts"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-commit-ts-seams"
 version = "0.0.0"
 dependencies = [
@@ -9350,6 +9376,7 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-commit-ts",
  "backend-access-transam-generic-xlog",
  "backend-access-transam-parallel",
  "backend-access-transam-timeline",
