@@ -52,6 +52,7 @@ backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
+backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
