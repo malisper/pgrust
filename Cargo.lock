@@ -630,6 +630,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-parallel"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-parallel",
+]
+
+[[package]]
+name = "backend-access-transam-parallel-rt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-parallel",
+]
+
+[[package]]
 name = "backend-access-transam-parallel-seams"
 version = "0.0.0"
 dependencies = [
@@ -3536,6 +3562,7 @@ dependencies = [
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-parallel",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
@@ -3740,6 +3767,13 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-parallel"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
