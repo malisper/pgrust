@@ -103,4 +103,8 @@ pub fn init_seams() {
     makefuncs_seams::make_type_name_from_name_list::set(
         makefuncs::make_type_name_from_name_list_seam,
     );
+
+    // The nodefuncs family (`nodeFuncs.c`) owns `backend-nodes-nodeFuncs-seams`
+    // and installs its expression-inspection seams.
+    nodefuncs::init_seams();
 }

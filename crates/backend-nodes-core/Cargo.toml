@@ -22,6 +22,7 @@ types-storage = { path = "../types-storage" }
 types-tidbitmap = { path = "../types-tidbitmap" }
 types-execparallel = { path = "../types-execparallel" }
 types-pathnodes = { path = "../types-pathnodes" }
+types-fmgr = { path = "../types-fmgr" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
@@ -34,3 +35,5 @@ backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-nodes-readfuncs-seams = { path = "../backend-nodes-readfuncs-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
