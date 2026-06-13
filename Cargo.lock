@@ -8293,6 +8293,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-pglz"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-pglz-seams"
 version = "0.0.0"
 dependencies = [
