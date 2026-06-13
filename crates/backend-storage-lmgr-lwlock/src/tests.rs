@@ -5,9 +5,8 @@
 
 use super::*;
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicBool, Ordering as O};
 use std::sync::{Mutex, Once};
-use types_storage::{pg_atomic_uint32, LWLockWaitState};
+use types_storage::{pg_atomic_uint32, LWLockWaitList, LWLockWaitState};
 
 // The seam slots are process-wide and the held-lock table is thread-local;
 // serialize the tests that use them.
@@ -18,6 +17,12 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     INSTALL.call_once(install_seams);
     g
+}
+
+/// A `TopMemoryContext` stand-in for the registry-allocating entry points.
+fn with_mcx<R>(f: impl FnOnce(Mcx<'_>) -> R) -> R {
+    let ctx = mcx::MemoryContext::new("lwlock-test");
+    f(ctx.mcx())
 }
 
 // ---- process-wide test fakes for the genuine externals --------------------
@@ -47,9 +52,6 @@ thread_local! {
     static SEM_UNLOCKS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
 }
 
-static UNDER_POSTMASTER: AtomicBool = AtomicBool::new(false);
-static SHMEM_REQUEST_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-
 fn install_seams() {
     shmem::add_size::set(|a, b| {
         a.checked_add(b)
@@ -62,12 +64,8 @@ fn install_seams() {
     shmem::shmem_lock_acquire::set(|| {});
     shmem::shmem_lock_release::set(|| {});
 
-    globals::is_under_postmaster::set(|| UNDER_POSTMASTER.load(O::SeqCst));
     globals::hold_interrupts::set(|| {});
     globals::resume_interrupts::set(|| {});
-    globals::my_proc_number::set(|| MY_PROC.with(|p| p.get()));
-
-    miscinit::process_shmem_requests_in_progress::set(|| SHMEM_REQUEST_IN_PROGRESS.load(O::SeqCst));
 
     waitevent::pgstat_report_wait_start::set(|_| {});
     waitevent::pgstat_report_wait_end::set(|| {});
@@ -99,9 +97,7 @@ fn install_seams() {
 }
 
 fn reset_world(n_procs: usize, my: i32) {
-    LWLOCK_COUNTER.store(LWTRANCHE_FIRST_USER_DEFINED, O::SeqCst);
-    UNDER_POSTMASTER.store(false, O::SeqCst);
-    SHMEM_REQUEST_IN_PROGRESS.store(true, O::SeqCst);
+    LWLOCK_COUNTER.store(LWTRANCHE_FIRST_USER_DEFINED, Ordering::SeqCst);
     PROCS.with(|p| *p.borrow_mut() = vec![FakeProc::default(); n_procs]);
     MY_PROC.with(|p| p.set(my));
     SEM_UNLOCKS.with(|s| s.borrow_mut().clear());
@@ -111,8 +107,8 @@ fn reset_world(n_procs: usize, my: i32) {
     let _ = LWLockReleaseAll();
 }
 
-fn set_my(p: i32) {
-    MY_PROC.with(|c| c.set(p));
+fn my() -> i32 {
+    MY_PROC.with(|c| c.get())
 }
 
 fn waiting(p: i32) -> LWLockWaitState {
@@ -125,6 +121,12 @@ fn make_lock() -> LWLock {
     lock
 }
 
+/// Test-only snapshot of a lock's wait-list head (single-threaded tests; no
+/// concurrent wait-list mutation is possible).
+fn waiters_of(lock: &LWLock) -> proclist_head {
+    unsafe { *lock.waiters.ptr() }
+}
+
 // ---- tests ----------------------------------------------------------------
 
 #[test]
@@ -133,13 +135,13 @@ fn initializes_lwlock_like_postgres() {
     let mut lock = LWLock {
         tranche: 0,
         state: pg_atomic_uint32::new(0),
-        waiters: proclist_head { head: 0, tail: 0 },
+        waiters: LWLockWaitList::new(proclist_head { head: 0, tail: 0 }),
     };
     LWLockInitialize(&mut lock, LWTRANCHE_BUFFER_MAPPING);
     assert_eq!(lock.tranche, LWTRANCHE_BUFFER_MAPPING as uint16);
     assert_eq!(lock.state.read(), LW_FLAG_RELEASE_OK);
-    assert_eq!(lock.waiters.head, INVALID_PROC_NUMBER);
-    assert_eq!(lock.waiters.tail, INVALID_PROC_NUMBER);
+    assert_eq!(waiters_of(&lock).head, INVALID_PROC_NUMBER);
+    assert_eq!(waiters_of(&lock).tail, INVALID_PROC_NUMBER);
 }
 
 #[test]
@@ -187,7 +189,7 @@ fn dynamic_tranches_default_to_extension_until_registered() {
     let tranche_id = LWLockNewTrancheId();
     assert_eq!(tranche_id, LWTRANCHE_FIRST_USER_DEFINED);
     assert_eq!(GetLWTrancheName(tranche_id as uint16), "extension");
-    LWLockRegisterTranche(tranche_id, "ExtensionLock").unwrap();
+    with_mcx(|m| LWLockRegisterTranche(m, tranche_id, "ExtensionLock")).unwrap();
     assert_eq!(GetLWTrancheName(tranche_id as uint16), "ExtensionLock");
     assert_eq!(
         GetLWLockIdentifier(PG_WAIT_LWLOCK, tranche_id as uint16),
@@ -200,7 +202,7 @@ fn named_request_size_matches_postgres_formula() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    RequestNamedLWLockTranche("RequestA", 2).unwrap();
+    with_mcx(|m| RequestNamedLWLockTranche(m, "RequestA", 2, true)).unwrap();
 
     let size = LWLockShmemSize().unwrap();
     let expected = (NUM_FIXED_LWLOCKS as usize + 2) * core::mem::size_of::<LWLockPadded>()
@@ -212,15 +214,21 @@ fn named_request_size_matches_postgres_formula() {
     assert_eq!(size, expected);
 }
 
+/// `CreateLWLocks` publishes the main array exactly once per process
+/// (OnceLock), so creation and the under-postmaster attach are exercised in
+/// one test: the postmaster builds + publishes; a backend's "attach" gets the
+/// SAME table (no rebuild) and re-registers the named tranches in its own
+/// process-local registry.
 #[test]
-fn create_lwlocks_initializes_fixed_and_named_tranches() {
+fn create_lwlocks_initializes_then_backend_attaches() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    RequestNamedLWLockTranche("RequestA", 2).unwrap();
-    let mut table = CreateLWLocks().unwrap();
+    with_mcx(|m| RequestNamedLWLockTranche(m, "RequestA", 2, true)).unwrap();
+    with_mcx(|m| RequestNamedLWLockTranche(m, "RequestB", 3, true)).unwrap();
+    let table = with_mcx(|m| CreateLWLocks(m, false)).unwrap();
 
-    assert_eq!(table.locks().len(), NUM_FIXED_LWLOCKS as usize + 2);
+    assert_eq!(table.locks().len(), NUM_FIXED_LWLOCKS as usize + 5);
     assert_eq!(table.lock(0).unwrap().tranche, 0);
     assert_eq!(
         table
@@ -237,7 +245,7 @@ fn create_lwlocks_initializes_fixed_and_named_tranches() {
         LWTRANCHE_LOCK_MANAGER as uint16
     );
 
-    let named = GetNamedLWLockTranche(&mut table, "RequestA").unwrap();
+    let named = GetNamedLWLockTranche(table, "RequestA").unwrap();
     assert_eq!(named.len(), 2);
     for slot in named.iter() {
         assert_eq!(slot.lock.tranche as i32, LWTRANCHE_FIRST_USER_DEFINED);
@@ -248,31 +256,34 @@ fn create_lwlocks_initializes_fixed_and_named_tranches() {
         "RequestA"
     );
 
-    let missing = GetNamedLWLockTranche(&mut table, "Missing").unwrap_err();
+    let missing = GetNamedLWLockTranche(table, "Missing").unwrap_err();
     assert_eq!(missing.message(), "requested tranche is not registered");
-}
 
-#[test]
-fn attached_backend_rederives_named_tranche_ranges() {
-    let _g = guard();
-    reset_world(0, INVALID_PROC_NUMBER);
-    UNDER_POSTMASTER.store(true, O::SeqCst);
-
-    RequestNamedLWLockTranche("RequestA", 1).unwrap();
-    RequestNamedLWLockTranche("RequestB", 3).unwrap();
-    let table = CreateLWLocks().unwrap();
-
-    assert_eq!(table.locks().len(), NUM_FIXED_LWLOCKS as usize + 4);
-    assert_eq!(table.named_tranches().len(), 2);
-    let b = &table.named_tranches()[1];
+    // A backend attaches: same table, names re-registered in this "process".
+    LWLOCK_TRANCHE_NAMES.with(|n| n.borrow_mut().clear());
+    let attached = with_mcx(|m| CreateLWLocks(m, true)).unwrap();
+    assert!(core::ptr::eq(table, attached));
+    assert_eq!(attached.named_tranches().len(), 2);
+    let b = &attached.named_tranches()[1];
     assert_eq!(b.tranche_name, "RequestB");
     assert_eq!(b.tranche_id, LWTRANCHE_FIRST_USER_DEFINED + 1);
-    assert_eq!(b.start, NUM_FIXED_LWLOCKS as usize + 1);
+    assert_eq!(b.start, NUM_FIXED_LWLOCKS as usize + 2);
     assert_eq!(b.len, 3);
     assert_eq!(
         GetLWTrancheName((LWTRANCHE_FIRST_USER_DEFINED + 1) as uint16),
         "RequestB"
     );
+
+    // The published table serves the by-offset main-array surface.
+    let main_guard =
+        LWLockAcquireMain(BUFFER_MAPPING_LWLOCK_OFFSET as usize, LW_SHARED, my()).unwrap();
+    assert!(LWLockHeldByMe(
+        table.lock(BUFFER_MAPPING_LWLOCK_OFFSET as usize).unwrap()
+    ));
+    main_guard.release().unwrap();
+    assert!(!LWLockHeldByMe(
+        table.lock(BUFFER_MAPPING_LWLOCK_OFFSET as usize).unwrap()
+    ));
 }
 
 #[test]
@@ -280,18 +291,18 @@ fn conditional_acquire_and_release_update_state() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
-    assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
+    let lock = make_lock();
+    assert!(LWLockConditionalAcquire(&lock, LW_SHARED).unwrap());
     assert_eq!(lock.state.read() & LW_SHARED_MASK, 1);
-    assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
+    assert!(LWLockConditionalAcquire(&lock, LW_SHARED).unwrap());
     assert_eq!(lock.state.read() & LW_SHARED_MASK, 2);
-    LWLockRelease(&mut lock).unwrap();
-    LWLockRelease(&mut lock).unwrap();
+    LWLockRelease(&lock).unwrap();
+    LWLockRelease(&lock).unwrap();
     assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 
-    assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
-    assert!(!LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
-    LWLockRelease(&mut lock).unwrap();
+    assert!(LWLockConditionalAcquire(&lock, LW_EXCLUSIVE).unwrap());
+    assert!(!LWLockConditionalAcquire(&lock, LW_SHARED).unwrap());
+    LWLockRelease(&lock).unwrap();
     assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
 
@@ -300,12 +311,12 @@ fn acquire_release_track_held_locks_like_postgres() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
-    assert!(LWLockAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
+    let lock = make_lock();
+    assert!(LWLockAcquire(&lock, LW_EXCLUSIVE, my()).unwrap());
     assert!(LWLockHeldByMe(&lock));
     assert!(LWLockHeldByMeInMode(&lock, LW_EXCLUSIVE));
     assert!(!LWLockHeldByMeInMode(&lock, LW_SHARED));
-    LWLockRelease(&mut lock).unwrap();
+    LWLockRelease(&lock).unwrap();
     assert!(!LWLockHeldByMe(&lock));
 }
 
@@ -314,8 +325,8 @@ fn release_of_unheld_lock_reports_tranche_name() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
-    let err = LWLockRelease(&mut lock).unwrap_err();
+    let lock = make_lock();
+    let err = LWLockRelease(&lock).unwrap_err();
     assert_eq!(err.message(), "lock BufferMapping is not held");
 }
 
@@ -324,12 +335,12 @@ fn disown_stops_tracking_without_releasing_lock() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
-    assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
-    LWLockDisown(&mut lock).unwrap();
+    let lock = make_lock();
+    assert!(LWLockConditionalAcquire(&lock, LW_SHARED).unwrap());
+    LWLockDisown(&lock).unwrap();
     assert!(!LWLockHeldByMe(&lock));
     assert_eq!(lock.state.read() & LW_SHARED_MASK, 1);
-    LWLockReleaseDisowned(&mut lock, LW_SHARED);
+    LWLockReleaseDisowned(&lock, LW_SHARED);
     assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
 
@@ -338,10 +349,10 @@ fn release_all_releases_held_locks() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut first = make_lock();
-    let mut second = make_lock();
-    assert!(LWLockConditionalAcquire(&mut first, LW_SHARED).unwrap());
-    assert!(LWLockConditionalAcquire(&mut second, LW_EXCLUSIVE).unwrap());
+    let first = make_lock();
+    let second = make_lock();
+    assert!(LWLockConditionalAcquire(&first, LW_SHARED).unwrap());
+    assert!(LWLockConditionalAcquire(&second, LW_EXCLUSIVE).unwrap());
     LWLockReleaseAll().unwrap();
     assert_eq!(first.state.read() & LW_LOCK_MASK, 0);
     assert_eq!(second.state.read() & LW_LOCK_MASK, 0);
@@ -360,16 +371,16 @@ fn for_each_and_any_held_by_me() {
 
     assert!(!LWLockAnyHeldByMe(&padded));
 
-    assert!(LWLockConditionalAcquire(&mut padded[1].lock, LW_SHARED).unwrap());
-    let addr1 = &padded[1].lock as *const LWLock as usize;
+    assert!(LWLockConditionalAcquire(&padded[1].lock, LW_SHARED).unwrap());
+    let ptr1 = &padded[1].lock as *const LWLock;
 
-    let mut seen: Vec<(usize, LWLockMode)> = Vec::new();
-    ForEachLWLockHeldByMe(|addr, mode| seen.push((addr, mode)));
-    assert_eq!(seen, vec![(addr1, LW_SHARED)]);
+    let mut seen: Vec<(*const LWLock, LWLockMode)> = Vec::new();
+    ForEachLWLockHeldByMe(|lock, mode| seen.push((lock, mode)));
+    assert_eq!(seen, vec![(ptr1, LW_SHARED)]);
 
     assert!(LWLockAnyHeldByMe(&padded));
 
-    LWLockRelease(&mut padded[1].lock).unwrap();
+    LWLockRelease(&padded[1].lock).unwrap();
 }
 
 #[test]
@@ -377,10 +388,10 @@ fn release_clear_var_stores_value_before_unlock() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
+    let lock = make_lock();
     let value = pg_atomic_uint64::new(1);
-    assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
-    LWLockReleaseClearVar(&mut lock, &value, 42).unwrap();
+    assert!(LWLockConditionalAcquire(&lock, LW_EXCLUSIVE).unwrap());
+    LWLockReleaseClearVar(&lock, &value, 42).unwrap();
     assert_eq!(value.read(), 42);
     assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
@@ -393,27 +404,25 @@ fn queue_self_orders_head_and_tail_by_mode() {
     let lock = make_lock();
     // Three exclusive waiters enqueue at the tail in order 1, 2, 3.
     for p in [1, 2, 3] {
-        set_my(p);
-        LWLockQueueSelf(&lock, LW_EXCLUSIVE);
+        LWLockQueueSelf(&lock, LW_EXCLUSIVE, p).unwrap();
     }
-    assert_eq!(lock.waiters.head, 1);
-    assert_eq!(lock.waiters.tail, 3);
+    assert_eq!(waiters_of(&lock).head, 1);
+    assert_eq!(waiters_of(&lock).tail, 3);
     assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
 
     // A LW_WAIT_UNTIL_FREE waiter jumps to the head.
-    set_my(0);
-    LWLockQueueSelf(&lock, LW_WAIT_UNTIL_FREE);
-    assert_eq!(lock.waiters.head, 0);
-    assert_eq!(lock.waiters.tail, 3);
+    LWLockQueueSelf(&lock, LW_WAIT_UNTIL_FREE, 0).unwrap();
+    assert_eq!(waiters_of(&lock).head, 0);
+    assert_eq!(waiters_of(&lock).tail, 3);
 
-    assert_eq!(collect_waiters(&lock.waiters), vec![0, 1, 2, 3]);
+    assert_eq!(collect_waiters(&lock), vec![0, 1, 2, 3]);
 }
 
 /// Test-only: snapshot a wait list's pgprocnos head-to-tail via the same
 /// `proclist_foreach_modify` traversal the production code uses.
-fn collect_waiters(list: &proclist_head) -> Vec<i32> {
+fn collect_waiters(lock: &LWLock) -> Vec<i32> {
     let mut out = Vec::new();
-    proclist_foreach_modify(list.head, |cur| {
+    proclist_foreach_modify(waiters_of(lock).head, |cur| {
         out.push(cur);
         ControlFlow::Continue(())
     });
@@ -427,18 +436,16 @@ fn wakeup_wakes_one_exclusive_and_clears_flags() {
 
     let lock = make_lock();
     for p in [1, 2] {
-        set_my(p);
-        LWLockQueueSelf(&lock, LW_EXCLUSIVE);
+        LWLockQueueSelf(&lock, LW_EXCLUSIVE, p).unwrap();
     }
 
-    set_my(0);
     LWLockWakeup(&lock);
 
     assert_eq!(SEM_UNLOCKS.with(|s| s.borrow().clone()), vec![1]);
     assert_eq!(waiting(1), LW_WS_NOT_WAITING);
     assert_eq!(waiting(2), LW_WS_WAITING); // still queued
-    assert_eq!(lock.waiters.head, 2);
-    assert_eq!(lock.waiters.tail, 2);
+    assert_eq!(waiters_of(&lock).head, 2);
+    assert_eq!(waiters_of(&lock).tail, 2);
     assert_eq!(lock.state.read() & LW_FLAG_RELEASE_OK, 0);
     assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
     assert_eq!(lock.state.read() & LW_FLAG_LOCKED, 0);
@@ -451,15 +458,13 @@ fn wakeup_wakes_all_shared_waiters() {
 
     let lock = make_lock();
     for p in [1, 2, 3] {
-        set_my(p);
-        LWLockQueueSelf(&lock, LW_SHARED);
+        LWLockQueueSelf(&lock, LW_SHARED, p).unwrap();
     }
 
-    set_my(0);
     LWLockWakeup(&lock);
 
     assert_eq!(SEM_UNLOCKS.with(|s| s.borrow().clone()), vec![1, 2, 3]);
-    assert!(proclist_is_empty(&lock.waiters));
+    assert!(proclist_is_empty(&waiters_of(&lock)));
     assert_eq!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
     assert_eq!(lock.state.read() & LW_FLAG_RELEASE_OK, 0);
 }
@@ -470,11 +475,11 @@ fn dequeue_self_removes_and_clears_has_waiters() {
     reset_world(2, 1);
 
     let lock = make_lock();
-    LWLockQueueSelf(&lock, LW_EXCLUSIVE);
+    LWLockQueueSelf(&lock, LW_EXCLUSIVE, 1).unwrap();
     assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
 
-    LWLockDequeueSelf(&lock);
-    assert!(proclist_is_empty(&lock.waiters));
+    LWLockDequeueSelf(&lock, 1);
+    assert!(proclist_is_empty(&waiters_of(&lock)));
     assert_eq!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
     assert_eq!(waiting(1), LW_WS_NOT_WAITING);
 }
@@ -497,11 +502,11 @@ fn wait_for_var_returns_free_when_unlocked() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut lock = make_lock();
+    let lock = make_lock();
     let value = pg_atomic_uint64::new(7);
     let mut newval = 0u64;
     // Lock is free (not exclusive): WaitForVar returns true immediately.
-    assert!(LWLockWaitForVar(&mut lock, &value, 7, &mut newval).unwrap());
+    assert!(LWLockWaitForVar(&lock, &value, 7, &mut newval, my()).unwrap());
 }
 
 #[test]
@@ -509,15 +514,15 @@ fn wait_for_var_returns_false_on_value_mismatch() {
     let _g = guard();
     reset_world(1, 0);
 
-    let mut lock = make_lock();
+    let lock = make_lock();
     // Hold exclusively so the slot is not free.
-    assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
+    assert!(LWLockConditionalAcquire(&lock, LW_EXCLUSIVE).unwrap());
     let value = pg_atomic_uint64::new(99);
     let mut newval = 0u64;
     // oldval (7) != current (99): no wait, returns false, newval = 99.
-    assert!(!LWLockWaitForVar(&mut lock, &value, 7, &mut newval).unwrap());
+    assert!(!LWLockWaitForVar(&lock, &value, 7, &mut newval, my()).unwrap());
     assert_eq!(newval, 99);
-    LWLockRelease(&mut lock).unwrap();
+    LWLockRelease(&lock).unwrap();
 }
 
 #[test]
@@ -525,23 +530,21 @@ fn update_var_wakes_until_free_waiters() {
     let _g = guard();
     reset_world(2, 0);
 
-    let mut lock = make_lock();
+    let lock = make_lock();
     // Hold exclusively (required precondition for LWLockUpdateVar).
-    assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
+    assert!(LWLockConditionalAcquire(&lock, LW_EXCLUSIVE).unwrap());
 
     // Proc 1 queues as LW_WAIT_UNTIL_FREE.
-    set_my(1);
-    LWLockQueueSelf(&lock, LW_WAIT_UNTIL_FREE);
-    set_my(0);
+    LWLockQueueSelf(&lock, LW_WAIT_UNTIL_FREE, 1).unwrap();
 
     let value = pg_atomic_uint64::new(0);
-    LWLockUpdateVar(&mut lock, &value, 123);
+    LWLockUpdateVar(&lock, &value, 123);
 
     assert_eq!(value.read(), 123);
     assert_eq!(SEM_UNLOCKS.with(|s| s.borrow().clone()), vec![1]);
     assert_eq!(waiting(1), LW_WS_NOT_WAITING);
 
-    LWLockRelease(&mut lock).unwrap();
+    LWLockRelease(&lock).unwrap();
 }
 
 #[test]
@@ -549,16 +552,16 @@ fn too_many_lwlocks_taken_matches_postgres_message() {
     let _g = guard();
     reset_world(0, INVALID_PROC_NUMBER);
 
-    let mut locks: Vec<LWLock> = (0..MAX_SIMUL_LWLOCKS).map(|_| make_lock()).collect();
-    for lock in locks.iter_mut() {
+    let locks: Vec<LWLock> = (0..MAX_SIMUL_LWLOCKS).map(|_| make_lock()).collect();
+    for lock in locks.iter() {
         assert!(LWLockConditionalAcquire(lock, LW_SHARED).unwrap());
     }
-    let mut one_more = make_lock();
-    let err = LWLockAcquire(&mut one_more, LW_SHARED).unwrap_err();
+    let one_more = make_lock();
+    let err = LWLockAcquire(&one_more, LW_SHARED, my()).unwrap_err();
     assert_eq!(err.message(), "too many LWLocks taken");
-    let err = LWLockConditionalAcquire(&mut one_more, LW_SHARED).unwrap_err();
+    let err = LWLockConditionalAcquire(&one_more, LW_SHARED).unwrap_err();
     assert_eq!(err.message(), "too many LWLocks taken");
-    let err = LWLockAcquireOrWait(&mut one_more, LW_SHARED).unwrap_err();
+    let err = LWLockAcquireOrWait(&one_more, LW_SHARED, my()).unwrap_err();
     assert_eq!(err.message(), "too many LWLocks taken");
     LWLockReleaseAll().unwrap();
 }
@@ -568,8 +571,8 @@ fn acquire_or_wait_acquires_free_lock() {
     let _g = guard();
     reset_world(1, 0);
 
-    let mut lock = make_lock();
-    assert!(LWLockAcquireOrWait(&mut lock, LW_EXCLUSIVE).unwrap());
+    let lock = make_lock();
+    assert!(LWLockAcquireOrWait(&lock, LW_EXCLUSIVE, my()).unwrap());
     assert!(LWLockHeldByMe(&lock));
-    LWLockRelease(&mut lock).unwrap();
+    LWLockRelease(&lock).unwrap();
 }

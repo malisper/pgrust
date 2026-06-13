@@ -7,18 +7,25 @@
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     backend_access_common_heaptuple::init_seams();
+    backend_access_common_reloptions::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_rmgrdesc_small::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_transam_twophase::init_seams();
+    backend_access_transam_xact::init_seams();
+    backend_access_transam_xlog::init_seams();
+    backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_catalog_namespace::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_executor_execAmi::init_seams();
+    backend_executor_execParallel::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
     backend_executor_nodeMaterial::init_seams();
+    backend_executor_nodeMergejoin::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
@@ -26,11 +33,18 @@ pub fn init_all() {
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_startup::init_seams();
+    backend_replication_logical_logical::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_replication_logical_applyparallelworker::init_seams();
+    backend_replication_logical_conflict::init_seams();
+    backend_replication_logical_proto::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
+    backend_storage_ipc_latch::init_seams();
     backend_storage_ipc_procsignal::init_seams();
+    backend_storage_ipc_shm_mq::init_seams();
+    backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_standby::init_seams();
+    backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
@@ -39,7 +53,10 @@ pub fn init_all() {
     backend_utils_activity_small::init_seams();
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_numutils::init_seams();
+    backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_cache_attoptcache::init_seams();
+    backend_utils_cache_inval::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();
     backend_utils_cache_syscache::init_seams();
@@ -51,6 +68,7 @@ pub fn init_all() {
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
+    backend_utils_mmgr_freepage::init_seams();
     backend_utils_time_combocid::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
 }

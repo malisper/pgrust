@@ -9,8 +9,10 @@ name = "backend_storage_ipc_dsm_core"
 path = "src/lib.rs"
 
 [dependencies]
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }

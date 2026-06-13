@@ -6,6 +6,7 @@
 //! until then a call panics loudly. Snapshots cross as trimmed owned
 //! `SnapshotData` values.
 
+use types_core::CommandId;
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -25,6 +26,14 @@ seam_core::seam!(
     pub fn register_snapshot(
         snapshot: types_snapshot::SnapshotData,
     ) -> types_error::PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `UnregisterSnapshot(snapshot)` (snapmgr.c): drop the resource-owner
+    /// registration taken by [`register_snapshot`], freeing the snapshot when
+    /// its last registration goes away. The owned `SnapshotData` is consumed.
+    /// Cannot `ereport` in C; modeled infallible bare.
+    pub fn unregister_snapshot(snapshot: types_snapshot::SnapshotData)
 );
 
 seam_core::seam!(
@@ -59,4 +68,77 @@ seam_core::seam!(
     pub fn with_transaction_snapshot(
         f: &mut dyn FnMut() -> PgResult<()>,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SnapshotSetCommandId(curcid)` — propagate the new command id into the
+    /// static snapshots. Pure field updates; cannot `ereport`.
+    pub fn snapshot_set_command_id(curcid: CommandId)
+);
+
+seam_core::seam!(
+    /// `AtEOXact_Snapshot(isCommit, resetXmin)` — snapshot cleanup at
+    /// transaction end (WARNs about leaks at commit; can `ereport(ERROR)` on
+    /// exported-snapshot file cleanup).
+    pub fn at_eoxact_snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtSubCommit_Snapshot(level)`.
+    pub fn at_subcommit_snapshot(level: i32)
+);
+
+seam_core::seam!(
+    /// `AtSubAbort_Snapshot(level)`.
+    pub fn at_subabort_snapshot(level: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XactHasExportedSnapshots()` — true after `pg_export_snapshot`, which
+    /// forbids PREPARE.
+    pub fn xact_has_exported_snapshots() -> bool
+);
+
+seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
+    /// catalog snapshot so the next catalog read takes a fresh one — driven by
+    /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;
+    /// infallible.
+    pub fn invalidate_catalog_snapshot()
+);
+
+seam_core::seam!(
+    /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
+    /// `None` (the C may return NULL when no snapshot is active). Snapshots
+    /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
+    /// pointer the snapshot stack and callers alias).
+    pub fn get_active_snapshot() -> PgResult<Option<std::rc::Rc<types_snapshot::SnapshotData>>>
+);
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(snap)` (snapmgr.c) — make `snap` the active
+    /// snapshot (copies it onto the active-snapshot stack). Allocates; can
+    /// `ereport(ERROR)`.
+    pub fn push_active_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
+    pub fn pop_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLatestSnapshot()` (snapmgr.c): a fresh MVCC snapshot reflecting all
+    /// committed transactions as of now. Snapshot acquisition can
+    /// `ereport(ERROR)` (e.g. too-old-snapshot / xmin), carried on `Err`.
+    pub fn get_latest_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `GetTransactionSnapshot()` (snapmgr.c): the transaction snapshot
+    /// (serializable: the registered xact snapshot; otherwise a fresh one).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
 );

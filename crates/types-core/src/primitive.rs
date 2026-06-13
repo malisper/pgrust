@@ -84,6 +84,45 @@ pub enum ForkNumber {
 
 pub use ForkNumber::*;
 
+impl ForkNumber {
+    /// The C `ForkNumber` int as stored in WAL record bodies; `None` for a
+    /// value outside the enum (impossible for well-formed WAL).
+    pub const fn from_i32(value: i32) -> Option<ForkNumber> {
+        match value {
+            -1 => Some(ForkNumber::InvalidForkNumber),
+            0 => Some(ForkNumber::MAIN_FORKNUM),
+            1 => Some(ForkNumber::FSM_FORKNUM),
+            2 => Some(ForkNumber::VISIBILITYMAP_FORKNUM),
+            3 => Some(ForkNumber::INIT_FORKNUM),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ForkNumber {
+    /// C's zero value (`MAIN_FORKNUM`), for zero-initialized decoded blocks.
+    fn default() -> Self {
+        ForkNumber::MAIN_FORKNUM
+    }
+}
+
+/// `Buffer` (`storage/buf.h`) — a buffer-pool slot index (a C `int`):
+/// positive = shared buffer, negative = local buffer, 0 = invalid.
+pub type Buffer = i32;
+
+/// `InvalidBuffer` (`storage/buf.h`).
+pub const InvalidBuffer: Buffer = 0;
+
+/// `BufferIsValid(buffer)` (`storage/bufmgr.h`) — `(buffer) != InvalidBuffer`
+/// (after the Assert on the valid range).
+#[inline]
+pub const fn BufferIsValid(buffer: Buffer) -> bool {
+    buffer != InvalidBuffer
+}
+
+/// `InvalidRelFileNumber` (`storage/relfilelocator.h`) — `InvalidOid`.
+pub const InvalidRelFileNumber: RelFileNumber = InvalidOid;
+
 /// `MAX_FORKNUM` (`common/relpath.h`) — `INIT_FORKNUM`.
 pub const MAX_FORKNUM: ForkNumber = ForkNumber::INIT_FORKNUM;
 

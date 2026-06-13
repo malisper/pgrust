@@ -293,13 +293,7 @@ impl MemoryContext {
     /// The `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)` this context produces when
     /// an allocation fails; message shape follows `mcxt.c`.
     pub fn oom(&self, request: usize) -> PgError {
-        PgError::error("out of memory")
-            .with_sqlstate(ERRCODE_OUT_OF_MEMORY)
-            .with_detail(alloc::format!(
-                "Failed on request of size {} in memory context \"{}\".",
-                request,
-                self.acct.name
-            ))
+        crate::oom_named(self.acct.name, request)
     }
 
     fn fire_reset_callbacks(&self) {
@@ -351,6 +345,20 @@ impl MemoryContext {
             node.subtree_used.set(node.subtree_used.get().saturating_sub(n));
         }
     }
+}
+
+/// `mcxt.c`'s out-of-memory `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)` for an
+/// allocation charged to a context identified by name. [`MemoryContext::oom`]
+/// and [`Mcx::oom`] delegate here; ports whose backend-local state stands in
+/// for a named C context (e.g. a `thread_local!` replacing
+/// `TopTransactionContext` storage) call it directly rather than duplicating
+/// the message shape.
+pub fn oom_named(context_name: &str, request: usize) -> PgError {
+    PgError::error("out of memory")
+        .with_sqlstate(ERRCODE_OUT_OF_MEMORY)
+        .with_detail(alloc::format!(
+            "Failed on request of size {request} in memory context \"{context_name}\"."
+        ))
 }
 
 impl Drop for MemoryContext {

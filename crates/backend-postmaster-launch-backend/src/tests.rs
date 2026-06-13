@@ -17,11 +17,11 @@ fn postmaster_child_name_matches_table() {
     assert_eq!(postmaster_child_name(BackendType::Invalid), "invalid");
     assert_eq!(postmaster_child_name(BackendType::Backend), "backend");
     assert_eq!(postmaster_child_name(BackendType::DeadEndBackend), "dead-end backend");
-    assert_eq!(postmaster_child_name(BackendType::AutoVacLauncher), "autovacuum launcher");
-    assert_eq!(postmaster_child_name(BackendType::AutoVacWorker), "autovacuum worker");
+    assert_eq!(postmaster_child_name(BackendType::AutovacLauncher), "autovacuum launcher");
+    assert_eq!(postmaster_child_name(BackendType::AutovacWorker), "autovacuum worker");
     assert_eq!(postmaster_child_name(BackendType::BgWorker), "bgworker");
     assert_eq!(postmaster_child_name(BackendType::WalSender), "wal sender");
-    assert_eq!(postmaster_child_name(BackendType::SlotSyncWorker), "slot sync worker");
+    assert_eq!(postmaster_child_name(BackendType::SlotsyncWorker), "slot sync worker");
     assert_eq!(postmaster_child_name(BackendType::StandaloneBackend), "standalone backend");
     assert_eq!(postmaster_child_name(BackendType::Archiver), "archiver");
     assert_eq!(postmaster_child_name(BackendType::BgWriter), "bgwriter");

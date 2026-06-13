@@ -7,11 +7,11 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
 use types_core::xact::FullTransactionId;
+use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::PgResult;
+use types_storage::SharedInvalidationMessage;
 use types_storage::lock::LOCKTAG;
-use types_storage::sinval::SharedInvalidationMessage;
 use types_storage::storage::{ProcSignalReason, RelFileLocator, VirtualTransactionId};
 
 seam_core::seam!(
@@ -162,5 +162,21 @@ seam_core::seam!(
         mcx: mcx::Mcx<'_>,
         msgs: &[SharedInvalidationMessage],
         relcache_init_file_inval: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RecordKnownAssignedTransactionIds(xid)` — hot-standby bookkeeping for
+    /// as-yet-unobserved XIDs in a completion record.
+    pub fn record_known_assigned_transaction_ids(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExpireTreeKnownAssignedTransactionIds(xid, nsubxids, subxids,
+    /// max_xid)`.
+    pub fn expire_tree_known_assigned_transaction_ids(
+        xid: TransactionId,
+        subxids: &[TransactionId],
+        max_xid: TransactionId,
     ) -> PgResult<()>
 );

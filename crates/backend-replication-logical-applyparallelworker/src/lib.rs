@@ -87,9 +87,9 @@ pub const SHM_SEND_RETRY_INTERVAL_MS: i64 = 1000;
 pub const SHM_SEND_TIMEOUT_MS: i32 = 10000 - SHM_SEND_RETRY_INTERVAL_MS as i32;
 
 /// Wake-event flags for `WaitLatch` (`storage/latch.h`).
-const WL_LATCH_SET: i32 = 1 << 0;
-const WL_TIMEOUT: i32 = 1 << 3;
-const WL_EXIT_ON_PM_DEATH: i32 = 1 << 5;
+const WL_LATCH_SET: u32 = 1 << 0;
+const WL_TIMEOUT: u32 = 1 << 3;
+const WL_EXIT_ON_PM_DEATH: u32 = 1 << 5;
 
 /// `NAMEDATALEN` — the savepoint-name buffer size (`char spname[NAMEDATALEN]`).
 const NAMEDATALEN: Size = 64;
@@ -326,7 +326,7 @@ fn XLogRecPtrIsInvalid(p: XLogRecPtr) -> bool {
 /// parallel apply worker.
 fn pa_can_start() -> PgResult<bool> {
     /* Only leader apply workers can start parallel apply workers. */
-    if !worker::am_leader_apply_worker::call() {
+    if !worker::am_leader_apply_worker::call()? {
         return Ok(false);
     }
 
@@ -851,7 +851,7 @@ fn LogicalParallelApplyLoop() -> PgResult<()> {
                             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
                             1000,
                             WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN,
-                        );
+                        )?;
 
                         if rc & WL_LATCH_SET != 0 {
                             backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
@@ -1103,7 +1103,7 @@ pub fn pa_send_data(winfo_index: WorkerHandle, data: &[u8]) -> PgResult<bool> {
             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
             SHM_SEND_RETRY_INTERVAL_MS,
             WAIT_EVENT_LOGICAL_APPLY_SEND_DATA,
-        );
+        )?;
 
         if rc & WL_LATCH_SET != 0 {
             backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
@@ -1177,11 +1177,11 @@ fn pa_wait_for_xact_state(
         }
 
         /* Wait to be signalled. */
-        let _ = backend_storage_ipc_latch_seams::wait_latch_my_latch::call(
+        backend_storage_ipc_latch_seams::wait_latch_my_latch::call(
             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
             10,
             WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE,
-        );
+        )?;
 
         /* Reset the latch so we don't spin. */
         backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
@@ -1461,7 +1461,7 @@ fn pa_set_fileset_state_handle(
      * destination `wshared` fields.
      */
     let stream_fileset = if fileset_state == PartialFileSetState::FS_SERIALIZE_DONE {
-        debug_assert!(worker::am_leader_apply_worker::call());
+        debug_assert!(worker::am_leader_apply_worker::call()?);
         Some(
             worker::my_worker_stream_fileset::call()
                 .expect("pa_set_fileset_state: MyLogicalRepWorker->stream_fileset is NULL"),
@@ -1579,7 +1579,7 @@ pub fn pa_decr_and_wait_stream_block() -> PgResult<()> {
 
 /// `void pa_xact_finish(ParallelApplyWorkerInfo *winfo, XLogRecPtr remote_lsn)`.
 pub fn pa_xact_finish(winfo_index: WorkerHandle, remote_lsn: XLogRecPtr) -> PgResult<()> {
-    debug_assert!(worker::am_leader_apply_worker::call());
+    debug_assert!(worker::am_leader_apply_worker::call()?);
 
     let shared = winfo_shared_or_panic(winfo_index);
     let xid = shared_xid(&shared);

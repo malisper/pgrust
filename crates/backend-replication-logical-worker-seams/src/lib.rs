@@ -22,7 +22,11 @@ use types_core::{Oid, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 
 // --- apply-worker / subscription identity + state -------------------------
-seam_core::seam!(pub fn am_leader_apply_worker() -> bool);
+// `am_leader_apply_worker()` (worker.c): leader apply worker?
+// (`MyLogicalRepWorker->type == WORKERTYPE_APPLY`). Modeled fallible to mirror
+// the failure surface of the inline accessors it uses (the owner's authoritative
+// contract on main).
+seam_core::seam!(pub fn am_leader_apply_worker() -> PgResult<bool>);
 seam_core::seam!(pub fn am_parallel_apply_worker() -> bool);
 seam_core::seam!(pub fn my_worker_parallel_apply() -> bool);
 seam_core::seam!(pub fn my_subscription_skiplsn() -> XLogRecPtr);
@@ -99,3 +103,41 @@ seam_core::seam!(pub fn my_worker_stream_fileset() -> core::option::Option<FileS
 //     Messages' transient context) ---------------------------------------
 seam_core::seam!(pub fn enter_hpam_context() -> PgResult<()>);
 seam_core::seam!(pub fn leave_hpam_context());
+
+// --- additional worker.c-owned externals (from current main's owner contract)
+seam_core::seam!(
+    /// `AtEOXact_LogicalRepWorkers(isCommit)`.
+    pub fn at_eoxact_logical_rep_workers(is_commit: bool)
+);
+
+seam_core::seam!(
+    /// `LogRepWorkerWalRcvConn != NULL` (worker.c global): does this worker
+    /// currently hold a walreceiver connection to the remote side?
+    pub fn have_walrcv_conn() -> bool
+);
+
+seam_core::seam!(
+    /// `walrcv_disconnect(LogRepWorkerWalRcvConn)` (walreceiver dispatch via the
+    /// worker's connection global): gracefully disconnect from the remote side.
+    /// Can `ereport(ERROR)` on a protocol/libpq failure, carried on `Err`.
+    pub fn walrcv_disconnect() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MyLogicalRepWorker->stream_fileset != NULL` (worker.c): is a streaming
+    /// transaction fileset currently allocated for this worker?
+    pub fn have_stream_fileset() -> bool
+);
+
+seam_core::seam!(
+    /// `FileSetDeleteAll(MyLogicalRepWorker->stream_fileset)`: delete the
+    /// streaming-transaction fileset and all its buffiles. Can `ereport` on a
+    /// filesystem error, carried on `Err`.
+    pub fn fileset_delete_all() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializingApplyWorker` (worker.c global): true while an apply worker
+    /// is still initializing; gates the session-level `LockReleaseAll` on exit.
+    pub fn initializing_apply_worker() -> bool
+);

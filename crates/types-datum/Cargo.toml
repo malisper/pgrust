@@ -9,4 +9,5 @@ name = "types_datum"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }

@@ -12,9 +12,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `TimestampDifference(start_time, stop_time, *secs, *microsecs)` —
-    /// the difference split into seconds and microseconds, clamped to zero
-    /// when `stop_time <= start_time`.
+    /// `void TimestampDifference(TimestampTz start, TimestampTz stop,
+    /// long *secs, int *microsecs)` (`timestamp.c`) — returns `(secs, usecs)`
+    /// of `stop - start`, clamped to 0 when negative.
     pub fn timestamp_difference(start_time: TimestampTz, stop_time: TimestampTz) -> (i64, i32)
 );
 
@@ -25,4 +25,34 @@ seam_core::seam!(
         stop_time: TimestampTz,
         msec: i32,
     ) -> bool
+);
+
+seam_core::seam!(
+    /// `timestamptz_to_str(t)` (timestamp.c): format a timestamp with ISO
+    /// date style and the session timezone. The C writes a static buffer and
+    /// never errors ("(timestamp out of range)" on conversion failure); the
+    /// owned copy lands in `mcx`, so OOM of the copy is the only `Err`.
+    pub fn timestamptz_to_str<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        t: TimestampTz,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `bool TimestampDifferenceExceedsSeconds(TimestampTz start,
+    /// TimestampTz stop, int threshold_sec)` (`timestamp.c`).
+    pub fn timestamp_difference_exceeds_seconds(
+        start_time: TimestampTz,
+        stop_time: TimestampTz,
+        threshold_sec: i32,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `TimestampDifferenceMilliseconds(start_time, stop_time)` — the
+    /// difference in milliseconds, clamped to the `[0, INT_MAX]` range.
+    pub fn timestamp_difference_milliseconds(
+        start_time: TimestampTz,
+        stop_time: TimestampTz
+    ) -> i64
 );

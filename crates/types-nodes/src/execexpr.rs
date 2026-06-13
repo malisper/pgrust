@@ -4,6 +4,15 @@ use mcx::PgBox;
 
 use crate::planstate::PlanStateNode;
 
+/// `ExprState` (execnodes.h) — the compiled, executable form of an expression
+/// tree (`ExecInitExpr` / `ExecInitQual` output). Trimmed: ports so far only
+/// store/hand an `ExprState *` to the expression interpreter, never inspect its
+/// compiled steps. The `expr` back-link is preserved so the owner can recompile
+/// or report; the step/resvalue/resnull machinery arrives with the execExpr
+/// interpreter when it lands.
+#[derive(Clone, Debug, Default)]
+pub struct ExprState;
+
 /// `ProjectionInfo` (execnodes.h) — node for caching needed info for
 /// projection. Trimmed: ports so far only set/test a `ProjectionInfo *` for
 /// NULL-ness (`ps_ProjInfo`); the expression machinery stays with its owning

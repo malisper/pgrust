@@ -1,6 +1,9 @@
 //! Seam declarations for the `backend-storage-ipc-procarray` unit
-//! (`storage/ipc/procarray.c`). The owning unit installs these from its
-//! `init_seams()` when it lands; until then a call panics loudly.
+//! (`storage/ipc/procarray.c`), incl. the subset consumed by logical decoding.
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+#![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
 use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
@@ -94,4 +97,106 @@ seam_core::seam!(
     /// proc->tempNamespaceId))`, or `None` when the slot is empty (backend
     /// not alive). Shared-memory read; cannot `ereport`.
     pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
+);
+
+seam_core::seam!(
+    /// `ProcArrayEndTransaction(MyProc, latestXid)` — advertise no transaction
+    /// in progress (the proc argument is always `MyProc` from xact.c).
+    pub fn proc_array_end_transaction(latest_xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayClearTransaction(MyProc)` — PREPARE's variant.
+    pub fn proc_array_clear_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XidCacheRemoveRunningXids(xid, nxids, xids, latestXid)` — drop aborted
+    /// subxids from PGPROC's subxid cache.
+    pub fn xid_cache_remove_running_xids(
+        xid: TransactionId,
+        children: &[TransactionId],
+        latest_xid: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayApplyXidAssignment(topxid, nsubxids, subxids)` — redo-side
+    /// subxid bookkeeping for hot standby.
+    pub fn proc_array_apply_xid_assignment(
+        xtop: TransactionId,
+        subxids: &[TransactionId],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayAdd(GetPGProcByNumber(pgprocno))` (procarray.c) — enter the
+    /// dummy prepared-xact proc into the global ProcArray so
+    /// `TransactionIdIsInProgress` sees its XID running. Takes
+    /// `ProcArrayLock`; the `ereport(FATAL)` past `maxProcs` is carried on
+    /// `Err`.
+    pub fn proc_array_add(pgprocno: ProcNumber) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayRemove(GetPGProcByNumber(pgprocno), latestXid)` (procarray.c)
+    /// — remove the dummy proc from the global ProcArray on COMMIT/ABORT
+    /// PREPARED, advancing the latest-completed xid to `latest_xid`. Takes
+    /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
+    pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
+);
+
+// --- Subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)`.
+    pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> TransactionId
+);
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE)`.
+    pub fn ProcArrayLock_acquire_exclusive()
+);
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn ProcArrayLock_release()
+);
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_IN_LOGICAL_DECODING;
+    /// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;`
+    /// performed while holding `ProcArrayLock`.
+    pub fn mark_proc_in_logical_decoding()
+);
+
+// --- Subset consumed by slot.c ---
+
+seam_core::seam!(
+    /// `void ProcArraySetReplicationSlotXmin(TransactionId xmin,
+    /// TransactionId catalog_xmin, bool already_locked)` (procarray.c) —
+    /// publish the aggregate slot xmin horizons into the ProcArray.
+    pub fn proc_array_set_replication_slot_xmin(
+        xmin: TransactionId,
+        catalog_xmin: TransactionId,
+        already_locked: bool,
+    )
+);
+
+seam_core::seam!(
+    /// Clear `PROC_IN_LOGICAL_DECODING` on `MyProc` and mirror it into
+    /// `ProcGlobal->statusFlags[MyProc->pgxactoff]`, under `ProcArrayLock`
+    /// exclusive (slot.c `ReplicationSlotRelease`). The acquire/release of
+    /// `ProcArrayLock` is part of this operation in the owner.
+    pub fn proc_array_clear_logical_decoding_flag()
+);
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);
+
+seam_core::seam!(
+    /// `IsBackendPid(pid)` (procarray.c) — is `pid` the PID of a live backend
+    /// (`BackendPidGetProc(pid) != NULL`)? Shared-memory scan; cannot
+    /// `ereport`.
+    pub fn is_backend_pid(pid: i32) -> bool
 );

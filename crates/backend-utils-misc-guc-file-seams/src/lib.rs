@@ -30,3 +30,32 @@ seam_core::seam!(
     /// Plain backend-local state write.
     pub fn guc_check_errdetail(detail: String)
 );
+
+seam_core::seam!(
+    /// `AtStart_GUC()` (guc.c) — sanity-reset GUC nesting at transaction
+    /// start.
+    pub fn at_start_guc()
+);
+
+seam_core::seam!(
+    /// Read the `log_transaction_sample_rate` GUC
+    /// (`double log_xact_sample_rate`, guc_tables.c).
+    pub fn log_xact_sample_rate() -> f64
+);
+
+seam_core::seam!(
+    /// `set_config_with_handle(name, get_config_handle(name), value, context,
+    /// PGC_S_SESSION, srole, GUC_ACTION_SAVE, true, 0, false)` as called by
+    /// `fmgr_security_definer` for each of a function's `proconfig` SET items.
+    /// The handle lookup (`get_config_handle`) is folded in (owner-side). C
+    /// varies only `context` (`PGC_SUSET` when the current user is superuser,
+    /// else `PGC_USERSET`) and `srole` (`GetUserId()`); source / action /
+    /// changeVal / elevel / is_reload are fixed for this caller. Apply paths
+    /// allocate and can `ereport(ERROR)`, carried on `Err`.
+    pub fn set_config_with_handle(
+        name: &str,
+        value: &str,
+        context: types_guc::GucContext,
+        srole: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);

@@ -170,6 +170,21 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct DsmSegmentId(u64);
 
+impl DsmSegmentId {
+    /// The raw identity word. Consumers that name a segment across a seam
+    /// (e.g. the parallel-query DSA boundary) carry this token.
+    #[inline]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct an id from a token previously obtained via [`Self::as_u64`].
+    #[inline]
+    pub fn from_u64(v: u64) -> Self {
+        DsmSegmentId(v)
+    }
+}
+
 /// RAII guard standing in for the C `seg->resowner` bookkeeping: dropping it
 /// detaches the segment (`ResOwnerReleaseDSM`). [`dsm_pin_mapping`] consumes
 /// the guard, making the mapping session-lifetime (the C `resowner = NULL`);
@@ -245,7 +260,11 @@ fn control() -> *mut dsm_control_header {
 /// `LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE)` — guard
 /// scope, so the lock can never leak across an error return.
 fn acquire_control_lock() -> PgResult<MainLWLockGuard> {
-    LWLockAcquireMain(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)
+    LWLockAcquireMain(
+        DYNAMIC_SHARED_MEMORY_CONTROL_LOCK,
+        LW_EXCLUSIVE,
+        backend_utils_init_small_seams::my_proc_number::call(),
+    )
 }
 
 /// `dsm_main_space_begin` viewed as the region's `FreePageManager *`, as in C.
@@ -507,10 +526,11 @@ fn dsm_cleanup_for_mmap() -> PgResult<()> {
                     .finish(loc("dsm_cleanup_for_mmap"))?;
             }
         }
-        Ok(())
-    })
+        Ok(false)
+    })?;
 
     // Cleanup complete.
+    Ok(())
 }
 
 /// `dsm_postmaster_shutdown(int code, Datum arg)` — at shutdown, iterate the
@@ -629,7 +649,7 @@ pub fn dsm_shmem_init() -> PgResult<()> {
         // Initialize it and give it all the rest of the space.
         free_page_manager_initialize::call(fpm, begin);
         let pages = (size / FPM_PAGE_SIZE) - first_page;
-        free_page_manager_put::call(fpm, first_page, pages);
+        free_page_manager_put::call(fpm, first_page, pages)?;
     }
     Ok(())
 }
@@ -762,7 +782,7 @@ pub fn dsm_create(size: Size, flags: i32, mcx: Mcx<'static>) -> PgResult<Option<
     let maxitems = unsafe { (*control).maxitems };
     if nitems >= maxitems {
         if using_main_dsm_region {
-            free_page_manager_put::call(dsm_main_space_fpm, first_page, npages);
+            free_page_manager_put::call(dsm_main_space_fpm, first_page, npages)?;
         }
         control_lock.release()?;
         if !using_main_dsm_region {
@@ -1071,7 +1091,7 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
                             main_space_fpm(),
                             (*item).first_page,
                             (*item).npages,
-                        );
+                        )?;
                     }
                     // Assert(item.handle == seg->handle && item.refcnt == 1).
                     (*item).refcnt = 0;
@@ -1229,7 +1249,7 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
                         main_space_fpm(),
                         (*item).first_page,
                         (*item).npages,
-                    );
+                    )?;
                 }
                 // Assert(item.handle == handle && item.refcnt == 1).
                 (*item).refcnt = 0;

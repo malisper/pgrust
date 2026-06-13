@@ -19,3 +19,46 @@ seam_core::seam!(
         tts_ops: types_nodes::TupleSlotKind,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecAssignExprContext(estate, planstate)` (execUtils.c): create the
+    /// node's per-node expression context (`CreateExprContext(estate)`) and
+    /// store its id in `planstate.ps_ExprContext`. Allocates in the EState's
+    /// per-query context, so fallible on OOM.
+    pub fn exec_assign_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateExprContext(estate)` (execUtils.c): create a fresh standalone
+    /// `ExprContext` in the EState's pool, returning its id. Allocates in the
+    /// per-query context (plus a child per-tuple context), so fallible on OOM.
+    pub fn create_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_nodes::EcxtId>
+);
+
+seam_core::seam!(
+    /// `ExecAssignProjectionInfo(planstate, inputDesc)` (execUtils.c): build
+    /// the node's `ps_ProjInfo` from its result slot and target list (using the
+    /// node's `ps_ResultTupleSlot`/`ps_ExprContext`). The owned model lends the
+    /// estate too, since the projection builder reaches the result slot through
+    /// it. Allocates the compiled projection, so fallible on OOM; building can
+    /// also `ereport(ERROR)` for unsupported expression shapes.
+    pub fn exec_assign_projection_info<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResetExprContext(node->js.ps.ps_ExprContext)` (executor.h): reset the
+    /// node's per-tuple memory context, freeing per-tuple expression storage.
+    pub fn reset_per_tuple_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

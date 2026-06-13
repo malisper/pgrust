@@ -1,6 +1,7 @@
 //! Seam declarations for the `backend-storage-lmgr-lock` unit
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
+extern crate alloc;
 
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
@@ -205,4 +206,48 @@ seam_core::seam!(
 seam_core::seam!(
     /// `VirtualXactLockTableCleanup()`.
     pub fn virtual_xact_lock_table_cleanup() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtPrepare_Locks()` — collect lock data for the 2PC state file;
+    /// errors out for cases 2PC cannot handle (e.g. session locks).
+    pub fn at_prepare_locks() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PostPrepare_Locks(xid)` — transfer the prepared transaction's locks
+    /// to a dummy PGPROC.
+    pub fn post_prepare_locks(
+        xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// locks this backend holds in the given lock method. Used by the logical
+    /// apply worker on exit to drop session-level locks; can `ereport` on a
+    /// corrupt lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the display name of a
+    /// lock mode, used by the deadlock report.
+    pub fn get_lockmode_name(
+        lockmethodid: types_storage::lock::LOCKMETHODID,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
 );

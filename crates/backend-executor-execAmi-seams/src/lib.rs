@@ -18,3 +18,24 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecMarkPos(node)` (execAmi.c): save the current scan position of the
+    /// plan-state subtree, dispatching by node type. The C dispatch
+    /// `elog(ERROR, "unrecognized node type")` for nodes that do not support
+    /// marking, hence `PgResult`.
+    pub fn exec_mark_pos<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecRestrPos(node)` (execAmi.c): restore the scan position previously
+    /// saved with `ExecMarkPos`, dispatching by node type. `elog(ERROR)` on an
+    /// unrecognized node type, hence `PgResult`.
+    pub fn exec_restr_pos<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
