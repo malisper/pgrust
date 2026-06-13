@@ -37,16 +37,29 @@ use types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
 // ---- creation / teardown ----------------------------------------------------
 
 seam_core::seam!(
+    /// `BumpContextCreate`/`AllocSetContextCreate("TID storage", ...)` +
     /// `local_ts_create(rt_context)` — create a backend-local radix tree in a
-    /// fresh "TID storage" memory context sized from `max_bytes` (only a hint
-    /// to cap the context block size); `insert_only` selects a bump context.
-    /// Returns the tree's runtime [`TidStore`] identity.
-    pub fn radixtree_create_local(max_bytes: usize, insert_only: bool) -> PgResult<TidStore>
+    /// fresh "TID storage" memory context with the given block sizing (the
+    /// `max_bytes`-derived policy is computed by the caller in `tidstore.c`);
+    /// `insert_only` selects the bump context. Returns the tree's runtime
+    /// [`TidStore`] identity.
+    pub fn radixtree_create_local(
+        min_context_size: usize,
+        init_block_size: usize,
+        max_block_size: usize,
+        insert_only: bool,
+    ) -> PgResult<TidStore>
 );
 seam_core::seam!(
-    /// `dsa_create_ext(...)` + `shared_ts_create(area, tranche_id)` — create a
-    /// DSA-shared radix tree whose segment sizes are bounded by `max_bytes`.
-    pub fn radixtree_create_shared(max_bytes: usize, tranche_id: i32) -> PgResult<TidStore>
+    /// `dsa_create_ext(tranche_id, dsa_init_size, dsa_max_size)` +
+    /// `shared_ts_create(area, tranche_id)` — create a DSA-shared radix tree.
+    /// The segment sizes are the `max_bytes`-derived policy the caller computes
+    /// in `tidstore.c`.
+    pub fn radixtree_create_shared(
+        dsa_init_size: usize,
+        dsa_max_size: usize,
+        tranche_id: i32,
+    ) -> PgResult<TidStore>
 );
 seam_core::seam!(
     /// `dsa_attach(area_handle)` + `shared_ts_attach(area, handle)` — attach to

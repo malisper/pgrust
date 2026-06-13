@@ -338,22 +338,61 @@ fn tuple_offset_out_of_range(off: OffsetNumber) -> PgError {
 // owner records each tree's flavor, so the lock / handle ops delegate
 // unconditionally and the owner no-ops the lock for a local tree.
 
+/// `ALLOCSET_DEFAULT_MINSIZE` (`utils/memutils.h`): `0`.
+const ALLOCSET_DEFAULT_MINSIZE: usize = 0;
+/// `ALLOCSET_DEFAULT_INITSIZE` (`utils/memutils.h`): `8 * 1024`.
+const ALLOCSET_DEFAULT_INITSIZE: usize = 8 * 1024;
+/// `ALLOCSET_DEFAULT_MAXSIZE` (`utils/memutils.h`): `8 * 1024 * 1024`.
+const ALLOCSET_DEFAULT_MAXSIZE: usize = 8 * 1024 * 1024;
+
 /// `TidStore *TidStoreCreateLocal(size_t max_bytes, bool insert_only)`.
 ///
 /// Creates a backend-local radix-tree-backed store. `max_bytes` is only a hint
-/// used to cap the storage memory context's block size; it is not enforced
-/// here. The radix tree / memory-context creation is the external substrate.
+/// used to cap the storage memory context's block size; it is not enforced.
+/// The block-size policy (this function's own logic) is computed here; the
+/// memory-context + radix-tree creation is the external substrate.
 pub fn TidStoreCreateLocal(max_bytes: usize, insert_only: bool) -> PgResult<TidStore> {
-    radixtree_create_local::call(max_bytes, insert_only)
+    let init_block_size = ALLOCSET_DEFAULT_INITSIZE;
+    let min_context_size = ALLOCSET_DEFAULT_MINSIZE;
+    let mut max_block_size = ALLOCSET_DEFAULT_MAXSIZE;
+
+    // Choose the maxBlockSize to be no larger than 1/16 of max_bytes.
+    while 16 * max_block_size > max_bytes {
+        max_block_size >>= 1;
+    }
+
+    if max_block_size < ALLOCSET_DEFAULT_INITSIZE {
+        max_block_size = ALLOCSET_DEFAULT_INITSIZE;
+    }
+
+    radixtree_create_local::call(min_context_size, init_block_size, max_block_size, insert_only)
 }
 
 /// `TidStore *TidStoreCreateShared(size_t max_bytes, int tranche_id)`.
 ///
-/// Like [`TidStoreCreateLocal`] but the radix tree lives on a DSA area sized
-/// from `max_bytes`. The returned object is backend-local; the DSA segment and
-/// shared tree are the external substrate.
+/// Like [`TidStoreCreateLocal`] but the radix tree lives on a DSA area whose
+/// segment sizing (this function's own logic) is derived from `max_bytes`. The
+/// returned object is backend-local; the DSA segment and shared tree are the
+/// external substrate.
 pub fn TidStoreCreateShared(max_bytes: usize, tranche_id: i32) -> PgResult<TidStore> {
-    radixtree_create_shared::call(max_bytes, tranche_id)
+    let mut dsa_init_size = types_dsa::DSA_DEFAULT_INIT_SEGMENT_SIZE;
+    let mut dsa_max_size = types_dsa::DSA_MAX_SEGMENT_SIZE;
+
+    // Choose the initial and maximum DSA segment sizes to be no longer than
+    // 1/8 of max_bytes.
+    while 8 * dsa_max_size > max_bytes {
+        dsa_max_size >>= 1;
+    }
+
+    if dsa_max_size < types_dsa::DSA_MIN_SEGMENT_SIZE {
+        dsa_max_size = types_dsa::DSA_MIN_SEGMENT_SIZE;
+    }
+
+    if dsa_init_size > dsa_max_size {
+        dsa_init_size = dsa_max_size;
+    }
+
+    radixtree_create_shared::call(dsa_init_size, dsa_max_size, tranche_id)
 }
 
 /// `TidStore *TidStoreAttach(dsa_handle area_handle, dsa_pointer handle)`.
