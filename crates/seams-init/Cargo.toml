@@ -37,6 +37,7 @@ backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
+backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
@@ -51,12 +52,14 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-storage-sync = { path = "../backend-storage-sync" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
+backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
