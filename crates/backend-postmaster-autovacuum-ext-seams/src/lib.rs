@@ -27,7 +27,8 @@ use seam_core::seam;
 
 use types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
 use types_error::PgResult;
-use types_vacuum::{BufferStrategyHandle, VacuumParams};
+use types_vacuum::vacuum::VacuumParams;
+use types_vacuum::vacuumparallel::BufferAccessStrategyHandle as BufferStrategyHandle;
 use types_autovacuum::{
     AvwDbase, DbStatEntry, OrphanClassRow, PgClassScanRow, RecheckClassRow, TabStatEntry,
 };

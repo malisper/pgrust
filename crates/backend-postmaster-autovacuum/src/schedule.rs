@@ -12,7 +12,7 @@ use types_error::{DEBUG3, WARNING};
 
 use types_core::{bits32, MultiXactId, Oid, TransactionId};
 use types_reloptions::AutoVacOpts;
-use types_vacuum::{
+use types_vacuum::vacuum::{
     VacOptValue, VacuumParams, VACOPT_ANALYZE, VACOPT_PROCESS_MAIN, VACOPT_SKIP_DATABASE_STATS,
     VACOPT_SKIP_LOCKED, VACOPT_VACUUM,
 };

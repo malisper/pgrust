@@ -19,6 +19,7 @@ types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }

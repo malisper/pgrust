@@ -23,3 +23,11 @@ seam_core::seam!(
     /// carries a pending `ProcessInterrupts` `ereport(ERROR)` (query cancel).
     pub fn vacuum_delay_point() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `memset(&params, 0, sizeof(VacuumParams)); vacuum_get_cutoffs(OldHeap,
+    /// &params, &cutoffs)` (vacuum.c): freeze/cutoff computation for CLUSTER.
+    pub fn vacuum_get_cutoffs(
+        old_heap: &types_rel::Relation<'_>,
+    ) -> PgResult<types_cluster::VacuumCutoffs>
+);

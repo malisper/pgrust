@@ -10,7 +10,7 @@ use types_error::{LOG, WARNING};
 
 use types_core::{InvalidOid, Oid};
 use types_reloptions::AutoVacOpts;
-use types_vacuum::VACOPT_VACUUM;
+use types_vacuum::vacuum::VACOPT_VACUUM;
 
 use crate::core::{
     self, AutovacTable, AvRelation, OidIsValid, AutoVacRebalance, RELKIND_MATVIEW,

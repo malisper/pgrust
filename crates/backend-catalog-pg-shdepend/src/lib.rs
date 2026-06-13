@@ -28,7 +28,7 @@
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_tuple::heaptuple::ItemPointerData;
-use types_cache::{BTEqualStrategyNumber, ScanKeyInit};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, COLLATION_RELATION_ID, CONVERSION_RELATION_ID,
     DATABASE_RELATION_ID, DEFAULTTABLESPACE_OID, DEFAULT_ACL_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
@@ -57,9 +57,11 @@ use types_error::{
 };
 use types_nodes::parsenodes::DropBehavior;
 use types_rel::{Relation, RelationData};
-use types_scan::backend_access_index_genam::SysScanRow;
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
+use types_tuple::backend_access_common_heaptuple::TupleValue;
 
+use backend_access_common_heaptuple::heap_deform_tuple;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table as table;
 use backend_access_transam_xact_seams as xact_seams;
@@ -133,28 +135,135 @@ fn open_shdepend(mcx: Mcx<'_>, lockmode: LOCKMODE) -> PgResult<Relation<'_>> {
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_OIDEQ,
 /// ObjectIdGetDatum(value))`.
-fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyInit {
-    ScanKeyInit {
-        sk_attno: attno,
-        sk_strategy: BTEqualStrategyNumber,
-        sk_procedure: F_OIDEQ,
-        sk_argument: Datum::from_oid(value),
-        sk_subtype: InvalidOid,
-        sk_collation: InvalidOid,
-    }
+fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(value),
+    )?;
+    Ok(key)
 }
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_INT4EQ,
 /// Int32GetDatum(value))`.
-fn int4_key(attno: AttrNumber, value: i32) -> ScanKeyInit {
-    ScanKeyInit {
-        sk_attno: attno,
-        sk_strategy: BTEqualStrategyNumber,
-        sk_procedure: F_INT4EQ,
-        sk_argument: Datum::from_i32(value),
-        sk_subtype: InvalidOid,
-        sk_collation: InvalidOid,
+fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_INT4EQ,
+        Datum::from_i32(value),
+    )?;
+    Ok(key)
+}
+
+/// One scanned pg_shdepend row: the heap TID (`tup->t_self`, for
+/// delete/update legs) plus the `heap_deform_tuple` projection of the whole
+/// row.
+struct SysScanRow<'a> {
+    tid: ItemPointerData,
+    values: &'a [Datum],
+    isnull: &'a [bool],
+}
+
+/// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` + the
+/// `while ((tup = systable_getnext(scan)))` loop + `systable_endscan(scan)`
+/// (the genam iterator): invoke `body` once per matching row, in scan order.
+/// `body` returning `Ok(true)` continues, `Ok(false)` stops early (the C
+/// `break`); an `Err` propagates after the scan is ended (the [`SysScanGuard`]
+/// `Drop` covers the error path). The deformed columns / null flags land in
+/// a scratch context dropped at the end of each iteration.
+fn systable_scan_foreach(
+    rel: &RelationData<'_>,
+    index_id: Oid,
+    keys: &[ScanKeyData],
+    mut body: impl FnMut(&SysScanRow<'_>) -> PgResult<bool>,
+) -> PgResult<()> {
+    let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
+    loop {
+        let scratch = MemoryContext::new("systable_scan_foreach row");
+        let smcx = scratch.mcx();
+        let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+            break;
+        };
+        // GETSTRUCT(tup): the whole row, deformed (every pg_shdepend column is
+        // fixed-width and NOT NULL, so by-value).
+        let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
+        let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
+        for (value, null) in cols.iter() {
+            values.push(match value {
+                TupleValue::ByVal(d) => *d,
+                TupleValue::ByRef(_) => {
+                    return Err(PgError::error("pg_shdepend column is not by-value"))
+                }
+            });
+            isnull.push(*null);
+        }
+        let row = SysScanRow {
+            tid: tup.tuple.t_self,
+            values: &values,
+            isnull: &isnull,
+        };
+        let keep_going = body(&row)?;
+        if !keep_going {
+            break;
+        }
+        // The deformed-row scratch context drops at the end of each
+        // iteration (declared before the borrows of it, so it outlives them).
     }
+    scan.end()
+}
+
+/// As [`systable_scan_foreach`], but `body` additionally receives a `recheck`
+/// closure standing in for `systable_recheck_tuple(scan, tup)` (genam.c) on
+/// the current row: after acquiring a lock on a candidate object, the caller
+/// rechecks that the row it is processing is still live, returning `Ok(false)`
+/// (the C `false`) if it should be skipped. `Err` from `body`, `recheck`, or
+/// the scan machinery propagates after the scan is ended.
+fn systable_scan_foreach_recheckable(
+    rel: &RelationData<'_>,
+    index_id: Oid,
+    keys: &[ScanKeyData],
+    mut body: impl FnMut(&SysScanRow<'_>, &mut dyn FnMut() -> PgResult<bool>) -> PgResult<bool>,
+) -> PgResult<()> {
+    let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
+    loop {
+        let scratch = MemoryContext::new("systable_scan_foreach_recheckable row");
+        let smcx = scratch.mcx();
+        let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+            break;
+        };
+        let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
+        let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
+        for (value, null) in cols.iter() {
+            values.push(match value {
+                TupleValue::ByVal(d) => *d,
+                TupleValue::ByRef(_) => {
+                    return Err(PgError::error("pg_shdepend column is not by-value"))
+                }
+            });
+            isnull.push(*null);
+        }
+        let row = SysScanRow {
+            tid: tup.tuple.t_self,
+            values: &values,
+            isnull: &isnull,
+        };
+        // `systable_recheck_tuple(scan, tuple)`: rechecks the scan's current
+        // (most-recently-fetched) row under a fresh catalog snapshot.
+        let mut recheck = || genam_seams::systable_recheck_tuple::call(scan.desc_mut());
+        let keep_going = body(&row, &mut recheck)?;
+        if !keep_going {
+            break;
+        }
+    }
+    scan.end()
 }
 
 /// `(Form_pg_shdepend) GETSTRUCT(tup)` — interpret one deformed pg_shdepend
@@ -283,20 +392,20 @@ fn shdepChangeDep(
 
     /* Look for a previous entry */
     let key = [
-        oid_key(Anum_pg_shdepend_dbid, dbid),
-        oid_key(Anum_pg_shdepend_classid, classid),
-        oid_key(Anum_pg_shdepend_objid, objid),
-        int4_key(Anum_pg_shdepend_objsubid, objsubid),
+        oid_key(Anum_pg_shdepend_dbid, dbid)?,
+        oid_key(Anum_pg_shdepend_classid, classid)?,
+        oid_key(Anum_pg_shdepend_objid, objid)?,
+        int4_key(Anum_pg_shdepend_objsubid, objsubid)?,
     ];
 
     let mut oldtup: Option<(ItemPointerData, FormData_pg_shdepend)> = None;
     let mut dup_err: Option<PgError> = None;
 
-    genam_seams::systable_scan_foreach::call(
+    systable_scan_foreach(
         sdepRel,
         SharedDependDependerIndexId,
         &key,
-        &mut |row| {
+        |row| {
             let form = form_pg_shdepend(row);
             /* Ignore if not of the target dependency type */
             if form.deptype != deptype.as_char() {
@@ -748,17 +857,17 @@ pub fn checkSharedDependencies<'mcx>(
     let sdepRel = open_shdepend(ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_shdepend_refclassid, classId),
-        oid_key(Anum_pg_shdepend_refobjid, objectId),
+        oid_key(Anum_pg_shdepend_refclassid, classId)?,
+        oid_key(Anum_pg_shdepend_refobjid, objectId)?,
     ];
 
     let my_database_id = miscadmin_seams::my_database_id::call();
 
-    genam_seams::systable_scan_foreach::call(
+    systable_scan_foreach(
         &sdepRel,
         SharedDependReferenceIndexId,
         &key,
-        &mut |row| {
+        |row| {
             let sdepForm = form_pg_shdepend(row);
 
             object.classId = sdepForm.classid;
@@ -914,7 +1023,7 @@ pub fn copyTemplateDependencies(templateDbId: Oid, newDbId: Oid) -> PgResult<()>
     let max_slots = MAX_CATALOG_MULTI_INSERT_BYTES / core::mem::size_of::<FormData_pg_shdepend>();
 
     /* Scan all entries with dbid = templateDbId */
-    let key = [oid_key(Anum_pg_shdepend_dbid, templateDbId)];
+    let key = [oid_key(Anum_pg_shdepend_dbid, templateDbId)?];
 
     /*
      * Copy the entries of the original database, changing the database Id to
@@ -923,11 +1032,11 @@ pub fn copyTemplateDependencies(templateDbId: Oid, newDbId: Oid) -> PgResult<()>
      */
     let mut batch: PgVec<'_, FormData_pg_shdepend> = vec_with_capacity_in(ctx.mcx(), max_slots)?;
 
-    genam_seams::systable_scan_foreach::call(
+    systable_scan_foreach(
         &sdepRel,
         SharedDependDependerIndexId,
         &key,
-        &mut |row| {
+        |row| {
             let shdep = form_pg_shdepend(row);
 
             batch.push(FormData_pg_shdepend {
@@ -972,14 +1081,14 @@ pub fn dropDatabaseDependencies(databaseId: Oid) -> PgResult<()> {
      * First, delete all the entries that have the database Oid in the dbid
      * field.
      */
-    let key = [oid_key(Anum_pg_shdepend_dbid, databaseId)];
+    let key = [oid_key(Anum_pg_shdepend_dbid, databaseId)?];
     /* We leave the other index fields unspecified */
 
-    genam_seams::systable_scan_foreach::call(
+    systable_scan_foreach(
         &sdepRel,
         SharedDependDependerIndexId,
         &key,
-        &mut |row| {
+        |row| {
             indexing_seams::catalog_tuple_delete::call(&sdepRel, row.tid)?;
             Ok(true)
         },
@@ -1083,10 +1192,10 @@ fn shdepDropDependency(
 ) -> PgResult<()> {
     /* Scan for entries matching the dependent object */
     let key = [
-        oid_key(Anum_pg_shdepend_dbid, classIdGetDbId(classId)),
-        oid_key(Anum_pg_shdepend_classid, classId),
-        oid_key(Anum_pg_shdepend_objid, objectId),
-        int4_key(Anum_pg_shdepend_objsubid, objsubId),
+        oid_key(Anum_pg_shdepend_dbid, classIdGetDbId(classId))?,
+        oid_key(Anum_pg_shdepend_classid, classId)?,
+        oid_key(Anum_pg_shdepend_objid, objectId)?,
+        int4_key(Anum_pg_shdepend_objsubid, objsubId)?,
     ];
     let nkeys = if drop_subobjects { 3 } else { 4 };
 
@@ -1094,11 +1203,11 @@ fn shdepDropDependency(
      * When drop_subobjects, the C leaves key[3] unset and passes nkeys=3; we
      * slice off key[3] here so it is never read, matching the C.
      */
-    genam_seams::systable_scan_foreach::call(
+    systable_scan_foreach(
         sdepRel,
         SharedDependDependerIndexId,
         &key[..nkeys],
-        &mut |row| {
+        |row| {
             let shdepForm = form_pg_shdepend(row);
 
             /* Filter entries according to additional parameters */
@@ -1298,15 +1407,15 @@ pub fn shdepDropOwned(roleids: &[Oid], behavior: DropBehavior) -> PgResult<()> {
         }
 
         let key = [
-            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID),
-            oid_key(Anum_pg_shdepend_refobjid, roleid),
+            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID)?,
+            oid_key(Anum_pg_shdepend_refobjid, roleid)?,
         ];
 
-        genam_seams::systable_scan_foreach_recheckable::call(
+        systable_scan_foreach_recheckable(
             &sdepRel,
             SharedDependReferenceIndexId,
             &key,
-            &mut |row, recheck| {
+            |row, recheck| {
                 let sdepForm = form_pg_shdepend(row);
 
                 /*
@@ -1486,15 +1595,15 @@ pub fn shdepReassignOwned(roleids: &[Oid], newrole: Oid) -> PgResult<()> {
         }
 
         let key = [
-            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID),
-            oid_key(Anum_pg_shdepend_refobjid, roleid),
+            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID)?,
+            oid_key(Anum_pg_shdepend_refobjid, roleid)?,
         ];
 
-        genam_seams::systable_scan_foreach::call(
+        systable_scan_foreach(
             &sdepRel,
             SharedDependReferenceIndexId,
             &key,
-            &mut |row| {
+            |row| {
                 let sdepForm = form_pg_shdepend(row);
 
                 /*

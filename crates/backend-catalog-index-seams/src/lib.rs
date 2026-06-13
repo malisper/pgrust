@@ -2,6 +2,64 @@
 //! (`catalog/index.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+/// Arguments to [`index_create`], mirroring the C `index_create(...)`
+/// parameter list (catalog/index.c) trimmed to the fields the current callers
+/// supply. The C `IndexInfo *indexInfo` crosses by value; the index column
+/// names cross as an owned `Vec<String>` (the C `const List *indexColNames`);
+/// the C `const Oid *collationIds` / `const Oid *opclassIds` /
+/// `const int16 *coloptions` arrays cross as owned `Vec`s. `opclassOptions`,
+/// `stattargets`, and the `Oid *constraintId` out-parameter are NULL/ignored
+/// at the current call sites and are not carried.
+#[derive(Clone, Debug)]
+pub struct IndexCreateArgs {
+    /// `const char *indexRelationName`.
+    pub index_relation_name: std::string::String,
+    /// `Oid indexRelationId`.
+    pub index_relation_id: types_core::primitive::Oid,
+    /// `Oid parentIndexRelid`.
+    pub parent_index_relid: types_core::primitive::Oid,
+    /// `Oid parentConstraintId`.
+    pub parent_constraint_id: types_core::primitive::Oid,
+    /// `RelFileNumber relFileNumber`.
+    pub rel_file_number: types_core::primitive::Oid,
+    /// `IndexInfo *indexInfo`.
+    pub index_info: types_nodes::execnodes::IndexInfo,
+    /// `const List *indexColNames`.
+    pub index_col_names: std::vec::Vec<std::string::String>,
+    /// `Oid accessMethodId`.
+    pub access_method_id: types_core::primitive::Oid,
+    /// `Oid tableSpaceId`.
+    pub table_space_id: types_core::primitive::Oid,
+    /// `const Oid *collationIds`.
+    pub collation_ids: std::vec::Vec<types_core::primitive::Oid>,
+    /// `const Oid *opclassIds`.
+    pub opclass_ids: std::vec::Vec<types_core::primitive::Oid>,
+    /// `const int16 *coloptions`.
+    pub coloptions: std::vec::Vec<i16>,
+    /// `Datum reloptions`.
+    pub reloptions: types_datum::Datum,
+    /// `bits16 flags`.
+    pub flags: u16,
+    /// `bits16 constr_flags`.
+    pub constr_flags: u16,
+    /// `bool allow_system_table_mods`.
+    pub allow_system_table_mods: bool,
+    /// `bool is_internal`.
+    pub is_internal: bool,
+}
+
+seam_core::seam!(
+    /// `index_create(heapRelation, ...)` (catalog/index.c): create the
+    /// catalog entries for a new index and build it. Returns the new index
+    /// relation's OID. `Err` carries the catalog-mutation / validation
+    /// `ereport(ERROR)`s and OOM. The open `heapRelation` crosses by
+    /// reference; the caller retains ownership and closes it afterward.
+    pub fn index_create(
+        heap_relation: &types_rel::Relation<'_>,
+        args: IndexCreateArgs,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
 seam_core::seam!(
     /// `ResetReindexState(nestLevel)` — forget any active REINDEX at abort.
     pub fn reset_reindex_state(nest_level: i32)
@@ -50,4 +108,19 @@ seam_core::seam!(
         index: &types_rel::Relation<'_>,
         index_info: &types_nodes::execnodes::IndexInfo,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `reindex_relation(NULL, relid, flags, &params)` (index.c) — rebuilds
+    /// every index on the heap; ends with CommandCounterIncrement.
+    pub fn reindex_relation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+        flags: i32,
+        params: types_cluster::ReindexParams,
+    ) -> types_error::PgResult<()>
+);
+seam_core::seam!(
+    /// `IndexGetRelation(indexId, missing_ok)` (index.c).
+    pub fn index_get_relation(index_id: types_core::Oid, missing_ok: bool) -> types_error::PgResult<types_core::Oid>
 );
