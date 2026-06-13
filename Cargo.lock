@@ -4223,7 +4223,12 @@ dependencies = [
 name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xact-seams",
  "backend-nodes-core-seams",
+ "backend-nodes-params-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "common-hashfn",
  "mcx",
  "seam-core",

@@ -43,6 +43,7 @@ pub mod nodeseqscan;
 pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
+pub mod params;
 pub mod parsenodes;
 pub mod parsestmt;
 pub mod partition;
