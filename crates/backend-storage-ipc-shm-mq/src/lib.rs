@@ -39,7 +39,7 @@ use backend_storage_lmgr_proc_seams::proc_latch;
 use backend_storage_lmgr_s_lock::{s_lock_macro, s_unlock, Spinlock};
 use backend_tcop_postgres_seams::check_for_interrupts;
 use backend_utils_error::ereport;
-use mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
+use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
 use types_bgworker::{BackgroundWorkerHandle, BgwHandleStatus};
 use types_core::{ProcNumber, Size, INVALID_PROC_NUMBER};
 use types_datum::Datum;
@@ -480,26 +480,34 @@ pub fn shm_mq_attach<'mcx>(
     seg: Option<(DsmSegmentId, Mcx<'static>)>,
     handle: Option<BackgroundWorkerHandle>,
     my_latch: LatchHandle,
-) -> PgResult<ShmMqHandle<'mcx>> {
+) -> PgResult<PgBox<'mcx, ShmMqHandle<'mcx>>> {
     debug_assert!({
         let me = my_proc_number();
         mq.receiver().get() == Some(me) || mq.sender().get() == Some(me)
     });
 
-    let mqh = ShmMqHandle {
-        mqh_queue: mq,
-        mqh_segment: seg.map(|(s, _)| s),
-        mqh_handle: handle,
-        mqh_buffer: None,
-        mqh_consume_pending: 0,
-        mqh_send_pending: 0,
-        mqh_partial_bytes: 0,
-        mqh_expected_bytes: 0,
-        mqh_length_word_complete: false,
-        mqh_counterparty_attached: false,
-        mqh_context: mcx,
-        my_latch,
-    };
+    // C `palloc`s the `shm_mq_handle`; the owned box is the equivalent here.
+    // The DSM auto-detach callback (registered below) only ever *flags* the
+    // queue detached through `mq`'s base address — it must not touch this
+    // backend-local box. The box's `Drop` owns the actual free
+    // (`shm_mq_detach` consumes it; see the struct comment / OPTION (i)).
+    let mqh = mcx::alloc_in(
+        mcx,
+        ShmMqHandle {
+            mqh_queue: mq,
+            mqh_segment: seg.map(|(s, _)| s),
+            mqh_handle: handle,
+            mqh_buffer: None,
+            mqh_consume_pending: 0,
+            mqh_send_pending: 0,
+            mqh_partial_bytes: 0,
+            mqh_expected_bytes: 0,
+            mqh_length_word_complete: false,
+            mqh_counterparty_attached: false,
+            mqh_context: mcx,
+            my_latch,
+        },
+    )?;
 
     if let Some((seg_id, top_mcx)) = seg {
         on_dsm_detach(
@@ -999,13 +1007,10 @@ pub unsafe fn shm_mq_wait_for_attach(mqh: &mut ShmMqHandle<'_>) -> PgResult<shm_
 }
 
 /// Detach from a shared message queue, destroying the handle
-/// (`shm_mq_detach`). The C pfrees of `mqh_buffer` and the handle are the
-/// drop of the consumed value.
-///
-/// # Safety
-///
-/// `mqh` must wrap a live, initialized, attached `shm_mq`.
-pub unsafe fn shm_mq_detach(mut mqh: ShmMqHandle<'_>) {
+/// (`shm_mq_detach`). Consumes the owned handle box: the C pfrees of
+/// `mqh_buffer` and the handle itself are the box's drop at end of scope
+/// (OPTION (i): Rust's `Drop` owns the free; the DSM callback only flags).
+pub fn shm_mq_detach(mut mqh: PgBox<'_, ShmMqHandle<'_>>) {
     // Before detaching, notify the receiver about any already-written data.
     if mqh.mqh_send_pending > 0 {
         shm_mq_inc_bytes_written(mqh.mqh_queue, mqh.mqh_send_pending);
