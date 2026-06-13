@@ -2174,6 +2174,30 @@ fn oid_input_function_call_seam(
     oid_input_function_call_typed(ctx.mcx(), function_id, Some(str_), typioparam, typmod)
 }
 
+/// `InputFunctionCall(&flinfo, str, typioparam, typmod)` seam over a
+/// caller-cached `FmgrInfo` (`BuildTupleFromCStrings`), returning the result
+/// classified as a [`TupleValue`] for `heap_form_tuple`. The owned `FmgrInfo`
+/// carries only `fn_oid`, so this is the `Option<&str>` (NULL-allowing) form of
+/// the one-shot lookup + call. By-value results travel as `ByVal`; by-reference
+/// results have their registry payload materialized into `mcx`-owned bytes.
+fn input_function_call_for_heap_form_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    str_: Option<&str>,
+    typioparam: Oid,
+    typmod: i32,
+    attbyval: bool,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::TupleValue;
+    let datum = oid_input_function_call_typed(mcx, fn_oid, str_, typioparam, typmod)?;
+    if attbyval {
+        return Ok(TupleValue::ByVal(datum));
+    }
+    // By-reference: materialize the registry payload's verbatim bytes.
+    let bytes: Vec<u8> = datum_ref_registry::fetch(datum)?.flatten();
+    Ok(TupleValue::ByRef(mcx::slice_in(mcx, &bytes)?))
+}
+
 /// `OidOutputFunctionCall(functionId, val)` seam over a bare `Datum` (bootstrap's
 /// `InsertOneValue` DEBUG4 trace): one-shot lookup + call of a type's text output
 /// function on the `Datum` just built. A by-reference `Datum` is a
@@ -2225,6 +2249,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::output_function_call::set(output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::send_function_call::set(send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_input_function_call::set(oid_input_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::input_function_call_for_heap_form::set(
+        input_function_call_for_heap_form_seam,
+    );
     backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::set(
         oid_output_function_call_datum_seam,
     );

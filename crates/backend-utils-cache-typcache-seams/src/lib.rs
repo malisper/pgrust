@@ -63,6 +63,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `assign_record_type_typmod(tupDesc)` (typcache.c): for an anonymous
+    /// RECORD `TupleDesc`, find or create the matching entry in the record-type
+    /// cache and stamp its assigned `tdtypmod` (and `tdtypeid = RECORDOID`) back
+    /// into the descriptor in place, so it can be used to build composite
+    /// rowtype Datums (`BlessTupleDesc`). `Err` carries the cache-insert /
+    /// allocation surface.
+    pub fn assign_record_type_typmod(
+        tup_desc: &mut types_tuple::heaptuple::TupleDescData<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe

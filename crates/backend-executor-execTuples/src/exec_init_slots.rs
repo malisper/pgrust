@@ -27,6 +27,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
 use types_nodes::executor::{TTS_FLAG_EMPTY, TTS_FLAG_FIXED};
+use types_nodes::tuptable::SlotData;
 use types_nodes::{SlotId, TupleSlotKind, TupleTableSlot};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
@@ -65,6 +66,34 @@ fn exec_alloc_table_slot(
     let slot = make_tuple_table_slot_header(has_descriptor, tts_ops);
     // *tupleTable = lappend(*tupleTable, slot);
     estate.make_slot(slot)
+}
+
+// ===========================================================================
+//  Standalone-slot creation/teardown over the owned [`SlotData`] payload model.
+//  These mirror `MakeSingleTupleTableSlot` / `ExecDropSingleTupleTableSlot`
+//  (execTuples.c) for in-crate callers (e.g. the `begin/do/end_tup_output`
+//  family) that hold the live `SlotData` directly rather than a pool id.
+// ===========================================================================
+
+/// `MakeSingleTupleTableSlot(tupdesc, tts_ops)` (execTuples.c): create a
+/// standalone slot of the given class, fixed to `tupdesc`, allocated in `mcx`.
+pub fn MakeSingleTupleTableSlot<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: TupleDesc<'mcx>,
+    tts_ops: TupleSlotKind,
+) -> PgResult<SlotData<'mcx>> {
+    // TupleTableSlot *slot = MakeTupleTableSlotWithOps(tupdesc, tts_ops); return slot;
+    crate::slot_payload_model::MakeTupleTableSlot(mcx, tupdesc, tts_ops)
+}
+
+/// `ExecDropSingleTupleTableSlot(slot)` (execTuples.c): release a slot made
+/// with [`MakeSingleTupleTableSlot`] (clears it first, releasing any pin).
+pub fn ExecDropSingleTupleTableSlot(slot: SlotData<'_>) -> PgResult<()> {
+    // ExecClearTuple(slot); ... pfree(slot);
+    // The owned SlotData carries the value arrays and (optional) stored tuple;
+    // clearing + freeing reduces to dropping the owned value here.
+    drop(slot);
+    Ok(())
 }
 
 // ===========================================================================
