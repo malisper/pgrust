@@ -155,9 +155,26 @@ fn crc32c_final_rejects_undersized_buffer() {
 // pointer lifetime, and length logic without real crypto.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Once;
+use std::sync::{Mutex, MutexGuard, Once};
 
 static MOCK_FREED: AtomicUsize = AtomicUsize::new(0);
+
+// The cryptohash mock is installed on a process-global seam, and `MOCK_FREED`
+// is a process-global static. Every test that installs/observes that mock must
+// run serially with respect to one another: otherwise one test's
+// `pg_cryptohash_free` (incrementing `MOCK_FREED`) races another test's
+// `store(0)`/`load()` of the same counter, producing spurious failures only
+// under `cargo test`'s default parallel execution. Each such test acquires
+// this lock for its full body (install -> use -> observe -> teardown).
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Serialize a test that touches the global cryptohash mock seam / `MOCK_FREED`.
+/// The returned guard must be held for the whole test body. A poisoned lock
+/// (another such test panicked) is recovered rather than re-panicking, so one
+/// genuine failure does not cascade into spurious failures of the siblings.
+fn lock_global_mock() -> MutexGuard<'static, ()> {
+    TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 struct MockCtx {
     bytes: usize,
@@ -217,6 +234,7 @@ fn install_mock() {
 
 #[test]
 fn sha2_dispatch_lengths_and_pointer_lifetime() {
+    let _guard = lock_global_mock();
     install_mock();
 
     for (ty, expected_len) in [
@@ -242,6 +260,7 @@ fn sha2_dispatch_lengths_and_pointer_lifetime() {
 
 #[test]
 fn sha2_final_rejects_undersized_buffer() {
+    let _guard = lock_global_mock();
     install_mock();
     let mut ctx = pg_checksum_init(CHECKSUM_TYPE_SHA256).unwrap();
     pg_checksum_update(&mut ctx, b"x").unwrap();
