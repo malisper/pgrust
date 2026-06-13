@@ -423,7 +423,7 @@ fn phase_gset_length(aggstate: &AggStateData<'_>, idx: usize) -> i32 {
 fn phase_eqfunction<'a, 'mcx>(
     aggstate: &'a AggStateData<'mcx>,
     idx: usize,
-) -> &'a ExprState {
+) -> &'a ExprState<'mcx> {
     let phases = aggstate
         .phases
         .as_ref()

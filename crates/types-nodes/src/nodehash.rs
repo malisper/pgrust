@@ -499,7 +499,7 @@ pub struct HashState<'mcx> {
     /// `HashJoinTable hashtable` — hash table for the hashjoin (`None` = NULL).
     pub hashtable: Option<PgBox<'mcx, HashJoinTableData<'mcx>>>,
     /// `ExprState *hash_expr` — ExprState to get hash value.
-    pub hash_expr: Option<PgBox<'mcx, ExprState>>,
+    pub hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `FmgrInfo *skew_hashfunction` — lookup data for skew hash function.
     pub skew_hashfunction: Option<PgBox<'mcx, FmgrInfo>>,
     /// `Oid skew_collation` — collation to call skew_hashfunction with.
@@ -522,9 +522,9 @@ pub struct HashJoinState<'mcx> {
     /// `JoinState js` — its first field is `NodeTag`.
     pub js: JoinStateData<'mcx>,
     /// `ExprState *hashclauses`.
-    pub hashclauses: Option<PgBox<'mcx, ExprState>>,
+    pub hashclauses: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *hj_OuterHash`.
-    pub hj_OuterHash: Option<PgBox<'mcx, ExprState>>,
+    pub hj_OuterHash: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `HashJoinTable hj_HashTable`.
     pub hj_HashTable: Option<PgBox<'mcx, HashJoinTableData<'mcx>>>,
     /// `uint32 hj_CurHashValue`.

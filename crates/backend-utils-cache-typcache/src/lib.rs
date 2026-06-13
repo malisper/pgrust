@@ -1118,7 +1118,7 @@ fn fmgr_finfo_if_needed(
 /// store.
 fn fmgr_info_cxt(func_oid: Oid) -> PgResult<FmgrInfo> {
     fmgr_seams::fmgr_info_check::call(func_oid)?;
-    Ok(FmgrInfo { fn_oid: func_oid })
+    Ok(FmgrInfo { fn_oid: func_oid, ..Default::default() })
 }
 
 /* ==========================================================================
@@ -2589,4 +2589,6 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     backend_utils_cache_typcache_seams::at_eoxact_type_cache::set(at_eoxact_type_cache);
     backend_utils_cache_typcache_seams::at_eosubxact_type_cache::set(at_eosubxact_type_cache);
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
 }

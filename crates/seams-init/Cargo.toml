@@ -49,6 +49,8 @@ backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
+backend-executor-execExpr = { path = "../backend-executor-execExpr" }
+backend-executor-execExprInterp = { path = "../backend-executor-execExprInterp" }
 backend-executor-execParallel = { path = "../backend-executor-execParallel" }
 backend-executor-execPartition = { path = "../backend-executor-execPartition" }
 backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }
@@ -130,16 +132,19 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
+backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-catcache = { path = "../backend-utils-cache-catcache" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-relmapper = { path = "../backend-utils-cache-relmapper" }
@@ -163,6 +168,7 @@ backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
 backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
+backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
 backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }

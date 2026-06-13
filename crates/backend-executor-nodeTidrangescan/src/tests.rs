@@ -98,7 +98,7 @@ fn install() {
     exec_init_qual::set(|_, _| Ok(()));
     // Each compiled bound resolves to a freshly-allocated ExprState. In the
     // real flow ExecInitExpr allocates in CurrentMemoryContext; the test uses a
-    // process-lived context so the returned `PgBox<'mcx, ExprState>` outlives
+    // process-lived context so the returned `PgBox<'mcx, ExprState<'mcx>>` outlives
     // any per-test `'mcx`.
     exec_init_expr::set(|_tidstate, _node, _qual_index, _side| {
         mcx::alloc_in(expr_state_mcx(), ExprState::default())
@@ -215,6 +215,7 @@ fn ctid_geq_qual() -> Expr {
             }),
             Expr::Const(types_nodes::primnodes::Const::default()),
         ],
+        ..Default::default()
     })
 }
 

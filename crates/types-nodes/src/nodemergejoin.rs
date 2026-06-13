@@ -107,9 +107,9 @@ impl MergeJoin<'_> {
 #[derive(Debug)]
 pub struct MergeJoinClauseData<'mcx> {
     /// `ExprState *lexpr` — compiled left-hand (outer) input expression.
-    pub lexpr: Option<PgBox<'mcx, ExprState>>,
+    pub lexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *rexpr` — compiled right-hand (inner) input expression.
-    pub rexpr: Option<PgBox<'mcx, ExprState>>,
+    pub rexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `Datum ldatum` — current left-hand value.
     pub ldatum: Datum,
     /// `Datum rdatum` — current right-hand value.

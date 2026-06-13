@@ -1,0 +1,39 @@
+[package]
+name = "backend-utils-adt-numeric"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+# Keystone carrier: on-disk ABI + in-memory NumericVar<'mcx> + agg states.
+types-numeric = { path = "../types-numeric" }
+mcx = { path = "../mcx" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+
+# Externals this crate REACHES OUT to (real, already-ported owners): the
+# Jenkins/lookup3 byte hashers (hashfn.c hash_any/hash_any_extended) used by
+# hash_numeric/hash_numeric_extended.
+common-hashfn = { path = "../common-hashfn" }
+
+# Inward seams this crate OWNS and installs from init_seams(); also carries the
+# outbound numeric_abbrev_add_sample seam reached from the sort-support abbrev.
+backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
+
+# The real backend PRNG (xoroshiro128**) for random_numeric/random_var. The
+# `pg_prng_state` threaded in by the SQL random() setup is `pg_prng::PgPrng`.
+pg-prng = { path = "../pg-prng" }
+
+# seam_core::seam! for the OUTBOUND, owner-unported call frames the SRF /
+# planner-support / sort-support setup reach (the planner Node vocabulary, the
+# SRF FuncCallContext / multi-call context, and the tuplesort abbreviation
+# slots). Declared inline; NOT installed here (no owned X-seams crate -> they do
+# not trip the recurrence guard; they panic until each owner lands).
+seam-core = { path = "../seam-core" }
+
+# The real (merged) trimmed SortSupportData node numeric_sortsupport fills.
+types-sortsupport = { path = "../types-sortsupport" }

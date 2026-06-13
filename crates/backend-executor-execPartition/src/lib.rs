@@ -51,7 +51,7 @@ pub struct PartitionDispatchData<'mcx> {
     pub key: Option<mcx::PgBox<'mcx, PartitionKeyData<'mcx>>>,
     /// `List *keystate` — `ExprState`s for the partition-key expressions
     /// (`NIL` until first `FormPartitionKeyDatum`).
-    pub keystate: PgVec<'mcx, mcx::PgBox<'mcx, ExprState>>,
+    pub keystate: PgVec<'mcx, mcx::PgBox<'mcx, ExprState<'mcx>>>,
     /// `PartitionDesc partdesc` — partition descriptor of the table.
     pub partdesc: Option<mcx::PgBox<'mcx, PartitionDescData<'mcx>>>,
     /// `TupleTableSlot *tupslot` — standalone slot for this table's tupdesc, or

@@ -195,9 +195,9 @@ pub struct LimitStateData<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
     /// `ExprState *limitOffset` — OFFSET parameter, or `None` if none.
-    pub limitOffset: Option<PgBox<'mcx, ExprState>>,
+    pub limitOffset: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *limitCount` — COUNT parameter, or `None` if none.
-    pub limitCount: Option<PgBox<'mcx, ExprState>>,
+    pub limitCount: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `LimitOption limitOption` — limit specification type.
     pub limitOption: LimitOption,
     /// `int64 offset` — current OFFSET value.
@@ -214,7 +214,7 @@ pub struct LimitStateData<'mcx> {
     /// `es_tupleTable`; C's pointer alias of the child's returned slot).
     pub subSlot: Option<SlotId>,
     /// `ExprState *eqfunction` — tuple equality qual in case of WITH TIES.
-    pub eqfunction: Option<PgBox<'mcx, ExprState>>,
+    pub eqfunction: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `TupleTableSlot *last_slot` — slot for evaluation of ties (a persistent
     /// node-owned arena slot; WITH TIES copies the boundary row's datums in).
     pub last_slot: Option<SlotId>,

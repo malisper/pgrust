@@ -83,7 +83,7 @@ pub struct ResultState<'mcx> {
     pub ps: PlanStateData<'mcx>,
     /// `ExprState *resconstantqual` — the compiled constant qual (`None` = the
     /// C `NULL`, treated as always-true).
-    pub resconstantqual: Option<PgBox<'mcx, ExprState>>,
+    pub resconstantqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `bool rs_done` — are we done?
     pub rs_done: bool,
     /// `bool rs_checkqual` — do we need to check the qual?

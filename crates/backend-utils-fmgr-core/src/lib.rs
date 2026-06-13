@@ -1997,6 +1997,30 @@ fn fmgr_info_check(function_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
+/// `fmgr_info(functionId, &finfo)` resolving form (the `fmgr_info` seam):
+/// resolve the function and return the lookup metadata callers read to *plan*
+/// a call. The internal `fmgr_info()` yields a `types-fmgr::FmgrInfo` (whose
+/// `fn_addr` is a typed `PGFunction`); the seam crosses with a
+/// `types-core::FmgrInfo` (whose `fn_addr` is an opaque pointer word, so the
+/// callable does not have to cross). The fields are copied straight across;
+/// `fn_addr` is the resolved callable's address (`0` when unresolved, e.g. the
+/// security-definer / SQL legs where C installs a wrapper).
+fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmgr::FmgrInfo> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let f = &resolved.finfo;
+    // PGFunction is `Option<fn(...) -> Datum>`; a function pointer casts to its
+    // address. `None` (no direct callable resolved) maps to 0.
+    let fn_addr = f.fn_addr.map(|p| p as usize).unwrap_or(0);
+    Ok(types_core::fmgr::FmgrInfo {
+        fn_addr,
+        fn_oid: f.fn_oid,
+        fn_nargs: f.fn_nargs,
+        fn_strict: f.fn_strict,
+        fn_retset: f.fn_retset,
+        fn_stats: f.fn_stats,
+    })
+}
+
 /// `OidFunctionCall1(functionId, PointerGetDatum(deserialize_deflist(options)))`
 /// (the `oid_function_call_1_deflist` seam): the dictionary-init invocation
 /// (ts_cache.c). The `List` of string-`DefElem`s crosses as typed rows; here it
@@ -2240,6 +2264,7 @@ fn oid_output_function_call_datum_seam<'mcx>(
 /// those land, which is the correct frontier state.
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
+    backend_utils_fmgr_fmgr_seams::fmgr_info::set(fmgr_info_resolve);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
     backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);

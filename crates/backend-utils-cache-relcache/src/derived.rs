@@ -291,6 +291,41 @@ pub fn RelationGetIndexPredicate(relation: *mut RelationData) -> PgResult<()> {
     index_predicate_seam(relation)
 }
 
+/// `RelationGetDummyIndexExpressions(relation)` (relcache.c): a list of dummy
+/// `Const` nodes with the same types/typmods/collations as the index's real
+/// expressions — used where we must not run user-defined code (ANALYZE,
+/// planner). Returns `NIL` when the index has no expressions.
+///
+/// The entire body is node vocabulary: the quick-exit reads the raw
+/// `rd_indextuple` `indexprs` datum (`heap_attisnull`), and the result is a
+/// `List*` of `Const` nodes built via `stringToNode`/`makeConst` over
+/// `exprType`/`exprTypmod`/`exprCollation` of the raw expression sub-trees.
+/// None of `rd_indextuple` (the raw pg_index `HeapTuple`), the node list, nor
+/// the `Const` constructors are representable on the owned entry, so the whole
+/// routine routes through the node-tree owner seam. The presence-only quick
+/// exit (no `rd_index`, i.e. not an index, or no expression columns) is the
+/// own-logic shell. **Own shell + node-owner seam.**
+pub fn RelationGetDummyIndexExpressions(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let rd = unsafe { &*relation };
+
+    // Quick exit if there is nothing to do: the C tests `rd_indextuple == NULL
+    // || heap_attisnull(rd_indextuple, Anum_pg_index_indexprs)`. In the owned
+    // mirror, a non-index entry has no `rd_index` form at all (the C
+    // `rd_indextuple == NULL` case). Whether the index actually carries
+    // expression columns (`indexprs` not null) is only observable from the raw
+    // index tuple's `indexprs` attribute, which the owned model does not carry;
+    // that no-expressions short-circuit therefore lives behind the seam.
+    if rd.rd_index.is_none() {
+        return Ok(());
+    }
+
+    // Extract raw node tree(s) from the index tuple, build the dummy Const list
+    // (makeConst over exprType/exprTypmod/exprCollation of each raw sub-tree).
+    // All node vocabulary; route through the node-tree owner seam.
+    dummy_index_expressions_seam(relation)
+}
+
 /* ==========================================================================
  * RelationGetIndexAttrBitmap -- attribute bitmaps per index (rd_*attr).
  *
@@ -688,6 +723,19 @@ fn index_expressions_seam(_relation: *mut RelationData) -> PgResult<()> {
 /// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`.
 fn index_predicate_seam(_relation: *mut RelationData) -> PgResult<()> {
     todo!("relcache-derived: RelationGetIndexPredicate node-tree transform (node owner seam)")
+}
+
+/// `RelationGetDummyIndexExpressions(relation)`'s dummy-Const build: read the
+/// raw `pg_index.indexprs` datum (`heap_getattr` over `GetPgIndexDescriptor`),
+/// `stringToNode` the expression list, then per sub-tree `makeConst(exprType,
+/// exprTypmod, exprCollation, 1, (Datum) 0, true /*isnull*/, true /*byval*/)`.
+/// All node vocabulary (`stringToNode`/`makeConst`/`exprType`/`exprTypmod`/
+/// `exprCollation`) + the raw `rd_indextuple` read; node owner.
+fn dummy_index_expressions_seam(_relation: *mut RelationData) -> PgResult<()> {
+    todo!(
+        "relcache-derived: RelationGetDummyIndexExpressions dummy-Const build \
+         (stringToNode/makeConst over exprType/exprTypmod/exprCollation; node owner seam)"
+    )
 }
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,

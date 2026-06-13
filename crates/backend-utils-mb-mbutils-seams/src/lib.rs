@@ -165,3 +165,17 @@ seam_core::seam!(
     /// non-first byte of a multibyte char). Pure table predicate.
     pub fn pg_encoding_is_client_only(encoding: i32) -> bool
 );
+
+seam_core::seam!(
+    /// `pg_unicode_to_server(pg_wchar c, unsigned char *s)` (mbutils.c) —
+    /// convert the single Unicode code point `c` into the current server
+    /// encoding, returning the encoded bytes (no trailing NUL) allocated in
+    /// `mcx` (C writes into a caller `[MAX_UNICODE_EQUIVALENT_STRING + 1]`
+    /// buffer; here the carrier is the encoded byte run). `Err` carries the
+    /// "invalid Unicode code point" / "character ... has no equivalent in
+    /// encoding" `ereport(ERROR)`s and palloc OOM.
+    pub fn pg_unicode_to_server<'mcx>(
+        mcx: Mcx<'mcx>,
+        c: PgWChar,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);

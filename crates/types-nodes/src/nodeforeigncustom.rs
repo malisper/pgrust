@@ -209,7 +209,7 @@ pub struct ForeignScanState<'mcx> {
     pub ss: ScanStateData<'mcx>,
     /// `ExprState *fdw_recheck_quals` — compiled recheck quals (`None` = the C
     /// `NULL`). The compiled `ExprState` is execExpr-owned; carried opaquely.
-    pub fdw_recheck_quals: Option<PgBox<'mcx, crate::execexpr::ExprState>>,
+    pub fdw_recheck_quals: Option<PgBox<'mcx, crate::execexpr::ExprState<'mcx>>>,
     /// `Size pscan_len` — size of parallel coordination information.
     pub pscan_len: usize,
     /// `ResultRelInfo *resultRelInfo` — result rel info, if UPDATE or DELETE

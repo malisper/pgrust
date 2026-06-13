@@ -188,7 +188,7 @@ pub(crate) fn catalog_cache_initialize_cache(
         // comparison procedure with fmgr_info; we stamp only the eqfunc OID
         // (fmgr_info_cxt(eqfunc, &cc_skey[i].sk_func, CacheMemoryContext)).
         let mut skey = ScanKeyData::empty();
-        skey.sk_func = FmgrInfo { fn_oid: eqfunc };
+        skey.sk_func = FmgrInfo { fn_oid: eqfunc, ..Default::default() };
         // sk_attno suitably for HeapKeyTest() and heap scans.
         skey.sk_attno = cc_keyno[i] as AttrNumber;
         // sk_strategy --- always standard equality.

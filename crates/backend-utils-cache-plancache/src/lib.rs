@@ -1940,6 +1940,9 @@ pub fn ResOwnerReleaseCachedPlan(plan: CachedPlanHandle) -> PgResult<()> {
  * aggregator can call it uniformly.
  * ======================================================================== */
 
-/// Install plancache's own seams. plancache declares no inward seam crate
-/// (no cyclic caller exists yet), so this is currently empty.
-pub fn init_seams() {}
+/// Install plancache's own seams. `init_plan_cache` is consumed across the
+/// postinit bring-up cycle via `plancache-seams`, so it is installed here
+/// (assemble/seam-wiring-guard pure-wiring fix).
+pub fn init_seams() {
+    backend_utils_cache_plancache_seams::init_plan_cache::set(InitPlanCache);
+}
