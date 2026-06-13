@@ -31,6 +31,8 @@ pub const TEXTOID: Oid = 25;
 pub const OIDOID: Oid = 26;
 pub const JSONOID: Oid = 114;
 pub const JSONBOID: Oid = 3802;
+/// `TSQUERYOID` — `tsquery` type OID (`pg_type_d.h`).
+pub const TSQUERYOID: Oid = 3615;
 pub const XMLOID: Oid = 142;
 pub const FLOAT4OID: Oid = 700;
 pub const FLOAT8OID: Oid = 701;

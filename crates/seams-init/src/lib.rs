@@ -54,6 +54,7 @@ pub fn init_all() {
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
+    backend_utils_adt_ts_small::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();
