@@ -191,3 +191,66 @@ seam_core::seam!(
         planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
     ) -> types_nodes::TupleSlotKind
 );
+
+seam_core::seam!(
+    /// `ExecTypeFromTL(targetList)` (execTuples.c): build a tuple descriptor
+    /// from a target list (the planner's `indextlist` for an index-only scan),
+    /// allocated in `mcx`. Fallible on OOM.
+    pub fn exec_type_from_tl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        target_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecAllocTableSlot(tupleTable, desc, tts_ops)` (execTuples.c): allocate
+    /// a slot in the EState slot pool with the given descriptor and slot class,
+    /// returning its pool id. The descriptor is the relation's
+    /// `RelationGetDescr` copy; the slot class is `table_slot_callbacks`'s
+    /// result. Fallible on OOM.
+    pub fn exec_alloc_table_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        desc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c):
+    /// store a heap tuple in the slot regardless of the slot's native format
+    /// (materializing it if the slot is not a heap-tuple slot). Targets the
+    /// slot by pool id. Fallible on OOM.
+    pub fn exec_force_store_heap_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecStoreVirtualTuple(slot)` (tuptable.h/execTuples.c): mark the slot
+    /// as holding a valid virtual tuple (its `tts_values`/`tts_isnull` arrays
+    /// have already been filled, e.g. by `index_deform_tuple`). Targets the
+    /// slot by pool id. Fallible only via the slot-ops `ereport(ERROR)` paths.
+    pub fn exec_store_virtual_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Slot-payload op for `StoreIndexTuple`'s name-cstring fix-up
+    /// (nodeIndexonlyscan.c): for each attribute number in `attnums` whose slot
+    /// value is non-null, copy the cstring datum into a NAMEDATALEN-byte
+    /// allocation in `per_tuple_ecxt` (the C `namestrcpy` zero-pad) and store
+    /// the resulting `Name` datum back. The decision of *which* attnums is the
+    /// node's owned logic; this seam performs only the slot-value read/write
+    /// the slot owns. Fallible on OOM.
+    pub fn pad_name_cstring_columns<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        per_tuple_ecxt: types_nodes::EcxtId,
+        attnums: &[types_core::AttrNumber],
+    ) -> types_error::PgResult<()>
+);

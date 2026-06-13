@@ -65,6 +65,13 @@ pub struct EcxtId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
 
+/// Opaque token for a live `EPQState *` (`nodes/execnodes.h`), owned by the
+/// EvalPlanQual machinery (execMain). Scan nodes hold it only to test for
+/// presence and to index its `relsubs_*` arrays through the owner's seams;
+/// the full struct lands when EvalPlanQual is ported.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EPQStateHandle(pub usize);
+
 /// An opaque handle to a genuinely AM/extension-opaque object the executor
 /// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
 /// itself leaves opaque). The owning unit downcasts with a loud panic on
@@ -268,6 +275,15 @@ pub struct PlanStateData<'mcx> {
 pub struct ScanStateData<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
+    /// `Relation ss_currentRelation` — the scan's base relation (an alias
+    /// handle of the relation `es_relations` owns). `None` is the C `NULL`.
+    pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
+    /// `struct TableScanDescData *ss_currentScanDesc` — the table scan
+    /// descriptor (`NULL` for index-only scans, which carry no heap scan). The
+    /// table-AM scan-descriptor type lives above this crate's layer, so the
+    /// owned handle rides opaquely; consumers that need it resolve it through
+    /// the table-AM owner.
+    pub ss_currentScanDesc: Option<Opaque>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
@@ -281,6 +297,17 @@ pub struct ScanStateData<'mcx> {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
+    /// `Snapshot es_snapshot` — time qual to use. The active-snapshot token
+    /// owned by snapmgr (`SnapshotHandle`); `None` is the C `NULL`. Lands
+    /// with its first consumer (the index/heap scan ports), per docs/types.md
+    /// rule 3.
+    pub es_snapshot: Option<types_scan::snapshot::SnapshotHandle>,
+    /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
+    /// recheck state this EState belongs to. The full `EPQState` is owned by
+    /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle
+    /// here; scan nodes read its `relsubs_*` arrays through the EvalPlanQual
+    /// owner's seams.
+    pub es_epq_active: Option<EPQStateHandle>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
@@ -370,6 +397,9 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
+            // es_snapshot = InvalidSnapshot; es_epq_active = NULL;
+            es_snapshot: None,
+            es_epq_active: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,

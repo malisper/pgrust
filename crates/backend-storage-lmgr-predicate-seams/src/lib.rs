@@ -3,6 +3,18 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 seam_core::seam!(
+    /// `PredicateLockPage(relation, blkno, snapshot)` (predicate.c): acquire a
+    /// page-level predicate (SIREAD) lock, as an index-only scan must when it
+    /// returns a tuple without visiting the heap. The snapshot is the
+    /// active-snapshot token owned by snapmgr. Can `ereport(ERROR)`.
+    pub fn predicate_lock_page<'mcx>(
+        relation: types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+        snapshot: Option<types_scan::snapshot::SnapshotHandle>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `predicatelock_twophase_recover(xid, info, recdata, len)` — restore a
     /// prepared transaction's SIREAD predicate locks at recovery (slot
     /// `TWOPHASE_RM_PREDICATELOCK_ID` of `twophase_recover_callbacks`).

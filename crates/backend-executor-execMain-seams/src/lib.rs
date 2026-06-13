@@ -7,6 +7,79 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `epqstate->relsubs_done[scanrelid - 1]` (execMain.c / EvalPlanQual):
+    /// whether the EPQ test tuple for this scan relation has already been
+    /// returned. Pure read of the EPQ state.
+    pub fn epq_relsubs_done(
+        epqstate: types_nodes::EPQStateHandle,
+        scanrelid_minus_1: u32,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `epqstate->relsubs_slot[scanrelid - 1] != NULL` — is there a
+    /// replacement-slot EPQ source for this scan relation?
+    pub fn epq_relsubs_slot_present(
+        epqstate: types_nodes::EPQStateHandle,
+        scanrelid_minus_1: u32,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `epqstate->relsubs_rowmark[scanrelid - 1] != NULL` — is there a
+    /// non-locking-rowmark EPQ source for this scan relation?
+    pub fn epq_relsubs_rowmark_present(
+        epqstate: types_nodes::EPQStateHandle,
+        scanrelid_minus_1: u32,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `epqstate->relsubs_done[scanrelid - 1] = value` (execMain.c): mark
+    /// whether the EPQ test tuple has been returned.
+    pub fn epq_set_relsubs_done(
+        epqstate: types_nodes::EPQStateHandle,
+        scanrelid_minus_1: u32,
+        value: bool,
+    )
+);
+
+seam_core::seam!(
+    /// Load the EPQ replacement slot (`epqstate->relsubs_slot[scanrelid - 1]`)
+    /// into the scan node's scan slot (`ExecCopySlot`-shape), returning whether
+    /// a (non-empty) tuple was loaded. Fallible on OOM.
+    pub fn epq_load_relsubs_slot<'mcx>(
+        epqstate: types_nodes::EPQStateHandle,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        scanrelid_minus_1: u32,
+        dest_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualFetchRowMark(epqstate, scanrelid, slot)` (execMain.c):
+    /// fetch the EPQ replacement tuple for a non-locking rowmark into the scan
+    /// slot, returning whether a tuple was produced. Fallible on
+    /// `ereport(ERROR)`.
+    pub fn eval_plan_qual_fetch_row_mark<'mcx>(
+        epqstate: types_nodes::EPQStateHandle,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        scanrelid: u32,
+        dest_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// For a `scanrelid == 0` Foreign/Custom scan that pushed a join down,
+    /// whether the node's `extParam` set overlaps the EPQ relation set — the
+    /// `bms_overlap` test in `ExecScanFetch`'s `scanrelid == 0` branch.
+    pub fn epq_param_is_member_of_ext_param(
+        epqstate: types_nodes::EPQStateHandle,
+        node_ext_param: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
     /// `InitResultRelInfo(resultRelInfo, resultRelationDesc,
     /// resultRelationIndex, partition_root_rri, instrument_options)`
     /// (execMain.c): fill a `ResultRelInfo` for the given target relation

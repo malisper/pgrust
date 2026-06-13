@@ -23,6 +23,7 @@ pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
+pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
@@ -35,14 +36,20 @@ pub mod queryenvironment;
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
+    EPQStateHandle, EStateData, EcxtId, ExecProcNodeMtd, ExprContext,
+    ExprContextCallbackFunction, ExprContext_CB, Opaque, ParamExecData, PlanStateData,
+    ResultRelInfo, RriId, ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId,
+    T_MaterialState,
 };
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,
+};
+pub use nodeindexonlyscan::{
+    IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
+    IndexScanInstrumentation, ParallelIndexScanDesc, ParallelIndexScanDescData, Scan,
+    SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;

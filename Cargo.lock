@@ -53,6 +53,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-indextuple-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-next-seams"
 version = "0.0.0"
 dependencies = [
@@ -231,6 +241,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-visibilitymap-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-index-amapi-seams"
 version = "0.0.0"
 dependencies = [
@@ -274,8 +295,11 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
+ "types-scan",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -637,6 +661,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-execparallel",
+ "types-nodes",
 ]
 
 [[package]]
@@ -1411,6 +1436,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execScan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
@@ -1462,6 +1496,8 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -1567,6 +1603,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeIndexonlyscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-heap-visibilitymap-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeIndexonlyscan-seams",
+ "backend-executor-nodeIndexscan-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-shm_toc-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeIndexonlyscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -1582,6 +1649,16 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeIndexscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -2446,6 +2523,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-shm_toc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-storage-ipc-shmem-seams"
 version = "0.0.0"
 dependencies = [
@@ -2606,6 +2694,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
+ "types-scan",
 ]
 
 [[package]]
@@ -3547,6 +3637,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",

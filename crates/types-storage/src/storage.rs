@@ -6,6 +6,12 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 
+/// `Buffer` (`storage/buf.h`) — a buffer-pool slot identifier: positive for a
+/// shared buffer, negative for a local buffer, `InvalidBuffer` (0) for none.
+pub type Buffer = i32;
+/// `InvalidBuffer` (`storage/buf.h`) — the C `0` sentinel.
+pub const InvalidBuffer: Buffer = 0;
+
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

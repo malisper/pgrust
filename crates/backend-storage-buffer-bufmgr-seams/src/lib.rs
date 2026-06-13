@@ -50,3 +50,9 @@ seam_core::seam!(
         block_num: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::PrefetchBufferResult>
 );
+
+seam_core::seam!(
+    /// `ReleaseBuffer(buffer)` (bufmgr.c): drop a pin on a buffer (the VM
+    /// buffer an index-only scan holds). `InvalidBuffer` is never passed.
+    pub fn release_buffer(buffer: types_storage::Buffer)
+);
