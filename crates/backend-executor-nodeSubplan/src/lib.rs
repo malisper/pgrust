@@ -1399,4 +1399,5 @@ fn elog_unrecognized_testexpr(tag: i32) -> PgError {
 /// `backend-executor-nodeSubplan-seams`).
 pub fn init_seams() {
     backend_executor_nodeSubplan_seams::exec_re_scan_set_param_plan::set(ExecReScanSetParamPlan);
+    backend_executor_nodeSubplan_seams::exec_sub_plan::set(ExecSubPlan);
 }

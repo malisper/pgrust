@@ -2907,7 +2907,10 @@ dependencies = [
  "backend-executor-execExpr-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-nodeSubplan-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -3886,6 +3889,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-datum",
  "types-error",
  "types-nodes",
 ]
