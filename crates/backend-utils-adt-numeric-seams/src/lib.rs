@@ -41,3 +41,16 @@ seam_core::seam!(
         v2: types_datum::Datum,
     ) -> types_error::PgResult<f64>
 );
+
+seam_core::seam!(
+    /// `addHyperLogLog(&nss->abbr_card, DatumGetUInt32(hash_uint32(tmp)))`
+    /// (numeric.c:5173, the `estimating` branch of `numeric_abbrev_convert_var`).
+    /// `tmp` is the folded 32-bit abbreviation (`(uint32) result ^ (uint32)
+    /// ((uint64) result >> 32)`), already computed in the numeric unit; the
+    /// `hash_uint32` mix + HyperLogLog accumulation against the sort's
+    /// `hyperLogLogState` (attached to `SortSupport.ssup_extra` by the
+    /// genuinely-unported `numeric_sortsupport` setup) live behind this seam.
+    /// Pure side-effect on the HLL counter; never ereports. OUTBOUND: this unit
+    /// only calls it; the sort-support/HLL owner installs it.
+    pub fn numeric_abbrev_add_sample(tmp: u32)
+);
