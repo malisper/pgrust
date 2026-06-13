@@ -614,7 +614,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// The per-partition MERGE action map-and-build of `ExecInitPartitionInfo`
-    /// (execPartition.c L933-981): mirrors `exec_init_merge_actions_for_rel` but
+    /// (execPartition.c L933-981): mirrors the ExecInitMerge per-action build but
     /// for a leaf partition rel reached by tuple routing. Build
     /// `build_attrmap_by_name(partrel, firstResultRel)`, map the join condition
     /// `map_variable_attnos(ref_join_condition, firstVarno, attmap)` and
