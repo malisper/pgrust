@@ -36,8 +36,26 @@ pub mod eval_scalar;
 pub mod interp_loop;
 pub mod justs;
 
-/// Install this unit's seams. The interpreter is reached through the
-/// `ExprState::evalfunc` entry point that the compiler installs, not through a
-/// seam of its own, so there is nothing to install yet — kept as the
-/// single wiring slot per the seams-init convention.
-pub fn init_seams() {}
+/// Install this unit's seams. The interpreter owns
+/// `backend-executor-execExprInterp-seams`: `exec_ready_interpreted_expr`
+/// (`ExecReadyInterpretedExpr`) and `exec_eval_expr_switch_context`
+/// (`ExecEvalExprSwitchContext` / the `ExecInterpExpr` dispatch loop). `execExpr`
+/// (the compiler) and the executor nodes reach the interpreter through these.
+///
+/// `exec_ready_interpreted_expr` takes `&mut ExprState` in both the seam and
+/// [`dispatch::ExecReadyInterpretedExpr`], so it is installed directly.
+///
+/// `exec_eval_expr_switch_context` is a tracked contract divergence: the seam
+/// declares `state: &ExprState` (the C `ExecEvalExprSwitchContext` macro reads
+/// `state->evalfunc`), but the owned dispatch entry
+/// [`dispatch::ExecInterpExprStillValid`] needs `&mut ExprState` because the
+/// still-valid first-call check and the `ExecJust*` / `ExecInterpExpr` evalfuncs
+/// mutate per-eval scratch. Reconciling the shared-vs-mut mismatch is the
+/// seam-contract-reconcile lane's job (DESIGN_DEBT +
+/// `CONTRACT_RECONCILE_PENDING`); until then this seam stays seam-and-panic on
+/// the still-uninstalled `&ExprState` surface.
+pub fn init_seams() {
+    backend_executor_execExprInterp_seams::exec_ready_interpreted_expr::set(
+        dispatch::ExecReadyInterpretedExpr,
+    );
+}

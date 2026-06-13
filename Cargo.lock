@@ -2905,6 +2905,7 @@ name = "backend-executor-execExprInterp"
 version = "0.0.0"
 dependencies = [
  "backend-executor-execExpr-seams",
+ "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",

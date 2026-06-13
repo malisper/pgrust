@@ -476,6 +476,14 @@ mod recurrence_guard {
         ("backend_catalog_namespace", "make_range_var_from_name_list"),
         ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
+        // execExprInterp owns the dispatch loop; `exec_eval_expr_switch_context`
+        // is declared `&ExprState` in the seam (C `ExecEvalExprSwitchContext`
+        // macro) but the owned `ExecInterpExprStillValid` entry needs
+        // `&mut ExprState` for the still-valid check + ExecJust*/ExecInterpExpr
+        // per-eval scratch mutation. Shared-vs-mut reconcile is the
+        // seam-contract-reconcile lane's job (DESIGN_DEBT). `ExecReadyInterpretedExpr`
+        // (`exec_ready_interpreted_expr`) matches `&mut` and IS installed.
+        ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
         ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
