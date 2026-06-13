@@ -6390,6 +6390,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-multirangetypes"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-multirangetypes-seams",
+ "backend-utils-adt-rangetypes-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rangetypes",
+]
+
+[[package]]
 name = "backend-utils-adt-multirangetypes-seams"
 version = "0.0.0"
 dependencies = [
@@ -8221,6 +8235,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
