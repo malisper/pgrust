@@ -24,7 +24,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use mcx::PgString;
+use mcx::{Mcx, PgString, PgVec};
 use types_core::{ForkNumber, Oid, RelFileNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr, INVALID_PROC_NUMBER, InvalidOid, InvalidRepOriginId, InvalidTransactionId};
 use types_error::{PgError, PgResult};
 use types_storage::sinval::SharedInvalMessages;
@@ -308,6 +308,48 @@ fn parse_commit_abort_body(
         parsed.origin_timestamp = i64_at(data, offset + 8)?;
     }
     Ok(())
+}
+
+/// Collect `parsed.xlocators[0..parsed.nrels]` from a parsed commit/abort into
+/// an `mcx`-owned vector. The C `ParseCommitRecord`/`ParseAbortRecord` point
+/// `parsed.xlocators` into the record buffer; consumers that outlive the
+/// describer (`pg_waldump`, the WAL summarizer) need the locators materialized,
+/// which is why the seam returns them owned in `mcx`.
+fn parsed_xlocators<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsed: &ParsedCommitAbort,
+    data: &[u8],
+) -> PgResult<PgVec<'mcx, RelFileLocator>> {
+    let n = validate_count(data, parsed.nrels, parsed.xlocators_offset, SIZE_OF_REL_FILE_LOCATOR)?;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        out.push(rellocator_at(data, parsed.xlocators_offset, i)?);
+    }
+    Ok(out)
+}
+
+/// `ParseCommitRecord(info, xlrec, &parsed)` (xactdesc.c) — seam form. Parses
+/// the commit body and returns the relations removed on commit
+/// (`parsed.xlocators[0..nrels]`), owned in `mcx`. Used by the WAL summarizer.
+pub fn parse_commit_record_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: u8,
+    data: &[u8],
+) -> PgResult<PgVec<'mcx, RelFileLocator>> {
+    let parsed = parse_commit_record(info, data)?;
+    parsed_xlocators(mcx, &parsed, data)
+}
+
+/// `ParseAbortRecord(info, xlrec, &parsed)` (xactdesc.c) — seam form. Parses
+/// the abort body and returns the relations removed on abort
+/// (`parsed.xlocators[0..nrels]`), owned in `mcx`. Used by the WAL summarizer.
+pub fn parse_abort_record_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: u8,
+    data: &[u8],
+) -> PgResult<PgVec<'mcx, RelFileLocator>> {
+    let parsed = parse_abort_record(info, data)?;
+    parsed_xlocators(mcx, &parsed, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +805,8 @@ pub fn xact_identify(info: u8) -> Option<&'static str> {
 pub fn init_seams() {
     backend_access_rmgrdesc_xactdesc_seams::xact_desc::set(xact_desc);
     backend_access_rmgrdesc_xactdesc_seams::xact_identify::set(xact_identify);
+    backend_access_rmgrdesc_xactdesc_seams::parse_commit_record::set(parse_commit_record_seam);
+    backend_access_rmgrdesc_xactdesc_seams::parse_abort_record::set(parse_abort_record_seam);
 }
 
 #[cfg(test)]
