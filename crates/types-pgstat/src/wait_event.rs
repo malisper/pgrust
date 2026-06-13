@@ -58,6 +58,22 @@ pub const WAIT_EVENT_SLRU_SYNC: u32 = PG_WAIT_IO + 52;
 /// `WAIT_EVENT_SLRU_WRITE` — "Waiting for a write of an SLRU page."
 /// (value 167772213, matching c2rust).
 pub const WAIT_EVENT_SLRU_WRITE: u32 = PG_WAIT_IO + 53;
+
+// Replication-slot wait events (`wait_event_names.txt`), values matching the
+// generated `wait_event_types.h` (verified against the c2rust rendering).
+/// IPC: waiting for a replication slot to become inactive (drop/acquire).
+pub const WAIT_EVENT_REPLICATION_SLOT_DROP: u32 = PG_WAIT_IPC + 49;
+/// CLIENT: waiting for physical standbys to confirm a logical-decoding LSN.
+pub const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = PG_WAIT_CLIENT + 6;
+/// IO: writing a replication slot's state file.
+pub const WAIT_EVENT_REPLICATION_SLOT_WRITE: u32 = PG_WAIT_IO + 49;
+/// IO: fsyncing a replication slot's state file at save time.
+pub const WAIT_EVENT_REPLICATION_SLOT_SYNC: u32 = PG_WAIT_IO + 48;
+/// IO: fsyncing a replication slot's state file at restore time.
+pub const WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC: u32 = PG_WAIT_IO + 47;
+/// IO: reading a replication slot's state file.
+pub const WAIT_EVENT_REPLICATION_SLOT_READ: u32 = PG_WAIT_IO + 46;
+
 /// `WAIT_EVENT_WAL_RECEIVER_MAIN` — index 14 of the Activity section of
 /// `wait_event_names.txt` (after SYSLOGGER_MAIN at 13).
 pub const WAIT_EVENT_WAL_RECEIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 14;

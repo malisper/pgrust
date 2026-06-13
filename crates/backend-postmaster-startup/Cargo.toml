@@ -32,5 +32,6 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
 types-signal = { path = "../types-signal" }
+types-startup = { path = "../types-startup" }
 types-timeout = { path = "../types-timeout" }
 types-wal = { path = "../types-wal" }
