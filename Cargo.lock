@@ -3747,6 +3747,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSetOp"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeSort"
 version = "0.0.0"
 dependencies = [
@@ -9135,6 +9155,7 @@ dependencies = [
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
  "backend-lib-dshash",

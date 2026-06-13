@@ -37,6 +37,7 @@ pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod noderesult;
 pub mod nodenestloop;
+pub mod nodesetop;
 pub mod nodes;
 pub mod nodeseqscan;
 pub mod nodesort;
@@ -103,6 +104,11 @@ pub use nodeagg::{
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
+pub use nodesetop::{
+    SetOp, SetOpCmd, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SetOpStrategy,
+    SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
+    SETOP_HASHED, SETOP_SORTED, T_SetOp, T_SetOpState,
+};
 pub use nodesort::{
     SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
     TuplesortMethod, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
