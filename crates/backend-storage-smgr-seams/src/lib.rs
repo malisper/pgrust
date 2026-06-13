@@ -56,3 +56,9 @@ seam_core::seam!(
         forknum: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `smgrdestroyall()` (smgr.c) — close and destroy all open
+    /// `SMgrRelation` objects. Used by `XLogDropDatabase` during replay.
+    pub fn smgrdestroyall() -> PgResult<()>
+);
