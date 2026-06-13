@@ -38,6 +38,7 @@ backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
