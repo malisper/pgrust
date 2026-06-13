@@ -1234,6 +1234,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-matview"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-matview-deps-seams",
+ "backend-commands-matview-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-matview",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-matview-deps-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-matview",
+]
+
+[[package]]
+name = "backend-commands-matview-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-matview",
+]
+
+[[package]]
 name = "backend-commands-sequence-seams"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3580,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-matview",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3709,6 +3747,15 @@ dependencies = [
  "mcx",
  "types-amvalidate",
  "types-core",
+]
+
+[[package]]
+name = "types-matview"
+version = "0.0.0"
+dependencies = [
+ "types-catalog",
+ "types-core",
+ "types-tuple",
 ]
 
 [[package]]
