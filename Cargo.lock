@@ -21,6 +21,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "backend-access-brin-entry-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-brin-tuple"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-entry-seams",
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-toast-internals-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-cache-typcache-seams",
+ "mcx",
+ "types-brin",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-access-brin-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -2883,6 +2914,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-scalar-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-timestamp-seams"
 version = "0.0.0"
 dependencies = [
@@ -3078,6 +3119,7 @@ dependencies = [
  "types-error",
  "types-rel",
  "types-tuple",
+ "types-typcache",
 ]
 
 [[package]]
@@ -3633,6 +3675,19 @@ name = "types-bgworker"
 version = "0.0.0"
 
 [[package]]
+name = "types-brin"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "types-cache"
 version = "0.0.0"
 dependencies = [
@@ -3866,6 +3921,13 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "types-typcache"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
