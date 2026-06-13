@@ -30,6 +30,7 @@ backend-access-transam-timeline = { path = "../backend-access-transam-timeline" 
 backend-access-transam-subtrans = { path = "../backend-access-transam-subtrans" }
 backend-access-transam-transam = { path = "../backend-access-transam-transam" }
 backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }
+backend-access-transam-varsup = { path = "../backend-access-transam-varsup" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }

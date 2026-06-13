@@ -313,15 +313,16 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
 
 /// `RemoveProcFromArray(int code, Datum arg)` — shmem-exit callback that
 /// removes `MyProc` from the procarray.
-pub fn RemoveProcFromArray(_code: i32, _arg: Datum) {
+pub fn RemoveProcFromArray(_code: i32, _arg: Datum) -> PgResult<()> {
     debug_assert!(seam::my_proc_is_set());
     seam::proc_array_remove(seam::my_proc_number(), InvalidTransactionId);
+    Ok(())
 }
 
 /// `ProcKill(int code, Datum arg)` — shmem-exit callback that releases this
 /// backend's `PGPROC`: drop held LWLocks, leave any lock group, push the slot
 /// back onto its freelist.
-pub fn ProcKill(_code: i32, _arg: Datum) {
+pub fn ProcKill(_code: i32, _arg: Datum) -> PgResult<()> {
     debug_assert!(seam::my_proc_is_set());
     let my_procno = seam::my_proc_number();
 
@@ -408,11 +409,13 @@ pub fn ProcKill(_code: i32, _arg: Datum) {
     if avl != 0 {
         seam::kill_sigusr2(avl);
     }
+
+    Ok(())
 }
 
 /// `AuxiliaryProcKill(int code, Datum arg)` — shmem-exit callback releasing an
 /// auxiliary-process `PGPROC` slot.
-pub fn AuxiliaryProcKill(_code: i32, arg: Datum) {
+pub fn AuxiliaryProcKill(_code: i32, arg: Datum) -> PgResult<()> {
     let proctype = arg.as_i32();
     debug_assert!(proctype >= 0 && proctype < types_storage::storage::NUM_AUXILIARY_PROCS);
 
@@ -454,6 +457,8 @@ pub fn AuxiliaryProcKill(_code: i32, arg: Datum) {
     ));
 
     seam::spin_lock_release_proc_struct_lock();
+
+    Ok(())
 }
 
 /// `AuxiliaryPidGetProc(int pid)` — find the auxiliary-process `PGPROC` with
@@ -575,13 +580,11 @@ pub(crate) fn lock_group_members_iter(leaderno: ProcNumber) -> Vec<ProcNumber> {
 /// The `holdMask` of every `PROCLOCK` on
 /// `GetPGProcByNumber(procno)->myProcLocks[partition]`. The `myProcLocks`
 /// partitions hold `PROCLOCK`s, which are lock.c-owned shmem records; walking
-/// them belongs to lock.c (a Class-B panic-through). Only reachable from the
-/// dead reclaimed `proc_misc::lock_group_held_locks` (JoinWaitQueue uses the
-/// `lock::lock_group_held_locks` seam instead).
+/// them belongs to lock.c, so this routes through lock.c's
+/// `proc_locks_hold_masks` seam (panics until lock.c installs it). Only
+/// reachable from the dead reclaimed `proc_misc::lock_group_held_locks`
+/// (JoinWaitQueue uses the `lock::lock_group_held_locks` seam instead).
 #[allow(dead_code)]
-pub(crate) fn my_proc_locks_hold_masks(
-    _procno: ProcNumber,
-    _partition: usize,
-) -> Vec<LOCKMASK> {
-    todo!("lock.c: hold masks on GetPGProcByNumber(procno)->myProcLocks[partition] (PROCLOCKs)")
+pub(crate) fn my_proc_locks_hold_masks(procno: ProcNumber, partition: usize) -> Vec<LOCKMASK> {
+    backend_storage_lmgr_lock_seams::proc_locks_hold_masks::call(procno, partition)
 }
