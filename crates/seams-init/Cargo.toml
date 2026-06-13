@@ -117,6 +117,7 @@ backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-tsearch-ispell-regis = { path = "../backend-tsearch-ispell-regis" }
 backend-tsearch-spell = { path = "../backend-tsearch-spell" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }

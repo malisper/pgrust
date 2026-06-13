@@ -25,6 +25,14 @@ use types_storage::lock::LOCKMODE;
 extern crate alloc;
 
 seam_core::seam!(
+    /// `GetLockNameFromTagType(uint16 locktag_type)` (lmgr.c): the name of a
+    /// heavyweight lock type (`LockTagTypeNames[locktag_type]`, or
+    /// `"unknown wait event"` for an out-of-range value). Returns a `'static`
+    /// lock-method name owned by lmgr.c.
+    pub fn get_lock_name_from_tag_type(locktag_type: types_core::uint16) -> &'static str
+);
+
+seam_core::seam!(
     /// `CheckRelationLockedByMe(relation, lockmode, orstronger)` (lmgr.c):
     /// does this backend hold `lockmode` (or, with `orstronger`, any
     /// stronger lock) on the relation? Infallible (pure local lock-table

@@ -4,6 +4,23 @@
 //! `wait_event_names.txt` — first event of a class == the class base, then
 //! +1 in file order).
 
+/// `WAIT_EVENT_CLASS_MASK` (`wait_event.c`): the high byte selecting the
+/// wait-event class.
+pub const WAIT_EVENT_CLASS_MASK: u32 = 0xFF000000;
+/// `WAIT_EVENT_ID_MASK` (`wait_event.c`): the low 16 bits selecting the event
+/// id within a class.
+pub const WAIT_EVENT_ID_MASK: u32 = 0x0000FFFF;
+
+/// `WAIT_EVENT_CUSTOM_HASH_INIT_SIZE` (`wait_event.c`): initial size of the
+/// custom-wait-event shared hash tables.
+pub const WAIT_EVENT_CUSTOM_HASH_INIT_SIZE: i64 = 16;
+/// `WAIT_EVENT_CUSTOM_HASH_MAX_SIZE` (`wait_event.c`): maximum number of custom
+/// wait events; also the ceiling the id counter checks against.
+pub const WAIT_EVENT_CUSTOM_HASH_MAX_SIZE: i64 = 128;
+/// `WAIT_EVENT_CUSTOM_INITIAL_ID` (`wait_event.c`): first id assigned to a
+/// custom wait event.
+pub const WAIT_EVENT_CUSTOM_INITIAL_ID: u32 = 1;
+
 pub const PG_WAIT_LWLOCK: u32 = 0x01000000;
 pub const PG_WAIT_LOCK: u32 = 0x03000000;
 pub const PG_WAIT_BUFFERPIN: u32 = 0x04000000;
