@@ -110,6 +110,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatabasePath` (globals.c): the path to the current database's data
+    /// directory, set up at backend startup. Returns an owned copy of the
+    /// backend-global string (the caller uses it transiently). `Err` carries
+    /// the OOM surface of copying the global.
+    pub fn database_path() -> types_error::PgResult<String>
+);
+
+seam_core::seam!(
     /// Read `IsPostmasterEnvironment` (`globals.c`).
     pub fn is_postmaster_environment() -> bool
 );
@@ -124,6 +132,13 @@ seam_core::seam!(
     /// `MyClientSocket = palloc(...); memcpy(...)` (`globals.c` global): store
     /// this child's inherited client socket.
     pub fn set_my_client_socket(client_sock: types_net::ClientSocket)
+);
+
+seam_core::seam!(
+    /// `*MyClientSocket` (`globals.c` global): the inherited accepted client
+    /// socket, copied out. `None` when `MyClientSocket == NULL`. Pure read of
+    /// process-identity state.
+    pub fn my_client_socket() -> Option<types_net::ClientSocket>
 );
 
 seam_core::seam!(
@@ -154,4 +169,12 @@ seam_core::seam!(
     /// `AmWalReceiverProcess()` macros are `MyBackendType == B_*` tests).
     /// Process-identity read, same class as `my_proc_pid`.
     pub fn my_backend_type() -> types_core::init::BackendType
+);
+
+seam_core::seam!(
+    /// `IsBinaryUpgrade` (globals.c / miscadmin.h): true during a
+    /// `pg_upgrade`-driven binary upgrade. The launcher refuses to register the
+    /// logical-replication launcher in this mode. Pure read of backend-local
+    /// state.
+    pub fn is_binary_upgrade() -> bool
 );

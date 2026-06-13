@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use types_error::{ErrorLevel, PgResult};
 
 seam_core::seam!(
     /// The `AllocateDir(dirname)` / `ReadDir(dir, dirname)` / `FreeDir(dir)`
@@ -72,4 +72,16 @@ seam_core::seam!(
     /// report data-sync failures at: the given level if `data_sync_retry`,
     /// otherwise PANIC.
     pub fn data_sync_elevel(elevel: types_error::ErrorLevel) -> types_error::ErrorLevel
+);
+
+seam_core::seam!(
+    /// `durable_rename(oldfile, newfile, elevel)` (`storage/file/fd.c`) —
+    /// rename a file durably (fsync old + new + containing directory). The C
+    /// callers in timeline.c pass `ERROR`; a failure surfaces as `Err` at the
+    /// effective `data_sync_elevel`. Returns `Ok(())` on success.
+    pub fn durable_rename(
+        oldfile: &str,
+        newfile: &str,
+        elevel: ErrorLevel,
+    ) -> PgResult<()>
 );

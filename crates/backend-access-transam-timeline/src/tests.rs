@@ -1,29 +1,33 @@
 //! Tests for the `timeline.c` port.
 //!
-//! The pure parsing helpers run without any seam. The file-touching paths run
-//! through the `backend-storage-file-fd` / `backend-access-transam-xlogarchive`
-//! seams; these tests install in-memory providers (backed by thread-local
-//! state) exactly once. Because the seam slots are process-global `OnceLock`s,
-//! the providers are installed by a single `std::sync::Once` and every test
-//! that touches files clears and seeds the backing state before running.
+//! The pure parsing helpers run without any seam. The read/exists probes run
+//! through the `backend-storage-file-fd` seams, backed by an in-memory map. The
+//! *write* path (`writeTimeLineHistory`/`writeTimeLineHistoryFile`) keeps its
+//! temp-file/fsync/durable_rename orchestration in-crate and performs real
+//! syscalls (`open`/`read`/`write`/`unlink`/`rename`); to exercise it without a
+//! ported `fd.c`, the individual fd primitives are stubbed to plain libc and the
+//! tests run inside a private temp directory containing a `pg_wal` subdir. The
+//! seam slots are process-global `OnceLock`s, installed once via `Once`; each
+//! test resets the backing state and chdir's into its own scratch dir.
 
 use super::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Once;
+use std::ffi::CString;
+use std::sync::{Mutex, Once};
 
 use mcx::MemoryContext;
 use types_error::FATAL;
 
 thread_local! {
     static FILES: RefCell<BTreeMap<String, Vec<u8>>> = const { RefCell::new(BTreeMap::new()) };
-    // (final_path, content, replace_existing) tuples recorded by durable_write_file.
-    static WRITTEN: RefCell<Vec<(String, Vec<u8>, bool)>> = const { RefCell::new(Vec::new()) };
     // histfnames passed to xlog_archive_notify.
     static ARCHIVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 static INSTALL: Once = Once::new();
+// Serializes the write tests, which chdir into a shared scratch directory.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Install the in-memory seam providers once; reset the backing state.
 fn setup() {
@@ -32,7 +36,7 @@ fn setup() {
         xlogarchive::restore_archived_history_file::set(|_mcx, _xlogfname| Ok(None));
         xlogarchive::keep_file_restored_from_archive::set(|_path, _xlogfname| Ok(()));
         xlogarchive::xlog_archive_notify::set(|xlog| {
-            ARCHIVED.with(|c| c.borrow_mut().push(xlog.to_string()));
+            ARCHIVED.with(|c| c.borrow_mut().push(xlog));
             Ok(())
         });
 
@@ -43,21 +47,59 @@ fn setup() {
             })
         });
         fd::file_exists::set(|path| Ok(FILES.with(|c| c.borrow().contains_key(path))));
-        fd::durable_write_file::set(|final_path, content, replace_existing| {
-            FILES.with(|c| {
-                c.borrow_mut().insert(final_path.to_string(), content.to_vec());
-            });
-            WRITTEN.with(|c| {
-                c.borrow_mut()
-                    .push((final_path.to_string(), content.to_vec(), replace_existing))
-            });
+
+        // fd.c primitives backing the in-crate write orchestration: plain libc
+        // against the (chdir'd) scratch directory.
+        file::open_transient_file::set(|path, flags| {
+            let c = CString::new(path).unwrap();
+            Ok(unsafe { libc::open(c.as_ptr(), flags, 0o600) })
+        });
+        file::close_transient_file::set(|fd| unsafe { libc::close(fd) });
+        file::pg_fsync::set(|fd| unsafe { libc::fsync(fd) });
+        file::data_sync_elevel::set(|elevel| elevel);
+        file::durable_rename::set(|oldfile, newfile, _elevel| {
+            let o = CString::new(oldfile).unwrap();
+            let n = CString::new(newfile).unwrap();
+            if unsafe { libc::rename(o.as_ptr(), n.as_ptr()) } != 0 {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(current_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not rename file \"{oldfile}\" to \"{newfile}\": %m"))
+                    .into_error()
+                    .with_error_location(here()));
+            }
             Ok(())
         });
+
+        waitevent::pgstat_report_wait_start::set(|_| {});
+        waitevent::pgstat_report_wait_end::set(|| {});
     });
 
     FILES.with(|c| c.borrow_mut().clear());
-    WRITTEN.with(|c| c.borrow_mut().clear());
     ARCHIVED.with(|c| c.borrow_mut().clear());
+}
+
+/// Enter a fresh scratch dir (with a `pg_wal` subdir) for a write test; the
+/// returned guard restores the original cwd on drop and holds `WRITE_LOCK`.
+fn write_scratch() -> impl Drop {
+    struct Guard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        orig: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.orig);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    let lock = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let orig = std::env::current_dir().unwrap();
+    let dir = std::env::temp_dir().join(format!("tl_write_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("pg_wal")).unwrap();
+    std::env::set_current_dir(&dir).unwrap();
+    Guard { _lock: lock, orig, dir }
 }
 
 fn put_file(path: &str, bytes: &[u8]) {
@@ -66,8 +108,14 @@ fn put_file(path: &str, bytes: &[u8]) {
     });
 }
 
-fn get_file(path: &str) -> Option<Vec<u8>> {
-    FILES.with(|c| c.borrow().get(path).cloned())
+/// Read a file relative to the current (scratch) directory.
+fn read_scratch(path: &str) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// Seed a real file in the scratch dir (parent-history input for the write path).
+fn put_scratch(path: &str, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -224,11 +272,12 @@ fn read_history_ignores_comments_and_blanks() {
 #[test]
 fn write_history_appends_line_and_copies_parent() {
     setup();
-    put_file("pg_wal/00000001.history", b"# header\n");
+    let _g = write_scratch();
+    put_scratch("pg_wal/00000001.history", b"# header\n");
     let ctx = MemoryContext::new("test");
     writeTimeLineHistory(2, 1, 0x2000000, "no recovery target specified", false, false, ctx.mcx())
         .unwrap();
-    let written = get_file("pg_wal/00000002.history").unwrap();
+    let written = read_scratch("pg_wal/00000002.history").unwrap();
     let text = String::from_utf8(written).unwrap();
     assert_eq!(text, "# header\n\n1\t0/2000000\tno recovery target specified\n");
 }
@@ -236,15 +285,17 @@ fn write_history_appends_line_and_copies_parent() {
 #[test]
 fn write_history_no_parent_omits_leading_newline() {
     setup();
+    let _g = write_scratch();
     let ctx = MemoryContext::new("test");
     writeTimeLineHistory(2, 1, 0x16B6C50, "reason", false, false, ctx.mcx()).unwrap();
-    let text = String::from_utf8(get_file("pg_wal/00000002.history").unwrap()).unwrap();
+    let text = String::from_utf8(read_scratch("pg_wal/00000002.history").unwrap()).unwrap();
     assert_eq!(text, "1\t0/16B6C50\treason\n");
 }
 
 #[test]
 fn write_history_archives_when_active() {
     setup();
+    let _g = write_scratch();
     let ctx = MemoryContext::new("test");
     writeTimeLineHistory(2, 1, 0x16B6C50, "reason", false, true, ctx.mcx()).unwrap();
     ARCHIVED.with(|c| assert_eq!(c.borrow().as_slice(), ["00000002.history"]));
@@ -253,17 +304,11 @@ fn write_history_archives_when_active() {
 #[test]
 fn write_history_file_replaces() {
     setup();
+    let _g = write_scratch();
+    // A pre-existing destination must be replaced.
+    put_scratch("pg_wal/00000004.history", b"stale");
     writeTimeLineHistoryFile(4, b"contents").unwrap();
-    WRITTEN.with(|c| {
-        let entry = c
-            .borrow()
-            .iter()
-            .find(|(p, ..)| p == "pg_wal/00000004.history")
-            .cloned()
-            .unwrap();
-        assert!(entry.2, "writeTimeLineHistoryFile must replace existing");
-        assert_eq!(entry.1, b"contents");
-    });
+    assert_eq!(read_scratch("pg_wal/00000004.history").unwrap(), b"contents");
 }
 
 // ---------------------------------------------------------------------------

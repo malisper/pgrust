@@ -11,8 +11,16 @@
 //!
 //! The genuinely external operations cross per-owner seams:
 //!   - archive restore / keep / notify -> `backend-access-transam-xlogarchive`;
-//!   - raw history-file I/O (read-whole / exists-probe / atomic durable write)
-//!     -> `backend-storage-file-fd`.
+//!   - the *individual* fd.c primitives the write path orchestrates —
+//!     `OpenTransientFile` / `pg_fsync` / `CloseTransientFile` /
+//!     `durable_rename` / `data_sync_elevel` -> `backend-storage-file`; the
+//!     temp-name (`getpid`), `unlink`, and the `read`/`write`/`access` syscalls
+//!     are plain libc, exactly as timeline.c open-codes them. The temp-file
+//!     emplacement orchestration of `writeTimeLineHistory` /
+//!     `writeTimeLineHistoryFile` lives in this crate, not behind a bundled
+//!     seam;
+//!   - the read/exists probes (`AllocateFile`+read / `AllocateFile`+`FreeFile`)
+//!     -> `backend-storage-file-fd` (`read_file_or_absent` / `file_exists`).
 //!
 //! The `ArchiveRecoveryRequested` and `XLogArchivingActive()` per-backend
 //! globals (owned by xlogrecovery / xlog) are passed in as explicit parameters,
@@ -28,13 +36,38 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
+use backend_utils_error::errno::current_errno;
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR, FATAL};
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{TimeLineHistoryEntry, TimeLineID, XLogRecPtr, InvalidXLogRecPtr, XLOGDIR};
+use types_pgstat::wait_event::{
+    WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE,
+    WAIT_EVENT_TIMELINE_HISTORY_READ, WAIT_EVENT_TIMELINE_HISTORY_SYNC,
+    WAIT_EVENT_TIMELINE_HISTORY_WRITE,
+};
 
 use backend_access_transam_xlogarchive_seams as xlogarchive;
 use backend_storage_file_fd_seams as fd;
+use backend_storage_file_seams as file;
+use backend_utils_activity_waitevent_seams as waitevent;
+
+/// `errno`'s thread-local location (set to reproduce `%m` after a syscall the
+/// way timeline.c relies on `errno` being live when it calls `ereport`).
+#[cfg(target_os = "macos")]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+#[cfg(not(target_os = "macos"))]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
+fn set_errno(value: i32) {
+    unsafe {
+        *errno_location() = value;
+    }
+}
 
 /// `XLogRecPtrIsInvalid(r)` (`access/xlogdefs.h`).
 #[inline]
@@ -294,6 +327,15 @@ pub fn findNewestTimeLine(
     Ok(newestTLI)
 }
 
+/// `BLCKSZ` (`pg_config.h`) — the size of the parent-copy read buffer.
+const BLCKSZ: usize = 8192;
+
+/// `XLOGDIR "/xlogtemp.%d"` with the current pid (timeline.c's `snprintf`).
+fn xlog_temp_path() -> String {
+    let pid = unsafe { libc::getpid() } as i32;
+    format!("{XLOGDIR}/xlogtemp.{pid}")
+}
+
 /// Create a new timeline history file (`writeTimeLineHistory`,
 /// timeline.c:303-453).
 pub fn writeTimeLineHistory(
@@ -308,29 +350,111 @@ pub fn writeTimeLineHistory(
     debug_assert!(newTLI > parentTLI); /* else bad selection of newTLI */
 
     /*
-     * If a history file exists for the parent, copy it verbatim.
+     * Write into a temp file name.
      */
-    let parent_path;
-    if archive_recovery_requested {
-        let histfname = TLHistoryFileName(parentTLI);
-        match xlogarchive::restore_archived_history_file::call(mcx, &histfname)? {
-            Some(restored) => parent_path = restored.as_str().to_string(),
-            None => parent_path = String::new(),
-        }
-    } else {
-        parent_path = TLHistoryFilePath(parentTLI);
+    let tmppath = xlog_temp_path();
+
+    unsafe {
+        let c = std::ffi::CString::new(tmppath.as_bytes()).unwrap();
+        libc::unlink(c.as_ptr());
+    }
+
+    /* do not use get_sync_bit() here --- want to fsync only at end of fill */
+    let fd_ = file::open_transient_file::call(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
+    if fd_ < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
     }
 
     /*
-     * In C the parent file is read in BLCKSZ chunks and streamed into the temp
-     * file; the net effect is that the parent's bytes are copied verbatim ahead
-     * of the appended line. `had_parent` mirrors C's `srcfd >= 0` test, which
-     * controls whether the extra leading newline is inserted.
+     * If a history file exists for the parent, copy it verbatim.
      */
-    let (mut buffer, had_parent) = match fd::read_file_or_absent::call(mcx, &parent_path)? {
-        Some(bytes) => (bytes, true),
-        None => (PgVec::new_in(mcx), false),
-    };
+    let path;
+    if archive_recovery_requested {
+        let histfname = TLHistoryFileName(parentTLI);
+        /* RestoreArchivedFile(path, histfname, "RECOVERYHISTORY", 0, false). */
+        match xlogarchive::restore_archived_history_file::call(mcx, &histfname)? {
+            Some(restored) => path = restored.as_str().to_string(),
+            None => path = String::new(),
+        }
+    } else {
+        path = TLHistoryFilePath(parentTLI);
+    }
+
+    let srcfd = file::open_transient_file::call(&path, libc::O_RDONLY)?;
+    if srcfd < 0 {
+        if current_errno() != libc::ENOENT {
+            return Err(ereport(ERROR)
+                .with_saved_errno(current_errno())
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\": %m"))
+                .into_error()
+                .with_error_location(here()));
+        }
+        /* Not there, so assume parent has no parents */
+    } else {
+        let mut buffer = [0u8; BLCKSZ];
+        loop {
+            set_errno(0);
+            waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_READ);
+            let nbytes = unsafe {
+                libc::read(srcfd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len())
+            };
+            waitevent::pgstat_report_wait_end::call();
+            if nbytes < 0 || current_errno() != 0 {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(current_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not read file \"{path}\": %m"))
+                    .into_error()
+                    .with_error_location(here()));
+            }
+            if nbytes == 0 {
+                break;
+            }
+            let nbytes = nbytes as usize;
+            set_errno(0);
+            waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+            let written = unsafe {
+                libc::write(fd_, buffer.as_ptr() as *const libc::c_void, nbytes)
+            };
+            if written != nbytes as isize {
+                let save_errno = current_errno();
+
+                /*
+                 * If we fail to make the file, delete it to release disk space
+                 */
+                unsafe {
+                    let c = std::ffi::CString::new(tmppath.as_bytes()).unwrap();
+                    libc::unlink(c.as_ptr());
+                }
+
+                /* if write didn't set errno, assume problem is no disk space */
+                let en = if save_errno != 0 { save_errno } else { libc::ENOSPC };
+
+                return Err(ereport(ERROR)
+                    .with_saved_errno(en)
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not write to file \"{tmppath}\": %m"))
+                    .into_error()
+                    .with_error_location(here()));
+            }
+            waitevent::pgstat_report_wait_end::call();
+        }
+
+        if file::close_transient_file::call(srcfd) != 0 {
+            return Err(ereport(ERROR)
+                .with_saved_errno(current_errno())
+                .errcode_for_file_access()
+                .errmsg(format!("could not close file \"{path}\": %m"))
+                .into_error()
+                .with_error_location(here()));
+        }
+    }
 
     /*
      * Append one line with the details of this timeline split.
@@ -340,28 +464,69 @@ pub fn writeTimeLineHistory(
      */
     let line = format!(
         "{}{}\t{:X}/{:X}\t{}\n",
-        if !had_parent { "" } else { "\n" },
+        if srcfd < 0 { "" } else { "\n" },
         parentTLI,
         (switchpoint >> 32) as u32,
         switchpoint as u32,
         reason,
     );
-    let bytes = line.as_bytes();
-    buffer
-        .try_reserve(bytes.len())
-        .map_err(|_| mcx.oom(bytes.len()))?;
-    buffer.extend_from_slice(bytes);
+    let line_bytes = line.as_bytes();
+
+    set_errno(0);
+    waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_WRITE);
+    let written = unsafe {
+        libc::write(fd_, line_bytes.as_ptr() as *const libc::c_void, line_bytes.len())
+    };
+    if written != line_bytes.len() as isize {
+        let save_errno = current_errno();
+        unsafe {
+            let c = std::ffi::CString::new(tmppath.as_bytes()).unwrap();
+            libc::unlink(c.as_ptr());
+        }
+        let en = if save_errno != 0 { save_errno } else { libc::ENOSPC };
+        return Err(ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not write to file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+    waitevent::pgstat_report_wait_end::call();
+
+    waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_SYNC);
+    if file::pg_fsync::call(fd_) != 0 {
+        return Err(ereport(file::data_sync_elevel::call(ERROR))
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+    waitevent::pgstat_report_wait_end::call();
+
+    if file::close_transient_file::call(fd_) != 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
 
     /*
      * Now move the completed history file into place with its final name.
      */
     let path = TLHistoryFilePath(newTLI);
-    fd::durable_write_file::call(&path, &buffer, false)?;
+    debug_assert!({
+        let c = std::ffi::CString::new(path.as_bytes()).unwrap();
+        unsafe { libc::access(c.as_ptr(), libc::F_OK) != 0 && current_errno() == libc::ENOENT }
+    });
+    file::durable_rename::call(&tmppath, &path, ERROR)?;
 
     /* The history file can be archived immediately. */
     if xlog_archiving_active {
         let histfname = TLHistoryFileName(newTLI);
-        xlogarchive::xlog_archive_notify::call(&histfname)?;
+        xlogarchive::xlog_archive_notify::call(histfname)?;
     }
 
     Ok(())
@@ -371,11 +536,73 @@ pub fn writeTimeLineHistory(
 /// (`writeTimeLineHistoryFile`, timeline.c:462-520).
 pub fn writeTimeLineHistoryFile(tli: TimeLineID, content: &[u8]) -> PgResult<()> {
     /*
+     * Write into a temp file name.
+     */
+    let tmppath = xlog_temp_path();
+
+    unsafe {
+        let c = std::ffi::CString::new(tmppath.as_bytes()).unwrap();
+        libc::unlink(c.as_ptr());
+    }
+
+    /* do not use get_sync_bit() here --- want to fsync only at end of fill */
+    let fd_ = file::open_transient_file::call(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
+    if fd_ < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+
+    set_errno(0);
+    waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE);
+    let written = unsafe {
+        libc::write(fd_, content.as_ptr() as *const libc::c_void, content.len())
+    };
+    if written != content.len() as isize {
+        let save_errno = current_errno();
+        unsafe {
+            let c = std::ffi::CString::new(tmppath.as_bytes()).unwrap();
+            libc::unlink(c.as_ptr());
+        }
+        let en = if save_errno != 0 { save_errno } else { libc::ENOSPC };
+        return Err(ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not write to file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+    waitevent::pgstat_report_wait_end::call();
+
+    waitevent::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC);
+    if file::pg_fsync::call(fd_) != 0 {
+        return Err(ereport(file::data_sync_elevel::call(ERROR))
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+    waitevent::pgstat_report_wait_end::call();
+
+    if file::close_transient_file::call(fd_) != 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{tmppath}\": %m"))
+            .into_error()
+            .with_error_location(here()));
+    }
+
+    /*
      * Now move the completed history file into place with its final name,
      * replacing any existing file with the same name.
      */
     let path = TLHistoryFilePath(tli);
-    fd::durable_write_file::call(&path, content, true)
+    file::durable_rename::call(&tmppath, &path, ERROR)
 }
 
 /// Returns true if `expectedTLEs` contains a timeline with id `tli`

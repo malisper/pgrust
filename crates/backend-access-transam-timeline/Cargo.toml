@@ -17,3 +17,7 @@ types-error = { path = "../types-error" }
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
 backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-file-seams = { path = "../backend-storage-file-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+types-pgstat = { path = "../types-pgstat" }
+libc = "0.2"
