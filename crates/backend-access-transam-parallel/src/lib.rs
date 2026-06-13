@@ -2783,4 +2783,159 @@ mod dsm_substrate_tests {
         let _ = top;
         Ok(())
     }
+
+    /// Family `tqueue-substrate-check` (integration): drive execParallel's
+    /// *tuple-queue* path — `ExecParallelSetupTupleQueues` (leader) +
+    /// `ExecParallelGetReceiver` (worker) — through the exact same real seam
+    /// layer, proving the tuple queues are real shm_mq rings over real in-segment
+    /// chunk addresses, with the real `DsmSegmentId` + `Mcx<'static>` (the handle
+    /// is allocated in `top_memory_context()`) + `MyLatch` threaded into
+    /// `shm_mq_attach`. Mirrors the error-queue round-trip but over a
+    /// multi-worker tqueue region keyed by `PARALLEL_KEY_TUPLE_QUEUE`, with the
+    /// leader as receiver and the worker as sender (the C tuple-flow direction).
+    #[test]
+    fn tuple_queue_roundtrip_over_real_dsm() -> PgResult<()> {
+        use backend_storage_ipc_dsm_core::dsm::{dsm_create, dsm_detach};
+        use backend_storage_ipc_shm_mq::{
+            shm_mq_attach as real_attach, shm_mq_send as real_send, ShmMq, SHM_MQ_SUCCESS,
+        };
+
+        // execParallel.c constants (execParallel.c:69, the TUPLE_QUEUE TOC key).
+        const PARALLEL_KEY_TUPLE_QUEUE: u64 = 0xE000000000000005;
+        const PARALLEL_TUPLE_QUEUE_SIZE: usize = 65536;
+        // Two workers — exercises the `i*SIZE` chunk arithmetic in both
+        // `shm_mq_create_at` and the worker's `shm_mq_at` cast.
+        const NWORKERS: i32 = 2;
+        // The worker we round-trip through (the C `ParallelWorkerNumber`).
+        const WORKER: i32 = 1;
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+        install_shm_mq_seam_layer_once();
+
+        // --- LEADER: real DSM segment + real shm_toc; allocate the whole
+        // `mul_size(SIZE, nworkers)` tuple-queue region and create+attach one
+        // queue per worker, exactly as ExecParallelSetupTupleQueues. ---
+        let segsize: usize = mul_size(PARALLEL_TUPLE_QUEUE_SIZE, NWORKERS as usize)? + (1 << 16);
+        let leader_seg = dsm_create(segsize, 0, top)
+            .expect("dsm_create errored")
+            .expect("dsm_create returned None");
+        let id = leader_seg.id();
+        let leader_base = dsm_segment_address(id);
+        assert!(!leader_base.is_null());
+        let leader_base_nn = NonNull::new(leader_base).unwrap();
+        // SAFETY: freshly created, page-aligned, segsize-byte writable segment.
+        let leader_toc = unsafe { ShmToc::create(PARALLEL_MAGIC, leader_base_nn, segsize) };
+        let tq_region = leader_toc
+            .allocate(mul_size(PARALLEL_TUPLE_QUEUE_SIZE, NWORKERS as usize)?)
+            .expect("leader allocate tuple-queue region");
+        // SAFETY: chunk is a real in-segment address from this segment.
+        unsafe {
+            leader_toc
+                .insert(PARALLEL_KEY_TUPLE_QUEUE, tq_region)
+                .expect("leader insert tuple-queue region");
+        }
+        let tq_off = tq_region.as_ptr() as usize - leader_base as usize;
+        let tqueuespace = SerializeCursor(tq_region.as_ptr() as usize);
+
+        // Per-worker: create the real shm_mq at `region + i*SIZE`, set ourselves
+        // (the leader, MyProc==0) as receiver, attach over the real seg. This is
+        // the verbatim ExecParallelSetupTupleQueues loop body.
+        let mut leader_handles = Vec::new();
+        for i in 0..NWORKERS {
+            let mq = shmmq::shm_mq_create_at::call(tqueuespace, i, PARALLEL_TUPLE_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            leader_handles.push(shmmq::shm_mq_attach::call(mq, seg_to_exec(seg_handle_of(id)))?);
+        }
+        assert_eq!(leader_handles.len(), NWORKERS as usize);
+
+        // --- WORKER (same process): unlike the error-queue round-trip we keep
+        // the leader's mapping LIVE rather than detach+re-attach, because the
+        // faithful `ExecParallelSetupTupleQueues` attaches the leader's receiver
+        // handles with `Some(seg)` (the real C call), so detaching the leader's
+        // mapping in a single process would fire their `on_dsm_detach` and mark
+        // the queues detached. The leader's `toc`/base IS the shared segment
+        // here; the worker resolves the same tuple-queue region over it and casts
+        // + attaches its own queue (ExecParallelGetReceiver: shm_mq_at,
+        // set_sender, attach over the real `seg`). ---
+        let real_toc = unsafe { ShmToc::attach(PARALLEL_MAGIC, leader_base_nn) }
+            .expect("ShmToc::attach: magic must match the leader's");
+        let toc_base = leader_base as usize;
+        WORKER_ATTACHED.with(|w| {
+            w.borrow_mut().push(WorkerAttached {
+                base: toc_base,
+                _seg_guard: leader_seg,
+                toc: real_toc,
+            })
+        });
+        let toc = ExecShmToc(toc_base);
+        let worker_seg = seg_handle_of(id);
+
+        let mqspace = SerializeCursor(worker_lookup(toc, PARALLEL_KEY_TUPLE_QUEUE)?);
+        assert_eq!(
+            mqspace.0 - toc_base,
+            tq_off,
+            "worker resolves the same tuple-queue offset the leader inserted"
+        );
+        // C: mq = (shm_mq *)(mqspace + ParallelWorkerNumber*SIZE) — a cast, not a
+        // re-create (re-creating would wipe the leader's mq_set_receiver).
+        let worker_mq =
+            shmmq::shm_mq_at::call(mqspace, WORKER, PARALLEL_TUPLE_QUEUE_SIZE);
+        shmmq::shm_mq_set_sender_to_myproc::call(worker_mq);
+        let worker_mqh = shmmq::shm_mq_attach::call(worker_mq, seg_to_exec(worker_seg))
+            .expect("worker tuple-queue shm_mq_attach over real DsmSegmentId");
+
+        // The leader's receiver queue for WORKER now sees the worker as sender —
+        // the wait_for_parallel_workers_to_attach probe.
+        let probe = shmmq::shm_mq_get_queue::call(worker_mqh);
+        assert!(
+            shmmq::shm_mq_get_sender::call(probe).is_some(),
+            "leader must see the worker attached as sender on the real tuple chunk"
+        );
+
+        // --- DATA ROUND-TRIP: worker sends a tuple frame; leader receives it on
+        // the matching per-worker queue, proving real bytes flow over the real
+        // DSM tuple chunk. ---
+        // SAFETY: the worker-side queue base is the real in-segment chunk address.
+        let worker_send_mq =
+            unsafe { ShmMq::from_base(NonNull::new(worker_mq.0 as *mut u8).unwrap()) };
+        let mut worker_send_h = real_attach(
+            worker_send_mq,
+            top,
+            None,
+            None,
+            backend_storage_ipc_latch_seams::my_latch::call(),
+        )
+        .expect("worker tuple sender shm_mq_attach");
+
+        let frame = b"parallel tuple frame";
+        // SAFETY: both handles wrap the same live, attached in-segment queue.
+        let sres =
+            unsafe { real_send(&mut worker_send_h, frame, false, true) }.expect("shm_mq_send");
+        assert_eq!(sres, SHM_MQ_SUCCESS);
+
+        // The leader receives through the SAME registry handle it attached as
+        // receiver for WORKER (`leader_handles[WORKER]`) — no second attach
+        // (that would reset the ring). This is exactly the seam the tuple-queue
+        // readers (`TupleQueueReceiver`) use: `shm_mq_receive::call`.
+        let (rres, payload) = shmmq::shm_mq_receive::call(leader_handles[WORKER as usize])?;
+        assert_eq!(rres, Some(ShmMqResult::Success));
+        assert_eq!(payload, frame, "leader reads back the worker's tuple bytes");
+
+        // --- teardown: detach the seam handles (cancels their on_dsm_detach),
+        // then release the single shared mapping. ---
+        shmmq::shm_mq_detach::call(worker_mqh);
+        for h in leader_handles {
+            shmmq::shm_mq_detach::call(h);
+        }
+        let entry = WORKER_ATTACHED.with(|w| {
+            let mut w = w.borrow_mut();
+            let pos = w.iter().position(|e| e.base == toc_base).unwrap();
+            w.remove(pos)
+        });
+        dsm_detach(entry._seg_guard.into_id()).expect("dsm_detach (segment)");
+        let _ = (top, frame, worker_send_h);
+        Ok(())
+    }
 }
