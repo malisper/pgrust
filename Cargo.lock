@@ -3645,6 +3645,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-unicode-norm-bitfields"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -3831,6 +3841,7 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
+ "common-unicode-norm-bitfields",
  "interfaces-libpq-legacy-pqsignal",
 ]
 

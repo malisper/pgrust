@@ -72,4 +72,5 @@ backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvir
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
+common-unicode-norm-bitfields = { path = "../common-unicode-norm-bitfields" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
