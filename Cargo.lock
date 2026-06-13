@@ -2269,6 +2269,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-define"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-commands-define-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-parser-parse-type-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
+ "mcx",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-commands-define-seams"
 version = "0.0.0"
 dependencies = [
@@ -4019,6 +4037,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -4211,6 +4230,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-opclass",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -8525,6 +8545,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-define",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execPartition",

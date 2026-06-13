@@ -408,6 +408,11 @@ pub enum Node {
     RoleSpec(RoleSpec),
     /// `T_AccessPriv`
     AccessPriv(AccessPriv),
+    /// `T_List` — a generic `List *` of nodes (e.g. a `DefElem` value that is a
+    /// possibly-qualified name list, or `defGetStringList`'s list of `String`s).
+    List(Vec<Node>),
+    /// `T_A_Star` — the `*` wildcard value node (`nodes/parsenodes.h`).
+    A_Star,
 }
 
 impl Node {
@@ -480,6 +485,43 @@ impl Node {
         match self {
             Node::AccessPriv(a) => Some(a),
             _ => None,
+        }
+    }
+
+    /// `IsA(node, List)` accessor — the cells of a generic `List *`.
+    pub fn as_list(&self) -> Option<&[Node]> {
+        match self {
+            Node::List(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// `castNode(Float, node)->fval` accessor.
+    pub fn as_float(&self) -> Option<&Float> {
+        match self {
+            Node::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The node's tag name, used in the `unrecognized node type` / `unexpected
+    /// node type in name list` error messages (C prints the numeric `NodeTag`;
+    /// the trimmed enum has no numeric tag, so we print the C type name).
+    pub fn node_tag_name(&self) -> &'static str {
+        match self {
+            Node::Integer(_) => "Integer",
+            Node::Float(_) => "Float",
+            Node::Boolean(_) => "Boolean",
+            Node::String(_) => "String",
+            Node::BitString(_) => "BitString",
+            Node::TypeName(_) => "TypeName",
+            Node::DefElem(_) => "DefElem",
+            Node::ObjectWithArgs(_) => "ObjectWithArgs",
+            Node::FunctionParameter(_) => "FunctionParameter",
+            Node::RoleSpec(_) => "RoleSpec",
+            Node::AccessPriv(_) => "AccessPriv",
+            Node::List(_) => "List",
+            Node::A_Star => "A_Star",
         }
     }
 }
