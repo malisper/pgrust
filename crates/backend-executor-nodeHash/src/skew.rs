@@ -3,14 +3,27 @@
 
 use mcx::Mcx;
 use types_core::{uint32, Size};
+use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::nodehash::{
-    Hash, HashJoinBuckets, HashJoinTupleLink, HashState, HashJoinTableData,
-    INVALID_SKEW_BUCKET_NO,
+    Hash, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashSkewBucket, HashState,
+    HashJoinTableData, INVALID_SKEW_BUCKET_NO,
 };
+use types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
 
-use crate::hash_table::{dense_alloc, ExecHashGetBucketAndBatch};
-use crate::{SKEW_BUCKET_OVERHEAD, HJTUPLE_OVERHEAD};
+use crate::hash_table::{dense_alloc, ExecHashGetBucketAndBatch, ExecHashIncreaseNumBatches};
+use crate::{MaxAllocSize, SKEW_BUCKET_OVERHEAD, HJTUPLE_OVERHEAD, SKEW_MIN_OUTER_FRACTION};
+
+/// `pg_nextpower2_32(num)` (`port/pg_bitutils.h`, static inline) — the next
+/// power of 2 not less than `num` (`num` must be > 0 and <= 2^31).
+#[inline]
+fn pg_nextpower2_32(num: u32) -> u32 {
+    debug_assert!(num > 0 && num <= (1u32 << 31));
+    if num == 1 {
+        return 1;
+    }
+    1u32 << (32 - (num - 1).leading_zeros())
+}
 
 /// `ExecHashBuildSkewHash(HashState *hashstate, HashJoinTable hashtable,
 /// Hash *node, int mcvsToUse)` (nodeHash.c:2403) — set up the skew hashtable
@@ -21,7 +34,7 @@ pub fn ExecHashBuildSkewHash<'mcx>(
     hashstate: &mut HashState<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
     node: &Hash<'mcx>,
-    mcvsToUse: i32,
+    mut mcvsToUse: i32,
 ) -> PgResult<()> {
     // Do nothing if planner didn't identify the outer relation's join key.
     if !types_core::OidIsValid(node.skewTable) {
@@ -37,27 +50,149 @@ pub fn ExecHashBuildSkewHash<'mcx>(
     //                                skewInherit);
     //   if (!HeapTupleIsValid(statsTuple)) return;
     //   if (get_attstatsslot(&sslot, statsTuple, STATISTIC_KIND_MCV, InvalidOid,
-    //                        ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)) {
-    //       ... build the skewBucket[] open-addressing table, hashing each MCV
-    //       through FunctionCall1Coll(hashstate->skew_hashfunction, ...) ...
-    //   }
+    //                        ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)) { ... }
     //   ReleaseSysCache(statsTuple);
     //
-    // The pg_statistic MCV lookup (SearchSysCache3(STATRELATTINH) /
-    // get_attstatsslot / free_attstatsslot / ReleaseSysCache) and the per-MCV
-    // skew hash function (FunctionCall1Coll on hashstate->skew_hashfunction)
-    // are owned by backend-utils-cache-syscache and backend-utils-fmgr-fmgr.
-    // Neither owner declares the STATRELATTINH MCV-slot projection nor the
-    // collation-aware fmgr call in its seam crate yet, so the build path is a
-    // loud seam-boundary panic until they land. The two guards above are the
-    // real C logic that precedes the lookup.
-    let _ = (mcx, hashstate, hashtable);
-    panic!(
-        "backend-utils-cache-syscache: SearchSysCache3(STATRELATTINH) + \
-         get_attstatsslot(STATISTIC_KIND_MCV), and backend-utils-fmgr-fmgr: \
-         FunctionCall1Coll(hashstate.skew_hashfunction) not yet ported \
-         (nodeHash.c:2403 ExecHashBuildSkewHash)"
-    );
+    // The owner (lsyscache) does the SearchSysCache3 + get_attstatsslot +
+    // free_attstatsslot + ReleaseSysCache, returning the MCV slot's
+    // (values, numbers) arrays copied into mcx, or None on a missing
+    // pg_statistic row or missing MCV slot.
+    let slot = backend_utils_cache_lsyscache_seams::get_attstatsslot_mcv::call(
+        mcx,
+        node.skewTable,
+        node.skewColumn,
+        node.skewInherit,
+    )?;
+    let (values, numbers) = match slot {
+        // !HeapTupleIsValid(statsTuple) || !get_attstatsslot(...): nothing to do.
+        None => return Ok(()),
+        Some(s) => s,
+    };
+
+    // get_attstatsslot succeeded.
+    let nvalues = values.len() as i32;
+
+    if mcvsToUse > nvalues {
+        mcvsToUse = nvalues;
+    }
+
+    // Calculate the expected fraction of outer relation that will participate
+    // in the skew optimization.  If this isn't at least SKEW_MIN_OUTER_FRACTION,
+    // don't use skew optimization.
+    let mut frac: f64 = 0.0;
+    for i in 0..mcvsToUse as usize {
+        frac += numbers[i] as f64;
+    }
+    if frac < SKEW_MIN_OUTER_FRACTION {
+        // free_attstatsslot(&sslot); ReleaseSysCache(statsTuple): the owner
+        // already released; the copied arrays drop here.
+        return Ok(());
+    }
+
+    // Okay, set up the skew hashtable.
+    //
+    // skewBucket[] is an open addressing hashtable with a power of 2 size that
+    // is greater than the number of MCV values.  (This ensures there will be at
+    // least one null entry, so searches will always terminate.)
+    //
+    // Note: this code could fail if mcvsToUse exceeds INT_MAX/8 or
+    // MaxAllocSize/sizeof(void *)/8, but that is not currently possible since we
+    // limit pg_statistic entries to much less than that.
+    let _ = MaxAllocSize;
+    let mut nbuckets = pg_nextpower2_32((mcvsToUse + 1) as u32) as i32;
+    // use two more bits just to help avoid collisions
+    nbuckets <<= 2;
+
+    hashtable.skewEnabled = true;
+    hashtable.skewBucketLen = nbuckets;
+
+    // We allocate the bucket memory in the hashtable's batch context. It is only
+    // needed during the first batch, and this ensures it will be automatically
+    // removed once the first batch is done.
+    //   hashtable->skewBucket = MemoryContextAllocZero(batchCxt,
+    //       nbuckets * sizeof(HashSkewBucket *));
+    //   hashtable->skewBucketNums = MemoryContextAllocZero(batchCxt,
+    //       mcvsToUse * sizeof(int));
+    let mut skewBucket = mcx::vec_with_capacity_in::<Option<Box<HashSkewBucket>>>(
+        mcx,
+        nbuckets as usize,
+    )?;
+    for _ in 0..nbuckets {
+        skewBucket.push(None);
+    }
+    let mut skewBucketNums = mcx::vec_with_capacity_in::<i32>(mcx, mcvsToUse as usize)?;
+    for _ in 0..mcvsToUse {
+        skewBucketNums.push(0);
+    }
+    hashtable.skewBucket = skewBucket;
+    hashtable.skewBucketNums = skewBucketNums;
+
+    let arrays_space: Size =
+        nbuckets as usize * core::mem::size_of::<usize>() + mcvsToUse as usize * core::mem::size_of::<i32>();
+    hashtable.spaceUsed += arrays_space;
+    hashtable.spaceUsedSkew += arrays_space;
+    if hashtable.spaceUsed > hashtable.spacePeak {
+        hashtable.spacePeak = hashtable.spaceUsed;
+    }
+
+    // Create a skew bucket for each MCV hash value.
+    //
+    // Note: it is very important that we create the buckets in order of
+    // decreasing MCV frequency.  If we have to remove some buckets, they must be
+    // removed in reverse order of creation (see notes in
+    // ExecHashRemoveNextSkewBucket) and we want the least common MCVs to be
+    // removed first.
+    for i in 0..mcvsToUse as usize {
+        // hashvalue = DatumGetUInt32(FunctionCall1Coll(hashstate->skew_hashfunction,
+        //                            hashstate->skew_collation, sslot.values[i]));
+        let skew_hashfunction = hashstate
+            .skew_hashfunction
+            .as_ref()
+            .expect("skew_hashfunction must be set when building skew hashtable");
+        let result: Datum = backend_utils_fmgr_fmgr_seams::function_call1_coll::call(
+            skew_hashfunction.fn_oid,
+            hashstate.skew_collation,
+            values[i],
+        )?;
+        let hashvalue: uint32 = result.as_u32();
+
+        // While we have not hit a hole in the hashtable and have not hit the
+        // desired bucket, we have collided with some previous hash value, so try
+        // the next bucket location.  NB: this code must match
+        // ExecHashGetSkewBucket.
+        let mask = (nbuckets - 1) as uint32;
+        let mut bucket = (hashvalue & mask) as usize;
+        while let Some(entry) = hashtable.skewBucket[bucket].as_ref() {
+            if entry.hashvalue == hashvalue {
+                break;
+            }
+            bucket = ((bucket as uint32 + 1) & mask) as usize;
+        }
+
+        // If we found an existing bucket with the same hashvalue, leave it
+        // alone.  It's okay for two MCVs to share a hashvalue.
+        if hashtable.skewBucket[bucket].is_some() {
+            continue;
+        }
+
+        // Okay, create a new skew bucket for this hashvalue.
+        hashtable.skewBucket[bucket] = Some(Box::new(HashSkewBucket {
+            hashvalue,
+            tuples: None,
+        }));
+        let n = hashtable.nSkewBuckets as usize;
+        hashtable.skewBucketNums[n] = bucket as i32;
+        hashtable.nSkewBuckets += 1;
+        hashtable.spaceUsed += SKEW_BUCKET_OVERHEAD;
+        hashtable.spaceUsedSkew += SKEW_BUCKET_OVERHEAD;
+        if hashtable.spaceUsed > hashtable.spacePeak {
+            hashtable.spacePeak = hashtable.spaceUsed;
+        }
+    }
+
+    // free_attstatsslot(&sslot); ReleaseSysCache(statsTuple): handled by the
+    // owner; the copied arrays drop here.
+    Ok(())
 }
 
 /// `ExecHashGetSkewBucket(HashJoinTable hashtable, uint32 hashvalue)`
@@ -106,15 +241,62 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     // bool shouldFree;
     // MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
     //
-    // ExecFetchSlotMinimalTuple is owned by backend-executor-execTuples, which
-    // does not yet declare it in its seam crate. The remaining logic below is
-    // the real C body; it panics at the seam boundary until that owner lands.
-    let _ = (mcx, hashtable, slot, hashvalue, bucketNumber);
-    panic!(
-        "backend-executor-execTuples: ExecFetchSlotMinimalTuple / \
-         heap_free_minimal_tuple not yet ported (nodeHash.c:2601 \
-         ExecHashSkewTableInsert)"
-    );
+    // The owned model always copies into mcx, so the C shouldFree /
+    // heap_free_minimal_tuple bookkeeping is internal to the owner.
+    let mut tuple =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, slot)?;
+
+    // Create the HashJoinTuple.
+    //   hashTupleSize = HJTUPLE_OVERHEAD + tuple->t_len;
+    //   hashTuple = MemoryContextAlloc(hashtable->batchCxt, hashTupleSize);
+    //   hashTuple->hashvalue = hashvalue;
+    //   memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
+    //   HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(hashTuple));
+    let hashTupleSize: Size = HJTUPLE_OVERHEAD + tuple.t_len as usize;
+    // HeapTupleHeaderClearMatch: tup->t_infomask2 &= ~HEAP_TUPLE_HAS_MATCH.
+    tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+    let hashTuple = HashJoinTupleData {
+        next: HashJoinTupleLink::Unshared(None),
+        hashvalue,
+        mintuple: tuple,
+    };
+    // Push the tuple into the owned arena (C: MemoryContextAlloc in batchCxt).
+    hashtable.tuples.try_reserve(1).map_err(|_| mcx.oom(hashTupleSize))?;
+    let idx = types_nodes::nodehash::HashTupleIdx(hashtable.tuples.len());
+    hashtable.tuples.push(hashTuple);
+
+    // Push it onto the front of the skew bucket's list.
+    //   hashTuple->next.unshared = hashtable->skewBucket[bucketNumber]->tuples;
+    //   hashtable->skewBucket[bucketNumber]->tuples = hashTuple;
+    //   Assert(hashTuple != hashTuple->next.unshared);
+    {
+        let bucket = hashtable.skewBucket[bucketNumber as usize]
+            .as_mut()
+            .expect("skew bucket slot must be occupied for an insert");
+        let old_head = bucket.tuples;
+        hashtable.tuples[idx.0].next = HashJoinTupleLink::Unshared(old_head);
+        bucket.tuples = Some(idx);
+        debug_assert!(old_head != Some(idx));
+    }
+
+    // Account for space used, and back off if we've used too much.
+    hashtable.spaceUsed += hashTupleSize;
+    hashtable.spaceUsedSkew += hashTupleSize;
+    if hashtable.spaceUsed > hashtable.spacePeak {
+        hashtable.spacePeak = hashtable.spaceUsed;
+    }
+    while hashtable.spaceUsedSkew > hashtable.spaceAllowedSkew {
+        ExecHashRemoveNextSkewBucket(mcx, hashtable)?;
+    }
+
+    // Check we are not over the total spaceAllowed, either.
+    if hashtable.spaceUsed > hashtable.spaceAllowed {
+        ExecHashIncreaseNumBatches(mcx, hashtable)?;
+    }
+
+    // if (shouldFree) heap_free_minimal_tuple(tuple): the owned copy lives in
+    // the arena; the original slot tuple is the owner's concern.
+    Ok(())
 }
 
 /// `ExecHashRemoveNextSkewBucket(HashJoinTable hashtable)` (nodeHash.c:2647) —
@@ -212,9 +394,9 @@ pub fn ExecHashRemoveNextSkewBucket<'mcx>(
         hashTuple = nextHashTuple;
 
         // Allow this loop to be cancellable.
-        // CHECK_FOR_INTERRUPTS(): owned by the signal/interrupt subsystem;
-        // a no-op stand-in here would silently drop cancellation, so this
-        // call point is left as the documented C site without a fake check.
+        // CHECK_FOR_INTERRUPTS(): owned by tcop/postgres; the interrupt seam is
+        // a no-op for the skew data structure's correctness and is a
+        // cross-family Cargo concern, so the call site is left documented here.
     }
 
     // Free the bucket struct itself and reset the hashtable entry to NULL.
