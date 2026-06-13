@@ -25,6 +25,14 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
     root_result_rel_info: RriId,
     partidx: i32,
 ) -> PgResult<RriId> {
+    // ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
+    //
+    // The `ModifyTable` *plan* node (nodeModifyTable.h) — distinct from the
+    // ported `ModifyTableState` — is not in `types-nodes` yet, so `node` and
+    // every field the tail reads off it (operation, onConflictAction,
+    // withCheckOptionLists, returningLists, onConflictSet/Cols/Where,
+    // mergeActionLists, mergeJoinConditions) is unavailable here.
+
     // Oid partOid = dispatch->partdesc->oids[partidx];
     let part_oid = {
         let pd = &proute.partition_dispatch_info[dispatch];
@@ -34,6 +42,26 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
             .expect("PartitionDispatch.partdesc set");
         partdesc.oids[partidx as usize]
     };
+
+    // int       firstVarno = mtstate->resultRelInfo[0].ri_RangeTableIndex;
+    // Relation  firstResultRel = mtstate->resultRelInfo[0].ri_RelationDesc;
+    //
+    // These reference the "first" result relation, used as the attno-mapping
+    // reference for the WCO / RETURNING / ON CONFLICT / MERGE Var translation.
+    // Read them up front exactly as the C prologue does (before any branch).
+    let first_rri_id = mtstate.resultRelInfo[0];
+    let _first_varno = estate.result_rel(first_rri_id).ri_RangeTableIndex;
+    let _first_result_rel = estate
+        .result_rel(first_rri_id)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.alias());
+
+    // oldcxt = MemoryContextSwitchTo(proute->memcxt);
+    //
+    // The owned model threads `mcx` (proute->memcxt) into each allocating call
+    // rather than switching an ambient current context, so there is no switch
+    // to perform here; the C `oldcxt`/restore pair collapses away.
 
     // partrel = table_open(partOid, RowExclusiveLock);
     let partrel =
@@ -57,16 +85,22 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
     // The following per-partition setup steps — verifying the result rel is a
     // valid INSERT target (CheckValidResultRel), opening partition indices
     // (ExecOpenIndices), building the WITH CHECK OPTION / RETURNING / ON
-    // CONFLICT / MERGE state, and storing the per-partition FdwRoutine/batch
-    // bookkeeping — all read or write `ResultRelInfo` fields that the trimmed
-    // executor type (and their owning -seams crates) do not yet carry.  Until
-    // those land, the C body past InitResultRelInfo cannot be expressed; a loud
-    // panic here beats silently dropping that logic.
-    let _ = (mtstate, partidx, &partrel, &mut leaf_part_rri);
+    // CONFLICT / MERGE state via map_variable_attnos / build_attrmap_by_name /
+    // ExecInitQual / ExecBuildProjectionInfo / ExecBuildUpdateProjection /
+    // ExecInitMerge / ExecInitRoutingInfo, then appending leaf_part_rri to
+    // estate->es_tuple_routing_result_relations — all need the `ModifyTable`
+    // plan node and read or write `ResultRelInfo` fields (ri_WithCheckOptions,
+    // ri_returningList, ri_projectReturning, ri_onConflict, ri_MergeActions,
+    // ri_MergeJoinCondition, ri_newTupleSlot, ri_projectNewInfoValid) that the
+    // trimmed executor type does not yet carry, plus owner functions for which
+    // no seam is authored.  Until those land the C body past InitResultRelInfo
+    // cannot be expressed; a loud panic beats silently dropping that logic.
+    let _ = (partidx, &partrel, &mut leaf_part_rri);
     panic!(
         "ExecInitPartitionInfo: CheckValidResultRel / ExecOpenIndices / WCO / \
-         RETURNING / ON CONFLICT / MERGE setup not yet portable — trimmed \
-         ResultRelInfo and its owners (execMain index/WCO, execExpr update \
-         projection, nodeModifyTable merge) have not landed"
+         RETURNING / ON CONFLICT / MERGE setup not yet portable — the ModifyTable \
+         plan node, the trimmed ResultRelInfo's per-command fields, and owners \
+         (execMain index open/WCO, execExpr update projection, nodeModifyTable \
+         merge, map_variable_attnos/build_attrmap_by_name) have not landed"
     );
 }
