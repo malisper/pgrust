@@ -795,6 +795,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-xactdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xactdesc-seams",
+ "backend-rmgrdesc-next",
+ "backend-utils-adt-timestamp-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-xactdesc-seams"
 version = "0.0.0"
 dependencies = [
