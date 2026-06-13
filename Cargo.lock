@@ -70,6 +70,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-detoast"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-toast-compression-seams",
+ "backend-access-common-toast-internals-seams",
+ "backend-utils-adt-misc2-seams",
+ "common-pglz-seams",
+ "mcx",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-common-detoast-seams"
 version = "0.0.0"
 dependencies = [
@@ -199,6 +213,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-common-toast-compression-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
 ]
 
@@ -7667,6 +7690,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-pglz-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "common-relpath-seams"
 version = "0.0.0"
 dependencies = [
@@ -7851,6 +7882,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",

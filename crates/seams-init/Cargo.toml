@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }

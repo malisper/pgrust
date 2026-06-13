@@ -6,6 +6,7 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
+    backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_reloptions::init_seams();
     backend_access_hashvalidate::init_seams();
