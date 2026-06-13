@@ -59,3 +59,9 @@ seam_core::seam!(
     /// condition-variable seams, so only a borrow is handed out here.
     pub fn with_wal_confirm_rcv_cv(f: &mut dyn FnMut(&types_condvar::ConditionVariable))
 );
+
+seam_core::seam!(
+    /// `if (AllowCascadeReplication()) WalSndWakeup(true, false)` — wake
+    /// cascading walsenders after the walreceiver flushes new WAL.
+    pub fn walsnd_wakeup_if_cascading()
+);

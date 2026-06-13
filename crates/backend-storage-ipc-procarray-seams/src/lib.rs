@@ -187,3 +187,9 @@ seam_core::seam!(
     /// `ProcArrayLock` is part of this operation in the owner.
     pub fn proc_array_clear_logical_decoding_flag()
 );
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);
