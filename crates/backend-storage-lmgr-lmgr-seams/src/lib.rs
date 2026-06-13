@@ -67,6 +67,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LockSharedObject(classid, objid, objsubid, lockmode)` (lmgr.c): lock a
+    /// shared-catalog object (a global object visible from every database);
+    /// also accepts pending invalidation messages. Can `ereport(ERROR)`,
+    /// carried on `Err`. On success the lock is held by the returned guard
+    /// (released at transaction end via `keep`, the C default).
+    pub fn lock_shared_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<LockGuard>
+);
+
+seam_core::seam!(
     /// `UnlockRelationOid(relid, lockmode)` (lmgr.c). [`LockGuard`] plumbing
     /// — consumers go through the guard, never call this directly. C can
     /// `elog(WARNING/ERROR)` on a lock-table inconsistency, carried on `Err`.
@@ -151,6 +165,51 @@ fn unlock(tag: LockTag) -> PgResult<()> {
         LockTag::Relation { relid, lockmode } => unlock_relation_oid::call(relid, lockmode),
         LockTag::Object { classid, objid, objsubid, lockmode } => {
             unlock_database_object::call(classid, objid, objsubid, lockmode)
+        }
+    }
+}
+
+seam_core::seam!(
+    /// `LockRelationForExtension(rel, ExclusiveLock)` (lmgr.c): take the
+    /// relation-extension lock. On success the lock is held by the returned
+    /// guard; releasing the guard is `UnlockRelationForExtension`. Acquisition
+    /// can `ereport(ERROR)`, carried on `Err`.
+    pub fn lock_relation_for_extension<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<RelationExtensionLockGuard>
+);
+
+seam_core::seam!(
+    /// `UnlockRelationForExtension(rel, ExclusiveLock)` (lmgr.c) — the release
+    /// half, reached only through [`RelationExtensionLockGuard`].
+    pub fn unlock_relation_for_extension(relid: Oid) -> PgResult<()>
+);
+
+/// A held relation-extension lock. Releasing it (explicitly or on unwind)
+/// delegates to `UnlockRelationForExtension`. Constructed by the lmgr owner
+/// when installing `lock_relation_for_extension`.
+#[derive(Debug)]
+pub struct RelationExtensionLockGuard(Option<Oid>);
+
+impl RelationExtensionLockGuard {
+    /// Guard for a lock just acquired on the relation with this OID.
+    pub fn new(relid: Oid) -> Self {
+        RelationExtensionLockGuard(Some(relid))
+    }
+
+    /// Explicit early release — the C `UnlockRelationForExtension`.
+    pub fn release(mut self) -> PgResult<()> {
+        match self.0.take() {
+            Some(relid) => unlock_relation_for_extension::call(relid),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for RelationExtensionLockGuard {
+    fn drop(&mut self) {
+        if let Some(relid) = self.0.take() {
+            let _ = unlock_relation_for_extension::call(relid);
         }
     }
 }

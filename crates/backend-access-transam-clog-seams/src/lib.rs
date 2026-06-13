@@ -39,3 +39,10 @@ seam_core::seam!(
         lsn: XLogRecPtr,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `clogsyncfiletag(const FileTag *ftag, char *path)` (the `syncsw[SYNC_HANDLER_*]`
+    /// sync callback this SLRU owns) — fsync the SLRU segment the tag names,
+    /// returning the `0`/`<0` code, resolved path, and saved `errno`.
+    pub fn clogsyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+);

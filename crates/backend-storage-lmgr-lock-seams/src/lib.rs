@@ -1,7 +1,6 @@
 //! Seam declarations for the `backend-storage-lmgr-lock` unit
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
-
 extern crate alloc;
 
 seam_core::seam!(
@@ -220,6 +219,17 @@ seam_core::seam!(
     /// to a dummy PGPROC.
     pub fn post_prepare_locks(
         xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// locks this backend holds in the given lock method. Used by the logical
+    /// apply worker on exit to drop session-level locks; can `ereport` on a
+    /// corrupt lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
     ) -> types_error::PgResult<()>
 );
 

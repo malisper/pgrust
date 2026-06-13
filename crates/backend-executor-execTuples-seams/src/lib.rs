@@ -191,3 +191,28 @@ seam_core::seam!(
         planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
     ) -> types_nodes::TupleSlotKind
 );
+
+seam_core::seam!(
+    /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
+    /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
+    /// taking ownership when `should_free`. Fallible on OOM.
+    pub fn exec_force_store_minimal_tuple<'mcx>(
+        slot: types_nodes::SlotId,
+        mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        should_free: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): materialize
+    /// the slot's contents as a `MinimalTuple` (copied into `mcx`), returning it
+    /// and whether the caller must free it. Fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<(
+        mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        bool,
+    )>
+);

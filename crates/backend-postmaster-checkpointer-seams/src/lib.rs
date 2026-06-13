@@ -7,3 +7,28 @@ seam_core::seam!(
     /// point invoked by `postmaster_child_launch`; never returns.
     pub fn checkpointer_main(startup_data: &types_startup::StartupData) -> !
 );
+
+seam_core::seam!(
+    /// `AbsorbSyncRequests()` (checkpointer.c) — drain the checkpointer's shmem
+    /// request queue into the local `pendingOps`/`pendingUnlinks` (via
+    /// `RememberSyncRequest`). It allocates, so callers must not be in a
+    /// critical section; `Err` carries any allocation `ereport`.
+    pub fn absorb_sync_requests() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ForwardSyncRequest(ftag, type)` (checkpointer.c) — try to enqueue one
+    /// request onto the checkpointer's shmem queue. Returns `true` if queued,
+    /// `false` if the queue was full (caller may retry).
+    pub fn forward_sync_request(
+        ftag: types_storage::sync::FileTag,
+        request_type: types_storage::sync::SyncRequestType,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// Store the post-sync metrics into `CheckpointStats` (xlog.c global):
+    /// `ckpt_sync_rels`, `ckpt_longest_sync`, `ckpt_agg_sync_time`. Pure
+    /// bookkeeping; infallible.
+    pub fn checkpoint_stats_set(ckpt_sync_rels: i32, ckpt_longest_sync: u64, ckpt_agg_sync_time: u64)
+);
