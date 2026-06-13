@@ -3282,6 +3282,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-help-config"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-more-seams"
 version = "0.0.0"
 dependencies = [
