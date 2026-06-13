@@ -1232,11 +1232,58 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-port-sysv-shmem-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-autovacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
 name = "backend-postmaster-auxprocess-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-postmaster-bgworker-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-bgwriter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-checkpointer-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-fork-process-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -1255,11 +1302,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-launch-backend"
+version = "0.0.0"
+dependencies = [
+ "backend-port-sysv-shmem-seams",
+ "backend-postmaster-autovacuum-seams",
+ "backend-postmaster-bgworker-seams",
+ "backend-postmaster-bgwriter-seams",
+ "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-fork-process-seams",
+ "backend-postmaster-pgarch-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-postmaster-startup-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-postmaster-walsummarizer-seams",
+ "backend-postmaster-walwriter-seams",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-storage-aio-methods-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-tcop-backend-startup-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "types-core",
+ "types-net",
+ "types-startup",
+]
+
+[[package]]
 name = "backend-postmaster-launch-backend-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-postmaster-pgarch-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-postmaster-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -1300,6 +1392,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+ "types-startup",
 ]
 
 [[package]]
@@ -1337,6 +1430,23 @@ name = "backend-postmaster-syslogger-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-walsummarizer-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-walwriter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -1377,6 +1487,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-slotsync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
+]
+
+[[package]]
 name = "backend-replication-slot-seams"
 version = "0.0.0"
 dependencies = [
@@ -1384,6 +1502,14 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-replication-walreceiver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -1415,6 +1541,14 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-aio-methods-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -1464,6 +1598,13 @@ dependencies = [
  "types-freepage",
  "types-guc",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-dsm-core-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -1715,6 +1856,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-tcop-backend-startup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -2463,6 +2613,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
+ "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
@@ -2573,6 +2724,7 @@ dependencies = [
 name = "types-net"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "types-core",
 ]
 
@@ -2636,6 +2788,13 @@ version = "0.0.0"
 [[package]]
 name = "types-snapshot"
 version = "0.0.0"
+
+[[package]]
+name = "types-startup"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-storage"

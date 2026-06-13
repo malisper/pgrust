@@ -76,3 +76,9 @@ seam_core::seam!(
     /// assignment path for the variable startup.c owns).
     pub fn set_log_startup_progress_interval(value: i32)
 );
+
+seam_core::seam!(
+    /// `StartupProcessMain(startup_data, startup_data_len)` (`src/backend/postmaster/startup.c`): child entry
+    /// point invoked by `postmaster_child_launch`; never returns.
+    pub fn startup_process_main(startup_data: &types_startup::StartupData) -> !
+);

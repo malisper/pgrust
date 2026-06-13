@@ -1,13 +1,12 @@
 [package]
-name = "backend-postmaster-syslogger-seams"
+name = "backend-storage-ipc-dsm-core-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_postmaster_syslogger_seams"
+name = "backend_storage_ipc_dsm_core_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-startup = { path = "../types-startup" }

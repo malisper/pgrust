@@ -68,3 +68,10 @@ seam_core::seam!(
         noerr: bool,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `InitPostmasterChild()` (`miscinit.c`): initialization common to all
+    /// postmaster children — detangle the child from the postmaster (signal
+    /// handling, process group, postmaster-death watch, etc.).
+    pub fn init_postmaster_child()
+);

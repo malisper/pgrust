@@ -26,3 +26,10 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_log_memory_context_interrupt()
 );
+
+seam_core::seam!(
+    /// `MemoryContextSwitchTo(TopMemoryContext)` (`mcxt.c` /
+    /// `utils/palloc.h`): make `TopMemoryContext` the current allocation
+    /// context.
+    pub fn switch_to_top_memory_context()
+);

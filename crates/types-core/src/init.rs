@@ -49,6 +49,31 @@ pub enum BackendType {
     Logger,
 }
 
+
+impl BackendType {
+    /// Every `BackendType`, in C enum (discriminant) order.
+    pub const ALL: [BackendType; BACKEND_NUM_TYPES] = [
+        BackendType::Invalid,
+        BackendType::Backend,
+        BackendType::DeadEndBackend,
+        BackendType::AutovacLauncher,
+        BackendType::AutovacWorker,
+        BackendType::BgWorker,
+        BackendType::WalSender,
+        BackendType::SlotsyncWorker,
+        BackendType::StandaloneBackend,
+        BackendType::Archiver,
+        BackendType::BgWriter,
+        BackendType::Checkpointer,
+        BackendType::IoWorker,
+        BackendType::Startup,
+        BackendType::WalReceiver,
+        BackendType::WalSummarizer,
+        BackendType::WalWriter,
+        BackendType::Logger,
+    ];
+}
+
 /// `BACKEND_NUM_TYPES` (`miscadmin.h`): `B_LOGGER + 1`.
 pub const BACKEND_NUM_TYPES: usize = BackendType::Logger as usize + 1;
 
