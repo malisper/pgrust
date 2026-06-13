@@ -18,3 +18,4 @@ types-locale = { path = "../types-locale" }
 backend-regex-core-seams = { path = "../backend-regex-core-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }

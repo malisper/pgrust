@@ -4630,13 +4630,11 @@ name = "backend-regex-core"
 version = "0.0.0"
 dependencies = [
  "backend-regex-core-seams",
- "backend-utils-adt-pg-locale-seams",
- "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
- "types-locale",
  "types-regex",
 ]
 
@@ -6459,9 +6457,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-core",
  "types-error",
- "types-locale",
 ]
 
 [[package]]
