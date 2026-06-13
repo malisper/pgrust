@@ -22,3 +22,16 @@ pub struct pg_tm {
     pub tm_gmtoff: i64,
     pub tm_zone: Option<String>,
 }
+
+/// `struct pg_tz` (`timezone/pgtz.h`), trimmed to the canonical name
+/// (`char TZname[TZ_STRLEN_MAX + 1]`). The tzdata `struct state` payload
+/// stays with the pgtz owner, which widens this type when it lands; until
+/// then consumers only carry the value across the `pg_localtime` seam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct pg_tz {
+    /// Canonically-cased timezone name.
+    pub TZname: String,
+}
+
+/// `TZ_STRLEN_MAX` (`pgtime.h`).
+pub const TZ_STRLEN_MAX: usize = 255;

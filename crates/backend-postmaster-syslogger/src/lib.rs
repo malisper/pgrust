@@ -19,14 +19,25 @@
 //! - **PgResult instead of longjmp**: functions whose C bodies can
 //!   `ereport(ERROR)`-or-higher (here only via callees: ProcessConfigFile,
 //!   WaitEventSet calls, plus FATAL paths) return
-//!   `types_error::PgResult`; `ereport(FATAL)` diverges inside elog
-//!   (proc_exit) and so never returns here.
+//!   `types_error::PgResult`; FATAL (like every severity >= ERROR)
+//!   propagates as `Err(PgError)` if `errfinish` returns it, per the settled
+//!   AGENTS.md convention.
 //! - **Cross-unit calls**: direct deps where acyclic (elog, interrupt,
 //!   pqsignal masks); not-yet-ported owners via their seam crates
-//!   (waiteventset, latch, guc, fd.c's `MakePGDirectory`, `pg_localtime`/
-//!   `log_timezone`, `pg_strftime`, `postmaster_child_launch`,
-//!   `init_ps_display`, `pqsignal`, `pg_mode_mask`, `proc_exit`,
-//!   `MyStartTime`/`MyBackendType`) — those panic until the owners land.
+//!   (waiteventset, latch, guc, fd.c's `MakePGDirectory`, `pg_localtime`,
+//!   `pg_strftime`, `postmaster_child_launch`, `init_ps_display`,
+//!   `pqsignal`, `proc_exit`, `MyBackendType`) — those panic until the
+//!   owners land. Foreign per-backend global *values* (`MyStartTime`,
+//!   `pg_mode_mask`) are explicit [`SysLoggerMain`] parameters; the
+//!   `log_timezone` GUC mirror lives on [`config`] (set by the pgtz/guc
+//!   owner when it lands).
+//! - **Sanctioned divergence — infallible std allocation**: the C file's
+//!   pallocs (`logfile_getname`'s MAXPGPATH buffer, the per-pid save
+//!   buffers' appendBinaryStringInfo growth) can `ereport(ERROR,
+//!   OUT_OF_MEMORY)`; this daemon's allocations are small, process-lifetime
+//!   std `String`/`Vec` ones with no memory context to charge, so they stay
+//!   infallible (abort-on-OOM) instead of threading `Mcx` through the
+//!   logging path.
 //! - **`MemoryContextDelete(PostmasterContext)` is not reproduced**: under
 //!   the mcx RAII model (docs/mctx-design.md) there is no ambient
 //!   `PostmasterContext` global; releasing the postmaster's working memory in
@@ -54,7 +65,9 @@ use backend_postmaster_interrupt::{
 };
 use backend_utils_error::config as elog_config;
 use backend_utils_error::{ereport, errno};
-use types_core::{pg_time_t, B_LOGGER, MAXPGPATH, PGINVALID_SOCKET};
+use backend_storage_ipc_waiteventset_seams::WaitEventSet;
+use types_core::init::BackendType;
+use types_core::{pg_time_t, MAXPGPATH, PGINVALID_SOCKET};
 use types_error::{
     PgResult, DEBUG1, FATAL, LOG, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
     LOG_DESTINATION_STDERR,
@@ -82,13 +95,13 @@ macro_rules! here {
 // pipe protocol layout (postmaster/syslogger.h)
 // ---------------------------------------------------------------------------
 
-/// `PIPE_CHUNK_SIZE`: `PIPE_BUF` clamped to 64K. `PIPE_BUF` is 4096 on Linux
-/// and the POSIX-minimum 512 on macOS/BSD. Must match elog's
-/// `write_pipe_chunks` (both sides come from `syslogger.h`).
-#[cfg(target_os = "linux")]
-pub const PIPE_CHUNK_SIZE: usize = 4096;
-#[cfg(not(target_os = "linux"))]
-pub const PIPE_CHUNK_SIZE: usize = 512;
+/// `PIPE_CHUNK_SIZE` (`syslogger.h`): the OS `PIPE_BUF` clamped to 64K, so
+/// both sides share the OS constant. Must match elog's `write_pipe_chunks`.
+pub const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 {
+    65536
+} else {
+    libc::PIPE_BUF
+};
 
 /// `PIPE_HEADER_SIZE = offsetof(PipeProtoHeader, data)`:
 /// `nuls[2]` (2) + `uint16 len` (2) + `int32 pid` (4) + `bits8 flags` (1) —
@@ -247,11 +260,19 @@ fn cstring(s: &str) -> CString {
 /// `ereport(ERROR)` from a callee — impossible to catch here in C without a
 /// handler, hence promoted — surfaces as the `Err` return.
 ///
-/// `my_latch` is C's `MyLatch` (globals.c), registered in the wait set and
-/// reset each loop iteration — an explicit parameter per the
-/// no-ambient-global rule. (The SIGUSR1 handler still sets the latch through
-/// the `set_latch_my_latch` seam, the signal-safe shape.)
-pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()> {
+/// `start_time` is the C `MyStartTime`, `mode_mask` the C `pg_mode_mask`
+/// (`common/file_perm.c`), and `my_latch` C's `MyLatch` (globals.c),
+/// registered in the wait set and reset each loop iteration — foreign
+/// per-backend/process globals taken as explicit parameters per AGENTS.md;
+/// the child-launch machinery that sets them passes them in. (The SIGUSR1
+/// handler still sets the latch through the `set_latch_my_latch` seam, the
+/// signal-safe shape.)
+pub fn SysLoggerMain(
+    startup_data: &[u8],
+    start_time: pg_time_t,
+    mode_mask: u32,
+    my_latch: LatchHandle,
+) -> PgResult<()> {
     let mut logbuffer = [0u8; READ_BUF_SIZE];
     let mut bytes_in_logbuffer: usize = 0;
 
@@ -262,10 +283,11 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
     // context is an owned value of the child-launch machinery (see crate
     // docs), so there is nothing to delete in this crate.
 
-    let mut now: pg_time_t = backend_utils_init_small_seams::my_start_time::call();
+    // now = MyStartTime (passed in by the child-launch machinery).
+    let mut now: pg_time_t = start_time;
 
     // MyBackendType = B_LOGGER (plus elog's per-backend mirror of it).
-    backend_utils_init_small_seams::set_my_backend_type::call(B_LOGGER);
+    backend_utils_init_small_seams::set_my_backend_type::call(BackendType::Logger);
     elog_config::set_am_syslogger(true);
     backend_utils_misc_more_seams::init_ps_display::call(None);
 
@@ -344,7 +366,7 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
     let mut current_log_rotation_age = config::log_rotation_age();
     // set next planned rotation time
     set_next_rotation_time();
-    update_metainfo_datafile()?;
+    update_metainfo_datafile(mode_mask)?;
 
     // Reset whereToSendOutput, as the postmaster will do (but hasn't yet, at
     // the point where we forked), to prevent duplicate output of messages
@@ -356,19 +378,9 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
     // Unlike all other postmaster child processes, we ignore postmaster death
     // because we want to collect final log output from all backends and exit
     // last — we run until we see EOF on the syslog pipe.
-    let wes = backend_storage_ipc_waiteventset_seams::create_wait_event_set::call(2)?;
-    backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        wes,
-        WL_LATCH_SET,
-        PGINVALID_SOCKET,
-        Some(my_latch),
-    )?;
-    backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        wes,
-        WL_SOCKET_READABLE,
-        config::syslog_pipe()[0],
-        None,
-    )?;
+    let wes = WaitEventSet::create(2)?;
+    wes.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch))?;
+    wes.add_event(WL_SOCKET_READABLE, config::syslog_pipe()[0], None)?;
 
     // main worker loop
     loop {
@@ -432,7 +444,7 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
             // Force rewriting last log filename when reloading configuration.
             // Even if rotation_requested is false, log_destination may have
             // been changed and we don't want to wait the next file rotation.
-            update_metainfo_datafile()?;
+            update_metainfo_datafile(mode_mask)?;
         }
 
         if config::log_rotation_age() > 0 && !ROTATION_DISABLED.get() {
@@ -472,7 +484,7 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
                 size_rotation_for =
                     LOG_DESTINATION_STDERR | LOG_DESTINATION_CSVLOG | LOG_DESTINATION_JSONLOG;
             }
-            logfile_rotate(time_based_rotation, size_rotation_for)?;
+            logfile_rotate(time_based_rotation, size_rotation_for, mode_mask)?;
         }
 
         // Calculate time till next time-based rotation, so that we don't
@@ -495,12 +507,7 @@ pub fn SysLoggerMain(startup_data: &[u8], my_latch: LatchHandle) -> PgResult<()>
 
         // Sleep until there's something to do.
         let mut occurred = [types_storage::waiteventset::WaitEvent::default(); 1];
-        let noccurred = backend_storage_ipc_waiteventset_seams::wait_event_set_wait::call(
-            wes,
-            cur_timeout,
-            &mut occurred,
-            WAIT_EVENT_SYSLOGGER_MAIN,
-        )?;
+        let noccurred = wes.wait(cur_timeout, &mut occurred, WAIT_EVENT_SYSLOGGER_MAIN)?;
 
         if noccurred == 1 && occurred[0].events == WL_SOCKET_READABLE {
             let bytes_read = unsafe {
@@ -624,7 +631,9 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
     }
 
     let syslogger_pid = backend_postmaster_launch_backend_seams::postmaster_child_launch::call(
-        B_LOGGER, child_slot, &[],
+        BackendType::Logger,
+        child_slot,
+        &[],
     );
 
     if syslogger_pid == -1 {
@@ -1060,7 +1069,11 @@ fn logfile_rotate_dest(
 
 /// `static void logfile_rotate(bool time_based_rotation, int
 /// size_rotation_for)` — perform logfile rotation.
-fn logfile_rotate(time_based_rotation: bool, size_rotation_for: i32) -> PgResult<()> {
+fn logfile_rotate(
+    time_based_rotation: bool,
+    size_rotation_for: i32,
+    mode_mask: u32,
+) -> PgResult<()> {
     ROTATION_REQUESTED.set(false);
 
     // When doing a time-based rotation, invent the new logfile name based on
@@ -1105,7 +1118,7 @@ fn logfile_rotate(time_based_rotation: bool, size_rotation_for: i32) -> PgResult
         return Ok(());
     }
 
-    update_metainfo_datafile()?;
+    update_metainfo_datafile(mode_mask)?;
 
     set_next_rotation_time();
 
@@ -1126,15 +1139,21 @@ fn logfile_getname(timestamp: pg_time_t, suffix: Option<&str>) -> String {
     truncate_to_cstr_capacity(&mut filename, MAXPGPATH);
 
     // treat Log_filename as a strftime pattern, formatted in log_timezone
-    let tm = backend_timezone_pgtz_seams::pg_localtime_log_timezone::call(timestamp)
+    // (this crate's config mirror of the pgtz-owned GUC)
+    let tz = config::log_timezone();
+    let tm = backend_timezone_pgtz_seams::pg_localtime::call(timestamp, &tz)
         .expect("pg_localtime returned NULL for a valid wall-clock time");
-    let mut formatted = backend_timezone_strftime_seams::pg_strftime::call(
+    // pg_strftime(filename + len, MAXPGPATH - len, Log_filename, tm): the
+    // seam buffer's length plays the C `maxsize - 1` role (no stored NUL).
+    let len = filename.len();
+    let mut buf = [0u8; MAXPGPATH];
+    let cap = (MAXPGPATH - len).saturating_sub(1);
+    let n = backend_timezone_strftime_seams::pg_strftime::call(
+        &mut buf[..cap],
         &config::log_filename(),
         &tm,
     );
-    let len = filename.len();
-    truncate_to_cstr_capacity(&mut formatted, MAXPGPATH - len);
-    filename.push_str(&formatted);
+    filename.push_str(&String::from_utf8_lossy(&buf[..n]));
 
     if let Some(suffix) = suffix {
         let mut len = filename.len();
@@ -1169,7 +1188,8 @@ fn set_next_rotation_time() {
     // GMT.
     let rotinterval = (config::log_rotation_age() * SECS_PER_MINUTE) as pg_time_t;
     let mut now: pg_time_t = unsafe { libc::time(ptr::null_mut()) };
-    let tm = backend_timezone_pgtz_seams::pg_localtime_log_timezone::call(now)
+    let tz = config::log_timezone();
+    let tm = backend_timezone_pgtz_seams::pg_localtime::call(now, &tz)
         .expect("pg_localtime returned NULL for a valid wall-clock time");
     now += tm.tm_gmtoff;
     now -= now % rotinterval;
@@ -1178,12 +1198,35 @@ fn set_next_rotation_time() {
     NEXT_ROTATION_TIME.set(now);
 }
 
+/// Owned `FILE *`: `fclose` on drop, so an `Err`-propagating `?` can never
+/// leak the stream (AGENTS.md "Locks and held resources"). `close()` is the
+/// explicit straight-line fclose.
+struct FileGuard(*mut libc::FILE);
+
+impl FileGuard {
+    /// `fclose` now (the C straight-line `fclose(fh)`).
+    fn close(self) {
+        drop(self);
+    }
+}
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                libc::fclose(self.0);
+            }
+        }
+    }
+}
+
 /// `static void update_metainfo_datafile(void)` — store the name of the
 /// file(s) the log collector writes to in `current_logfiles`. Filenames are
 /// written to a temporary file renamed into the final destination for
-/// atomicity; the file gets the data-directory permissions (`pg_mode_mask`)
-/// and line buffering.
-fn update_metainfo_datafile() -> PgResult<()> {
+/// atomicity; the file gets the data-directory permissions (`mode_mask` =
+/// the C `pg_mode_mask` global, an explicit parameter here) and line
+/// buffering.
+fn update_metainfo_datafile(mode_mask: u32) -> PgResult<()> {
     let dest = elog_config::log_destination();
 
     if dest & LOG_DESTINATION_STDERR == 0
@@ -1206,8 +1249,7 @@ fn update_metainfo_datafile() -> PgResult<()> {
     }
 
     // use the same permissions as the data directory for the new file
-    let oumask =
-        unsafe { libc::umask(common_file_perm_seams::pg_mode_mask::call() as libc::mode_t) };
+    let oumask = unsafe { libc::umask(mode_mask as libc::mode_t) };
     let c_tmp = cstring(LOG_METAINFO_DATAFILE_TMP);
     let c_mode = cstring("w");
     let fh = unsafe { libc::fopen(c_tmp.as_ptr(), c_mode.as_ptr()) };
@@ -1230,6 +1272,7 @@ fn update_metainfo_datafile() -> PgResult<()> {
             .finish(here!())?;
         return Ok(());
     }
+    let fh = FileGuard(fh);
 
     // fprintf(fh, "<label> <last_file_name>\n") per enabled destination, in
     // stderr/csvlog/jsonlog order; a short write aborts the rewrite.
@@ -1257,9 +1300,11 @@ fn update_metainfo_datafile() -> PgResult<()> {
         }
         let line = format!("{} {}\n", label, name);
         let written = unsafe {
-            libc::fwrite(line.as_ptr() as *const libc::c_void, 1, line.len(), fh)
+            libc::fwrite(line.as_ptr() as *const libc::c_void, 1, line.len(), fh.0)
         };
         if written != line.len() {
+            // fh closes via the guard on both the Err propagation and the
+            // early Ok return.
             ereport(LOG)
                 .with_saved_errno(errno::current_errno())
                 .errcode_for_file_access()
@@ -1268,15 +1313,10 @@ fn update_metainfo_datafile() -> PgResult<()> {
                     LOG_METAINFO_DATAFILE_TMP
                 ))
                 .finish(here!())?;
-            unsafe {
-                libc::fclose(fh);
-            }
             return Ok(());
         }
     }
-    unsafe {
-        libc::fclose(fh);
-    }
+    fh.close();
 
     let c_final = cstring(LOG_METAINFO_DATAFILE);
     if unsafe { libc::rename(c_tmp.as_ptr(), c_final.as_ptr()) } != 0 {

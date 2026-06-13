@@ -21,10 +21,11 @@ pub const WL_SOCKET_MASK: u32 = WL_SOCKET_READABLE
     | WL_SOCKET_ACCEPT
     | WL_SOCKET_CLOSED;
 
-/// Opaque handle to a `WaitEventSet *` owned by the waiteventset unit (the C
-/// type is header-opaque: `typedef struct WaitEventSet WaitEventSet`). The
-/// owner allocates the set and hands consumers a stable id; `0` is never a
-/// valid handle.
+/// Raw owner-side id for a `WaitEventSet *` (the C type is header-opaque:
+/// `typedef struct WaitEventSet WaitEventSet`); `0` is never a valid handle.
+/// Seam-marshaling vocabulary only: consumers hold the owning
+/// `WaitEventSet` guard (`backend-storage-ipc-waiteventset-seams`), whose
+/// `Drop` is `FreeWaitEventSet`, never this bare id.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WaitEventSetHandle(usize);
 

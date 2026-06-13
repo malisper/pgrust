@@ -39,11 +39,11 @@ use types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONNECTION_DOES_NOT_EXIST,
     ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
+use backend_storage_ipc_waiteventset_seams::WaitEventSet;
 use types_net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr, SockError, SockResult};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{
-    WaitEvent, WaitEventSetHandle, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED,
-    WL_SOCKET_WRITEABLE,
+    WaitEvent, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED, WL_SOCKET_WRITEABLE,
 };
 use types_stringinfo::StringInfo;
 
@@ -143,11 +143,12 @@ thread_local! {
     static PQ_ALLOC: RefCell<Option<McxOwned<PqCommAllocTy>>> = const { RefCell::new(None) };
     /// internal_flush_buffer's `static int last_reported_send_errno`.
     static LAST_REPORTED_SEND_ERRNO: Cell<i32> = const { Cell::new(0) };
-    /// `WaitEventSet *FeBeWaitSet`, paired with the latch registered at
-    /// `FeBeWaitSetLatchPos` (C: `MyLatch`), which `pq_check_connection`
-    /// resets.
-    static FE_BE_WAIT_SET: Cell<Option<(WaitEventSetHandle, LatchHandle)>> =
-        const { Cell::new(None) };
+    /// `WaitEventSet *FeBeWaitSet` — an owned guard (`Drop` =
+    /// `FreeWaitEventSet`; in C it lives for the backend's lifetime), paired
+    /// with the latch registered at `FeBeWaitSetLatchPos` (C: `MyLatch`),
+    /// which `pq_check_connection` resets.
+    static FE_BE_WAIT_SET: RefCell<Option<(WaitEventSet, LatchHandle)>> =
+        const { RefCell::new(None) };
 }
 
 /// Run `f` over the context-allocated pqcomm state, creating the owning
@@ -178,9 +179,10 @@ fn send_buffer_size() -> usize {
 }
 
 /// `FeBeWaitSet` — the backend's socket/latch/postmaster-death wait set,
-/// created by [`pq_init`].
-pub fn fe_be_wait_set() -> Option<WaitEventSetHandle> {
-    FE_BE_WAIT_SET.with(Cell::get).map(|(set, _)| set)
+/// created by [`pq_init`], plus the latch registered in it. Callback shape:
+/// the set is an owned guard, so no raw handle escapes.
+pub fn with_fe_be_wait_set<R>(f: impl FnOnce(Option<(&WaitEventSet, LatchHandle)>) -> R) -> R {
+    FE_BE_WAIT_SET.with(|c| f(c.borrow().as_ref().map(|(set, latch)| (set, *latch))))
 }
 
 fn comm_busy() -> bool {
@@ -373,28 +375,11 @@ pub fn pq_init(client_sock: &ClientSocket, my_latch: LatchHandle) -> PgResult<Po
             .finish(loc("pq_init"))?;
     }
 
-    let set = backend_storage_ipc_waiteventset_seams::create_wait_event_set::call(
-        FeBeWaitSetNEvents as i32,
-    )?;
-    let socket_pos = backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_SOCKET_WRITEABLE,
-        port.sock,
-        None,
-    )?;
-    let latch_pos = backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_LATCH_SET,
-        PGINVALID_SOCKET,
-        Some(my_latch),
-    )?;
-    backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_POSTMASTER_DEATH,
-        PGINVALID_SOCKET,
-        None,
-    )?;
-    FE_BE_WAIT_SET.with(|c| c.set(Some((set, my_latch))));
+    let set = WaitEventSet::create(FeBeWaitSetNEvents as i32)?;
+    let socket_pos = set.add_event(WL_SOCKET_WRITEABLE, port.sock, None)?;
+    let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch))?;
+    set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None)?;
+    FE_BE_WAIT_SET.with(|c| *c.borrow_mut() = Some((set, my_latch)));
 
     // The event positions match the order we added them.
     debug_assert_eq!(socket_pos, FeBeWaitSetSocketPos);
@@ -2011,40 +1996,32 @@ pub fn show_tcp_user_timeout() -> String {
 /// `pq_check_connection` — is the client still connected? (Polls
 /// `FeBeWaitSet` for `WL_SOCKET_CLOSED`.)
 pub fn pq_check_connection() -> PgResult<bool> {
-    let (set, latch) = FE_BE_WAIT_SET
-        .with(Cell::get)
-        .expect("pq_check_connection: FeBeWaitSet not created");
+    with_fe_be_wait_set(|set| {
+        let (set, latch) = set.expect("pq_check_connection: FeBeWaitSet not created");
 
-    // It's OK to modify the socket event filter without restoring, because
-    // all FeBeWaitSet socket wait sites do the same.
-    backend_storage_ipc_waiteventset_seams::modify_wait_event::call(
-        set,
-        FeBeWaitSetSocketPos,
-        WL_SOCKET_CLOSED,
-    )?;
+        // It's OK to modify the socket event filter without restoring,
+        // because all FeBeWaitSet socket wait sites do the same.
+        set.modify_event(FeBeWaitSetSocketPos, WL_SOCKET_CLOSED)?;
 
-    'retry: loop {
-        let mut events = [WaitEvent::default(); FeBeWaitSetNEvents];
-        let rc = backend_storage_ipc_waiteventset_seams::wait_event_set_wait::call(
-            set,
-            0,
-            &mut events,
-            0,
-        )?;
-        for event in events.iter().take(rc.max(0) as usize) {
-            if event.events & WL_SOCKET_CLOSED != 0 {
-                return Ok(false);
+        'retry: loop {
+            let mut events = [WaitEvent::default(); FeBeWaitSetNEvents];
+            let rc = set.wait(0, &mut events, 0)?;
+            for event in events.iter().take(rc.max(0) as usize) {
+                if event.events & WL_SOCKET_CLOSED != 0 {
+                    return Ok(false);
+                }
+                if event.events & WL_LATCH_SET != 0 {
+                    // A latch event might be preventing other events from
+                    // being reported. Reset it and poll again. (No code
+                    // expects latches to survive across
+                    // CHECK_FOR_INTERRUPTS().)
+                    backend_storage_ipc_latch_seams::reset_latch::call(latch);
+                    continue 'retry;
+                }
             }
-            if event.events & WL_LATCH_SET != 0 {
-                // A latch event might be preventing other events from being
-                // reported. Reset it and poll again. (No code expects latches
-                // to survive across CHECK_FOR_INTERRUPTS().)
-                backend_storage_ipc_latch_seams::reset_latch::call(latch);
-                continue 'retry;
-            }
+            return Ok(true);
         }
-        return Ok(true);
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------

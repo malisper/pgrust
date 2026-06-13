@@ -659,7 +659,6 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
  "backend-utils-misc-more-seams",
- "common-file-perm-seams",
  "libc",
  "port-pqsignal-seams",
  "types-core",
@@ -667,6 +666,7 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-pgstat",
+ "types-pgtime",
  "types-signal",
  "types-storage",
 ]
@@ -1421,13 +1421,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "common-file-perm-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
-]
 
 [[package]]
 name = "common-ip-seams"

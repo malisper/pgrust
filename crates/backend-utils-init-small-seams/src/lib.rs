@@ -84,16 +84,16 @@ seam_core::seam!(
 // explicit parameter and read it off this unit's state when it lands.
 
 seam_core::seam!(
-    /// `MyStartTime` (globals.c): this process's start time (`pg_time_t`,
-    /// seconds since the Unix epoch), set once at process start.
-    pub fn my_start_time() -> types_core::pg_time_t
-);
-
-seam_core::seam!(
     /// Write `MyBackendType` (globals.c, declared in miscadmin.h): processes
     /// assign their own type at startup (e.g. `MyBackendType = B_LOGGER` in
     /// SysLoggerMain). Per-crate mirrors of this global (e.g. elog's
     /// `am_syslogger`) are updated by the assigning unit itself.
+    ///
+    /// Decision (recorded per AGENTS.md): this write-side seam to a foreign
+    /// ambient global is accepted because process-identity assignment at
+    /// bootstrap is the C semantics; when `launch_backend` lands, prefer
+    /// folding backend-type assignment into the
+    /// `postmaster_child_launch`/child-main contract and retiring this seam.
     pub fn set_my_backend_type(backend_type: types_core::init::BackendType)
 );
 

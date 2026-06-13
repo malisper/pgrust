@@ -15,6 +15,8 @@
 
 use std::cell::{Cell, RefCell};
 
+use types_pgtime::pg_tz;
+
 use crate::{DEFAULT_LOG_ROTATION_AGE, DEFAULT_LOG_ROTATION_SIZE};
 
 thread_local! {
@@ -30,6 +32,13 @@ thread_local! {
     /// `int syslogPipe[2] = {-1, -1}` — exported; the postmaster closes the
     /// read end in `ClosePostmasterPorts` and backends write into [1].
     static SYSLOG_PIPE: Cell<[i32; 2]> = const { Cell::new([-1, -1]) };
+    /// Mirror of the pgtz-owned `log_timezone` GUC (`pgtz.c`), held on this
+    /// crate's config facet (like elog's `log_destination` mirror) and set
+    /// by the pgtz/guc owner when it lands. guc.c guarantees `log_timezone`
+    /// is at least GMT before anything can log, hence the GMT boot value.
+    static LOG_TIMEZONE: RefCell<pg_tz> = RefCell::new(pg_tz {
+        TZname: String::from("GMT"),
+    });
 }
 
 pub fn logging_collector() -> bool {
@@ -94,4 +103,12 @@ pub fn syslog_pipe() -> [i32; 2] {
 
 pub fn set_syslog_pipe(pipe: [i32; 2]) {
     SYSLOG_PIPE.with(|c| c.set(pipe));
+}
+
+pub fn log_timezone() -> pg_tz {
+    LOG_TIMEZONE.with(|c| c.borrow().clone())
+}
+
+pub fn set_log_timezone(tz: pg_tz) {
+    LOG_TIMEZONE.with(|c| *c.borrow_mut() = tz);
 }
