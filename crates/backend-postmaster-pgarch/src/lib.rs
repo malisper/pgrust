@@ -117,6 +117,26 @@ thread_local! {
         const { Cell::new(None) };
     static archive_module_state: RefCell<Option<ArchiveModuleState>> =
         const { RefCell::new(None) };
+
+    /// `static MemoryContext archive_context = NULL;` — the archiver-private
+    /// `AllocSetContextCreate(TopMemoryContext, "archiver", ...)`. Allocated in
+    /// `PgArchiverMain`; switched into and reset around each `archive_file_cb`.
+    static archive_context: Cell<Option<types_logical::MemoryContextHandle>> =
+        const { Cell::new(None) };
+
+    /// `char *arch_module_check_errdetail_string;` (pgarch.c) — the global an
+    /// archive module's `check_configured_cb` may set via the
+    /// `arch_module_check_errdetail()` macro (archive_module.h). Reset before
+    /// each check; consumed when emitting the "not configured" WARNING.
+    static arch_module_check_errdetail_string: RefCell<Option<alloc::string::String>> =
+        const { RefCell::new(None) };
+}
+
+/// Set `arch_module_check_errdetail_string` (the `arch_module_check_errdetail()`
+/// macro in `archive/archive_module.h`). Archive modules call this from their
+/// `check_configured_cb` to attach an errdetail to the "not configured" WARNING.
+pub fn set_arch_module_check_errdetail(detail: alloc::string::String) {
+    arch_module_check_errdetail_string.with(|c| *c.borrow_mut() = Some(detail));
 }
 
 // ---------------------------------------------------------------------------
@@ -477,9 +497,11 @@ fn pg_archiver_main_inner(startup_data: &types_startup::StartupData) -> PgResult
     };
     arch_files.with(|c| *c.borrow_mut() = Some(state));
 
-    // archive_context = AllocSetContextCreate(TopMemoryContext, "archiver", ...).
-    // The per-file context switch/reset is owned by mmgr; the reset runs inside
-    // the error-recovery suite. No archiver-owned logic depends on the handle.
+    // Create a memory context to use for the WAL archiver:
+    // archive_context = AllocSetContextCreate(TopMemoryContext, "archiver",
+    //                                         ALLOCSET_DEFAULT_SIZES);
+    let ctx = backend_utils_mmgr_mcxt_seams::create_archiver_memcxt::call();
+    archive_context.with(|c| c.set(Some(ctx)));
 
     // Load the archive_library.
     LoadArchiveLibrary()?;
@@ -601,6 +623,37 @@ fn pgarch_ArchiverCopyLoop() -> PgResult<()> {
             // archive_command as soon as possible even with a backlog.
             ProcessPgArchInterrupts()?;
 
+            // Reset variables that might be set by the callback.
+            // arch_module_check_errdetail_string = NULL;
+            arch_module_check_errdetail_string.with(|c| *c.borrow_mut() = None);
+
+            // can't do anything if not configured ...
+            // if (ArchiveCallbacks->check_configured_cb != NULL &&
+            //     !ArchiveCallbacks->check_configured_cb(archive_module_state))
+            let check_cb = archive_callbacks
+                .with(|c| c.get())
+                .expect("archive module not loaded")
+                .check_configured_cb;
+            if let Some(check_configured_cb) = check_cb {
+                if !with_module_state(check_configured_cb) {
+                    // ereport(WARNING,
+                    //   (errmsg("\"archive_mode\" enabled, yet archiving is not configured"),
+                    //    arch_module_check_errdetail_string ?
+                    //    errdetail_internal("%s", arch_module_check_errdetail_string) : 0));
+                    let mut report = ereport(WARNING).errmsg(
+                        "\"archive_mode\" enabled, yet archiving is not configured",
+                    );
+                    if let Some(detail) =
+                        arch_module_check_errdetail_string.with(|c| c.borrow().clone())
+                    {
+                        report = report.errdetail_internal(detail);
+                    }
+                    report.finish(loc())?;
+
+                    return Ok(());
+                }
+            }
+
             // snprintf(pathname, MAXPGPATH, XLOGDIR "/%s", xlog);
             let pathname = truncate(alloc::format!("{XLOGDIR}/{xlog}"), MAXPGPATH);
 
@@ -690,8 +743,11 @@ fn pgarch_archiveXlog(xlog: &str) -> PgResult<bool> {
     let activitymsg = truncate_activity(alloc::format!("archiving {xlog}"));
     backend_utils_misc_ps_status_seams::set_ps_display::call(&activitymsg);
 
-    // oldcontext = MemoryContextSwitchTo(archive_context); — context lifecycle
-    // is owned by mmgr; the per-file reset happens inside archive_error_cleanup.
+    // oldcontext = MemoryContextSwitchTo(archive_context);
+    let ctx = archive_context
+        .with(|c| c.get())
+        .expect("archive_context created in PgArchiverMain");
+    let oldcontext = backend_utils_mmgr_mcxt_seams::MemoryContextSwitchTo::call(ctx);
 
     // The archiver operates at the bottom of the exception stack, so an ERROR
     // would normally turn into FATAL and restart the process. To avoid that,
@@ -708,9 +764,17 @@ fn pgarch_archiveXlog(xlog: &str) -> PgResult<bool> {
     let result = with_module_state(|state| cb(state, xlog, &pathname));
 
     let ret = match result {
-        Ok(r) => r,
+        Ok(r) => {
+            // Remove our exception handler / reset our memory context and switch
+            // back to the original one:
+            // MemoryContextSwitchTo(oldcontext);
+            // MemoryContextReset(archive_context);
+            backend_utils_mmgr_mcxt_seams::MemoryContextSwitchTo::call(oldcontext);
+            backend_utils_mmgr_mcxt_seams::MemoryContextReset::call(ctx);
+            r
+        }
         Err(_err) => {
-            archive_error_cleanup();
+            archive_error_cleanup(oldcontext, ctx);
             // Report failure so that the archiver retries this file.
             false
         }
@@ -729,7 +793,10 @@ fn pgarch_archiveXlog(xlog: &str) -> PgResult<bool> {
 /// The `pgarch_archiveXlog` sigsetjmp error-recovery block: reset the error
 /// stack, hold interrupts, emit the error, run the module-leftover cleanup
 /// suite, flush the error state, reset the archive context, resume interrupts.
-fn archive_error_cleanup() {
+fn archive_error_cleanup(
+    oldcontext: types_logical::MemoryContextHandle,
+    archive_ctx: types_logical::MemoryContextHandle,
+) {
     // error_context_stack = NULL; / HOLD_INTERRUPTS().
     backend_utils_init_small_seams::hold_interrupts::call();
 
@@ -749,10 +816,11 @@ fn archive_error_cleanup() {
 
     // Return to the original memory context and clear ErrorContext for next
     // time: MemoryContextSwitchTo(oldcontext); FlushErrorState();
+    backend_utils_mmgr_mcxt_seams::MemoryContextSwitchTo::call(oldcontext);
     backend_utils_error::FlushErrorState();
 
-    // Flush any leaked data: MemoryContextReset(archive_context). The archive
-    // context is owned by mmgr; reset is part of the seamed lifecycle.
+    // Flush any leaked data: MemoryContextReset(archive_context).
+    backend_utils_mmgr_mcxt_seams::MemoryContextReset::call(archive_ctx);
 
     // PG_exception_stack = NULL; / RESUME_INTERRUPTS().
     backend_utils_init_small_seams::resume_interrupts::call();

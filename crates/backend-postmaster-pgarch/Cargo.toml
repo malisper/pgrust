@@ -50,6 +50,7 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
+types-logical = { path = "../types-logical" }
 types-pgarch = { path = "../types-pgarch" }
 types-pgstat = { path = "../types-pgstat" }
 types-signal = { path = "../types-signal" }

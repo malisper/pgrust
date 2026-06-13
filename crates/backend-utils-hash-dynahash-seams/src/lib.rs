@@ -1,9 +1,61 @@
 //! Seam declarations for the `backend-utils-hash-dynahash` unit
 //! (`utils/hash/dynahash.c`).
 //!
-//! Only the transaction-end hash-table cleanup the archiver's error-recovery
-//! path needs. The owning unit installs this from its `init_seams()` when it
-//! lands; until then a call panics loudly.
+//! The owning unit installs these from its `init_seams()` when it lands;
+//! until then a call panics loudly. Entry pointers are raw (`*mut u8` for the
+//! C `void *` user entry, `*mut HTAB` for the opaque per-backend table
+//! handle) because shared hash tables live in genuinely shared memory.
+
+#![allow(non_snake_case)]
+
+use types_error::PgResult;
+use types_hash::hsearch::{HASHACTION, HASHCTL, HASH_SEQ_STATUS, HTAB};
+
+seam_core::seam!(
+    /// `hash_create(tabname, nelem, info, flags)` (dynahash.c) — create (or,
+    /// with `HASH_ATTACH`, attach to) a hash table. For shared tables the
+    /// caller passes the in-shmem `HASHHDR` via `info.hctl`. `Err` carries
+    /// the C `elog(ERROR)`s (bad flags, out of memory).
+    pub fn hash_create(name: &str, nelem: i64, info: &HASHCTL, flags: i32) -> PgResult<*mut HTAB>
+);
+
+seam_core::seam!(
+    /// `hash_search(hashp, keyPtr, action, foundPtr)` (dynahash.c). `key_ptr`
+    /// mirrors the C `const void *keyPtr` (for `HASH_STRINGS` tables it
+    /// points at a NUL-terminated name). Returns the entry pointer (null for
+    /// not-found / `HASH_ENTER_NULL` out-of-memory) and the C `*foundPtr`.
+    /// `Err` carries the `HASH_ENTER` out-of-memory `ereport(ERROR)`.
+    pub fn hash_search(
+        hashp: *mut HTAB,
+        key_ptr: *const u8,
+        action: HASHACTION,
+    ) -> PgResult<(*mut u8, bool)>
+);
+
+seam_core::seam!(
+    /// `hash_select_dirsize(num_entries)` (dynahash.c) — directory size for a
+    /// shared hash table of the given max size. Infallible.
+    pub fn hash_select_dirsize(num_entries: i64) -> i64
+);
+
+seam_core::seam!(
+    /// `hash_get_shared_size(info, flags)` (dynahash.c) — bytes of shared
+    /// memory the table's fixed structures require. Infallible.
+    pub fn hash_get_shared_size(info: &HASHCTL, flags: i32) -> usize
+);
+
+seam_core::seam!(
+    /// `hash_seq_init(status, hashp)` (dynahash.c) — start a sequential scan.
+    pub fn hash_seq_init(status: &mut HASH_SEQ_STATUS, hashp: *mut HTAB)
+);
+
+seam_core::seam!(
+    /// `hash_seq_search(status)` (dynahash.c) — next entry, or null at scan
+    /// end (which also terminates the scan). `Err` carries the
+    /// `elog(ERROR, "no hash_seq_search scan to end")` from the internal
+    /// `hash_seq_term`.
+    pub fn hash_seq_search(status: &mut HASH_SEQ_STATUS) -> PgResult<*mut u8>
+);
 
 seam_core::seam!(
     /// `AtEOXact_HashTables(isCommit)` (`utils/hash/dynahash.c`) — clean up
