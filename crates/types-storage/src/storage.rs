@@ -70,6 +70,11 @@ impl pg_atomic_uint64 {
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
     }
+
+    /// `pg_atomic_write_u64(ptr, val)`.
+    pub fn write(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::Relaxed);
+    }
 }
 
 /// A PostgreSQL spinlock word (`slock_t`, `storage/s_lock.h`).

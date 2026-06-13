@@ -115,3 +115,11 @@ seam_core::seam!(
     /// bytes. Can `ereport(ERROR)`, carried on `Err`.
     pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>>
 );
+
+seam_core::seam!(
+    /// `CheckpointStats.ckpt_slru_written++` (xlog.c's `CheckpointStats`
+    /// global, bumped directly by slru.c during checkpoint write-all).
+    /// Narrow write-side capability on the owner's global, same shape as
+    /// `set_my_backend_type` (see DESIGN_DEBT.md).
+    pub fn count_ckpt_slru_written()
+);
