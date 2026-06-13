@@ -13,8 +13,10 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-pgstat = { path = "../types-pgstat" }
+types-wal = { path = "../types-wal" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-activity-shmem-seams = { path = "../backend-utils-activity-shmem-seams" }
 backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
+backend-utils-activity-xact-seams = { path = "../backend-utils-activity-xact-seams" }

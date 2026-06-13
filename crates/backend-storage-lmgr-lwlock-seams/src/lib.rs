@@ -173,3 +173,17 @@ seam_core::seam!(
     /// predicate guarding the redo/scan entry points. Pure read.
     pub fn twophase_state_held_exclusive() -> bool
 );
+
+seam_core::seam!(
+    /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
+    /// hold the built-in lock at `lock_offset` (in any mode)? Used in
+    /// `Assert`s; the lock is named by offset since `MainLWLockArray` is
+    /// lwlock.c-owned shared memory.
+    pub fn lwlock_held_by_me_main(lock_offset: usize) -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(&MainLWLockArray[lock_offset].lock, mode)` — does
+    /// this backend hold the built-in lock at `lock_offset` in exactly `mode`?
+    pub fn lwlock_held_by_me_in_mode_main(lock_offset: usize, mode: LWLockMode) -> bool
+);
