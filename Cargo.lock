@@ -3396,6 +3396,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execScan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execScan-seams"
 version = "0.0.0"
 dependencies = [
@@ -9851,6 +9866,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
+ "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",
  "backend-executor-instrument",
