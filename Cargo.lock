@@ -7810,6 +7810,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pqsignal"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-init-small-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "types-signal",
+]
+
+[[package]]
 name = "port-pqsignal-seams"
 version = "0.0.0"
 dependencies = [
@@ -7919,6 +7929,7 @@ dependencies = [
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
+ "port-pqsignal",
 ]
 
 [[package]]

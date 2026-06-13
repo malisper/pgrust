@@ -78,3 +78,4 @@ backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
+port-pqsignal = { path = "../port-pqsignal" }
