@@ -392,7 +392,7 @@ pub struct ParseState {
 // ---------------------------------------------------------------------------
 
 /// A raw-parser `Node *`. Variants are added as command ports consume them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Node {
     Integer(Integer),

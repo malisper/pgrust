@@ -1867,6 +1867,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-user"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-utils-error",
+ "types-authid",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-commands-user-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-authid",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-commands-vacuum-seams"
 version = "0.0.0"
 dependencies = [
@@ -5535,6 +5561,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-user",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -5559,7 +5586,6 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
- "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -5627,6 +5653,13 @@ dependencies = [
 
 [[package]]
 name = "types-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-authid"
 version = "0.0.0"
 dependencies = [
  "types-core",
