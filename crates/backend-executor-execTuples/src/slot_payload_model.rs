@@ -5,46 +5,183 @@
 //! The owned types live in [`types_nodes::tuptable`]; this module owns the
 //! per-kind sizing and the make/empty helpers that operate on them.
 
-use mcx::Mcx;
+use mcx::{vec_with_capacity_in, Mcx};
 use types_core::primitive::Size;
+use types_datum::Datum;
 use types_error::PgResult;
-use types_nodes::tuptable::{SlotData, TupleTableSlotOps};
-use types_nodes::TupleSlotKind;
-use types_tuple::heaptuple::TupleDesc;
+use types_nodes::tuptable::{
+    BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase, SlotData,
+    TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
+};
+use types_nodes::{TupleSlotKind, TupleTableSlot};
+use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
-/// `sizeof(VirtualTupleTableSlot)` (`MakeTupleTableSlot` sizing).
+use crate::slot_ops_vtables;
+
+/// `sizeof(VirtualTupleTableSlot)` (`MakeTupleTableSlot` sizing /
+/// `TTSOpsVirtual.base_slot_size`).
 pub fn virtual_slot_size() -> Size {
-    todo!("execTuples.c TTSOpsVirtual.base_slot_size")
+    core::mem::size_of::<VirtualTupleTableSlot>()
 }
 
-/// `sizeof(HeapTupleTableSlot)`.
+/// `sizeof(HeapTupleTableSlot)` (`TTSOpsHeapTuple.base_slot_size`).
 pub fn heap_slot_size() -> Size {
-    todo!("execTuples.c TTSOpsHeapTuple.base_slot_size")
+    core::mem::size_of::<HeapTupleTableSlot>()
 }
 
-/// `sizeof(MinimalTupleTableSlot)`.
+/// `sizeof(MinimalTupleTableSlot)` (`TTSOpsMinimalTuple.base_slot_size`).
 pub fn minimal_slot_size() -> Size {
-    todo!("execTuples.c TTSOpsMinimalTuple.base_slot_size")
+    core::mem::size_of::<MinimalTupleTableSlot>()
 }
 
-/// `sizeof(BufferHeapTupleTableSlot)`.
+/// `sizeof(BufferHeapTupleTableSlot)` (`TTSOpsBufferHeapTuple.base_slot_size`).
 pub fn buffer_slot_size() -> Size {
-    todo!("execTuples.c TTSOpsBufferHeapTuple.base_slot_size")
+    core::mem::size_of::<BufferHeapTupleTableSlot>()
 }
 
 /// The `TupleTableSlotOps` metadata for a slot kind (the `&TTSOps*` singleton
-/// the kind selects).
-pub fn ops_for_kind(_kind: TupleSlotKind) -> TupleTableSlotOps {
-    todo!("execTuples.c TTSOpsVirtual / TTSOpsHeapTuple / TTSOpsMinimalTuple / TTSOpsBufferHeapTuple")
+/// the kind selects). Mirrors the four `const TupleTableSlotOps` tables in
+/// execTuples.c: `base_slot_size` is the concrete struct size, and the
+/// `get_heap_tuple` / `get_minimal_tuple` callback presence is exactly the
+/// `NULL`/non-`NULL` pattern of those tables.
+pub fn ops_for_kind(kind: TupleSlotKind) -> TupleTableSlotOps {
+    match kind {
+        // TTSOpsVirtual: get_heap_tuple = NULL, get_minimal_tuple = NULL.
+        TupleSlotKind::Virtual => TupleTableSlotOps {
+            base_slot_size: virtual_slot_size(),
+            has_get_heap_tuple: false,
+            has_get_minimal_tuple: false,
+        },
+        // TTSOpsHeapTuple: get_heap_tuple = tts_heap_get_heap_tuple,
+        // get_minimal_tuple = NULL.
+        TupleSlotKind::HeapTuple => TupleTableSlotOps {
+            base_slot_size: heap_slot_size(),
+            has_get_heap_tuple: true,
+            has_get_minimal_tuple: false,
+        },
+        // TTSOpsMinimalTuple: get_heap_tuple = NULL,
+        // get_minimal_tuple = tts_minimal_get_minimal_tuple.
+        TupleSlotKind::MinimalTuple => TupleTableSlotOps {
+            base_slot_size: minimal_slot_size(),
+            has_get_heap_tuple: false,
+            has_get_minimal_tuple: true,
+        },
+        // TTSOpsBufferHeapTuple: get_heap_tuple = tts_buffer_heap_get_heap_tuple,
+        // get_minimal_tuple = NULL.
+        TupleSlotKind::BufferHeapTuple => TupleTableSlotOps {
+            base_slot_size: buffer_slot_size(),
+            has_get_heap_tuple: true,
+            has_get_minimal_tuple: false,
+        },
+    }
+}
+
+/// A zeroed `HeapTupleData` — the owned analog of the `palloc0`'d `tupdata` /
+/// `minhdr` workspace that `MakeTupleTableSlot` leaves in a fresh slot.
+fn zeroed_heap_tuple_data<'mcx>() -> HeapTupleData<'mcx> {
+    HeapTupleData {
+        t_len: 0,
+        t_self: ItemPointerData::default(),
+        t_tableOid: 0,
+        t_data: None,
+    }
 }
 
 /// `MakeTupleTableSlot(tupleDesc, tts_ops)` (execTuples.c): allocate a slot of
 /// the given kind, fixed to `tupleDesc`, with its `tts_values`/`tts_isnull`
 /// arrays sized from the descriptor. The slot allocates in `mcx`.
+///
+/// The C single-block `palloc0(allocsz)` (base struct + `MAXALIGN`ed Datum and
+/// bool arrays) becomes the owned subtype struct plus two `mcx`-allocated
+/// arrays: when `tupleDesc` is fixed they are sized to `natts` and zero-filled
+/// (`palloc0`); when it is `NULL` they are empty (the slot type's `init`/store
+/// callbacks size them on demand). `tts_mcxt = CurrentMemoryContext` is modeled
+/// by allocating in `mcx`.
 pub fn MakeTupleTableSlot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _tupleDesc: TupleDesc<'mcx>,
-    _kind: TupleSlotKind,
+    mcx: Mcx<'mcx>,
+    tupleDesc: TupleDesc<'mcx>,
+    kind: TupleSlotKind,
 ) -> PgResult<SlotData<'mcx>> {
-    todo!("execTuples.c MakeTupleTableSlot")
+    // tts_flags |= TTS_FLAG_EMPTY (the header default), plus TTS_FLAG_FIXED
+    // when a descriptor is supplied.
+    let mut header = TupleTableSlot {
+        tts_ops: kind,
+        ..TupleTableSlot::default()
+    };
+
+    let (mut tts_values, mut tts_isnull) = (vec_with_capacity_in(mcx, 0)?, vec_with_capacity_in(mcx, 0)?);
+
+    let tts_tupleDescriptor = if let Some(mut desc) = tupleDesc {
+        header.tts_flags |= TTS_FLAG_FIXED;
+
+        let natts = desc.natts as usize;
+        // palloc0 of the Datum/bool arrays.
+        let mut values: mcx::PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, natts)?;
+        let mut isnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        isnull.resize(natts, false);
+        tts_values = values;
+        tts_isnull = isnull;
+
+        // PinTupleDesc: bump the refcount of a refcounted descriptor
+        // (`if (tupleDesc->tdrefcount >= 0) IncrTupleDescRefCount`). The
+        // `IncrTupleDescRefCount` helper's own guard is exactly this gate, so
+        // routing through the tupdesc owner is correct: a non-refcounted
+        // (`tdrefcount < 0`) descriptor is left untouched.
+        if desc.tdrefcount >= 0 {
+            backend_access_common_tupdesc::IncrTupleDescRefCount(&mut desc)?;
+        }
+        Some(desc)
+    } else {
+        None
+    };
+
+    let base = SlotBase {
+        header,
+        tts_nvalid: 0,
+        tts_tupleDescriptor,
+        tts_values,
+        tts_isnull,
+    };
+
+    // Build the concrete subtype, then run the slot-type-specific `init`
+    // callback (`slot->tts_ops->init(slot)`), owned by the slot-ops vtable
+    // family.
+    let mut slot = match kind {
+        TupleSlotKind::Virtual => SlotData::Virtual(VirtualTupleTableSlot {
+            base,
+            data: vec_with_capacity_in(mcx, 0)?,
+        }),
+        TupleSlotKind::HeapTuple => SlotData::Heap(HeapTupleTableSlot {
+            base,
+            tuple: None,
+            off: 0,
+            tupdata: zeroed_heap_tuple_data(),
+        }),
+        TupleSlotKind::MinimalTuple => SlotData::Minimal(MinimalTupleTableSlot {
+            base,
+            tuple: None,
+            mintuple: None,
+            minhdr: zeroed_heap_tuple_data(),
+            off: 0,
+        }),
+        TupleSlotKind::BufferHeapTuple => SlotData::BufferHeap(BufferHeapTupleTableSlot {
+            base: HeapTupleTableSlot {
+                base,
+                tuple: None,
+                off: 0,
+                tupdata: zeroed_heap_tuple_data(),
+            },
+            buffer: types_storage::buf::InvalidBuffer,
+        }),
+    };
+
+    match &mut slot {
+        SlotData::Virtual(s) => slot_ops_vtables::tts_virtual_init(s),
+        SlotData::Heap(s) => slot_ops_vtables::tts_heap_init(s),
+        SlotData::Minimal(s) => slot_ops_vtables::tts_minimal_init(s),
+        SlotData::BufferHeap(s) => slot_ops_vtables::tts_buffer_heap_init(s),
+    }
+
+    Ok(slot)
 }
