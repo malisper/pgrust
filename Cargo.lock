@@ -8252,12 +8252,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-checksum-helper"
+version = "0.0.0"
+dependencies = [
+ "common-cryptohash-seams",
+ "port-crc32c",
+ "port-pgstrcasecmp",
+ "types-core",
+ "types-crypto",
+]
+
+[[package]]
 name = "common-controldata-utils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-control",
  "types-error",
+]
+
+[[package]]
+name = "common-cryptohash-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-crypto",
 ]
 
 [[package]]
@@ -8587,6 +8607,7 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
+ "common-checksum-helper",
  "interfaces-libpq-legacy-pqsignal",
 ]
 
@@ -8746,6 +8767,10 @@ dependencies = [
 
 [[package]]
 name = "types-core"
+version = "0.0.0"
+
+[[package]]
+name = "types-crypto"
 version = "0.0.0"
 
 [[package]]
