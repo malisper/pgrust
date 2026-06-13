@@ -1,10 +1,14 @@
 //! Seam declarations for the `backend-access-transam-timeline` unit
-//! (`access/transam/timeline.c`).
+//! (`access/transam/timeline.c`): timeline-history file reading and the
+//! switch-point lookup.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::TimeLineID;
+use mcx::{Mcx, PgVec};
+use types_core::{TimeLineID, XLogRecPtr};
+use types_error::PgResult;
+use types_wal::TimeLineHistoryEntry;
 
 seam_core::seam!(
     /// `existsTimeLineHistory(tli)` — whether a timeline-history file exists.
@@ -20,36 +24,35 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
-/// Result of `tliSwitchPoint(tli, history, &nextTLI)` — the LSN at which the
-/// timeline ends (`InvalidXLogRecPtr` for the current one) and the next
-/// timeline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelineSwitch {
-    /// `tliSwitchPoint` return — the LSN where `tli` ends.
-    pub valid_until: types_core::XLogRecPtr,
-    /// `*nextTLI` out-param — the timeline `tli` switches into.
-    pub next_tli: TimeLineID,
-}
-
 seam_core::seam!(
-    /// `tliOfPointInHistory(ptr, readTimeLineHistory(curr_tli))`
-    /// (timeline.c) — the timeline of the last LSN on the segment containing
-    /// `ptr`, looked up in the history of `curr_tli`. Reads the
-    /// timeline-history file; `ereport(ERROR)` on a malformed file, carried
-    /// on `Err`. The history list is read and freed inside the owner.
-    pub fn tli_of_point_in_history(
-        curr_tli: TimeLineID,
-        ptr: types_core::XLogRecPtr,
-    ) -> types_error::PgResult<TimeLineID>
+    /// `readTimeLineHistory(targetTLI)` (timeline.c) — read and parse the
+    /// timeline-history file for `target_tli`, returning the entries newest
+    /// first (the C `List *` built head-insert). The list and its cells are
+    /// palloc'd in the caller's current context, so the port allocates in
+    /// `mcx`; `Err` carries the file-read `ereport(ERROR)` and OOM.
+    pub fn read_timeline_history<'mcx>(
+        mcx: Mcx<'mcx>,
+        target_tli: TimeLineID,
+    ) -> PgResult<PgVec<'mcx, TimeLineHistoryEntry>>
 );
 
 seam_core::seam!(
-    /// `tliSwitchPoint(tli, readTimeLineHistory(curr_tli), &nextTLI)`
-    /// (timeline.c) — the switch point of `tli` within the history of
-    /// `curr_tli`, plus the next timeline. `ereport(ERROR)` on a malformed
-    /// history file, carried on `Err`.
+    /// `tliOfPointInHistory(ptr, history)` (timeline.c) — the timeline of the
+    /// last LSN on the segment containing `ptr`, looked up in the already-read
+    /// `history` (newest first, as returned by `read_timeline_history`).
+    pub fn tli_of_point_in_history(
+        ptr: XLogRecPtr,
+        history: &[TimeLineHistoryEntry],
+    ) -> PgResult<TimeLineID>
+);
+
+seam_core::seam!(
+    /// `tliSwitchPoint(tli, history, *nextTLI)` (timeline.c) — find the LSN at
+    /// which `tli` ended; returns `(switchpoint, next_tli)` (`next_tli`
+    /// mirrors the non-NULL `*nextTLI` out-param, the timeline `tli` switched
+    /// to). `elog(ERROR)` if `tli` is not found in `history`.
     pub fn tli_switch_point(
-        curr_tli: TimeLineID,
         tli: TimeLineID,
-    ) -> types_error::PgResult<TimelineSwitch>
+        history: &[TimeLineHistoryEntry],
+    ) -> PgResult<(XLogRecPtr, TimeLineID)>
 );

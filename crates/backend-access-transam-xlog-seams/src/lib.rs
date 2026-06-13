@@ -146,6 +146,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetFlushRecPtr(*insertTLI)` (xlog.c) — the LSN up to which WAL is
+    /// flushed, with the corresponding insert timeline. Returns `(lsn, tli)`.
+    pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
+);
+
+seam_core::seam!(
+    /// `GetWALInsertionTimeLineIfSet()` (xlog.c) — the insert TLI once it has
+    /// been initialized in shared memory, else `0` (the C `InvalidTimeLineID`
+    /// / 0 sentinel before recovery finishes).
+    pub fn get_wal_insertion_timeline_if_set() -> TimeLineID
+);
+
+seam_core::seam!(
     /// `XLogRecPtr GetRedoRecPtr(void)` (xlog.c) — the current redo pointer.
     pub fn get_redo_rec_ptr() -> XLogRecPtr
 );
@@ -214,17 +227,16 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
-// ---------------------------------------------------------------------------
-// Flush position + local WAL read, consumed by xlogutils.c's
-// read_local_xlog_page page-read callback.
-// ---------------------------------------------------------------------------
-
 seam_core::seam!(
-    /// `GetFlushRecPtr(&insertTLI)` (xlog.c) — the position up to which WAL
-    /// has been flushed, with the current insert timeline. Returns
-    /// `(read_upto, currTLI)`.
-    pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
+    /// `XLogGetOldestSegno(tli)` (xlog.c) — the oldest WAL segment number that
+    /// still exists on disk for `tli`, or `0` if none.
+    pub fn xlog_get_oldest_segno(tli: TimeLineID) -> XLogSegNo
 );
+
+// ---------------------------------------------------------------------------
+// Local WAL read, consumed by xlogutils.c's read_local_xlog_page page-read
+// callback. (The flush position uses the `get_flush_rec_ptr` seam above.)
+// ---------------------------------------------------------------------------
 
 /// The `WALReadError` fields needed by `WALReadRaiseError`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

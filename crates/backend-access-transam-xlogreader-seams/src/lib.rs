@@ -32,6 +32,8 @@ use types_storage::RelFileLocator;
 use types_wal::rmgr::XLogReaderState;
 use types_wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
+use types_walsummarizer::{BlockTag, ReadRecordResult};
+use types_walsummarizer::XLogReaderHandle as SummarizerXLogReaderHandle;
 
 seam_core::seam!(
     /// `XLogReaderHasQueuedRecordOrError(reader)` (xlogreader.h inline) —
@@ -276,4 +278,122 @@ seam_core::seam!(
 seam_core::seam!(
     /// `close(state->seg.ws_file); state->seg.ws_file = -1` (xlogreader.c).
     pub fn reader_close_ws_file(reader: &mut XLogReaderState<'_>)
+);
+
+// ---------------------------------------------------------------------------
+// Handle-based private-reader API used by the WAL summarizer (walsummarizer.c
+// `SummarizeWAL`). The summarizer allocates its own `XLogReaderState` with a
+// page-read callback (`summarizer_read_local_xlog_page`) and a per-reader
+// `SummarizerReadLocalXLogPrivate` private_data block that the summarizer
+// owns. Because the reader's full shape is not the trimmed shared
+// `XLogReaderState`, the reader is named by an opaque registry token
+// (`XLogReaderHandle`); the summarizer owns the private_data keyed by the
+// same token.
+// ---------------------------------------------------------------------------
+
+/// The page-read callback the summarizer installs (`XLogPageReadCB` with
+/// `.page_read = &summarizer_read_local_xlog_page`). Called by the reader
+/// while a record read is in flight; `Ok(n)` is the number of valid bytes in
+/// `cur_page` (or `-1` at end of a historic timeline), `Err` an
+/// `ereport(ERROR)` raised inside the callback.
+pub type SummarizerPageReadCB =
+    fn(reader: SummarizerXLogReaderHandle, target_page_ptr: XLogRecPtr, req_len: i32, cur_page: &mut [u8]) -> PgResult<i32>;
+
+seam_core::seam!(
+    /// `XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.page_read =
+    /// page_read, .segment_open = wal_segment_open, .segment_close =
+    /// wal_segment_close), NULL)` — allocate a private reader for one summary
+    /// pass and return its registry handle. `Err` carries the C
+    /// `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)` for a failed allocation.
+    pub fn summarizer_xlogreader_allocate(
+        wal_segment_size: i32,
+        page_read: SummarizerPageReadCB,
+    ) -> PgResult<SummarizerXLogReaderHandle>
+);
+
+seam_core::seam!(
+    /// `XLogReaderFree(reader)` — free the private reader and its registry
+    /// slot. Infallible.
+    pub fn summarizer_xlogreader_free(reader: SummarizerXLogReaderHandle)
+);
+
+seam_core::seam!(
+    /// `XLogBeginRead(reader, start_lsn)` on the private reader.
+    pub fn summarizer_xlog_begin_read(reader: SummarizerXLogReaderHandle, start_lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `XLogFindNextRecord(reader, start_lsn)` — search forward for the start
+    /// of the next record; returns `InvalidXLogRecPtr` (0) when none is found
+    /// before end-of-WAL. `Err` carries an `ereport(ERROR)` from the page
+    /// read.
+    pub fn summarizer_xlog_find_next_record(
+        reader: SummarizerXLogReaderHandle,
+        start_lsn: XLogRecPtr,
+    ) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `record = XLogReadRecord(reader, &errormsg)` — read the next record,
+    /// discriminated into [`ReadRecordResult`] (record / deferred error /
+    /// end-of-WAL, the latter via the summarizer's `private_data->end_of_wal`).
+    /// `Err` carries an `ereport(ERROR)` from the page-read callback.
+    pub fn summarizer_xlog_read_record(reader: SummarizerXLogReaderHandle) -> PgResult<ReadRecordResult>
+);
+
+seam_core::seam!(
+    /// `WALRead(reader, buf, startptr, count, tli, &errinfo)`; on failure C
+    /// calls `WALReadRaiseError(&errinfo)`, so the read error is `Err`.
+    pub fn summarizer_wal_read(
+        reader: SummarizerXLogReaderHandle,
+        buf: &mut [u8],
+        startptr: XLogRecPtr,
+        count: i32,
+        tli: TimeLineID,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `reader->EndRecPtr` of the private reader.
+    pub fn summarizer_reader_end_rec_ptr(reader: SummarizerXLogReaderHandle) -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `reader->ReadRecPtr` of the private reader.
+    pub fn summarizer_reader_read_rec_ptr(reader: SummarizerXLogReaderHandle) -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `XLogRecGetRmid(reader)` — the resource-manager id of the current
+    /// record.
+    pub fn summarizer_rec_get_rmid(reader: SummarizerXLogReaderHandle) -> u8
+);
+
+seam_core::seam!(
+    /// `XLogRecGetInfo(reader)` — the `xl_info` byte of the current record.
+    pub fn summarizer_rec_get_info(reader: SummarizerXLogReaderHandle) -> u8
+);
+
+seam_core::seam!(
+    /// `XLogRecGetData(reader)` — the main-data payload of the current record,
+    /// copied into a fresh `Vec` (the C code reads it as a `char *`; an owned
+    /// copy avoids holding a borrow into the reader's decode buffer across
+    /// further seam calls).
+    pub fn summarizer_rec_get_data(reader: SummarizerXLogReaderHandle) -> alloc::vec::Vec<u8>
+);
+
+seam_core::seam!(
+    /// `XLogRecMaxBlockId(reader)` — highest block id referenced by the
+    /// current record.
+    pub fn summarizer_rec_max_block_id(reader: SummarizerXLogReaderHandle) -> i32
+);
+
+seam_core::seam!(
+    /// `XLogRecGetBlockTagExtended(reader, block_id, &rlocator, &forknum,
+    /// &blocknum, NULL)` — `None` when the block id has no tag (C returns
+    /// `false`).
+    pub fn summarizer_rec_get_block_tag_extended(
+        reader: SummarizerXLogReaderHandle,
+        block_id: i32,
+    ) -> Option<BlockTag>
 );

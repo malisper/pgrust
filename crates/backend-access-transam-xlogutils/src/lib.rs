@@ -655,16 +655,26 @@ pub fn XLogReadDetermineTimeline(
         let endOfSegment: XLogRecPtr = ((wantPage / ws_segsize) + 1) * ws_segsize - 1;
         debug_assert!(wantPage / ws_segsize == endOfSegment / ws_segsize);
 
+        // We need to re-read the timeline history in case it's been changed
+        // by a promotion or replay from a cascaded replica. The C reads
+        // `readTimeLineHistory(currTLI)` into the current memory context and
+        // frees it at the end of the block; a scoped context dropped at block
+        // end mirrors that free.
+        let history_ctx = mcx::MemoryContext::new("xlogutils timeline history");
+        let history = timeline_seam::read_timeline_history::call(history_ctx.mcx(), currTLI)?;
+
         // Find the timeline of the last LSN on the segment containing wantPage.
-        let new_curr_tli = timeline_seam::tli_of_point_in_history::call(currTLI, endOfSegment)?;
+        let new_curr_tli =
+            timeline_seam::tli_of_point_in_history::call(endOfSegment, &history)?;
         reader_seam::reader_set_curr_tli::call(state, new_curr_tli);
-        let switch = timeline_seam::tli_switch_point::call(currTLI, new_curr_tli)?;
-        reader_seam::reader_set_curr_tli_valid_until::call(state, switch.valid_until);
-        reader_seam::reader_set_next_tli::call(state, switch.next_tli);
+        let (valid_until, next_tli) =
+            timeline_seam::tli_switch_point::call(new_curr_tli, &history)?;
+        reader_seam::reader_set_curr_tli_valid_until::call(state, valid_until);
+        reader_seam::reader_set_next_tli::call(state, next_tli);
 
         debug_assert!(
-            switch.valid_until == InvalidXLogRecPtr
-                || wantPage + (wantLength as u64) < switch.valid_until
+            valid_until == InvalidXLogRecPtr
+                || wantPage + (wantLength as u64) < valid_until
         );
 
         elog(
@@ -672,7 +682,7 @@ pub fn XLogReadDetermineTimeline(
             format!(
                 "switched to timeline {} valid until {}",
                 new_curr_tli,
-                lsn_format_args(switch.valid_until)
+                lsn_format_args(valid_until)
             ),
         )?;
     }
