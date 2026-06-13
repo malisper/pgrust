@@ -2844,6 +2844,8 @@ dependencies = [
 name = "backend-executor-execExpr"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-objectaccess-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
@@ -2852,8 +2854,10 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-core",
  "types-datum",
  "types-error",
