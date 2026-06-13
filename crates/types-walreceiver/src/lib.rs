@@ -2,21 +2,23 @@
 //! `libpqwalreceiver`.
 //!
 //! These owned types are shared by the walreceiver port and the owner-seam
-//! crates it calls into.  The shared-memory `WalRcvData` control block stays
-//! resident in its (not-yet-ported) `walreceiverfuncs` owner; the owned port
-//! only ever sees the spinlocked snapshots the seams hand back and pushes
-//! spinlocked updates back through them.
+//! crates it calls into.  The shared-memory `WalRcvData` control block
+//! (`replication/walreceiver.h`) is defined here as a real synchronized type:
+//! the spinlock-guarded fields live behind a host mutex and the lock-free
+//! `writtenUpto`/`force_reply` words are atomics, so the walreceiver port runs
+//! its own `switch(walRcvState)` / state-transition logic under the lock while
+//! the (not-yet-ported) `walreceiverfuncs` owner supplies the actual block via
+//! the `with_walrcv` accessor seam.
 
-#![no_std]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-extern crate alloc;
+use std::string::String;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicU64};
 
-use alloc::string::String;
-
-use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
+use types_core::{ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
 
 /// Opaque libpq connection handle (`WalReceiverConn *`).  The concrete struct
 /// lives in the (separately ported) libpqwalreceiver module; here it is the
@@ -87,41 +89,93 @@ impl Default for WalRcvStreamOptions {
     }
 }
 
-/// Snapshot of the streaming parameters read out of `WalRcv` under the spinlock
-/// in `WalReceiverMain`'s startup section.
+/// `WalRcvData` (`replication/walreceiver.h`) — the spinlock-guarded fields of
+/// the WAL-receiver shared-memory control block.
+///
+/// Trimmed to the fields walreceiver.c actually reads or writes (the C struct
+/// also carries `startTime` and `walRcvStoppedCV`, both reached separately).
+/// The C `slock_t mutex` that guards these fields becomes the host [`Mutex`]
+/// wrapping a [`WalRcvData`] in [`WalRcvShared`]; the lock-free `writtenUpto`
+/// and `force_reply` words sit outside it as atomics.
 #[derive(Clone, Debug)]
-pub struct WalRcvStartupInfo {
-    /// `walrcv->conninfo` (NUL-padded fixed buffer).
-    pub conninfo: [u8; MAXCONNINFO],
-    /// `walrcv->slotname` (NUL-padded fixed buffer).
-    pub slotname: [u8; NAMEDATALEN],
-    /// `walrcv->is_temp_slot`.
+pub struct WalRcvData {
+    /// `ProcNumber procno` — the active receiver's proc number.
+    pub procno: ProcNumber,
+    /// `pid_t pid` — the active receiver's PID (0 when none).
+    pub pid: i32,
+    /// `WalRcvState walRcvState`.
+    pub walRcvState: WalRcvState,
+    /// `XLogRecPtr receiveStart`.
+    pub receiveStart: XLogRecPtr,
+    /// `TimeLineID receiveStartTLI`.
+    pub receiveStartTLI: TimeLineID,
+    /// `XLogRecPtr flushedUpto`.
+    pub flushedUpto: XLogRecPtr,
+    /// `TimeLineID receivedTLI`.
+    pub receivedTLI: TimeLineID,
+    /// `XLogRecPtr latestChunkStart`.
+    pub latestChunkStart: XLogRecPtr,
+    /// `TimestampTz lastMsgSendTime`.
+    pub lastMsgSendTime: TimestampTz,
+    /// `TimestampTz lastMsgReceiptTime`.
+    pub lastMsgReceiptTime: TimestampTz,
+    /// `XLogRecPtr latestWalEnd`.
+    pub latestWalEnd: XLogRecPtr,
+    /// `TimestampTz latestWalEndTime`.
+    pub latestWalEndTime: TimestampTz,
+    /// `char conninfo[MAXCONNINFO]` — user-visible (obfuscated) conn string.
+    pub conninfo: String,
+    /// `char sender_host[NI_MAXHOST]`.
+    pub sender_host: String,
+    /// `int sender_port`.
+    pub sender_port: i32,
+    /// `char slotname[NAMEDATALEN]`.
+    pub slotname: String,
+    /// `bool is_temp_slot`.
     pub is_temp_slot: bool,
-    /// `walrcv->receiveStart`.
-    pub receive_start: XLogRecPtr,
-    /// `walrcv->receiveStartTLI`.
-    pub receive_start_tli: TimeLineID,
+    /// `bool ready_to_display`.
+    pub ready_to_display: bool,
 }
 
-/// Consistent snapshot of `WalRcv` read under the spinlock at the top of
-/// `pg_stat_get_wal_receiver`.
-#[derive(Clone, Debug)]
-pub struct WalRcvStatSnapshot {
-    pub pid: i32,
-    pub ready_to_display: bool,
-    pub state: WalRcvState,
-    pub receive_start_lsn: XLogRecPtr,
-    pub receive_start_tli: TimeLineID,
-    pub flushed_lsn: XLogRecPtr,
-    pub received_tli: TimeLineID,
-    pub last_send_time: TimestampTz,
-    pub last_receipt_time: TimestampTz,
-    pub latest_end_lsn: XLogRecPtr,
-    pub latest_end_time: TimestampTz,
-    pub slotname: String,
-    pub sender_host: String,
-    pub sender_port: i32,
-    pub conninfo: String,
+impl Default for WalRcvData {
+    fn default() -> Self {
+        WalRcvData {
+            procno: types_core::INVALID_PROC_NUMBER,
+            pid: 0,
+            walRcvState: WalRcvState::WALRCV_STOPPED,
+            receiveStart: 0,
+            receiveStartTLI: 0,
+            flushedUpto: 0,
+            receivedTLI: 0,
+            latestChunkStart: 0,
+            lastMsgSendTime: 0,
+            lastMsgReceiptTime: 0,
+            latestWalEnd: 0,
+            latestWalEndTime: 0,
+            conninfo: String::new(),
+            sender_host: String::new(),
+            sender_port: 0,
+            slotname: String::new(),
+            is_temp_slot: false,
+            ready_to_display: false,
+        }
+    }
+}
+
+/// The whole shared-memory `WalRcvData` block: the `slock_t mutex`-guarded
+/// fields plus the two lock-free words (`pg_atomic_uint64 writtenUpto`,
+/// `sig_atomic_t force_reply`).  The owner (`walreceiverfuncs`) holds the one
+/// process-wide instance; the walreceiver port reaches it through the
+/// `with_walrcv` accessor seam, which takes the mutex around the caller's
+/// closure exactly like `SpinLockAcquire`/`SpinLockRelease` bracket the C code.
+#[derive(Debug, Default)]
+pub struct WalRcvShared {
+    /// `slock_t mutex` + the fields it guards.
+    pub guarded: Mutex<WalRcvData>,
+    /// `pg_atomic_uint64 writtenUpto`.
+    pub writtenUpto: AtomicU64,
+    /// `sig_atomic_t force_reply` (used as a bool).
+    pub force_reply: AtomicI32,
 }
 
 /// Structured form of the `pg_stat_get_wal_receiver` result row.  `None` fields

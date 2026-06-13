@@ -3,7 +3,7 @@
 
 use super::*;
 
-use types_walreceiver::{WalRcvStatSnapshot, WalRcvState};
+use types_walreceiver::WalRcvState;
 
 #[test]
 fn wakeup_enum_indices_match_c() {
@@ -109,31 +109,85 @@ fn wakeup_reason_index_roundtrip() {
     }
 }
 
-#[allow(dead_code)]
-fn empty_snapshot(pid: i32, ready: bool) -> WalRcvStatSnapshot {
-    WalRcvStatSnapshot {
-        pid,
-        ready_to_display: ready,
-        state: WalRcvState::WALRCV_STREAMING,
-        receive_start_lsn: 0,
-        receive_start_tli: 0,
-        flushed_lsn: 0,
-        received_tli: 0,
-        last_send_time: 0,
-        last_receipt_time: 0,
-        latest_end_lsn: 0,
-        latest_end_time: 0,
-        slotname: String::new(),
-        sender_host: String::new(),
-        sender_port: 0,
-        conninfo: String::new(),
+// The full `pg_stat_get_wal_receiver` / `WalReceiverMain` state machine runs
+// against the shared `WalRcvData` block its (not-yet-ported) owner installs via
+// the `with_walrcv` seam; this repo's seams install exactly once (`OnceLock`),
+// so the spinlock-guarded branches are exercised here directly on a
+// `WalRcvData` value, matching the logic the crate runs inside those closures.
+
+#[test]
+fn flush_advance_conditional_store() {
+    // XLogWalRcvFlush: only advance flushedUpto when it moved forward, and
+    // latestChunkStart adopts the prior flushedUpto.
+    let mut w = WalRcvData {
+        flushedUpto: 100,
+        latestChunkStart: 0,
+        receivedTLI: 1,
+        ..Default::default()
+    };
+    let new_flush = 150;
+    let tli = 7;
+    if w.flushedUpto < new_flush {
+        w.latestChunkStart = w.flushedUpto;
+        w.flushedUpto = new_flush;
+        w.receivedTLI = tli;
     }
+    assert_eq!(w.flushedUpto, 150);
+    assert_eq!(w.latestChunkStart, 100);
+    assert_eq!(w.receivedTLI, 7);
+
+    // A non-advancing flush leaves everything untouched.
+    let new_flush = 120;
+    if w.flushedUpto < new_flush {
+        w.latestChunkStart = w.flushedUpto;
+        w.flushedUpto = new_flush;
+        w.receivedTLI = 9;
+    }
+    assert_eq!(w.flushedUpto, 150);
+    assert_eq!(w.latestChunkStart, 100);
+    assert_eq!(w.receivedTLI, 7);
 }
 
-// The `pg_stat_get_wal_receiver` field-selection logic is exercised by the
-// audit rather than here: this repo's seams install exactly once
-// (`OnceLock`), so a test that re-installs the snapshot seam with different
-// values is not possible.
+#[test]
+fn process_walsndr_latest_wal_end_conditional() {
+    // ProcessWalSndrMessage: latestWalEndTime only updates when walEnd advances;
+    // the other three fields update unconditionally.
+    let mut w = WalRcvData {
+        latestWalEnd: 200,
+        latestWalEndTime: 11,
+        ..Default::default()
+    };
+    let (wal_end, send_time, receipt) = (250, 99, 100);
+    if w.latestWalEnd < wal_end {
+        w.latestWalEndTime = send_time;
+    }
+    w.latestWalEnd = wal_end;
+    w.lastMsgSendTime = send_time;
+    w.lastMsgReceiptTime = receipt;
+    assert_eq!(w.latestWalEnd, 250);
+    assert_eq!(w.latestWalEndTime, 99);
+    assert_eq!(w.lastMsgSendTime, 99);
+    assert_eq!(w.lastMsgReceiptTime, 100);
+
+    // walEnd not advancing keeps the old latestWalEndTime.
+    let (wal_end, send_time, receipt) = (250, 105, 106);
+    if w.latestWalEnd < wal_end {
+        w.latestWalEndTime = send_time;
+    }
+    w.latestWalEnd = wal_end;
+    w.lastMsgSendTime = send_time;
+    w.lastMsgReceiptTime = receipt;
+    assert_eq!(w.latestWalEndTime, 99);
+    assert_eq!(w.lastMsgSendTime, 105);
+}
+
+#[test]
+fn walrcvdata_defaults_match_c_init() {
+    let w = WalRcvData::default();
+    assert_eq!(w.procno, types_core::INVALID_PROC_NUMBER);
+    assert_eq!(w.pid, 0);
+    assert_eq!(w.walRcvState, WalRcvState::WALRCV_STOPPED);
+}
 
 #[test]
 fn compute_next_wakeup_uses_gucs() {

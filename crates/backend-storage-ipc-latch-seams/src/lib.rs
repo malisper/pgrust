@@ -14,6 +14,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetLatch(&GetPGProcByNumber(procno)->procLatch)`: set the process latch
+    /// of the backend identified by `procno`. The latch crate resolves the
+    /// target PGPROC's latch when installing. Async-signal-safe and infallible
+    /// in C.
+    pub fn set_latch_for_procno(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
     /// `ResetLatch(latch)`: clear the given latch. C call sites that pass
     /// `MyLatch` translate to an explicit handle the caller holds.
     /// Infallible in C.

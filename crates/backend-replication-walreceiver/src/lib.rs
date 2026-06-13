@@ -34,8 +34,8 @@ use types_pgstat::wait_event::{
 use types_startup::StartupData;
 use types_wal::ArchiveMode;
 use types_walreceiver::{
-    WalRcvState, WalRcvStreamOptions, WalRcvWakeupReason, WalReceiverActivity, WalReceiverConn,
-    NAMEDATALEN, NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
+    WalRcvData, WalRcvState, WalRcvStreamOptions, WalRcvWakeupReason, WalReceiverActivity,
+    WalReceiverConn, MAXCONNINFO, NAMEDATALEN, NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
 };
 use WalRcvWakeupReason::*;
 
@@ -305,21 +305,85 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     backend_postmaster_auxprocess_seams::auxiliary_process_main_common::call()?;
 
     /*
-     * Mark walreceiver as running in shared memory, fail out if asked to stop,
-     * advertise pid/procno, init message times, and read streaming params.
-     * (lines 188-241 spinlock block.)
+     * Mark walreceiver as running in shared memory.
+     *
+     * Do this as early as possible, so that if we fail later on, we'll set
+     * state to STOPPED. If we die before this, the startup process will keep
+     * waiting for us to start up, until it times out.
      */
     let now = timestamp::get_current_timestamp::call();
-    let startup = match walrcvfuncs::walrcv_start_in_shmem::call(now)? {
-        Some(info) => info,
-        None => ipc::proc_exit::call(1, my_proc_pid()),
-    };
+    let mut conninfo = String::new();
+    let mut slotname = [0u8; NAMEDATALEN];
+    let mut is_temp_slot = false;
+    let mut startpoint: XLogRecPtr = InvalidXLogRecPtr;
+    let mut startpointTLI: TimeLineID = 0;
+    let mut should_proc_exit = false;
+    let mut still_running_panic: Option<PgError> = None;
 
-    let conninfo = cstr_from_bytes(&startup.conninfo);
-    let mut slotname = startup.slotname;
-    let is_temp_slot = startup.is_temp_slot;
-    let mut startpoint: XLogRecPtr = startup.receive_start;
-    let mut startpointTLI: TimeLineID = startup.receive_start_tli;
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        assert!(walrcv.pid == 0); /* Assert(walrcv->pid == 0); */
+        match walrcv.walRcvState {
+            WalRcvState::WALRCV_STOPPING => {
+                /* If we've already been requested to stop, don't start up. */
+                walrcv.walRcvState = WalRcvState::WALRCV_STOPPED;
+                /* fall through */
+                should_proc_exit = true;
+            }
+            WalRcvState::WALRCV_STOPPED => {
+                should_proc_exit = true;
+            }
+            WalRcvState::WALRCV_STARTING => {
+                /* The usual case */
+            }
+            WalRcvState::WALRCV_WAITING
+            | WalRcvState::WALRCV_STREAMING
+            | WalRcvState::WALRCV_RESTARTING => {
+                /* Shouldn't happen */
+                still_running_panic = Some(
+                    ereport(PANIC)
+                        .errmsg("walreceiver still running according to shared memory state")
+                        .into_error(),
+                );
+            }
+        }
+
+        if should_proc_exit || still_running_panic.is_some() {
+            return;
+        }
+
+        /* Advertise our PID so that the startup process can kill us */
+        walrcv.pid = my_proc_pid();
+        walrcv.walRcvState = WalRcvState::WALRCV_STREAMING;
+
+        /* Fetch information required to start streaming */
+        walrcv.ready_to_display = false;
+        conninfo = strlcpy_to_string(walrcv.conninfo.as_bytes(), MAXCONNINFO);
+        slotname = strlcpy_to_buf(walrcv.slotname.as_bytes(), NAMEDATALEN);
+        is_temp_slot = walrcv.is_temp_slot;
+        startpoint = walrcv.receiveStart;
+        startpointTLI = walrcv.receiveStartTLI;
+
+        /* Initialise to a sanish value */
+        walrcv.lastMsgSendTime = now;
+        walrcv.lastMsgReceiptTime = now;
+        walrcv.latestWalEndTime = now;
+
+        /* Report our proc number so that others can wake us up */
+        walrcv.procno = my_proc_number();
+    });
+
+    if should_proc_exit {
+        /*
+         * The STOPPING/STOPPED arm: release the lock, broadcast the stopped
+         * CV, and proc_exit(1).
+         */
+        walrcvfuncs::wal_rcv_stopped_cv_broadcast::call();
+        ipc::proc_exit::call(1, my_proc_pid());
+    }
+    if let Some(err) = still_running_panic {
+        return Err(err);
+    }
+
     with_state(|s| s.startpointTLI = startpointTLI);
 
     /*
@@ -365,7 +429,12 @@ fn wal_receiver_main_inner() -> PgResult<()> {
      */
     let tmp_conninfo = libpqwalrcv::walrcv_get_conninfo::call(conn);
     let (sender_host, sender_port) = libpqwalrcv::walrcv_get_senderinfo::call(conn);
-    walrcvfuncs::walrcv_save_conninfo::call(tmp_conninfo, sender_host, sender_port);
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        walrcv.conninfo = tmp_conninfo.clone().unwrap_or_default();
+        walrcv.sender_host = sender_host.clone().unwrap_or_default();
+        walrcv.sender_port = sender_port;
+        walrcv.ready_to_display = true;
+    });
 
     let mut first_stream = true;
     loop {
@@ -416,7 +485,10 @@ fn wal_receiver_main_inner() -> PgResult<()> {
             );
             slotname = name_from_str(&new_slot);
             libpqwalrcv::walrcv_create_slot::call(conn, new_slot.clone())?;
-            walrcvfuncs::walrcv_set_slotname::call(new_slot);
+            let slot_for_shmem = strlcpy_to_string(slotname.as_slice(), NAMEDATALEN);
+            walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+                walrcv.slotname = slot_for_shmem.clone();
+            });
         }
 
         /*
@@ -687,7 +759,15 @@ fn WalRcvWaitForStartPosition(
      * SpinLockAcquire; if state != STREAMING, release and proc_exit(0) / FATAL;
      * else move to WAITING and clear receiveStart/TLI.
      */
-    let state = walrcvfuncs::walrcv_begin_wait::call();
+    let mut state = WalRcvState::WALRCV_STREAMING;
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        state = walrcv.walRcvState;
+        if state == WalRcvState::WALRCV_STREAMING {
+            walrcv.walRcvState = WalRcvState::WALRCV_WAITING;
+            walrcv.receiveStart = InvalidXLogRecPtr;
+            walrcv.receiveStartTLI = 0;
+        }
+    });
     if state != WalRcvState::WALRCV_STREAMING {
         if state == WalRcvState::WALRCV_STOPPING {
             ipc::proc_exit::call(0, my_proc_pid());
@@ -710,20 +790,31 @@ fn WalRcvWaitForStartPosition(
 
         /*
          * Assert(walRcvState == RESTARTING || WAITING || STOPPING). Poll the
-         * shmem state.
+         * shmem state under the spinlock; on RESTARTING move to STREAMING and
+         * adopt the new receiveStart/TLI.
          */
-        let (st, recv_start, recv_start_tli) = walrcvfuncs::walrcv_poll_wait::call();
-        assert!(
-            st == WalRcvState::WALRCV_RESTARTING
-                || st == WalRcvState::WALRCV_WAITING
-                || st == WalRcvState::WALRCV_STOPPING
-        );
+        let mut st = WalRcvState::WALRCV_WAITING;
+        let mut recv_start: XLogRecPtr = InvalidXLogRecPtr;
+        let mut recv_start_tli: TimeLineID = 0;
+        walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+            st = walrcv.walRcvState;
+            assert!(
+                st == WalRcvState::WALRCV_RESTARTING
+                    || st == WalRcvState::WALRCV_WAITING
+                    || st == WalRcvState::WALRCV_STOPPING
+            );
+            if st == WalRcvState::WALRCV_RESTARTING {
+                /*
+                 * No need to handle changes in primary_conninfo or
+                 * primary_slot_name here. Startup process will signal us to
+                 * terminate in case those change.
+                 */
+                recv_start = walrcv.receiveStart;
+                recv_start_tli = walrcv.receiveStartTLI;
+                walrcv.walRcvState = WalRcvState::WALRCV_STREAMING;
+            }
+        });
         if st == WalRcvState::WALRCV_RESTARTING {
-            /*
-             * No need to handle changes in primary_conninfo or
-             * primary_slot_name here. (walrcv_poll_wait moved RESTARTING ->
-             * STREAMING under the lock and returned the new start point.)
-             */
             *startpoint = recv_start;
             *startpointTLI = recv_start_tli;
             break;
@@ -815,11 +906,23 @@ pub fn WalRcvDie(_code: i32, startpointTLI: TimeLineID) -> PgResult<()> {
     /* Ensure that all WAL records received are flushed to disk */
     XLogWalRcvFlush(true, startpointTLI)?;
 
-    /*
-     * Mark ourselves inactive in shared memory: assert running state, set
-     * STOPPED, clear pid/procno/ready_to_display, broadcast the stopped CV.
-     */
-    walrcvfuncs::walrcv_die_shmem::call();
+    /* Mark ourselves inactive in shared memory */
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        assert!(
+            walrcv.walRcvState == WalRcvState::WALRCV_STREAMING
+                || walrcv.walRcvState == WalRcvState::WALRCV_RESTARTING
+                || walrcv.walRcvState == WalRcvState::WALRCV_STARTING
+                || walrcv.walRcvState == WalRcvState::WALRCV_WAITING
+                || walrcv.walRcvState == WalRcvState::WALRCV_STOPPING
+        );
+        assert!(walrcv.pid == my_proc_pid());
+        walrcv.walRcvState = WalRcvState::WALRCV_STOPPED;
+        walrcv.pid = 0;
+        walrcv.procno = types_core::INVALID_PROC_NUMBER;
+        walrcv.ready_to_display = false;
+    });
+
+    walrcvfuncs::wal_rcv_stopped_cv_broadcast::call();
 
     /* Terminate the connection gracefully. */
     if let Some(conn) = with_state(|s| s.wrconn) {
@@ -994,11 +1097,14 @@ fn XLogWalRcvFlush(dying: bool, tli: TimeLineID) -> PgResult<()> {
         with_state(|s| s.LogstreamResult.Flush = s.LogstreamResult.Write);
         let new_flush = with_state(|s| s.LogstreamResult.Flush);
 
-        /*
-         * Update shared-memory status: advance flushedUpto/latestChunkStart/
-         * receivedTLI if we moved forward (under the spinlock in the seam).
-         */
-        walrcvfuncs::flush_advance_shmem::call(new_flush, tli);
+        /* Update shared-memory status */
+        walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+            if walrcv.flushedUpto < new_flush {
+                walrcv.latestChunkStart = walrcv.flushedUpto;
+                walrcv.flushedUpto = new_flush;
+                walrcv.receivedTLI = tli;
+            }
+        });
 
         /* Signal the startup process and walsender that new WAL has arrived */
         xlogrecovery::wakeup_recovery::call();
@@ -1225,8 +1331,15 @@ fn XLogWalRcvSendHSFeedback(immed: bool) -> PgResult<()> {
 fn ProcessWalSndrMessage(walEnd: XLogRecPtr, sendTime: TimestampTz) {
     let lastMsgReceiptTime = timestamp::get_current_timestamp::call();
 
-    /* Update shared-memory status (latestWalEnd/Time, lastMsgSend/Receipt). */
-    walrcvfuncs::process_walsndr_shmem::call(walEnd, sendTime, lastMsgReceiptTime);
+    /* Update shared-memory status */
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        if walrcv.latestWalEnd < walEnd {
+            walrcv.latestWalEndTime = sendTime;
+        }
+        walrcv.latestWalEnd = walEnd;
+        walrcv.lastMsgSendTime = sendTime;
+        walrcv.lastMsgReceiptTime = lastMsgReceiptTime;
+    });
 
     if message_level_is_interesting(DEBUG2) {
         /* Copy because timestamptz_to_str returns a static buffer */
@@ -1298,12 +1411,15 @@ fn WalRcvComputeNextWakeup(reason: WalRcvWakeupReason, now: TimestampTz) {
 ///
 /// Called by the startup process whenever interesting xlog records are applied.
 pub fn WalRcvForceReply() {
-    /*
-     * Set force_reply, read procno under the lock, and
-     * SetLatch(&GetPGProcByNumber(procno)->procLatch) if valid. The whole
-     * sequence lives behind the seam since WalRcv + PGPROC are shared memory.
-     */
-    walrcvfuncs::walrcv_force_reply::call();
+    walrcvfuncs::set_force_reply::call();
+    /* fetching the proc number is probably atomic, but don't rely on it */
+    let mut procno = types_core::INVALID_PROC_NUMBER;
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        procno = walrcv.procno;
+    });
+    if procno != types_core::INVALID_PROC_NUMBER {
+        latch::set_latch_for_procno::call(procno);
+    }
 }
 
 /// `static const char *WalRcvGetStateString(WalRcvState state)`.
@@ -1325,8 +1441,11 @@ fn WalRcvGetStateString(state: WalRcvState) -> &'static str {
 /// [`WalReceiverActivity`], with the field-by-field NULL/value selection logic
 /// ported 1:1 from C. `Ok(None)` corresponds to C's `PG_RETURN_NULL()`.
 pub fn pg_stat_get_wal_receiver() -> PgResult<Option<WalReceiverActivity>> {
-    /* Take a lock to ensure value consistency (the seam snapshots WalRcv). */
-    let snap = walrcvfuncs::pg_stat_get_wal_receiver_snapshot::call();
+    /* Take a lock to ensure value consistency (snapshot WalRcv under it). */
+    let mut snap = WalRcvData::default();
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        snap = walrcv.clone();
+    });
 
     /*
      * No WAL receiver (or not ready yet), just return a tuple with NULL values.
@@ -1354,44 +1473,44 @@ pub fn pg_stat_get_wal_receiver() -> PgResult<Option<WalReceiverActivity>> {
         return Ok(Some(act));
     }
 
-    act.state = Some(WalRcvGetStateString(snap.state).to_string());
+    act.state = Some(WalRcvGetStateString(snap.walRcvState).to_string());
 
-    if XLogRecPtrIsInvalid(snap.receive_start_lsn) {
+    if XLogRecPtrIsInvalid(snap.receiveStart) {
         act.receive_start_lsn = None;
     } else {
-        act.receive_start_lsn = Some(snap.receive_start_lsn);
+        act.receive_start_lsn = Some(snap.receiveStart);
     }
-    act.receive_start_tli = Some(snap.receive_start_tli);
+    act.receive_start_tli = Some(snap.receiveStartTLI);
     if XLogRecPtrIsInvalid(written_lsn) {
         act.written_lsn = None;
     } else {
         act.written_lsn = Some(written_lsn);
     }
-    if XLogRecPtrIsInvalid(snap.flushed_lsn) {
+    if XLogRecPtrIsInvalid(snap.flushedUpto) {
         act.flushed_lsn = None;
     } else {
-        act.flushed_lsn = Some(snap.flushed_lsn);
+        act.flushed_lsn = Some(snap.flushedUpto);
     }
-    act.received_tli = Some(snap.received_tli);
-    if snap.last_send_time == 0 {
+    act.received_tli = Some(snap.receivedTLI);
+    if snap.lastMsgSendTime == 0 {
         act.last_send_time = None;
     } else {
-        act.last_send_time = Some(snap.last_send_time);
+        act.last_send_time = Some(snap.lastMsgSendTime);
     }
-    if snap.last_receipt_time == 0 {
+    if snap.lastMsgReceiptTime == 0 {
         act.last_receipt_time = None;
     } else {
-        act.last_receipt_time = Some(snap.last_receipt_time);
+        act.last_receipt_time = Some(snap.lastMsgReceiptTime);
     }
-    if XLogRecPtrIsInvalid(snap.latest_end_lsn) {
+    if XLogRecPtrIsInvalid(snap.latestWalEnd) {
         act.latest_end_lsn = None;
     } else {
-        act.latest_end_lsn = Some(snap.latest_end_lsn);
+        act.latest_end_lsn = Some(snap.latestWalEnd);
     }
-    if snap.latest_end_time == 0 {
+    if snap.latestWalEndTime == 0 {
         act.latest_end_time = None;
     } else {
-        act.latest_end_time = Some(snap.latest_end_time);
+        act.latest_end_time = Some(snap.latestWalEndTime);
     }
     if snap.slotname.is_empty() {
         act.slotname = None;
@@ -1533,6 +1652,33 @@ fn name_from_str(s: &str) -> [u8; NAMEDATALEN] {
     let n = bytes.len().min(NAMEDATALEN - 1);
     out[..n].copy_from_slice(&bytes[..n]);
     out
+}
+
+/// Copy a fixed C buffer (`strlcpy(_, src, size)`) out as a Rust `String`,
+/// truncated to `size-1` bytes — how `WalRcvData`'s fixed-width string fields
+/// are read.
+fn strlcpy_to_string(src: &[u8], size: usize) -> String {
+    let s = cstr_from_bytes(src);
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(size.saturating_sub(1));
+    String::from_utf8_lossy(&bytes[..n]).into_owned()
+}
+
+/// `strlcpy(dst, src, size)` into a fresh fixed buffer (`src` is itself a fixed
+/// C buffer).
+fn strlcpy_to_buf(src: &[u8], size: usize) -> [u8; NAMEDATALEN] {
+    let s = cstr_from_bytes(src);
+    let mut out = [0u8; NAMEDATALEN];
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(size.saturating_sub(1)).min(NAMEDATALEN - 1);
+    out[..n].copy_from_slice(&bytes[..n]);
+    out
+}
+
+/// `MyProcNumber` (globals.c) — passed explicitly per the no-ambient-global
+/// rule.
+fn my_proc_number() -> types_core::ProcNumber {
+    backend_utils_init_small_seams::my_proc_number::call()
 }
 
 /// Map a `wakeup[]` index back to its `WalRcvWakeupReason`.
