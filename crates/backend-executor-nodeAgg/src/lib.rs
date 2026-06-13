@@ -6,9 +6,11 @@
 //!
 //! Function families (one module file each, see the module docs):
 //!
-//! - [`node_lifecycle`] — node init / end / rescan / the `ExecAgg` driver and
-//!   its setup helpers (phase/set selection, input fetch, column analysis,
+//! - [`node_lifecycle`] — node end / rescan / the `ExecAgg` driver and its
+//!   setup helpers (phase/set selection, input fetch, column analysis,
 //!   per-trans build).
+//! - [`exec_init_agg`] — `ExecInitAgg`, split out of `node_lifecycle` because
+//!   the C function (~854 lines) dwarfs the rest of the lifecycle family.
 //! - [`transition`] — initializing and advancing transition state (the
 //!   transfn driver, ordered/distinct paths).
 //! - [`finalize`] — running final functions and projecting the result.
@@ -32,6 +34,7 @@
 #![allow(unused_variables)]
 
 pub mod aggapi;
+pub mod exec_init_agg;
 pub mod finalize;
 pub mod hash_grouping;
 pub mod node_lifecycle;
@@ -45,8 +48,9 @@ pub use aggapi::{
     AggStateIsShared, ExecAggEstimate, ExecAggInitializeDSM, ExecAggInitializeWorker,
     ExecAggRetrieveInstrumentation,
 };
+pub use exec_init_agg::ExecInitAgg;
 pub use hash_grouping::hash_agg_entry_size;
-pub use node_lifecycle::{ExecAgg, ExecEndAgg, ExecInitAgg, ExecReScanAgg};
+pub use node_lifecycle::{ExecAgg, ExecEndAgg, ExecReScanAgg};
 pub use spill::hash_agg_set_limits;
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ use types_core::primitive::Oid;
 use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
-    Agg, Aggref, AggStateData, AggStatePerTransData,
+    Aggref, AggStateData, AggStatePerTransData,
 };
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, SlotId};
@@ -106,18 +106,6 @@ pub fn ExecAgg<'mcx>(
     pstate: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
-    todo!("decomp")
-}
-
-/// `ExecInitAgg(node, estate, eflags)` — build the `AggState` from the Agg
-/// plan node: catalog reads for every aggregate, per-trans/per-agg setup,
-/// phase and grouping-set layout, hash-table and context creation.
-pub fn ExecInitAgg<'mcx>(
-    node: &'mcx Agg<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    eflags: i32,
-    mcx: Mcx<'mcx>,
-) -> PgResult<PgBox<'mcx, AggStateData<'mcx>>> {
     todo!("decomp")
 }
 
