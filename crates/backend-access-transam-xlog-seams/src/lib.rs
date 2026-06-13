@@ -340,3 +340,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn xlog_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `XLogPutNextOid(nextOid)` (xlog.c): emit the `XLOG_NEXTOID` record that
+    /// logs the next OID to be allocated, so a crash recovery sees the
+    /// preallocated OID range. Called by `GetNewObjectId` while holding
+    /// `OidGenLock`. The WAL insert can `ereport(ERROR)`, carried on `Err`.
+    pub fn xlog_put_next_oid(next_oid: types_core::Oid) -> PgResult<()>
+);
