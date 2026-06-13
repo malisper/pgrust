@@ -21,3 +21,11 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # Owned seam crate this unit installs from init_seams().
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+# Per-owner seams for unported neighbors reached by the tuple-output family.
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }

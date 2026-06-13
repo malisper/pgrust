@@ -13,9 +13,34 @@ use types_core::primitive::AttrNumber;
 use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
+use types_nodes::tuptable::SlotData;
 use types_nodes::{SlotId, TupleSlotKind, TupleTableSlot};
 use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
+
+// ===========================================================================
+//  Standalone-slot creation/teardown over the owned [`SlotData`] payload model.
+//  These mirror `MakeSingleTupleTableSlot` / `ExecDropSingleTupleTableSlot`
+//  (execTuples.c) for in-crate callers (e.g. the `begin/do/end_tup_output`
+//  family) that hold the live `SlotData` directly rather than a pool id. Their
+//  bodies land with this slot-creation family.
+// ===========================================================================
+
+/// `MakeSingleTupleTableSlot(tupdesc, tts_ops)` (execTuples.c): create a
+/// standalone slot of the given class, fixed to `tupdesc`, allocated in `mcx`.
+pub fn MakeSingleTupleTableSlot<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _tupdesc: TupleDesc<'mcx>,
+    _tts_ops: TupleSlotKind,
+) -> PgResult<SlotData<'mcx>> {
+    todo!("execTuples.c MakeSingleTupleTableSlot")
+}
+
+/// `ExecDropSingleTupleTableSlot(slot)` (execTuples.c): release a slot made
+/// with [`MakeSingleTupleTableSlot`] (clears it first, releasing any pin).
+pub fn ExecDropSingleTupleTableSlot(_slot: SlotData<'_>) -> PgResult<()> {
+    todo!("execTuples.c ExecDropSingleTupleTableSlot")
+}
 
 // ===========================================================================
 //  Seam install targets — signatures mirror
