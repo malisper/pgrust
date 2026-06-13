@@ -31,7 +31,7 @@ use crate::proc_shmem;
 /// `proc`'s lock-group fields. C:
 /// `&MainLWLockArray[LOCK_MANAGER_LWLOCK_OFFSET +
 ///  (GetNumberFromPGProc(proc) % NUM_LOCK_PARTITIONS)].lock`.
-fn lock_hash_partition_lock_offset_by_proc(procno: ProcNumber) -> usize {
+pub(crate) fn lock_hash_partition_lock_offset_by_proc(procno: ProcNumber) -> usize {
     (LOCK_MANAGER_LWLOCK_OFFSET as i64 + (procno as i64 % NUM_LOCK_PARTITIONS as i64))
         as usize
 }
