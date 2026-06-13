@@ -1,0 +1,40 @@
+[package]
+name = "backend-commands-prepare"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_prepare"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-scan = { path = "../types-scan" }
+
+# Owner seam crates (calls into not-yet-ported owners panic until they land).
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+backend-utils-cache-plancache-seams = { path = "../backend-utils-cache-plancache-seams" }
+backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
+backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
+backend-tcop-pquery-seams = { path = "../backend-tcop-pquery-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }

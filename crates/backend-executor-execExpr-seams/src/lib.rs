@@ -7,6 +7,64 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `CreateExecutorState()` (execUtils.c): build a throwaway `EState` in a
+    /// fresh per-query context. The PREPARE/EXECUTE/EXPLAIN drivers use it only
+    /// to evaluate parameter expressions and never read its fields, so it
+    /// crosses as the opaque [`types_nodes::parsestmt::EStateHandle`]. (Declared
+    /// here alongside the parameter-evaluation seams that consume it — the
+    /// throwaway-EState-for-params idiom lands with the expression evaluator.)
+    /// Allocates.
+    pub fn create_executor_state(
+    ) -> types_error::PgResult<types_nodes::parsestmt::EStateHandle>
+);
+
+seam_core::seam!(
+    /// `estate->es_param_list_info = params` — set the external param list on
+    /// the throwaway executor state.
+    pub fn estate_set_param_list_info(
+        estate: types_nodes::parsestmt::EStateHandle,
+        params: types_nodes::parsestmt::ParamListInfoHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `FreeExecutorState(estate)` (execUtils.c): release the throwaway
+    /// executor state and its per-query context.
+    pub fn free_executor_state(
+        estate: types_nodes::parsestmt::EStateHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecPrepareExprList(exprs, estate)` (execExpr.c): compile a list of
+    /// already analyzed parameter expression nodes into `ExprState`s, one per
+    /// input node, in the throwaway executor state's context. The PREPARE
+    /// driver threads the owned parameter nodes in and gets opaque
+    /// [`types_nodes::parsestmt::ExprStateHandle`]s back. Allocates / can
+    /// `ereport(ERROR)`.
+    pub fn exec_prepare_expr_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        params: &[mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>],
+        estate: types_nodes::parsestmt::EStateHandle,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::parsestmt::ExprStateHandle>>
+);
+
+seam_core::seam!(
+    /// For the `i`-th prepared `ExprState`, set `paramLI->params[i]`:
+    /// `ptype = param_types[i]`, `pflags = PARAM_FLAG_CONST`,
+    /// `value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
+    /// &prm->isnull)` (prepare.c `EvaluateParams`). fmgr/`Datum` value layer.
+    /// Can `ereport(ERROR)`.
+    pub fn eval_exec_param_into_list(
+        param_li: types_nodes::parsestmt::ParamListInfoHandle,
+        exprstate: types_nodes::parsestmt::ExprStateHandle,
+        param_index: i32,
+        ptype: types_core::Oid,
+        estate: types_nodes::parsestmt::EStateHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecBuildProjectionInfo(targetList, econtext, slot, parent,
     /// inputDesc)` (execExpr.c), marshaled over the owned tree: the owner
     /// extracts the target list (`planstate->plan->targetlist`), the node's

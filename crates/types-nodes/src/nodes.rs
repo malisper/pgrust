@@ -43,9 +43,10 @@ pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum CmdType {
+    #[default]
     CMD_UNKNOWN = 0,
     /// select stmt
     CMD_SELECT = 1,

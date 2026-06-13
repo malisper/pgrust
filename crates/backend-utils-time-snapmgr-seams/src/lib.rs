@@ -10,6 +10,15 @@ use types_core::CommandId;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `GetActiveSnapshot()` (snapmgr.c): the topmost active snapshot, or the
+    /// C `NULL` (`None`) if none is set. The live `Snapshot` belongs to the
+    /// snapmgr active-snapshot stack, so it crosses as the opaque
+    /// [`types_scan::snapshot::SnapshotHandle`] the consumer hands to
+    /// `PortalStart`.
+    pub fn get_active_snapshot() -> Option<types_scan::snapshot::SnapshotHandle>
+);
+
+seam_core::seam!(
     /// `GetCatalogSnapshot(relid)` (snapmgr.c): an MVCC snapshot capable of
     /// reading the catalog (refreshed if invalidations arrived). Can
     /// `ereport(ERROR)` (snapshot import/allocation paths), carried on

@@ -1492,6 +1492,9 @@ pub fn init_seams() {
     backend_access_transam_xact_seams::transaction_id_is_current_transaction_id::set(
         TransactionIdIsCurrentTransactionId,
     );
+    backend_access_transam_xact_seams::get_current_statement_start_timestamp::set(
+        GetCurrentStatementStartTimestamp,
+    );
 }
 
 #[cfg(test)]

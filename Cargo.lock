@@ -140,6 +140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tupdesc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1204,6 +1215,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-createas-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
@@ -1224,6 +1245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-explain-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-commands-extension-seams"
 version = "0.0.0"
 dependencies = [
@@ -1231,6 +1262,39 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-prepare"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc-seams",
+ "backend-access-transam-xact-seams",
+ "backend-commands-createas-seams",
+ "backend-commands-explain-seams",
+ "backend-executor-execExpr-seams",
+ "backend-nodes-params-seams",
+ "backend-parser-analyze-seams",
+ "backend-parser-parse-expr-seams",
+ "backend-parser-parse-type-seams",
+ "backend-tcop-pquery-seams",
+ "backend-tcop-utility-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-plancache-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-resowner-resowner-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-scan",
+ "types-tuple",
 ]
 
 [[package]]
@@ -1315,6 +1379,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
  "types-nodes",
@@ -1786,6 +1851,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-params-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
@@ -1799,6 +1874,39 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-parser-analyze-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-parse-expr-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-parse-type-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2667,6 +2775,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-pquery-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-scan",
+]
+
+[[package]]
+name = "backend-tcop-utility-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-timezone-localtime"
 version = "0.0.0"
 dependencies = [
@@ -2808,6 +2937,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
 ]
@@ -2954,6 +3084,18 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-cache-plancache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3328,15 +3470,28 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
 name = "backend-utils-mmgr-portalmem-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-utils-resowner-resowner-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -3378,6 +3533,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-scan",
  "types-snapshot",
 ]
 

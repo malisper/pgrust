@@ -12,8 +12,23 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
+use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
+
+seam_core::seam!(
+    /// `construct_array_builtin(elems, nelems, elmtype)` (arrayfuncs.c): build
+    /// a one-dimensional array `Datum` from `nelems` pass-by-value element
+    /// `Datum`s of the built-in type `elmtype` (e.g. `REGTYPEOID`). An empty
+    /// input yields a zero-element array, not NULL. The result varlena is
+    /// allocated in `mcx`; the carried `Datum` is its pointer word. Can
+    /// `ereport(ERROR)` (unsupported element type).
+    pub fn construct_array_builtin<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[Datum],
+        elmtype: Oid,
+    ) -> PgResult<Datum>
+);
 
 seam_core::seam!(
     /// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...)`

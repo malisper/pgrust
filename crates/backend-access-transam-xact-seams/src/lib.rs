@@ -7,6 +7,13 @@
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `GetCurrentStatementStartTimestamp()` (xact.c): the timestamp the
+    /// current statement (transaction command) started. Pure read of
+    /// backend-local transaction state.
+    pub fn get_current_statement_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `CommandCounterIncrement()` (xact.c): bump the command counter so
     /// in-progress catalog changes become visible. Can `ereport(ERROR)`
     /// (e.g. `cannot have more than 2^32-2 commands in a transaction`),
