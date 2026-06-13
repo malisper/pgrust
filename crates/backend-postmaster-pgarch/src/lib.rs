@@ -741,7 +741,7 @@ fn pgarch_archiveXlog(xlog: &str) -> PgResult<bool> {
 
     // Report archive activity in PS display.
     let activitymsg = truncate_activity(alloc::format!("archiving {xlog}"));
-    backend_utils_misc_ps_status_seams::set_ps_display::call(&activitymsg);
+    backend_utils_misc_ps_status_seams::set_ps_display::call(activitymsg);
 
     // oldcontext = MemoryContextSwitchTo(archive_context);
     let ctx = archive_context
@@ -785,7 +785,7 @@ fn pgarch_archiveXlog(xlog: &str) -> PgResult<bool> {
     } else {
         truncate_activity(alloc::format!("failed on {xlog}"))
     };
-    backend_utils_misc_ps_status_seams::set_ps_display::call(&activitymsg);
+    backend_utils_misc_ps_status_seams::set_ps_display::call(activitymsg);
 
     Ok(ret)
 }
@@ -894,18 +894,18 @@ fn pgarch_readyXlog() -> PgResult<Option<String>> {
 
         // Ignore entries with unexpected number of characters.
         if basenamelen_i < MIN_XFN_CHARS as isize || basenamelen_i > MAX_XFN_CHARS as isize {
-            return Ok(());
+            return Ok(false);
         }
         let basenamelen = basenamelen_i as usize;
 
         // Ignore entries with unexpected characters.
         if c_strspn(name, VALID_XFN_CHARS) < basenamelen {
-            return Ok(());
+            return Ok(false);
         }
 
         // Ignore anything not suffixed with .ready.
         if &name[basenamelen..] != b".ready" {
-            return Ok(());
+            return Ok(false);
         }
 
         // Truncate off the .ready: basename = d_name[..basenamelen].
@@ -934,7 +934,8 @@ fn pgarch_readyXlog() -> PgResult<Option<String>> {
                 af.arch_heap.add(String::from(basename));
             }
         });
-        Ok(())
+        // The C while-loop never stops early; it scans the whole directory.
+        Ok(false)
     })?;
 
     // If no files were found, simply return.
