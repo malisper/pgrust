@@ -199,3 +199,21 @@ seam_core::seam!(
         type_id: types_core::Oid,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `CreateFakeRelcacheEntry(rlocator)` (xlogutils.c, but allocating a
+    /// relcache `RelationData` + non-pinned `SMgrRelation`, which is relcache
+    /// substrate). The C `palloc0`s a `FakeRelCacheEntryData`, fills the
+    /// physical-storage fields, and `smgropen`s a non-pinned handle. Returns
+    /// the owned fake entry in `mcx`. `Err` carries OOM.
+    pub fn create_fake_relcache_entry<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rlocator: types_storage::RelFileLocator,
+    ) -> types_error::PgResult<types_rel::RelationData<'mcx>>
+);
+
+seam_core::seam!(
+    /// `FreeFakeRelcacheEntry(fakerel)` (xlogutils.c) — `pfree` the fake entry.
+    /// Takes ownership; the owner drops the allocation and its `SMgrRelation`.
+    pub fn free_fake_relcache_entry(fakerel: types_rel::RelationData<'_>)
+);
