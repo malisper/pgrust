@@ -16,7 +16,11 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-locale = { path = "../types-locale" }
 types-sortsupport = { path = "../types-sortsupport" }
+types-regex = { path = "../types-regex" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }
+backend-regex-core-seams = { path = "../backend-regex-core-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
