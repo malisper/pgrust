@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 # allocation + error + shared vocabulary
 mcx = { path = "../mcx" }
+# this unit's own inward seams (installed by init_seams)
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }

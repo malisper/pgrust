@@ -15,7 +15,7 @@
 use backend_utils_error::ereport;
 use mcx::{Mcx, PgString};
 use types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
-use types_core::primitive::{Oid, OidIsValid};
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_TOO_MANY_CONNECTIONS,
@@ -1297,11 +1297,28 @@ fn reserve_failed(_: std::collections::TryReserveError) -> PgError {
     PgError::new(ERROR, "out of memory").with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
 }
 
-/// Install this crate's seam implementations. postinit has no cyclic inward
-/// consumers (its callers — postmaster/main/bootstrap — depend on it directly),
-/// so there is no `backend-utils-init-postinit-seams` crate and nothing to
-/// install.
-pub fn init_seams() {}
+/// Install this crate's seam implementations.
+///
+/// `backend-bootstrap-bootstrap` calls back into postinit's
+/// `InitializeMaxBackends`/`InitializeFastPathLocks`/`BaseInit`/`InitPostgres`
+/// (a real dependency cycle: bootstrap.c's `BootstrapModeMain` drives these
+/// per-backend init steps). Those four entry points are declared in
+/// `backend-utils-init-postinit-seams` and installed here.
+pub fn init_seams() {
+    backend_utils_init_postinit_seams::initialize_max_backends::set(InitializeMaxBackends);
+    backend_utils_init_postinit_seams::initialize_fast_path_locks::set(|| {
+        // C InitializeFastPathLocks is void; the port returns PgResult only to
+        // carry the debug asserts. The seam contract is infallible, matching C,
+        // so a panic here would only fire on the impossible already-initialized
+        // assertion. Unwrap to honor the infallible signature.
+        InitializeFastPathLocks().expect("InitializeFastPathLocks is infallible");
+    });
+    backend_utils_init_postinit_seams::base_init::set(BaseInit);
+    backend_utils_init_postinit_seams::init_postgres_bootstrap::set(|mcx| {
+        // C: InitPostgres(NULL, InvalidOid, NULL, InvalidOid, 0, NULL).
+        InitPostgres(mcx, None, InvalidOid, None, InvalidOid, 0, None)
+    });
+}
 
 #[cfg(test)]
 mod tests {

@@ -440,7 +440,7 @@ pub fn BootstrapModeMain(mcx: Mcx<'static>, argv: Vec<String>, check_only: bool)
             .finish(loc(371, "BootstrapModeMain"));
     }
 
-    backend_utils_init_postinit_seams::init_postgres_bootstrap::call()?;
+    backend_utils_init_postinit_seams::init_postgres_bootstrap::call(mcx)?;
 
     /* Initialize stuff for bootstrap-file processing */
     STATE.with(|s| {

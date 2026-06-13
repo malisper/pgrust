@@ -6,6 +6,7 @@
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -31,5 +32,5 @@ seam_core::seam!(
     /// `InitPostgres(NULL, InvalidOid, NULL, InvalidOid, 0, NULL)` (postinit.c)
     /// as called from bootstrap mode: complete backend initialization without
     /// selecting a database. `ereport(ERROR/FATAL)` on failure.
-    pub fn init_postgres_bootstrap() -> PgResult<()>
+    pub fn init_postgres_bootstrap(mcx: Mcx<'static>) -> PgResult<()>
 );
