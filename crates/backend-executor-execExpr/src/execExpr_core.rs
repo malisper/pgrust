@@ -912,23 +912,51 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
         // ----- nodes routed to owner families / structural blockers -----
         Expr::ScalarArrayOpExpr(_) => panic!(
-            "execExpr-core: ScalarArrayOpExpr needs the fmgr_info seam + (for the hashed form) \
-             typcache; per-arg fcinfo cells are modeled. Port lands with the fmgr_info seam."
+            "execExpr-core: ScalarArrayOpExpr's compile reads opexpr->opfuncid / hashfuncid / \
+             negfuncid / inputcollid (execExpr.c:1282-1320), but the keystone-trimmed \
+             primnodes::ScalarArrayOpExpr carries only opno/useOr/args — the planner-set \
+             opfuncid/hashfuncid/negfuncid (and inputcollid) are absent, so neither the \
+             EEOP_SCALARARRAYOP nor the EEOP_HASHED_SCALARARRAYOP step can be filled. Genuine \
+             model gap: the primnodes ScalarArrayOpExpr struct must be expanded field-for-field \
+             (owned by the nodes/keystone model layer). The scalar_cell/array_cell fcinfo-arg \
+             cells are already modeled; the fmgr_info seam is landed."
         ),
         Expr::MinMaxExpr(_) => panic!(
-            "execExpr-core: MinMaxExpr needs lookup_type_cache(TYPECACHE_CMP_PROC) + fmgr_info \
-             (typcache/fmgr owner seams)"
+            "execExpr-core: MinMaxExpr recurses each arg into &scratch.d.minmax.values[off] / \
+             nulls[off] (execExpr.c:2274-2284), but the ExprEvalStepData::MinMax variant models \
+             values/nulls as plain Datum/bool workspace vecs with no per-element ResultCellId — \
+             so there is no arena cell for exec_init_expr_rec to write each argument into. \
+             Genuine model gap (gap-2 not extended to MinMax): the MinMax step payload needs a \
+             per-element arg-cell vector, landed in lockstep with the interpreter (joint \
+             keystone). cmp_proc (lookup_element_cmp_proc) and fmgr_info seams are landed."
         ),
         Expr::ArrayExpr(_) => panic!(
-            "execExpr-core: ArrayExpr needs get_typlenbyvalalign element-type info (lsyscache \
-             owner seam) for the per-element workspace; arg recursion is modeled"
+            "execExpr-core: ArrayExpr recurses each element into \
+             &scratch.d.arrayexpr.elemvalues[elemoff] / elemnulls[elemoff] (execExpr.c:1950-1958), \
+             but the ExprEvalStepData::ArrayExpr variant models elemvalues/elemnulls as plain \
+             Datum/bool workspace vecs with no per-element ResultCellId, so there is no arena \
+             cell for the element recursion to target. Genuine model gap (gap-2 not extended to \
+             ArrayExpr): the step payload needs a per-element arg-cell vector landed in lockstep \
+             with the interpreter (joint keystone). get_typlenbyvalalign is a landed seam."
         ),
         Expr::RowExpr(_) => panic!(
-            "execExpr-core: RowExpr needs the result tupdesc (BlessTupleDesc/typcache owner)"
+            "execExpr-core: RowExpr recurses each field into &scratch.d.row.elemvalues[i] / \
+             elemnulls[i] (execExpr.c:2048-2050), but the ExprEvalStepData::Row variant models \
+             elemvalues/elemnulls as plain Datum/bool workspace vecs with no per-element \
+             ResultCellId, so the per-field recursion has no arena cell to target. Genuine model \
+             gap (gap-2 not extended to Row); additionally the RECORDOID generic-record branch \
+             needs ExecTypeFromExprList + BlessTupleDesc (execTuples owner, no seam). \
+             lookup_rowtype_tupdesc_copy (named-type branch) and exprType are landed seams."
         ),
         Expr::RowCompareExpr(_) => panic!(
-            "execExpr-core: RowCompareExpr needs per-column fmgr_info comparison lookups (fmgr \
-             owner seam)"
+            "execExpr-core: RowCompareExpr recurses left/right args into &fcinfo->args[0/1].value \
+             (execExpr.c:2127-2130), but the ExprEvalStepData::RowCompareStep variant carries \
+             finfo/fcinfo_data/fn_addr/jumpnull/jumpdone with no per-arg ResultCellId cells (the \
+             gap-2 arg-cells the keystone added to Func/HashDatum/ScalarArrayOp were not extended \
+             to RowCompareStep), so the two argument sub-expressions have no arena cell to write \
+             into. Genuine model gap: the RowCompareStep payload needs arg-cell fields landed in \
+             lockstep with the interpreter (joint keystone). The opfamily/proc lsyscache lookups \
+             and fmgr_info seams are landed."
         ),
         Expr::SubscriptingRef(sbsref) => {
             let mut scratch = scratch_for(resv);
@@ -937,25 +965,213 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             )
         }
         Expr::CoerceViaIO(_) => panic!(
-            "execExpr-core: CoerceViaIO needs getTypeOutputInfo/getTypeInputInfo + fmgr_info \
-             (lsyscache/fmgr owner seams); owned by execExpr_func_subscript"
+            "execExpr-core: CoerceViaIO preloads the result type's input function's constant args \
+             (fcinfo_in->args[1] = typioparam, args[2] = -1; execExpr.c:1664-1668) and stamps \
+             fcinfo_in->context = state->escontext, but the keystone-trimmed \
+             FunctionCallInfoBaseData carries only `resultinfo` — it has no args[] array nor a \
+             context field, and the ExprEvalStepData::IoCoerce variant has no typioparam slot, so \
+             those load-bearing preloads cannot be modeled. Genuine model gap: the fcinfo / \
+             IoCoerce payload must be expanded (owned by the nodes/keystone model layer) before \
+             the interpreter can read typioparam. getTypeOutputInfo/getTypeInputInfo (lsyscache) \
+             and fmgr_info are landed seams."
         ),
-        Expr::ArrayCoerceExpr(_) => panic!(
-            "execExpr-core: ArrayCoerceExpr needs the per-element ExprState + array_map state \
-             (execExpr_func_subscript / arrayfuncs owner seams)"
-        ),
-        Expr::ConvertRowtypeExpr(_) => panic!(
-            "execExpr-core: ConvertRowtypeExpr needs the in/out rowtype caches + TupleConversionMap \
-             (typcache/tupconvert owner seams)"
-        ),
+        // ----- T_ArrayCoerceExpr -----
+        Expr::ArrayCoerceExpr(acoerce) => {
+            // C: ExecInitExprRec(acoerce->arg, state, resv, resnull);
+            let arg = acoerce.arg.as_deref().expect("ArrayCoerceExpr.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+
+            // C: resultelemtype = get_element_type(acoerce->resulttype);
+            //    if (!OidIsValid(resultelemtype))
+            //        ereport(ERROR, errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+            //                errmsg("target type is not an array"));
+            let resultelemtype =
+                backend_utils_cache_lsyscache_seams::get_element_type::call(acoerce.resulttype)?
+                    .unwrap_or(types_core::InvalidOid);
+            if resultelemtype == types_core::InvalidOid {
+                return Err(types_error::PgError::error("target type is not an array")
+                    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+
+            // C: Construct a sub-expression for the per-element coercion; don't
+            //    ready it until after the triviality check. It has no Var refs
+            //    but does have a CaseTestExpr for the source element value.
+            //    elemstate = makeNode(ExprState);
+            //    elemstate->expr = acoerce->elemexpr;
+            //    elemstate->parent = state->parent;
+            //    elemstate->ext_params = state->ext_params;
+            //    elemstate->innermost_caseval = palloc(sizeof(Datum));
+            //    elemstate->innermost_casenull = palloc(sizeof(bool));
+            //    ExecInitExprRec(acoerce->elemexpr, elemstate,
+            //                    &elemstate->resvalue, &elemstate->resnull);
+            let elemexpr = acoerce
+                .elemexpr
+                .as_deref()
+                .expect("ArrayCoerceExpr.elemexpr present");
+            let mut elemstate = make_expr_state();
+            // C: elemstate->parent = state->parent;  (a raw PlanState* copy).
+            // The parent is owned (PgBox, not Clone) in this model and is only
+            // consulted to set up SubPlan / whole-row Var references — which a
+            // per-element array coercion sub-expression cannot contain (it has
+            // no Var refs by construction, only a CaseTestExpr for the source
+            // element value). So leaving it unset is faithful for every shape
+            // this sub-expression can take.
+            elemstate.parent = None;
+            elemstate.ext_params = state.ext_params;
+            ensure_result_arena(mcx, &mut elemstate)?;
+            // C palloc's a dedicated innermost_caseval/casenull cell for the
+            // element value the CaseTestExpr reads; allocate one in the
+            // sub-state's arena.
+            elemstate.innermost_caseval = Some(new_result_cell(mcx, &mut elemstate)?);
+            // The element coercion result is written into the sub-state's own
+            // resvalue/resnull (STATE_RESULT_CELL), the C `&elemstate->resvalue`.
+            exec_init_expr_rec(mcx, elemexpr, &mut elemstate, STATE_RESULT_CELL)?;
+
+            // C: if (elemstate->steps_len == 1 &&
+            //        elemstate->steps[0].opcode == EEOP_CASE_TESTVAL)
+            //        elemstate = NULL;   /* trivial, no per-element work */
+            //    else { append EEOP_DONE_RETURN; ExecReadyExpr(elemstate); }
+            let trivial = elemstate.steps_len == 1
+                && matches!(
+                    elemstate
+                        .steps
+                        .as_ref()
+                        .and_then(|s| s.first())
+                        .map(|s| s.opcode),
+                    Some(ExprEvalOp::EEOP_CASE_TESTVAL)
+                );
+            let elemexprstate = if trivial {
+                None
+            } else {
+                expr_eval_push_step(mcx, &mut elemstate, done_return_step(STATE_RESULT_CELL))?;
+                exec_ready_expr(&mut elemstate)?;
+                Some(mcx::alloc_in(mcx, elemstate)?)
+            };
+
+            // C: scratch.opcode = EEOP_ARRAYCOERCE;
+            //    scratch.d.arraycoerce.elemexprstate = elemstate;
+            //    scratch.d.arraycoerce.resultelemtype = resultelemtype;
+            //    if (elemstate) scratch.d.arraycoerce.amstate = palloc0(sizeof(ArrayMapState));
+            //    else           scratch.d.arraycoerce.amstate = NULL;
+            //
+            // `ArrayMapState` is array_map's runtime workspace, opaque to this
+            // layer (the arrayfuncs owner's struct); the interpreter allocates it
+            // on first use, so we leave it as the parked-address sentinel 0,
+            // exactly as C leaves it NULL when there is no per-element work and
+            // zeroed (lazily filled) when there is.
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_ARRAYCOERCE,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::ArrayCoerce {
+                    elemexprstate,
+                    resultelemtype,
+                    amstate: 0,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
+        // ----- T_ConvertRowtypeExpr -----
+        Expr::ConvertRowtypeExpr(convert) => {
+            // C: rowcachep = palloc(2 * sizeof(ExprEvalRowtypeCache));
+            //    rowcachep[0].cacheptr = NULL; rowcachep[1].cacheptr = NULL;
+            // The in/out rowtype caches are fresh (cacheptr == NULL); the
+            // interpreter fills them at runtime from the typcache. They are
+            // out-of-line in C for space; here each is its own boxed
+            // ExprEvalRowtypeCache on the step payload.
+            let incache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let outcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+
+            // C: ExecInitExprRec(convert->arg, state, resv, resnull);
+            let arg = convert.arg.as_deref().expect("ConvertRowtypeExpr.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+
+            // C: scratch.opcode = EEOP_CONVERT_ROWTYPE;
+            //    scratch.d.convert_rowtype.inputtype = exprType((Node *) convert->arg);
+            //    scratch.d.convert_rowtype.outputtype = convert->resulttype;
+            //    scratch.d.convert_rowtype.incache = &rowcachep[0];
+            //    scratch.d.convert_rowtype.outcache = &rowcachep[1];
+            //    scratch.d.convert_rowtype.map = NULL;
+            //
+            // `exprType((Node *) convert->arg)` is a pure node-type inspection
+            // owned by nodeFuncs (already threaded here). `map` (the
+            // TupleConversionMap) is built lazily by the interpreter, so it stays
+            // NULL (the parked-address sentinel 0) exactly as C palloc-NULLs it.
+            let inputtype = backend_nodes_nodeFuncs_seams::expr_type_info::call(arg)?.typid;
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_CONVERT_ROWTYPE,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::ConvertRowtype {
+                    inputtype,
+                    outputtype: convert.resulttype,
+                    incache: Some(incache),
+                    outcache: Some(outcache),
+                    map: 0,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         Expr::FieldStore(_) => panic!(
-            "execExpr-core: FieldStore (DEFORM/FORM pair) needs the composite rowcache + column \
-             workspace (typcache owner seam); owned by execExpr_func_subscript"
+            "execExpr-core: FieldStore threads each new field value through \
+             state->innermost_caseval = &values[fieldnum-1] and recurses into \
+             &values[fieldnum-1] (execExpr.c:1581-1586), but the ExprEvalStepData::FieldStore \
+             variant models values/nulls as plain Datum/bool workspace vecs with no per-column \
+             ResultCellId — so neither the innermost_caseval thread nor the per-field recursion \
+             has an arena cell to bind to. The variant also parks the FieldStore node itself as \
+             an opaque address (fstore: usize), but the interpreter's DEFORM/FORM pair needs \
+             fstore->fieldnums. Genuine model gap (gap-2 not extended to FieldStore + parked \
+             node), owned by the nodes/keystone model layer. lookup_rowtype_tupdesc (for natts) \
+             is a landed seam."
         ),
-        Expr::CoerceToDomain(_) | Expr::CoerceToDomainValue(_) => panic!(
-            "execExpr-core: domain coercion is owned by execExpr_domain_agg \
-             (ExecInitCoerceToDomain) — needs the domain constraint list (typcache owner)"
-        ),
+        // ----- T_CoerceToDomain -----
+        Expr::CoerceToDomain(ctest) => {
+            // C: ExecInitCoerceToDomain(&scratch, ctest, state, resv, resnull);
+            // The DOMAIN_NOTNULL/DOMAIN_CHECK step emission is owned by the
+            // execExpr_domain_agg sibling family (it threads the
+            // InitDomainConstraintRef typcache lookup and the per-CHECK
+            // recursion); the dispatch routes there, exactly as the C switch
+            // delegates to ExecInitCoerceToDomain.
+            let mut scratch = scratch_for(resv);
+            let arg = ctest.arg.as_deref().expect("CoerceToDomain.arg present");
+            crate::execExpr_domain_agg::exec_init_coerce_to_domain(
+                mcx,
+                &mut scratch,
+                ctest.resulttype,
+                arg,
+                state,
+                resv,
+            )
+        }
+
+        // ----- T_CoerceToDomainValue -----
+        Expr::CoerceToDomainValue(_) => {
+            // C: read from innermost_domainval; if NULL (a standalone domain
+            //    check rather than one embedded in a larger expression) we must
+            //    read from econtext->domainValue_datum via the specialized
+            //    EEOP_DOMAIN_TESTVAL_EXT op.
+            let scratch = match state.innermost_domainval {
+                None => ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_DOMAIN_TESTVAL_EXT,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::NoPayload,
+                },
+                Some(cell) => ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_DOMAIN_TESTVAL,
+                    resvalue: resv,
+                    resnull: resv,
+                    // C shares the casetest union variant with DOMAIN_TESTVAL:
+                    //   scratch.d.casetest.value = state->innermost_domainval;
+                    //   scratch.d.casetest.isnull = state->innermost_domainnull;
+                    d: ExprEvalStepData::CaseTest { value: cell },
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         Expr::SubPlan(subplan) => {
             // `Expr::SubPlan` carries a `Box<SubPlan<'static>>` (the lifetime-free
             // Expr enum erases the arena lifetime); the SubPlan tree is allocated
