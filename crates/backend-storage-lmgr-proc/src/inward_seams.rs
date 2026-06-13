@@ -376,6 +376,29 @@ fn init_process() -> PgResult<()> {
     crate::proc_lifecycle::InitProcess(cx.mcx())
 }
 
+fn init_process_phase2(mcx: mcx::Mcx<'_>) -> PgResult<()> {
+    // `InitProcessPhase2(void)` — add MyProc to the ProcArray. The owner body
+    // takes the explicit `Mcx` (it allocates nothing in it; the parameter
+    // threads the memory-context convention).
+    crate::proc_lifecycle::InitProcessPhase2(mcx)
+}
+
+fn have_n_free_procs(n: i32, nfree: &mut i32) -> bool {
+    // `HaveNFreeProcs(int n, int *nfree)` — exact C signature; the owner body
+    // counts `ProcGlobal->freeProcs` under the ProcStructLock.
+    crate::proc_lifecycle::HaveNFreeProcs(n, nfree)
+}
+
+fn set_my_proc_role_id(userid: Oid) {
+    // `MyProc->roleId = userid` — plain shared-memory field store.
+    with_my_proc(|p| p.roleId = userid);
+}
+
+fn set_my_proc_database_id(dboid: Oid) {
+    // `MyProc->databaseId = dboid` — plain shared-memory field store.
+    with_my_proc(|p| p.databaseId = dboid);
+}
+
 fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadlock::LockId) {
     // The deadlock detector's `ProcLockWakeup(space, lock)` entry: re-wake the
     // grantable waiters on `lock` after a soft-deadlock queue rearrangement.
@@ -456,4 +479,14 @@ pub(crate) fn install() {
     // diverge (extra Mcx / out-param) or are mis-homed in miscadmin/globals
     // and are tracked in DESIGN_DEBT.
     seams::check_dead_lock_alert::set(crate::proc_waitqueue::CheckDeadLockAlert);
+
+    // Contract-reconciled installs (assemble/seam-contract-reconciles): the
+    // postinit / miscinit lifecycle seams over this unit's own `MyProc` state.
+    // `init_process_phase2` threads the owner's `Mcx`; `have_n_free_procs`
+    // matches the C `(int, int *) -> bool` out-param shape; the role/database
+    // id setters are plain `MyProc` field stores.
+    seams::init_process_phase2::set(init_process_phase2);
+    seams::have_n_free_procs::set(have_n_free_procs);
+    seams::set_my_proc_role_id::set(set_my_proc_role_id);
+    seams::set_my_proc_database_id::set(set_my_proc_database_id);
 }

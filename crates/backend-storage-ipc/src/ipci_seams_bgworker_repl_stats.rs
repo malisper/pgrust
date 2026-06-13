@@ -10,7 +10,7 @@
 //! | `WalSummarizerShmemSize`/`Init`       | `backend-postmaster-walsummarizer-seams`      |
 //! | `PgArchShmemSize`/`Init`              | `backend-postmaster-pgarch-seams`             |
 //! | `WalSndShmemSize`/`Init`              | `backend-replication-walsender-seams`         |
-//! | `WalRcvShmemSize`/`Init`              | `backend-replication-walreceiver-seams`       |
+//! | `WalRcvShmemSize`/`Init`              | `backend-replication-walreceiverfuncs-seams`  |
 //! | `ReplicationSlotsShmemSize`/`Init`    | `backend-replication-slot-seams`              |
 //! | `ReplicationOriginShmemSize`/`Init`   | `backend-replication-logical-origin-seams`    |
 //! | `ApplyLauncherShmemSize`/`Init`       | `backend-replication-logical-launcher-seams`  |
@@ -30,31 +30,36 @@ pub fn checkpointer_shmem_init() -> PgResult<()> {
     backend_postmaster_checkpointer_seams::checkpointer_shmem_init::call()
 }
 
-pub fn auto_vacuum_shmem_size() -> PgResult<Size> {
+/// `AutoVacuumShmemSize()` — infallible owner seam (`-> Size`).
+pub fn auto_vacuum_shmem_size() -> Size {
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_size::call()
 }
 pub fn auto_vacuum_shmem_init() -> PgResult<()> {
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_init::call()
 }
 
-pub fn background_worker_shmem_size() -> PgResult<Size> {
+/// `BackgroundWorkerShmemSize()` — infallible owner seam (`-> Size`).
+pub fn background_worker_shmem_size() -> Size {
     backend_postmaster_bgworker_seams::background_worker_shmem_size::call()
 }
 pub fn background_worker_shmem_init() -> PgResult<()> {
     backend_postmaster_bgworker_seams::background_worker_shmem_init::call()
 }
 
-pub fn wal_summarizer_shmem_size() -> PgResult<Size> {
+/// `WalSummarizerShmemSize()` — infallible owner seam (`-> Size`).
+pub fn wal_summarizer_shmem_size() -> Size {
     backend_postmaster_walsummarizer_seams::wal_summarizer_shmem_size::call()
 }
 pub fn wal_summarizer_shmem_init() -> PgResult<()> {
     backend_postmaster_walsummarizer_seams::wal_summarizer_shmem_init::call()
 }
 
-pub fn pg_arch_shmem_size() -> PgResult<Size> {
+/// `PgArchShmemSize()` — infallible owner seam (`-> Size`).
+pub fn pg_arch_shmem_size() -> Size {
     backend_postmaster_pgarch_seams::pg_arch_shmem_size::call()
 }
-pub fn pg_arch_shmem_init() -> PgResult<()> {
+/// `PgArchShmemInit()` — infallible owner seam (`void` / `-> ()`).
+pub fn pg_arch_shmem_init() {
     backend_postmaster_pgarch_seams::pg_arch_shmem_init::call()
 }
 
@@ -66,10 +71,10 @@ pub fn wal_snd_shmem_init() -> PgResult<()> {
 }
 
 pub fn wal_rcv_shmem_size() -> PgResult<Size> {
-    backend_replication_walreceiver_seams::wal_rcv_shmem_size::call()
+    backend_replication_walreceiverfuncs_seams::wal_rcv_shmem_size::call()
 }
 pub fn wal_rcv_shmem_init() -> PgResult<()> {
-    backend_replication_walreceiver_seams::wal_rcv_shmem_init::call()
+    backend_replication_walreceiverfuncs_seams::wal_rcv_shmem_init::call()
 }
 
 pub fn replication_slots_shmem_size() -> PgResult<Size> {
@@ -81,14 +86,16 @@ pub fn replication_slots_shmem_init() {
     backend_replication_slot_seams::replication_slots_shmem_init::call()
 }
 
-pub fn replication_origin_shmem_size() -> PgResult<Size> {
+/// `ReplicationOriginShmemSize()` — infallible owner seam (`-> Size`).
+pub fn replication_origin_shmem_size() -> Size {
     backend_replication_logical_origin_seams::replication_origin_shmem_size::call()
 }
 pub fn replication_origin_shmem_init() -> PgResult<()> {
     backend_replication_logical_origin_seams::replication_origin_shmem_init::call()
 }
 
-pub fn apply_launcher_shmem_size() -> PgResult<Size> {
+/// `ApplyLauncherShmemSize()` — infallible owner seam (`-> Size`).
+pub fn apply_launcher_shmem_size() -> Size {
     backend_replication_logical_launcher_seams::apply_launcher_shmem_size::call()
 }
 pub fn apply_launcher_shmem_init() -> PgResult<()> {

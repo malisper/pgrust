@@ -79,6 +79,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid))`: whether a
+    /// `pg_class` row exists for `relid`.
+    pub fn reloid_exists(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(TABLESPACEOID, ObjectIdGetDatum(tblspc))`:
+    /// whether a `pg_tablespace` row exists for `tblspc`.
+    pub fn tablespace_exists(tblspc: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid))`
     /// (utils/cache/syscache.c): does a pg_authid row for this role OID exist?
     /// Used to confirm a role wasn't concurrently dropped. `Err` carries the

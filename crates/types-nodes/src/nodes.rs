@@ -27,6 +27,13 @@ impl core::fmt::Display for NodeTag {
 
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
+
+// The four List flavours (nodes/pg_list.h).  T_List is the very first tag.
+pub const T_List: NodeTag = NodeTag(1);
+pub const T_IntList: NodeTag = NodeTag(471);
+pub const T_OidList: NodeTag = NodeTag(472);
+pub const T_XidList: NodeTag = NodeTag(473);
+
 pub const T_Result: NodeTag = NodeTag(331);
 pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
@@ -152,6 +159,18 @@ pub enum Node<'mcx> {
     SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
     /// `T_ForeignScan`.
     ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
+    /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
+    ///
+    /// In C, every `Expr`-derived node is a `Node *` via the
+    /// `Expr`/`Node` supertype relationship, and constructors such as
+    /// `makeConst`/`makeBoolExpr` are routinely cast to `(Node *)` and returned
+    /// through `Node *`-typed APIs (`get_typdefault`, the partition-qual list,
+    /// `stringToNode`). This variant is that cast: it embeds the lifetime-free
+    /// [`crate::primnodes::Expr`] subtree as a `Node` without collapsing the two
+    /// types (the split Expr/Node model is preserved — `Expr` remains its own
+    /// enum, this arm only makes an expression reachable where a `Node` is
+    /// expected). Additive: the enum is `#[non_exhaustive]`.
+    Expr(crate::primnodes::Expr),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -175,6 +194,7 @@ impl<'mcx> Node<'mcx> {
             Node::TidRangeScan(_) => T_TidRangeScan,
             Node::SeqScan(_) => T_SeqScan,
             Node::ForeignScan(_) => T_ForeignScan,
+            Node::Expr(e) => expr_tag(e),
         }
     }
 
@@ -198,6 +218,11 @@ impl<'mcx> Node<'mcx> {
             Node::TidRangeScan(t) => &t.scan.plan,
             Node::SeqScan(s) => &s.scan.plan,
             Node::ForeignScan(f) => &f.scan.plan,
+            // An expression node has no embedded `Plan` (C: `((Plan *) expr)`
+            // would be a type error — `plan_head` is only called on plan nodes).
+            Node::Expr(_) => {
+                panic!("Node::plan_head: called on an expression node, which has no Plan base")
+            }
         }
     }
 
@@ -227,7 +252,41 @@ impl<'mcx> Node<'mcx> {
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
+            // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
+            // plain clone reproduces it; `copyObject` over an expression node.
+            Node::Expr(e) => Ok(Node::Expr(e.clone())),
         }
+    }
+}
+
+// `T_*` tags for the expression nodes reachable through `Node::Expr`
+// (nodes/nodetags.h, PostgreSQL 18.3 generated order). Defined here, where the
+// `Node::tag()` arm reads them.
+const T_Var: NodeTag = NodeTag(132);
+const T_Const: NodeTag = NodeTag(134);
+const T_FuncExpr: NodeTag = NodeTag(140);
+const T_OpExpr: NodeTag = NodeTag(142);
+const T_DistinctExpr: NodeTag = NodeTag(143);
+const T_NullIfExpr: NodeTag = NodeTag(144);
+const T_BoolExpr: NodeTag = NodeTag(146);
+const T_RelabelType: NodeTag = NodeTag(156);
+
+/// `nodeTag((Node *) expr)` for an embedded expression node — the C tag of the
+/// concrete `Expr` variant. Variants whose tag no consumer reads yet fall
+/// through to `NodeTag(0)` (`T_Invalid`); they gain a real tag when a reader
+/// needs it (the enum is `#[non_exhaustive]`, so a wildcard is required).
+fn expr_tag(e: &crate::primnodes::Expr) -> NodeTag {
+    use crate::primnodes::Expr;
+    match e {
+        Expr::Var(_) => T_Var,
+        Expr::Const(_) => T_Const,
+        Expr::FuncExpr(_) => T_FuncExpr,
+        Expr::OpExpr(_) => T_OpExpr,
+        Expr::DistinctExpr(_) => T_DistinctExpr,
+        Expr::NullIfExpr(_) => T_NullIfExpr,
+        Expr::BoolExpr(_) => T_BoolExpr,
+        Expr::RelabelType(_) => T_RelabelType,
+        _ => NodeTag(0),
     }
 }
 
