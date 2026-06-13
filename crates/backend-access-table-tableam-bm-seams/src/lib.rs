@@ -12,7 +12,6 @@
 use types_error::PgResult;
 use types_nodes::executor::TupleTableSlot;
 use types_rel::Relation;
-use types_scan::snapshot::SnapshotHandle;
 use types_tableam::relscan::{TableScanDesc, TableScanDescData};
 
 seam_core::seam!(
@@ -22,7 +21,7 @@ seam_core::seam!(
     /// by the AM (`palloc`), so the call is fallible on OOM.
     pub fn table_beginscan_bm<'mcx>(
         rel: Relation<'mcx>,
-        snapshot: Option<SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
     ) -> PgResult<TableScanDesc<'mcx>>
 );
 

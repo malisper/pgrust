@@ -138,7 +138,7 @@ fn BitmapTableScanSetup<'mcx>(
             .as_ref()
             .expect("ss_currentRelation")
             .alias();
-        node.ss_currentScanDesc = Some(tableam_bm::table_beginscan_bm::call(rel, estate.es_snapshot)?);
+        node.ss_currentScanDesc = Some(tableam_bm::table_beginscan_bm::call(rel, estate.es_snapshot.clone())?);
     }
 
     // node->ss.ss_currentScanDesc->st.rs_tbmiterator = tbmiterator;

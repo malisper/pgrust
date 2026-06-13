@@ -9,8 +9,9 @@ name = "backend_access_common_toastdesc_seams"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
-types-error = { path = "../types-error" }
+seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }

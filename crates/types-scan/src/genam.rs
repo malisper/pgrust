@@ -1,8 +1,20 @@
-//! Handle vocabulary for `access/index/genam.c` scans.
+//! System-table scan vocabulary (`access/genam.h`).
 
-/// Opaque token standing in for C's `SysScanDesc` pointer when a systable
-/// scan crosses a seam: the genam runtime owns the live scan state and hands
-/// the consumer this ticket. Valid from `systable_beginscan*` until the
-/// matching `systable_endscan*`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SysScanHandle(pub u64);
+use types_snapshot::SnapshotData;
+
+/// `SysScanDescData` (`access/genam.h`), trimmed.
+///
+/// C spells the struct out: `heap_rel`, `irel`, the live `TableScanDescData`
+/// / `IndexScanDescData` pointers, `snapshot`, and the result `slot`. The
+/// live scan-state pointers belong to the unported genam owner
+/// (`access/index/genam.c`), which extends this struct with the fields its
+/// implementation needs when it lands; today the struct carries the one
+/// field representable at this layer. Consumers never construct one — they
+/// receive it from `systable_beginscan*` (wrapped in the seam crate's scan
+/// guard) and hand it back to `systable_getnext*` / `systable_endscan*`.
+#[derive(Debug)]
+pub struct SysScanDescData {
+    /// `snapshot` — the snapshot to unregister at end of scan, or `None`
+    /// (C's NULL: the caller's snapshot, nothing to unregister).
+    pub snapshot: Option<SnapshotData>,
+}

@@ -15,3 +15,4 @@ types-rel = { path = "../types-rel" }
 types-tableam = { path = "../types-tableam" }
 types-nodes = { path = "../types-nodes" }
 types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }

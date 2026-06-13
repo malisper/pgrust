@@ -23,7 +23,8 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
+use types_core::primitive::{AttrNumber, Index, Oid};
+use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
@@ -64,6 +65,13 @@ pub struct EcxtId(pub u32);
 /// [`EStateData::es_result_rel_pool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
+
+/// Opaque token for a live `EPQState *` (`nodes/execnodes.h`), owned by the
+/// EvalPlanQual machinery (execMain). Scan nodes hold it only to test for
+/// presence and to index its `relsubs_*` arrays through the owner's seams;
+/// the full struct lands when EvalPlanQual is ported.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EPQStateHandle(pub usize);
 
 /// An opaque handle to a genuinely AM/extension-opaque object the executor
 /// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
@@ -148,10 +156,58 @@ pub struct ParamExecData {
 }
 
 /// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// `ii_IndexAttrNumbers` is the C `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]`,
+/// fixed-size here.
+#[derive(Clone, Copy, Debug)]
 pub struct IndexInfo {
+    /// `int ii_NumIndexAttrs` — total number of columns in the index.
+    pub ii_NumIndexAttrs: i32,
+    /// `int ii_NumIndexKeyAttrs` — number of key columns in the index.
+    pub ii_NumIndexKeyAttrs: i32,
+    /// `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]` — heap-attribute
+    /// numbers of the index's columns (0 for an expression column).
+    pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
     /// `bool ii_Unique` — is it a unique index?
     pub ii_Unique: bool,
+    /// `bool ii_NullsNotDistinct` — does a unique index treat NULLs as not
+    /// distinct?
+    pub ii_NullsNotDistinct: bool,
+    /// `bool ii_ReadyForInserts` — is the index ready for inserts?
+    pub ii_ReadyForInserts: bool,
+    /// `bool ii_CheckedUnchanged` — HOT/summarizing-unchanged checked for the
+    /// current tuple?
+    pub ii_CheckedUnchanged: bool,
+    /// `bool ii_IndexUnchanged` — is the current tuple unchanged wrt this
+    /// index?
+    pub ii_IndexUnchanged: bool,
+    /// `bool ii_Concurrent` — built with CONCURRENTLY?
+    pub ii_Concurrent: bool,
+    /// `bool ii_BrokenHotChain` — was a broken HOT chain seen during build?
+    pub ii_BrokenHotChain: bool,
+    /// `int ii_ParallelWorkers` — number of parallel workers for the build.
+    pub ii_ParallelWorkers: i32,
+    /// `Oid ii_Am` — the index access method's OID.
+    pub ii_Am: Oid,
+}
+
+impl Default for IndexInfo {
+    fn default() -> Self {
+        IndexInfo {
+            ii_NumIndexAttrs: 0,
+            ii_NumIndexKeyAttrs: 0,
+            ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
+            ii_Unique: false,
+            ii_NullsNotDistinct: false,
+            ii_ReadyForInserts: false,
+            ii_CheckedUnchanged: false,
+            ii_IndexUnchanged: false,
+            ii_Concurrent: false,
+            ii_BrokenHotChain: false,
+            ii_ParallelWorkers: 0,
+            ii_Am: Oid::default(),
+        }
+    }
 }
 
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
@@ -272,6 +328,12 @@ pub struct ScanStateData<'mcx> {
     /// or `None` (C `NULL`, e.g. a ForeignScan/CustomScan with no
     /// currentRelation). Aliases the executor-owned open (no release authority).
     pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
+    /// `struct TableScanDescData *ss_currentScanDesc` — the table scan
+    /// descriptor (`NULL` for index-only scans, which carry no heap scan). The
+    /// table-AM scan-descriptor type lives above this crate's layer, so the
+    /// owned handle rides opaquely; consumers that need it resolve it through
+    /// the table-AM owner.
+    pub ss_currentScanDesc: Option<Opaque>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
@@ -404,11 +466,17 @@ impl Default for RowMarkType {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
-    /// `Snapshot es_snapshot` — time qual to use. A [`SnapshotHandle`] token
-    /// into the snapshot manager (which owns the live `SnapshotData`); `None`
-    /// is the C `InvalidSnapshot`. Consumed first by `nodeBitmapHeapscan`
-    /// (`table_beginscan_bm` passes `estate->es_snapshot`).
-    pub es_snapshot: Option<types_scan::snapshot::SnapshotHandle>,
+    /// `Snapshot es_snapshot` — time qual to use. The C `Snapshot` is a shared
+    /// pointer, modeled as the shared `Rc<SnapshotData>` the active-snapshot
+    /// stack/owner alias; `None` is the C `NULL`. Lands with its first consumer
+    /// (the index/heap scan ports), per docs/types.md rule 3.
+    pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
+    /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
+    /// recheck state this EState belongs to. The full `EPQState` is owned by
+    /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle
+    /// here; scan nodes read its `relsubs_*` arrays through the EvalPlanQual
+    /// owner's seams.
+    pub es_epq_active: Option<EPQStateHandle>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
@@ -507,8 +575,9 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
-            // es_snapshot = InvalidSnapshot;
+            // es_snapshot = InvalidSnapshot; es_epq_active = NULL;
             es_snapshot: None,
+            es_epq_active: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
