@@ -225,7 +225,7 @@ pub fn ExecFindPartition<'mcx>(
                 // slot payload model is not yet wired, so the conversion goes
                 // through the tupconvert seam against the dispatch's own slot.
                 let tempslot = myslot;
-                let new_my = dispatch_tupslot_id(proute, next_dispatch);
+                let new_my = dispatch_tupslot_id(estate, proute, next_dispatch)?;
                 myslot = Some(new_my);
                 let map = proute.partition_dispatch_info[next_dispatch]
                     .tupmap
@@ -303,22 +303,23 @@ fn root_result_rel_info_relispartition(estate: &EStateData<'_>, rri: RriId) -> b
         .unwrap_or(false)
 }
 
-/// `dispatch->tupslot` — the id of the dispatch's standalone conversion slot.
-/// The dispatch stores the slot inline (`tupslot: Option<TupleTableSlot>`); the
-/// owned slot-payload model addresses slots by id, so the slot must already be
-/// registered in the EState pool by `ExecInitPartitionDispatchInfo`. Until that
-/// payload model lands, this resolves through the not-yet-wired routing setup.
-fn dispatch_tupslot_id(
-    _proute: &PartitionTupleRouting<'_>,
-    _dispatch: PartitionDispatchId,
-) -> SlotId {
-    // The slot id wiring belongs to ExecInitPartitionDispatchInfo (routing
-    // setup family); the per-tuple path cannot fabricate it. This is reached
-    // only for sub-partitioned tables whose rowtype differs from the parent.
-    panic!(
-        "backend_executor_execPartition::routing_find::dispatch_tupslot_id: \
-         sub-partition slot-id wiring lands with the routing-setup family"
-    )
+/// `dispatch->tupslot` — resolve the dispatch's standalone conversion slot to a
+/// slot id usable by the id-addressed conversion/clear seams. The dispatch owns
+/// the slot inline (`tupslot: Option<TupleTableSlot>`); the seams address slots
+/// by id into the EState pool, so the inline slot is registered into the pool
+/// (`ExecAllocTableSlot`-shaped `make_slot`) and its id returned. The slot is a
+/// virtual slot fully overwritten by each `execute_attr_map_slot` and reset by
+/// `ExecClearTuple`, so a fresh pool entry per use carries no stale payload.
+fn dispatch_tupslot_id<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    proute: &PartitionTupleRouting<'mcx>,
+    dispatch: PartitionDispatchId,
+) -> PgResult<SlotId> {
+    let slot = proute.partition_dispatch_info[dispatch]
+        .tupslot
+        .clone()
+        .expect("dispatch_tupslot_id called without a tupslot");
+    estate.make_slot(slot)
 }
 
 /// Copy an `AttrMap` into `mcx` so the estate can be re-borrowed mutably.
