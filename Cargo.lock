@@ -2953,7 +2953,11 @@ dependencies = [
 name = "backend-executor-execProcnode"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execAmi-seams",
  "backend-executor-execProcnode-seams",
+ "backend-executor-instrument-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-misc-stack-depth-seams",
  "mcx",
  "seam-core",
