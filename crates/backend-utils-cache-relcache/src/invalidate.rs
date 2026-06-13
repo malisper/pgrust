@@ -333,6 +333,9 @@ fn equal_tuple_descs(
         return false;
     }
     for (a1, a2) in d1.attrs.iter().zip(d2.attrs.iter()) {
+        // C disregards attrelid/attnum (placement keys); we keep attnum here as
+        // the owned mirror uses it as the row's identity, which is benign for a
+        // same-shape comparison.
         if a1.attname != a2.attname
             || a1.atttypid != a2.atttypid
             || a1.attlen != a2.attlen
@@ -346,8 +349,51 @@ fn equal_tuple_descs(
         {
             return false;
         }
+        // When the column has a not-null constraint, its validity aspect lives
+        // only in attnullability, so compare it too (C equalTupleDescs).
+        if a1.attnotnull && a1.attnullability != a2.attnullability {
+            return false;
+        }
+        // C also compares attndims/attstorage/attcompression/atthasdef/
+        // attidentity/attgenerated/attislocal/attinhcount; those fields are not
+        // carried on the trimmed OwnedAttr mirror (they are not consumed
+        // elsewhere in this crate), so they are not representable here.
     }
-    true
+
+    // Compare the constr substructure (C equalTupleDescs constr block): the
+    // has_* flags + the defval array (assumed adnum-sorted) + the check array
+    // (assumed name-sorted). The `missing`/AttrMissing array is node/datum
+    // vocabulary not carried on the owned mirror and so is not compared.
+    match (&d1.constr, &d2.constr) {
+        (Some(c1), Some(c2)) => {
+            if c1.has_not_null != c2.has_not_null
+                || c1.has_generated_stored != c2.has_generated_stored
+                || c1.has_generated_virtual != c2.has_generated_virtual
+                || c1.defval.len() != c2.defval.len()
+                || c1.check.len() != c2.check.len()
+            {
+                return false;
+            }
+            for (dv1, dv2) in c1.defval.iter().zip(c2.defval.iter()) {
+                if dv1.adnum != dv2.adnum || dv1.adbin != dv2.adbin {
+                    return false;
+                }
+            }
+            for (ck1, ck2) in c1.check.iter().zip(c2.check.iter()) {
+                if ck1.ccname != ck2.ccname
+                    || ck1.ccbin != ck2.ccbin
+                    || ck1.ccenforced != ck2.ccenforced
+                    || ck1.ccvalid != ck2.ccvalid
+                    || ck1.ccnoinherit != ck2.ccnoinherit
+                {
+                    return false;
+                }
+            }
+            true
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// `RelationIsMapped(relation)` (utils/rel.h) over the owned entry:
