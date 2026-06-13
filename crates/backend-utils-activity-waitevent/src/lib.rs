@@ -1116,6 +1116,12 @@ fn out_of_memory() -> PgError {
 pub fn init_seams() {
     backend_utils_activity_waitevent_seams::pgstat_report_wait_start::set(pgstat_report_wait_start);
     backend_utils_activity_waitevent_seams::pgstat_report_wait_end::set(pgstat_report_wait_end);
+    backend_utils_activity_waitevent_seams::wait_event_custom_shmem_size::set(
+        WaitEventCustomShmemSize,
+    );
+    backend_utils_activity_waitevent_seams::wait_event_custom_shmem_init::set(
+        WaitEventCustomShmemInit,
+    );
 }
 
 #[cfg(test)]
