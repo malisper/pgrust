@@ -10,31 +10,80 @@ use alloc::string::String;
 
 use types_core::primitive::Oid;
 
-/// Opaque, implementation-owned planned-constraint `List*`
-/// (`List *constraints` of a `DomainConstraintCache`). `0` models NIL.
-///
-/// The list itself lives in the domain-constraint owner's "Domain constraints"
-/// memory context (created lazily by `load_domaintype_info`); the typcache only
-/// holds this token and refcounts it.
+/// Opaque handle to a planned domain CHECK `Expr *` (the output of
+/// `stringToNode(conbin)` + `expression_planner()`). The planner is a
+/// genuinely-external neighbor (inherited opacity); the typcache stores and
+/// hands these handles to `ExecInitExpr` without inspecting them. `0` models a
+/// NULL expr (NOT NULL constraints carry no `check_expr`).
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct ConstraintListHandle(pub u64);
+pub struct ExprHandle(pub u64);
 
-impl ConstraintListHandle {
-    /// The empty list (NIL).
-    pub const NIL: ConstraintListHandle = ConstraintListHandle(0);
+impl ExprHandle {
+    /// No expression (the NOT NULL constraint case).
+    pub const NULL: ExprHandle = ExprHandle(0);
 
-    /// Whether this is NIL.
+    /// Whether this is the null expr.
     #[inline]
-    pub fn is_nil(self) -> bool {
+    pub fn is_null(self) -> bool {
         self.0 == 0
     }
 }
 
+/// Opaque handle to a compiled `ExprState *` (the output of `ExecInitExpr`).
+/// The executor is a genuinely-external neighbor (inherited opacity). `0`
+/// models a NULL exprstate.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct ExprStateHandle(pub u64);
+
+impl ExprStateHandle {
+    /// No compiled expression state.
+    pub const NULL: ExprStateHandle = ExprStateHandle(0);
+}
+
 /// Opaque token for a "Domain constraints" / ref memory context owned by the
-/// not-yet-ported domain-constraint planner. The typcache passes it back to
-/// the owner's seams to reparent / delete the context.
+/// not-yet-ported memory-context owner. The typcache passes it back to the
+/// owner's seams to reparent / delete the context.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct DomainCtxHandle(pub u64);
+
+/// `DomainConstraintState` (execnodes.h) — one compiled domain constraint, in
+/// the typcache's in-crate form. `check_expr`/`check_exprstate` are opaque
+/// planner/executor handles (inherited opacity); `constrainttype` and `name`
+/// are the typcache's own data.
+#[derive(Clone, Debug)]
+pub struct DomainConstraintState {
+    /// `DOM_CONSTRAINT_CHECK` or `DOM_CONSTRAINT_NOTNULL`.
+    pub constrainttype: i32,
+    pub name: String,
+    /// Planned CHECK `Expr *` (NULL for NOT NULL constraints).
+    pub check_expr: ExprHandle,
+    /// Compiled `ExprState *` (only set by `prep_domain_constraints`).
+    pub check_exprstate: ExprStateHandle,
+}
+
+/// One raw CHECK constraint row scanned from `pg_constraint` for a domain:
+/// the constraint name and its `conbin` node-string (`TextDatumGetCString`).
+/// The typcache plans each (`stringToNode` + `expression_planner`) via the
+/// `plan_check_expr` seam into the lazily-created "Domain constraints" context.
+#[derive(Clone, Debug)]
+pub struct DomainCheckConstraintRow {
+    pub conname: String,
+    pub conbin: String,
+}
+
+/// Result of scanning one level of the domain stack
+/// (`SearchSysCache1(TYPEOID)` reading `typtype`/`typnotnull`/`typbasetype`),
+/// as consumed by the in-crate `load_domaintype_info` orchestration.
+#[derive(Clone, Debug, Default)]
+pub struct DomainLevelScan {
+    /// Whether this catalog row is still a domain (`typtype == 'd'`). When
+    /// false the crawl stops.
+    pub is_domain: bool,
+    /// `typnotnull` of this level's `pg_type` row.
+    pub typnotnull: bool,
+    /// `typbasetype` — the next type in the domain stack.
+    pub typbasetype: Oid,
+}
 
 /// Fields read from a `pg_type` row when building a `TypeCacheEntry`.
 ///

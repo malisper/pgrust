@@ -40,7 +40,8 @@ use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use std::collections::HashMap;
 
 use types_cache::typcache::{
-    ConstraintListHandle, DomainCtxHandle, PgTypeRow,
+    DomainConstraintState, DomainCtxHandle, PgTypeRow,
+    DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL,
 };
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{Oid, INVALID_OID};
@@ -278,10 +279,14 @@ impl TypeCacheEntry {
     }
 }
 
-/// `DomainConstraintCache` (opaque outside typcache.c).
-#[derive(Clone, Copy, Debug)]
+/// `DomainConstraintCache` (opaque outside typcache.c). The `constraints` list
+/// is real in-crate data (built by `load_domaintype_info`); only the planned
+/// `check_expr`/`check_exprstate` payloads inside each node are opaque
+/// planner/executor handles. `dcc_context` is the external "Domain
+/// constraints" memory context the nodes are allocated in.
+#[derive(Clone, Debug)]
 struct DomainConstraintCache {
-    constraints: ConstraintListHandle,
+    constraints: Vec<DomainConstraintState>,
     dcc_context: DomainCtxHandle,
     dcc_refcount: i64,
 }
@@ -1200,22 +1205,114 @@ fn load_multirangetype_info(type_id: Oid) -> PgResult<()> {
  * load_domaintype_info + DomainConstraintCache refcounting
  * ======================================================================== */
 
-/// `load_domaintype_info` — compile a domain's constraints.
+/// `load_domaintype_info` — compile a domain's constraints. The whole
+/// orchestration (domain-stack crawl, per-domain CHECK collection, name sort,
+/// parent-first `lcons` ordering, NOT NULL prepend, lazy DomainConstraintCache
+/// creation) lives here; only the genuinely-external callees — the
+/// `pg_constraint`/`pg_type` catalog reads, `stringToNode`/`expression_planner`,
+/// and the "Domain constraints" memory-context lifecycle — cross the domains
+/// seam.
 fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
-    // Release stale constraint info, nulling the link first.
+    // If we're here, any existing constraint info is stale, so release it.
+    // For safety, be sure to null the link before trying to delete the data.
     let stale = with_state(|st| st.entry(type_id).domain_data);
     if let Some(token) = stale {
         with_state(|st| st.entry_mut(type_id).domain_data = None);
         decr_dcc_refcount(token)?;
     }
 
-    // The seam handles the catalog crawl + planning, lazily creating the
-    // "Domain constraints" context only when at least one constraint (or NOT
-    // NULL) is found.
-    let scanned = domains_seams::scan_and_plan_domain_constraints::call(type_id)?;
+    // We try to optimize the common case of no domain constraints, so don't
+    // create the dcc object and context until we find a constraint. The
+    // accumulated constraint nodes and the (lazily created) context handle:
+    let mut dcc: Option<(DomainCtxHandle, Vec<DomainConstraintState>)> = None;
+    let mut not_null = false;
 
-    if let Some((ctx, constraints)) = scanned {
-        // Move the context into CacheMemoryContext and attach to the entry.
+    // Scan pg_constraint for relevant constraints. We want to find constraints
+    // for not just this domain, but any ancestor domains, so the outer loop
+    // crawls up the domain stack.
+    let mut type_oid = type_id;
+    loop {
+        // SearchSysCache1(TYPEOID, typeOid); elog(ERROR) if missing.
+        let level = domains_seams::lookup_domain_type_level::call(type_oid)?;
+
+        // Not a domain, so done.
+        if !level.is_domain {
+            break;
+        }
+
+        // Test for NOT NULL constraint.
+        if level.typnotnull {
+            not_null = true;
+        }
+
+        // Look for CHECK constraints on this domain (catalog scan; plan each in
+        // the dcc context, which we create lazily on first constraint).
+        let rows = domains_seams::scan_domain_check_constraints::call(type_oid)?;
+        if !rows.is_empty() {
+            // Create the DomainConstraintCache object and context if needed.
+            if dcc.is_none() {
+                let cxt = domains_seams::create_domain_ctx::call()?;
+                dcc = Some((cxt, Vec::new()));
+            }
+            let ctx = dcc.as_ref().unwrap().0;
+
+            // Plan each CHECK's Expr into ctx and build the
+            // DomainConstraintState nodes (constrainttype + name are this
+            // crate's data; check_expr is the planned handle from ctx).
+            let mut nccons: Vec<DomainConstraintState> = Vec::new();
+            for row in rows {
+                let check_expr = domains_seams::plan_check_expr::call(&row.conbin, ctx)?;
+                nccons.push(DomainConstraintState {
+                    constrainttype: DOM_CONSTRAINT_CHECK,
+                    name: row.conname,
+                    check_expr,
+                    check_exprstate: types_cache::typcache::ExprStateHandle::NULL,
+                });
+            }
+
+            if !nccons.is_empty() {
+                // Sort the items for this domain, so that CHECKs are applied in
+                // a deterministic order (dcs_cmp == strcmp on name).
+                if nccons.len() > 1 {
+                    nccons.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+                // Attach them to the overall list. Use lcons() semantics here
+                // because constraints of parent domains should be applied
+                // earlier: while (nccons > 0) constraints = lcons(ccons[--n], ...)
+                // i.e. prepend in reverse, leaving this domain's checks in
+                // ascending-name order at the front of the list.
+                let list = &mut dcc.as_mut().unwrap().1;
+                for node in nccons.into_iter().rev() {
+                    list.insert(0, node);
+                }
+            }
+        }
+
+        // Loop to next domain in stack.
+        type_oid = level.typbasetype;
+    }
+
+    // Only need to add one NOT NULL check regardless of how many domains in the
+    // stack request it.
+    if not_null {
+        // Create the DomainConstraintCache object and context if needed.
+        if dcc.is_none() {
+            let cxt = domains_seams::create_domain_ctx::call()?;
+            dcc = Some((cxt, Vec::new()));
+        }
+        let node = DomainConstraintState {
+            constrainttype: DOM_CONSTRAINT_NOTNULL,
+            name: "NOT NULL".to_string(),
+            check_expr: types_cache::typcache::ExprHandle::NULL,
+            check_exprstate: types_cache::typcache::ExprStateHandle::NULL,
+        };
+        // lcons to apply the nullness check FIRST.
+        dcc.as_mut().unwrap().1.insert(0, node);
+    }
+
+    // If we made a constraint object, move it into CacheMemoryContext and
+    // attach it to the typcache entry.
+    if let Some((ctx, constraints)) = dcc {
         domains_seams::set_parent_to_cache_context::call(ctx)?;
 
         let dcc = DomainConstraintCache {
@@ -1231,7 +1328,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
         with_state(|st| st.entry_mut(type_id).domain_data = Some(token));
     }
 
-    // Either way, domain data is now valid.
+    // Either way, the typcache entry's domain data is now valid.
     with_state(|st| st.entry_mut(type_id).flags |= TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
     Ok(())
 }
@@ -2312,13 +2409,34 @@ pub fn at_eosubxact_type_cache() {
 /// `DomainConstraintRef` (typcache.h) — long-lived domain constraint reference.
 #[derive(Clone, Debug)]
 pub struct DomainConstraintRef {
-    pub constraints: ConstraintListHandle,
+    pub constraints: Vec<DomainConstraintState>,
     pub refctx: DomainCtxHandle,
     pub tcache: Oid,
     pub need_exprstate: bool,
     dcc: Option<u64>,
     /// Stable token identifying this ref to the reset callback.
     token: u64,
+}
+
+/// `prep_domain_constraints` — convert the cached constraint list into an
+/// executable list, computing `check_exprstate` via `ExecInitExpr` in
+/// `execctx`. The list copy + node construction is this crate's logic; only
+/// `ExecInitExpr` crosses the domains seam.
+fn prep_domain_constraints(
+    constraints: &[DomainConstraintState],
+    execctx: DomainCtxHandle,
+) -> PgResult<Vec<DomainConstraintState>> {
+    let mut result = Vec::new();
+    for r in constraints {
+        let check_exprstate = domains_seams::exec_init_expr::call(r.check_expr, execctx)?;
+        result.push(DomainConstraintState {
+            constrainttype: r.constrainttype,
+            name: r.name.clone(),
+            check_expr: r.check_expr,
+            check_exprstate,
+        });
+    }
+    Ok(result)
 }
 
 /// `InitDomainConstraintRef`.
@@ -2332,7 +2450,7 @@ pub fn init_domain_constraint_ref(
 
     let token = with_state(|st| st.fresh_token());
     let mut r = DomainConstraintRef {
-        constraints: ConstraintListHandle::NIL,
+        constraints: Vec::new(),
         refctx,
         tcache: type_id,
         need_exprstate,
@@ -2350,15 +2468,15 @@ pub fn init_domain_constraint_ref(
         let constraints = with_state(|st| {
             let dcc = st.dcc_table.get_mut(&dcc_token).expect("dcc must exist");
             dcc.dcc_refcount += 1;
-            dcc.constraints
+            dcc.constraints.clone()
         });
         r.constraints = if r.need_exprstate {
-            domains_seams::prep_domain_constraints::call(constraints, r.refctx)?
+            prep_domain_constraints(&constraints, r.refctx)?
         } else {
             constraints
         };
     } else {
-        r.constraints = ConstraintListHandle::NIL;
+        r.constraints = Vec::new();
     }
 
     // Record the ref so the reset callback can find it.
@@ -2385,7 +2503,7 @@ pub fn update_domain_constraint_ref(r: &mut DomainConstraintRef) -> PgResult<()>
     if r.dcc != domain_data {
         // Release the previous dcc (leaking previous exec list, as in C).
         if let Some(old) = r.dcc.take() {
-            r.constraints = ConstraintListHandle::NIL;
+            r.constraints = Vec::new();
             decr_dcc_refcount(old)?;
         }
         if let Some(dcc_token) = domain_data {
@@ -2393,10 +2511,10 @@ pub fn update_domain_constraint_ref(r: &mut DomainConstraintRef) -> PgResult<()>
             let constraints = with_state(|st| {
                 let dcc = st.dcc_table.get_mut(&dcc_token).expect("dcc must exist");
                 dcc.dcc_refcount += 1;
-                dcc.constraints
+                dcc.constraints.clone()
             });
             r.constraints = if r.need_exprstate {
-                domains_seams::prep_domain_constraints::call(constraints, r.refctx)?
+                prep_domain_constraints(&constraints, r.refctx)?
             } else {
                 constraints
             };
