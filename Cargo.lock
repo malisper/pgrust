@@ -5656,6 +5656,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-freepage-seams",
  "libc",
  "mcx",
