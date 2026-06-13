@@ -162,3 +162,17 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn stats_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `pgstat_set_wait_event_storage(&GetPGProcByNumber(procno)->wait_event_info)`
+    /// (pgstat.c / wait_event.c): point this backend's wait-event reporting at
+    /// the named PGPROC's `wait_event_info` word, so other backends can read
+    /// what it is waiting on. Called from `InitProcess` / `InitAuxiliaryProcess`.
+    pub fn pgstat_set_wait_event_storage_for_proc(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// `pgstat_reset_wait_event_storage()` (wait_event.c): reset wait-event
+    /// reporting back to the process-local word during proc teardown.
+    pub fn pgstat_reset_wait_event_storage()
+);

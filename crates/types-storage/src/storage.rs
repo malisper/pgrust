@@ -330,8 +330,14 @@ pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 /// `DSMRegistryLock` (`lwlocklist.h`, `PG_LWLOCK(50, DSMRegistry)`): offset of
 /// the DSM-registry lock in `MainLWLockArray` (`&MainLWLockArray[50].lock`).
 pub const DSM_REGISTRY_LOCK: usize = 50;
+/// `OidGenLock` (`lwlocklist.h`): `PG_LWLOCK(2, OidGen)`.
+pub const OID_GEN_LOCK: usize = 2;
+/// `XidGenLock` (`lwlocklist.h`): `PG_LWLOCK(3, XidGen)`.
+pub const XID_GEN_LOCK: usize = 3;
 /// `ProcArrayLock` (`lwlocklist.h`): `PG_LWLOCK(4, ProcArray)`.
 pub const PROC_ARRAY_LOCK: usize = 4;
+/// `XactTruncationLock` (`lwlocklist.h`): `PG_LWLOCK(44, XactTruncation)`.
+pub const XACT_TRUNCATION_LOCK: usize = 44;
 /// `ReplicationSlotAllocationLock` — `PG_LWLOCK(36, ReplicationSlotAllocation)`.
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
 /// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.
