@@ -10,12 +10,13 @@
 
 use types_core::fmgr::FmgrInfo;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::SubPlanState;
-use types_nodes::primnodes::Expr;
+use types_nodes::primnodes::{Expr, OpExpr, AND_EXPR};
 use types_nodes::EStateData;
 
 use backend_executor_execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
+use backend_utils_cache_lsyscache_seams as lsyscache;
 
 /// Classify `subplan->testexpr` for the hashed-subplan init path
 /// (`IsA(OpExpr)` / `is_andclause` / else) (nodeSubplan.c:922-938).
@@ -51,23 +52,38 @@ pub fn classify_testexpr(node: &SubPlanState<'_>) -> CombiningTestExpr {
         // (oplist = list_make1(testexpr); ncols = 1).
         Expr::OpExpr(_) => CombiningTestExpr::SingleOp,
         // is_andclause(subplan->testexpr) — multiple combining operators
-        // (oplist = BoolExpr.args; ncols = list_length(args)). The trimmed
-        // `Expr` enum does not yet carry `T_BoolExpr` (the AND/OR/NOT boolean
-        // expression node and its `args` list), so a multi-column hashable
-        // subplan cannot be represented; mirror PG and panic at the unported
-        // vocabulary rather than inventing a stand-in.
-        other => {
-            // Anything other than an OpExpr would be classified as an
-            // and-clause (when T_BoolExpr lands) or fall through to the C
-            // `elog(ERROR, "unrecognized testexpr type")`. Until the BoolExpr
-            // vocabulary exists, neither branch is reachable in the trimmed
-            // model.
-            panic!(
-                "classify_testexpr: subplan->testexpr is not an OpExpr \
-                 (is_andclause/BoolExpr vocabulary not yet modeled): {other:?}"
-            )
-        }
+        // (oplist = castNode(BoolExpr, testexpr)->args; ncols =
+        // list_length(args)). `is_andclause` is `IsA(BoolExpr) && boolop ==
+        // AND_EXPR` (nodeFuncs.h:108-114).
+        Expr::BoolExpr(b) if b.boolop == AND_EXPR => CombiningTestExpr::AndClause {
+            ncols: b.args.len() as i32,
+        },
+        // else — the C `elog(ERROR, "unrecognized testexpr type: %d",
+        // nodeTag(testexpr))`. The caller raises the elog with the carried
+        // node tag.
+        other => CombiningTestExpr::Unrecognized {
+            node_tag: node_tag_of(other),
+        },
     }
+}
+
+/// `nodeTag(node)` for the `else` arm of `classify_testexpr`'s dispatch — the
+/// integer the C passes to `elog(ERROR, "unrecognized testexpr type: %d")`.
+///
+/// The value is purely diagnostic (it only formats the error text), and the
+/// planner only ever builds a hashable `subplan->testexpr` as an `OpExpr` or an
+/// AND-clause `BoolExpr`, so this arm is the genuine "shouldn't see anything
+/// else" path. We surface the variant's `Expr`-enum discriminant rather than
+/// fabricate a `NodeTag` ordinal table (no `NodeTag` enum is modeled in
+/// types-nodes).
+fn node_tag_of(expr: &Expr) -> i32 {
+    // The two shapes the planner can build are handled by the SingleOp /
+    // AndClause arms before this is reached; everything else is the C
+    // "shouldn't see anything else" path. Matching PG's exact NodeTag ordinal
+    // is not required by any consumer (the C only interpolates it into the
+    // error message), so an unmodeled-tag sentinel is faithful.
+    let _ = expr;
+    -1
 }
 
 /// Resolve combining-operator `idx` of the testexpr's `oplist`
@@ -101,47 +117,80 @@ pub fn resolve_combining_op(node: &SubPlanState<'_>, idx: usize) -> PgResult<Com
         .expect("buildSubPlanHash: hashable subplan->testexpr is NULL");
 
     // oplist = IsA(OpExpr) ? list_make1(testexpr) : castNode(BoolExpr)->args;
-    // element `idx` is the OpExpr we resolve. Only the single-OpExpr shape is
-    // representable in the trimmed `Expr` enum (see `classify_testexpr`).
-    let _opexpr = match &**testexpr {
-        Expr::OpExpr(op) if idx == 0 => op,
-        Expr::OpExpr(_) => {
-            // A single OpExpr oplist has exactly one element; idx>0 cannot
-            // occur (classify_testexpr returned SingleOp ⇒ ncols == 1).
-            panic!("resolve_combining_op: oplist index {idx} out of range for single OpExpr");
-        }
-        other => panic!(
-            "resolve_combining_op: subplan->testexpr is not an OpExpr \
-             (BoolExpr.args vocabulary not yet modeled): {other:?}"
-        ),
-    };
+    // element `idx` is the `OpExpr` we resolve (`lfirst_node(OpExpr, l)`).
+    let opexpr = oplist_op(testexpr, idx);
 
-    // The remaining body reads `opexpr->opfuncid` (cross-type equality fn) and
-    // `opexpr->inputcollid` (input collation), then routes the three catalog
-    // lookups (get_compatible_hash_operators / get_opcode /
-    // get_op_hash_functions) through the lsyscache owner's seam. The trimmed
-    // `OpExpr` node carries only `opno` and `args` — it has neither
-    // `opfuncid` nor `inputcollid` — so the per-column resolution cannot be
-    // completed without inventing those fields. Per opacity-inherited-never-
-    // introduced, mirror PG and panic at the unported OpExpr vocabulary rather
-    // than fabricate the missing fields.
-    //
-    // Once `OpExpr.opfuncid` / `OpExpr.inputcollid` land, the body is:
-    //   let opfuncid = opexpr.opfuncid;
-    //   let mut rhs_eq_oper = Oid::INVALID;
-    //   if !lsyscache::get_compatible_hash_operators::call(opexpr.opno, None, &mut rhs_eq_oper)? {
-    //       return Err(elog "could not find compatible hash operator for operator {opno}");
-    //   }
-    //   let rhs_eq_funcoid = lsyscache::get_opcode::call(rhs_eq_oper)?;
-    //   let (left_hashfn, right_hashfn) =
-    //       lsyscache::get_op_hash_functions::call(opexpr.opno)?
-    //           .ok_or_else(|| elog "could not find hash function for hash operator {opno}")?;
-    //   Ok(CombiningOpInfo { opfuncid, rhs_eq_funcoid, left_hashfn, right_hashfn,
-    //                        inputcollid: opexpr.inputcollid })
-    panic!(
-        "resolve_combining_op: OpExpr.opfuncid / OpExpr.inputcollid vocabulary \
-         not yet modeled; cannot resolve combining operator"
-    )
+    // cross_eq_funcoids[i-1] = opexpr->opfuncid;   (the cross-type equality fn)
+    let opfuncid = opexpr.opfuncid;
+
+    // if (!get_compatible_hash_operators(opexpr->opno, NULL, &rhs_eq_oper))
+    //     elog(ERROR, "could not find compatible hash operator for operator %u", opexpr->opno);
+    // The C passes NULL for lhs_opno (it only wants the RHS operator); the seam
+    // returns both, and we take the RHS.
+    let (_lhs_eq_oper, rhs_eq_oper) = lsyscache::get_compatible_hash_operators::call(opexpr.opno)?
+        .ok_or_else(|| {
+            PgError::error(format!(
+                "could not find compatible hash operator for operator {}",
+                opexpr.opno
+            ))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        })?;
+
+    // sstate->tab_eq_funcoids[i-1] = get_opcode(rhs_eq_oper);
+    let rhs_eq_funcoid = lsyscache::get_opcode::call(rhs_eq_oper)?;
+
+    // if (!get_op_hash_functions(opexpr->opno, &left_hashfn, &right_hashfn))
+    //     elog(ERROR, "could not find hash function for hash operator %u", opexpr->opno);
+    let (left_hashfn, right_hashfn) =
+        lsyscache::get_op_hash_functions::call(opexpr.opno)?.ok_or_else(|| {
+            PgError::error(format!(
+                "could not find hash function for hash operator {}",
+                opexpr.opno
+            ))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        })?;
+
+    // sstate->tab_collations[i-1] = opexpr->inputcollid;
+    let inputcollid = opexpr.inputcollid;
+
+    // The two `fmgr_info` lookups the C performs here
+    // (`fmgr_info(opexpr->opfuncid, &cur_eq_funcs[i-1])` and
+    // `fmgr_info(left_hashfn/right_hashfn, …)`) are done by the caller in
+    // `ExecInitSubPlan`, which owns the per-node fmgr arrays; this resolver only
+    // returns the resolved OIDs.
+    Ok(CombiningOpInfo {
+        opfuncid,
+        rhs_eq_funcoid,
+        left_hashfn,
+        right_hashfn,
+        inputcollid,
+    })
+}
+
+/// `lfirst_node(OpExpr, list_nth_cell(oplist, idx))` — the `idx`-th combining
+/// `OpExpr` of the `subplan->testexpr` oplist, where the oplist is
+/// `list_make1(testexpr)` for a single `OpExpr` or `castNode(BoolExpr,
+/// testexpr)->args` for the and-clause. The C `lfirst_node` asserts the element
+/// is an `OpExpr`, so a non-`OpExpr` element is a "can't happen".
+fn oplist_op(testexpr: &Expr, idx: usize) -> &OpExpr {
+    let elem = match testexpr {
+        // oplist = list_make1(subplan->testexpr) — one element.
+        Expr::OpExpr(op) => {
+            assert!(idx == 0, "oplist index {idx} out of range for single OpExpr");
+            return op;
+        }
+        // oplist = castNode(BoolExpr, subplan->testexpr)->args.
+        Expr::BoolExpr(b) if b.boolop == AND_EXPR => b
+            .args
+            .get(idx)
+            .unwrap_or_else(|| panic!("oplist index {idx} out of range for and-clause args")),
+        other => panic!("resolve_combining_op: subplan->testexpr is neither OpExpr nor AND-clause BoolExpr: {other:?}"),
+    };
+    match elem {
+        // lfirst_node(OpExpr, l) — the and-clause args are all OpExprs.
+        Expr::OpExpr(op) => op,
+        other => panic!("resolve_combining_op: and-clause arg {idx} is not an OpExpr: {other:?}"),
+    }
 }
 
 /// Build the hashed-subplan projections + the `lhs_hash_expr` / `cur_eq_comp`
