@@ -39,23 +39,41 @@ fn range_types_do_not_match<T>() -> PgResult<T> {
     Err(PgError::error("range types do not match"))
 }
 
+/// `TYPECACHE_RANGE_INFO` (typcache.h): the flag selecting the range-info fields
+/// (`rngelemtype` / `rng_collation` / `rng_cmp_proc_finfo` /
+/// `rng_canonical_finfo` / `rng_subdiff_finfo`) of a range type's
+/// `TypeCacheEntry`. Value matches `backend-utils-cache-typcache`'s
+/// `TYPECACHE_RANGE_INFO`.
+const TYPECACHE_RANGE_INFO: i32 = 0x00800;
+
 /// `range_get_typcache(fcinfo, rngtypid)` (rangetypes.c:1767): the cached
 /// `TypeCacheEntry` for the range type. Owns the inward seam.
-pub fn range_get_typcache(_rngtypid: Oid) -> PgResult<TypeCacheEntry> {
-    // C body is `lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO)` (+ the
-    // `rngelemtype == NULL` "type %u is not a range type" guard), caching the
-    // entry in `fcinfo->flinfo->fn_extra`. `lookup_type_cache` is owned by the
-    // not-yet-ported `backend-utils-cache-typcache`; its current inward seam
-    // hands back the storage-only `types_typcache::TypeCacheEntry`, which lacks
-    // the range-support fields (`rng_cmp_proc_finfo` / `rng_collation` /
-    // `rngelemtype`) this entry must carry. Mirror PG and panic loudly (naming
-    // the owner, as the sibling `get_range_io_data` does) until that owner
-    // exposes a range-bearing `TYPECACHE_RANGE_INFO` lookup seam.
-    panic!(
-        "range_get_typcache: lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO) \
-         (backend-utils-cache-typcache) not ported into this unit yet — its \
-         current seam does not return a range-bearing TypeCacheEntry"
-    )
+///
+/// C body is `lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO)` plus the
+/// `rngelemtype == NULL` "type %u is not a range type" guard, caching the entry
+/// in `fcinfo->flinfo->fn_extra`. `lookup_type_cache` is owned by the
+/// genuinely-unported `backend-utils-cache-typcache`; its `lookup_type_cache_entry`
+/// seam hands back the range-bearing `types_cache::TypeCacheEntry`
+/// (`rng_cmp_proc_finfo` / `rng_collation` / `rngelemtype` carried), the same
+/// seam the sibling `multirangetypes::multirange_get_typcache` consumes. The
+/// owned model re-looks-up each call (the cache is the typcache's own job) and
+/// returns the entry by value.
+pub fn range_get_typcache(rngtypid: Oid) -> PgResult<TypeCacheEntry> {
+    // typcache = lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO);
+    let typcache = backend_utils_cache_typcache_seams::lookup_type_cache_entry::call(
+        rngtypid,
+        TYPECACHE_RANGE_INFO,
+    )?;
+
+    // if (typcache->rngelemtype == NULL)
+    //     elog(ERROR, "type %u is not a range type", rngtypid);
+    if typcache.rngelemtype.is_none() {
+        return Err(PgError::error(format!(
+            "type {rngtypid} is not a range type"
+        )));
+    }
+
+    Ok(typcache)
 }
 
 /// `range_cmp_bounds(typcache, b1, b2)` (rangetypes.c:2080): compare two bounds
