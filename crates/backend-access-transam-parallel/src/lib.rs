@@ -759,6 +759,12 @@ fn make_parallel_worker_context(seg: ExecDsmSeg, toc: ExecShmToc) -> ParallelWor
     let _ = seg;
     ParallelWorkerContextHandle(toc.0)
 }
+fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
+    // `make_parallel_worker_context` encoded the worker context as the toc slot
+    // (`ParallelWorkerContextHandle(toc.0)`); recover it symmetrically. Mirrors
+    // C `pwcxt->toc`.
+    toc_handle(pwcxt.0)
+}
 fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)
 }
@@ -2131,6 +2137,7 @@ pub fn init_seams() {
     seams::pcxt_nworkers_launched::set(pcxt_nworkers_launched);
     seams::pcxt_estimator::set(pcxt_estimator);
     seams::pcxt_toc::set(pcxt_toc);
+    seams::pwcxt_toc::set(pwcxt_toc);
     seams::pcxt_seg::set(pcxt_seg);
     seams::pcxt_worker_bgwhandle::set(pcxt_worker_bgwhandle);
     seams::make_parallel_worker_context::set(make_parallel_worker_context);

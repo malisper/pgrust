@@ -462,29 +462,61 @@ pub fn exec_build_agg_trans<'mcx>(
                 core::exec_init_expr_rec(mcx, &source_expr, &mut state, arg_cell)?;
                 strict_arg_cells = Some(single_cell_vec(mcx, arg_cell)?);
             } else {
-                // deserialfn_oid set: the AGG[_STRICT]_DESERIALIZE step's
-                // `fcinfo_data` payload must carry `pertrans->deserialfn_fcinfo`
-                // — the nodeAgg-owned, pre-initialized deserialize
-                // FunctionCallInfo (with its bound flinfo/collation). That
-                // FunctionCallInfo is owned by nodeAgg (it lives on
-                // AggStatePerTransData and is reused at execution time); the
-                // owned model has no way to hand the step a shared reference to
-                // it (the payload wants an owned `PgBox`, and the trimmed
-                // FunctionCallInfoBaseData cannot reconstruct the bound
-                // flinfo/args). Threading the nodeAgg-owned ds_fcinfo into the
-                // step is a cross-owner ownership change beyond this family's
-                // module.
-                let _ = &source_expr;
-                panic!(
-                    "execExpr-domain-agg: ExecBuildAggTrans combine-with-deserialization path \
-                     emits EEOP_AGG[_STRICT]_DESERIALIZE whose fcinfo_data payload must carry \
-                     pertrans->deserialfn_fcinfo — the nodeAgg-owned, pre-initialized deserialize \
-                     FunctionCallInfo. The owned AggDeserialize.fcinfo_data is an owned PgBox and \
-                     the trimmed FunctionCallInfoBaseData cannot hold the bound flinfo/args, so the \
-                     nodeAgg-owned ds_fcinfo cannot be handed to the step from here. The \
-                     non-deserialize combine, presorted/non-sorted, and single-column-sort input \
-                     paths are fully emitted."
-                );
+                // deserialfn_oid set: we must deserialize the input transition
+                // state before calling the combine function.
+                //
+                //   FunctionCallInfo ds_fcinfo = pertrans->deserialfn_fcinfo;
+                //   ExecInitExprRec(source_tle->expr, state,
+                //                   &ds_fcinfo->args[0].value,
+                //                   &ds_fcinfo->args[0].isnull);
+                //   ds_fcinfo->args[1] = dummy (PointerGetDatum(NULL), notnull);
+                //
+                // The owned model mirrors the C `ds_fcinfo` frame the same way
+                // the HashDatum path mirrors its hash fcinfo: a fresh
+                // `init_fcinfo` call frame (`AggDeserialize.fcinfo_data`, an
+                // owned PgBox) plus the F0-modeled `arg_cell` arena id standing
+                // in for the `&ds_fcinfo->args[0]` aliasing target the
+                // serialized-state sub-expression evaluates into. The dummy
+                // args[1] is a no-op here — the trimmed FunctionCallInfoBaseData
+                // carries no `args[]` vector; the interpreter supplies the dummy
+                // second argument from the deserialfn frame at call time. The
+                // re-resolved deserialfn FmgrInfo / collation are threaded by the
+                // owner alongside the frame, exactly like the transfn frame.
+                let ds_fcinfo = init_fcinfo(mcx, types_core::InvalidOid)?;
+                let ds_arg_cell = new_result_cell(mcx, &mut state)?;
+                core::exec_init_expr_rec(mcx, &source_expr, &mut state, ds_arg_cell)?;
+
+                // The deserialize step writes into the transfn's first real
+                // argument cell (the C `&trans_fcinfo->args[argno + 1]`); name it
+                // with a fresh arena cell so the strict-input check and the
+                // transition call read it as the transfn input.
+                let out_cell = new_result_cell(mcx, &mut state)?;
+
+                // Don't call a strict deserialization function with NULL input.
+                let opcode = if p.deserialfn_strict {
+                    ExprEvalOp::EEOP_AGG_STRICT_DESERIALIZE
+                } else {
+                    ExprEvalOp::EEOP_AGG_DESERIALIZE
+                };
+                let scratch = ExprEvalStep {
+                    opcode,
+                    resvalue: out_cell,
+                    resnull: out_cell,
+                    d: ExprEvalStepData::AggDeserialize {
+                        fcinfo_data: Some(ds_fcinfo),
+                        arg_cell: ds_arg_cell,
+                        jumpnull: -1, // adjust later
+                    },
+                };
+                core::expr_eval_push_step(mcx, &mut state, scratch)?;
+                // Don't add an adjustment unless the function is strict.
+                if p.deserialfn_strict {
+                    adjust_bailout.push(state.steps_len - 1);
+                }
+                // strictargs = trans_fcinfo->args + 1 (the C sets it once at the
+                // top of the isCombine branch); the single transfn input is the
+                // deserialize step's output cell.
+                strict_arg_cells = Some(single_cell_vec(mcx, out_cell)?);
             }
             argno += 1;
             debug_assert_eq!(p.num_inputs, argno);

@@ -245,3 +245,10 @@ seam_core::seam!(
     /// the out-of-shmem `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn create_lwlocks() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `InitLWLockAccess()` (lwlock.c) — initialize a backend's lock-statistics
+    /// state at process start (`InitProcess` / `InitAuxiliaryProcess`). A no-op
+    /// unless `LWLOCK_STATS` is compiled in.
+    pub fn init_lwlock_access()
+);
