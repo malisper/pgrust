@@ -61,8 +61,9 @@ pub fn exec_init_merge_when_qual<'mcx>(
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     panic!(
         "execExpr-modify::exec_init_merge_when_qual: ExecInitQual((List *) action->qual) \
-         routes to execExpr_core (ExecInitQual, still todo!()) and the not-yet-modeled \
-         Node->Expr qual-list view in types-nodes"
+         is blocked on the not-yet-modeled Node->Expr qual-list view in types-nodes \
+         (MergeAction.qual is a plan-only Node enum with no Expr-list path; the C cast \
+         (List *) action->qual cannot be expressed to feed execExpr_core::exec_init_qual)"
     )
 }
 
@@ -128,8 +129,9 @@ pub fn exec_init_merge_join_condition<'mcx>(
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::exec_init_merge_join_condition: \
-         ri_MergeJoinCondition = ExecInitQual((List *) joinCondition) routes to execExpr_core \
-         (ExecInitQual, still todo!()) and the not-yet-modeled Node->Expr qual-list view"
+         ri_MergeJoinCondition = ExecInitQual((List *) joinCondition) is blocked on the \
+         not-yet-modeled Node->Expr qual-list view in types-nodes (joinCondition is a \
+         plan-only Node with no Expr-list path to feed execExpr_core::exec_init_qual)"
     )
 }
 
@@ -316,9 +318,10 @@ pub fn exec_init_with_check_options<'mcx>(
     _wco_list: &[Node<'mcx>],
 ) -> PgResult<()> {
     panic!(
-        "execExpr-modify::exec_init_with_check_options: per-WCO ExecInitQual(wco->qual) routes \
-         to execExpr_core (ExecInitQual, still todo!()) and the not-yet-modeled \
-         WithCheckOption.qual Expr-list view in types-nodes"
+        "execExpr-modify::exec_init_with_check_options: per-WCO ExecInitQual((List *) wco->qual) \
+         is blocked on the not-yet-modeled WithCheckOption.qual Expr-list view in types-nodes \
+         (wco->qual is a plan-only Node with no Expr-list path to feed \
+         execExpr_core::exec_init_qual)"
     )
 }
 
@@ -381,8 +384,9 @@ pub fn exec_init_on_conflict_where<'mcx>(
 ) -> PgResult<Option<ExprState<'mcx>>> {
     panic!(
         "execExpr-modify::exec_init_on_conflict_where: \
-         ExecInitQual((List *) node->onConflictWhere) routes to execExpr_core (ExecInitQual, \
-         still todo!()) and the not-yet-modeled Node->Expr qual-list view in types-nodes"
+         ExecInitQual((List *) node->onConflictWhere) is blocked on the not-yet-modeled \
+         Node->Expr qual-list view in types-nodes (onConflictWhere is a plan-only Node with \
+         no Expr-list path to feed execExpr_core::exec_init_qual)"
     )
 }
 
