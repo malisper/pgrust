@@ -714,13 +714,14 @@ pub fn write_console(line: &[u8]) {
 // Syslogger pipe chunk protocol (write_pipe_chunks)
 // ---------------------------------------------------------------------------
 
-/// `PIPE_CHUNK_SIZE` (`postmaster/syslogger.h`): `PIPE_BUF` clamped to 64K.
-/// `PIPE_BUF` is 4096 on Linux and the POSIX-minimum 512 on macOS/BSD
-/// (`sys/syslimits.h`), both <= 65536.
-#[cfg(target_os = "linux")]
-const PIPE_CHUNK_SIZE: usize = 4096;
-#[cfg(not(target_os = "linux"))]
-const PIPE_CHUNK_SIZE: usize = 512;
+/// `PIPE_CHUNK_SIZE` (`postmaster/syslogger.h`): the OS `PIPE_BUF` clamped
+/// to 64K, so both sides of the pipe protocol share the OS constant (the
+/// syslogger crate derives its copy the same way).
+const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 {
+    65536
+} else {
+    libc::PIPE_BUF
+};
 
 /// `PIPE_HEADER_SIZE = offsetof(PipeProtoHeader, data)`:
 /// `nuls[2]` (2) + `uint16 len` (2) + `int32 pid` (4) + `bits8 flags` (1).

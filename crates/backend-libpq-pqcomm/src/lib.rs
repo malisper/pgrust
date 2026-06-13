@@ -38,9 +38,9 @@ use types_error::{
     FATAL, LOG,
 };
 use types_net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr};
+use backend_storage_ipc_waiteventset_seams::WaitEventSet;
 use types_storage::waiteventset::{
-    WaitEvent, WaitEventSetHandle, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED,
-    WL_SOCKET_WRITEABLE,
+    WaitEvent, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED, WL_SOCKET_WRITEABLE,
 };
 
 pub mod config;
@@ -136,14 +136,16 @@ thread_local! {
     static LAST_REPORTED_SEND_ERRNO: Cell<i32> = const { Cell::new(0) };
     /// `static List *sock_paths` — Unix socket file paths for maintenance.
     static SOCK_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    /// `WaitEventSet *FeBeWaitSet`.
-    static FE_BE_WAIT_SET: Cell<Option<WaitEventSetHandle>> = const { Cell::new(None) };
+    /// `WaitEventSet *FeBeWaitSet` — an owned guard (`Drop` =
+    /// `FreeWaitEventSet`); in C it lives for the backend's lifetime.
+    static FE_BE_WAIT_SET: RefCell<Option<WaitEventSet>> = const { RefCell::new(None) };
 }
 
 /// `FeBeWaitSet` — the backend's socket/latch/postmaster-death wait set,
-/// created by [`pq_init`].
-pub fn fe_be_wait_set() -> Option<WaitEventSetHandle> {
-    FE_BE_WAIT_SET.with(Cell::get)
+/// created by [`pq_init`]. Callback shape: the set is an owned guard, so no
+/// raw handle escapes.
+pub fn with_fe_be_wait_set<R>(f: impl FnOnce(Option<&WaitEventSet>) -> R) -> R {
+    FE_BE_WAIT_SET.with(|c| f(c.borrow().as_ref()))
 }
 
 fn comm_busy() -> bool {
@@ -331,28 +333,11 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
             .finish(loc("pq_init"))?;
     }
 
-    let set = backend_storage_ipc_waiteventset_seams::create_wait_event_set::call(
-        FeBeWaitSetNEvents as i32,
-    )?;
-    let socket_pos = backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_SOCKET_WRITEABLE,
-        port.sock,
-        false,
-    )?;
-    let latch_pos = backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_LATCH_SET,
-        PGINVALID_SOCKET,
-        true,
-    )?;
-    backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
-        set,
-        WL_POSTMASTER_DEATH,
-        PGINVALID_SOCKET,
-        false,
-    )?;
-    FE_BE_WAIT_SET.with(|c| c.set(Some(set)));
+    let set = WaitEventSet::create(FeBeWaitSetNEvents as i32)?;
+    let socket_pos = set.add_event(WL_SOCKET_WRITEABLE, port.sock, false)?;
+    let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, true)?;
+    set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, false)?;
+    FE_BE_WAIT_SET.with(|c| *c.borrow_mut() = Some(set));
 
     // The event positions match the order we added them.
     debug_assert_eq!(socket_pos, FeBeWaitSetSocketPos);
@@ -1988,38 +1973,32 @@ pub fn show_tcp_user_timeout() -> String {
 /// `pq_check_connection` — is the client still connected? (Polls
 /// `FeBeWaitSet` for `WL_SOCKET_CLOSED`.)
 pub fn pq_check_connection() -> PgResult<bool> {
-    let set = fe_be_wait_set().expect("pq_check_connection: FeBeWaitSet not created");
+    with_fe_be_wait_set(|set| {
+        let set = set.expect("pq_check_connection: FeBeWaitSet not created");
 
-    // It's OK to modify the socket event filter without restoring, because
-    // all FeBeWaitSet socket wait sites do the same.
-    backend_storage_ipc_waiteventset_seams::modify_wait_event::call(
-        set,
-        FeBeWaitSetSocketPos,
-        WL_SOCKET_CLOSED,
-    )?;
+        // It's OK to modify the socket event filter without restoring,
+        // because all FeBeWaitSet socket wait sites do the same.
+        set.modify_event(FeBeWaitSetSocketPos, WL_SOCKET_CLOSED)?;
 
-    'retry: loop {
-        let mut events = [WaitEvent::default(); FeBeWaitSetNEvents];
-        let rc = backend_storage_ipc_waiteventset_seams::wait_event_set_wait::call(
-            set,
-            0,
-            &mut events,
-            0,
-        )?;
-        for event in events.iter().take(rc.max(0) as usize) {
-            if event.events & WL_SOCKET_CLOSED != 0 {
-                return Ok(false);
+        'retry: loop {
+            let mut events = [WaitEvent::default(); FeBeWaitSetNEvents];
+            let rc = set.wait(0, &mut events, 0)?;
+            for event in events.iter().take(rc.max(0) as usize) {
+                if event.events & WL_SOCKET_CLOSED != 0 {
+                    return Ok(false);
+                }
+                if event.events & WL_LATCH_SET != 0 {
+                    // A latch event might be preventing other events from
+                    // being reported. Reset it and poll again. (No code
+                    // expects latches to survive across
+                    // CHECK_FOR_INTERRUPTS().)
+                    backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
+                    continue 'retry;
+                }
             }
-            if event.events & WL_LATCH_SET != 0 {
-                // A latch event might be preventing other events from being
-                // reported. Reset it and poll again. (No code expects latches
-                // to survive across CHECK_FOR_INTERRUPTS().)
-                backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
-                continue 'retry;
-            }
+            return Ok(true);
         }
-        return Ok(true);
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------

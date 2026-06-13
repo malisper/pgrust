@@ -16,6 +16,7 @@ types-guc = { path = "../types-guc" }
 types-signal = { path = "../types-signal" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
+types-pgtime = { path = "../types-pgtime" }
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
@@ -31,5 +32,4 @@ backend-timezone-strftime-seams = { path = "../backend-timezone-strftime-seams" 
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
-common-file-perm-seams = { path = "../common-file-perm-seams" }
 libc = "0.2"
