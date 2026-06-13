@@ -135,3 +135,11 @@ impl Drop for WaitEventSet {
         free_wait_event_set::call(self.0);
     }
 }
+
+seam_core::seam!(
+    /// `InitializeWaitEventSupport()` (`storage/ipc/waiteventset.c`) — set up
+    /// the process-local wait-event support (epoll/kqueue fd, self-pipe). Called
+    /// from `InitPostmasterChild`/`InitStandaloneProcess`. `Err` on the
+    /// epoll_create/pipe failure path (`elog(ERROR)`).
+    pub fn initialize_wait_event_support() -> types_error::PgResult<()>
+);

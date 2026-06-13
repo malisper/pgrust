@@ -142,3 +142,12 @@ seam_core::seam!(
     /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
     pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CountUserBackends(roleid)` (`storage/ipc/procarray.c`) — number of
+    /// regular client backends running as `roleid` (used by
+    /// `InitializeSessionUserId` for the per-role connection limit). Scans
+    /// `ProcGlobal`; cannot `ereport`, but the scan crosses shmem so the seam
+    /// returns `PgResult` for the wider procarray failure surface consistency.
+    pub fn count_user_backends(roleid: Oid) -> PgResult<i32>
+);

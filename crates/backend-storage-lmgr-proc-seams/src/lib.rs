@@ -206,3 +206,15 @@ seam_core::seam!(
     /// prepare/commit WAL insert. Plain shared-memory field write.
     pub fn set_delay_chkpt_start(on: bool)
 );
+
+seam_core::seam!(
+    /// `&MyProc->procLatch` (`storage/proc.c`) — this backend's PGPROC shared
+    /// latch, the latch `SwitchToSharedLatch` points `MyLatch` at.
+    pub fn my_proc_latch() -> types_storage::latch::LatchHandle
+);
+
+seam_core::seam!(
+    /// `MyProc->roleId = userid` (`storage/proc.c`) — stamp this backend's
+    /// PGPROC entry with the authenticated user id (an atomic store; no lock).
+    pub fn set_my_proc_role_id(userid: Oid)
+);

@@ -69,3 +69,14 @@ seam_core::seam!(
         n: i32,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `SplitDirectoriesString(rawstring, ',', &elemlist)` (varlena.c) — split
+    /// a comma-separated, possibly-quoted directory list into canonicalized
+    /// path elements, each allocated in `mcx`. `Ok(None)` is the C `false`
+    /// return (syntax error); `Ok(Some(list))` carries the parsed elements.
+    pub fn split_directories_string<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rawstring: &str,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>>
+);

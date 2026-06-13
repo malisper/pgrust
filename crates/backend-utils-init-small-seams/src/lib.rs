@@ -155,3 +155,11 @@ seam_core::seam!(
     /// Process-identity read, same class as `my_proc_pid`.
     pub fn my_backend_type() -> types_core::init::BackendType
 );
+
+seam_core::seam!(
+    /// `InitProcessGlobals()` (`utils/init/globals.c`) — set `MyProcPid`,
+    /// `MyStartTime`/`MyStartTimestamp`, and seed the per-process PRNG. Reached
+    /// by `InitPostmasterChild` / `InitStandaloneProcess`. The PRNG seeding can
+    /// fail (entropy source), so it returns `PgResult`.
+    pub fn init_process_globals() -> types_error::PgResult<()>
+);

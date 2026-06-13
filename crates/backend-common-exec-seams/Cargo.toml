@@ -1,11 +1,11 @@
 [package]
-name = "backend-utils-misc-guc-seams"
+name = "backend-common-exec-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_utils_misc_guc_seams"
+name = "backend_common_exec_seams"
 path = "src/lib.rs"
 
 [dependencies]

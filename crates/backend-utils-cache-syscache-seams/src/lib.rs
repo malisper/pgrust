@@ -17,6 +17,25 @@ use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, OperRow, ProcRow};
+use types_cache::AuthIdRow;
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` projected to the
+    /// `pg_authid` fields role-identity callers read. `Ok(None)` on cache miss.
+    pub fn lookup_authid_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        roleid: Oid,
+    ) -> PgResult<Option<AuthIdRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHNAME, PointerGetDatum(rolename))` projected to the
+    /// `pg_authid` fields role-identity callers read. `Ok(None)` on cache miss.
+    pub fn lookup_authid_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        rolename: &str,
+    ) -> PgResult<Option<AuthIdRow<'mcx>>>
+);
 
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the

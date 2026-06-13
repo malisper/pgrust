@@ -157,3 +157,10 @@ seam_core::seam!(pub fn store_jit_instrumentation_header(
 seam_core::seam!(pub fn jit_instrumentation_from_chunk(chunk: SerializeCursor) -> JitInstrumentationHandle);
 /// `shared_jit->num_workers`.
 seam_core::seam!(pub fn shared_jit_num_workers(shared_jit: JitInstrumentationHandle) -> i32);
+
+seam_core::seam!(
+    /// `InitializingParallelWorker` (`access/parallel.c`): true while a parallel
+    /// worker is in `ParallelWorkerMain` initialization (a distinct flag from
+    /// `IsParallelWorker()`). `InitializeSessionUserId` skips its work when set.
+    pub fn initializing_parallel_worker() -> bool
+);

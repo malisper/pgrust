@@ -44,3 +44,10 @@ seam_core::seam!(
         arg: types_datum::Datum,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `on_exit_reset()` (`storage/ipc/ipc.c`) — clear the on_proc_exit /
+    /// before_shmem_exit / on_shmem_exit callback arrays inherited from the
+    /// postmaster (a forked child must not run the parent's handlers).
+    pub fn on_exit_reset()
+);
