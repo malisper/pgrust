@@ -6237,6 +6237,7 @@ dependencies = [
  "backend-access-common-detoast-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-arrayutils-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
