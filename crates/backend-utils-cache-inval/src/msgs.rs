@@ -61,6 +61,19 @@ impl InvalidationMsgsGroup {
     }
 }
 
+/// The dense backing slice for one subgroup of a group: `arrays[subgroup].msgs`
+/// indexed by `[group.firstmsg[subgroup] .. group.nextmsg[subgroup]]`. This is
+/// the `&InvalMessageArrays[subgroup].msgs[group->firstmsg[subgroup]]` pointer +
+/// `NumMessagesInSubGroup(group, subgroup)` length that the C `memcpy` /
+/// `XLogRegisterData` calls read.
+pub(crate) fn num_messages_in_subgroup_slice<'a, 'mcx>(
+    arrays: &'a [InvalMessageArray<'mcx>; 2],
+    group: &InvalidationMsgsGroup,
+    subgroup: usize,
+) -> &'a [SharedInvalidationMessage] {
+    &arrays[subgroup].msgs[group.firstmsg[subgroup]..group.nextmsg[subgroup]]
+}
+
 /// `AddInvalidationMessage` — add a message to the end of a (sub)group's
 /// subgroup, appending to the dense array.
 pub(crate) fn add_invalidation_message<'mcx>(
