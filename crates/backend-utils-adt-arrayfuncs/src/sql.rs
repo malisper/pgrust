@@ -4,12 +4,13 @@
 //! `array_iterate` / `array_free_iterator`), and `array_map`.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use types_array::ArrayElementDatum;
 use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::{
     PgResult, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERROR,
 };
 
 use backend_utils_error::ereport;
@@ -21,6 +22,11 @@ use crate::ops;
 
 use backend_utils_adt_arrayutils_seams as arrayutils;
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_typcache_seams as typcache;
+use backend_utils_fmgr_fmgr_seams as fmgr;
+
+/// `InvalidOid` (`postgres_ext.h`).
+const INVALID_OID: Oid = 0;
 
 // ---------------------------------------------------------------------------
 // Larger/smaller (arrayfuncs.c).
@@ -397,16 +403,134 @@ pub fn width_bucket_array(
         return Ok(width_bucket_array_float8(operand, thresholds)?);
     }
 
-    // The generic fixed-/variable-width paths need the element type's cached
-    // comparison-proc finfo (C: lookup_type_cache(element_type,
-    // TYPECACHE_CMP_PROC_FINFO) -> typentry->cmp_proc_finfo, driven through fmgr
-    // `element_cmp`). Not yet exposed by the shared TypeCacheEntry.
-    let _ = collation;
+    // Cache information about the input type: the element type's btree
+    // comparison support proc OID (C: lookup_type_cache(element_type,
+    // TYPECACHE_CMP_PROC_FINFO) -> typentry->cmp_proc_finfo.fn_oid), resolved
+    // through the typcache owner's lookup_element_cmp_proc seam.
+    let cmp_proc = typcache::lookup_element_cmp_proc::call(element_type)?;
+    if cmp_proc == INVALID_OID {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "could not identify a comparison function for type {element_type}"
+            ))
+            .into_error());
+    }
+
+    // We have separate implementation paths for fixed- and variable-width
+    // types, since indexing the array is a lot cheaper in the first case.
+    let s = lsyscache::get_typlenbyvalalign::call(element_type)?;
+    let typlen = s.typlen as i32;
+    let typbyval = s.typbyval;
+    let typalign = s.typalign as u8;
+    if typlen > 0 {
+        width_bucket_array_fixed(operand, thresholds, collation, cmp_proc, typlen, typbyval)
+    } else {
+        width_bucket_array_variable(
+            operand, thresholds, collation, cmp_proc, typlen, typbyval, typalign,
+        )
+    }
+}
+
+/// `width_bucket_array_fixed(operand, thresholds, collation, typentry)`
+/// (arrayfuncs.c:6802): binary search over a sorted, NULL-free array of a
+/// generic fixed-width element type, indexing the data directly (`ptr =
+/// thresholds_data + mid * typlen`) and comparing `operand` against each probed
+/// element via the cached btree comparison proc (fmgr `element_cmp`).
+fn width_bucket_array_fixed(
+    operand: Datum,
+    thresholds: &[u8],
+    collation: Oid,
+    cmp_proc: Oid,
+    typlen: i32,
+    typbyval: bool,
+) -> PgResult<i32> {
+    let data_off = foundation::arr_data_ptr_off(thresholds);
+
+    // operand is itself an element of the (fixed-width) element type. For a
+    // fixed-width type the comparator arg0 carries the operand value by-value;
+    // a fixed by-reference type would need the operand's on-disk bytes, which a
+    // bare Datum does not expose in the safe model (see the variable path).
+    let arg0 = if typbyval {
+        ArrayElementDatum::ByValue(operand)
+    } else {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INTERNAL_ERROR)
+            .errmsg(
+                "width_bucket_array (fixed by-reference element): the operand bytes behind a bare \
+                 Datum are not exposed by the safe model; lands with the element-bytes carrier \
+                 (mirror-and-panic)",
+            )
+            .into_error());
+    };
+
+    let mut left: i32 = 0;
+    let mut right: i32 = arrayutils::array_get_n_items::call(
+        foundation::arr_ndim(thresholds),
+        &dims_vec(thresholds),
+    )?;
+
+    while left < right {
+        let mid = (left + right) / 2;
+        let ptr = data_off + (mid as usize) * (typlen as usize);
+        let arg1 = element_datum_at(thresholds, ptr, typlen, typbyval);
+
+        let cmpresult = fmgr::element_cmp::call(cmp_proc, collation, arg0, arg1)?;
+
+        if cmpresult < 0 {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+
+    Ok(left)
+}
+
+/// `width_bucket_array_variable(operand, thresholds, collation, typentry)`
+/// (arrayfuncs.c:6857): binary search over a sorted, NULL-free array of a
+/// generic variable-width element type, walking the data pointer
+/// (`att_addlength_pointer` + `att_align_nominal`) to reach the mid'th element
+/// and advancing the base past confirmed-lower elements to keep the indexing
+/// work O(N) rather than O(N^2).
+fn width_bucket_array_variable(
+    operand: Datum,
+    thresholds: &[u8],
+    collation: Oid,
+    cmp_proc: Oid,
+    typlen: i32,
+    typbyval: bool,
+    typalign: u8,
+) -> PgResult<i32> {
+    // The operand is a variable-width (by-reference) element; its on-disk bytes
+    // live behind a bare Datum pointer-word that the safe model does not
+    // expose. The threshold elements are walked from the array buffer, but
+    // arg0 (the operand) cannot be materialized here. Route the operand-bytes
+    // need across the (unported) element-bytes carrier boundary.
+    let _ = (operand, thresholds, collation, cmp_proc, typlen, typbyval, typalign);
     unimplemented!(
-        "width_bucket_array (non-float8 element): generic comparison requires the typcache owner \
-         to expose TypeCacheEntry.cmp_proc_finfo (TYPECACHE_CMP_PROC_FINFO) for the fmgr \
-         element_cmp seam; not yet landed (mirror-and-panic per Mirror-PG-and-panic)"
+        "width_bucket_array (variable-width element): the operand's on-disk bytes live behind a \
+         bare Datum pointer-word the safe model does not expose (same boundary as array_fill's \
+         varlena element); lands with the detoast/element-bytes carrier (mirror-and-panic)"
     )
+}
+
+/// Materialize the element at byte offset `off` in `buf` as an
+/// [`ArrayElementDatum`] for the comparison seams: by-value types carry the
+/// fetched `Datum`; by-reference types carry the element's on-disk byte window
+/// (`att_addlength_pointer` gives its raw end before alignment).
+fn element_datum_at<'a>(
+    buf: &'a [u8],
+    off: usize,
+    typlen: i32,
+    typbyval: bool,
+) -> ArrayElementDatum<'a> {
+    if typbyval {
+        ArrayElementDatum::ByValue(foundation::fetch_att(buf, off, typbyval, typlen))
+    } else {
+        let end = foundation::att_addlength_pointer(off, typlen, buf, off);
+        ArrayElementDatum::ByRef(&buf[off..end])
+    }
 }
 
 /// `width_bucket_array_float8(operand, thresholds)` (arrayfuncs.c:6758): binary
