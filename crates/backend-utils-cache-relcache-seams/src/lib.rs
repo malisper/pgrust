@@ -18,6 +18,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationNeedsWAL(relation)` (utils/rel.h): true if the relation needs
+    /// WAL — permanent and not skipping WAL for a new relfilenode this
+    /// transaction. Reads `rd_createSubid`/`rd_firstRelfilelocatorSubid` (not
+    /// in the trimmed `RelationData`) and the `wal_level` GUC, so the owner
+    /// evaluates the whole macro. Pure read.
+    pub fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `RELATION_IS_LOCAL(relation)` (utils/rel.h): true if the relation is
+    /// temp or newly created this transaction (accessible only to this
+    /// backend). Reads `rd_islocaltemp`/`rd_createSubid` (not in the trimmed
+    /// `RelationData`), so the owner evaluates the macro. Pure read.
+    pub fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `AtEOXact_RelationCache(isCommit)` — relcache cleanup at top-level
     /// transaction end.
     pub fn at_eoxact_relation_cache(is_commit: bool) -> types_error::PgResult<()>
@@ -44,6 +61,56 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::RelationData<'_>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// Read the relation's cached partition key (`relation->rd_partkey`),
+    /// returning a copy in `mcx`, or `Ok(None)` when it has not been built
+    /// yet (the C NULL). `partcache.c`'s `RelationGetPartitionKey` builds the
+    /// key lazily and the relcache caches it on the entry, preserved across
+    /// relcache rebuilds; this is the relcache-owned read half (partcache
+    /// owns the build). Pure cache read; cannot `ereport` (OOM from the copy
+    /// is carried on `Err`).
+    pub fn relation_get_partkey<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+    ) -> types_error::PgResult<Option<types_partition::PartitionKeyData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// Store the freshly built partition key on the relation's relcache entry
+    /// (`relation->rd_partkey = key`, in the entry's own `rd_partkeycxt`
+    /// child of `CacheMemoryContext`). The relcache owner copies `key` into
+    /// that long-lived context; `partcache.c`'s `RelationBuildPartitionKey`
+    /// is the builder. `Err` carries OOM from the copy into cache memory.
+    pub fn relation_set_partkey<'mcx>(
+        relid: types_core::Oid,
+        key: types_partition::PartitionKeyData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Read the relation's cached partition CHECK qual list
+    /// (`relation->rd_partcheck`), returning a copy in `mcx`, plus the
+    /// `relation->rd_partcheckvalid` flag. When the flag is false the cache is
+    /// stale and the caller rebuilds; partcache owns the build/recursion.
+    /// OOM from the copy is carried on `Err`.
+    pub fn relation_get_partcheck<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+    ) -> types_error::PgResult<(bool, mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// Store the freshly built partition CHECK qual list on the relation's
+    /// relcache entry (`relation->rd_partcheck = copyObject(result)` in
+    /// `rd_partcheckcxt`, then `rd_partcheckvalid = true`). An empty list is
+    /// the C NIL (no context made). The relcache owner copies into cache
+    /// memory; `Err` carries OOM.
+    pub fn relation_set_partcheck<'mcx>(
+        relid: types_core::Oid,
+        partcheck: mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

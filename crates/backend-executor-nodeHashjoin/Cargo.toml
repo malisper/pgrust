@@ -1,0 +1,26 @@
+[package]
+name = "backend-executor-nodeHashjoin"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_nodeHashjoin"
+path = "src/lib.rs"
+
+[dependencies]
+backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }
+backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }
