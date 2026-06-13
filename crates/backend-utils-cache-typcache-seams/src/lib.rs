@@ -77,6 +77,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_rowtype_tupdesc_copy(type_id, typmod)` (typcache.c): like
+    /// `lookup_rowtype_tupdesc`, but returns an independent
+    /// (`CreateTupleDescCopyConstr`) copy with no refcount bookkeeping —
+    /// `TypeGetTupleDesc` renames its attributes and re-stamps the rowtype, so
+    /// it needs a freestanding descriptor. Cloned into `mcx`. `Err` carries the
+    /// C `ereport(ERROR)`s (type is not composite / record type not registered)
+    /// and OOM from the copy.
+    pub fn lookup_rowtype_tupdesc_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+        typmod: i32,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO)->eq_opr_finfo.fn_oid`
     /// (typcache.c): resolve the OID of `element_type`'s default equality
     /// operator's underlying function (the cached `eq_opr_finfo`), as

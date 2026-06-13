@@ -16,6 +16,20 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-namespace = { path = "../types-namespace" }
 types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
+# Ported neighbor: the descriptor builders (CreateTemplateTupleDesc /
+# TupleDescInitEntry) TypeGetTupleDesc's scalar path calls directly.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+# Owner seams routed by the tupledesc family for UNPORTED neighbors.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 # Inward seam crate this unit OWNS and installs from init_seams().
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }

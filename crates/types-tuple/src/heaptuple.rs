@@ -196,6 +196,18 @@ impl NameData {
             .unwrap_or(self.data.len());
         &self.data[..len]
     }
+
+    /// `namestrcpy(name, str)` (`backend/utils/adt/name.c`) — copy a C string
+    /// into a fixed-size `Name`, NUL-terminating and zero-padding. The source
+    /// is truncated to `NAMEDATALEN - 1` bytes (C copies up to the limit and
+    /// always leaves a trailing NUL within the fixed buffer).
+    pub fn namestrcpy(&mut self, src: &str) {
+        self.data.fill(0);
+        let bytes = src.as_bytes();
+        let limit = types_core::NAMEDATALEN as usize - 1;
+        let len = bytes.len().min(limit);
+        self.data[..len].copy_from_slice(&bytes[..len]);
+    }
 }
 
 impl Default for NameData {
