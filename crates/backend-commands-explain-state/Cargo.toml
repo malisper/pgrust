@@ -1,0 +1,20 @@
+[package]
+name = "backend-commands-explain-state"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_explain_state"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+types-error = { path = "../types-error" }
+types-explain = { path = "../types-explain" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-cluster = { path = "../types-cluster" }
+backend-commands-define = { path = "../backend-commands-define" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
+backend-commands-explain-state-seams = { path = "../backend-commands-explain-state-seams" }

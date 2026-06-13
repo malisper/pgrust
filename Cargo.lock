@@ -2400,6 +2400,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-explain-state"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define",
+ "backend-commands-explain-state-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-cluster",
+ "types-error",
+ "types-explain",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-commands-explain-state-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-cluster",
+ "types-error",
+ "types-explain",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-commands-extension-seams"
 version = "0.0.0"
 dependencies = [
