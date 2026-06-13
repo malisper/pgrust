@@ -8,6 +8,7 @@ use mcx::PgBox;
 use crate::nodes::NodeTag;
 
 use crate::execnodes::{PlanStateData, T_MaterialState};
+use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
 
@@ -19,6 +20,8 @@ use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
 pub enum PlanStateNode<'mcx> {
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
+    /// `T_MergeAppendState`.
+    MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
     /// `T_HashJoinState`.
@@ -30,6 +33,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     pub fn tag(&self) -> NodeTag {
         match self {
             PlanStateNode::Material(_) => T_MaterialState,
+            PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
         }
@@ -40,6 +44,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     pub fn ps_head(&self) -> &PlanStateData<'mcx> {
         match self {
             PlanStateNode::Material(m) => &m.ss.ps,
+            PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
         }
@@ -49,6 +54,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     pub fn ps_head_mut(&mut self) -> &mut PlanStateData<'mcx> {
         match self {
             PlanStateNode::Material(m) => &mut m.ss.ps,
+            PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
         }

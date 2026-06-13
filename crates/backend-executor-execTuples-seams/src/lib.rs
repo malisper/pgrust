@@ -216,3 +216,16 @@ seam_core::seam!(
         bool,
     )>
 );
+
+seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch ordinary
+    /// attribute `attnum` (1-based) from `slot`, deforming the tuple as needed
+    /// (`slot_getsomeattrs` → `slot_getsomeattrs_int`), returning
+    /// `(value, isnull)`. The merge-append comparator only ever asks for
+    /// ordinary columns (`attnum >= 1`). Deforming can detoast / allocate and
+    /// the underlying ops can `ereport(ERROR)`, hence `PgResult`.
+    pub fn slot_getattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: types_core::primitive::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);

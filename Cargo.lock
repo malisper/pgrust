@@ -1885,6 +1885,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execPartition-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
@@ -2135,6 +2145,26 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeMergeAppend"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execPartition-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-sortsupport",
 ]
 
 [[package]]
@@ -5043,6 +5073,7 @@ dependencies = [
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
+ "backend-executor-nodeMergeAppend",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",

@@ -25,6 +25,7 @@ pub mod jointype;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
 pub mod nodeindexscan;
+pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod nodes;
 pub mod nodetidrangescan;
@@ -45,6 +46,10 @@ pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
+};
+pub use nodemergeappend::{
+    BinaryHeap, MergeAppend, MergeAppendStateData, PartitionPruneState, T_MergeAppend,
+    T_MergeAppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;
