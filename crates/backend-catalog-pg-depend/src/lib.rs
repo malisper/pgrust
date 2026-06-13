@@ -43,10 +43,13 @@ use types_error::{
     ERROR,
 };
 use types_rel::RelationData;
-use types_scan::backend_access_index_genam::SysScanRow;
-use types_cache::{ScanKeyInit, BTEqualStrategyNumber};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, LOCKMODE};
+use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::heaptuple::ItemPointerData;
 
+use backend_access_common_heaptuple::heap_deform_tuple;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table as table;
 use types_rel::Relation;
@@ -72,29 +75,89 @@ fn open_depend(mcx: Mcx<'_>, lockmode: LOCKMODE) -> PgResult<Relation<'_>> {
 }
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_OIDEQ,
-/// ObjectIdGetDatum(value))`.
-fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyInit {
-    ScanKeyInit {
-        sk_attno: attno,
-        sk_strategy: BTEqualStrategyNumber,
-        sk_procedure: F_OIDEQ,
-        sk_argument: Datum::from_oid(value),
-        sk_subtype: InvalidOid,
-        sk_collation: InvalidOid,
-    }
+/// ObjectIdGetDatum(value))`. The eager fmgr resolution crosses the fmgr
+/// seam (panics until fmgr lands, exactly where C does the lookup).
+fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(value),
+    )?;
+    Ok(key)
 }
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_INT4EQ,
 /// Int32GetDatum(value))`.
-fn int4_key(attno: AttrNumber, value: i32) -> ScanKeyInit {
-    ScanKeyInit {
-        sk_attno: attno,
-        sk_strategy: BTEqualStrategyNumber,
-        sk_procedure: F_INT4EQ,
-        sk_argument: Datum::from_i32(value),
-        sk_subtype: InvalidOid,
-        sk_collation: InvalidOid,
+fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_INT4EQ,
+        Datum::from_i32(value),
+    )?;
+    Ok(key)
+}
+
+/// One scanned pg_depend row: the heap TID (`tup->t_self`, for delete/update
+/// legs) plus the `heap_deform_tuple` projection of the whole row.
+struct SysScanRow<'a> {
+    tid: ItemPointerData,
+    values: &'a [Datum],
+    isnull: &'a [bool],
+}
+
+/// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` + the
+/// `while ((tup = systable_getnext(scan)))` loop + `systable_endscan(scan)`
+/// (the genam iterator): invoke `body` once per matching row, in scan order.
+/// `body` returning `Ok(true)` continues, `Ok(false)` stops early (the C
+/// `break`); an `Err` propagates after the scan is ended (the [`SysScanGuard`]
+/// `Drop` covers the error path). The deformed columns / null flags land in
+/// a scratch context dropped at the end of each iteration.
+fn systable_scan_foreach(
+    rel: &RelationData<'_>,
+    index_id: Oid,
+    keys: &[ScanKeyData],
+    mut body: impl FnMut(&SysScanRow<'_>) -> PgResult<bool>,
+) -> PgResult<()> {
+    let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
+    loop {
+        let scratch = MemoryContext::new("systable_scan_foreach row");
+        let smcx = scratch.mcx();
+        let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+            break;
+        };
+        // GETSTRUCT(tup): the whole row, deformed (every pg_depend column is
+        // fixed-width and NOT NULL, so by-value).
+        let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
+        let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
+        for (value, null) in cols.iter() {
+            values.push(match value {
+                TupleValue::ByVal(d) => *d,
+                TupleValue::ByRef(_) => {
+                    return Err(PgError::error("pg_depend column is not by-value"))
+                }
+            });
+            isnull.push(*null);
+        }
+        let row = SysScanRow {
+            tid: tup.tuple.t_self,
+            values: &values,
+            isnull: &isnull,
+        };
+        let keep_going = body(&row)?;
+        if !keep_going {
+            break;
+        }
+        // The deformed-row scratch context drops at the end of each
+        // iteration (declared before the borrows of it, so it outlives them).
     }
+    scan.end()
 }
 
 /// `(Form_pg_depend) GETSTRUCT(tup)` — interpret one deformed pg_depend row.
@@ -377,11 +440,11 @@ pub fn deleteDependencyRecordsFor(
     let depRel = open_depend(dep_ctx.mcx(), RowExclusiveLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         if skipExtensionDeps && form_pg_depend(row).deptype == DEPENDENCY_EXTENSION.as_char() {
             return Ok(true);
         }
@@ -416,11 +479,11 @@ pub fn deleteDependencyRecordsForClass(
     let depRel = open_depend(dep_ctx.mcx(), RowExclusiveLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == refclassId && depform.deptype == deptype {
@@ -452,11 +515,11 @@ pub fn deleteDependencyRecordsForSpecific(
     let depRel = open_depend(dep_ctx.mcx(), RowExclusiveLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == refclassId
@@ -546,11 +609,11 @@ pub fn changeDependencyFor(
 
     /* There should be existing dependency record(s), so search. */
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == refClassId && depform.refobjid == oldRefObjectId {
@@ -590,11 +653,11 @@ pub fn changeDependenciesOf(classId: Oid, oldObjectId: Oid, newObjectId: Oid) ->
     let depRel = open_depend(dep_ctx.mcx(), RowExclusiveLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, oldObjectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, oldObjectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         /* make a modifiable copy */
         let mut newform = form_pg_depend(row);
 
@@ -664,11 +727,11 @@ pub fn changeDependenciesOn(
 
     /* Now search for dependency records */
     let key = [
-        oid_key(Anum_pg_depend_refclassid, refClassId),
-        oid_key(Anum_pg_depend_refobjid, oldRefObjectId),
+        oid_key(Anum_pg_depend_refclassid, refClassId)?,
+        oid_key(Anum_pg_depend_refobjid, oldRefObjectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependReferenceIndexId, &key, |row| {
         if newIsPinned {
             indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
         } else {
@@ -718,11 +781,11 @@ pub fn getExtensionOfObject(classId: Oid, objectId: Oid) -> PgResult<Oid> {
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == EXTENSION_RELATION_ID
@@ -753,11 +816,11 @@ pub fn getAutoExtensionsOfObject<'mcx>(
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
+        oid_key(Anum_pg_depend_classid, classId)?,
+        oid_key(Anum_pg_depend_objid, objectId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == EXTENSION_RELATION_ID
@@ -796,12 +859,12 @@ pub fn getExtensionType(mcx: Mcx<'_>, extensionOid: Oid, typname: &str) -> PgRes
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_refclassid, EXTENSION_RELATION_ID),
-        oid_key(Anum_pg_depend_refobjid, extensionOid),
-        int4_key(Anum_pg_depend_refobjsubid, 0),
+        oid_key(Anum_pg_depend_refclassid, EXTENSION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_refobjid, extensionOid)?,
+        int4_key(Anum_pg_depend_refobjsubid, 0)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependReferenceIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.classid == TYPE_RELATION_ID && depform.deptype == DEPENDENCY_EXTENSION.as_char()
@@ -840,11 +903,11 @@ pub fn sequenceIsOwned(seqId: Oid, deptype: i8) -> PgResult<Option<(Oid, i32)>> 
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID),
-        oid_key(Anum_pg_depend_objid, seqId),
+        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_objid, seqId)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let depform = form_pg_depend(row);
 
         if depform.refclassid == RELATION_RELATION_ID && depform.deptype == deptype {
@@ -875,14 +938,14 @@ fn getOwnedSequences_internal<'mcx>(
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID),
-        oid_key(Anum_pg_depend_refobjid, relid),
-        int4_key(Anum_pg_depend_refobjsubid, attnum as i32),
+        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_refobjid, relid)?,
+        int4_key(Anum_pg_depend_refobjsubid, attnum as i32)?,
     ];
     /* the C nkeys is `attnum ? 3 : 2` */
     let key = if attnum != 0 { &key[..] } else { &key[..2] };
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependReferenceIndexId, key, &mut |row| {
+    systable_scan_foreach(&depRel, DependReferenceIndexId, key, |row| {
         let deprec = form_pg_depend(row);
 
         /*
@@ -987,12 +1050,12 @@ pub fn get_index_constraint(indexId: Oid) -> PgResult<Oid> {
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID),
-        oid_key(Anum_pg_depend_objid, indexId),
-        int4_key(Anum_pg_depend_objsubid, 0),
+        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_objid, indexId)?,
+        int4_key(Anum_pg_depend_objsubid, 0)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependDependerIndexId, &key, |row| {
         let deprec = form_pg_depend(row);
 
         /*
@@ -1029,12 +1092,12 @@ pub fn get_index_ref_constraints<'mcx>(
     let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
 
     let key = [
-        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID),
-        oid_key(Anum_pg_depend_refobjid, indexId),
-        int4_key(Anum_pg_depend_refobjsubid, 0),
+        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_refobjid, indexId)?,
+        int4_key(Anum_pg_depend_refobjsubid, 0)?,
     ];
 
-    genam_seams::systable_scan_foreach::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
+    systable_scan_foreach(&depRel, DependReferenceIndexId, &key, |row| {
         let deprec = form_pg_depend(row);
 
         /*
