@@ -143,6 +143,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_namespace_name_or_temp(nspid)` (lsyscache.c): `"pg_temp"` if
+    /// `isTempNamespace(nspid)`, else `get_namespace_name(nspid)`, copied into
+    /// `mcx` (C: `pstrdup`). A missing namespace is `Ok(None)`. `Err` is OOM.
+    pub fn get_namespace_name_or_temp<'mcx>(
+        mcx: Mcx<'mcx>,
+        nspid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `get_rel_relkind(relid)` (lsyscache.c): the relation's `relkind`, or 0
     /// when there is no such pg_class row (the C `'\0'` return). `Err`
     /// carries the syscache machinery's `ereport(ERROR)`s.
