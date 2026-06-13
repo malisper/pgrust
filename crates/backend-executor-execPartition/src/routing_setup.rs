@@ -70,13 +70,50 @@ pub(crate) fn ExecInitRoutingInfo<'mcx>(
     partidx: i32,
     is_borrowed_rel: bool,
 ) -> PgResult<()> {
-    // The tuple-conversion-slot setup (ExecGetRootToChildMap + table_slot_create
-    // into ri_PartitionTupleSlot) and the FDW init / batch-size / multi-insert
-    // bookkeeping all touch `ResultRelInfo` fields the trimmed executor type does
-    // not carry yet, and seams for ExecGetRootToChildMap / table_slot_create /
-    // the FdwRoutine vtable have not been authored.  The array-tracking tail,
-    // however, is fully expressible and is the part `proute` depends on.
-    let _ = (mtstate, estate);
+    // C: oldcxt = MemoryContextSwitchTo(proute->memcxt);
+    // The owned model allocates from `mcx` (threaded explicitly), so the
+    // context switch is a no-op here.
+    let _ = mtstate;
+
+    // Set up tuple conversion between root parent and the partition if the two
+    // have different rowtypes.  If conversion is indeed required, also
+    // initialize a slot dedicated to storing this partition's converted tuples.
+    //
+    // if (ExecGetRootToChildMap(partRelInfo, estate) != NULL) {
+    //     Relation partrel = partRelInfo->ri_RelationDesc;
+    //     partRelInfo->ri_PartitionTupleSlot =
+    //         table_slot_create(partrel, &estate->es_tupleTable);
+    // } else
+    //     partRelInfo->ri_PartitionTupleSlot = NULL;
+    let root_to_child =
+        backend_executor_execUtils_seams::exec_get_root_to_child_map::call(mcx, estate, part_rel_info)?;
+    let partition_tuple_slot = if root_to_child.is_some() {
+        // table_slot_create pins the partition's TupleDesc and builds a slot of
+        // the partition's AM-appropriate class; ExecAllocTableSlot then registers
+        // it in es_tupleTable (C: the `&estate->es_tupleTable` reglist) so it is
+        // dropped at end of command.
+        let partrel = estate
+            .result_rel(part_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("partition ResultRelInfo.ri_RelationDesc set")
+            .alias();
+        let slot = backend_access_table_tableam::table_slot_create(mcx, &partrel)?;
+        Some(estate.make_slot(slot)?)
+    } else {
+        None
+    };
+
+    // If the partition is a foreign table, let the FDW init itself for routing
+    // tuples to the partition (BeginForeignInsert), then determine its batch
+    // size and reset the multi-insert buffer.  The trimmed ResultRelInfo carries
+    // none of ri_FdwRoutine / ri_BatchSize / ri_CopyMultiInsertBuffer; those land
+    // with the full nodeModifyTable ResultRelInfo.  For every relation the
+    // trimmed type can represent (ri_FdwRoutine == NULL), the C path is: skip the
+    // FDW branches, set ri_BatchSize = 1, ri_CopyMultiInsertBuffer = NULL — all
+    // no-ops against the fields this type omits.
+    let part_rel_info_data = estate.result_rel_mut(part_rel_info);
+    part_rel_info_data.ri_PartitionTupleSlot = partition_tuple_slot;
 
     // Assert(dispatch->indexes[partidx] == -1);
     debug_assert_eq!(
@@ -367,24 +404,39 @@ pub fn ExecCleanupTupleRouting<'mcx>(
 
     // for (i = 0; i < proute->num_partitions; i++) {
     //     ResultRelInfo *resultRelInfo = proute->partitions[i];
-    //     ... FDW EndForeignInsert ...
+    //     /* Allow any FDWs to shut down */
+    //     if (resultRelInfo->ri_FdwRoutine != NULL &&
+    //         resultRelInfo->ri_FdwRoutine->EndForeignInsert != NULL)
+    //         resultRelInfo->ri_FdwRoutine->EndForeignInsert(mtstate->ps.state,
+    //                                                        resultRelInfo);
+    //     /* skip result relations borrowed from the owning ModifyTableState */
     //     if (proute->is_borrowed_rel[i]) continue;
     //     ExecCloseIndices(resultRelInfo);
     //     table_close(resultRelInfo->ri_RelationDesc, NoLock);
     // }
     //
-    // Closing a routed leaf partition runs FDW shutdown (EndForeignInsert, which
-    // reads ri_FdwRoutine — absent from the trimmed ResultRelInfo), closes its
-    // indices (ExecCloseIndices — no seam authored), and closes the relation.
-    // Until those owners land this per-partition close loop cannot run; a loud
-    // panic beats silently leaking the opens.  (No partitions are ever stored in
-    // `proute->partitions` yet because ExecInitPartitionInfo/ExecInitRoutingInfo
-    // are likewise blocked, so this is unreachable in practice.)
-    if proute.num_partitions > 0 {
+    // FDW EndForeignInsert reads ri_FdwRoutine, absent from the trimmed
+    // ResultRelInfo; it lands with the full nodeModifyTable ResultRelInfo, and is
+    // a no-op for every relation the trimmed type can represent
+    // (ri_FdwRoutine == NULL).  The non-borrowed leaf partitions, however, must
+    // have their indices closed (ExecCloseIndices) before the relation is closed
+    // (table_close).  ExecCloseIndices is owned by execIndexing.c, which has no
+    // seam crate authored yet — consistent with this crate's other blocked-owner
+    // sites (ExecInitPartitionInfo's ExecOpenIndices), the close of a routed leaf
+    // partition's indices cannot run until that owner lands; panic loudly rather
+    // than silently leak the index opens.
+    for i in 0..proute.num_partitions as usize {
+        if proute.is_borrowed_rel[i] {
+            continue;
+        }
+        // The relation is closed in the same step as ExecCloseIndices in C;
+        // splitting them (close the rel now, leak the indices) would be a worse
+        // half-port than refusing the whole non-borrowed close until the
+        // ExecCloseIndices owner exists.
         panic!(
-            "ExecCleanupTupleRouting: per-partition close (FDW EndForeignInsert, \
-             ExecCloseIndices) not yet portable — ri_FdwRoutine and the \
-             ExecCloseIndices owner have not landed"
+            "ExecCleanupTupleRouting: closing a routed (non-borrowed) leaf \
+             partition needs ExecCloseIndices (execIndexing.c), whose seam owner \
+             has not landed"
         );
     }
 

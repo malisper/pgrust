@@ -1407,6 +1407,7 @@ dependencies = [
  "backend-access-common-next-seams",
  "backend-access-common-relation-seams",
  "backend-access-common-tupconvert-seams",
+ "backend-access-table-tableam",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-partition-seams",
