@@ -121,6 +121,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_clear(state)` (tuplestore.c): delete all the stored tuples
+    /// and reset every read pointer to the start, but keep the tuplestore
+    /// itself allocated and re-usable. Frees/truncates the backing buffer
+    /// (BufFile close paths) — infallible.
+    pub fn tuplestore_clear(state: &mut types_nodes::Tuplestorestate<'_>)
+);
+
+seam_core::seam!(
     /// `tuplestore_end(state)` (tuplestore.c): release the tuplestore's
     /// resources. Consumes the carrier (the C caller NULLs its pointer).
     /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.

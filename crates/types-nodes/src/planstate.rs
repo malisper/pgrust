@@ -15,6 +15,7 @@ use crate::nodelimit::T_LimitState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::noderecursiveunion::T_RecursiveUnionState;
 use crate::noderesult::T_ResultState;
 use crate::nodesetop::T_SetOpState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
@@ -37,6 +38,8 @@ pub enum PlanStateNode<'mcx> {
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_RecursiveUnionState`.
+    RecursiveUnion(PgBox<'mcx, crate::noderecursiveunion::RecursiveUnionStateData<'mcx>>),
     /// `T_ResultState`.
     Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
     /// `T_SetOpState`.
@@ -71,6 +74,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::RecursiveUnion(_) => T_RecursiveUnionState,
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
@@ -94,6 +98,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::RecursiveUnion(r) => &r.ps,
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
@@ -116,6 +121,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::RecursiveUnion(r) => &mut r.ps,
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,

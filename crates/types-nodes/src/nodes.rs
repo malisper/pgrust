@@ -133,6 +133,8 @@ pub enum Node<'mcx> {
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_RecursiveUnion`.
+    RecursiveUnion(crate::noderecursiveunion::RecursiveUnion<'mcx>),
     /// `T_Result`.
     Result(crate::noderesult::Result<'mcx>),
     /// `T_SetOp`.
@@ -181,6 +183,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::RecursiveUnion(_) => crate::noderecursiveunion::T_RecursiveUnion,
             Node::Result(_) => T_Result,
             Node::SetOp(_) => T_SetOp,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
@@ -205,6 +208,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::RecursiveUnion(r) => &r.plan,
             Node::Result(r) => &r.plan,
             Node::SetOp(s) => &s.plan,
             Node::Memoize(m) => &m.plan,
@@ -239,6 +243,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::RecursiveUnion(r) => Ok(Node::RecursiveUnion(r.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
             Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),

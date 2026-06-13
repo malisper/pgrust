@@ -4057,6 +4057,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeRecursiveunion"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeWorktablescan-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeResult"
 version = "0.0.0"
 dependencies = [
@@ -4277,6 +4297,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeWorktablescan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-nodes",
 ]
@@ -9880,6 +9909,7 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
+ "backend-executor-nodeRecursiveunion",
  "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
