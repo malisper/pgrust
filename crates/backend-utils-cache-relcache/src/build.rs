@@ -140,6 +140,7 @@ fn project_entry<'mcx>(
     // Index fields: `rd_index` / `rd_opcintype` (None/empty for a table).
     let rd_index = r.rd_index.as_ref().map(|ix| types_rel::FormData_pg_index {
         indnkeyatts: ix.indnkeyatts,
+        indisunique: ix.indisunique,
         indimmediate: ix.indimmediate,
         indrelid: ix.indrelid,
         indkey0: ix.indkey.first().copied().unwrap_or(0),
