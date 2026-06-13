@@ -25,7 +25,7 @@
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
 use types_core::primitive::{Index, Oid};
 use types_core::xact::CommandId;
-use types_core::PgResult;
+use types_error::PgResult;
 use types_datum::Datum;
 use types_tuple::heaptuple::TupleDescData;
 use types_tuple::tupconvert::TupleConversionMap;
@@ -37,7 +37,7 @@ use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
 use crate::planstate::PlanStateNode;
-use types_core::NodeTag;
+use crate::nodes::NodeTag;
 
 /// `T_MaterialState` (nodes/nodetags.h) — the executor-state node tag for a
 /// Material node.

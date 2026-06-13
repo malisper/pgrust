@@ -34,7 +34,6 @@ name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
- "backend-utils-adt-misc2-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -1012,14 +1011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-utils-adt-misc2-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-error",
-]
-
-[[package]]
 name = "backend-utils-adt-regproc-seams"
 version = "0.0.0"
 dependencies = [
@@ -1230,6 +1221,7 @@ dependencies = [
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "libc",
+ "types-core",
  "types-dest",
  "types-error",
 ]
@@ -1452,6 +1444,7 @@ name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "types-signal",
 ]
 
 [[package]]
