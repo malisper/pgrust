@@ -6156,6 +6156,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-cmdtag"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-numutils",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
