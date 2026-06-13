@@ -77,3 +77,36 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> types_error::PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `IndexAmTranslateCompareType(cmptype, amoid, opfamily, missing_ok)`
+    /// (amapi.c): translate an AM-independent `CompareType` (its `i32` value)
+    /// into the AM-specific `StrategyNumber` (returned as `i16`; `0` when there
+    /// is no mapping). Used by lsyscache.c's `get_opfamily_member_for_cmptype`.
+    /// The owner reaches the AM's `amtranslatecmptype`. Errors carry the C
+    /// lookup/validation `ereport`s when `missing_ok = false`.
+    pub fn index_am_translate_cmptype(
+        cmptype: i32,
+        amoid: types_core::Oid,
+        opfamily: types_core::Oid,
+        missing_ok: bool,
+    ) -> types_error::PgResult<i16>
+);
+
+seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)->amconsistentequality`
+    /// (lsyscache.c `equality_ops_are_compatible`): whether the index access
+    /// method guarantees consistent equality semantics across its opclasses.
+    /// The owning amapi unit loads the AM handler and reads the flag (the C
+    /// `pfree(amroutine)` is folded into the seam). `Err` carries the
+    /// handler-load `ereport`s.
+    pub fn index_am_consistent_equality(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)->amconsistentordering`
+    /// (lsyscache.c `comparison_ops_are_compatible`): whether the index access
+    /// method guarantees consistent ordering semantics across its opclasses.
+    /// `Err` carries the handler-load `ereport`s.
+    pub fn index_am_consistent_ordering(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);

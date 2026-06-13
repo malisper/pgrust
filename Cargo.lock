@@ -1535,6 +1535,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-sink"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -1952,6 +1961,15 @@ dependencies = [
 
 [[package]]
 name = "backend-catalog-pg-namespace-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-opclass-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -7123,6 +7141,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-lsyscache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amapi-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-opclass-seams",
+ "backend-nodes-copyfuncs-pc-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-opclass",
+ "types-selfuncs",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
@@ -7344,12 +7387,14 @@ dependencies = [
  "types-cache",
  "types-cluster",
  "types-core",
+ "types-datum",
  "types-error",
  "types-fmgr",
  "types-format-type",
  "types-hash",
  "types-namespace",
  "types-partition",
+ "types-selfuncs",
  "types-storage",
  "types-tuple",
 ]
@@ -8524,82 +8569,41 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
- "backend-access-common-relation",
  "backend-access-common-reloptions",
- "backend-access-common-tupdesc",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
- "backend-access-heap-vacuumlazy",
- "backend-access-index-indexam",
- "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
- "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
- "backend-access-transam-generic-xlog",
- "backend-access-transam-parallel",
- "backend-access-transam-timeline",
- "backend-access-transam-transam",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
- "backend-access-transam-xlogutils",
- "backend-catalog-catalog",
  "backend-catalog-namespace",
- "backend-catalog-objectaccess",
- "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
- "backend-catalog-pg-shdepend",
- "backend-commands-cluster",
- "backend-commands-copyto",
- "backend-commands-foreigncmds",
- "backend-commands-matview",
- "backend-commands-portalcmds",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execUtils",
  "backend-executor-instrument",
- "backend-executor-nodeAgg",
- "backend-executor-nodeAppend",
- "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
- "backend-executor-nodeHash",
- "backend-executor-nodeHashjoin",
- "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeMaterial",
- "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeSeqscan",
- "backend-executor-nodeSort",
- "backend-executor-nodeSubplan",
- "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
- "backend-postmaster-autovacuum",
- "backend-postmaster-bgworker",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
- "backend-postmaster-pgarch",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
- "backend-postmaster-walsummarizer",
  "backend-regex-core",
- "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
- "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
- "backend-replication-logical-origin",
  "backend-replication-logical-proto",
- "backend-replication-logical-slotsync",
- "backend-replication-slot",
- "backend-replication-walreceiver",
- "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
  "backend-storage-ipc",
@@ -8608,64 +8612,40 @@ dependencies = [
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
- "backend-storage-ipc-shmem",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
- "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
- "backend-storage-sync",
- "backend-tcop-backend-startup",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
- "backend-tsearch-ispell-regis",
- "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
- "backend-utils-adt-format-type",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
- "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
- "backend-utils-adt-ri-triggers",
  "backend-utils-cache-attoptcache",
- "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache",
  "backend-utils-cache-relfilenumbermap",
- "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
- "backend-utils-cache-typcache",
  "backend-utils-error",
- "backend-utils-fmgr-core",
- "backend-utils-fmgr-dfmgr",
- "backend-utils-init-miscinit",
- "backend-utils-init-postinit",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
- "backend-utils-misc-guc-file",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
- "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
- "backend-utils-mmgr-portalmem",
- "backend-utils-sort-sortsupport",
  "backend-utils-time-combocid",
- "backend-utils-time-snapmgr",
- "common-ip",
  "interfaces-libpq-legacy-pqsignal",
- "port-crc32c",
- "port-pgsleep",
- "port-pqsignal",
 ]
 
 [[package]]

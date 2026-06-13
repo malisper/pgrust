@@ -975,3 +975,265 @@ seam_core::seam!(
     /// [`search_statrelattinh`]: drops the syscache pin. Infallible.
     pub fn release_stats_tuple(stats_tuple: types_selfuncs::StatsTuple)
 );
+
+// ===========================================================================
+// Additional lsyscache.c projected-row reads (PG 18.3). Each is a
+// `SearchSysCache*` + `GETSTRUCT` field projection owned by syscache.c; a
+// cache miss is `Ok(None)` so the lsyscache caller raises its own
+// `cache lookup failed` / returns the C "not found" sentinel. These panic
+// loudly until the catcache/syscache owner installs them.
+// ===========================================================================
+
+/// The fixed-width `Form_pg_operator` columns lsyscache.c reads off
+/// `SearchSysCache1(OPEROID, ...)`. `oprname` rides as an owned `String`
+/// (error-message / `get_opname` use only).
+#[derive(Clone, Debug)]
+pub struct PgOperatorForm {
+    /// `oprname` — the operator's name.
+    pub oprname: String,
+    /// `oprcanmerge` — `pg_operator.oprcanmerge`.
+    pub oprcanmerge: bool,
+    /// `oprcanhash` — `pg_operator.oprcanhash`.
+    pub oprcanhash: bool,
+    /// `oprleft` — left input type.
+    pub oprleft: Oid,
+    /// `oprright` — right input type.
+    pub oprright: Oid,
+    /// `oprresult` — result type.
+    pub oprresult: Oid,
+    /// `oprcom` — commutator.
+    pub oprcom: Oid,
+    /// `oprnegate` — negator.
+    pub oprnegate: Oid,
+    /// `oprcode` — the implementing function OID.
+    pub oprcode: Oid,
+    /// `oprrest` — restriction selectivity estimator.
+    pub oprrest: Oid,
+    /// `oprjoin` — join selectivity estimator.
+    pub oprjoin: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` + `GETSTRUCT` of the
+    /// fixed-width `Form_pg_operator` columns the lsyscache operator helpers
+    /// read. `Ok(None)` on a cache miss; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn pg_operator_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        opno: Oid,
+    ) -> PgResult<Option<PgOperatorForm>>
+);
+
+/// The fixed-width `Form_pg_proc` columns lsyscache.c reads off
+/// `SearchSysCache1(PROCOID, ...)` for the scalar `get_func_*` / `func_*`
+/// helpers. `proname` rides as an owned `String`.
+#[derive(Clone, Debug)]
+pub struct PgProcForm {
+    /// `proname` — the function's name.
+    pub proname: String,
+    /// `pronamespace` — the function's schema OID.
+    pub pronamespace: Oid,
+    /// `provariadic` — the variadic array element type OID.
+    pub provariadic: Oid,
+    /// `prosupport` — the planner support function OID.
+    pub prosupport: Oid,
+    /// `prokind` — `f`/`p`/`a`/`w`.
+    pub prokind: i8,
+    /// `proleakproof` — leakproof flag.
+    pub proleakproof: bool,
+    /// `proisstrict` — strict flag.
+    pub proisstrict: bool,
+    /// `proretset` — returns-set flag.
+    pub proretset: bool,
+    /// `provolatile` — `i`/`s`/`v`.
+    pub provolatile: i8,
+    /// `proparallel` — `s`/`r`/`u`.
+    pub proparallel: i8,
+    /// `pronargs` — number of input arguments.
+    pub pronargs: i16,
+    /// `prorettype` — the result type OID.
+    pub prorettype: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` + `GETSTRUCT` of the
+    /// fixed-width `Form_pg_proc` columns the scalar `get_func_*` / `func_*`
+    /// lsyscache helpers read. `Ok(None)` on a cache miss; the installer owns
+    /// the `ReleaseSysCache`.
+    pub fn pg_proc_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<PgProcForm>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// + `GETSTRUCT(Form_pg_attribute)` projected to the fixed-width row
+    /// (`get_attgenerated` / `get_atttype` / `get_atttypetypmodcoll`).
+    /// `Ok(None)` on a cache miss; the installer owns the `ReleaseSysCache`.
+    pub fn pg_attribute_form(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Option<types_tuple::heaptuple::FormData_pg_attribute>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ...)` + `SysCacheGetAttr(ATTNAME, tuple,
+    /// Anum_pg_attribute_attoptions, &isnull)` + `datumCopy` (`get_attoptions`):
+    /// the attribute's `attoptions` `text[]` Datum copied into `mcx`, or
+    /// `Ok(None)` for SQL null. An outer `Ok(None)` (the cache miss) lets the
+    /// caller raise its own `cache lookup failed for attribute` error. `Err`
+    /// carries OOM from the copy.
+    pub fn pg_attribute_attoptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<Option<types_datum::Datum>>>
+);
+
+/// The fixed-width `Form_pg_class` columns lsyscache.c reads off
+/// `SearchSysCache1(RELOID, ...)` not already covered by the single-field
+/// relation seams.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PgClassExtra {
+    /// `relnatts` — number of user attributes.
+    pub relnatts: i16,
+    /// `reltype` — the relation's composite type OID.
+    pub reltype: Oid,
+    /// `reltablespace` — the relation's tablespace OID.
+    pub reltablespace: Oid,
+    /// `relpersistence` — `p`/`u`/`t`.
+    pub relpersistence: u8,
+    /// `relam` — the table/index access method OID.
+    pub relam: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` + `GETSTRUCT` of the
+    /// extra fixed-width `Form_pg_class` columns the remaining lsyscache
+    /// relation helpers read. `Ok(None)` on a cache miss; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn pg_class_extra(relid: Oid) -> PgResult<Option<PgClassExtra>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass))` projected to
+    /// `(opcfamily, opcintype, opcmethod)` (`get_opclass_opfamily_and_input_type`
+    /// / `get_opclass_method`). `Ok(None)` on a cache miss; the installer owns
+    /// the `ReleaseSysCache`.
+    pub fn pg_opclass_form(opclass: Oid) -> PgResult<Option<(Oid, Oid, Oid)>>
+);
+
+/// The `Form_pg_range` columns `get_range_*` read off `SearchSysCache1(
+/// RANGETYPE, ...)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PgRangeFields {
+    /// `rngsubtype` — the range's element (subtype) OID.
+    pub rngsubtype: Oid,
+    /// `rngcollation` — the range's collation OID.
+    pub rngcollation: Oid,
+    /// `rngmultitypid` — the corresponding multirange type OID.
+    pub rngmultitypid: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(RANGETYPE, ObjectIdGetDatum(rangeOid))` projected to the
+    /// `Form_pg_range` fields `get_range_subtype` / `get_range_collation` /
+    /// `get_range_multirange` read. `Ok(None)` on a cache miss; the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn pg_range_fields(range_oid: Oid) -> PgResult<Option<PgRangeFields>>
+);
+
+/// The `Form_pg_index` boolean flags `get_index_*` read off `SearchSysCache1(
+/// INDEXRELID, ...)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PgIndexFlags {
+    /// `indisreplident` — the replica-identity flag.
+    pub indisreplident: bool,
+    /// `indisvalid` — the index-is-valid flag.
+    pub indisvalid: bool,
+    /// `indisclustered` — the index-is-clustered flag.
+    pub indisclustered: bool,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` projected to
+    /// the boolean `Form_pg_index` flags `get_index_isreplident` /
+    /// `get_index_isvalid`. `Ok(None)` on a cache miss; the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn pg_index_flags(index_oid: Oid) -> PgResult<Option<PgIndexFlags>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ...)` + `Form_pg_index.indnatts` /
+    /// `indnkeyatts` + `SysCacheGetAttrNotNull(INDEXRELID, tuple,
+    /// Anum_pg_index_indclass)` projected to the `oidvector` of per-column
+    /// opclass OIDs (`get_index_column_opclass`). Returns `(indnatts,
+    /// indnkeyatts, indclass)` with `indclass` copied into `mcx`. `Ok(None)` on
+    /// a cache miss (the C `return InvalidOid`). `Err` carries OOM and the
+    /// `SysCacheGetAttrNotNull` `elog`.
+    pub fn pg_index_indclass<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_oid: Oid,
+    ) -> PgResult<Option<(i16, i16, PgVec<'mcx, Oid>)>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid,
+    /// CStringGetDatum(pubname))` (`get_publication_oid`). `InvalidOid` (0) when
+    /// not found; the caller turns that into the "publication does not exist"
+    /// `ereport(ERROR)` when `!missing_ok`. `Err` carries the catcache surface.
+    pub fn get_publication_oid_syscache(pubname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PUBLICATIONOID, ObjectIdGetDatum(pubid))` +
+    /// `pstrdup(NameStr(pubname))` (`get_publication_name`): the publication's
+    /// name copied into `mcx`, or `Ok(None)` on a cache miss. `Err` includes
+    /// OOM from the copy.
+    pub fn get_publication_name_syscache<'mcx>(
+        mcx: Mcx<'mcx>,
+        pubid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid2(SUBSCRIPTIONNAME, Anum_pg_subscription_oid,
+    /// MyDatabaseId, CStringGetDatum(subname))` (`get_subscription_oid`). The
+    /// `MyDatabaseId` key is supplied by the syscache installer (it owns the
+    /// per-backend global). `InvalidOid` (0) when not found. `Err` carries the
+    /// catcache surface.
+    pub fn get_subscription_oid_syscache(subname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid))` +
+    /// `pstrdup(NameStr(subname))` (`get_subscription_name`): the subscription's
+    /// name copied into `mcx`, or `Ok(None)` on a cache miss. `Err` includes
+    /// OOM from the copy.
+    pub fn get_subscription_name_syscache<'mcx>(
+        mcx: Mcx<'mcx>,
+        subid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists3(AMOPOPID, ObjectIdGetDatum(opno),
+    /// CharGetDatum(AMOP_SEARCH), ObjectIdGetDatum(opfamily))`
+    /// (`op_in_opfamily`). `Err` carries the catcache surface.
+    pub fn amop_search_exists(opno: Oid, opfamily: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(AMOPOPID, ObjectIdGetDatum(opno), CharGetDatum(purpose),
+    /// ObjectIdGetDatum(opfamily))` projected to `(amopstrategy, amopsortfamily)`
+    /// (`get_op_opfamily_strategy` with `purpose = AMOP_SEARCH`,
+    /// `get_op_opfamily_sortfamily` with `purpose = AMOP_ORDER`). `purpose` is
+    /// the raw `pg_amop.amoppurpose` char. `Ok(None)` on a cache miss. `Err`
+    /// carries the catcache surface.
+    pub fn amop_by_opr_purpose(
+        opno: Oid,
+        purpose: u8,
+        opfamily: Oid,
+    ) -> PgResult<Option<(i16, Oid)>>
+);

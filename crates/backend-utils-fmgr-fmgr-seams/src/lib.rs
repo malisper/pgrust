@@ -107,6 +107,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `OidFunctionCall0(functionId)` — a zero-argument fmgr dispatch
+    /// (lsyscache.c's `getSubscriptingRoutines`, which calls the type's
+    /// subscripting handler with no arguments). The returned `Datum` is the
+    /// handler's `const struct SubscriptRoutines *` pointer word, kept opaque
+    /// (the C `DatumGetPointer` cast targets a struct whose definition lives in
+    /// `nodes/subscripting.h`, outside this TU; the c2rust translation likewise
+    /// types it as `*const c_void`). `Err` carries whatever the called function
+    /// raises.
+    pub fn oid_function_call0(function_id: Oid) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `OidFunctionCall1(functionId,
     /// PointerGetDatum(deserialize_deflist(...)))` — the dictionary-init
     /// invocation shape (ts_cache.c): the argument is a `List` of
