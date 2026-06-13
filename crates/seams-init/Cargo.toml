@@ -48,6 +48,7 @@ backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
+backend-executor-execExpr = { path = "../backend-executor-execExpr" }
 backend-executor-execParallel = { path = "../backend-executor-execParallel" }
 backend-executor-execPartition = { path = "../backend-executor-execPartition" }
 backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }

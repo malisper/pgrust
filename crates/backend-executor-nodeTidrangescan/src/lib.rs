@@ -192,7 +192,7 @@ fn MakeTidOpExpr<'mcx>(
     let arg1_is_ctid = is_ctid_var(node, qual_index, OperandSide::Left);
     let arg2_is_ctid = is_ctid_var(node, qual_index, OperandSide::Right);
 
-    let exprstate: PgBox<'mcx, ExprState>;
+    let exprstate: PgBox<'mcx, ExprState<'mcx>>;
     let mut invert = false;
 
     if arg1_is_ctid {

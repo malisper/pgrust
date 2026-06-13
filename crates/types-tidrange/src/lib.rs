@@ -42,7 +42,7 @@ pub struct TidOpExpr<'mcx> {
     pub exprtype: TidExprType,
     /// `ExprState *exprstate` — compiled `ExprState` for a TID-yielding
     /// subexpr (the real `ExprState` the expression subsystem owns).
-    pub exprstate: Option<PgBox<'mcx, ExprState>>,
+    pub exprstate: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `bool inclusive` — whether op is inclusive.
     pub inclusive: bool,
 }

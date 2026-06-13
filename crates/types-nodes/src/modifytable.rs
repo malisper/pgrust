@@ -141,24 +141,24 @@ pub struct MergeActionState<'mcx> {
     /// `MergeAction *mas_action` — associated MergeAction node.
     pub mas_action: Option<PgBox<'mcx, MergeAction<'mcx>>>,
     /// `ProjectionInfo *mas_proj` — projection of the action's targetlist.
-    pub mas_proj: Option<PgBox<'mcx, ProjectionInfo>>,
+    pub mas_proj: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
     /// `ExprState *mas_whenqual` — WHEN [NOT] MATCHED AND conditions.
-    pub mas_whenqual: Option<PgBox<'mcx, ExprState>>,
+    pub mas_whenqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 /// `OnConflictSetState` (nodes/execnodes.h) — exec state for ON CONFLICT DO
 /// UPDATE.
 #[derive(Debug)]
-pub struct OnConflictSetState {
+pub struct OnConflictSetState<'mcx> {
     pub type_: NodeTag,
     /// `TupleTableSlot *oc_Existing` — slot for the existing target tuple.
     pub oc_Existing: Option<SlotId>,
     /// `TupleTableSlot *oc_ProjSlot` — SET projection target.
     pub oc_ProjSlot: Option<SlotId>,
     /// `ProjectionInfo *oc_ProjInfo` — for ON CONFLICT DO UPDATE SET.
-    pub oc_ProjInfo: Option<ProjectionInfo>,
+    pub oc_ProjInfo: Option<ProjectionInfo<'mcx>>,
     /// `ExprState *oc_WhereClause` — state for the WHERE clause.
-    pub oc_WhereClause: Option<ExprState>,
+    pub oc_WhereClause: Option<ExprState<'mcx>>,
 }
 
 /// `TransitionCaptureState` (commands/trigger.h), trimmed to the fields

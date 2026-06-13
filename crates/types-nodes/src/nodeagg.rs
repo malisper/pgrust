@@ -251,9 +251,9 @@ pub struct TupleHashTable<'mcx> {
     /// `AttrNumber *keyColIdx` — attr numbers of key columns.
     pub keyColIdx: Option<PgVec<'mcx, AttrNumber>>,
     /// `ExprState *tab_hash_expr` — ExprState for hashing table datatype(s).
-    pub tab_hash_expr: Option<PgBox<'mcx, ExprState>>,
+    pub tab_hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *tab_eq_func` — comparator for table datatype(s).
-    pub tab_eq_func: Option<PgBox<'mcx, ExprState>>,
+    pub tab_eq_func: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `Oid *tab_collations` — collations for hash and comparison.
     pub tab_collations: Option<PgVec<'mcx, Oid>>,
     /// `MemoryContext tablecxt` — memory context containing the table.
@@ -269,9 +269,9 @@ pub struct TupleHashTable<'mcx> {
     pub inputslot: Option<SlotId>,
     /// `ExprState *in_hash_expr` — ExprState for hashing input datatype(s)
     /// (transient).
-    pub in_hash_expr: Option<PgBox<'mcx, ExprState>>,
+    pub in_hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *cur_eq_func` — comparator for input vs. table (transient).
-    pub cur_eq_func: Option<PgBox<'mcx, ExprState>>,
+    pub cur_eq_func: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprContext *exprcontext` — expression context for the evaluations.
     pub exprcontext: Option<EcxtId>,
 }
@@ -334,7 +334,7 @@ pub struct AggStatePerTransData<'mcx> {
     /// `FmgrInfo equalfnOne` — single-column DISTINCT comparator.
     pub equalfn_one: FmgrInfo,
     /// `ExprState *equalfnMulti` — multi-column DISTINCT comparator.
-    pub equalfn_multi: Option<PgBox<'mcx, ExprState>>,
+    pub equalfn_multi: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `Datum initValue`.
     pub init_value: Datum,
     /// `bool initValueIsNull`.
@@ -383,7 +383,7 @@ pub struct AggStatePerAggData<'mcx> {
     /// `int numFinalArgs`.
     pub num_final_args: i32,
     /// `List *aggdirectargs` — ExprStates for direct-argument expressions.
-    pub aggdirectargs: Option<PgVec<'mcx, PgBox<'mcx, ExprState>>>,
+    pub aggdirectargs: Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>,
     /// `int16 resulttypeLen`.
     pub resulttype_len: i16,
     /// `bool resulttypeByVal`.
@@ -417,16 +417,16 @@ pub struct AggStatePerPhaseData<'mcx> {
     /// `Bitmapset **grouped_cols` — column groupings for rollup.
     pub grouped_cols: Option<PgVec<'mcx, PgBox<'mcx, Bitmapset<'mcx>>>>,
     /// `ExprState **eqfunctions` — equality expr indexed by nr of cols.
-    pub eqfunctions: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>>,
+    pub eqfunctions: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
     /// `Agg *aggnode` — Agg node for phase data.
     pub aggnode: Option<PgBox<'mcx, Agg<'mcx>>>,
     /// `Sort *sortnode` — Sort node for input ordering for phase.
     pub sortnode: Option<PgBox<'mcx, Sort<'mcx>>>,
     /// `ExprState *evaltrans` — evaluation of transition functions.
-    pub evaltrans: Option<PgBox<'mcx, ExprState>>,
+    pub evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *evaltrans_cache[2][2]` — cached compiled variants:
     /// [outerops|MinimalTuple][no-nullcheck|nullcheck].
-    pub evaltrans_cache: [[Option<PgBox<'mcx, ExprState>>; 2]; 2],
+    pub evaltrans_cache: [[Option<PgBox<'mcx, ExprState<'mcx>>>; 2]; 2],
 }
 
 /// `AggStatePerHashData` (executor/nodeAgg.h) — per-hashtable state.

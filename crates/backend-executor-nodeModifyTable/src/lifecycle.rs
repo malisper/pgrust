@@ -322,7 +322,7 @@ pub fn ExecInitGenerated<'mcx>(
     };
 
     // ri_GeneratedExprs = palloc0(natts * sizeof(ExprState *));
-    let mut ri_generated_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ExprState>>> =
+    let mut ri_generated_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ExprState<'mcx>>>> =
         mcx::PgVec::new_in(mcx);
     for _ in 0..natts {
         ri_generated_exprs.push(None);

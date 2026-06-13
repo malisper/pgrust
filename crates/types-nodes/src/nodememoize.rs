@@ -359,10 +359,10 @@ pub struct MemoizeScanState<'mcx> {
     pub probe_isnull: PgVec<'mcx, bool>,
     /// `ExprState *cache_eq_expr` — compiled non-binary key-equality expression
     /// (`ExecBuildParamSetEqual`). `None` until built in `ExecInitMemoize`.
-    pub cache_eq_expr: Option<PgBox<'mcx, ExprState>>,
+    pub cache_eq_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState **param_exprs` — the compiled cache-key parameter expressions
     /// evaluated by `prepare_probe_slot`. `nkeys` long.
-    pub param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState>>,
+    pub param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     /// `FmgrInfo *hashfunctions` — the per-key hash function lookup info
     /// (`fmgr_info(left_hashfn, ...)`), used by the non-binary hash loop.
     /// `nkeys` long.

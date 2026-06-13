@@ -186,7 +186,7 @@ pub struct PartitionPruneContext<'mcx> {
     pub exprcontext: Option<EcxtId>,
     /// `ExprState **exprstates` — per-step, per-key compiled pruning exprs;
     /// a `None` element is the C `NULL` (Const / not-needed slot).
-    pub exprstates: PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>,
+    pub exprstates: PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
 }
 
 /* ---------------------------------------------------------------------------
