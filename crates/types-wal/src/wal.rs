@@ -300,6 +300,19 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
         self.blocks.get(block_id).filter(|b| b.in_use)
     }
 
+    /// `XLogRecMaxBlockId(record)` — the highest block id in the record
+    /// (`record->max_block_id`); `-1` when no blocks are registered. The block
+    /// array is sized `0..=max_block_id`, so this is `blocks.len() - 1`.
+    pub fn max_block_id(&self) -> i32 {
+        self.blocks.len() as i32 - 1
+    }
+
+    /// `XLogRecHasBlockRef(record, block_id)` — whether the block id is in
+    /// range and the entry is in use.
+    pub fn has_block_ref(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some()
+    }
+
     /// `XLogRecHasBlockData(record, block_id)`.
     pub fn has_block_data(&self, block_id: usize) -> bool {
         self.block(block_id).is_some_and(|b| b.data.is_some())
@@ -339,6 +352,9 @@ pub struct RedoRecord<'a> {
 
 /// `RM_STANDBY_ID` — the Standby resource manager (rmgrlist.h entry 8).
 pub const RM_STANDBY_ID: RmgrId = 8;
+
+/// `RM_GENERIC_ID` — the Generic-WAL resource manager (rmgrlist.h entry 20).
+pub const RM_GENERIC_ID: RmgrId = 20;
 
 /// `XLOG_MARK_UNIMPORTANT` (access/xlog.h) — record flag: not important for
 /// durability decisions (checkpoint / archive-timeout triggering).

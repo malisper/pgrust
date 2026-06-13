@@ -37,6 +37,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BufferGetPage(buffer)` with write access (`storage/bufpage.h`): runs
+    /// `f` over the buffer's live page bytes (`BLCKSZ`). The owner holds the
+    /// buffer pin/content lock across the callback (the caller already holds
+    /// the exclusive content lock), so reads and in-place writes both happen
+    /// against the shared page — modelling C's direct `Page` pointer without
+    /// handing out an aliasable `&'static mut`. The page is mutated in place;
+    /// `f`'s `Err` (and any buffer-access `ereport`) propagates.
+    pub fn with_buffer_page(
+        buffer: types_storage::Buffer,
+        f: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MarkBufferDirty(buffer)` (bufmgr.c) — mark the buffer's contents as
+    /// dirty. Called inside a critical section; the C path only `Assert`s,
+    /// so the seam is infallible.
+    pub fn mark_buffer_dirty(buffer: types_storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `UnlockReleaseBuffer(buffer)` (bufmgr.c) — release the buffer's content
+    /// lock and pin. Infallible.
+    pub fn unlock_release_buffer(buffer: types_storage::Buffer)
+);
+
+seam_core::seam!(
     /// `PrefetchSharedBuffer(smgropen(rlocator, backend), forkNum, blockNum)`
     /// (bufmgr.c): initiate (or note as unnecessary) a prefetch of a shared
     /// buffer. The C function takes the `SMgrRelation` handle; smgropen is

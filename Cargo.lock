@@ -31,6 +31,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-bufmask-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-common-detoast-seams"
 version = "0.0.0"
 dependencies = [
@@ -610,6 +618,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-generic-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-transam-generic-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seams-init",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-generic-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -911,6 +939,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -967,6 +996,8 @@ name = "backend-access-transam-xlogutils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-storage",
  "types-wal",
 ]
 
@@ -3536,6 +3567,7 @@ dependencies = [
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-generic-xlog",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",

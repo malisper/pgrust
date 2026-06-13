@@ -33,6 +33,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationNeedsWAL(relation)` (utils/rel.h) — whether modifications to
+    /// the relation must be WAL-logged: `RelationIsPermanent(relation) &&
+    /// (XLogIsNeeded() || (rd_createSubid == InvalidSubTransactionId &&
+    /// rd_firstRelfilelocatorSubid == InvalidSubTransactionId))`. The
+    /// `rd_createSubid` / `rd_firstRelfilelocatorSubid` fields and the
+    /// `wal_level` GUC behind `XLogIsNeeded()` live with the relcache owner,
+    /// so this resolves against its cached entry for `rel.rd_id`. Pure
+    /// predicate; cannot `ereport`.
+    pub fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `RelationGetIdentityKeyBitmap(relation)` (relcache.c): the bitmap of
     /// replica-identity-index key columns, offset by
     /// `FirstLowInvalidHeapAttributeNumber`, or `None` when the relation has
