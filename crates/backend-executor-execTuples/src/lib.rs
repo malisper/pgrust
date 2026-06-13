@@ -28,25 +28,32 @@
 //!   the `begin/do/end_tup_output` convenience routines.
 //!
 //! STATUS: every routine has its real signature (mirroring the C and verified
-//! against `executor/tuptable.h` / `funcapi.h` / `executor.h`). The control
-//! flow that the landed payload model supports — slot creation/teardown, the
-//! clear/store-header callbacks, the byte-deform state machine, the
-//! `ExecForceStore*`/`ExecStore*`/`ExecFetch*` dispatch, the tuple-descriptor
-//! constructors and the `begin/do/end_tup_output` family — is implemented.
+//! against `executor/tuptable.h` / `funcapi.h` / `executor.h`). The
+//! `SlotData` payload model — slot creation/teardown, the clear/store
+//! callbacks, the byte-deform state machine, the per-kind `materialize` /
+//! `get_*_tuple` / `copy_*_tuple` / `store_tuple` / `copyslot` ops, the
+//! `ExecForceStore*`/`ExecStore*`/`ExecFetch*`/`ExecCopy*` entry points, the
+//! tuple-descriptor constructors and the `begin/do/end_tup_output` family — is
+//! implemented as own-logic over the body-bearing carriers: the slot fields
+//! carry the full `FormedTuple` / `FormedMinimalTuple` (header + data-area
+//! bytes), `tts_values` carries the by-reference `TupleValue::ByRef` lane, and
+//! the op return / store-param types are the body-bearing carriers so no data
+//! bytes are dropped at any boundary.
 //!
-//! The tuple-bearing bodies that must store, copy, form, return, or deform a
-//! *physical heap/minimal tuple with its user-data bytes* are blocked on a
-//! genuine carrier gap in the landed model and `panic!` (mirror-PG-and-panic):
-//! the slot fields hold a header-only `HeapTuple`/`MinimalTuple`
-//! (`HeapTupleData.t_data` is the header struct, no trailing data area), while
-//! `heap_form_tuple`/`heap_copytuple` produce a `FormedTuple { tuple, data }`
-//! whose `data: PgVec<u8>` body has nowhere to live in the slot; and
-//! `tts_values: PgVec<Datum>` carries bare machine words that cannot hold a
-//! by-reference column (`TupleValue::ByRef`). Closing these requires expanding
-//! the slot structs (a `FormedTuple`-shaped body carrier + a by-reference lane
-//! in `tts_values`), which is the separate workspace-wide
-//! `TupleTableSlot`-header / `es_tupleTable` convergence campaign; the
-//! provisional bridge seams in [`exec_init_slots`] stay until it lands.
+//! Two genuinely-unported dependencies remain mirror-PG-and-panic:
+//! * the **composite-`Datum` bridge** (`DatumGetHeapTupleHeader` /
+//!   `HeapTupleGetDatum`) used by `ExecStoreHeapTupleDatum` /
+//!   `ExecFetchSlotHeapTupleDatum` — the bare-word owned `Datum` has no
+//!   pointer-to-tuple lane and the decode/mint is unported workspace-wide (the
+//!   same bridge execExprInterp's row steps panic on); and
+//! * the **by-reference→bare-`Datum` projection** in the pool-seam form of
+//!   `slot_getattr` (a by-reference column is C's `PointerGetDatum`, which the
+//!   bare-word `Datum` cannot represent; in-crate callers read the `TupleValue`
+//!   directly).
+//!
+//! The `SlotId`/`es_tupleTable` pool bridge seams in [`exec_init_slots`] stay
+//! provisional (the separate pool-convergence campaign); they are unrelated to
+//! the `SlotData` payload bodies above.
 
 #![allow(non_snake_case)]
 
@@ -56,6 +63,9 @@ pub mod slot_deform;
 pub mod slot_store_fetch;
 pub mod exec_init_slots;
 pub mod exectype_tupoutput;
+
+#[cfg(test)]
+mod tests;
 
 /// Install every seam this unit owns (the
 /// `backend-executor-execTuples-seams` declarations). Called once at startup

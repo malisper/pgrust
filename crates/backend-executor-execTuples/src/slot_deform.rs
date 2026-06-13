@@ -588,18 +588,29 @@ pub fn slot_getattr<'mcx>(
         // *isnull = slot->tts_isnull[attnum - 1];
         // return slot->tts_values[attnum - 1];
         //
-        // Project the stored `TupleValue` back to a single `Datum`: a by-value
-        // column is the word itself; a by-reference column is C's pointer into
-        // owned bytes, whose bare-Datum projection (the owner's pointer-bytes
-        // convention) is the slot payload model's by-reference fill. Mirror PG
-        // and panic on the by-reference projection until it lands.
+        // Project the stored `TupleValue` back to a single `Datum`. A by-value
+        // column is the word itself (C's scalar Datum). A by-reference column is
+        // C's `PointerGetDatum(tp + off)` — a pointer into the tuple's owned
+        // bytes; the owned `Datum` (`types-datum`, a bare machine word) has NO
+        // by-reference / pointer lane, and the workspace has no pointer-bytes
+        // (datum-arena) convention to mint a stable pointer word from owned
+        // bytes (the `TupleValue` model is precisely what avoids needing one;
+        // every deform consumer in this codebase works over `TupleValue`, not a
+        // bare Datum, for exactly this reason). Projecting a by-reference column
+        // to a bare `Datum` is therefore unrepresentable in the owned model —
+        // genuinely blocked on the unported pointer-bytes Datum convention, not
+        // on own-logic. Mirror PG and panic. (This `Datum`-returning form is the
+        // pool seam's contract, still in CONTRACT_RECONCILE_PENDING; in-crate
+        // callers read the `TupleValue` directly.)
         let base = slot.base();
         let isnull = base.tts_isnull[(attnum - 1) as usize];
         let value = match &base.tts_values[(attnum - 1) as usize] {
             TupleValue::ByVal(d) => *d,
             TupleValue::ByRef(_) => panic!(
-                "execTuples.c slot_getattr: by-reference attribute projected to a \
-                 bare Datum needs the slot payload model's pointer-bytes convention"
+                "execTuples.c slot_getattr: a by-reference column is C's PointerGetDatum \
+                 (pointer into tuple bytes); the bare-word owned Datum has no pointer lane \
+                 and the workspace has no pointer-bytes Datum-arena convention to mint one \
+                 — genuinely unported, not own-logic"
             ),
         };
         Ok((value, isnull))

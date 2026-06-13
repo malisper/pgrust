@@ -16,8 +16,8 @@ use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
 use types_nodes::TupleSlotKind;
 use types_storage::buf::{Buffer, BufferIsValid};
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
-use types_tuple::heaptuple::{HeapTuple, MinimalTuple, MINIMAL_TUPLE_OFFSET};
+use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple, TupleValue};
+use types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
 use crate::slot_ops_vtables::{
     slot_clear, slot_copyslot, slot_materialize, tts_buffer_heap_copy_heap_tuple,
@@ -29,7 +29,7 @@ use crate::slot_ops_vtables::{
 
 /// `ExecStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c).
 pub fn ExecStoreHeapTuple<'mcx>(
-    tuple: HeapTuple<'mcx>,
+    tuple: FormedTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -45,10 +45,7 @@ pub fn ExecStoreHeapTuple<'mcx>(
     };
 
     // slot->tts_tableOid = tuple->t_tableOid; (read before the move).
-    let t_table_oid = tuple
-        .as_ref()
-        .map(|t| t.t_tableOid)
-        .unwrap_or_default();
+    let t_table_oid = tuple.tuple.t_tableOid;
 
     // tts_heap_store_tuple(slot, tuple, shouldFree);
     tts_heap_store_tuple(hslot, tuple, should_free);
@@ -118,7 +115,8 @@ pub fn ExecStorePinnedBufferHeapTuple<'mcx>(
 
 /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c).
 pub fn ExecStoreMinimalTuple<'mcx>(
-    mtup: MinimalTuple<'mcx>,
+    mcx: Mcx<'mcx>,
+    mtup: FormedMinimalTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -131,16 +129,14 @@ pub fn ExecStoreMinimalTuple<'mcx>(
     };
 
     // tts_minimal_store_tuple(slot, mtup, shouldFree);
-    tts_minimal_store_tuple(mslot, mtup, should_free);
-
-    Ok(())
+    tts_minimal_store_tuple(mcx, mslot, mtup, should_free)
 }
 
 /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c): store a
 /// `HeapTuple` into any kind of slot, performing conversion if necessary.
 pub fn ExecForceStoreHeapTuple<'mcx>(
     mcx: Mcx<'mcx>,
-    tuple: HeapTuple<'mcx>,
+    tuple: FormedTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -157,7 +153,7 @@ pub fn ExecForceStoreHeapTuple<'mcx>(
             slot.base_mut().mark_not_empty();
             // oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
             // bslot->base.tuple = heap_copytuple(tuple);
-            let copied = heap_copytuple_into_slot_context(mcx, tuple)?;
+            let copied = backend_access_common_heaptuple::heap_copytuple(mcx, Some(&tuple))?;
             if let SlotData::BufferHeap(bslot) = slot {
                 bslot.base.tuple = copied;
             }
@@ -173,7 +169,7 @@ pub fn ExecForceStoreHeapTuple<'mcx>(
             slot_clear(slot);
             // heap_deform_tuple(tuple, slot->tts_tupleDescriptor,
             //                   slot->tts_values, slot->tts_isnull);
-            deform_foreign_tuple_into_slot(mcx, slot, tuple.as_deref())?;
+            deform_into_slot(mcx, slot, &tuple)?;
             // ExecStoreVirtualTuple(slot);
             ExecStoreVirtualTuple(slot)?;
             // if (shouldFree) { ExecMaterializeSlot(slot); pfree(tuple); }
@@ -189,14 +185,13 @@ pub fn ExecForceStoreHeapTuple<'mcx>(
 /// `MinimalTuple` into any kind of slot, performing conversion if necessary.
 pub fn ExecForceStoreMinimalTuple<'mcx>(
     mcx: Mcx<'mcx>,
-    mtup: MinimalTuple<'mcx>,
+    mtup: FormedMinimalTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
     // if (TTS_IS_MINIMALTUPLE(slot)) tts_minimal_store_tuple(slot, mtup, shouldFree);
     if let SlotData::Minimal(mslot) = slot {
-        tts_minimal_store_tuple(mslot, mtup, should_free);
-        return Ok(());
+        return tts_minimal_store_tuple(mcx, mslot, mtup, should_free);
     }
 
     // else: build the transient HeapTupleData over the minimal tuple and deform.
@@ -206,7 +201,14 @@ pub fn ExecForceStoreMinimalTuple<'mcx>(
     // htup.t_data = (HeapTupleHeader) ((char *) mtup - MINIMAL_TUPLE_OFFSET);
     // heap_deform_tuple(&htup, slot->tts_tupleDescriptor,
     //                   slot->tts_values, slot->tts_isnull);
-    deform_minimal_tuple_into_slot(mcx, slot, mtup.as_deref(), MINIMAL_TUPLE_OFFSET)?;
+    //
+    // heap_tuple_from_minimal_tuple builds exactly that transient heap-tuple view
+    // over the minimal body (t_len + MINIMAL_TUPLE_OFFSET, shared infomask/natts/
+    // t_bits/t_hoff tail, system columns zeroed) as a FormedTuple; deform it into
+    // the slot's value arrays.
+    let _ = MINIMAL_TUPLE_OFFSET;
+    let htup = backend_access_common_heaptuple::heap_tuple_from_minimal_tuple(mcx, &mtup)?;
+    deform_into_slot(mcx, slot, &htup)?;
     // ExecStoreVirtualTuple(slot);
     ExecStoreVirtualTuple(slot)?;
     // if (shouldFree) { ExecMaterializeSlot(slot); pfree(mtup); }
@@ -289,7 +291,7 @@ pub fn ExecFetchSlotHeapTuple<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     materialize: bool,
-) -> PgResult<(HeapTuple<'mcx>, bool)> {
+) -> PgResult<(FormedTuple<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base().is_empty());
 
@@ -328,7 +330,7 @@ pub fn ExecFetchSlotHeapTuple<'mcx>(
 pub fn ExecFetchSlotMinimalTuple<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<(MinimalTuple<'mcx>, bool)> {
+) -> PgResult<(FormedMinimalTuple<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base().is_empty());
 
@@ -339,19 +341,19 @@ pub fn ExecFetchSlotMinimalTuple<'mcx>(
     // Only the minimal kind implements get_minimal_tuple; the others copy.
     match slot {
         SlotData::Minimal(mslot) => {
-            let mtup = tts_minimal_get_minimal_tuple(mslot)?;
+            let mtup = tts_minimal_get_minimal_tuple(mcx, mslot)?;
             Ok((mtup, false))
         }
         SlotData::Virtual(vslot) => {
-            let mtup = tts_virtual_copy_minimal_tuple(mcx, vslot)?;
+            let mtup = tts_virtual_copy_minimal_tuple(mcx, vslot, 0)?;
             Ok((mtup, true))
         }
         SlotData::Heap(hslot) => {
-            let mtup = tts_heap_copy_minimal_tuple(mcx, hslot)?;
+            let mtup = tts_heap_copy_minimal_tuple(mcx, hslot, 0)?;
             Ok((mtup, true))
         }
         SlotData::BufferHeap(bslot) => {
-            let mtup = tts_buffer_heap_copy_minimal_tuple(mcx, bslot)?;
+            let mtup = tts_buffer_heap_copy_minimal_tuple(mcx, bslot, 0)?;
             Ok((mtup, true))
         }
     }
@@ -404,7 +406,7 @@ pub fn ExecCopySlot<'mcx>(
 pub fn ExecCopySlotHeapTuple<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<HeapTuple<'mcx>> {
+) -> PgResult<FormedTuple<'mcx>> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base().is_empty());
     // return slot->tts_ops->copy_heap_tuple(slot);
@@ -422,19 +424,17 @@ pub fn ExecCopySlotMinimalTupleExtra<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     extra: Size,
-) -> PgResult<MinimalTuple<'mcx>> {
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base().is_empty());
     // return slot->tts_ops->copy_minimal_tuple(slot, extra);
     //
-    // The per-kind `copy_minimal_tuple` callbacks reserve `extra` leading bytes;
-    // the slot-ops family owns the `extra` plumbing.
-    let _ = extra;
+    // The per-kind `copy_minimal_tuple` callbacks reserve `extra` leading bytes.
     match slot {
-        SlotData::Virtual(vslot) => tts_virtual_copy_minimal_tuple(mcx, vslot),
-        SlotData::Heap(hslot) => tts_heap_copy_minimal_tuple(mcx, hslot),
-        SlotData::Minimal(mslot) => tts_minimal_copy_minimal_tuple(mcx, mslot),
-        SlotData::BufferHeap(bslot) => tts_buffer_heap_copy_minimal_tuple(mcx, bslot),
+        SlotData::Virtual(vslot) => tts_virtual_copy_minimal_tuple(mcx, vslot, extra),
+        SlotData::Heap(hslot) => tts_heap_copy_minimal_tuple(mcx, hslot, extra),
+        SlotData::Minimal(mslot) => tts_minimal_copy_minimal_tuple(mcx, mslot, extra),
+        SlotData::BufferHeap(bslot) => tts_buffer_heap_copy_minimal_tuple(mcx, bslot, extra),
     }
 }
 
@@ -529,86 +529,67 @@ fn _slot_kind(slot: &SlotData) -> TupleSlotKind {
 
 // ---------------------------------------------------------------------------
 // deform-into-slot (the `heap_deform_tuple(tuple, tupleDesc, slot->tts_values,
-// slot->tts_isnull)` calls of the `ExecForceStore*`/`ExecStoreHeapTupleDatum`
-// virtual-store paths).
+// slot->tts_isnull)` calls of the `ExecForceStore*` virtual/minimal-store paths).
 //
 // In C these are a `heap_deform_tuple` straight into the slot's `tts_values`/
-// `tts_isnull` arrays. heaptuple.c's `heap_deform_tuple` is a direct dependency
-// here, but its idiomatic form deforms a `(header, tupleDesc, data-area bytes)`
-// triple into `(TupleValue, bool)` columns. The source tuple's *data area*
-// (`tup + t_hoff`) is carried by the slot payload model's heap-tuple-with-data
-// carrier (a `FormedTuple`-shaped pairing), which the scaffold's header-only
-// `HeapTuple` / `MinimalTuple` / opaque composite `Datum` do not yet expose —
-// that carrier, and the `TupleValue`→slot-`Datum` bridge, are owned by the
-// `slot_payload_model` / `slot_deform` sibling families and have not landed.
-//
-// Per "Mirror PG and panic", the foreign-tuple deform-into-slot is routed
-// through that owner and panics loudly until the payload model lands; the
-// surrounding `ExecForceStore*` control flow (clear / store-virtual /
-// materialize / kind dispatch) is implemented in full above.
+// `tts_isnull` arrays. heaptuple.c's `heap_deform_tuple` is a direct dependency;
+// its idiomatic form deforms a `(header, tupleDesc, data-area bytes)` triple
+// into `(TupleValue, bool)` columns. The body-bearing `FormedTuple` carrier
+// supplies both the header and the data area, so the deform is now real
+// own-logic over the slot's `TupleValue` lanes.
 // ---------------------------------------------------------------------------
 
 /// `heap_deform_tuple(tuple, slot->tts_tupleDescriptor, slot->tts_values,
-/// slot->tts_isnull)` over a foreign `HeapTuple` (the `ExecForceStoreHeapTuple`
-/// virtual/minimal-target path).
-fn deform_foreign_tuple_into_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &mut SlotData<'mcx>,
-    _tuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+/// slot->tts_isnull)` over a `FormedTuple` (the `ExecForceStore*`
+/// virtual/minimal-target path): deconstruct the source tuple's columns directly
+/// into the slot's `tts_values`/`tts_isnull` arrays.
+fn deform_into_slot<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    tuple: &FormedTuple<'mcx>,
 ) -> PgResult<()> {
-    // The header-only `HeapTuple` carries no data area; the heap-tuple-with-data
-    // carrier is the slot payload model's, not yet landed.
-    panic!(
-        "execTuples.c ExecForceStoreHeapTuple: heap_deform_tuple into slot needs the \
-         payload model's heap-tuple-data carrier (slot_payload_model/slot_deform owner)"
-    )
-}
+    // Snapshot the descriptor (read-only) before borrowing the tts arrays.
+    let base = slot.base();
+    let desc = base
+        .tts_tupleDescriptor
+        .as_ref()
+        .ok_or_else(|| PgError::error("deform_into_slot: slot has no tuple descriptor"))?;
+    // heap_deform_tuple(tuple, tupleDesc, values, isnull): a column at a time
+    // into (TupleValue, bool) pairs (heaptuple.c is a direct dependency).
+    let columns =
+        backend_access_common_heaptuple::heap_deform_tuple(mcx, &tuple.tuple, desc, &tuple.data)?;
 
-/// `htup` (over `mtup - MINIMAL_TUPLE_OFFSET`) deformed into the slot (the
-/// `ExecForceStoreMinimalTuple` non-minimal-target path).
-fn deform_minimal_tuple_into_slot<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _slot: &mut SlotData<'mcx>,
-    _mtup: Option<&types_tuple::heaptuple::MinimalTupleData<'mcx>>,
-    _minimal_tuple_offset: usize,
-) -> PgResult<()> {
-    panic!(
-        "execTuples.c ExecForceStoreMinimalTuple: heap_deform_tuple of the minimal tuple \
-         into slot needs the payload model's heap-tuple-data carrier \
-         (slot_payload_model/slot_deform owner)"
-    )
+    // Write the deformed (value, isnull) pairs into the slot's value arrays.
+    let base = slot.base_mut();
+    debug_assert!(base.tts_values.len() >= columns.len());
+    for (i, (value, isnull)) in columns.into_iter().enumerate() {
+        base.tts_values[i] = value;
+        base.tts_isnull[i] = isnull;
+    }
+    Ok(())
 }
 
 /// `tuple` (built from `DatumGetHeapTupleHeader(data)`) deformed into the slot
 /// (`ExecStoreHeapTupleDatum`).
+///
+/// `DatumGetHeapTupleHeader(data)` decodes a composite (`record`) `Datum` — a
+/// pointer-into-varlena word — back into a `HeapTupleHeader` + its data area.
+/// In this owned model a `Datum` is a bare machine word (`types-datum`) with no
+/// by-reference / pointer-to-tuple lane, and the composite-Datum decode bridge
+/// (`DatumGetHeapTupleHeader` / `HeapTupleHeaderGetDatumLength` over owned bytes)
+/// is not ported anywhere in the workspace — every consumer of it
+/// (execExprInterp's row/fieldselect/fieldstore steps included) is still a
+/// mirror-PG-and-panic on the same unported bridge. Mirror PG and panic on the
+/// genuinely-unported composite-Datum decode.
 fn deform_composite_datum_into_slot<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &mut SlotData<'mcx>,
     _data: Datum,
 ) -> PgResult<()> {
     panic!(
-        "execTuples.c ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader + heap_deform_tuple \
-         into slot needs the payload model's composite-Datum carrier \
-         (slot_payload_model/slot_deform owner)"
-    )
-}
-
-/// `bslot->base.tuple = heap_copytuple(tuple)` (the `ExecForceStoreHeapTuple`
-/// buffer-heap-target path): a self-owned copy of the source tuple in the
-/// slot's context.
-///
-/// heaptuple.c's `heap_copytuple` is a direct dependency: it copies a
-/// `FormedTuple` (header + data area), which is now the slot's `tuple` carrier.
-/// The public input is a header-only `HeapTuple`, so recovering its data-area
-/// bytes into the slot's `FormedTuple` is the slot payload model's carrier
-/// bridge, not yet landed — routed through that owner and panicking until it does.
-fn heap_copytuple_into_slot_context<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _tuple: HeapTuple<'mcx>,
-) -> PgResult<Option<FormedTuple<'mcx>>> {
-    panic!(
-        "execTuples.c ExecForceStoreHeapTuple (buffer-heap target): heap_copytuple needs the \
-         payload model's HeapTuple->FormedTuple carrier bridge (slot_payload_model/slot_deform owner)"
+        "execTuples.c ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader (composite-Datum \
+         decode) is not ported anywhere in the workspace (bare-word Datum has no \
+         pointer-to-tuple lane); same unported bridge execExprInterp's row steps panic on"
     )
 }
 
@@ -616,19 +597,20 @@ fn heap_copytuple_into_slot_context<'mcx>(
 /// (`ExecFetchSlotHeapTupleDatum`): the fetched heap tuple flattened into a
 /// composite `Datum`.
 ///
-/// heaptuple.c's `heap_copy_tuple_as_datum` is a direct dependency, but it
-/// works over a `FormedTuple` (header + data area) and yields a `FormedTuple`
-/// composite carrier; the scaffold's `HeapTuple` / `Datum` are header-only /
-/// opaque and the data-area + composite-Datum carriers are the slot payload
-/// model's — routed through that owner and panicking until it lands.
+/// `heap_copy_tuple_as_datum` itself is ported (it yields a `FormedTuple`
+/// composite image), but minting that image back into a composite `Datum` word
+/// (`HeapTupleGetDatum` / `PointerGetDatum` over owned bytes) is the same
+/// composite-Datum bridge that has no representation in the bare-word `Datum`
+/// model and is unported workspace-wide. Mirror PG and panic on the
+/// genuinely-unported composite-Datum mint.
 fn heap_copy_tuple_as_datum_carrier<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &SlotData<'mcx>,
-    _tup: HeapTuple<'mcx>,
+    _tup: FormedTuple<'mcx>,
 ) -> PgResult<Datum> {
     panic!(
-        "execTuples.c ExecFetchSlotHeapTupleDatum: heap_copy_tuple_as_datum needs the \
-         payload model's heap-tuple-data + composite-Datum carriers \
-         (slot_payload_model/slot_deform owner)"
+        "execTuples.c ExecFetchSlotHeapTupleDatum: minting heap_copy_tuple_as_datum's image \
+         into a composite Datum word (HeapTupleGetDatum) needs the composite-Datum bridge, \
+         which the bare-word Datum model cannot represent and is unported workspace-wide"
     )
 }
