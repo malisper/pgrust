@@ -5,6 +5,20 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c): fetch (creating if
+    /// necessary) the `TypeCacheEntry` for `type_id`. `flags` selects which
+    /// optional fields to compute (`TYPECACHE_*`); callers needing only the
+    /// `pg_type` storage fields pass `0`. The returned entry is copied out (C
+    /// returns a long-lived cache pointer; the safe port hands back the trimmed
+    /// row by value). `Err` carries `ereport(ERROR, ERRCODE_UNDEFINED_OBJECT,
+    /// "type ... does not exist")` and the catalog-lookup surface.
+    pub fn lookup_type_cache(
+        type_id: types_core::primitive::Oid,
+        flags: i32,
+    ) -> types_error::PgResult<types_typcache::TypeCacheEntry>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe

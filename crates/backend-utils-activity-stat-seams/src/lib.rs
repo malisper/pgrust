@@ -114,6 +114,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_report_deadlock()` (`pgstat_database.c`) — bump the per-database
+    /// deadlock counter. Called once by `DeadLockReport` just before it
+    /// `ereport`s. Pending-stats bookkeeping only; infallible.
+    pub fn report_deadlock()
+);
+
+seam_core::seam!(
     /// `pgstat_report_subscription_conflict(subid, type)`
     /// (pgstat_subscription.c): bump the subscription's conflict counter for
     /// the given conflict type. Preparing the pending stats entry can

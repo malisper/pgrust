@@ -17,8 +17,9 @@
 use types_error::PgResult;
 use types_execparallel::{
     DsaAreaHandle, EStateHandle, ExprContextHandle, InstrumentationHandle, JitInstrumentation,
-    JitInstrumentationHandle, ParamExecValue, ParamListInfoHandle, PlanHandle, PlanStateHandle,
-    PlannedStmtHandle, QueryDescHandle, RestoredParam, SerializeCursor, Size, SnapshotHandle,
+    JitInstrumentationHandle, ParallelContextHandle, ParallelWorkerContextHandle, ParamExecValue,
+    ParamListInfoHandle, PlanHandle, PlanStateHandle, PlannedStmtHandle, QueryDescHandle,
+    RestoredParam, SerializeCursor, Size, SnapshotHandle,
 };
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::instrument::Instrumentation;
@@ -238,3 +239,53 @@ seam_core::seam!(pub fn get_active_snapshot() -> SnapshotHandle);
 seam_core::seam!(pub fn pgstat_report_activity_running(query: String));
 /// `debug_query_string = str`.
 seam_core::seam!(pub fn set_debug_query_string(s: String));
+
+// ===========================================================================
+// Per-node parallel-sort field/shm access (access/parallel.h, storage/shm_toc.h,
+// nodes/execnodes.h) reached by nodeSort's Exec*{Estimate,InitializeDSM,
+// InitializeWorker,RetrieveInstrumentation}. nodeSort owns the C control flow;
+// these handle-addressed operations on the not-yet-ported ParallelContext, the
+// shm_toc, and the live SortState node go through the owning subsystems.
+// ===========================================================================
+
+/// `((SortState *) planstate)->ss.ps.instrument != NULL`.
+seam_core::seam!(pub fn sort_instrument_present(planstate: PlanStateHandle) -> bool);
+/// `((SortState *) planstate)->ss.ps.plan->plan_node_id`.
+seam_core::seam!(pub fn sort_plan_node_id(planstate: PlanStateHandle) -> i32);
+/// `((SortState *) planstate)->shared_info != NULL`.
+seam_core::seam!(pub fn sort_shared_info_present(planstate: PlanStateHandle) -> bool);
+/// `((SortState *) planstate)->shared_info->num_workers`.
+seam_core::seam!(pub fn sort_shared_info_num_workers(planstate: PlanStateHandle) -> i32);
+/// `((SortState *) planstate)->am_worker = true`.
+seam_core::seam!(pub fn sort_set_am_worker(planstate: PlanStateHandle));
+/// `pcxt->nworkers`.
+seam_core::seam!(pub fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32);
+/// `shm_toc_estimate_chunk(&pcxt->estimator, size)`.
+seam_core::seam!(pub fn pcxt_estimate_chunk(pcxt: ParallelContextHandle, size: Size) -> PgResult<()>);
+/// `shm_toc_estimate_keys(&pcxt->estimator, keys)`.
+seam_core::seam!(pub fn pcxt_estimate_keys(pcxt: ParallelContextHandle, keys: Size) -> PgResult<()>);
+/// `node->shared_info = shm_toc_allocate(pcxt->toc, size); memset(0);
+/// node->shared_info->num_workers = nworkers; shm_toc_insert(pcxt->toc,
+/// plan_node_id, node->shared_info)` — allocate the per-worker `SharedSortInfo`
+/// in DSM, zero it, set `num_workers`, and register it under the node's id.
+seam_core::seam!(pub fn sort_initialize_dsm_shared_info(
+    planstate: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+    nworkers: i32,
+    plan_node_id: i32,
+    size: Size,
+) -> PgResult<()>);
+/// `node->shared_info = shm_toc_lookup(pwcxt->toc, plan_node_id, true)` — attach
+/// the worker to the per-node `SharedSortInfo` in DSM.
+seam_core::seam!(pub fn sort_initialize_worker_shared_info(
+    planstate: PlanStateHandle,
+    pwcxt: ParallelWorkerContextHandle,
+    plan_node_id: i32,
+) -> PgResult<()>);
+/// `si = palloc(size); memcpy(si, node->shared_info, size);
+/// node->shared_info = si` — copy the per-node `SharedSortInfo` out of DSM into
+/// the leader's per-query memory (`size` is the C byte length the leader pallocs).
+seam_core::seam!(pub fn sort_retrieve_shared_info(
+    planstate: PlanStateHandle,
+    size: Size,
+) -> PgResult<()>);

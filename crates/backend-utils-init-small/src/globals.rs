@@ -27,9 +27,9 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use types_core::{
-    pg_time_t, uint32, uint8, InvalidOid, Oid, ProcNumber, ProtocolVersion, TimestampTz,
-    DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH, MAX_CANCEL_KEY_LENGTH,
-    PG_DIR_MODE_OWNER, USE_ISO_DATES,
+    init::BackendType, pg_time_t, uint32, uint8, InvalidOid, Oid, ProcNumber, ProtocolVersion,
+    TimestampTz, DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH,
+    MAX_CANCEL_KEY_LENGTH, PG_DIR_MODE_OWNER, USE_ISO_DATES,
 };
 pub use types_core::pid_t;
 use types_net::{ClientSocket, Port};
@@ -537,4 +537,51 @@ pub fn DatabasePath() -> Option<String> {
 
 pub fn SetDatabasePath(value: Option<String>) {
     DATABASE_PATH.set(value);
+}
+
+scalar_global!(
+    /// `BackendType MyBackendType;` (globals.c, declared in miscadmin.h) —
+    /// this process's identity, assigned once at startup.
+    MY_BACKEND_TYPE, MyBackendType, SetMyBackendType, BackendType, BackendType::Invalid
+);
+
+/// `HOLD_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount++`.
+#[inline]
+pub fn HoldInterrupts() {
+    SetInterruptHoldoffCount(InterruptHoldoffCount() + 1);
+}
+
+/// `RESUME_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount--` with
+/// underflow assertion.
+#[inline]
+pub fn ResumeInterrupts() {
+    let count = InterruptHoldoffCount();
+    assert!(count > 0, "InterruptHoldoffCount underflow");
+    SetInterruptHoldoffCount(count - 1);
+}
+
+/// `START_CRIT_SECTION()` (c.h) — increment `CritSectionCount`; while
+/// non-zero any ERROR escalates to PANIC.
+#[inline]
+pub fn StartCriticalSection() {
+    SetCritSectionCount(CritSectionCount() + 1);
+}
+
+/// `END_CRIT_SECTION()` (c.h) — decrement `CritSectionCount`.
+#[inline]
+pub fn EndCriticalSection() {
+    let count = CritSectionCount();
+    assert!(count > 0, "CritSectionCount underflow");
+    SetCritSectionCount(count - 1);
+}
+
+/// Wrapper for the `with_my_proc_port` seam: adapts the callback-style seam
+/// signature `fn(&mut dyn FnMut(Option<&mut Port>))` to the internal
+/// `WithMyProcPort` which provides `Option<R>` from `FnOnce`.
+pub fn with_my_proc_port_seam(f: &mut dyn FnMut(Option<&mut types_net::Port>)) {
+    if MyProcPortIsSet() {
+        WithMyProcPort(|port| f(Some(port)));
+    } else {
+        f(None);
+    }
 }

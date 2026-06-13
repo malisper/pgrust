@@ -1360,6 +1360,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execCurrent"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execMain-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-mmgr-portalmem-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execExpr-seams"
 version = "0.0.0"
 dependencies = [
@@ -3595,6 +3610,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
