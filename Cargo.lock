@@ -964,6 +964,7 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+ "types-stringinfo",
 ]
 
 [[package]]
