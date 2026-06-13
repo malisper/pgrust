@@ -51,3 +51,18 @@ seam_core::seam!(
         index_info: &types_nodes::execnodes::IndexInfo,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `reindex_relation(NULL, relid, flags, &params)` (index.c) — rebuilds
+    /// every index on the heap; ends with CommandCounterIncrement.
+    pub fn reindex_relation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+        flags: i32,
+        params: types_cluster::ReindexParams,
+    ) -> types_error::PgResult<()>
+);
+seam_core::seam!(
+    /// `IndexGetRelation(indexId, missing_ok)` (index.c).
+    pub fn index_get_relation(index_id: types_core::Oid, missing_ok: bool) -> types_error::PgResult<types_core::Oid>
+);

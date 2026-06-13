@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bitmapset;
+pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;

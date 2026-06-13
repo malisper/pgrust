@@ -16,11 +16,11 @@
 //! the orchestration (which rows, which dependencies, in which order) stays
 //! here.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use backend_utils_error::ereport;
 
 use backend_access_index_amapi_seams::{am_adjust_members, get_index_am_info};
-use backend_access_index_genam_seams::systable_scan;
+use backend_access_index_genam_seams as genam_seams;
 use backend_catalog_aclchk_seams::{aclcheck_error, object_aclcheck};
 use backend_catalog_catalog_seams::is_pinned_object;
 use backend_catalog_dependency_seams::perform_deletion;
@@ -54,7 +54,11 @@ use backend_utils_cache_syscache_seams::{
 use backend_utils_init_miscinit_seams::{get_user_id, superuser_arg};
 
 use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
-use types_cache::skey::{ScanKeyInit, BTEqualStrategyNumber, F_OIDEQ};
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_core::fmgr::F_OIDEQ;
+use backend_access_common_scankey::ScanKeyInit;
+use backend_access_common_heaptuple::heap_deform_tuple;
+use types_tuple::heaptuple::ItemPointerData;
 use types_catalog::catalog::{
     ACCESS_METHOD_OPERATOR_RELATION_ID, ACCESS_METHOD_PROCEDURE_RELATION_ID,
     ACCESS_METHOD_RELATION_ID, NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID,
@@ -64,7 +68,8 @@ use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
 use types_catalog::opclasscmds_catalog::{
-    Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype, Anum_pg_opclass_opcname,
+    Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype, Anum_pg_opclass_opcmethod,
+    Anum_pg_opclass_opcname,
     FormData_pg_amop, FormData_pg_amproc,
     FormData_pg_opclass, FormData_pg_opfamily, OpclassAmNameNspIndexId,
 };
@@ -569,27 +574,28 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
      * that typcache.c can find unique solutions to its questions.)
      */
     if stmt.isDefault {
-        let keys = [ScanKeyInit {
-            sk_attno: types_catalog::opclasscmds_catalog::Anum_pg_opclass_opcmethod,
-            sk_strategy: BTEqualStrategyNumber,
-            sk_procedure: F_OIDEQ,
-            sk_argument: Datum::from_oid(amoid),
-            sk_subtype: InvalidOid,
-            sk_collation: InvalidOid,
-        }];
-        let rows = systable_scan::call(
-            mcx,
-            OPERATOR_CLASS_RELATION_ID,
-            OpclassAmNameNspIndexId,
-            true,
-            &keys,
+        // ScanKeyInit(&skey[0], Anum_pg_opclass_opcmethod, BTEqualStrategyNumber,
+        //             F_OIDEQ, ObjectIdGetDatum(amoid));
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            Anum_pg_opclass_opcmethod,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(amoid),
         )?;
-        for row in &rows {
+        let keys = [key];
+
+        // scan = systable_beginscan(rel, OpclassAmNameNspIndexId, true, NULL, 1, skey);
+        // while (HeapTupleIsValid(tup = systable_getnext(scan))) { ... }
+        // systable_endscan(scan);
+        let mut ret: PgResult<()> = Ok(());
+        systable_scan_foreach(&rel, OpclassAmNameNspIndexId, &keys, |row| {
             let opcintype = column_oid(row, Anum_pg_opclass_opcintype);
             let opcdefault = column_bool(row, Anum_pg_opclass_opcdefault);
             if opcintype == typeoid && opcdefault {
                 let existing_opcname = column_name(row, Anum_pg_opclass_opcname);
-                return Err(ereport(ERROR)
+                ret = Err(ereport(ERROR)
                     .errcode(ERRCODE_DUPLICATE_OBJECT)
                     .errmsg(format!(
                         "could not make operator class \"{opcname}\" be default for type {}",
@@ -600,8 +606,11 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
                         "Operator class \"{existing_opcname}\" already is the default."
                     ))
                     .into_error());
+                return Ok(false);
             }
-        }
+            Ok(true)
+        })?;
+        ret?;
     }
 
     /* Okay, let's create the pg_opclass entry. */
@@ -1941,27 +1950,67 @@ fn namespace_name_for_error(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>
     )
 }
 
-/// Read a by-value `Oid` column from a deformed `systable_scan` row
-/// (`row[attno - 1]`).
-fn column_oid(row: &[(TupleValue<'_>, bool)], attno: i16) -> Oid {
-    match &row[(attno - 1) as usize].0 {
+/// One scanned `pg_opclass` row: the heap TID (`tup->t_self`) plus the
+/// `heap_deform_tuple` projection of the whole row (`GETSTRUCT(tup)`).
+struct SysScanRow<'a> {
+    #[allow(dead_code)]
+    tid: ItemPointerData,
+    cols: &'a [(TupleValue<'a>, bool)],
+}
+
+/// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` +
+/// `while ((tup = systable_getnext(scan)))` + `systable_endscan(scan)`
+/// (the genam iterator): invoke `body` once per matching row, in scan order.
+/// `body` returning `Ok(true)` continues, `Ok(false)` stops early (the C
+/// `break`); an `Err` propagates after the scan is ended (the `SysScanGuard`
+/// `Drop` covers the error path). The deformed columns land in a scratch
+/// context dropped at the end of each iteration.
+fn systable_scan_foreach(
+    rel: &types_rel::RelationData<'_>,
+    index_id: Oid,
+    keys: &[ScanKeyData],
+    mut body: impl FnMut(&SysScanRow<'_>) -> PgResult<bool>,
+) -> PgResult<()> {
+    let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
+    loop {
+        let scratch = MemoryContext::new("systable_scan_foreach row");
+        let smcx = scratch.mcx();
+        let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+            break;
+        };
+        let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        let row = SysScanRow {
+            tid: tup.tuple.t_self,
+            cols: &cols,
+        };
+        let keep_going = body(&row)?;
+        if !keep_going {
+            break;
+        }
+    }
+    scan.end()
+}
+
+/// Read a by-value `Oid` column from a deformed row (`GETSTRUCT(tup)->col`).
+fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
+    match &row.cols[(attno - 1) as usize].0 {
         TupleValue::ByVal(d) => d.as_oid(),
         TupleValue::ByRef(_) => InvalidOid,
     }
 }
 
-/// Read a by-value `bool` column from a deformed `systable_scan` row.
-fn column_bool(row: &[(TupleValue<'_>, bool)], attno: i16) -> bool {
-    match &row[(attno - 1) as usize].0 {
+/// Read a by-value `bool` column from a deformed row.
+fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
+    match &row.cols[(attno - 1) as usize].0 {
         TupleValue::ByVal(d) => d.as_bool(),
         TupleValue::ByRef(_) => false,
     }
 }
 
 /// Read a `NameData` column (`char[NAMEDATALEN]`, NUL-padded) from a deformed
-/// `systable_scan` row as a `String`, mirroring C's `NameStr(...)`.
-fn column_name(row: &[(TupleValue<'_>, bool)], attno: i16) -> String {
-    match &row[(attno - 1) as usize].0 {
+/// row as a `String`, mirroring C's `NameStr(...)`.
+fn column_name(row: &SysScanRow<'_>, attno: i16) -> String {
+    match &row.cols[(attno - 1) as usize].0 {
         TupleValue::ByRef(bytes) => {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             String::from_utf8_lossy(&bytes[..end]).into_owned()
