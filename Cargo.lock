@@ -2875,6 +2875,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execExprInterp"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-nodeSubplan-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execExprInterp-seams"
 version = "0.0.0"
 dependencies = [
