@@ -26,6 +26,9 @@ types-error = { path = "../types-error" }
 
 # Type vocabulary embedded in the owned RelationData entry / crossed at seams.
 types-core = { path = "../types-core" }
+# pg_class / pg_class_oid_index OIDs used by the RelationCacheInvalidate
+# two-phase rebuild ordering.
+types-catalog = { path = "../types-catalog" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
@@ -34,7 +37,6 @@ types-nodes = { path = "../types-nodes" }
 types-partition = { path = "../types-partition" }
 types-reloptions = { path = "../types-reloptions" }
 types-hash = { path = "../types-hash" }
-types-catalog = { path = "../types-catalog" }
 types-cache = { path = "../types-cache" }
 types-wal = { path = "../types-wal" }
 

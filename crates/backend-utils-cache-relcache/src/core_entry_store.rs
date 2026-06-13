@@ -12,10 +12,10 @@ use std::cell::RefCell;
 
 use backend_utils_error::{ereport, PgResult};
 use types_error::ERROR;
-use backend_utils_hash_dynahash::{hash_create, hash_search};
+use backend_utils_hash_dynahash::{hash_create, hash_search, hash_seq_init, hash_seq_search};
 use types_core::primitive::{Oid, ProcNumber};
 use types_core::xact::SubTransactionId;
-use types_hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
+use types_hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_SEQ_STATUS, HTAB};
 
 use crate::{INITRELCACHESIZE, MAX_EOXACT_LIST};
 use entry::RelationData;
@@ -232,6 +232,55 @@ pub(crate) fn cache_delete(id: Oid) -> PgResult<()> {
     }
 }
 
+/// Collect the `Relation` pointer of every live `RelIdCacheEnt` in
+/// `RelationIdCache` via a `hash_seq_init`/`hash_seq_search` scan (relcache.c's
+/// `HASH_SEQ_STATUS` walk). Returned as an owned snapshot so callers that need
+/// to delete/rebuild entries (the `RelationCacheInvalidate` / `AtEOXact` whole-
+/// cache passes) don't mutate the table while a `hash_seq_search` is live —
+/// matching the C requirement that `hash_seq_search` only copes with deletion
+/// of the element it is currently visiting.
+#[allow(unsafe_code)]
+pub(crate) fn cache_seq_reldescs() -> Vec<*mut RelationData> {
+    with_state(|st| {
+        let mut out = Vec::new();
+        if st.id_cache.is_null() {
+            return out;
+        }
+        let mut status = HASH_SEQ_STATUS::new();
+        hash_seq_init(&mut status, st.id_cache);
+        loop {
+            // SAFETY: scan over the live `RelationIdCache`; the returned key
+            // pointer is the element buffer (a `RelIdCacheEnt`, `reloid` at
+            // offset 0). Null terminates and deregisters the scan.
+            let key = match hash_seq_search(&mut status) {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            if key.is_null() {
+                break;
+            }
+            // SAFETY: live element buffer is a `RelIdCacheEnt`.
+            let hentry = unsafe { &*(key as *const RelIdCacheEnt) };
+            out.push(hentry.reldesc);
+        }
+        out
+    })
+}
+
+/// `hash_search(RelationIdCache, &relid, HASH_FIND)` returning the entry's
+/// `Relation` (the `AtEOXact`/`AtEOSubXact` non-overflow path). `None` is the
+/// C `NULL` (entry not present — nothing to do, per the C comment).
+pub(crate) fn cache_find_reldesc(relid: Oid) -> Option<*mut RelationData> {
+    cache_lookup(relid)
+}
+
+/// `eoxact_list` reset half of `AtEOXact_RelationCache` tail (clear the list and
+/// overflow flag once we're out of the transaction).
+pub(crate) fn eoxact_list_reset(st: &mut RelcacheState) {
+    st.eoxact_list.clear();
+    st.eoxact_list_overflowed = false;
+}
+
 /* ==========================================================================
  * `eoxact_list` bookkeeping (relcache.c `EOXactListAdd` macro).
  * ======================================================================== */
@@ -306,9 +355,10 @@ pub fn RelationClose(relation: *mut RelationData) -> PgResult<()> {
 pub(crate) fn RelationCloseCleanup(relation: *mut RelationData) -> PgResult<()> {
     // SAFETY: live `Relation` pointer.
     let rd = unsafe { &*relation };
-    if rd.rd_refcnt == 0 {
-        // C: MemoryContextDeleteChildren(rd_pdcxt/rd_pddcxt) when those
-        // partition-descriptor contexts have children. Not represented here.
+    // C: MemoryContextDeleteChildren(rd_pdcxt/rd_pddcxt) when those
+    // partition-descriptor contexts have children. Not represented here.
+    if rd.rd_refcnt == 0 && (!rd.rd_isvalid || rd.rd_droppedSubid != 0) {
+        return crate::invalidate::RelationClearRelation(relation);
     }
     Ok(())
 }
