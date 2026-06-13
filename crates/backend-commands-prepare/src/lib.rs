@@ -83,8 +83,8 @@ const NAMEDATALEN: usize = 64;
 /// (C `long`) is carried as `i64` (LP64 backends).
 const FETCH_ALL: i64 = i64::MAX;
 
-/// `#define CURSOR_OPT_PARALLEL_OK 0x0400` (`nodes/parsenodes.h`).
-const CURSOR_OPT_PARALLEL_OK: i32 = 0x0400;
+/// `#define CURSOR_OPT_PARALLEL_OK 0x0800` (`nodes/parsenodes.h`).
+const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 
 /// `#define PARAM_FLAG_CONST 0x0001` (`nodes/params.h`).
 const PARAM_FLAG_CONST: u16 = 0x0001;
