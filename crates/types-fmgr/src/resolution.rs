@@ -160,12 +160,28 @@ pub enum FmgrResolution {
         /// C: `fcinfo->flinfo->fn_oid`.
         fn_oid: Oid,
     },
+    /// C: `prolang == SQLlanguageId`; `fn_addr = fmgr_sql`. `fmgr_sql`'s body
+    /// lives in `executor/functions.c` (a separate compilation unit); fmgr.c
+    /// merely installs the function pointer here, exactly as the secdef leg
+    /// installs `fmgr_security_definer`. The target's `fn_oid` is captured (C
+    /// reads it from `fcinfo->flinfo->fn_oid` inside `fmgr_sql`). At call time
+    /// the dispatch hands the frame to the `executor/functions.c` owner via its
+    /// `fmgr_sql` seam.
+    Sql {
+        /// C: `fcinfo->flinfo->fn_oid`.
+        fn_oid: Oid,
+    },
 }
 
 impl FmgrResolution {
     /// Convenience constructor for the security-definer resolution.
     pub fn security_definer(fn_oid: Oid) -> Self {
         FmgrResolution::SecurityDefiner { fn_oid }
+    }
+
+    /// Convenience constructor for the SQL-language resolution.
+    pub fn sql(fn_oid: Oid) -> Self {
+        FmgrResolution::Sql { fn_oid }
     }
 }
 

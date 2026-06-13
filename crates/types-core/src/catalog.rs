@@ -50,6 +50,12 @@ pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
 /// predefined role.
 pub const ROLE_PG_DATABASE_OWNER: Oid = 6171;
 
+/// `FirstGenbkiObjectId` (`access/transam.h`) — first OID assignable by
+/// genbki.pl; the initdb OID generator starts here.
+pub const FirstGenbkiObjectId: Oid = 10000;
+/// `FirstUnpinnedObjectId` (`access/transam.h`) — first OID that is not pinned;
+/// `StopGeneratingPinnedObjectIds` forces the counter up to this value.
+pub const FirstUnpinnedObjectId: Oid = 12000;
 /// `FirstNormalObjectId` (`access/transam.h`) — first OID assignable to
 /// user-created objects; OIDs below this belong to built-in system objects.
 pub const FirstNormalObjectId: Oid = 16384;
