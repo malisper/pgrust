@@ -24,6 +24,11 @@ pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `Cost startup_cost` — cost expended before fetching any tuples. `Cost`
+    /// is `double` in C.
+    pub startup_cost: f64,
+    /// `Cost total_cost` — total cost (assuming all tuples fetched).
+    pub total_cost: f64,
     /// `List *targetlist` — target list to be computed at this node
     /// (`None` = the C `NIL`).
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
@@ -55,6 +60,8 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            startup_cost: self.startup_cost,
+            total_cost: self.total_cost,
             targetlist,
             parallel_aware: self.parallel_aware,
             lefttree: match &self.lefttree {

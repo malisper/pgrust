@@ -62,11 +62,13 @@ pub const EXEC_FLAG_BACKWARD: i32 = 0x0008;
 /// `EXEC_FLAG_MARK` (executor.h) — mark/restore; never for a hash join.
 pub const EXEC_FLAG_MARK: i32 = 0x0010;
 
-// Wait-event codes (utils/wait_event_names.txt) used at parallel barriers.
-const WAIT_EVENT_HASH_BUILD_HASH_OUTER: u32 = 0x0A000010;
-const WAIT_EVENT_HASH_BATCH_ELECT: u32 = 0x0A000005;
-const WAIT_EVENT_HASH_BATCH_ALLOCATE: u32 = 0x0A000004;
-const WAIT_EVENT_HASH_BATCH_LOAD: u32 = 0x0A000006;
+// Wait-event codes (utils/wait_event_names.txt; class PG_WAIT_IPC = 0x08000000)
+// used at parallel barriers. Values verified against the c2rust rendering of
+// wait_event.h.
+const WAIT_EVENT_HASH_BUILD_HASH_OUTER: u32 = 0x08000014;
+const WAIT_EVENT_HASH_BATCH_ELECT: u32 = 0x0800000F;
+const WAIT_EVENT_HASH_BATCH_ALLOCATE: u32 = 0x0800000E;
+const WAIT_EVENT_HASH_BATCH_LOAD: u32 = 0x08000010;
 
 // SEEK_SET (stdio.h) — `BufFileSeek(file, 0, 0, SEEK_SET)` rewinds the file.
 const SEEK_SET: i32 = 0;
@@ -389,12 +391,27 @@ fn ExecHashJoinImpl<'mcx>(
 }
 
 /// `outerNode->plan->startup_cost < hashNode->ps.plan->total_cost` — the
-/// empty-outer prefetch cost heuristic. The cost fields are not carried in the
-/// trimmed `Plan` yet; until the planner-cost facet lands, this conservatively
-/// answers `true` (always try the prefetch, the safe direction — it only
-/// affects whether we prefetch one tuple, never correctness). Panics-free.
-fn outer_startup_lt_inner_total(_node: &HashJoinState) -> PgResult<bool> {
-    Ok(true)
+/// empty-outer prefetch cost heuristic. `outerNode = outerPlan(node)` is the
+/// HashJoin plan's left child; `hashNode` is the inner `Hash` plan (the right
+/// child), whose `ps.plan` is that same Hash plan. We read both costs straight
+/// off the plan tree carried in `node.js.ps.plan`.
+fn outer_startup_lt_inner_total(node: &HashJoinState) -> PgResult<bool> {
+    let plan = node
+        .js
+        .ps
+        .plan
+        .expect("nodeHashjoin: HashJoin plan must be set");
+    let outer = plan
+        .plan_head()
+        .lefttree
+        .as_deref()
+        .expect("nodeHashjoin: outerPlan(node) must be present");
+    let inner = plan
+        .plan_head()
+        .righttree
+        .as_deref()
+        .expect("nodeHashjoin: innerPlan(node) must be present");
+    Ok(outer.plan_head().startup_cost < inner.plan_head().total_cost)
 }
 
 /// `outerPlanState(node)` — the outer child plan-state.
@@ -749,14 +766,20 @@ fn build_hash_exprs<'mcx>(
     // the first key's resolved hash function and collation.
     let skew_hashfuncid = outer_hashfuncid.first().copied().unwrap_or(0);
     let skew_collation = collations.first().copied().unwrap_or(0);
-    // `OidIsValid(hash->skewTable)` — the inner Hash plan's skewTable is not in
-    // the trimmed plan yet; the owner reads it and no-ops when invalid. Pass the
-    // resolved values; the owner gates on the real skewTable.
+    // `if (OidIsValid(hash->skewTable))` — `hash = (Hash *) innerPlan(node)`;
+    // gate on the inner Hash plan's real `skewTable` OID (InvalidOid when skew
+    // optimization is disabled). The owner sets up the skew hash function from
+    // `outer_hashfuncid[0]` / `linitial_oid(hashcollations)` only when valid.
+    let skew_table = match hj.join.plan.righttree.as_deref() {
+        Some(types_nodes::nodes::Node::Hash(h)) => h.skewTable,
+        Some(other) => panic!("innerPlan(HashJoin) is not a Hash node: {other:?}"),
+        None => 0,
+    };
     nodeHash::setup_skew_hashfunction::call(
         hjstate,
         skew_hashfuncid,
         skew_collation,
-        OidIsValid(skew_hashfuncid),
+        OidIsValid(skew_table),
         estate,
     )?;
 
@@ -1591,10 +1614,23 @@ pub fn ExecHashJoinInitializeDSM(node: &mut HashJoinState<'_>, _pcxt: &mut Paral
 
 /// `ExecHashJoinReInitializeDSM(state, pcxt)` — reset shared state before a
 /// fresh scan.
-pub fn ExecHashJoinReInitializeDSM(
-    _node: &mut HashJoinState<'_>,
-    _pcxt: &mut ParallelContextHandle,
-) {
+///
+/// The in-crate part — when `hj_HashTable != NULL`, detach the batch and the
+/// hash table (both nodeHash seams) to free any remaining shared memory — runs
+/// first, exactly as C does. The trailing `shm_toc_lookup` /
+/// `SharedFileSetDeleteAll` / `BarrierInit` is execParallel-owned and panics
+/// loudly until that unit lands.
+pub fn ExecHashJoinReInitializeDSM(node: &mut HashJoinState<'_>, _pcxt: &mut ParallelContextHandle) {
+    // pcxt->seg == NULL → return (handled by the caller's parallel-setup unit).
+
+    // Detach, freeing any remaining shared memory.
+    if node.hj_HashTable.is_some() {
+        nodeHash::exec_hash_table_detach_batch::call(node)
+            .expect("ExecHashJoinReInitializeDSM: ExecHashTableDetachBatch failed");
+        nodeHash::exec_hash_table_detach::call(node)
+            .expect("ExecHashJoinReInitializeDSM: ExecHashTableDetach failed");
+    }
+
     panic!(
         "ExecHashJoinReInitializeDSM: parallel-context DSM reset requires \
          backend-executor-execParallel (not yet ported)"

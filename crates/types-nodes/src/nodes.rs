@@ -77,6 +77,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_HashJoin`.
     HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
+    /// `T_Hash` — the inner child of a HashJoin.
+    Hash(crate::nodehashjoin::Hash<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -85,6 +87,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(_) => T_Material,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
+            Node::Hash(_) => crate::nodehashjoin::T_Hash,
         }
     }
 
@@ -93,6 +96,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
             Node::HashJoin(h) => &h.join.plan,
+            Node::Hash(h) => &h.plan,
         }
     }
 
@@ -107,6 +111,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
+            Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
         }
     }
 }

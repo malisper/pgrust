@@ -167,6 +167,70 @@ impl<'mcx> HashJoin<'mcx> {
     }
 }
 
+/// `T_Hash` (nodes/nodetags.h) — the plan-node tag for the inner Hash node of a
+/// hash join.
+pub const T_Hash: crate::nodes::NodeTag = crate::nodes::NodeTag(370);
+
+/// `Hash` plan node (plannodes.h) — the inner child of a `HashJoin`:
+///
+/// ```c
+/// typedef struct Hash
+/// {
+///     Plan        plan;
+///     List       *hashkeys;
+///     Oid         skewTable;     /* outer join key's table OID, or InvalidOid */
+///     AttrNumber  skewColumn;    /* outer join key's column #, or zero */
+///     bool        skewInherit;   /* is outer join rel an inheritance tree? */
+///     Cardinality rows_total;    /* estimate total rows if parallel_aware */
+/// } Hash;
+/// ```
+///
+/// Trimmed to the fields `nodeHashjoin.c` consumes (`skewTable`, read by
+/// `ExecInitHashJoin` to gate skew-hashfunction setup); `hashkeys` is built by
+/// the planner and consumed by nodeHash, the rest of the skew fields are
+/// nodeHash-owned.
+#[derive(Debug, Default)]
+pub struct Hash<'mcx> {
+    /// `Plan plan` — the abstract plan-node base.
+    pub plan: Plan<'mcx>,
+    /// `List *hashkeys` — hash keys for the hashjoin condition, a heterogeneous
+    /// expression list (`None` = the C `NIL`).
+    pub hashkeys: Option<PgVec<'mcx, Node<'mcx>>>,
+    /// `Oid skewTable` — outer join key's table OID, or `InvalidOid`.
+    pub skewTable: Oid,
+    /// `AttrNumber skewColumn` — outer join key's column #, or zero.
+    pub skewColumn: i16,
+    /// `bool skewInherit` — is the outer join rel an inheritance tree?
+    pub skewInherit: bool,
+    /// `Cardinality rows_total` — estimate of total rows if `parallel_aware`.
+    pub rows_total: f64,
+}
+
+impl<'mcx> Hash<'mcx> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Hash<'b>> {
+        let hashkeys = match &self.hashkeys {
+            Some(v) => {
+                let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+                for n in v.iter() {
+                    out.push(n.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(Hash {
+            plan: self.plan.clone_in(mcx)?,
+            hashkeys,
+            skewTable: self.skewTable,
+            skewColumn: self.skewColumn,
+            skewInherit: self.skewInherit,
+            rows_total: self.rows_total,
+        })
+    }
+}
+
 /// `JoinState` head (execnodes.h) — the executor-state base every join state
 /// node embeds:
 ///
