@@ -854,6 +854,21 @@ pub fn init_seams() {
     s::init_standalone_process::set(crate::process::InitStandaloneProcess);
     s::has_rolreplication::set(has_rolreplication);
     s::superuser::set(superuser);
+
+    // DatabasePath direct set/clear (the recovery "quick hack" path in
+    // ProcessCommittedInvalidationMessages) — bypasses SetDatabasePath's
+    // one-shot Assert; both write the globals.c-owned DatabasePath.
+    s::set_database_path::set(|path| {
+        backend_utils_init_small::globals::SetDatabasePath(Some(path.to_owned()))
+    });
+    s::clear_database_path::set(|| backend_utils_init_small::globals::SetDatabasePath(None));
+
+    // WAL summarizer backend-type set/test (MyBackendType lives in globals.c;
+    // miscinit owns the accessor the C macros use).
+    s::set_my_backend_type_wal_summarizer::set(|| {
+        SetMyBackendType(BackendType::WalSummarizer)
+    });
+    s::am_wal_summarizer_process::set(|| GetMyBackendType() == BackendType::WalSummarizer);
 }
 
 #[cfg(test)]
