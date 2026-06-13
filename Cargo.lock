@@ -1212,6 +1212,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-logical",
+ "types-storage",
  "types-wal",
  "types-walsummarizer",
 ]
@@ -1232,6 +1233,32 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlogutils"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-smgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "common-relpath-seams",
+ "mcx",
+ "port-pgsleep-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
  "types-wal",
 ]
 
@@ -5094,6 +5121,7 @@ dependencies = [
  "types-nodes",
  "types-partition",
  "types-rel",
+ "types-storage",
  "types-tableam",
  "types-tuple",
 ]
@@ -5816,6 +5844,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-net",
+]
+
+[[package]]
+name = "common-relpath-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]
