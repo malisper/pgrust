@@ -21,6 +21,22 @@ pub struct CatalogObjectName<'mcx> {
     pub name: PgString<'mcx>,
 }
 
+/// The projection of a `Form_pg_am` row that amcmds.c's `get_am_type_oid`
+/// reads via `GETSTRUCT` after a `SearchSysCache1(AMNAME, ...)` lookup: the
+/// access method's OID, its single-character type discriminant, and its
+/// (NUL-trimmed) name (`NameStr(amform->amname)`, used in the wrong-type error
+/// message). Copied out of the catcache into the consumer's `Mcx`; the
+/// installer owns the `ReleaseSysCache`.
+#[derive(Debug)]
+pub struct PgAmInfo<'mcx> {
+    /// `amform->oid`.
+    pub oid: Oid,
+    /// `amform->amtype` (`AMTYPE_INDEX` / `AMTYPE_TABLE`).
+    pub amtype: u8,
+    /// `NameStr(amform->amname)`.
+    pub amname: PgString<'mcx>,
+}
+
 /// The raw projection of a `pg_proc.proallargtypes` attribute value (an
 /// `ArrayType` datum): the header fields the C call site validates plus the
 /// element data read as Oids. The consumer (`FuncnameGetCandidates`) performs
