@@ -7991,6 +7991,7 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
+ "common-ip",
  "interfaces-libpq-legacy-pqsignal",
 ]
 

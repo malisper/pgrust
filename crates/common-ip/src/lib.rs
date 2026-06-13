@@ -197,6 +197,18 @@ fn getaddrinfo_unix(
 }
 
 /// Convert an AF_UNIX address to a hostname (`getnameinfo_unix`).
+///
+/// C writes into caller `char` buffers via `snprintf(buf, len, ...)` and
+/// returns `EAI_MEMORY` when the formatted value would not fit
+/// (`ret < 0 || ret >= len`, i.e. its length excluding the NUL is `>= len`).
+/// The seam marshals the buffers as unbounded `String`s, dropping
+/// `nodelen`/`servicelen`; the C API contract is that callers pass
+/// `NI_MAXHOST`/`NI_MAXSERV`-sized buffers (verified across every caller:
+/// backend_startup.c, elog.c, auth.c, hba.c, pgstatfuncs.c, network.c,
+/// fe-connect.c). We re-impose those exact bounds so the
+/// truncation -> `EAI_MEMORY` branch fires under the same predicate as C
+/// (a `service` longer than `NI_MAXSERV`-1 is the live case for long Unix
+/// socket paths).
 fn getnameinfo_unix(
     addr: &SockAddr,
     node: Option<&mut String>,
@@ -208,7 +220,12 @@ fn getnameinfo_unix(
     }
 
     if let Some(n) = node {
-        *n = "[local]".to_string();
+        /* C: snprintf(node, nodelen, "%s", "[local]"); ret >= nodelen -> EAI_MEMORY */
+        let formatted = "[local]".to_string();
+        if formatted.len() >= libc::NI_MAXHOST as usize {
+            return libc::EAI_MEMORY;
+        }
+        *n = formatted;
     }
 
     if let Some(s) = service {
@@ -218,11 +235,16 @@ fn getnameinfo_unix(
          * Check whether it looks like an abstract socket, but it could also
          * just be an empty string.
          */
-        if path[0] == 0 && path.get(1).copied().unwrap_or(0) != 0 {
-            *s = format!("@{}", cstr_bytes_to_string(&path[1..]));
+        let formatted = if path[0] == 0 && path.get(1).copied().unwrap_or(0) != 0 {
+            format!("@{}", cstr_bytes_to_string(&path[1..]))
         } else {
-            *s = cstr_bytes_to_string(&path);
+            cstr_bytes_to_string(&path)
+        };
+        /* C: snprintf(service, servicelen, ...); ret >= servicelen -> EAI_MEMORY */
+        if formatted.len() >= libc::NI_MAXSERV as usize {
+            return libc::EAI_MEMORY;
         }
+        *s = formatted;
     }
 
     0
@@ -424,6 +446,23 @@ mod tests {
         pg_getaddrinfo_all(None, Some("/tmp/socket"), &unix_hint(libc::SOCK_STREAM), &mut out);
         let rc = pg_getnameinfo_all(&out[0].addr, None, None, 0);
         assert_eq!(rc, libc::EAI_FAIL);
+    }
+
+    #[test]
+    fn unix_nameinfo_long_path_overflows_service() {
+        /*
+         * C getnameinfo_unix snprintf()s the path into a NI_MAXSERV buffer and
+         * returns EAI_MEMORY when it doesn't fit; pg_getnameinfo_all then fills
+         * "???". Build a path longer than NI_MAXSERV-1 (but within sun_path).
+         */
+        let path = format!("/tmp/{}", "x".repeat(libc::NI_MAXSERV as usize));
+        assert!(path.len() < sun_path_len());
+        let mut out = Vec::new();
+        pg_getaddrinfo_all(None, Some(&path), &unix_hint(libc::SOCK_STREAM), &mut out);
+        let mut service = String::new();
+        let rc = pg_getnameinfo_all(&out[0].addr, None, Some(&mut service), 0);
+        assert_eq!(rc, libc::EAI_MEMORY);
+        assert_eq!(service, "???");
     }
 
     #[test]
