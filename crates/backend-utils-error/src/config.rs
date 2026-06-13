@@ -20,10 +20,11 @@
 
 use std::cell::{Cell, RefCell};
 
-use types_dest::{CommandDest, DestNone};
+use types_core::NAMEDATALEN;
+use types_dest::CommandDest;
 use types_error::{
-    ErrorLevel, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
-    LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, PGERROR_DEFAULT, WARNING,
+    ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,
 };
 
 // ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ use types_error::{
 
 thread_local! { static LOG_MIN_MESSAGES: Cell<i32> = const { Cell::new(WARNING.0) }; }
 thread_local! { static CLIENT_MIN_MESSAGES: Cell<i32> = const { Cell::new(NOTICE.0) }; }
-thread_local! { static WHERE_TO_SEND_OUTPUT: Cell<u32> = const { Cell::new(DestNone) }; }
+thread_local! { static WHERE_TO_SEND_OUTPUT: Cell<CommandDest> = const { Cell::new(CommandDest::None) }; }
 thread_local! { static CLIENT_AUTH_IN_PROGRESS: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static LOG_MIN_ERROR_STATEMENT: Cell<i32> = const { Cell::new(ERROR.0) }; }
 
@@ -80,17 +81,17 @@ pub fn set_log_min_error_statement(level: ErrorLevel) {
 // Server-log formatting GUCs (elog.c file-level globals)
 // ---------------------------------------------------------------------------
 
-thread_local! { static LOG_ERROR_VERBOSITY: Cell<i32> = const { Cell::new(PGERROR_DEFAULT) }; }
+thread_local! { static LOG_ERROR_VERBOSITY: Cell<PGErrorVerbosity> = const { Cell::new(PGErrorVerbosity::Default) }; }
 thread_local! { static LOG_LINE_PREFIX: RefCell<Option<String>> = const { RefCell::new(None) }; }
 thread_local! { static LOG_DESTINATION: Cell<i32> = const { Cell::new(LOG_DESTINATION_STDERR) }; }
 thread_local! { static SYSLOG_SEQUENCE_NUMBERS: Cell<bool> = const { Cell::new(true) }; }
 thread_local! { static SYSLOG_SPLIT_MESSAGES: Cell<bool> = const { Cell::new(true) }; }
 
-pub fn log_error_verbosity() -> i32 {
+pub fn log_error_verbosity() -> PGErrorVerbosity {
     LOG_ERROR_VERBOSITY.with(Cell::get)
 }
 
-pub fn set_log_error_verbosity(verbosity: i32) {
+pub fn set_log_error_verbosity(verbosity: PGErrorVerbosity) {
     LOG_ERROR_VERBOSITY.with(|c| c.set(verbosity));
 }
 
@@ -340,16 +341,26 @@ pub fn assign_syslog_facility(newval: i32) {
     crate::syslog::assign_syslog_facility(newval);
 }
 
-/// `SplitIdentifierString` (varlena.c) semantics inlined for the
-/// `log_destination` list: comma-separated identifiers, unquoted ones
-/// whitespace-trimmed and downcased, double-quoted ones taken verbatim with
-/// `""` as an escaped quote. `Err` is the C `false` (syntax error) return.
+/// `scanner_isspace` (scansup.c): the lexer's {space} set — NOT Unicode
+/// whitespace.
+fn scanner_isspace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+/// `SplitIdentifierString` (varlena.c) semantics, duplicated here until the
+/// adt/varlena unit lands (recorded on its CATALOG.tsv row): comma-separated
+/// identifiers; unquoted ones trimmed and put through
+/// `downcase_truncate_identifier` (scansup.c) — ASCII downcasing (the
+/// high-bit `tolower` branch only fires in single-byte encodings; owned
+/// strings are UTF-8) plus truncation to NAMEDATALEN-1 bytes on a character
+/// boundary; double-quoted ones taken verbatim with `""` as an escaped quote.
+/// `Err` is the C `false` (syntax error) return.
 fn split_identifier_string(raw: &str, separator: char) -> PgResult<Vec<String>> {
     let syntax_error = || PgError::error("List syntax is invalid.");
     let mut chars = raw.char_indices().peekable();
     let mut identifiers = Vec::new();
 
-    while matches!(chars.peek(), Some((_, ch)) if ch.is_whitespace()) {
+    while matches!(chars.peek(), Some((_, ch)) if scanner_isspace(*ch)) {
         chars.next();
     }
     if chars.peek().is_none() {
@@ -374,28 +385,38 @@ fn split_identifier_string(raw: &str, separator: char) -> PgResult<Vec<String>> 
             }
             identifier
         } else {
-            // Unquoted identifier: up to separator or whitespace, downcased
+            // Unquoted identifier: up to separator or whitespace, then
+            // downcase_truncate_identifier.
             let mut identifier = String::new();
             while let Some((_, ch)) = chars.peek().copied() {
-                if ch == separator || ch.is_whitespace() {
+                if ch == separator || scanner_isspace(ch) {
                     break;
                 }
                 chars.next();
-                identifier.extend(ch.to_lowercase());
+                identifier.push(ch.to_ascii_lowercase());
             }
             if identifier.is_empty() {
                 return Err(syntax_error());
             }
+            // truncate_identifier: clip to NAMEDATALEN-1 bytes at a
+            // character boundary.
+            if identifier.len() >= NAMEDATALEN as usize {
+                let mut clip = NAMEDATALEN as usize - 1;
+                while !identifier.is_char_boundary(clip) {
+                    clip -= 1;
+                }
+                identifier.truncate(clip);
+            }
             identifier
         };
 
-        while matches!(chars.peek(), Some((_, ch)) if ch.is_whitespace()) {
+        while matches!(chars.peek(), Some((_, ch)) if scanner_isspace(*ch)) {
             chars.next();
         }
         match chars.peek().copied() {
             Some((_, ch)) if ch == separator => {
                 chars.next();
-                while matches!(chars.peek(), Some((_, ch)) if ch.is_whitespace()) {
+                while matches!(chars.peek(), Some((_, ch)) if scanner_isspace(*ch)) {
                     chars.next();
                 }
                 identifiers.push(identifier);

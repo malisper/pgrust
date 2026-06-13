@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use backend_utils_error::{config, elog, ereport, error_context_stack_clear};
+use backend_utils_error::{config, elog, ereport};
 use types_datum::Datum;
 use types_error::{
     ErrorLocation, PgResult, DEBUG3, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, PANIC,
@@ -121,11 +121,9 @@ fn proc_exit_prepare(code: i32) {
     backend_utils_init_small_seams::set_interrupt_holdoff_count::call(1);
     config::set_crit_section_count(0);
 
-    // Clear the error context stack: whatever context the callbacks might
-    // offer is no longer relevant, and they're likely to fail outright
-    // after things like aborting any open transaction.
-    error_context_stack_clear();
-    // For the same reason, reset debug_query_string before it's clobbered.
+    // (C clears error_context_stack here; that chain is retired in favor of
+    // attach-on-propagation, so there is no ambient state to clear.)
+    // Reset debug_query_string before it's clobbered.
     backend_tcop_postgres_seams::reset_debug_query_string::call();
 
     // Do our shared memory exits first.

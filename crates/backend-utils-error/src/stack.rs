@@ -16,12 +16,12 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::cell::Cell;
 
-use types_dest::{DestNone, DestRemote};
+use types_dest::CommandDest;
 use types_error::{
     ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState, ERROR, FATAL, PANIC,
 };
 
-use crate::{config, context_chain, errno, policy, report, sink};
+use crate::{config, errno, policy, report, sink};
 
 /// `ERRORDATA_STACK_SIZE` (elog.c): the re-entrant ErrorData stack depth.
 pub const ERRORDATA_STACK_SIZE: usize = 5;
@@ -124,10 +124,10 @@ pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {
             // C resets ErrorContext (the allocation arena) here; no arena in
             // the owned model. The infinite-recursion fallbacks do apply:
             if st.recursion_depth > 2 {
-                // in_error_recursion_trouble(): abandon context callbacks and
-                // statement logging — either could be the source of the
-                // recursive failure.
-                context_chain::error_context_stack_clear();
+                // in_error_recursion_trouble(): abandon statement logging — it
+                // could be the source of the recursive failure. (C also clears
+                // error_context_stack; that chain is retired in favor of
+                // attach-on-propagation, see the crate docs.)
                 STATEMENT_SUPPRESSED.with(|c| c.set(true));
             }
         }
@@ -220,20 +220,8 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         }
     }
 
-    // Call the context callback functions. Errors occurring inside them are
-    // treated as recursive errors (recursion_depth is still elevated). The
-    // error is copied out for the callbacks and written back, because the
-    // callbacks may themselves push/pop stack frames.
-    let mut error = STACK.with(|s| {
-        s.borrow()
-            .frames
-            .last()
-            .expect("frame checked above")
-            .error
-            .clone()
-    });
-    context_chain::run_error_context_callbacks(&mut error);
-    with_current_mut_unchecked(|slot| *slot = error);
+    // (C walks error_context_stack here; context now attaches on propagation
+    // via PgError::add_context — see the crate docs.)
 
     // If ERROR (not more nor less), hand it to the handler: pop the frame and
     // return it as Err (divergence from C's PG_RE_THROW; see crate docs).
@@ -259,8 +247,8 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         // If we just reported a startup failure, the client will disconnect
         // on receiving it, so don't send any more to the client. (The C gate
         // `PG_exception_stack == NULL` is subsumed by the divergence above.)
-        if config::where_to_send_output() == DestRemote {
-            config::set_where_to_send_output(DestNone);
+        if config::where_to_send_output() == CommandDest::Remote {
+            config::set_where_to_send_output(CommandDest::None);
         }
 
         // fflush(NULL): improve the odds the message is seen if proc_exit crashes.
@@ -501,7 +489,7 @@ pub fn errhint_plural(fmt_singular: &str, fmt_plural: &str, n: u64) -> PgResult<
 pub fn errcontext_msg(context: &str) -> PgResult<()> {
     with_current_mut(|error| {
         let line = errno::replace_percent_m(context, error.saved_errno.unwrap_or(0));
-        context_chain::append_error_context(error, &line);
+        error.add_context_line(line);
     })
 }
 
@@ -687,18 +675,9 @@ pub fn pg_re_throw<T>() -> PgResult<T> {
     }
 }
 
-/// `GetErrorContextStack` — collect the context-callback output for
-/// display/diagnostics: crank up a fresh entry, fire the callbacks into it,
-/// and return the accumulated context string.
-pub fn GetErrorContextStack() -> String {
-    // recursion_depth++ around the callbacks, as in C (it feeds
-    // in_error_recursion_trouble() should a callback misbehave).
-    STACK.with(|s| s.borrow_mut().recursion_depth += 1);
-    let mut scratch = PgError::new(types_error::LOG, String::new());
-    context_chain::run_error_context_callbacks(&mut scratch);
-    STACK.with(|s| s.borrow_mut().recursion_depth -= 1);
-    scratch.context.unwrap_or_default()
-}
+// (C's `GetErrorContextStack` fires the error_context_stack callbacks into a
+// scratch entry; with attach-on-propagation there is no ambient chain to walk,
+// so it has no counterpart — context lives on the propagating PgError.)
 
 // ---------------------------------------------------------------------------
 // Soft-error support (errsave_start / errsave_finish)

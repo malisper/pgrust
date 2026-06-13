@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use types_dest::{CommandDest, DestNone, DestRemote};
+use types_dest::CommandDest;
 use types_error::{
     make_sqlstate, ErrorLevel, ErrorLocation, PgError, DEBUG1, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -28,7 +28,7 @@ fn set_guc(log_min: ErrorLevel, client_min: ErrorLevel, dest: CommandDest, auth:
 }
 
 fn reset_guc() {
-    set_guc(WARNING, NOTICE, DestNone, false);
+    set_guc(WARNING, NOTICE, CommandDest::None, false);
 }
 
 #[test]
@@ -68,12 +68,12 @@ fn should_output_to_server_honors_log_min_messages() {
     assert!(!should_output_to_server(NOTICE));
     assert!(should_output_to_server(LOG));
 
-    set_guc(ERROR, NOTICE, DestNone, false);
+    set_guc(ERROR, NOTICE, CommandDest::None, false);
     assert!(!should_output_to_server(WARNING));
     assert!(should_output_to_server(ERROR));
     assert!(should_output_to_server(LOG));
 
-    set_guc(FATAL, NOTICE, DestNone, false);
+    set_guc(FATAL, NOTICE, CommandDest::None, false);
     assert!(!should_output_to_server(LOG));
     assert!(should_output_to_server(FATAL));
 
@@ -84,12 +84,12 @@ fn should_output_to_server_honors_log_min_messages() {
 fn should_output_to_client_honors_dest_auth_and_client_min_messages() {
     let _guard = lock();
 
-    set_guc(WARNING, NOTICE, DestRemote, false);
+    set_guc(WARNING, NOTICE, CommandDest::Remote, false);
     assert!(should_output_to_client(NOTICE));
     assert!(should_output_to_client(ERROR));
 
     // INFO is always sent to the client regardless of client_min_messages.
-    set_guc(ERROR, ERROR, DestRemote, false);
+    set_guc(ERROR, ERROR, CommandDest::Remote, false);
     assert!(should_output_to_client(INFO));
     assert!(!should_output_to_client(NOTICE));
     assert!(should_output_to_client(ERROR));
@@ -98,13 +98,13 @@ fn should_output_to_client_honors_dest_auth_and_client_min_messages() {
     assert!(!should_output_to_client(LOG_SERVER_ONLY));
 
     // During authentication only ERROR and above reach the client.
-    set_guc(NOTICE, NOTICE, DestRemote, true);
+    set_guc(NOTICE, NOTICE, CommandDest::Remote, true);
     assert!(!should_output_to_client(NOTICE));
     assert!(!should_output_to_client(INFO));
     assert!(should_output_to_client(ERROR));
 
     // When output is not directed at a remote client, nothing is sent.
-    set_guc(NOTICE, NOTICE, DestNone, false);
+    set_guc(NOTICE, NOTICE, CommandDest::None, false);
     assert!(!should_output_to_client(ERROR));
     assert!(!should_output_to_client(NOTICE));
 
@@ -115,16 +115,16 @@ fn should_output_to_client_honors_dest_auth_and_client_min_messages() {
 fn message_level_is_interesting_matches_errstart_decision() {
     let _guard = lock();
 
-    set_guc(PANIC, ERROR, DestNone, false);
+    set_guc(PANIC, ERROR, CommandDest::None, false);
     assert!(message_level_is_interesting(ERROR));
     assert!(message_level_is_interesting(FATAL));
     assert!(!message_level_is_interesting(NOTICE));
     assert!(!message_level_is_interesting(WARNING));
 
-    set_guc(PANIC, NOTICE, DestRemote, false);
+    set_guc(PANIC, NOTICE, CommandDest::Remote, false);
     assert!(message_level_is_interesting(NOTICE));
 
-    set_guc(NOTICE, ERROR, DestNone, false);
+    set_guc(NOTICE, ERROR, CommandDest::None, false);
     assert!(message_level_is_interesting(NOTICE));
 
     reset_guc();
@@ -282,35 +282,39 @@ fn rethrow_error_checks_level() {
 }
 
 #[test]
-fn context_chain_fires_innermost_first() {
-    let outer = error_context_push(Box::new(|e: &mut PgError| {
-        append_error_context(e, "outer frame");
-    }));
-    let inner = error_context_push(Box::new(|e: &mut PgError| {
-        append_error_context(e, "inner frame");
-    }));
-
-    assert_eq!(GetErrorContextStack(), "inner frame\nouter frame");
-
-    drop(inner);
-    assert_eq!(GetErrorContextStack(), "outer frame");
-    drop(outer);
-    assert_eq!(error_context_depth(), 0);
+fn context_attaches_on_propagation_innermost_first() {
+    // docs/query-lifecycle-raii.md: error context attaches on propagation,
+    // innermost boundary first (replacing the error_context_stack walk).
+    fn inner() -> PgResult<()> {
+        Err(PgError::error("kaput"))
+    }
+    fn middle() -> PgResult<()> {
+        inner().map_err(|e| e.add_context("inner frame"))
+    }
+    let err = middle()
+        .map_err(|e| e.add_context("outer frame"))
+        .unwrap_err();
+    assert_eq!(err.context.as_deref(), Some("inner frame\nouter frame"));
 }
 
 #[test]
-fn errfinish_runs_context_callbacks() {
+fn errcontext_msg_appends_to_in_flight_error() {
     let _guard = lock();
     reset_guc();
     FlushErrorState();
 
-    let g = error_context_push(Box::new(|e: &mut PgError| {
-        append_error_context(e, "SQL statement \"SELECT 1\"");
-    }));
-    let err = ThrowErrorData(PgError::error("kaput")).unwrap_err();
-    drop(g);
+    assert!(errstart(ERROR, None));
+    errmsg("kaput").unwrap();
+    errcontext_msg("SQL statement \"SELECT 1\"").unwrap();
+    let err = pg_re_throw::<()>().unwrap_err();
 
-    assert_eq!(err.context.as_deref(), Some("SQL statement \"SELECT 1\""));
+    let err = Err::<(), _>(err)
+        .map_err(|e: PgError| e.add_context("PL/pgSQL function f() line 1"))
+        .unwrap_err();
+    assert_eq!(
+        err.context.as_deref(),
+        Some("SQL statement \"SELECT 1\"\nPL/pgSQL function f() line 1")
+    );
 }
 
 #[test]

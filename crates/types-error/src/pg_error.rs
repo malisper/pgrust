@@ -246,11 +246,25 @@ impl PgError {
         self
     }
 
-    /// Appends to any existing context, newline-separated, matching how the
-    /// error-context callback chain accumulates context lines.
+    /// Appends to any existing context, newline-separated, matching how C's
+    /// `errcontext()` accumulates context lines.
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = append_context(self.context.take(), context.into());
         self
+    }
+
+    /// Attach-on-propagation context (docs/query-lifecycle-raii.md): the
+    /// replacement for C's `error_context_stack` callbacks, applied at the
+    /// boundary where C pushed the callback —
+    /// `result.map_err(|e| e.add_context("while ..."))`.
+    pub fn add_context(self, context: impl Into<String>) -> Self {
+        self.with_context(context)
+    }
+
+    /// In-place flavor of [`PgError::add_context`] (C's `errcontext()` body:
+    /// append one context line, newline-joined).
+    pub fn add_context_line(&mut self, line: impl Into<String>) {
+        self.context = append_context(self.context.take(), line.into());
     }
 
     pub fn with_backtrace(mut self, backtrace: impl Into<String>) -> Self {

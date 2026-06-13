@@ -1,6 +1,6 @@
 //! Output-decision policy: is_log_level_output and friends.
 
-use types_dest::DestRemote;
+use types_dest::CommandDest;
 use types_error::{ErrorLevel, ERROR, FATAL, INFO, LOG, LOG_SERVER_ONLY, WARNING_CLIENT_ONLY};
 
 use crate::config;
@@ -42,7 +42,7 @@ pub fn should_output_to_server(elevel: ErrorLevel) -> bool {
 /// handshake completes (security, and clients that can't handle NOTICE during
 /// auth); INFO is always sent.
 pub fn should_output_to_client(elevel: ErrorLevel) -> bool {
-    if config::where_to_send_output() == DestRemote && elevel != LOG_SERVER_ONLY {
+    if config::where_to_send_output() == CommandDest::Remote && elevel != LOG_SERVER_ONLY {
         if config::client_auth_in_progress() {
             elevel >= ERROR
         } else {
