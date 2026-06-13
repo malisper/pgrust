@@ -442,10 +442,42 @@ fn set_latch_my_latch() {
     SetLatch(latch);
 }
 
+/// `ResetLatch(MyLatch)` for the seam's parameterless shape. A NULL `MyLatch`
+/// would crash the C; surface it loudly.
+fn reset_latch_my_latch() {
+    let latch = my_latch().expect("ResetLatch(MyLatch): MyLatch is not set");
+    ResetLatch(latch);
+}
+
+/// `WaitLatch(MyLatch, ...)` for the seam's MyLatch shape.
+fn wait_latch_my_latch(
+    wake_events: u32,
+    timeout: i64,
+    wait_event_info: u32,
+) -> types_error::PgResult<u32> {
+    WaitLatch(my_latch(), wake_events, timeout, wait_event_info)
+}
+
+/// `WaitLatch(latch, ...)` for the seam's explicit-handle shape. The seam
+/// takes a non-optional `LatchHandle` (C call sites that pass a concrete
+/// latch pointer) and returns `PgResult<i32>` matching the C return type.
+fn wait_latch_seam(
+    latch: LatchHandle,
+    wake_events: u32,
+    timeout: i64,
+    wait_event_info: u32,
+) -> types_error::PgResult<i32> {
+    WaitLatch(Some(latch), wake_events, timeout, wait_event_info).map(|v| v as i32)
+}
+
 /// Install this unit's seams (`backend-storage-ipc-latch-seams`).
 pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::set(set_latch_my_latch);
     backend_storage_ipc_latch_seams::reset_latch::set(ResetLatch);
+    backend_storage_ipc_latch_seams::set_latch::set(SetLatch);
+    backend_storage_ipc_latch_seams::reset_latch_my_latch::set(reset_latch_my_latch);
+    backend_storage_ipc_latch_seams::wait_latch_my_latch::set(wait_latch_my_latch);
+    backend_storage_ipc_latch_seams::wait_latch::set(wait_latch_seam);
 }
 
 #[cfg(test)]
