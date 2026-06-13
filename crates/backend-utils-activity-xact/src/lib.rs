@@ -47,10 +47,58 @@ pub use types_pgstat::activity_pgstat::{
     PgStat_Kind, PgStat_PendingDroppedStatsItem, PgStat_SubXactStatus,
 };
 
-/// Install this crate's seam implementations. This unit's functions have no
-/// seam crate yet (no cyclic consumer has needed one), so there is nothing to
-/// install.
-pub fn init_seams() {}
+/// Install this crate's seam implementations into
+/// `backend-utils-activity-xact-seams`.
+pub fn init_seams() {
+    use backend_utils_activity_xact_seams as xact_stat_seams;
+
+    // at_eoxact_pgstat: seam declares no return; impl returns PgResult<()>.
+    // Callers in engine.rs do not propagate errors, mirroring the C path where
+    // AtEOXact_PgStat either returns normally or ereport(ERROR) (longjmp).
+    // Unwrap propagates the ereport panic if one fires.
+    xact_stat_seams::at_eoxact_pgstat::set(|is_commit, parallel| {
+        AtEOXact_PgStat(is_commit, parallel)
+            .expect("AtEOXact_PgStat failed");
+    });
+
+    // at_eosubxact_pgstat: same treatment as at_eoxact_pgstat.
+    xact_stat_seams::at_eosubxact_pgstat::set(|is_commit, nest_depth| {
+        AtEOSubXact_PgStat(is_commit, nest_depth)
+            .expect("AtEOSubXact_PgStat failed");
+    });
+
+    xact_stat_seams::at_prepare_pgstat::set(AtPrepare_PgStat);
+    xact_stat_seams::post_prepare_pgstat::set(PostPrepare_PgStat);
+
+    // pgstat_get_transactional_drops: seam uses types_wal::XlXactStatsItem
+    // while the impl uses types_core::xact::XlXactStatsItem. Both types are
+    // structurally identical (same fields, same layout) — convert field-by-field.
+    xact_stat_seams::pgstat_get_transactional_drops::set(|mcx, is_commit| {
+        let core_items = pgstat_get_transactional_drops(mcx, is_commit)?;
+        let mut wal_items = mcx::vec_with_capacity_in(mcx, core_items.len())?;
+        for it in core_items.iter() {
+            wal_items.push(types_wal::XlXactStatsItem {
+                kind: it.kind,
+                dboid: it.dboid,
+                objid: it.objid,
+            });
+        }
+        Ok(wal_items)
+    });
+
+    // pgstat_execute_transactional_drops: same type-bridging in reverse.
+    xact_stat_seams::pgstat_execute_transactional_drops::set(|items, is_redo| {
+        let core_items: Vec<XlXactStatsItem> = items
+            .iter()
+            .map(|it| XlXactStatsItem {
+                kind: it.kind,
+                dboid: it.dboid,
+                objid: it.objid,
+            })
+            .collect();
+        pgstat_execute_transactional_drops(&core_items, is_redo)
+    });
+}
 
 thread_local! {
     /// `static PgStat_SubXactStatus *pgStatXactStack = NULL;` — the top of the

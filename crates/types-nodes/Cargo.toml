@@ -19,3 +19,4 @@ types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 types-storage = { path = "../types-storage" }
 types-execgrouping = { path = "../types-execgrouping" }
+types-execparallel = { path = "../types-execparallel" }

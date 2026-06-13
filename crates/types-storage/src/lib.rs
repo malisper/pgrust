@@ -8,13 +8,16 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod buf;
 pub mod latch;
 pub mod lock;
 pub mod relfilelocator;
 pub mod sinval;
 pub mod storage;
+pub mod sync;
 pub mod waiteventset;
 
+pub use buf::*;
 pub use lock::*;
 pub use relfilelocator::*;
 pub use sinval::*;

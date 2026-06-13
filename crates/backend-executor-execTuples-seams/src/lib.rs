@@ -49,6 +49,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c): store
+    /// the minimal tuple in the slot (a `MINIMALTUPLE` slot;
+    /// `tts_minimal_store_tuple`). The slot is addressed by pool id. The tuple
+    /// is read into the slot's context (C: `shouldFree` controls whether the
+    /// passed tuple is `pfree`d after copying; the gather caller passes
+    /// `false`). Wrong slot class is the C `elog(ERROR)`, carried on `Err`;
+    /// storing can also allocate, so fallible on OOM.
+    pub fn exec_store_minimal_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        mtup: types_tuple::heaptuple::MinimalTuple<'mcx>,
+        slot: types_nodes::SlotId,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): set the node's result
+    /// tuple descriptor from its plan targetlist
+    /// (`ExecTypeFromTL(planstate->plan->targetlist)`), storing it in
+    /// `planstate.ps_ResultTupleDesc`. Building the descriptor allocates, so
+    /// fallible on OOM.
+    pub fn exec_init_result_type_tl<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h): copy the source slot's
     /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). The
     /// copy allocates in `mcx`, the destination slot's memory context (C:
@@ -209,4 +236,29 @@ seam_core::seam!(
     pub fn exec_get_result_slot_ops<'mcx>(
         planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
     ) -> types_nodes::TupleSlotKind
+);
+
+seam_core::seam!(
+    /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
+    /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
+    /// taking ownership when `should_free`. Fallible on OOM.
+    pub fn exec_force_store_minimal_tuple<'mcx>(
+        slot: types_nodes::SlotId,
+        mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        should_free: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): materialize
+    /// the slot's contents as a `MinimalTuple` (copied into `mcx`), returning it
+    /// and whether the caller must free it. Fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<(
+        mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        bool,
+    )>
 );

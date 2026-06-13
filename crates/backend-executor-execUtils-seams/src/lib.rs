@@ -41,6 +41,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecConditionalAssignProjectionInfo(planstate, inputDesc, varno)`
+    /// (execUtils.c): if the node's targetlist already matches `inputDesc`
+    /// (var-by-var, all simple `Var`s of `varno`), skip projection
+    /// (`ps_ProjInfo = NULL`) and copy the scan slot ops onto the result ops;
+    /// otherwise create the result slot if needed and build the projection
+    /// (`ExecAssignProjectionInfo`). The estate is lent because the projection
+    /// builder reaches the result slot through it. Allocates / can
+    /// `ereport(ERROR)` on an unsupported expression, so fallible.
+    pub fn exec_conditional_assign_projection_info<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
+        varno: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecAssignProjectionInfo(planstate, inputDesc)` (execUtils.c): build
     /// the node's `ps_ProjInfo` from its result slot and target list (using the
     /// node's `ps_ResultTupleSlot`/`ps_ExprContext`). The owned model lends the
@@ -62,4 +79,13 @@ seam_core::seam!(
     pub fn exec_get_common_child_slot_ops<'mcx>(
         ps: &types_nodes::execnodes::PlanStateData<'mcx>,
     ) -> Option<types_nodes::TupleSlotKind>
+);
+
+seam_core::seam!(
+    /// `ResetExprContext(node->js.ps.ps_ExprContext)` (executor.h): reset the
+    /// node's per-tuple memory context, freeing per-tuple expression storage.
+    pub fn reset_per_tuple_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
 );
