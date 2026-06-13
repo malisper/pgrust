@@ -3683,6 +3683,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-dshash"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-dshash-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-lib-dshash-seams"
 version = "0.0.0"
 dependencies = [
@@ -7736,6 +7752,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "common-ip"
 version = "0.0.0"
 dependencies = [
@@ -7838,6 +7862,14 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg-prng"
 version = "0.0.0"
+
+[[package]]
+name = "port-crc32c"
+version = "0.0.0"
+dependencies = [
+ "port-crc32c-seams",
+ "port-pg-crc32c-seams",
+]
 
 [[package]]
 name = "port-crc32c-seams"
