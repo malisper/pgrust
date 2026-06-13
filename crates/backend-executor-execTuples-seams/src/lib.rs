@@ -43,6 +43,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): initialize the node's
+    /// result tuple type (`ps_ResultTupleDesc`) from the plan's targetlist,
+    /// without creating a result slot. Allocates the descriptor, so fallible on
+    /// OOM.
+    pub fn exec_init_result_type_tl<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h): clear the slot's contents
     /// (`slot->tts_ops->clear`).
     pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_error::PgResult<()>

@@ -28,6 +28,7 @@ backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execParallel = { path = "../backend-executor-execParallel" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
+backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }

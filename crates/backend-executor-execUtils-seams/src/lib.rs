@@ -53,3 +53,16 @@ seam_core::seam!(
         input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecAssignScanProjectionInfo(scanstate)` (execUtils.c): set up
+    /// projection info for a scan node whose scan tuple slot's descriptor is
+    /// the projection input, choosing whether a projection is needed
+    /// (`ExecConditionalAssignProjectionInfo` over the scan's `scanrelid`
+    /// varno). Reaches the scan slot through the estate. Allocates the compiled
+    /// projection, so fallible on OOM.
+    pub fn exec_assign_scan_projection_info<'mcx>(
+        scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

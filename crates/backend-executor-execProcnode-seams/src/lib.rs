@@ -44,3 +44,16 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MultiExecProcNode(node)` (execProcnode.c): run a node that returns a
+    /// bulk result rather than a tuple-at-a-time stream — for bitmap-scan
+    /// inputs the child `BitmapIndexScan`/`BitmapAnd`/`BitmapOr` returns a
+    /// built `TIDBitmap`. Dispatches through the node's `MultiExecProcNodeMtd`.
+    /// The result is allocated during execution (`es_query_cxt`), so the call
+    /// is fallible. The caller verifies `IsA(result, TIDBitmap)`.
+    pub fn multi_exec_proc_node<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tidbitmap::TIDBitmap>>
+);

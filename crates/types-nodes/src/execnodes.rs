@@ -281,6 +281,11 @@ pub struct ScanStateData<'mcx> {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
+    /// `Snapshot es_snapshot` — time qual to use. A [`SnapshotHandle`] token
+    /// into the snapshot manager (which owns the live `SnapshotData`); `None`
+    /// is the C `InvalidSnapshot`. Consumed first by `nodeBitmapHeapscan`
+    /// (`table_beginscan_bm` passes `estate->es_snapshot`).
+    pub es_snapshot: Option<types_scan::snapshot::SnapshotHandle>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
@@ -359,6 +364,11 @@ pub struct EStateData<'mcx> {
     /// EState (C: caller-owned nodes aliased from the lists above), addressed
     /// by [`RriId`].
     pub es_result_rel_pool: PgVec<'mcx, ResultRelInfo<'mcx>>,
+    /// `struct dsa_area *es_query_dsa` — the per-query DSA area for parallel
+    /// execution, a live [`DsaAreaHandle`] into the DSA subsystem; `None` is
+    /// the C `NULL` (no parallel workers). Consumed first by
+    /// `nodeBitmapHeapscan`'s parallel-scan DSM setup.
+    pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -370,6 +380,8 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
+            // es_snapshot = InvalidSnapshot;
+            es_snapshot: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
@@ -423,6 +435,8 @@ impl<'mcx> EStateData<'mcx> {
             es_unpruned_relids: None,
             es_partition_directory: Opaque(None),
             es_result_rel_pool: PgVec::new_in(mcx),
+            // es_query_dsa = NULL;
+            es_query_dsa: None,
         }
     }
 

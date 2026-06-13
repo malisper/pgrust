@@ -63,6 +63,12 @@ pub struct TableScanDescData<'mcx> {
     pub rs_flags: u32,
     /// `rs_parallel` — parallel scan information (shared descriptor).
     pub rs_parallel: Option<std::sync::Arc<ParallelTableScanDescData>>,
+    /// `union { ... struct { TBMIterator rs_tbmiterator; } st; ... }` — the
+    /// scan-type-specific union. Trimmed to the bitmap-scan member
+    /// `st.rs_tbmiterator`, the only one any ported consumer reads
+    /// (`nodeBitmapHeapscan`). Other union members land with their first
+    /// consumer.
+    pub rs_tbmiterator: types_tidbitmap::TBMIterator,
     /// The AM-private scan state (heap's `HeapScanDescData` tail), owned by
     /// the access method that created the descriptor.
     pub am_private: Option<std::boxed::Box<dyn Any>>,
