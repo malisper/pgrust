@@ -331,6 +331,22 @@ pub const PROC_ARRAY_LOCK: usize = 4;
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
 /// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.
 pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
+/// `ShmemIndexLock` (`lwlocklist.h`): offset of the shmem-index lock in
+/// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
+pub const SHMEM_INDEX_LOCK: usize = 1;
+
+/// Possible values for `huge_pages` and `huge_pages_status`
+/// (`storage/pg_shmem.h`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HugePagesStatus {
+    HUGE_PAGES_OFF = 0,
+    HUGE_PAGES_ON = 1,
+    /// Only for `huge_pages`.
+    HUGE_PAGES_TRY = 2,
+    /// Only for `huge_pages_status`.
+    HUGE_PAGES_UNKNOWN = 3,
+}
 
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
@@ -494,7 +510,7 @@ pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1
 
 /// `RelFileLocator` (`storage/relfilelocator.h`) — the physical identity of a
 /// relation: tablespace, database, and relfilenumber.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct RelFileLocator {
     /// `spcOid` — tablespace.
     pub spcOid: Oid,
@@ -502,6 +518,23 @@ pub struct RelFileLocator {
     pub dbOid: Oid,
     /// `relNumber` — relation storage number.
     pub relNumber: RelFileNumber,
+}
+
+/// `ReadBufferMode` (`storage/bufmgr.h`) — mirrors the C enum exactly,
+/// including discriminant order, so it round-trips byte-for-byte across seams.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub enum ReadBufferMode {
+    /// `RBM_NORMAL`.
+    Normal = 0,
+    /// `RBM_ZERO_AND_LOCK`.
+    ZeroAndLock,
+    /// `RBM_ZERO_AND_CLEANUP_LOCK`.
+    ZeroAndCleanupLock,
+    /// `RBM_ZERO_ON_ERROR`.
+    ZeroOnError,
+    /// `RBM_NORMAL_NO_LOG`.
+    NormalNoLog,
 }
 
 /// `RelFileLocatorEquals(locator1, locator2)` (`storage/relfilelocator.h`).

@@ -173,3 +173,11 @@ seam_core::seam!(
     /// (`PGFILETYPE_ERROR`=0, `_UNKNOWN`=1, `_REG`=2, `_DIR`=3, `_LNK`=4).
     pub fn get_dirent_type(path: &str) -> i32
 );
+
+seam_core::seam!(
+    /// `BasicOpenFile(path, O_RDONLY | PG_BINARY)` (fd.c) — open a file
+    /// outside the virtual-fd pool. `Ok(fd)` on success; `Err(errno)` carries
+    /// the `errno` the C caller inspects (e.g. `ENOENT`) to choose its
+    /// `ereport` message.
+    pub fn basic_open_file(path: &str) -> Result<i32, i32>
+);
