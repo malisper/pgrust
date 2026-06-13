@@ -158,6 +158,7 @@ backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
+common-string = { path = "../common-string" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
 port-crc32c = { path = "../port-crc32c" }
 port-pgsleep = { path = "../port-pgsleep" }

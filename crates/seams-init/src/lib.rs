@@ -154,6 +154,7 @@ pub fn init_all() {
     common_checksum_helper::init_seams();
     common_ip::init_seams();
     common_pglz::init_seams();
+    common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();
     port_pgsleep::init_seams();
