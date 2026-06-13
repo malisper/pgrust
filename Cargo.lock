@@ -3409,6 +3409,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execSRF-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execScan-seams"
 version = "0.0.0"
 dependencies = [
@@ -4054,6 +4065,24 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeProjectSet"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execSRF-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-datum",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -9880,6 +9909,7 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
+ "backend-executor-nodeProjectSet",
  "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
