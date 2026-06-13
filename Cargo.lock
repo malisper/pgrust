@@ -5187,14 +5187,16 @@ dependencies = [
 name = "backend-storage-file-fd"
 version = "0.0.0"
 dependencies = [
- "backend-storage-aio-aio-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-file-seams",
- "backend-utils-activity-waitevent-seams",
+ "backend-utils-activity-stat-seams",
  "backend-utils-error",
+ "backend-utils-init-small-seams",
  "libc",
  "mcx",
+ "pg-prng",
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-storage",

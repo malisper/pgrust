@@ -104,6 +104,17 @@ pub(crate) fn walkdir(
     todo!("fd.c walkdir: recurse, call action per entry then on the dir itself")
 }
 
+/// `unlink_if_exists_fname(const char *fname, bool isdir, int elevel)` (fd.c) —
+/// a `walkdir` action: remove the entry (`rmdir` for a directory, `unlink`
+/// otherwise), tolerating `ENOENT`, logging other failures at `elevel`.
+pub(crate) fn unlink_if_exists_fname(
+    _fname: &Path,
+    _isdir: bool,
+    _elevel: ErrorLevel,
+) -> PgResult<()> {
+    todo!("fd.c unlink_if_exists_fname: rmdir/unlink tolerating ENOENT, log at elevel")
+}
+
 /// `SyncDataDirectory(void)` (fd.c) — fsync (or syncfs) the whole data dir.
 pub fn SyncDataDirectory() -> PgResult<()> {
     todo!("fd.c SyncDataDirectory: pre_sync_fname walk + datadir_fsync_fname walk, or syncfs")
