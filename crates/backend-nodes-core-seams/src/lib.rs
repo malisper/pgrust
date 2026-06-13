@@ -26,6 +26,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bms_next_member(a, prevbit)` (bitmapset.c): return the next set bit
+    /// strictly greater than `prevbit`, or `-2` past the last member (the C
+    /// returns `-2` once exhausted; callers stop on `< 0`). A `None` set is the
+    /// C NULL (empty) set. Infallible.
+    pub fn bms_next_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_is_empty(a)` (bitmapset.c): is the set empty? A `None` set is the
+    /// C NULL set, which is empty. Infallible.
+    pub fn bms_is_empty(a: Option<&types_nodes::Bitmapset<'_>>) -> bool
+);
+
+seam_core::seam!(
     /// `bms_intersect(a, b)` (bitmapset.c): form a new set with the
     /// intersection of the inputs (allocates the copy in `mcx`; `None` in or
     /// empty result is the C NULL).

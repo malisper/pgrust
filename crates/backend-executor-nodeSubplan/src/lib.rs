@@ -1,0 +1,1125 @@
+//! Port of `executor/nodeSubplan.c` — routines to support sub-selects appearing
+//! in expressions.
+//!
+//! This module executes `SubPlan` expression nodes (not sub-SELECTs in FROM).
+//! SubPlans split into "initplans" (one evaluation per query) and "regular"
+//! subplans (re-evaluated whenever their result is needed).
+//!
+//! The crate owns the control flow ported 1:1 from PostgreSQL 18.3. The
+//! subsystems it reaches into are not all ported, so their operations go
+//! through per-owner seam crates (they panic until the owner lands, which is
+//! correct):
+//!
+//! - the child subselect plan's `ExecProcNode`/`ExecReScan` (execProcnode /
+//!   execAmi),
+//! - the compiled expression states and projections, and the hashed-subplan
+//!   setup (execExpr),
+//! - the `TupleHashTable`s and their probing (execGrouping),
+//! - the `ArrayBuildStateAny` accumulation (arrayfuncs),
+//! - `clamp_cardinality_to_long` (costsize), the `Bitmapset` ops (nodes-core),
+//!   `CHECK_FOR_INTERRUPTS` (tcop).
+//!
+//! The owned-executor model threads `&mut EStateData` and the expression
+//! context `EcxtId` explicitly (in place of C's `PlanState.state` /
+//! `ExprContext` back-pointers); `ParamExecData` reads/writes and the scan
+//! direction are taken directly off the `EState`, per the execnodes vocabulary.
+
+#![allow(non_snake_case)]
+// `PgError` is a large enum carried by value in `PgResult`, matching the other
+// executor-node crates.
+#![allow(clippy::result_large_err)]
+// The NULL-result cascade in `ExecHashSubPlan` mirrors the C `if`/`else if`
+// chain literally: each branch tests a different condition but several share the
+// `isNull = true` action, and the short-circuit order is significant.
+#![allow(clippy::if_same_then_else)]
+
+extern crate alloc;
+
+use backend_executor_execAmi_seams as exec_ami;
+use backend_executor_execExpr_seams as exec_expr;
+use backend_executor_execGrouping_seams as exec_grouping;
+use backend_executor_execProcnode_seams as exec_procnode;
+use backend_executor_execTuples_seams as exec_tuples;
+use backend_nodes_core_seams as bms;
+use backend_optimizer_path_costsize_seams as costsize;
+use backend_tcop_postgres_seams as tcop;
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs;
+
+use exec_expr::ProjectionKind;
+use exec_grouping::HashTableKind;
+use mcx::PgBox;
+use types_core::AttrNumber;
+use types_datum::Datum;
+use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
+use types_nodes::execexpr::SubPlanState;
+use types_nodes::primnodes::SubLinkType;
+use types_nodes::{Bitmapset, EStateData, EcxtId};
+
+type Astate<'mcx> = arrayfuncs::ArrayBuildStateAnyHandle<'mcx>;
+
+// ===========================================================================
+// postgres.h inline helpers (pure node-layer).
+// ===========================================================================
+
+/// `BoolGetDatum(X)` (postgres.h).
+#[inline]
+fn BoolGetDatum(x: bool) -> Datum {
+    Datum::from_bool(x)
+}
+
+/// `DatumGetBool(X)` (postgres.h) — `(X) != 0`.
+#[inline]
+fn DatumGetBool(x: Datum) -> bool {
+    x.as_usize() != 0
+}
+
+// ===========================================================================
+// ExecSubPlan — main entry point for a regular SubPlan.
+// ===========================================================================
+
+/// `ExecSubPlan(node, econtext, isNull)` — process a sub-select. The boolean
+/// `isNull` out-parameter is returned alongside the result `Datum` as
+/// `(Datum, bool)`.
+pub fn ExecSubPlan<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum, bool)> {
+    let subplan = subplan_ref(node)?;
+    let subLinkType = subplan.subLinkType;
+    let has_setparam = !subplan.setParam.is_empty();
+    let useHashTable = subplan.useHashTable;
+
+    // EState   *estate = node->planstate->state;
+    // ScanDirection dir = estate->es_direction;
+    let dir = estate.es_direction;
+
+    tcop::check_for_interrupts::call()?;
+
+    // Set non-null as default
+    let mut isNull = false;
+
+    // Sanity checks
+    if subLinkType == SubLinkType::Cte {
+        return Err(elog_internal("CTE subplans should not be executed via ExecSubPlan"));
+    }
+    if has_setparam && subLinkType != SubLinkType::MultiExpr {
+        return Err(elog_internal("cannot set parent params from subquery"));
+    }
+
+    // Force forward-scan mode for evaluation
+    estate.es_direction = types_nodes::ScanDirection::ForwardScanDirection;
+
+    // Select appropriate evaluation strategy
+    let retval = if useHashTable {
+        ExecHashSubPlan(node, econtext, estate, &mut isNull)
+    } else {
+        ExecScanSubPlan(node, econtext, estate, &mut isNull)
+    };
+
+    // restore scan direction
+    estate.es_direction = dir;
+
+    let result = retval?;
+    Ok((result, isNull))
+}
+
+/// `ExecHashSubPlan` — store subselect result in an in-memory hash table.
+fn ExecHashSubPlan<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+    isNull: &mut bool,
+) -> PgResult<Datum> {
+    let mut result = false;
+
+    let subplan = subplan_ref(node)?;
+    // Shouldn't have any direct correlation Vars
+    if !subplan.parParam.is_empty() || !subplan.args.is_empty() {
+        return Err(elog_internal("hashed subplan with direct correlation not supported"));
+    }
+
+    // If first time through or we need to rescan the subplan, build the hash
+    // table.  (node->hashtable == NULL || planstate->chgParam != NULL)
+    let need_build = !exec_grouping::hash_table_present::call(node, HashTableKind::Main)
+        || planstate_chgparam_set(node);
+    if need_build {
+        buildSubPlanHash(node, econtext, estate)?;
+    }
+
+    // The result for an empty subplan is always FALSE; no need to evaluate
+    // lefthand side.
+    *isNull = false;
+    if !node.havehashrows && !node.havenullrows {
+        return Ok(BoolGetDatum(false));
+    }
+
+    // Evaluate lefthand expressions and form a projection tuple. First we have
+    // to set the econtext to use (hack alert!):
+    //   node->projLeft->pi_exprContext = econtext;
+    //   slot = ExecProject(node->projLeft);
+    exec_expr::sub_exec_project::call(node, estate, econtext, ProjectionKind::Left)?;
+
+    let havehashrows = node.havehashrows;
+    let havenullrows = node.havenullrows;
+    let has_hashnulls = exec_grouping::hash_table_present::call(node, HashTableKind::Nulls);
+
+    // If the LHS is all non-null, probe for an exact match in the main hash
+    // table.  If we find one, TRUE. Otherwise scan the partly-null table for an
+    // UNKNOWN; otherwise FALSE.
+    if slotNoNulls(node, estate, ProjectionKind::Left)? {
+        if havehashrows && exec_grouping::find_tuple_hash_entry_main::call(node, estate)? {
+            result = true;
+        } else if havenullrows && findPartialMatch(node, estate, HashTableKind::Nulls)? {
+            *isNull = true;
+        }
+    }
+    // When the LHS is partly or wholly NULL, we can never return TRUE.
+    else if !has_hashnulls {
+        // just return FALSE
+    } else if slotAllNulls(node, estate, ProjectionKind::Left)? {
+        *isNull = true;
+    }
+    // Scan partly-null table first, since more likely to get a match.
+    else if havenullrows && findPartialMatch(node, estate, HashTableKind::Nulls)? {
+        *isNull = true;
+    } else if havehashrows && findPartialMatch(node, estate, HashTableKind::Main)? {
+        *isNull = true;
+    }
+
+    // Explicitly clear the projected tuple before returning (per-tuple context
+    // double-free guard).
+    exec_expr::sub_clear_proj_result_slot::call(node, estate, ProjectionKind::Left)?;
+
+    // Also must reset the hashtempcxt after each hashtable lookup.
+    exec_grouping::reset_hashtempcxt::call(node);
+
+    Ok(BoolGetDatum(result))
+}
+
+/// `ExecScanSubPlan` — default case where we have to rescan the subplan each
+/// time.
+fn ExecScanSubPlan<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+    isNull: &mut bool,
+) -> PgResult<Datum> {
+    let subplan = subplan_ref(node)?;
+    let subLinkType = subplan.subLinkType;
+    let firstColType = subplan.firstColType;
+    let mut found = false; // true if got at least one subplan tuple
+    let mut astate: Astate<'mcx> = None;
+
+    // Initialize ArrayBuildStateAny in caller's context, if needed.
+    if subLinkType == SubLinkType::Array {
+        astate = arrayfuncs::init_array_result_any::call(estate.es_query_cxt, firstColType)?;
+    }
+
+    // We are probably in a short-lived expression-evaluation context. The
+    // per-query context is where the child plan's chgParam / ExecProcNode work
+    // happens; in the owned model that allocator is `estate.es_query_cxt`.
+    let per_query = estate.es_query_cxt;
+
+    // We rely on the caller to evaluate plan correlation values; we still record
+    // that the values (might have) changed, else ExecReScan() below won't know
+    // nodes need rescanning.
+    //   foreach(l, subplan->parParam)
+    //       planstate->chgParam = bms_add_member(planstate->chgParam, paramid);
+    let parParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.parParam)?;
+    for paramid in parParam {
+        let ps = planstate_head_mut(node)?;
+        let old = ps.chgParam.take();
+        ps.chgParam = Some(bms::bms_add_member::call(per_query, old, paramid)?);
+    }
+
+    // with that done, we can reset the subplan
+    exec_re_scan_child(node, estate)?;
+
+    // For all sublink types except EXPR and ARRAY, the result is boolean. We
+    // combine across tuples with OR (ANY) or AND (ALL) semantics. The result for
+    // no input tuples is FALSE for ANY, TRUE for ALL, NULL for ROWCOMPARE.
+    let mut result = BoolGetDatum(subLinkType == SubLinkType::All);
+    *isNull = false;
+
+    let paramIds = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.paramIds)?;
+    let setParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.setParam)?;
+
+    while let Some(slot) = exec_proc_node_child(node, estate)? {
+        if subLinkType == SubLinkType::Exists {
+            found = true;
+            result = BoolGetDatum(true);
+            break;
+        }
+
+        if subLinkType == SubLinkType::Expr {
+            // cannot allow multiple input tuples for EXPR sublink
+            if found {
+                return Err(cardinality_violation());
+            }
+            found = true;
+
+            // Copy the subplan's tuple in case the result is pass-by-ref;
+            // node->curTuple keeps it for eventual freeing.
+            exec_tuples::replace_cur_tuple_from_slot::call(node, estate, slot)?;
+
+            // result = heap_getattr(node->curTuple, 1, tdesc, isNull);
+            let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, 1)?;
+            result = attr.value;
+            *isNull = attr.isnull;
+            // keep scanning subplan to make sure there's only one tuple
+            continue;
+        }
+
+        if subLinkType == SubLinkType::MultiExpr {
+            // cannot allow multiple input tuples for MULTIEXPR sublink
+            if found {
+                return Err(cardinality_violation());
+            }
+            found = true;
+
+            exec_tuples::replace_cur_tuple_from_slot::call(node, estate, slot)?;
+
+            // Now set all the setParam params from the columns of the tuple.
+            let mut col: AttrNumber = 1;
+            for &paramid in setParam.iter() {
+                let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, col)?;
+                set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+                col += 1;
+            }
+            // keep scanning subplan to make sure there's only one tuple
+            continue;
+        }
+
+        if subLinkType == SubLinkType::Array {
+            found = true;
+            // stash away current value: dvalue = slot_getattr(slot, 1, &disnull)
+            let attr = exec_tuples::slot_getattr::call(estate, slot, 1)?;
+            astate = arrayfuncs::accum_array_result_any::call(
+                per_query, astate, attr.value, attr.isnull, firstColType,
+            )?;
+            // keep scanning subplan to collect all values
+            continue;
+        }
+
+        // cannot allow multiple input tuples for ROWCOMPARE sublink either
+        if subLinkType == SubLinkType::RowCompare && found {
+            return Err(cardinality_violation());
+        }
+
+        found = true;
+
+        // For ALL, ANY, ROWCOMPARE: load the Params representing the sub-select
+        // columns, then evaluate the combining expression.
+        let mut col: AttrNumber = 1;
+        for &paramid in paramIds.iter() {
+            let attr = exec_tuples::slot_getattr::call(estate, slot, col)?;
+            set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+            col += 1;
+        }
+
+        let (rowresult, rownull) =
+            exec_expr::eval_testexpr_switch_context::call(node, estate, econtext)?;
+
+        if subLinkType == SubLinkType::Any {
+            // combine across rows per OR semantics
+            if rownull {
+                *isNull = true;
+            } else if DatumGetBool(rowresult) {
+                result = BoolGetDatum(true);
+                *isNull = false;
+                break; // needn't look at any more rows
+            }
+        } else if subLinkType == SubLinkType::All {
+            // combine across rows per AND semantics
+            if rownull {
+                *isNull = true;
+            } else if !DatumGetBool(rowresult) {
+                result = BoolGetDatum(false);
+                *isNull = false;
+                break; // needn't look at any more rows
+            }
+        } else {
+            // must be ROWCOMPARE_SUBLINK
+            result = rowresult;
+            *isNull = rownull;
+        }
+    }
+
+    if subLinkType == SubLinkType::Array {
+        // We return the result in the caller's context.
+        result = arrayfuncs::make_array_result_any::call(per_query, astate)?;
+    } else if !found {
+        // deal with empty subplan result.  result/isNull were previously
+        // initialized correctly for all sublink types except EXPR and
+        // ROWCOMPARE; for those, return NULL.
+        if subLinkType == SubLinkType::Expr || subLinkType == SubLinkType::RowCompare {
+            result = Datum::null();
+            *isNull = true;
+        } else if subLinkType == SubLinkType::MultiExpr {
+            // We don't care about function result, but set the setParams.
+            for &paramid in setParam.iter() {
+                set_exec_param(estate, paramid, Datum::null(), true)?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// `buildSubPlanHash` — load hash table by scanning subplan output.
+fn buildSubPlanHash<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let subplan = subplan_ref(node)?;
+    debug_assert!(subplan.subLinkType == SubLinkType::Any);
+    let ncols = node.numCols;
+    let unknownEqFalse = subplan.unknownEqFalse;
+
+    // If we already had any hash tables, reset 'em; otherwise create empty hash
+    // table(s).  The input slot for each hash table is the ExecProject() result,
+    // so we use TTSOpsVirtual for the input ops.
+    exec_grouping::reset_hashtablecxt::call(node);
+    node.havehashrows = false;
+    node.havenullrows = false;
+
+    // nbuckets = clamp_cardinality_to_long(planstate->plan->plan_rows);
+    let plan_rows = planstate_plan_rows(node)?;
+    let mut nbuckets = costsize::clamp_cardinality_to_long::call(plan_rows);
+    if nbuckets < 1 {
+        nbuckets = 1;
+    }
+
+    if exec_grouping::hash_table_present::call(node, HashTableKind::Main) {
+        exec_grouping::reset_tuple_hash_table::call(node, HashTableKind::Main)?;
+    } else {
+        exec_grouping::build_tuple_hash_table::call(node, estate, HashTableKind::Main, nbuckets)?;
+    }
+
+    if !unknownEqFalse {
+        if ncols == 1 {
+            nbuckets = 1; // there can only be one entry
+        } else {
+            nbuckets /= 16;
+            if nbuckets < 1 {
+                nbuckets = 1;
+            }
+        }
+
+        if exec_grouping::hash_table_present::call(node, HashTableKind::Nulls) {
+            exec_grouping::reset_tuple_hash_table::call(node, HashTableKind::Nulls)?;
+        } else {
+            exec_grouping::build_tuple_hash_table::call(
+                node, estate, HashTableKind::Nulls, nbuckets,
+            )?;
+        }
+    } else {
+        exec_grouping::clear_hashnulls::call(node);
+    }
+
+    // The C switches to the per-query context (econtext->ecxt_per_query_memory
+    // == estate.es_query_cxt) for the child-plan manipulation below; the owned
+    // model has no ambient current context, and each operation takes its own
+    // allocator/estate, so no switch is needed.
+
+    // Reset subplan to start.
+    exec_re_scan_child(node, estate)?;
+
+    let paramIds = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.paramIds)?;
+
+    // Scan the subplan and load the hash table(s).  Duplicate rows are stored
+    // only once.
+    while let Some(slot) = exec_proc_node_child(node, estate)? {
+        // Load up the Params representing the raw sub-select outputs, then form
+        // the projection tuple to store in the hashtable.
+        //   prmdata = &(innerecontext->ecxt_param_exec_vals[paramid]);
+        //   prmdata->value = slot_getattr(slot, col, &(prmdata->isnull));
+        let mut col: AttrNumber = 1;
+        for &paramid in paramIds.iter() {
+            let attr = exec_tuples::slot_getattr::call(estate, slot, col)?;
+            set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+            col += 1;
+        }
+        // slot = ExecProject(node->projRight);
+        exec_expr::sub_exec_project::call(node, estate, econtext, ProjectionKind::Right)?;
+
+        // If result contains any nulls, store separately or not at all.
+        if slotNoNulls(node, estate, ProjectionKind::Right)? {
+            exec_grouping::lookup_tuple_hash_entry::call(node, estate, HashTableKind::Main)?;
+            node.havehashrows = true;
+        } else if exec_grouping::hash_table_present::call(node, HashTableKind::Nulls) {
+            exec_grouping::lookup_tuple_hash_entry::call(node, estate, HashTableKind::Nulls)?;
+            node.havenullrows = true;
+        }
+
+        // Reset innerecontext after each inner tuple to free ExecProject memory.
+        reset_inner_expr_context(node, estate)?;
+
+        // Also must reset the hashtempcxt after each hashtable lookup.
+        exec_grouping::reset_hashtempcxt::call(node);
+    }
+
+    // Clear the projRight result slot before any chance of a sub-query context
+    // reset (double-free guard).
+    exec_expr::sub_clear_proj_result_slot::call(node, estate, ProjectionKind::Right)?;
+
+    Ok(())
+}
+
+/// `execTuplesUnequal` — return true if two tuples are definitely unequal in the
+/// indicated fields (nodeSubplan.c:657-713).
+///
+/// Nulls are neither equal nor unequal to anything else. A true result is
+/// obtained only if there are non-null fields that compare not-equal. We compare
+/// last-to-first (least-significant sort key first), which is most likely to
+/// differ for sorted input, and can report a non-match as soon as one is found.
+fn execTuplesUnequal<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: HashTableKind,
+    num_cols: i32,
+) -> PgResult<bool> {
+    // Reset (and conceptually switch into) the table's temp/eval context.
+    exec_grouping::reset_hash_eval_context::call(node, which);
+
+    let mut result = false;
+
+    // for (i = numCols; --i >= 0;)
+    let mut i = num_cols;
+    loop {
+        i -= 1;
+        if i < 0 {
+            break;
+        }
+
+        // att = matchColIdx[i] (= hashtable->keyColIdx[i]).
+        let att = exec_grouping::hash_table_key_col_idx::call(node, which, i);
+
+        let attr1 = exec_expr::proj_left_slot_getattr::call(node, estate, att)?;
+        if attr1.isnull {
+            continue; // can't prove anything here
+        }
+
+        let attr2 = exec_grouping::tableslot_getattr::call(node, which, att)?;
+        if attr2.isnull {
+            continue; // can't prove anything here
+        }
+
+        // Apply the type-specific equality function.
+        let collation = exec_grouping::hash_table_collation::call(node, which, i);
+        if !DatumGetBool(exec_grouping::cur_eq_func_call2coll::call(
+            node, which, i, collation, attr1.value, attr2.value,
+        )?) {
+            result = true; // they are unequal
+            break;
+        }
+    }
+
+    Ok(result)
+}
+
+/// `findPartialMatch` — does the hashtable contain an entry that is not provably
+/// distinct from the tuple? (nodeSubplan.c:726-753).
+///
+/// We must scan the whole hashtable; hashkeys can't guide probing because
+/// partial matches can occur on unrelated hashkeys.
+fn findPartialMatch<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: HashTableKind,
+) -> PgResult<bool> {
+    let num_cols = exec_grouping::hash_table_num_cols::call(node, which);
+
+    exec_grouping::init_tuple_hash_iterator::call(node, which)?;
+    loop {
+        // entry = ScanTupleHashTable(...); if NULL break;
+        // ExecStoreMinimalTuple(TupleHashEntryGetTuple(entry), tableslot, false)
+        // is folded into scan_tuple_hash_table, which returns whether an entry
+        // was produced (and, if so, stored its tuple in the table's tableslot).
+        let produced = exec_grouping::scan_tuple_hash_table::call(node, which)?;
+        if !produced {
+            break;
+        }
+
+        tcop::check_for_interrupts::call()?;
+
+        if !execTuplesUnequal(node, estate, which, num_cols)? {
+            exec_grouping::term_tuple_hash_iterator::call(node, which);
+            return Ok(true);
+        }
+    }
+    // No TermTupleHashIterator call needed here.
+    Ok(false)
+}
+
+/// `slotAllNulls` — is the (projection result) slot completely NULL?
+fn slotAllNulls<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: ProjectionKind,
+) -> PgResult<bool> {
+    let ncols = exec_expr::proj_result_slot_natts::call(node, estate, which);
+    let mut i = 1;
+    while i <= ncols {
+        if !exec_expr::proj_result_slot_attisnull::call(node, estate, which, i)? {
+            return Ok(false);
+        }
+        i += 1;
+    }
+    Ok(true)
+}
+
+/// `slotNoNulls` — is the (projection result) slot entirely not NULL?
+fn slotNoNulls<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    which: ProjectionKind,
+) -> PgResult<bool> {
+    let ncols = exec_expr::proj_result_slot_natts::call(node, estate, which);
+    let mut i = 1;
+    while i <= ncols {
+        if exec_expr::proj_result_slot_attisnull::call(node, estate, which, i)? {
+            return Ok(false);
+        }
+        i += 1;
+    }
+    Ok(true)
+}
+
+// ===========================================================================
+// ExecInitSubPlan
+// ===========================================================================
+
+/// `ExecInitSubPlan(subplan, parent)` — create a `SubPlanState` for a `SubPlan`.
+///
+/// This is the SubPlan-specific part of `ExecInitExpr()`. The node is built and
+/// linked here; the executor-owned `es_subplanstates` linkage and the parent
+/// back-reference are resolved through seams (the owned model threads the parent
+/// state and estate explicitly).
+pub fn ExecInitSubPlan<'mcx>(
+    subplan: PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<SubPlanState<'mcx>> {
+    // sstate = makeNode(SubPlanState); sstate->subplan = subplan;
+    let mut sstate = SubPlanState::default();
+    let plan_id = subplan.plan_id;
+    let has_setparam = !subplan.setParam.is_empty();
+    let no_parparam = subplan.parParam.is_empty();
+    let subLinkType = subplan.subLinkType;
+    let useHashTable = subplan.useHashTable;
+    let setParam = clone_int_list(estate.es_query_cxt, &subplan.setParam)?;
+    sstate.subplan = Some(subplan);
+
+    // Link the SubPlanState to the already-initialized subplan state tree
+    // (es_subplanstates[plan_id - 1]) and check it is non-NULL; the executor
+    // owns that list, so it installs the link.
+    exec_procnode::link_subplan_planstate::call(&mut sstate, estate, plan_id)?;
+
+    // sstate->testexpr = ExecInitExpr((Expr *) subplan->testexpr, parent);
+    exec_expr::sub_init_testexpr::call(&mut sstate, estate)?;
+
+    // initialize my state (everything else already zeroed by makeNode /
+    // Default; the hash arrays are None until the useHashTable branch fills
+    // them).
+    sstate.curTuple = None;
+    sstate.curArray = Datum::null();
+
+    // If this is an initplan with output params and no direct correlation (and
+    // not a CTE), mark those params as needing evaluation.  We don't set
+    // parent->chgParam here.
+    if has_setparam && no_parparam && subLinkType != SubLinkType::Cte {
+        for &paramid in setParam.iter() {
+            // prm = &(estate->es_param_exec_vals[paramid]);  prm->execPlan = sstate;
+            mark_exec_param_needs_eval(estate, paramid)?;
+        }
+    }
+
+    // If we are going to hash the subquery output, initialize relevant stuff.
+    // (We don't create the hashtable until needed.)
+    if useHashTable {
+        // Memory contexts for the hash table(s) + a short-lived exprcontext.
+        exec_grouping::create_hash_contexts::call(&mut sstate, estate)?;
+
+        // Combining-operator list classification:
+        //   IsA(testexpr, OpExpr)   -> one combining operator
+        //   is_andclause(testexpr)  -> BoolExpr.args combining operators
+        //   else                    -> elog(ERROR, "unrecognized testexpr type")
+        let ncols = match exec_expr::classify_testexpr::call(&sstate) {
+            exec_expr::CombiningTestExpr::SingleOp => 1,
+            exec_expr::CombiningTestExpr::AndClause { ncols } => ncols,
+            exec_expr::CombiningTestExpr::Unrecognized { node_tag } => {
+                return Err(elog_unrecognized_testexpr(node_tag));
+            }
+        };
+
+        // Allocate the ncols-sized control arrays and set numCols.
+        exec_grouping::alloc_hash_control_arrays::call(&mut sstate, ncols)?;
+
+        // foreach(l, oplist) with i = 1..
+        let mut i: i32 = 1;
+        while i <= ncols {
+            let idx = (i - 1) as usize;
+            // Resolve the per-column combining op (opfuncid, RHS eq op, hash
+            // functions, collation); the catalog "could not find ..." errors
+            // propagate from inside the seam.
+            let info = exec_expr::resolve_combining_op::call(&sstate, idx)?;
+            // Append the left/right target entries, fmgr_info the equality/hash
+            // functions, record the cross-type eq oid, and store the scalar
+            // control fields (tab_eq_funcoids/tab_collations/keyColIdx).
+            exec_expr::fill_combining_column::call(
+                &mut sstate,
+                estate,
+                idx,
+                i as AttrNumber,
+                info,
+            )?;
+            i += 1;
+        }
+
+        // Build tupdescs/slots/projection nodes for both sides and the
+        // lhs_hash_expr / cur_eq_comp ExprStates.
+        exec_expr::build_hash_projections_and_exprs::call(&mut sstate, estate)?;
+    }
+
+    Ok(sstate)
+}
+
+// ===========================================================================
+// ExecSetParamPlan / ExecSetParamPlanMulti
+// ===========================================================================
+
+/// `ExecSetParamPlan(node, econtext)` — execute a subplan and set its output
+/// parameters. Called from `ExecEvalParamExec()` for lazy evaluation of
+/// initplans.
+pub fn ExecSetParamPlan<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // The C uses `econtext` only for its `ecxt_per_query_memory` switch (== the
+    // EState's per-query context) and to evaluate any down-passed params; this
+    // path rejects correlated subplans (no down-passed params) and allocates in
+    // `estate.es_query_cxt`, which is that same context. The parameter is kept
+    // for signature parity with the C and `ExecEvalParamExec` callers.
+    let _ = econtext;
+    let subplan = subplan_ref(node)?;
+    let subLinkType = subplan.subLinkType;
+    let firstColType = subplan.firstColType;
+    let has_parparam = !subplan.parParam.is_empty();
+    let has_args = !subplan.args.is_empty();
+
+    // ScanDirection dir = estate->es_direction;
+    let dir = estate.es_direction;
+    let mut found = false;
+    let mut astate: Astate<'mcx> = None;
+
+    if subLinkType == SubLinkType::Any || subLinkType == SubLinkType::All {
+        return Err(elog_internal("ANY/ALL subselect unsupported as initplan"));
+    }
+    if subLinkType == SubLinkType::Cte {
+        return Err(elog_internal("CTE subplans should not be executed via ExecSetParamPlan"));
+    }
+    if has_parparam || has_args {
+        return Err(elog_internal("correlated subplans should not be executed via ExecSetParamPlan"));
+    }
+
+    // Enforce forward scan direction regardless of caller.
+    estate.es_direction = types_nodes::ScanDirection::ForwardScanDirection;
+
+    // Initialize ArrayBuildStateAny in caller's context, if needed.
+    if subLinkType == SubLinkType::Array {
+        astate = arrayfuncs::init_array_result_any::call(estate.es_query_cxt, firstColType)?;
+    }
+
+    let per_query = estate.es_query_cxt;
+    let setParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.setParam)?;
+
+    // Run the plan.  (If it needs rescanning, the first ExecProcNode handles it.)
+    while let Some(slot) = exec_proc_node_child(node, estate)? {
+        let mut i: AttrNumber = 1;
+
+        if subLinkType == SubLinkType::Exists {
+            // There can be only one setParam...
+            let paramid = linitial_int(&setParam)?;
+            set_exec_param_clear_execplan(estate, paramid, BoolGetDatum(true), false)?;
+            found = true;
+            break;
+        }
+
+        if subLinkType == SubLinkType::Array {
+            found = true;
+            // stash away current value
+            let attr = exec_tuples::slot_getattr::call(estate, slot, 1)?;
+            astate = arrayfuncs::accum_array_result_any::call(
+                per_query, astate, attr.value, attr.isnull, firstColType,
+            )?;
+            // keep scanning subplan to collect all values
+            continue;
+        }
+
+        if found
+            && (subLinkType == SubLinkType::Expr
+                || subLinkType == SubLinkType::MultiExpr
+                || subLinkType == SubLinkType::RowCompare)
+        {
+            return Err(cardinality_violation());
+        }
+
+        found = true;
+
+        // Copy the subplan's tuple into our own context, in case any params are
+        // pass-by-ref; node->curTuple keeps it for eventual freeing.
+        exec_tuples::replace_cur_tuple_from_slot::call(node, estate, slot)?;
+
+        // Now set all the setParam params from the columns of the tuple.
+        for &paramid in setParam.iter() {
+            let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, i)?;
+            set_exec_param_clear_execplan(estate, paramid, attr.value, attr.isnull)?;
+            i += 1;
+        }
+    }
+
+    if subLinkType == SubLinkType::Array {
+        // There can be only one setParam...
+        let paramid = linitial_int(&setParam)?;
+
+        // Build the result array in query context; to avoid leaking memory
+        // across calls, remember the latest value (as for curTuple).
+        arrayfuncs::pfree_array_datum::call(node.curArray);
+        let arr = arrayfuncs::make_array_result_any::call(per_query, astate)?;
+        node.curArray = arr;
+        set_exec_param_clear_execplan(estate, paramid, arr, false)?;
+    } else if !found {
+        if subLinkType == SubLinkType::Exists {
+            // There can be only one setParam...
+            let paramid = linitial_int(&setParam)?;
+            set_exec_param_clear_execplan(estate, paramid, BoolGetDatum(false), false)?;
+        } else {
+            // For other sublink types, set all the output params to NULL.
+            for &paramid in setParam.iter() {
+                set_exec_param_clear_execplan(estate, paramid, Datum::null(), true)?;
+            }
+        }
+    }
+
+    // restore scan direction
+    estate.es_direction = dir;
+
+    Ok(())
+}
+
+/// `ExecSetParamPlanMulti(params, econtext)` — apply [`ExecSetParamPlan`] to
+/// evaluate any not-yet-evaluated initplan output parameters whose ParamIDs are
+/// listed in `params`. Any listed params that are not initplan outputs are
+/// ignored.
+///
+/// In the owned model the not-yet-evaluated subplan is held in the EState's
+/// param array (`es_param_exec_vals[paramid].execPlan`); resolving and
+/// re-entering `ExecSetParamPlan` over it belongs to the executor (it owns the
+/// `SubPlanState` pool), so it goes through a seam.
+pub fn ExecSetParamPlanMulti<'mcx>(
+    params: Option<&Bitmapset<'mcx>>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // paramid = -1; while ((paramid = bms_next_member(params, paramid)) >= 0)
+    let mut paramid: i32 = -1;
+    loop {
+        paramid = bms::bms_next_member::call(params, paramid);
+        if paramid < 0 {
+            break;
+        }
+        if exec_param_execplan_pending(estate, paramid) {
+            // Parameter not evaluated yet, so go do it.
+            exec_procnode::exec_set_param_plan_for_pending::call(econtext, paramid, estate)?;
+            // ExecSetParamPlan should have processed this param...
+            debug_assert!(!exec_param_execplan_pending(estate, paramid));
+        }
+    }
+    Ok(())
+}
+
+/// `ExecReScanSetParamPlan(node, parent)` — mark an initplan as needing
+/// recalculation.
+///
+/// `parent`'s `chgParam` and the `EState`-rooted param array are split out in
+/// the owned model: the parent's `chgParam` slot is passed by `&mut`, and the
+/// param array is the threaded estate.
+pub fn ExecReScanSetParamPlan<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    parent_chg_param: &mut Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let subplan = subplan_ref(node)?;
+    let has_parparam = !subplan.parParam.is_empty();
+    let is_cte = subplan.subLinkType == SubLinkType::Cte;
+
+    // sanity checks
+    if has_parparam {
+        return Err(elog_internal("direct correlated subquery unsupported as initplan"));
+    }
+    if subplan.setParam.is_empty() {
+        return Err(elog_internal("setParam list of initplan is empty"));
+    }
+    // if (bms_is_empty(planstate->plan->extParam)) elog(ERROR, ...)
+    if planstate_extparam_is_empty(node)? {
+        return Err(elog_internal("extParam set of initplan is empty"));
+    }
+
+    // Don't actually re-scan: it'll happen inside ExecSetParamPlan if needed.
+
+    // Mark this subplan's output parameters as needing recalculation.  CTE
+    // subplans are never executed via parameter recalculation; don't mark their
+    // output dirty, but do set the chgParam bit so dependent nodes rescan.
+    let mark_dirty = !is_cte;
+    let per_query = estate.es_query_cxt;
+    let setParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.setParam)?;
+    for paramid in setParam {
+        if mark_dirty {
+            // prm->execPlan = node;
+            mark_exec_param_needs_eval(estate, paramid)?;
+        }
+        // parent->chgParam = bms_add_member(parent->chgParam, paramid);
+        let old = parent_chg_param.take();
+        *parent_chg_param = Some(bms::bms_add_member::call(per_query, old, paramid)?);
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// Node-layer helpers (operate on the owned EState / node).
+// ===========================================================================
+
+/// Clone a subplan integer list (`parParam`/`paramIds`/`setParam`) into a
+/// working `Vec<i32>` charged to `mcx`, so the algorithm can iterate it without
+/// holding a borrow of `node`/`subplan` across the per-element seam calls (which
+/// also borrow `node`). Allocation failure surfaces the executor's OOM error.
+fn clone_int_list<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    src: &mcx::PgVec<'mcx, i32>,
+) -> PgResult<mcx::PgVec<'mcx, i32>> {
+    mcx::slice_in(mcx, src).map_err(|_| mcx.oom(src.len() * core::mem::size_of::<i32>()))
+}
+
+/// Borrow `node->subplan`, erroring loudly if absent (the C dereferences
+/// `node->subplan` unconditionally — it is always set by `ExecInitSubPlan`).
+#[inline]
+fn subplan_ref<'a, 'mcx>(
+    node: &'a SubPlanState<'mcx>,
+) -> PgResult<&'a types_nodes::primnodes::SubPlan<'mcx>> {
+    node.subplan
+        .as_deref()
+        .ok_or_else(|| elog_internal("SubPlanState has no subplan"))
+}
+
+/// `node->planstate` head, mutably (the C dereferences it unconditionally).
+#[inline]
+fn planstate_head_mut<'a, 'mcx>(
+    node: &'a mut SubPlanState<'mcx>,
+) -> PgResult<&'a mut types_nodes::execnodes::PlanStateData<'mcx>> {
+    node.planstate
+        .as_deref_mut()
+        .map(|ps| ps.ps_head_mut())
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))
+}
+
+/// `planstate->chgParam != NULL` — used to decide whether to rebuild the hash
+/// table.
+#[inline]
+fn planstate_chgparam_set(node: &SubPlanState<'_>) -> bool {
+    node.planstate
+        .as_deref()
+        .map(|ps| ps.ps_head().chgParam.is_some())
+        .unwrap_or(false)
+}
+
+/// `planstate->plan->plan_rows` (`buildSubPlanHash`).
+#[inline]
+fn planstate_plan_rows(node: &SubPlanState<'_>) -> PgResult<f64> {
+    let ps = node
+        .planstate
+        .as_deref()
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+    let plan = ps
+        .ps_head()
+        .plan
+        .ok_or_else(|| elog_internal("subplan planstate has no plan"))?;
+    Ok(plan.plan_head().plan_rows)
+}
+
+/// `bms_is_empty(planstate->plan->extParam)` (`ExecReScanSetParamPlan`).
+#[inline]
+fn planstate_extparam_is_empty(node: &SubPlanState<'_>) -> PgResult<bool> {
+    let ps = node
+        .planstate
+        .as_deref()
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+    let plan = ps
+        .ps_head()
+        .plan
+        .ok_or_else(|| elog_internal("subplan planstate has no plan"))?;
+    let ext = plan.plan_head().extParam.as_deref();
+    Ok(bms::bms_is_empty::call(ext))
+}
+
+/// `ExecReScan(node->planstate)` over the child subselect tree.
+#[inline]
+fn exec_re_scan_child<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ps = node
+        .planstate
+        .as_deref_mut()
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+    exec_ami::exec_re_scan::call(ps, estate)
+}
+
+/// `slot = ExecProcNode(node->planstate)` over the child subselect tree;
+/// `Some(slot)` while `!TupIsNull(slot)`, `None` at end.
+#[inline]
+fn exec_proc_node_child<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<types_nodes::SlotId>> {
+    let ps = node
+        .planstate
+        .as_deref_mut()
+        .ok_or_else(|| elog_internal("SubPlanState has no planstate"))?;
+    exec_procnode::exec_proc_node::call(ps, estate)
+}
+
+/// `ResetExprContext(node->innerecontext)` — reset the inner exprcontext's
+/// per-tuple memory (`MemoryContextReset`).
+#[inline]
+fn reset_inner_expr_context<'mcx>(
+    node: &SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ecxt = node
+        .innerecontext
+        .ok_or_else(|| elog_internal("subplan innerecontext is NULL"))?;
+    reset_per_tuple_memory(estate, ecxt)
+}
+
+/// `MemoryContextReset(econtext->ecxt_per_tuple_memory)` for the given context
+/// id in the EState pool.
+#[inline]
+fn reset_per_tuple_memory(estate: &mut EStateData<'_>, ecxt: EcxtId) -> PgResult<()> {
+    let slot = estate
+        .es_exprcontexts
+        .get_mut(ecxt.0 as usize)
+        .and_then(|e| e.as_mut())
+        .ok_or_else(|| elog_internal("ExprContext id out of range / freed"))?;
+    slot.ecxt_per_tuple_memory.reset();
+    Ok(())
+}
+
+/// `prmdata = &econtext->ecxt_param_exec_vals[paramid]; prmdata->value = v;
+/// prmdata->isnull = n;` — write a PARAM_EXEC slot in the EState param array
+/// (the C reaches it via the econtext alias of `estate->es_param_exec_vals`).
+#[inline]
+fn set_exec_param(
+    estate: &mut EStateData<'_>,
+    paramid: i32,
+    value: Datum,
+    isnull: bool,
+) -> PgResult<()> {
+    let prm = exec_param_mut(estate, paramid)?;
+    prm.value = value;
+    prm.isnull = isnull;
+    Ok(())
+}
+
+/// As [`set_exec_param`] but also clears the `execPlan` link
+/// (`prm->execPlan = NULL`) — the form used by `ExecSetParamPlan` after
+/// evaluating an initplan's output.
+#[inline]
+fn set_exec_param_clear_execplan(
+    estate: &mut EStateData<'_>,
+    paramid: i32,
+    value: Datum,
+    isnull: bool,
+) -> PgResult<()> {
+    let prm = exec_param_mut(estate, paramid)?;
+    prm.value = value;
+    prm.isnull = isnull;
+    // prm->execPlan = NULL; — the execPlan link is modeled by the executor's
+    // param-pending seam below; the value/isnull writes above are the data.
+    exec_procnode::clear_param_execplan::call(estate, paramid)?;
+    Ok(())
+}
+
+/// `prm->execPlan = sstate` — mark a PARAM_EXEC as needing evaluation by this
+/// subplan. The `execPlan` link to a `SubPlanState` is owned by the executor's
+/// param array (not carried by the trimmed `ParamExecData`), so installing it
+/// goes through a seam.
+#[inline]
+fn mark_exec_param_needs_eval(estate: &mut EStateData<'_>, paramid: i32) -> PgResult<()> {
+    exec_procnode::mark_param_execplan_pending::call(estate, paramid)
+}
+
+/// `econtext->ecxt_param_exec_vals[paramid].execPlan != NULL` — is the param
+/// not yet evaluated? The `execPlan` link is executor-owned, so the test goes
+/// through a seam.
+#[inline]
+fn exec_param_execplan_pending(estate: &EStateData<'_>, paramid: i32) -> bool {
+    exec_procnode::param_execplan_pending::call(estate, paramid)
+}
+
+/// `&estate->es_param_exec_vals[paramid]` — the param slot, mutably. The C
+/// indexes unconditionally; an out-of-range id is a caller/planner bug.
+#[inline]
+fn exec_param_mut<'a>(
+    estate: &'a mut EStateData<'_>,
+    paramid: i32,
+) -> PgResult<&'a mut types_nodes::execnodes::ParamExecData> {
+    estate
+        .es_param_exec_vals
+        .get_mut(paramid as usize)
+        .ok_or_else(|| elog_internal("PARAM_EXEC id out of range"))
+}
+
+/// `linitial_int(list)` — the first integer cell of a non-empty integer list.
+#[inline]
+fn linitial_int(list: &[i32]) -> PgResult<i32> {
+    list.first()
+        .copied()
+        .ok_or_else(|| elog_internal("setParam list of initplan is empty"))
+}
+
+// ===========================================================================
+// Error helpers (elog/ereport with exact text + SQLSTATE).
+// ===========================================================================
+
+/// `elog(ERROR, msg)` — an internal "can't happen" error (`errmsg_internal`,
+/// untranslated; `ERRCODE_INTERNAL_ERROR`).
+fn elog_internal(message: &'static str) -> PgError {
+    PgError::error(message).with_sqlstate(ERRCODE_INTERNAL_ERROR)
+}
+
+/// `ereport(ERROR, (errcode(ERRCODE_CARDINALITY_VIOLATION), errmsg(...)))`.
+fn cardinality_violation() -> PgError {
+    PgError::error("more than one row returned by a subquery used as an expression")
+        .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION)
+}
+
+/// `elog(ERROR, "unrecognized testexpr type: %d", (int) nodeTag(testexpr))`
+/// (nodeSubplan.c:935-936).
+fn elog_unrecognized_testexpr(tag: i32) -> PgError {
+    PgError::error(alloc::format!("unrecognized testexpr type: {tag}"))
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+}
+
+// ===========================================================================
+// Seam installation.
+// ===========================================================================
+
+/// Install every seam owned by this crate (declared in
+/// `backend-executor-nodeSubplan-seams`).
+pub fn init_seams() {
+    backend_executor_nodeSubplan_seams::exec_re_scan_set_param_plan::set(ExecReScanSetParamPlan);
+}

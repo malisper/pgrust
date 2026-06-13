@@ -1315,10 +1315,23 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-execGrouping-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -1657,6 +1670,27 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeSubplan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-nodeSubplan-seams",
+ "backend-nodes-core-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2808,6 +2842,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
 ]
@@ -3549,6 +3584,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeSubplan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

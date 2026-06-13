@@ -29,6 +29,8 @@ pub struct Plan<'mcx> {
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *qual` — implicitly-ANDed qual conditions (`None` = the C `NIL`).
     pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `Cardinality plan_rows` — estimated number of rows this node emits.
+    pub plan_rows: f64,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
@@ -69,6 +71,7 @@ impl Plan<'_> {
         Ok(Plan {
             targetlist,
             qual,
+            plan_rows: self.plan_rows,
             parallel_aware: self.parallel_aware,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
