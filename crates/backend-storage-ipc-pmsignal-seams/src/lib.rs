@@ -48,3 +48,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn pm_signal_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_START_AUTOVAC_LAUNCHER)` (pmsignal.c) —
+    /// set the shared `PMSignalFlags` slot and `kill(PostmasterPid, SIGUSR1)`
+    /// so the postmaster starts an autovacuum-launcher iteration. Narrow seam
+    /// for the single reason varsup.c sends (XID wraparound pressure).
+    pub fn send_postmaster_signal_start_autovac()
+);

@@ -1318,6 +1318,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-varsup"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-transam-varsup-seams"
 version = "0.0.0"
 dependencies = [
@@ -9355,6 +9381,7 @@ dependencies = [
  "backend-access-transam-timeline",
  "backend-access-transam-transam",
  "backend-access-transam-twophase",
+ "backend-access-transam-varsup",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
