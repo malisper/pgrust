@@ -20,7 +20,6 @@ use backend_utils_adt_arrayfuncs::construct::{array_contains_nulls, deconstruct_
 use backend_utils_adt_arrayfuncs::foundation::{arr_elemtype, arr_ndim, CSTRINGOID, MAX_ARRAY_SIZE};
 use backend_utils_adt_numutils::pg_strtoint32;
 
-use backend_access_common_detoast_seams as detoast_seam;
 
 /// `ArrayGetOffset(n, dim, lb, indx)` — convert a subscript list into a linear
 /// element number (from 0). Caller has range-checked, so no overflow possible.
@@ -221,33 +220,34 @@ pub fn array_get_integer_typmods<'mcx>(mcx: Mcx<'mcx>, arr: &[u8]) -> PgResult<V
     })?;
     for &(ev, _isnull) in elems.iter() {
         // C: result[i] = pg_strtoint32(DatumGetCString(elem_values[i]));
-        let s = datum_cstring(mcx, ev)?;
+        let s = datum_cstring(arr, ev)?;
         result.push(pg_strtoint32(&s)?);
     }
 
     Ok(result)
 }
 
-/// `DatumGetCString(datum)` over a `cstring` element Datum: resolve the
-/// NUL-terminated string payload the Datum's pointer word addresses, through
-/// the byref-payload owner (the detoast subsystem), matching every other
-/// by-reference element access in the array port. C hands the raw bytes
-/// straight to `pg_strtoint32` with no encoding gate; we do the same.
-fn datum_cstring<'mcx>(mcx: Mcx<'mcx>, datum: Datum) -> PgResult<String> {
-    // attlen == -2 (cstring): the payload bytes are NUL-terminated. The owned
-    // model has no global address space; the detoast seam (the byref-payload
-    // owner) resolves the real bytes, so this hands it a window keyed by the
-    // datum and lets the owner fault loudly until it lands — the same shape the
-    // array deconstruct port uses for every by-reference element.
-    let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(datum))?;
+/// `DatumGetCString(datum)` over a `cstring` element Datum produced by
+/// [`deconstruct_array_builtin`].
+///
+/// `cstring` is `attlen == -2` / pass-by-reference, so `fetch_att` records the
+/// element as the in-buffer **offset** into the deconstructed array bytes (the
+/// byte-model stand-in for C's `PointerGetDatum(T)` element address — see
+/// `backend_utils_adt_arrayfuncs::foundation::fetch_att`). A `cstring` is *not*
+/// a varlena and is never TOASTed, so the bytes are read straight out of `arr`
+/// at that offset; the payload is NUL-terminated (`DatumGetCString`), and C
+/// hands the raw bytes straight to `pg_strtoint32` with no encoding gate, so we
+/// do the same.
+fn datum_cstring(arr: &[u8], datum: Datum) -> PgResult<String> {
+    let off = datum.as_usize();
+    let bytes = arr.get(off..).ok_or_else(|| {
+        ereport(ERROR)
+            .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+            .errmsg("corrupt cstring element offset in typmod array")
+            .into_error()
+    })?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
-}
-
-/// View the bytes a pass-by-ref `Datum`'s pointer word addresses. See
-/// [`datum_cstring`]; the detoast owner resolves the real bytes.
-fn datum_as_byte_window(_datum: Datum) -> &'static [u8] {
-    &[]
 }
 
 /// Install every seam declared in `backend-utils-adt-arrayutils-seams` to its
@@ -334,5 +334,56 @@ mod tests {
         assert_eq!(mda_next_tuple(2, &mut curr, &span), 1);
         assert_eq!(curr, [1, 1]);
         assert_eq!(mda_next_tuple(2, &mut curr, &span), -1);
+    }
+
+    /// Hand-build a 1-D, no-NULL `cstring[]` `ArrayType` whose elements are the
+    /// given decimal strings, matching the on-disk layout
+    /// `array_get_integer_typmods` deconstructs and decodes.
+    fn build_cstring_array(strs: &[&str]) -> Vec<u8> {
+        use backend_utils_adt_arrayfuncs::foundation::{
+            arr_overhead_nonulls, maxalign, set_varsize,
+        };
+        use types_array::ARRAYTYPE_HDRSZ;
+
+        let ndim = 1i32;
+        let overhead = arr_overhead_nonulls(ndim); // MAXALIGN(hdr + 2*4*ndim)
+        let mut buf = vec![0u8; overhead];
+
+        // header fields (ndim @4, dataoffset @8 = 0 → no nulls, elemtype @12)
+        buf[4..8].copy_from_slice(&ndim.to_ne_bytes());
+        buf[8..12].copy_from_slice(&0i32.to_ne_bytes());
+        buf[12..16].copy_from_slice(&CSTRINGOID.to_ne_bytes());
+        // dims[0] @ ARRAYTYPE_HDRSZ, lbound[0] @ +4
+        buf[ARRAYTYPE_HDRSZ..ARRAYTYPE_HDRSZ + 4]
+            .copy_from_slice(&(strs.len() as i32).to_ne_bytes());
+        buf[ARRAYTYPE_HDRSZ + 4..ARRAYTYPE_HDRSZ + 8].copy_from_slice(&1i32.to_ne_bytes());
+
+        // cstring elements: NUL-terminated, char-aligned (no inter-element pad).
+        for s in strs {
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(0);
+        }
+        // pad tail to MAXALIGN like construct_md_array's nbytes does.
+        buf.resize(maxalign(buf.len()), 0);
+        let total = buf.len();
+        set_varsize(&mut buf, total);
+        buf
+    }
+
+    #[test]
+    fn integer_typmods_decode_and_guards() {
+        init_seams();
+        let root = mcx::MemoryContext::new("test");
+
+        // Real cstring[] → integer typmods (exercises the in-buffer offset
+        // decode that replaced the empty-window detoast stub).
+        let arr = build_cstring_array(&["10", "0", "255"]);
+        let out = array_get_integer_typmods(root.mcx(), &arr).unwrap();
+        assert_eq!(out, vec![10, 0, 255]);
+
+        // Wrong element type is rejected (C: ERRCODE_ARRAY_ELEMENT_ERROR).
+        let mut wrong = build_cstring_array(&["1"]);
+        wrong[12..16].copy_from_slice(&(CSTRINGOID + 1).to_ne_bytes());
+        assert!(array_get_integer_typmods(root.mcx(), &wrong).is_err());
     }
 }
