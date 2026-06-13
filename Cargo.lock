@@ -1795,6 +1795,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-regex-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-regex",
+]
+
+[[package]]
 name = "backend-replication-logical-applyparallelworker-seams"
 version = "0.0.0"
 dependencies = [
@@ -2515,6 +2526,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-regexp"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-utils-adt-regexp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-regex",
+]
+
+[[package]]
+name = "backend-utils-adt-regexp-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-regex",
+]
+
+[[package]]
 name = "backend-utils-adt-regproc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2547,6 +2583,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
 ]
@@ -2825,6 +2862,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -3193,6 +3231,7 @@ dependencies = [
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-numutils",
+ "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
@@ -3362,6 +3401,14 @@ dependencies = [
 name = "types-pgtime"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-regex"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "types-core",
 ]
 

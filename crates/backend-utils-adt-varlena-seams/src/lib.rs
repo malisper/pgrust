@@ -31,3 +31,41 @@ seam_core::seam!(
         raw: &str,
     ) -> PgResult<Option<PgVec<'mcx, PgString<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `text_substr(PG_FUNCTION_ARGS)` -> `text_substring(str, start, length,
+    /// false)` (varlena.c) — the SQL `substring(string, start, length)`
+    /// worker, on character positions. `regexp.c` reaches it via
+    /// `DirectFunctionCall3(text_substr, ...)`. `str` is the `text` payload
+    /// in the database encoding; the extracted substring payload is
+    /// allocated in `mcx` (C: palloc in the caller's current context).
+    /// `Err` carries `text_substring`'s "negative substring length not
+    /// allowed" `ereport(ERROR)` and palloc OOM.
+    pub fn text_substr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        str: &[u8],
+        start: i32,
+        length: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `replace_text_regexp(src_text, pattern_text, replace_text, cflags,
+    /// collation, search_start, n)` (varlena.c) — replace match(es) of
+    /// `pattern_text` in `src_text` with `replace_text` (which may contain
+    /// `\1`-`\9` / `\&` references). `n = 0` replaces all matches, `n > 0`
+    /// only the n'th; `search_start` is a character (not byte) offset. All
+    /// three texts are payload bytes in the database encoding; the result
+    /// payload is allocated in `mcx`. `Err` carries the regex-compile/
+    /// execute `ereport(ERROR)`s and palloc OOM.
+    pub fn replace_text_regexp<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        src_text: &[u8],
+        pattern_text: &[u8],
+        replace_text: &[u8],
+        cflags: i32,
+        collation: types_core::Oid,
+        search_start: i32,
+        n: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
