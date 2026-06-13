@@ -203,13 +203,3 @@ seam_core::seam!(
     /// applying a function's `proconfig` SET items. Reads the catalog cache.
     pub fn superuser() -> bool
 );
-
-seam_core::seam!(
-seam_core::seam!(
-    /// `GetBackendTypeDesc(backend_type)` (miscinit.c) — the human-readable,
-    /// `_()`-translatable description of a `BackendType` (e.g. "walsender").
-    /// C returns a `const char *` static literal; infallible.
-    pub fn get_backend_type_desc(
-        backend_type: types_core::init::BackendType,
-    ) -> &'static str
-);
