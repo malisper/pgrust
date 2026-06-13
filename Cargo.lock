@@ -7312,6 +7312,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-relcache"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-partition",
+ "types-rel",
+ "types-reloptions",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -8778,6 +8798,7 @@ dependencies = [
  "backend-utils-adt-ri-triggers",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-inval",
+ "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",

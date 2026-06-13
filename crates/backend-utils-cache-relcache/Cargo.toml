@@ -1,0 +1,36 @@
+[package]
+name = "backend-utils-cache-relcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_relcache"
+path = "src/lib.rs"
+
+[dependencies]
+# Inward seam crate this unit owns + installs.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+# The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
+# dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on
+# types/error/storage/core.
+backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
+
+# Memory contexts (CacheMemoryContext analog) + allocation.
+mcx = { path = "../mcx" }
+
+# Error / ereport surface.
+backend-utils-error = { path = "../backend-utils-error" }
+types-error = { path = "../types-error" }
+
+# Type vocabulary embedded in the owned RelationData entry / crossed at seams.
+types-core = { path = "../types-core" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-tableam = { path = "../types-tableam" }
+types-nodes = { path = "../types-nodes" }
+types-partition = { path = "../types-partition" }
+types-reloptions = { path = "../types-reloptions" }
+types-hash = { path = "../types-hash" }
