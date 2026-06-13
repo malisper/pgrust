@@ -2,12 +2,19 @@
 //! (`access/transam/xlogrecovery.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{TimestampTz, XLogRecPtr};
+use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
 
 seam_core::seam!(
     /// `GetXLogReceiptTime(*rtime, *fromStream)` — the last WAL receipt time
     /// and whether it arrived via streaming replication.
     pub fn get_xlog_receipt_time() -> (TimestampTz, bool)
+);
+
+seam_core::seam!(
+    /// `GetXLogReplayRecPtr(*replayTLI)` (xlogrecovery.c) — the last replayed
+    /// WAL record's end LSN and the timeline being replayed. Returns
+    /// `(lsn, tli)`.
+    pub fn get_xlog_replay_rec_ptr() -> (XLogRecPtr, TimeLineID)
 );
 
 seam_core::seam!(

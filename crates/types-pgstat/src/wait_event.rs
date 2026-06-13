@@ -117,3 +117,13 @@ pub const WAIT_EVENT_BGWORKER_SHUTDOWN: u32 = PG_WAIT_IPC + 5;
 
 /// `WAIT_EVENT_BGWORKER_STARTUP` — 7th entry (index 6) of the IPC section.
 pub const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
+
+/// `WAIT_EVENT_WAL_SUMMARIZER_WAL` — "Waiting in WAL summarizer for more WAL
+/// to be generated." 17th entry (0-based 16) of the Activity section, so
+/// `PG_WAIT_ACTIVITY | 16`.
+pub const WAIT_EVENT_WAL_SUMMARIZER_WAL: u32 = PG_WAIT_ACTIVITY | 16;
+
+/// `WAIT_EVENT_WAL_SUMMARIZER_ERROR` — "Waiting after a WAL summarizer error."
+/// 10th entry (0-based 9) of the `WaitEventTimeout` section, so
+/// `PG_WAIT_TIMEOUT | 9`.
+pub const WAIT_EVENT_WAL_SUMMARIZER_ERROR: u32 = PG_WAIT_TIMEOUT | 9;
