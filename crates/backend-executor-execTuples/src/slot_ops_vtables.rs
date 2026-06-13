@@ -426,6 +426,25 @@ pub fn tts_heap_store_tuple<'mcx>(
     }
 }
 
+/// `tts_heap_copyslot` (execTuples.c:438): copy `srcslot` into a heap slot by
+/// forming a heap tuple in the destination slot's context and storing it.
+pub fn tts_heap_copyslot<'mcx>(
+    _mcx: Mcx<'mcx>,
+    dst: &mut SlotData<'mcx>,
+    src: &SlotData<'mcx>,
+) -> PgResult<()> {
+    // oldcontext = MemoryContextSwitchTo(dstslot->tts_mcxt);
+    // tuple = ExecCopySlotHeapTuple(srcslot);
+    // MemoryContextSwitchTo(oldcontext);
+    // ExecStoreHeapTuple(tuple, dstslot, true);
+    //
+    // ExecCopySlotHeapTuple yields a FormedTuple the slot's HeapTuple carrier
+    // cannot hold, and forming it in dstslot->tts_mcxt is the slot payload
+    // model's per-slot context. Mirror PG and panic.
+    let _ = (dst, src);
+    todo!("execTuples.c tts_heap_copyslot: ExecCopySlotHeapTuple (FormedTuple -> slot HeapTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
+}
+
 // --- MinimalTupleTableSlot ops --------------------------------------------
 
 /// `tts_minimal_init` (execTuples.c): point `tuple` at `minhdr` so the minimal
@@ -621,6 +640,26 @@ pub fn tts_minimal_store_tuple<'mcx>(
     if should_free {
         slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
     }
+}
+
+/// `tts_minimal_copyslot` (execTuples.c:635): copy `srcslot` into a minimal
+/// slot by forming a minimal tuple in the destination slot's context and
+/// storing it.
+pub fn tts_minimal_copyslot<'mcx>(
+    _mcx: Mcx<'mcx>,
+    dst: &mut SlotData<'mcx>,
+    src: &SlotData<'mcx>,
+) -> PgResult<()> {
+    // oldcontext = MemoryContextSwitchTo(dstslot->tts_mcxt);
+    // mintuple = ExecCopySlotMinimalTuple(srcslot);
+    // MemoryContextSwitchTo(oldcontext);
+    // ExecStoreMinimalTuple(mintuple, dstslot, true);
+    //
+    // ExecCopySlotMinimalTuple yields a FormedMinimalTuple the slot's
+    // MinimalTuple carrier cannot hold, and forming it in dstslot->tts_mcxt is
+    // the slot payload model's per-slot context. Mirror PG and panic.
+    let _ = (dst, src);
+    todo!("execTuples.c tts_minimal_copyslot: ExecCopySlotMinimalTuple (FormedMinimalTuple -> slot MinimalTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
 }
 
 // --- BufferHeapTupleTableSlot ops -----------------------------------------
@@ -908,11 +947,15 @@ pub fn slot_copyslot<'mcx>(
     src: &SlotData<'mcx>,
 ) -> PgResult<()> {
     // The copyslot callback is dispatched on the *destination* slot's ops
-    // (C: dstslot->tts_ops->copyslot). Virtual and buffer-heap install one;
-    // heap and minimal slots inherit the generic copyslot, which is the
-    // virtual-slot path (tts_virtual_copyslot).
+    // (C: dstslot->tts_ops->copyslot). Each of the four ops installs its own:
+    //   TTSOpsVirtual.copyslot      = tts_virtual_copyslot
+    //   TTSOpsHeapTuple.copyslot    = tts_heap_copyslot
+    //   TTSOpsMinimalTuple.copyslot = tts_minimal_copyslot
+    //   TTSOpsBufferHeap.copyslot   = tts_buffer_heap_copyslot
     match dst.kind() {
+        types_nodes::TupleSlotKind::Virtual => tts_virtual_copyslot(mcx, dst, src),
+        types_nodes::TupleSlotKind::HeapTuple => tts_heap_copyslot(mcx, dst, src),
+        types_nodes::TupleSlotKind::MinimalTuple => tts_minimal_copyslot(mcx, dst, src),
         types_nodes::TupleSlotKind::BufferHeapTuple => tts_buffer_heap_copyslot(mcx, dst, src),
-        _ => tts_virtual_copyslot(mcx, dst, src),
     }
 }

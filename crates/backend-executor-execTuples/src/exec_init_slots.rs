@@ -323,4 +323,8 @@ pub fn init_seams() {
     seams::exec_init_null_tuple_slot::set(seam_exec_init_null_tuple_slot);
     seams::exec_get_result_type::set(seam_exec_get_result_type);
     seams::exec_get_result_slot_ops::set(seam_exec_get_result_slot_ops);
+    // ExecTypeFromTL is fully owned + implemented in this crate's
+    // exectype_tupoutput family (no pool-payload / Plan-model dependency), so
+    // its seam is installed here.
+    seams::exec_type_from_tl::set(crate::exectype_tupoutput::ExecTypeFromTL);
 }
