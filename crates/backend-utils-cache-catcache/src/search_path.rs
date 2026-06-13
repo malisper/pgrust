@@ -529,6 +529,13 @@ pub(crate) fn reuse_or_create_entry(
                 continue;
             }
             if ct.t_self != fetched.t_self {
+                continue; /* not same tuple */
+            }
+            /*
+             * Found a match, but can't use it if it belongs to another list
+             * already (C: `if (ct->c_list) continue;`).
+             */
+            if !ct.c_list.is_none() {
                 continue;
             }
             /* Found a match — reuse it (bump refcount). */

@@ -374,7 +374,11 @@ fn build_list_body(
         //       ct->c_list = cl;
         //       /* release the temporary refcount we used while building */
         //       ct->refcount--;
+        //       /* mark list dead if any members already dead */
+        //       if (ct->dead)
+        //           cl->dead = true;
         //   }
+        let mut any_member_dead = false;
         for &ct_idx in &ctlist {
             let ct = arena.caches[cache_idx.0].tuples[ct_idx.0]
                 .as_mut()
@@ -382,6 +386,16 @@ fn build_list_body(
             assert!(ct.c_list.is_none());
             ct.c_list = cl_idx;
             ct.refcount -= 1;
+            /* mark list dead if any members already dead */
+            if ct.dead {
+                any_member_dead = true;
+            }
+        }
+        if any_member_dead {
+            arena.caches[cache_idx.0].lists[cl_idx.0]
+                .as_mut()
+                .expect("freshly created list")
+                .dead = true;
         }
 
         // If the list bucket is now overfull, double it.
