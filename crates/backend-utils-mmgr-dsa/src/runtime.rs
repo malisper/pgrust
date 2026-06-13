@@ -108,6 +108,10 @@ pub struct DsaAreaSpan {
     pub fclass: u16,
 }
 
+// `dsa_size_classes[0]` is the literal `sizeof(dsa_area_span)` (56 on LP64); a
+// span must fit in the block-of-spans object that size class carves.
+const _: () = assert!(size_of::<DsaAreaSpan>() <= DSA_SIZE_CLASSES[0] as usize);
+
 /// The per-size-class allocator pool (`dsa_area_pool`).
 #[repr(C)]
 pub struct DsaAreaPool {
