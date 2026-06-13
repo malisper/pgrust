@@ -9,15 +9,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_execparallel::BufFileHandle;
 use types_nodes::nodehashjoin::BufFile;
-
-seam_core::seam!(
-    /// `BufFileClose(file)` (buffile.c): flush and close a buffered temp file,
-    /// deleting its backing segments. Consumes the handle. Flushing can fail
-    /// with an I/O `ereport(ERROR)`, so the call is fallible.
-    pub fn BufFileClose(file: BufFileHandle) -> types_error::PgResult<()>
-);
 
 seam_core::seam!(
     /// `BufFileCreateTemp(interXact)` (buffile.c): create a new temporary
@@ -36,8 +28,15 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `BufFileSeek(file, fileno, offset, whence)` (buffile.c): seek within the
-    /// file. Returns the C status (0 on success, EOF/non-zero on failure).
-    pub fn buf_file_seek(file: &mut BufFile, fileno: i32, offset: i64, whence: i32) -> i32
+    /// file. Returns the C status (0 on success, `EOF` on an impossible seek).
+    /// An invalid `whence` or a `SEEK_END` size failure is `ereport(ERROR)`, so
+    /// the call is fallible.
+    pub fn buf_file_seek(
+        file: &mut BufFile,
+        fileno: i32,
+        offset: i64,
+        whence: i32,
+    ) -> PgResult<i32>
 );
 
 seam_core::seam!(

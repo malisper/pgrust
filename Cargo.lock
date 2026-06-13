@@ -283,6 +283,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tupdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc-seams",
+ "backend-catalog-catalog-seams",
+ "backend-nodes-read-seams",
+ "backend-utils-cache-syscache-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-tupdesc-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -1566,6 +1583,38 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-catalog-catalog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-namespace",
+ "backend-common-relpath-seams",
+ "backend-storage-file-fd-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
 ]
 
 [[package]]
@@ -3956,6 +4005,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-read-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
@@ -5173,6 +5232,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-buffile"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-tablespace-seams",
+ "backend-executor-instrument",
+ "backend-storage-file-buffile-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-fileset-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "portability-instr-time",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-buffile-seams"
 version = "0.0.0"
 dependencies = [
@@ -5223,6 +5304,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -5231,6 +5313,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-file-fileset-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
 ]
 
 [[package]]
@@ -7353,6 +7445,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-conffiles-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-file"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-conffiles-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-file-seams"
 version = "0.0.0"
 dependencies = [
@@ -7415,6 +7528,7 @@ dependencies = [
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-more-seams",
  "backend-utils-misc-ps-status-seams",
+ "backend-utils-misc-superuser-seams",
  "common-controldata-utils-seams",
  "libc",
  "mcx",
@@ -7848,6 +7962,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-ip"
+version = "0.0.0"
+dependencies = [
+ "common-ip-seams",
+ "libc",
+ "types-net",
+]
+
+[[package]]
 name = "common-ip-seams"
 version = "0.0.0"
 dependencies = [
@@ -8008,6 +8131,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pgsleep"
+version = "0.0.0"
+dependencies = [
+ "port-pgsleep-seams",
+]
+
+[[package]]
 name = "port-pgsleep-seams"
 version = "0.0.0"
 dependencies = [
@@ -8073,7 +8203,6 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
- "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
@@ -8137,6 +8266,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",

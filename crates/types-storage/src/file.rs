@@ -3,17 +3,28 @@
 //! consumers need.
 //!
 //! A [`File`] is an *index* into the VFD cache, not a kernel handle (`fd.c`'s
-//! `typedef int File`). The directory-entry record [`DirEnt`] carries only the
-//! field PostgreSQL ever reads from `struct dirent` (`d_name`). The remaining
-//! aliases/constants are the `FileCopyMethod` / `DataDirSyncMethod` /
-//! `FileExtendMethod` enums, the `io_direct` flag bits, and the temp-file /
-//! tablespace path constants.
+//! `typedef int File`); it is a newtype over the C `int` so it is not
+//! interchangeable with a raw integer. The directory-entry record [`DirEnt`]
+//! carries only the field PostgreSQL ever reads from `struct dirent`
+//! (`d_name`). The remaining aliases/constants are the `FileCopyMethod` /
+//! `DataDirSyncMethod` / `FileExtendMethod` enums, the `io_direct` flag bits,
+//! and the temp-file / tablespace path constants. [`PGAlignedBlock`] is the
+//! `BLCKSZ`-sized I/O buffer block embedded by callers such as `buffile.c`.
 
 use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
-/// `File` (`storage/fd.h`) — a virtual file descriptor; an index into the VFD
-/// cache. `0` is the LRU/free-list header (never a usable VFD).
-pub type File = i32;
+use types_core::BLCKSZ;
+
+/// `File` (`storage/fd.h`) — `typedef int File`. A virtual file descriptor: an
+/// index into fd.c's VFD cache, NOT an OS file descriptor. A value `> 0` is a
+/// valid VFD; `<= 0` signals "no file"/error in the fd.c APIs. `0` is the
+/// LRU/free-list header (never a usable VFD). Modeled as a newtype over the C
+/// `int` so it is not interchangeable with a raw integer.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct File(pub i32);
 
 /// `Dir` — a live directory iterator opened with `AllocateDir`, identified by a
 /// stable integer handle (an index into the allocated-descriptor table).
@@ -27,6 +38,26 @@ pub type Dir = i32;
 pub struct DirEnt {
     /// `dirent.d_name` — the entry's file name.
     pub d_name: String,
+}
+
+/// `PGAlignedBlock` (`c.h`) — a `union { char data[BLCKSZ]; double force_align_d;
+/// int64 force_align_i64; }` used as a `BLCKSZ`-aligned I/O buffer. The
+/// alignment exists so the kernel can DMA into it; in the owned port the
+/// buffer is a heap `Vec<u8>` of exactly `BLCKSZ` bytes (the Rust allocator's
+/// 16-byte alignment is sufficient for the buffered read/write the callers
+/// perform). Only the `data` arm is ever read or written.
+#[derive(Clone, Debug)]
+pub struct PGAlignedBlock {
+    /// `char data[BLCKSZ]` — the block payload (always exactly `BLCKSZ` bytes).
+    pub data: Vec<u8>,
+}
+
+impl Default for PGAlignedBlock {
+    fn default() -> Self {
+        PGAlignedBlock {
+            data: vec![0u8; BLCKSZ],
+        }
+    }
 }
 
 // --- file_utils.h enums (carried as i32 aliases, the bits32/GUC-int use) ---
