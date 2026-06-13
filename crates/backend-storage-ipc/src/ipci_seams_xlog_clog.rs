@@ -73,7 +73,7 @@ pub fn multi_xact_shmem_init() -> PgResult<()> {
     backend_access_transam_multixact_seams::multi_xact_shmem_init::call()
 }
 
-pub fn two_phase_shmem_size() -> PgResult<Size> {
+pub fn two_phase_shmem_size() -> Size {
     backend_access_transam_twophase_seams::two_phase_shmem_size::call()
 }
 pub fn two_phase_shmem_init() -> PgResult<()> {
