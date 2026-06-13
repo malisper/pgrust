@@ -602,13 +602,60 @@ fn unlink_if_exists_fname(fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgRe
     Ok(())
 }
 
-/// `do_syncfs` (fd.c:3577) — Linux `syncfs(2)` on a directory's fd. `std` has
-/// no `syncfs`, so this logs and skips, matching the behaviour on platforms
-/// where `recovery_init_sync_method = syncfs` is rejected anyway.
+/// `do_syncfs(const char *path)` (fd.c:3563, `#if defined(HAVE_SYNCFS)`) —
+/// `OpenTransientFile(path, O_RDONLY)` + `syncfs(fd)` + `CloseTransientFile`,
+/// all failures logged at LOG (non-fatal startup sync). `syncfs(2)` is a Linux
+/// syscall; on platforms without it the `recovery_init_sync_method = syncfs`
+/// GUC value is unavailable so this path is never reached, mirroring the C's
+/// `HAVE_SYNCFS` guard.
+#[cfg(target_os = "linux")]
 fn do_syncfs(path: &str) {
-    elog(
-        LOG,
-        format!("syncfs is not available in the safe-Rust port; skipping \"{path}\""),
+    // fd.c:3568 -- ereport_startup_progress hint (folded into the phase report).
+    // fd.c:3570-3577 -- OpenTransientFile(path, O_RDONLY); LOG + return on error.
+    let fd = match OpenTransientFile(path, O_RDONLY) {
+        Ok(fd) => fd,
+        Err(error) => {
+            let save = error.saved_errno().unwrap_or(errno::EIO);
+            let _ = report_errno(LOG, format!("could not open file \"{path}\""), save);
+            return;
+        }
+    };
+    // fd.c:3578-3582 -- syncfs(fd); LOG on error (but still CloseTransientFile).
+    let raw = TransientFileRawFd(fd);
+    match raw {
+        Ok(raw) => {
+            // SAFETY: `raw` is a live kernel fd owned by the allocated-descriptor
+            // table; CloseTransientFile closes it. syncfs(2) only reads the fd.
+            if unsafe { libc::syncfs(raw) } < 0 {
+                let e = io::Error::last_os_error();
+                let _ = report_io(
+                    LOG,
+                    format!("could not synchronize file system for file \"{path}\""),
+                    &e,
+                );
+            }
+        }
+        Err(save) => {
+            let _ = report_errno(
+                LOG,
+                format!("could not synchronize file system for file \"{path}\""),
+                save,
+            );
+        }
+    }
+    // fd.c:3583 -- CloseTransientFile(fd).
+    let _ = CloseTransientFile(fd);
+}
+
+/// Non-Linux fall-through: `syncfs(2)` does not exist, so (matching the C's
+/// `HAVE_SYNCFS` guard) the `recovery_init_sync_method = syncfs` GUC value is
+/// unavailable and this is never reached. Provided only so `SyncDataDirectory`
+/// type-checks across platforms.
+#[cfg(not(target_os = "linux"))]
+fn do_syncfs(path: &str) {
+    let _ = path;
+    unreachable!(
+        "recovery_init_sync_method = syncfs is unavailable on platforms without syncfs(2)"
     );
 }
 
