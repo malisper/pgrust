@@ -17,7 +17,7 @@ use types_acl::{AclMode, AclResult};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
-use types_parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
+use types_parsenodes::{DefElem, InlineCodeBlock, Node, TypeName, VariableSetStmt};
 
 // ---------------------------------------------------------------------------
 // Signature carriers
@@ -280,16 +280,65 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `update_proconfig_value(a, set_items)` over the owned proconfig `text[]`.
-    pub fn update_proconfig_value(
+    /// `ExtractSetVariableArgs(sstmt)` (utils/misc/guc.c) — the SET arg string,
+    /// or `None` for a RESET. Owns the `A_Const` arg-list flattening.
+    pub fn extract_set_variable_args(sstmt: VariableSetStmt) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `GUCArrayAdd(array, name, value)` (utils/misc/guc.c) — append/replace the
+    /// `name=value` entry in the proconfig `text[]`.
+    pub fn guc_array_add(
         a: Option<Vec<String>>,
-        set_items: Vec<Node>,
+        name: String,
+        value: String,
+    ) -> PgResult<Vec<String>>
+);
+
+seam_core::seam!(
+    /// `GUCArrayDelete(array, name)` (utils/misc/guc.c) — drop the `name=...`
+    /// entry from the proconfig `text[]` (`None` if the array becomes empty).
+    pub fn guc_array_delete(
+        a: Option<Vec<String>>,
+        name: String,
     ) -> PgResult<Option<Vec<String>>>
 );
 
 seam_core::seam!(
-    /// `interpret_func_support`'s checks + `defGetQualifiedName` + `LookupFuncName`.
-    pub fn interpret_func_support(defel: DefElem) -> PgResult<Oid>
+    /// `defGetQualifiedName(def)` (commands/define.c) — the qualified name list.
+    pub fn def_get_qualified_name(defel: DefElem) -> PgResult<Vec<String>>
+);
+
+seam_core::seam!(
+    /// `LookupFuncName(funcname, nargs, argtypes, missing_ok)`
+    /// (parser/parse_func.c).
+    pub fn lookup_func_name(
+        funcname: Vec<String>,
+        nargs: i32,
+        argtypes: Vec<Oid>,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (utils/cache/lsyscache.c).
+    pub fn get_func_rettype(func_oid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `func_signature_string(funcname, nargs, NIL, argtypes)`
+    /// (parser/parse_func.c) — render `name(argtype, ...)`.
+    pub fn func_signature_string(
+        funcname: Vec<String>,
+        nargs: i32,
+        argtypes: Vec<Oid>,
+    ) -> PgResult<String>
+);
+
+seam_core::seam!(
+    /// `NameListToString(names)` (catalog/namespace.c) — render a possibly
+    /// qualified name list as a dotted string.
+    pub fn name_list_to_string(names: Vec<String>) -> PgResult<String>
 );
 
 seam_core::seam!(
