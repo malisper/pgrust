@@ -90,6 +90,17 @@ seam_core::seam!(
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
 
+seam_core::seam!(
+    /// `bms_del_member(a, x)` (bitmapset.c): remove `x` from the set,
+    /// recycling the input (the C clears the bit in place and returns `a`,
+    /// shrinking `nwords` if trailing words become zero; a `None` input is
+    /// the C NULL set, returned unchanged). No allocation, so infallible.
+    pub fn bms_del_member<'mcx>(
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        x: i32,
+    ) -> Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
+);
+
 // === tidbitmap (tidbitmap.c) ===============================================
 
 /// Opaque token standing in for C's `TIDBitmap *` while the executor owns the

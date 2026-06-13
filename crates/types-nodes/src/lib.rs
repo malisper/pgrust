@@ -23,6 +23,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
@@ -74,6 +75,12 @@ pub use nodeindexonlyscan::{
 pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
+};
+pub use nodeagg::{
+    Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
+    AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
+    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
+    AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{

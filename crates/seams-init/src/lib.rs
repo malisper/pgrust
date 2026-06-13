@@ -25,6 +25,7 @@ pub fn init_all() {
     backend_executor_execPartition::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
+    backend_executor_nodeAgg::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMergejoin::init_seams();
     backend_libpq_pqcomm::init_seams();

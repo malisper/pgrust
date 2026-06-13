@@ -84,6 +84,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `SlotId` (into the EState slot pool) of the named projection's
+    /// result slot — `node->proj*->pi_state.resultslot`. The slot is
+    /// execExpr-owned (created by `ExecBuildProjectionInfo`); its id is exposed
+    /// here so the canonical execGrouping `TupleHashTable` operations
+    /// (`LookupTupleHashEntry` / `FindTupleHashEntry`) can be driven over the
+    /// just-projected tuple. Infallible (the slot exists once the projection
+    /// was built at init).
+    pub fn sub_proj_result_slot_id<'mcx>(
+        node: &SubPlanState<'mcx>,
+        estate: &EStateData<'mcx>,
+        which: ProjectionKind,
+    ) -> types_nodes::SlotId
+);
+
+seam_core::seam!(
     /// `ExecClearTuple(node->proj*->pi_state.resultslot)` (executor.h): clear
     /// the named projection's result slot. Infallible per the C (no allocation).
     pub fn sub_clear_proj_result_slot<'mcx>(
