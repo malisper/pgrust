@@ -121,6 +121,25 @@ fn btequalimage_is_true() {
 // ---- Bare-Datum lane ------------------------------------------------------
 
 #[test]
+fn word_transfer_byval_is_verbatim() {
+    // !typByVal is false -> else leg -> datumCopy returns value verbatim.
+    let d = Datum::from_i64(42);
+    assert_eq!(datum_transfer(d, true, 8), d);
+}
+
+#[test]
+fn word_transfer_varlena_non_expanded_deep_copies() {
+    // typLen == -1 but not an external-expanded-RW pointer -> else leg ->
+    // datumCopy deep-copies the varlena verbatim.
+    let vl = varlena_4b(b"transfer");
+    let src = Datum::from_usize(vl.as_ptr() as usize);
+    let out = datum_transfer(src, false, -1);
+    assert_ne!(out.as_usize(), src.as_usize());
+    let copied = unsafe { core::slice::from_raw_parts(out.as_usize() as *const u8, vl.len()) };
+    assert_eq!(copied, &vl[..]);
+}
+
+#[test]
 fn word_copy_byval() {
     let d = Datum::from_i64(99);
     assert_eq!(datum_copy_word(d, true, 8), d);

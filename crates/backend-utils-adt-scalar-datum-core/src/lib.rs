@@ -448,6 +448,53 @@ pub fn datum_copy_word(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
     }
 }
 
+/// `datumTransfer(value, typByVal, typLen)` (datum.c) — bare-`Datum` form.
+/// Transfer a non-NULL datum into the current memory context. Equivalent to
+/// `datumCopy` except for a read-write pointer to an expanded object, where C
+/// merely reparents the object into `CurrentMemoryContext` and returns its
+/// standard R/W pointer (`TransferExpandedObject`).
+///
+/// C dispatch:
+/// ```c
+/// if (!typByVal && typLen == -1 && VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
+///     value = TransferExpandedObject(value, CurrentMemoryContext);
+/// else
+///     value = datumCopy(value, typByVal, typLen);
+/// ```
+///
+/// The else leg (the overwhelmingly common path: by-value, by-ref non-varlena,
+/// non-expanded varlena, and read-ONLY expanded varlena) is fully ported via
+/// [`datum_copy_word`]. The reparent leg calls `TransferExpandedObject`, which
+/// the owner (`misc2` `expandeddatum`) ports as mirror-and-panic at the
+/// mcx-ownership / `MemoryContextSetParent`-on-a-live-object boundary; there is
+/// no seam to delegate to (the owner panics), so this leg mirrors that panic
+/// with the same rationale. The serial/copy paths this unit's consumers exercise
+/// never produce a read-write expanded pointer, so the panic is unreachable for
+/// them.
+///
+/// SAFETY: a non-null by-ref `value` points at a live image (caller's tuple/mcx).
+pub fn datum_transfer(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
+    if !typ_byval && typ_len == -1 {
+        // SAFETY: by-ref varlena Datum points at a live image.
+        let img = unsafe { varlena_image(value) };
+        // VARATT_IS_EXTERNAL_EXPANDED_RW: external && VARTAG_EXTERNAL == VARTAG_EXPANDED_RW (3).
+        if varatt_is_external(img) && img.len() >= 2 && img[1] == 3 {
+            // TransferExpandedObject(value, CurrentMemoryContext): reparent a live
+            // expanded object. The owner (misc2 expandeddatum) mirror-and-panics at
+            // the mcx-ownership / MemoryContextSetParent boundary; mirror it here.
+            panic!(
+                "datumTransfer: TransferExpandedObject reparents a live read-write \
+                 expanded object via MemoryContextSetParent, an mcx-ownership boundary \
+                 the expanded-object substrate (misc2 expandeddatum) leaves as \
+                 mirror-and-panic; unreachable on this unit's serial/copy paths, which \
+                 never produce a read-write expanded pointer"
+            );
+        }
+    }
+    // Otherwise: datumCopy(value, typByVal, typLen).
+    datum_copy_word(value, typ_byval, typ_len)
+}
+
 /// `PointerGetDatum(palloc'd image)` — `Box::leak` the fresh copy so it outlives
 /// the call (owned by the caller exactly as a `palloc`'d chunk is) and return its
 /// base pointer as the `Datum` word.
