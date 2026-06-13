@@ -68,7 +68,7 @@ pub fn init_seams() {}
 /// ```
 pub struct TidExpr<'mcx> {
     /// `ExprState *exprstate` — compiled TID-yielding subexpr, or `None`.
-    pub exprstate: Option<PgBox<'mcx, ExprState>>,
+    pub exprstate: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `bool isarray` — if true, it yields `tid[]` not just `tid`.
     pub isarray: bool,
     /// `CurrentOfExpr *cexpr` — alternatively, we can have CURRENT OF.

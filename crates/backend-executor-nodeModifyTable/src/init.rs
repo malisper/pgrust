@@ -71,7 +71,7 @@ pub fn ExecInitModifyTable<'mcx>(
         vec_with_capacity_in(mcx, total_nrels)?;
     let mut merge_join_conditions: PgVec<
         'mcx,
-        Option<&'mcx PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>,
+        Option<&'mcx PgVec<'mcx, types_nodes::primnodes::Expr>>,
     > = vec_with_capacity_in(mcx, total_nrels)?;
 
     {
@@ -134,7 +134,7 @@ pub fn ExecInitModifyTable<'mcx>(
                     if let Some(mjc) = node.mergeJoinConditions.as_ref() {
                         // mergeJoinCondition = list_nth(node->mergeJoinConditions, i);
                         // mergeJoinConditions = lappend(mergeJoinConditions, mergeJoinCondition);
-                        let cond: &'mcx Option<PgBox<'mcx, types_nodes::nodes::Node<'mcx>>> =
+                        let cond: &'mcx Option<PgVec<'mcx, types_nodes::primnodes::Expr>> =
                             list_nth_ref(mjc, i)?;
                         merge_join_conditions.try_reserve(1).map_err(|_| mcx.oom(8))?;
                         merge_join_conditions.push(cond.as_ref());
@@ -624,8 +624,8 @@ pub fn ExecInitModifyTable<'mcx>(
         //   if (node->onConflictWhere)
         //       onconfl->oc_WhereClause =
         //           ExecInitQual((List *) node->onConflictWhere, &mtstate->ps);
-        let on_conflict_where: Option<&'mcx types_nodes::nodes::Node<'mcx>> =
-            node.onConflictWhere.as_ref().map(|w| &**w);
+        let on_conflict_where: Option<&'mcx [types_nodes::primnodes::Expr]> =
+            node.onConflictWhere.as_ref().map(|w| w.as_slice());
         let oc_where_clause = if on_conflict_where.is_some() {
             backend_executor_execExpr_seams::exec_init_on_conflict_where::call(
                 &mut mtstate,

@@ -207,5 +207,5 @@ seam_core::seam!(
         collations: &[Oid],
         parent: &mut PlanStateData<'mcx>,
         estate: &mut EStateData<'mcx>,
-    ) -> PgResult<Option<PgBox<'mcx, ExprState>>>
+    ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>>
 );

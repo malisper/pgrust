@@ -515,7 +515,7 @@ fn MJFillInner<'mcx>(
 /// always-true.
 #[inline]
 fn exec_qual_or_true<'mcx>(
-    state: Option<&types_nodes::execexpr::ExprState>,
+    state: Option<&types_nodes::execexpr::ExprState<'mcx>>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {

@@ -176,6 +176,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `fmgr_info(functionId, &finfo)` (fmgr.c) — the resolving form that fills
+    /// the lookup metadata the caller reads to *plan* a call (as opposed to
+    /// [`fmgr_info_check`], which only verifies). Returns the populated
+    /// `types-core::FmgrInfo`: `fn_oid`, `fn_nargs`, `fn_strict`, `fn_retset`,
+    /// `fn_stats`, and `fn_addr` (the resolved call address as an opaque
+    /// pointer word — the typed `PGFunction` is re-derived by the step-payload
+    /// layer that owns that type).
+    ///
+    /// The executor's expression compiler (`ExecInitFunc` /
+    /// agg-trans / agg-deserialize / hash / IO-coerce / rowcompare / minmax /
+    /// scalararrayop builders) reads `finfo.fn_strict` / `finfo.fn_stats` to
+    /// pick the `EEOP_FUNCEXPR{,_STRICT,_FUSAGE}` (etc.) opcode and stamps
+    /// `finfo.fn_addr` onto the step payload. `Err` carries the C
+    /// `ereport(ERROR)` (cache lookup failure, unsupported language, ...).
+    /// `mcx` is the context the resolution allocates handler state in
+    /// (`fmgr_info_cxt`'s `mcxt`).
+    pub fn fmgr_info<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+    ) -> PgResult<types_core::fmgr::FmgrInfo>
+);
+
+seam_core::seam!(
     /// `OidFunctionCall0(functionId)` — a zero-argument fmgr dispatch
     /// (lsyscache.c's `getSubscriptingRoutines`, which calls the type's
     /// subscripting handler with no arguments). The returned `Datum` is the

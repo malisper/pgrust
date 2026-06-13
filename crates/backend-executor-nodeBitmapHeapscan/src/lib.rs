@@ -241,10 +241,10 @@ fn BitmapHeapRecheck<'mcx>(
 /// `ExecQualAndReset(qual, econtext)` (executor.h): `ExecQual` then
 /// `ResetExprContext(econtext)`. A `NULL` qual is always-true. The reset clears
 /// the per-tuple memory regardless of the qual result.
-fn exec_qual_and_reset(
-    qual: Option<&types_nodes::execexpr::ExprState>,
+fn exec_qual_and_reset<'mcx>(
+    qual: Option<&types_nodes::execexpr::ExprState<'mcx>>,
     econtext: types_nodes::EcxtId,
-    estate: &mut EStateData<'_>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let res = match qual {
         // ExecQual: a NULL qual passes.

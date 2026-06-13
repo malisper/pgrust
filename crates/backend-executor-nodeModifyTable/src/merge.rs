@@ -285,11 +285,12 @@ pub fn ExecInitMerge<'mcx>(
     //   i = 0; foreach(lc, mergeActionLists) { ... }
     for (i, merge_action_list) in action_lists.iter().enumerate() {
         // joinCondition = (Node *) list_nth(mergeJoinConditions, i);
-        let join_condition: Option<&'mcx types_nodes::nodes::Node<'mcx>> = mtstate
+        // Modeled as the implicit-AND `List` of `Expr` ExecInitQual consumes.
+        let join_condition: Option<&'mcx [types_nodes::primnodes::Expr]> = mtstate
             .mt_mergeJoinConditions
             .as_ref()
             .and_then(|jc| jc.get(i).copied().flatten())
-            .map(|b| &**b);
+            .map(|v| v.as_slice());
 
         // resultRelInfo = mtstate->resultRelInfo + i;  i++;
         let result_rel_info = mtstate.resultRelInfo[i];
@@ -331,8 +332,8 @@ pub fn ExecInitMerge<'mcx>(
             let action = &merge_action_list[ai];
             let match_kind = action.matchKind;
             let command_type = action.commandType;
-            let qual: Option<&'mcx types_nodes::nodes::Node<'mcx>> =
-                action.qual.as_ref().map(|q| &**q);
+            let qual: Option<&'mcx [types_nodes::primnodes::Expr]> =
+                action.qual.as_ref().map(|q| q.as_slice());
             let target_list: &'mcx [types_nodes::TargetEntry<'mcx>] = action
                 .targetList
                 .as_ref()

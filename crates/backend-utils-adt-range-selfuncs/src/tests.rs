@@ -74,7 +74,7 @@ fn inf_bound(lower: bool) -> RangeBound {
 /// A typcache whose `rng_subdiff_finfo.fn_oid` is set (so interpolation runs).
 fn typcache_with_subdiff() -> TypeCacheEntry {
     TypeCacheEntry {
-        rng_subdiff_finfo: FmgrInfo { fn_oid: 1234 },
+        rng_subdiff_finfo: FmgrInfo { fn_oid: 1234, ..Default::default() },
         ..Default::default()
     }
 }

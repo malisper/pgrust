@@ -328,9 +328,9 @@ pub struct ResultRelInfo<'mcx> {
     /// to the relation's columns). A `None` element is a column with no stored
     /// generation expression. `None` for the whole field is the C `NULL` (not
     /// yet initialized).
-    pub ri_GeneratedExprsI: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>>,
+    pub ri_GeneratedExprsI: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
     /// `ExprState **ri_GeneratedExprsU` — same, for UPDATE.
-    pub ri_GeneratedExprsU: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>>,
+    pub ri_GeneratedExprsU: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>>,
     /// `int ri_NumGeneratedNeededI` — number of stored generated columns to
     /// compute for INSERT/MERGE.
     pub ri_NumGeneratedNeededI: i32,
@@ -338,7 +338,7 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_NumGeneratedNeededU: i32,
     /// `ProjectionInfo *ri_projectReturning` — the compiled RETURNING
     /// projection (built by `ExecBuildProjectionInfo`). `None` is the C `NULL`.
-    pub ri_projectReturning: Option<PgBox<'mcx, ProjectionInfo>>,
+    pub ri_projectReturning: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
     /// `ri_TrigDesc->trig_update_before_row` — BEFORE ROW UPDATE triggers
     /// exist.
     pub ri_trig_update_before_row: bool,
@@ -384,10 +384,10 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_WithCheckOptions: Option<PgVec<'mcx, crate::nodes::Node<'mcx>>>,
     /// `List *ri_WithCheckOptionExprs` — the compiled `ExprState`s for the
     /// WITH CHECK OPTION constraints, parallel to `ri_WithCheckOptions`.
-    pub ri_WithCheckOptionExprs: Option<PgVec<'mcx, PgBox<'mcx, ExprState>>>,
+    pub ri_WithCheckOptionExprs: Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>,
     /// `struct OnConflictSetState *ri_onConflict` — exec state for ON CONFLICT
     /// DO UPDATE. `None` is the C `NULL`.
-    pub ri_onConflict: Option<PgBox<'mcx, crate::modifytable::OnConflictSetState>>,
+    pub ri_onConflict: Option<PgBox<'mcx, crate::modifytable::OnConflictSetState<'mcx>>>,
     /// `List *ri_MergeActions[NUM_MERGE_MATCH_KINDS]` — per-`MergeMatchKind`
     /// lists of `MergeActionState`s (built by `ExecInitMerge` /
     /// `ExecInitPartitionInfo`). Each element `None` is the C `NIL` for that
@@ -397,7 +397,7 @@ pub struct ResultRelInfo<'mcx> {
             crate::modifytable::NUM_MERGE_MATCH_KINDS],
     /// `ExprState *ri_MergeJoinCondition` — compiled MERGE join-condition qual
     /// for this relation. `None` is the C `NULL`.
-    pub ri_MergeJoinCondition: Option<PgBox<'mcx, ExprState>>,
+    pub ri_MergeJoinCondition: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 /// `ExecProcNodeMtd` — the per-node execution callback stored in
@@ -434,7 +434,7 @@ pub struct PlanStateData<'mcx> {
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
     /// `ExprState *qual` — boolean qual condition (compiled `plan.qual`).
     /// `None` = the C `NULL` (always-true).
-    pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState>>,
+    pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState<'mcx>>>,
     /// `struct PlanState *lefttree` — input plan tree (`outerPlanState`).
     pub lefttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
     /// `struct PlanState *righttree` — `innerPlanState`.
@@ -456,7 +456,7 @@ pub struct PlanStateData<'mcx> {
     /// into `es_tupleTable`).
     pub ps_ResultTupleSlot: Option<SlotId>,
     /// `ProjectionInfo *ps_ProjInfo` — info for doing tuple projection.
-    pub ps_ProjInfo: Option<PgBox<'mcx, ProjectionInfo>>,
+    pub ps_ProjInfo: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
     /// `bool scanopsset` / `const TupleTableSlotOps *scanops` /
     /// `bool scanopsfixed` — information about the type of the scan slot.
     pub scanopsset: bool,

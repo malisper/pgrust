@@ -138,7 +138,7 @@ pub struct BitmapHeapScanState<'mcx> {
     /// `NULL`.
     pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
     /// `ExprState *bitmapqualorig`
-    pub bitmapqualorig: Option<PgBox<'mcx, ExprState>>,
+    pub bitmapqualorig: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `TIDBitmap *tbm`
     pub tbm: Option<PgBox<'mcx, TIDBitmap>>,
     /// `BitmapHeapScanInstrumentation stats`

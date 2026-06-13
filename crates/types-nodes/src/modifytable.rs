@@ -25,7 +25,7 @@ use crate::execexpr::{ExprState, ProjectionInfo};
 use crate::execnodes::{PlanStateData, RriId, SlotId};
 use crate::nodeindexscan::Plan;
 use crate::nodes::{CmdType, Node, NodeTag};
-use crate::primnodes::TargetEntry;
+use crate::primnodes::{Expr, TargetEntry};
 
 // `OnConflictAction` is canonically defined in `crate::nodes` (nodes/nodes.h);
 // re-export it here so the modifytable port can reach it under the
@@ -71,8 +71,11 @@ pub struct MergeAction<'mcx> {
     pub commandType: CmdType,
     /// `OverridingKind override` — OVERRIDING clause.
     pub overriding: OverridingKind,
-    /// `Node *qual` — transformed WHEN conditions (`None` = `NULL`).
-    pub qual: Option<PgBox<'mcx, Node<'mcx>>>,
+    /// `Node *qual` — transformed WHEN conditions (`None` = `NULL`). C stores a
+    /// `Node *`, but the executor always casts it `(List *) action->qual` and
+    /// feeds it to `ExecInitQual`, i.e. it is an implicit-AND `List` of `Expr`.
+    /// Modeled as that Expr-list so the modify-qual builders can consume it.
+    pub qual: Option<PgVec<'mcx, Expr>>,
     /// `List *targetList` — the target list (of `TargetEntry`).
     pub targetList: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *updateColnos` — target attribute numbers for an UPDATE.
@@ -98,7 +101,11 @@ pub struct ModifyTable<'mcx> {
     pub resultRelations: Option<PgVec<'mcx, Index>>,
     /// `List *updateColnosLists` — per-target-table update_colnos lists.
     pub updateColnosLists: Option<PgVec<'mcx, PgVec<'mcx, i32>>>,
-    /// `List *withCheckOptionLists` — per-target-table WCO lists.
+    /// `List *withCheckOptionLists` — per-target-table WCO lists. Each entry is
+    /// a `List` of `WithCheckOption` nodes (one per RLS/CHECK constraint), each
+    /// carrying its own `qual` (cast `(List *) wco->qual` and fed to
+    /// `ExecInitQual`). The `WithCheckOption` node is not yet modeled in the
+    /// trimmed `Node` enum, so this stays a plan-`Node` list.
     pub withCheckOptionLists: Option<PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>>,
     /// `char *returningOldAlias` — alias for OLD in RETURNING lists.
     pub returningOldAlias: Option<PgBox<'mcx, [u8]>>,
@@ -122,8 +129,10 @@ pub struct ModifyTable<'mcx> {
     pub onConflictSet: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *onConflictCols` — target column numbers for `onConflictSet`.
     pub onConflictCols: Option<PgVec<'mcx, i32>>,
-    /// `Node *onConflictWhere` — WHERE for ON CONFLICT UPDATE.
-    pub onConflictWhere: Option<PgBox<'mcx, Node<'mcx>>>,
+    /// `Node *onConflictWhere` — WHERE for ON CONFLICT UPDATE. Cast
+    /// `(List *) node->onConflictWhere` and fed to `ExecInitQual`, so modeled
+    /// as the implicit-AND `List` of `Expr`.
+    pub onConflictWhere: Option<PgVec<'mcx, Expr>>,
     /// `Index exclRelRTI` — RTI of the EXCLUDED pseudo relation.
     pub exclRelRTI: Index,
     /// `List *exclRelTlist` — tlist of the EXCLUDED pseudo relation.
@@ -131,7 +140,9 @@ pub struct ModifyTable<'mcx> {
     /// `List *mergeActionLists` — per-target-table MERGE actions.
     pub mergeActionLists: Option<PgVec<'mcx, PgVec<'mcx, MergeAction<'mcx>>>>,
     /// `List *mergeJoinConditions` — per-target-table MERGE join conditions.
-    pub mergeJoinConditions: Option<PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>>,
+    /// Each entry's `joinCondition` is cast `(List *) joinCondition` and fed to
+    /// `ExecInitQual`, so modeled as the implicit-AND `List` of `Expr`.
+    pub mergeJoinConditions: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>>,
 }
 
 /// `MergeActionState` (nodes/execnodes.h) — exec state for one MERGE action.
@@ -141,24 +152,24 @@ pub struct MergeActionState<'mcx> {
     /// `MergeAction *mas_action` — associated MergeAction node.
     pub mas_action: Option<PgBox<'mcx, MergeAction<'mcx>>>,
     /// `ProjectionInfo *mas_proj` — projection of the action's targetlist.
-    pub mas_proj: Option<PgBox<'mcx, ProjectionInfo>>,
+    pub mas_proj: Option<PgBox<'mcx, ProjectionInfo<'mcx>>>,
     /// `ExprState *mas_whenqual` — WHEN [NOT] MATCHED AND conditions.
-    pub mas_whenqual: Option<PgBox<'mcx, ExprState>>,
+    pub mas_whenqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 /// `OnConflictSetState` (nodes/execnodes.h) — exec state for ON CONFLICT DO
 /// UPDATE.
 #[derive(Debug)]
-pub struct OnConflictSetState {
+pub struct OnConflictSetState<'mcx> {
     pub type_: NodeTag,
     /// `TupleTableSlot *oc_Existing` — slot for the existing target tuple.
     pub oc_Existing: Option<SlotId>,
     /// `TupleTableSlot *oc_ProjSlot` — SET projection target.
     pub oc_ProjSlot: Option<SlotId>,
     /// `ProjectionInfo *oc_ProjInfo` — for ON CONFLICT DO UPDATE SET.
-    pub oc_ProjInfo: Option<ProjectionInfo>,
+    pub oc_ProjInfo: Option<ProjectionInfo<'mcx>>,
     /// `ExprState *oc_WhereClause` — state for the WHERE clause.
-    pub oc_WhereClause: Option<ExprState>,
+    pub oc_WhereClause: Option<ExprState<'mcx>>,
 }
 
 /// `TransitionCaptureState` (commands/trigger.h), trimmed to the fields
@@ -256,7 +267,7 @@ pub struct ModifyTableState<'mcx> {
     /// `List *mt_mergeJoinConditions` — per-kept-target-table MERGE join
     /// conditions, borrowed from the plan node (`None` element = the C `NULL`).
     pub mt_mergeJoinConditions:
-        Option<PgVec<'mcx, Option<&'mcx PgBox<'mcx, Node<'mcx>>>>>,
+        Option<PgVec<'mcx, Option<&'mcx PgVec<'mcx, Expr>>>>,
 }
 
 /// `HTAB *mt_resultOidHash` payload (the OID→resultRelInfo-index map for

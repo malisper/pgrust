@@ -140,7 +140,7 @@ seam_core::seam!(
         collations: &[Oid],
         keep_nulls: bool,
         estate: &mut EStateData<'mcx>,
-    ) -> PgResult<mcx::PgBox<'mcx, ExprState>>
+    ) -> PgResult<mcx::PgBox<'mcx, ExprState<'mcx>>>
 );
 
 seam_core::seam!(
