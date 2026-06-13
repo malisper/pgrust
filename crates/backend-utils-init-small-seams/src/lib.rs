@@ -147,3 +147,11 @@ seam_core::seam!(
     /// on error around its body).
     pub fn set_exit_on_any_error(value: bool)
 );
+
+seam_core::seam!(
+    /// `MyBackendType` (globals.c, declared in miscadmin.h) — this process's
+    /// identity, assigned once at startup (the `AmStartupProcess()` /
+    /// `AmWalReceiverProcess()` macros are `MyBackendType == B_*` tests).
+    /// Process-identity read, same class as `my_proc_pid`.
+    pub fn my_backend_type() -> types_core::init::BackendType
+);

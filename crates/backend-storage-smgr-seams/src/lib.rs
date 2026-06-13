@@ -36,3 +36,15 @@ seam_core::seam!(
     /// relation files during replay/commit application.
     pub fn drop_relation_files(delrels: &[RelFileLocator], is_redo: bool) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `smgrexists(smgropen(rlocator, backend), forknum)` (smgr.c): does the
+    /// fork's storage exist on disk? `Err` carries the file-layer
+    /// `ereport(ERROR)`s reachable under `mdexists` (the implicit `smgropen`
+    /// can also OOM-error creating the relation's smgr hash entry).
+    pub fn smgrexists(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+    ) -> types_error::PgResult<bool>
+);

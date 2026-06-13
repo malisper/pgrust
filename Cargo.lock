@@ -844,6 +844,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogprefetcher"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogreader-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlogreader-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlogrecovery-seams"
 version = "0.0.0"
 dependencies = [
@@ -1868,6 +1898,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -3064,6 +3095,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xact",
+ "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
