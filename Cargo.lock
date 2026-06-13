@@ -4231,6 +4231,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
  "types-tuple",
 ]
 
