@@ -78,3 +78,12 @@ seam_core::seam!(
         input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ResetExprContext(node->js.ps.ps_ExprContext)` (executor.h): reset the
+    /// node's per-tuple memory context, freeing per-tuple expression storage.
+    pub fn reset_per_tuple_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

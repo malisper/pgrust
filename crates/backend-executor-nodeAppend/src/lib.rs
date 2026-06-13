@@ -154,7 +154,6 @@ pub fn ExecInitAppend<'mcx>(
         let (prunestate, initially_valid) = execPartition::exec_init_partition_exec_pruning::call(
             mcx,
             &mut appendstate.ps,
-            estate,
             n_total,
             append.part_prune_index,
             append.apprelids.as_deref(),
@@ -1070,7 +1069,7 @@ fn ExecAppendAsyncEventWait<'mcx>(
     // everywhere else); the owned model holds it as a stack guard whose `Drop`
     // is `FreeWaitEventSet` (the C explicit frees become scope exits).
     let eventset = WaitEventSet::create(nevents)?;
-    eventset.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None)?;
+    eventset.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None)?;
 
     // Give each waiting subplan a chance to add an event.
     let mut i: i32 = -1;
@@ -1106,7 +1105,7 @@ fn ExecAppendAsyncEventWait<'mcx>(
     // this MUST be added after the ExecAsyncConfigureWait() calls (postgres_fdw
     // relies on `GetNumRegisteredWaitEvents(set) == 1`).
     let my_latch = latch::my_latch::call();
-    eventset.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch))?;
+    eventset.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch), None)?;
 
     // Return at most EVENT_BUFFER_SIZE events in one call.
     if nevents > EVENT_BUFFER_SIZE {
@@ -1125,38 +1124,35 @@ fn ExecAppendAsyncEventWait<'mcx>(
 
     // Deliver notifications.
     for w in occurred.iter().take(noccurred as usize) {
-        // Each waiting subplan registered its wait event with `user_data`
-        // pointing back to its AsyncRequest. The trimmed shared `WaitEvent`
-        // carries no `user_data`; the precise back-reference is restored when
-        // execAsync.c (which owns the registration that sets `user_data`)
-        // lands. Until then the configure-wait seam above panics, so this
-        // delivery loop is only reached with no pending callbacks; we mirror
-        // the C action — for a ready socket, notify each pending request.
+        // Each waiting subplan should have registered its wait event with
+        // `user_data` pointing back to its AsyncRequest. C recovers the single
+        // matched request via `(AsyncRequest *) w->user_data`; the owned model
+        // carries the request's `request_index` (== the subplan index in
+        // `as_asyncrequests`, see ExecAppendAsyncBegin) as the non-aliasing
+        // `user_data` key, so the lookup recovers exactly that one request.
         if (w.events & WL_SOCKET_READABLE) != 0 {
-            let mut i: i32 = -1;
-            loop {
-                i = bms::bms_next_member::call(node.as_asyncplans.as_deref(), i);
-                if i < 0 {
-                    break;
-                }
-                let pending = node
+            let request_index = w
+                .user_data
+                .ok_or_else(|| elog_error("Append async wait event has no AsyncRequest"))?;
+            let pending = node
+                .as_asyncrequests
+                .get(request_index as usize)
+                .and_then(|slot| slot.as_deref())
+                .map(|areq| areq.callback_pending)
+                .unwrap_or(false);
+            if pending {
+                // Mark it as no longer needing a callback. We must do this
+                // before dispatching the callback in case the callback resets
+                // the flag.
+                let areq = node
                     .as_asyncrequests
-                    .get(i as usize)
-                    .and_then(|slot| slot.as_deref())
-                    .map(|areq| areq.callback_pending)
-                    .unwrap_or(false);
-                if pending {
-                    // Mark it as no longer needing a callback. We must do this
-                    // before dispatching the callback in case the callback
-                    // resets the flag.
-                    let areq = node
-                        .as_asyncrequests
-                        .get_mut(i as usize)
-                        .and_then(|slot| slot.as_deref_mut())
-                        .ok_or_else(|| elog_error("Append async request is missing"))?;
-                    areq.callback_pending = false;
-                    execAsync::exec_async_notify::call(areq, estate)?;
-                }
+                    .get_mut(request_index as usize)
+                    .and_then(|slot| slot.as_deref_mut())
+                    .ok_or_else(|| elog_error("Append async request is missing"))?;
+                areq.callback_pending = false;
+
+                // Do the actual work.
+                execAsync::exec_async_notify::call(areq, estate)?;
             }
         }
 

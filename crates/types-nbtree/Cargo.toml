@@ -1,0 +1,18 @@
+[package]
+name = "types-nbtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_nbtree"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+types-condvar = { path = "../types-condvar" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }

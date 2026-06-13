@@ -37,10 +37,12 @@ pub const T_TableFuncScan: NodeTag = NodeTag(350);
 pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
+pub const T_Limit: NodeTag = NodeTag(373);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,8 +80,24 @@ pub enum Node<'mcx> {
     Append(crate::nodeappend::Append<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
+    /// `T_MergeAppend`.
+    MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Limit`.
+    Limit(crate::nodelimit::Limit<'mcx>),
+    /// `T_Sort`.
+    Sort(crate::nodesort::Sort<'mcx>),
+    /// `T_TableFuncScan`.
+    TableFuncScan(crate::nodetablefuncscan::TableFuncScan<'mcx>),
+    /// `T_NestLoop`.
+    NestLoop(crate::nodenestloop::NestLoop<'mcx>),
+    /// `T_HashJoin`.
+    HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
+    /// `T_Hash` — the inner child of a HashJoin.
+    Hash(crate::nodehashjoin::Hash<'mcx>),
+    /// `T_TidRangeScan`.
+    TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -88,7 +106,15 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
+            Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Limit(_) => T_Limit,
+            Node::Sort(_) => T_Sort,
+            Node::TableFuncScan(_) => T_TableFuncScan,
+            Node::NestLoop(_) => crate::nodenestloop::T_NestLoop,
+            Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
+            Node::Hash(_) => crate::nodehashjoin::T_Hash,
+            Node::TidRangeScan(_) => T_TidRangeScan,
         }
     }
 
@@ -97,7 +123,15 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
+            Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Limit(m) => &m.plan,
+            Node::Sort(s) => &s.plan,
+            Node::TableFuncScan(t) => &t.scan.plan,
+            Node::NestLoop(m) => &m.join.plan,
+            Node::HashJoin(h) => &h.join.plan,
+            Node::Hash(h) => &h.plan,
+            Node::TidRangeScan(t) => &t.scan.plan,
         }
     }
 
@@ -112,7 +146,15 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
+            Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
+            Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
+            Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
+            Node::NestLoop(m) => Ok(Node::NestLoop(m.clone_in(mcx)?)),
+            Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
+            Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
+            Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
         }
     }
 }
