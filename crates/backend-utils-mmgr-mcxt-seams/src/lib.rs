@@ -6,6 +6,8 @@
 //! elog LOG emission (see `docs/mctx-design.md`). Whichever crate ports that
 //! remainder installs these; until then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 seam_core::seam!(
     /// Read `LogMemoryContextPending` (mcxt.c), the per-backend
     /// `volatile sig_atomic_t` set by `HandleLogMemoryContextInterrupt()`
@@ -32,4 +34,34 @@ seam_core::seam!(
     /// `utils/palloc.h`): make `TopMemoryContext` the current allocation
     /// context.
     pub fn switch_to_top_memory_context()
+);
+
+// ---------------------------------------------------------------------------
+// Named-child-context lifecycle handles consumed by logical decoding.
+//
+// DESIGN DEBT (DESIGN_DEBT.md): logical.c's decoding context is an
+// `AllocSetContextCreate(CurrentMemoryContext, "Logical decoding context")`
+// whose handle is threaded through `MemoryContextSwitchTo`/`Delete` and stored
+// in `ctx->context`, plus the `makeStringInfo()` for `ctx->out`. The owner
+// (mcxt/aset) is not ported, so these are opaque handles the owner resolves;
+// once it lands as a real `mcx::Mcx`-creating API the context becomes an owned
+// `Mcx<'mcx>` value and these handle seams retire.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `AllocSetContextCreate(CurrentMemoryContext, "Logical decoding context",
+    /// ALLOCSET_DEFAULT_SIZES)`.
+    pub fn create_logical_decoding_context_memcxt() -> types_logical::MemoryContextHandle
+);
+seam_core::seam!(
+    /// `MemoryContextSwitchTo(context)` — returns the previous context.
+    pub fn MemoryContextSwitchTo(context: types_logical::MemoryContextHandle) -> types_logical::MemoryContextHandle
+);
+seam_core::seam!(
+    /// `MemoryContextDelete(context)`.
+    pub fn MemoryContextDelete(context: types_logical::MemoryContextHandle)
+);
+seam_core::seam!(
+    /// `makeStringInfo()` — allocate an empty output buffer (`ctx->out`).
+    pub fn makeStringInfo() -> types_logical::StringInfoHandle
 );
