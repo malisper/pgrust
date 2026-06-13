@@ -31,6 +31,7 @@ backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
+backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }

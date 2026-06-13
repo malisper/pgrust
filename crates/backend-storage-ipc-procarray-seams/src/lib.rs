@@ -95,3 +95,9 @@ seam_core::seam!(
     /// not alive). Shared-memory read; cannot `ereport`.
     pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
 );
+
+seam_core::seam!(
+    /// `GetReplicationHorizons(&xmin, &catalog_xmin)` (procarray.c) — the
+    /// oldest xmins to advertise via hot-standby feedback.
+    pub fn get_replication_horizons() -> (TransactionId, TransactionId)
+);

@@ -26,3 +26,18 @@ seam_core::seam!(
         msec: i32,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `TimestampDifferenceMilliseconds(start_time, stop_time)` — the
+    /// difference in milliseconds, clamped to the `[0, INT_MAX]` range.
+    pub fn timestamp_difference_milliseconds(
+        start_time: TimestampTz,
+        stop_time: TimestampTz
+    ) -> i64
+);
+
+seam_core::seam!(
+    /// `timestamptz_to_str(ts)` — render a timestamptz to its display string
+    /// (C returns a static buffer; the seam returns an owned copy).
+    pub fn timestamptz_to_str(ts: TimestampTz) -> String
+);

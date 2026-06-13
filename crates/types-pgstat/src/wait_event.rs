@@ -28,3 +28,15 @@ pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
 pub const WAIT_EVENT_SPIN_DELAY: u32 = PG_WAIT_TIMEOUT | 6;
+
+/// `WAIT_EVENT_WAL_RECEIVER_MAIN` — index 14 of the Activity section of
+/// `wait_event_names.txt` (after SYSLOGGER_MAIN at 13).
+pub const WAIT_EVENT_WAL_RECEIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 14;
+
+/// `WAIT_EVENT_WAL_RECEIVER_WAIT_START` — index 54 of the IPC section of
+/// `wait_event_names.txt`.
+pub const WAIT_EVENT_WAL_RECEIVER_WAIT_START: u32 = PG_WAIT_IPC + 54;
+
+/// `WAIT_EVENT_WAL_WRITE` — index 80 of the IO section of
+/// `wait_event_names.txt`.
+pub const WAIT_EVENT_WAL_WRITE: u32 = PG_WAIT_IO + 80;

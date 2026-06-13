@@ -1,0 +1,55 @@
+[package]
+name = "backend-replication-walreceiver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_replication_walreceiver"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-startup = { path = "../types-startup" }
+types-wal = { path = "../types-wal" }
+types-walreceiver = { path = "../types-walreceiver" }
+types-pgstat = { path = "../types-pgstat" }
+types-datum = { path = "../types-datum" }
+types-guc = { path = "../types-guc" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+
+# own seam crate
+backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
+
+# outward owner-seam crates
+backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
+backend-replication-libpqwalreceiver-seams = { path = "../backend-replication-libpqwalreceiver-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-activity-pgstat-wal-seams = { path = "../backend-utils-activity-pgstat-wal-seams" }
+backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }
+backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+types-signal = { path = "../types-signal" }
+libc = "0.2"

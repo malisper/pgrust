@@ -266,6 +266,18 @@ pub const WAL_LEVEL_MINIMAL: WalLevel = 0;
 pub const WAL_LEVEL_REPLICA: WalLevel = 1;
 pub const WAL_LEVEL_LOGICAL: WalLevel = 2;
 
+/// `ArchiveMode` (access/xlog.h) — the `archive_mode` GUC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub enum ArchiveMode {
+    /// disabled.
+    ArchiveModeOff = 0,
+    /// enabled while server is running normally.
+    ArchiveModeOn = 1,
+    /// enabled always (even during recovery).
+    ArchiveModeAlways = 2,
+}
+
 
 /// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
 /// invalidation causes.

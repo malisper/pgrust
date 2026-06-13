@@ -10,3 +10,9 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_wal_snd_init_stopping()
 );
+
+seam_core::seam!(
+    /// `if (AllowCascadeReplication()) WalSndWakeup(true, false)` — wake
+    /// cascading walsenders after the walreceiver flushes new WAL.
+    pub fn walsnd_wakeup_if_cascading()
+);
