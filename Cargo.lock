@@ -6407,8 +6407,6 @@ name = "backend-utils-adt-numeric-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-datum",
- "types-error",
 ]
 
 [[package]]
@@ -6478,11 +6476,9 @@ dependencies = [
 name = "backend-utils-adt-rangetypes"
 version = "0.0.0"
 dependencies = [
- "backend-utils-adt-numeric-seams",
  "backend-utils-adt-rangetypes-seams",
- "backend-utils-cache-typcache-seams",
- "backend-utils-fmgr-fmgr-seams",
- "common-hashfn-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "seam-core",
  "types-cache",
