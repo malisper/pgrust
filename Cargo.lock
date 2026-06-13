@@ -731,6 +731,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-timeline-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-transam"
 version = "0.0.0"
 dependencies = [
@@ -925,6 +934,14 @@ dependencies = [
  "types-error",
  "types-logical",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlogarchive-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2119,6 +2136,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-libpqwalreceiver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-walreceiver",
+]
+
+[[package]]
 name = "backend-replication-logical-applyparallelworker-seams"
 version = "0.0.0"
 dependencies = [
@@ -2306,6 +2333,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-walreceiver"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogarchive-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-libpq-pqsignal",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-libpqwalreceiver-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-replication-walreceiverfuncs-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-io-seams",
+ "backend-utils-activity-pgstat-wal-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-tables-seams",
+ "backend-utils-misc-ps-status-seams",
+ "libc",
+ "mcx",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-signal",
+ "types-startup",
+ "types-wal",
+ "types-walreceiver",
+]
+
+[[package]]
 name = "backend-replication-walreceiver-seams"
 version = "0.0.0"
 dependencies = [
@@ -2318,6 +2391,9 @@ name = "backend-replication-walreceiverfuncs-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-walreceiver",
 ]
 
 [[package]]
@@ -2470,6 +2546,7 @@ name = "backend-storage-ipc-latch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-storage",
 ]
@@ -2842,6 +2919,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-io-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-seams"
 version = "0.0.0"
 dependencies = [
@@ -2849,6 +2934,13 @@ dependencies = [
  "types-core",
  "types-error",
  "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-wal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -3494,6 +3586,13 @@ version = "0.0.0"
 dependencies = [
  "types-error",
  "types-guc",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-tables-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -4194,6 +4293,13 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "types-walreceiver"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
