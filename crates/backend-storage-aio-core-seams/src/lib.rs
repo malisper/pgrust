@@ -10,3 +10,10 @@ seam_core::seam!(
     /// Infallible.
     pub fn pgaio_error_cleanup()
 );
+
+seam_core::seam!(
+    /// `pgaio_closing_fd(int fd)` (`storage/aio/aio.c`) — notify the AIO
+    /// subsystem that a kernel fd is about to be closed so any in-flight IO
+    /// referencing it can be drained first. Infallible.
+    pub fn pgaio_closing_fd(fd: i32)
+);

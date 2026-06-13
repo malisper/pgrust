@@ -17,3 +17,8 @@ mcx = { path = "../mcx" }
 # Seam crates this unit OWNS (installs every decl from its own init_seams()).
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+# Unported-neighbor seams routed through their owners' per-owner seam crate.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-storage-aio-core-seams = { path = "../backend-storage-aio-core-seams" }
+backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+libc = "0.2"
