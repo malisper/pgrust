@@ -137,6 +137,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationCacheInvalidate(debug_discard)` (relcache.c): blow away the
+    /// whole relcache (the `SHAREDINVALRELCACHE_ID`-with-`InvalidOid` and
+    /// `InvalidateSystemCaches` paths). Also flushes smgr and the relation
+    /// map. Can `ereport(ERROR)` while rebuilding nailed entries, carried on
+    /// `Err`.
+    pub fn relation_cache_invalidate(debug_discard: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInvalidateEntry(relationId)` (relcache.c): mark one
+    /// relcache entry invalid (the per-relation `SHAREDINVALRELCACHE_ID` arm).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_cache_invalidate_entry(
+        relation_id: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// Read the relation's cached partition key (`relation->rd_partkey`),
     /// returning a copy in `mcx`, or `Ok(None)` when it has not been built
     /// yet (the C NULL). `partcache.c`'s `RelationGetPartitionKey` builds the
@@ -160,6 +178,26 @@ seam_core::seam!(
         relid: types_core::Oid,
         key: types_partition::PartitionKeyData<'mcx>,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationIdIsInInitFile(relationId)` (relcache.c): is the relation one
+    /// whose relcache entry is cached in the relcache init file (so a change
+    /// must zap that file at commit)? Pure lookup; infallible.
+    pub fn relation_id_is_in_init_file(relation_id: types_core::Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitFilePreInvalidate()` (relcache.c): take
+    /// `RelCacheInitLock` and unlink the init file ahead of sending
+    /// invalidations. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_cache_init_file_pre_invalidate() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitFilePostInvalidate()` (relcache.c): release
+    /// `RelCacheInitLock` after invalidations are sent.
+    pub fn relation_cache_init_file_post_invalidate() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

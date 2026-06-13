@@ -115,6 +115,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
+    /// catalog snapshot so the next catalog read takes a fresh one — driven by
+    /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;
+    /// infallible.
+    pub fn invalidate_catalog_snapshot()
+);
+
+seam_core::seam!(
     /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
     /// `None` (the C may return NULL when no snapshot is active). Snapshots
     /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
