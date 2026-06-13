@@ -747,6 +747,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-tableam-bm-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-tableam",
+]
+
+[[package]]
 name = "backend-access-table-toast-helper-seams"
 version = "0.0.0"
 dependencies = [
@@ -2027,6 +2039,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tidbitmap",
 ]
 
 [[package]]
@@ -2139,6 +2152,38 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeBitmapHeapscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-bm-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeBitmapHeapscan-seams",
+ "backend-nodes-core-tidbitmap-seams",
+ "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tidbitmap",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2621,6 +2666,16 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-nodes-core-tidbitmap-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+ "types-tidbitmap",
 ]
 
 [[package]]
@@ -5539,6 +5594,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
@@ -5829,6 +5885,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-execparallel",
  "types-rel",
  "types-scan",
  "types-sortsupport",
@@ -6027,7 +6084,15 @@ dependencies = [
  "types-rel",
  "types-snapshot",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
+]
+
+[[package]]
+name = "types-tidbitmap"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
