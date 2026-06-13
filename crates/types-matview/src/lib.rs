@@ -32,9 +32,10 @@ pub use types_catalog::catalog_dependency::ObjectAddress;
 /// `tcop/cmdtaglist.h`), as a value-checked newtype over the enumerator index.
 ///
 /// Only the two tags REFRESH MATERIALIZED VIEW uses are defined; the values are
-/// the positional indices in `cmdtaglist.h` (verified against PostgreSQL 18.3:
-/// `CMDTAG_UNKNOWN` = 0, `CMDTAG_REFRESH_MATERIALIZED_VIEW`,
-/// `CMDTAG_SELECT`). Extend as more commands are ported.
+/// the positional indices in `cmdtaglist.h` (verified against PostgreSQL 18.3
+/// via the c2rust rendering: `CMDTAG_UNKNOWN` = 0,
+/// `CMDTAG_REFRESH_MATERIALIZED_VIEW` = 169, `CMDTAG_SELECT` = 179). Extend as
+/// more commands are ported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct CommandTag(pub i32);
@@ -42,10 +43,10 @@ pub struct CommandTag(pub i32);
 impl CommandTag {
     /// `CMDTAG_UNKNOWN` (cmdtaglist.h line 27).
     pub const UNKNOWN: CommandTag = CommandTag(0);
-    /// `CMDTAG_REFRESH_MATERIALIZED_VIEW` (cmdtaglist.h line 196).
-    pub const REFRESH_MATERIALIZED_VIEW: CommandTag = CommandTag(101);
-    /// `CMDTAG_SELECT` (cmdtaglist.h line 206).
-    pub const SELECT: CommandTag = CommandTag(111);
+    /// `CMDTAG_REFRESH_MATERIALIZED_VIEW` (cmdtaglist.h line 196; enum index 169).
+    pub const REFRESH_MATERIALIZED_VIEW: CommandTag = CommandTag(169);
+    /// `CMDTAG_SELECT` (cmdtaglist.h line 206; enum index 179).
+    pub const SELECT: CommandTag = CommandTag(179);
 }
 
 /// `typedef struct QueryCompletion` (`tcop/cmdtag.h`).

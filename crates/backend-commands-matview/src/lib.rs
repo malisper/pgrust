@@ -52,7 +52,7 @@ const SPI_OK_SELECT: i32 = 5;
 const SPI_OK_INSERT: i32 = 7;
 const SPI_OK_DELETE: i32 = 8;
 const SPI_OK_UTILITY: i32 = 4;
-const SPI_OK_FINISH: i32 = 1;
+const SPI_OK_FINISH: i32 = 2;
 
 /// `ObjectAddressSet(addr, class, oid)` (`catalog/objectaddress.h`).
 #[inline]
