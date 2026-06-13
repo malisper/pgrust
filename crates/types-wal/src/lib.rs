@@ -18,6 +18,7 @@ pub mod rmgrdesc;
 pub mod wal;
 pub mod xact;
 pub mod xact_records;
+pub mod xloginsert;
 pub mod xlog_consts;
 pub mod xlogutils;
 
@@ -25,5 +26,6 @@ pub use rmgrdesc::*;
 pub use wal::*;
 pub use xact::*;
 pub use xact_records::*;
+pub use xloginsert::*;
 pub use xlog_consts::*;
 pub use xlogutils::*;

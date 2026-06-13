@@ -14,3 +14,4 @@ types-error = { path = "../types-error" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
 backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
+backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }

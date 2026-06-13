@@ -108,3 +108,66 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+// ---- bootstrap-mode backend startup (miscinit.c) ----
+
+seam_core::seam!(
+    /// `InitStandaloneProcess(argv0)` (miscinit.c): set up the fake-shared
+    /// state a standalone (non-postmaster) backend needs — `MyProcPid`,
+    /// `MyStartTime`, shared-memory disposition, fake `LocalProcessControl`.
+    /// Backend-local writes; infallible.
+    pub fn init_standalone_process(argv0: &str)
+);
+
+seam_core::seam!(
+    /// `checkDataDir()` (miscinit.c): validate the chosen data directory,
+    /// `ereport(FATAL)` if missing or wrong permissions.
+    pub fn check_data_dir() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ChangeToDataDir()` (miscinit.c): `chdir()` into the data directory,
+    /// `ereport(FATAL)` on failure.
+    pub fn change_to_data_dir() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateDataDirLockFile(amPostmaster)` (miscinit.c): create
+    /// `postmaster.pid`, `ereport(FATAL)` if a conflicting lock file exists.
+    pub fn create_data_dir_lock_file(am_postmaster: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetProcessingMode(BootstrapProcessing)` (miscadmin.h): set the `Mode`
+    /// global. Backend-local write; infallible.
+    pub fn set_processing_mode_bootstrap()
+);
+
+seam_core::seam!(
+    /// `SetProcessingMode(NormalProcessing)` (miscadmin.h): set the `Mode`
+    /// global. Backend-local write; infallible.
+    pub fn set_processing_mode_normal()
+);
+
+seam_core::seam!(
+    /// `IgnoreSystemIndexes = value` (the miscinit.c-owned global): force scans
+    /// to ignore system indexes during bootstrap. Backend-local write.
+    pub fn set_ignore_system_indexes(value: bool)
+);
+
+seam_core::seam!(
+    /// `bool has_rolreplication(Oid roleid)` (`utils/adt/acl.c`) — whether the
+    /// role has the REPLICATION attribute.
+    pub fn has_rolreplication(roleid: types_core::Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `BackendType MyBackendType` (globals.c) — this process's backend type.
+    pub fn my_backend_type() -> types_core::init::BackendType
+);
+
+seam_core::seam!(
+    /// `bool IsBinaryUpgrade` (globals.c) — running a `pg_upgrade` binary
+    /// upgrade.
+    pub fn is_binary_upgrade() -> bool
+);

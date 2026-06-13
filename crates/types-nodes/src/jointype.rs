@@ -24,17 +24,19 @@ pub enum JoinType {
     JOIN_SEMI = 4,
     /// `JOIN_ANTI` — 1 copy of each LHS row that has no match.
     JOIN_ANTI = 5,
+    /// `JOIN_RIGHT_SEMI` — 1 copy of each RHS row that has any match.
+    JOIN_RIGHT_SEMI = 6,
     /// `JOIN_RIGHT_ANTI` — 1 copy of each RHS row that has no match.
-    JOIN_RIGHT_ANTI = 6,
+    JOIN_RIGHT_ANTI = 7,
     /// `JOIN_UNIQUE_OUTER` — LHS path must be made unique.
-    JOIN_UNIQUE_OUTER = 7,
+    JOIN_UNIQUE_OUTER = 8,
     /// `JOIN_UNIQUE_INNER` — RHS path must be made unique.
-    JOIN_UNIQUE_INNER = 8,
+    JOIN_UNIQUE_INNER = 9,
 }
 
 pub use JoinType::{
-    JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
-    JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER,
+    JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI,
+    JOIN_SEMI, JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER,
 };
 
 /// `Join` plan node (nodes/plannodes.h) — the abstract base every join plan
