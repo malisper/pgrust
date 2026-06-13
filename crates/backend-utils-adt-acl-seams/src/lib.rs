@@ -28,3 +28,10 @@ seam_core::seam!(
     /// lookups, which can `ereport(ERROR)`.
     pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `object_ownercheck(classid, objectid, roleid)` (catalog/aclchk.c):
+    /// whether `roleid` owns the catalog object. Catalog lookup; can
+    /// `ereport(ERROR)`.
+    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
+);
