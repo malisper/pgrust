@@ -191,7 +191,11 @@ pub fn exec_init_merge_inherited_root<'mcx>(
         "execExpr-modify::exec_init_merge_inherited_root: inherited-root WCO/RETURNING setup \
          is blocked on attmap.c (build_attrmap_by_name) + rewriteManip.c \
          (map_variable_attnos) — no reachable owner seam — which must remap the WCO/RETURNING \
-         lists before the (landed) execExpr_core ExecInitQual/ExecBuildProjectionInfo can run"
+         lists before the (landed) execExpr_core ExecInitQual/ExecBuildProjectionInfo can run; \
+         the per-WCO branch is additionally blocked on the not-yet-modeled WithCheckOption node \
+         in types-nodes (withCheckOptionLists is a plain Node list, so wco->qual cannot be \
+         extracted as an Expr-list) — note this is the still-unmodeled WCO node, NOT the \
+         resolved gap-3 MergeAction/onConflictWhere/mergeJoinConditions Expr-list retype"
     )
 }
 
@@ -218,7 +222,9 @@ pub fn partition_init_with_check_options<'mcx>(
         "execExpr-modify::partition_init_with_check_options: WCO map-and-build routes to \
          attmap.c (build_attrmap_by_name) + rewriteManip.c (map_variable_attnos) — no reachable \
          owner seam — which must remap the WCO list before the (landed) execExpr_core \
-         ExecInitQual can run"
+         ExecInitQual can run; additionally blocked on the not-yet-modeled WithCheckOption node \
+         in types-nodes (the ref_wco_list is a plain Node list, so wco->qual cannot be extracted \
+         as an Expr-list) — the still-unmodeled WCO node, NOT the resolved gap-3 Expr-list retype"
     )
 }
 
