@@ -52,7 +52,6 @@ use types_error::{
 };
 use types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTLessEqualStrategyNumber, ScanKeyData,
-    StrategyNumber,
 };
 use types_scan::sdir::ForwardScanDirection;
 use types_storage::lock::AccessShareLock;
@@ -67,6 +66,7 @@ use types_tuple::toast_helper::{
     TOAST_NEEDS_CHANGE,
 };
 
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_common_detoast_seams as detoast_seams;
 use backend_access_common_toast_internals_seams as toast_internals_seams;
 use backend_access_index_genam_seams as genam_seams;
@@ -147,11 +147,6 @@ const HEAP_INSERT_SPECULATIVE: i32 = 0x0010;
 
 const InvalidOid: Oid = 0;
 
-/// `C_COLLATION_OID` (pg_collation.dat oid 950) — `ScanKeyInit` always sets
-/// `sk_collation` to the C collation; it is ignored for non-collatable
-/// columns such as the toast (valueid, chunkidx) keys.
-const C_COLLATION_OID: Oid = 950;
-
 // ---------------------------------------------------------------------------
 // varatt.h predicates over verbatim datum bytes (the value's on-disk image,
 // exactly what `DatumGetPointer` would dereference; little-endian build).
@@ -207,29 +202,6 @@ fn varsize_1b(b: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// ScanKeyInit (access/common/scankey.c) — plain field initialization. C's
-// `fmgr_info(procedure, &entry->sk_func)` resolves the function eagerly; the
-// trimmed `FmgrInfo` records only `fn_oid`, deferring the lookup to the scan
-// code that consumes the key (behind the genam seam).
-// ---------------------------------------------------------------------------
-
-fn ScanKeyInit(
-    entry: &mut ScanKeyData,
-    attribute_number: AttrNumber,
-    strategy: StrategyNumber,
-    procedure: Oid,
-    argument: Datum,
-) {
-    entry.sk_flags = 0;
-    entry.sk_attno = attribute_number;
-    entry.sk_strategy = strategy;
-    entry.sk_subtype = InvalidOid;
-    entry.sk_collation = C_COLLATION_OID;
-    entry.sk_argument = argument;
-    entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: procedure };
-}
-
-// ---------------------------------------------------------------------------
 // heap_toast_delete
 // ---------------------------------------------------------------------------
 
@@ -258,7 +230,7 @@ pub fn heap_toast_delete(
 
     // Do the real work.
     toast_internals_seams::toast_delete_external::call(
-        rel.rd_id,
+        rel,
         &toast_values,
         &toast_isnull,
         is_speculative,
@@ -646,6 +618,10 @@ pub fn toast_build_flattened_tuple<'mcx>(
 /// value; `sliceoffset`/`slicelength` delimit the slice. `result` is the
 /// `VARDATA` region of the caller-allocated result varlena (`slicelength`
 /// bytes), which this fills. `mcx` holds the scan temporaries.
+///
+/// `have_registered_or_active_snapshot` is C's per-backend
+/// `HaveRegisteredOrActiveSnapshot()` (read inside `get_toast_snapshot`),
+/// threaded in explicitly per the no-ambient-global rule.
 pub fn heap_fetch_toast_slice(
     mcx: Mcx<'_>,
     toastrel: &Relation<'_>,
@@ -654,6 +630,7 @@ pub fn heap_fetch_toast_slice(
     sliceoffset: i32,
     slicelength: i32,
     result: &mut [u8],
+    have_registered_or_active_snapshot: bool,
 ) -> PgResult<()> {
     let mut toastkey: [ScanKeyData; 3] = [
         ScanKeyData::empty(),
@@ -669,8 +646,8 @@ pub fn heap_fetch_toast_slice(
         .wrapping_add(1) as i32;
 
     // Look for the valid index of toast relation.
-    let (toastidxs, valid_index) =
-        toast_internals_seams::toast_open_indexes::call(mcx, toastrel.rd_id, AccessShareLock)?;
+    let toastidxs =
+        toast_internals_seams::toast_open_indexes::call(mcx, toastrel, AccessShareLock)?;
 
     let startchunk: i32 =
         (sliceoffset as usize).wrapping_div(TOAST_MAX_CHUNK_SIZE as usize) as i32;
@@ -685,7 +662,7 @@ pub fn heap_fetch_toast_slice(
         BTEqualStrategyNumber,
         F_OIDEQ,
         Datum::from_oid(valueid),
-    );
+    )?;
 
     // No additional condition if fetching all chunks. Otherwise, use an
     // equality condition for one chunk, and a range condition otherwise.
@@ -698,7 +675,7 @@ pub fn heap_fetch_toast_slice(
             BTEqualStrategyNumber,
             F_INT4EQ,
             Datum::from_i32(startchunk),
-        );
+        )?;
         2
     } else {
         ScanKeyInit(
@@ -707,23 +684,24 @@ pub fn heap_fetch_toast_slice(
             BTGreaterEqualStrategyNumber,
             F_INT4GE,
             Datum::from_i32(startchunk),
-        );
+        )?;
         ScanKeyInit(
             &mut toastkey[2],
             2 as AttrNumber,
             BTLessEqualStrategyNumber,
             F_INT4LE,
             Datum::from_i32(endchunk),
-        );
+        )?;
         3
     };
 
     // Prepare for scan.
-    let snapshot = toast_internals_seams::get_toast_snapshot::call()?;
-    let toastscan = genam_seams::systable_beginscan_ordered::call(
-        toastrel.rd_id,
-        toastidxs[valid_index as usize],
-        snapshot,
+    let snapshot =
+        toast_internals_seams::get_toast_snapshot::call(have_registered_or_active_snapshot)?;
+    let mut toastscan = genam_seams::systable_beginscan_ordered::call(
+        toastrel,
+        toastidxs.valid_index(),
+        Some(&snapshot),
         &toastkey[..nscankeys],
     )?;
 
@@ -731,9 +709,11 @@ pub fn heap_fetch_toast_slice(
     //
     // The index is on (valueid, chunkidx) so they will come in order.
     let mut expectedchunk: i32 = startchunk;
-    while let Some(ttup) =
-        genam_seams::systable_getnext_ordered::call(mcx, toastscan, ForwardScanDirection)?
-    {
+    while let Some(ttup) = genam_seams::systable_getnext_ordered::call(
+        mcx,
+        toastscan.desc_mut(),
+        ForwardScanDirection,
+    )? {
         // Have a chunk, extract the sequence number and the data.
         let (cur_value, isnull) = fastgetattr(mcx, &ttup, 2, toasttup_desc)?;
         debug_assert!(!isnull);
@@ -880,8 +860,8 @@ pub fn heap_fetch_toast_slice(
     }
 
     // End scan and close indexes.
-    genam_seams::systable_endscan_ordered::call(toastscan)?;
-    toast_internals_seams::toast_close_indexes::call(&toastidxs, AccessShareLock)?;
+    toastscan.end()?;
+    toastidxs.close()?;
 
     Ok(())
 }
