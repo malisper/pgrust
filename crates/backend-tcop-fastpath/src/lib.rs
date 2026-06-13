@@ -469,7 +469,9 @@ pub fn parse_fcall_arguments<'mcx>(
 
     // /* Get the argument format codes */
     // numAFormats = pq_getmsgint(msgBuf, 2);
-    numAFormats = pqformat::pq_getmsgint(msg_buf, 2)? as i16 as i32;
+    // C's pq_getmsgint(2) returns an `unsigned int` (the uint16 zero-extended),
+    // assigned to `int numAFormats` — so the value is 0..65535, never negative.
+    numAFormats = pqformat::pq_getmsgint(msg_buf, 2)? as i32;
     // if (numAFormats > 0)
     if numAFormats > 0 {
         // aformats = (int16 *) palloc(numAFormats * sizeof(int16));
@@ -484,7 +486,9 @@ pub fn parse_fcall_arguments<'mcx>(
     }
 
     // nargs = pq_getmsgint(msgBuf, 2);  /* # of arguments */
-    nargs = pqformat::pq_getmsgint(msg_buf, 2)? as i16 as i32;
+    // Zero-extended into C's `int nargs` (0..65535); the > FUNC_MAX_ARGS guard
+    // below rejects anything beyond 100.
+    nargs = pqformat::pq_getmsgint(msg_buf, 2)? as i32;
 
     // if (fip->flinfo.fn_nargs != nargs || nargs > FUNC_MAX_ARGS)
     if (fip.flinfo.fn_nargs as i32) != nargs || nargs > FUNC_MAX_ARGS as i32 {
