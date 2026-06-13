@@ -170,6 +170,10 @@ pub fn datum_to_json_internal(
 ) -> PgResult<()> {
     use JsonTypeCategory::*;
 
+    // C: check_stack_depth() — array/composite rendering recurses, so guard the
+    // execution stack (ERRCODE_STATEMENT_TOO_COMPLEX) before descending.
+    backend_utils_misc_stack_depth_seams::check_stack_depth::call()?;
+
     // callers are expected to ensure that null keys are not passed in
     debug_assert!(!(key_scalar && is_null));
 

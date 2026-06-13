@@ -20,3 +20,4 @@ backend-utils-adt-jsonfuncs-seams = { path = "../backend-utils-adt-jsonfuncs-sea
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 common-jsonapi-seams = { path = "../common-jsonapi-seams" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
