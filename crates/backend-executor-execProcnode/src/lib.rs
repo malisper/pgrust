@@ -8,6 +8,11 @@
 // all ported yet; the family bodies are `todo!()` until those owners land.
 #![allow(dead_code)]
 #![allow(unused_variables)]
+// Until the per-node `ExecInit*` owners land, every `ExecInitNode` dispatch
+// arm panics (diverges), so the tail after the dispatch `match` is statically
+// unreachable. The tail is the faithful C logic and becomes reachable as the
+// node owners' `ExecInit*` seams are wired in; accept the lint meanwhile.
+#![allow(unreachable_code)]
 
 //! `backend-executor-execProcnode` — port of `src/backend/executor/execProcnode.c`.
 //!

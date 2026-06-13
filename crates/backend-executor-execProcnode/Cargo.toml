@@ -13,5 +13,7 @@ seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
+# check_stack_depth() seam (utils/misc/stack_depth.c), unported owner.
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }

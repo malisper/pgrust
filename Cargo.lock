@@ -2954,6 +2954,7 @@ name = "backend-executor-execProcnode"
 version = "0.0.0"
 dependencies = [
  "backend-executor-execProcnode-seams",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "seam-core",
  "types-error",
