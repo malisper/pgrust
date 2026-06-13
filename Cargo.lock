@@ -7527,6 +7527,10 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-funcapi-seams",
  "mcx",

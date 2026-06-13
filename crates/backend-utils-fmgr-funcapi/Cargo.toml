@@ -17,5 +17,11 @@ types-nodes = { path = "../types-nodes" }
 types-namespace = { path = "../types-namespace" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
+# Real ported neighbour: tuple-descriptor entry init (access/common/tupdesc.c).
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+# Unported-neighbour seams routed through their owners' per-owner seam crates.
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # Inward seam crate this unit OWNS and installs from init_seams().
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
