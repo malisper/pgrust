@@ -239,6 +239,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tupdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc-seams",
+ "backend-catalog-catalog-seams",
+ "backend-nodes-read-seams",
+ "backend-utils-cache-syscache-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-tupdesc-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -3857,6 +3874,16 @@ dependencies = [
 name = "backend-nodes-queryjumble-seams"
 version = "0.0.0"
 dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-nodes-read-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -7652,6 +7679,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-ip-seams"
 version = "0.0.0"
 dependencies = [
@@ -7853,6 +7887,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-reloptions",
+ "backend-access-common-tupdesc",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-rmgrdesc-small",

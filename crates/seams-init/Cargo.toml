@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
