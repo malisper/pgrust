@@ -45,6 +45,7 @@ pub fn init_all() {
     backend_commands_portalcmds::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execExpr::init_seams();
+    backend_executor_execExprInterp::init_seams();
     backend_executor_execParallel::init_seams();
     backend_executor_execPartition::init_seams();
     backend_executor_execProcnode::init_seams();

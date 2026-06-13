@@ -58,7 +58,6 @@ backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 # types_acl (AclMode/AclResult/ACL_EXECUTE), the ProcedureRelationId catalog OID
 # and OBJECT_FUNCTION object type for the ACL check, and pgstat_track_functions /
-# TRACK_FUNC_* for the strict×fusage opcode selection.
-types-acl = { path = "../types-acl" }
+# TRACK_FUNC_* for the strict×fusage opcode selection (types-acl declared above).
 types-parsenodes = { path = "../types-parsenodes" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
