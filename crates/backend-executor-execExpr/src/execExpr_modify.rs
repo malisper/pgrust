@@ -19,21 +19,31 @@
 //!     `adjust_partition_colnos_using_map` / `ExecGetRootToChildMap`
 //!     (execPartition.c), and `table_slot_create` (tableam.c).
 //!
-//! Only `exec_project_returning` is reachable today: it reads the already-built
-//! `ResultRelInfo.ri_projectReturning` (modeled in `types-nodes`) and evaluates
-//! it through the in-unit `execExpr_core::exec_project_info`
-//! (`ExecProject(projInfo)`), with the caller having pre-wired the econtext
-//! slots and the OLD/NEW flags per the C contract.
+//! The `execExpr_core` compiler primitives these wrappers drive are now landed
+//! (the explicit-target-list `exec_build_projection_info_impl` /
+//! `exec_build_update_projection_impl` and `exec_project_info`), so every
+//! wrapper whose inputs are already in `Expr` / `TargetEntry` form — the four
+//! RETURNING / SET / MERGE-INSERT/UPDATE *projection* builders plus
+//! `exec_project_returning` — is fully wired to the core builder here.
 //!
-//! The remaining wrappers cannot yet emit their full C logic on this scaffold:
-//! the `execExpr_core` compiler primitives they call are still `todo!()` with
-//! node-driven (not explicit-target-list) signatures; the `ResultRelInfo`
-//! `ri_projectNew` field and the `Node`→`Expr`-qual-list view the C casts
-//! through (`(List *) action->qual`) are not yet modeled in `types-nodes`; and
-//! the attmap/rewrite/partition/tableam callees have no reachable owner seam in
-//! this crate's dependency set. Each therefore loud-panics, naming the owner it
-//! routes to — the sanctioned "owner not yet landed" marker — until those
-//! families/units land (mirror-PG-and-panic).
+//! The remaining wrappers still loud-panic, but on a *genuine unported owner*,
+//! not on the core compiler (which is ready):
+//!   * the *qual* wrappers (MERGE WHEN qual / join condition, WITH CHECK OPTION,
+//!     ON CONFLICT WHERE) take a plan-only `Node` and the C casts it
+//!     `(List *) node->qual` to a list of `Expr`s — the `types-nodes` `Node`
+//!     enum carries no `Expr`/`List` path, so the cast cannot be expressed to
+//!     feed `execExpr_core::exec_init_qual`;
+//!   * `exec_project_new_tuple` needs the `ResultRelInfo.ri_projectNew` field,
+//!     not yet modeled in `types-nodes` (only its `ri_projectNewInfoValid` flag
+//!     is);
+//!   * the `execPartition` / inherited-root map-and-build wrappers must first
+//!     `build_attrmap_by_name` (attmap.c) + `map_variable_attnos`
+//!     (rewriteManip.c) / `adjust_partition_colnos*` / `ExecGetRootToChildMap`
+//!     (execPartition.c) / `table_slot_create` (tableam.c) — none of which has a
+//!     reachable owner seam in this crate's dependency set — before they could
+//!     reach the (ready) core builder.
+//! Each such wrapper names the genuine owner it is blocked on
+//! (mirror-PG-and-panic).
 
 use mcx::{Mcx, PgBox};
 use types_core::primitive::Index;
@@ -50,10 +60,11 @@ use crate::execExpr_core;
 ///
 /// Compile one MERGE action's WHEN [NOT MATCHED] AND conditions into an
 /// `ExprState` via the in-unit `execExpr_core::exec_init_qual`
-/// (`ExecInitQual`). The C casts the `Node *` qual to a `List *` of `Expr`s; the
-/// trimmed `types-nodes` `Node` enum carries plan nodes only and cannot yet
-/// surface that `Expr` qual list, so the cast cannot be expressed. Routes to the
-/// execExpr_core compiler (and the missing `Node`→`Expr`-list modeling).
+/// (`ExecInitQual`), which is landed and ready. The C casts the `Node *` qual to
+/// a `List *` of `Expr`s (`(List *) action->qual`); the trimmed `types-nodes`
+/// `Node` enum carries plan nodes only and has no `Expr`/`List` path, so the
+/// cast that produces the `&[Expr]` `exec_init_qual` needs cannot be expressed.
+/// Blocked on that `types-nodes` `Node`→`Expr`-qual-list modeling.
 pub fn exec_init_merge_when_qual<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
     _estate: &mut EStateData<'mcx>,
@@ -71,47 +82,74 @@ pub fn exec_init_merge_when_qual<'mcx>(
 /// INSERT action.
 ///
 /// Build the explicit-target-list projection via the in-unit
-/// `execExpr_core::exec_build_projection_info` (`ExecBuildProjectionInfo`). The
-/// scaffold core variant is node-driven (reads the target list off a
-/// `PlanStateData`) and does not yet accept the explicit `target_list` / `slot`
-/// / `inputDesc` the C passes here, so the call cannot be expressed. Routes to
-/// the execExpr_core compiler.
+/// `execExpr_core::exec_build_projection_info_impl` (`ExecBuildProjectionInfo`).
+/// The C is
+/// `ExecBuildProjectionInfo(action->targetList, mtstate->ps.ps_ExprContext,
+/// tgtslot, &mtstate->ps, tgtdesc)`: the result slot (`tgt_slot`) only matters
+/// at `ExecProject` time and is not consulted during compilation, and the
+/// parent `PlanState` is ignored by the owned spine (mirrors `ExecInitExpr`), so
+/// the build needs only the target list, the econtext id, and the target tuple
+/// descriptor (`tgt_desc_rel`'s relation `rd_att`).
 pub fn exec_build_merge_insert_projection<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _target_list: &[TargetEntry<'mcx>],
-    _econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+    target_list: &[TargetEntry<'mcx>],
+    econtext: EcxtId,
     _tgt_slot: SlotId,
-    _tgt_desc_rel: RriId,
+    tgt_desc_rel: RriId,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
-    panic!(
-        "execExpr-modify::exec_build_merge_insert_projection: \
-         ExecBuildProjectionInfo(targetList, econtext, slot, parent, tgtdesc) routes to \
-         execExpr_core (explicit-target-list ExecBuildProjectionInfo, still todo!())"
+    let mcx = estate.es_query_cxt;
+    // tgtdesc = resultRelInfo->ri_RelationDesc->rd_att (the MERGE INSERT
+    // action's target relation descriptor). Clone it out of the pooled
+    // ResultRelInfo so it can be borrowed alongside the &mut estate.
+    let tgt_desc = estate
+        .result_rel(tgt_desc_rel)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecBuildMergeInsertProjection: ri_RelationDesc is NULL")
+        .rd_att_clone_in(mcx)?;
+    execExpr_core::exec_build_projection_info_impl(
+        estate,
+        target_list,
+        econtext,
+        Some(&tgt_desc),
     )
 }
 
 /// `ExecBuildUpdateProjection(...)` for a MERGE UPDATE action.
 ///
 /// Build the UPDATE "new tuple" projection over the explicit `target_list` /
-/// `update_colnos` via the in-unit `execExpr_core::exec_build_update_projection`
-/// (`ExecBuildUpdateProjection`). The scaffold core variant stores into a
-/// `ResultRelInfo.ri_projectNew` and does not return a standalone
-/// `ProjectionInfo` for the per-action `mas_proj`, and the explicit-target-list
-/// build it needs is still `todo!()`. Routes to the execExpr_core compiler.
+/// `update_colnos` via the in-unit
+/// `execExpr_core::exec_build_update_projection_impl`
+/// (`ExecBuildUpdateProjection`), returning the standalone per-action
+/// `ProjectionInfo` for `mas_proj`. The C is
+/// `ExecBuildUpdateProjection(action->targetList, true, action->updateColnos,
+/// resultRelInfo->ri_RelationDesc->rd_att, mtstate->ps.ps_ExprContext, tgtslot,
+/// &mtstate->ps)`: `evalTargetList = true`, the relation descriptor comes from
+/// `result_rel_info`'s `rd_att`, and the result slot only matters at
+/// `ExecProject` time (not during compilation).
 pub fn exec_build_merge_update_projection<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _target_list: &[TargetEntry<'mcx>],
-    _update_colnos: &[i32],
-    _econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    target_list: &[TargetEntry<'mcx>],
+    update_colnos: &[i32],
+    econtext: EcxtId,
 ) -> PgResult<PgBox<'mcx, ProjectionInfo<'mcx>>> {
-    panic!(
-        "execExpr-modify::exec_build_merge_update_projection: \
-         ExecBuildUpdateProjection(targetList, true, updateColnos, relDesc, econtext, slot, \
-         parent) routes to execExpr_core (explicit-target-list ExecBuildUpdateProjection, \
-         still todo!())"
+    let mcx = estate.es_query_cxt;
+    let rel_desc = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecBuildMergeUpdateProjection: ri_RelationDesc is NULL")
+        .rd_att_clone_in(mcx)?;
+    execExpr_core::exec_build_update_projection_impl(
+        estate,
+        target_list,
+        true,
+        update_colnos,
+        &rel_desc,
+        econtext,
     )
 }
 
@@ -119,8 +157,9 @@ pub fn exec_build_merge_update_projection<'mcx>(
 ///
 /// Compile the MERGE join condition for `result_rel_info` and store the
 /// compiled `ExprState` on the pooled `ResultRelInfo.ri_MergeJoinCondition`. The
-/// `Node`→`Expr`-qual-list cast feeding `ExecInitQual` is not yet modeled and
-/// the in-unit `ExecInitQual` is still `todo!()`. Routes to execExpr_core.
+/// in-unit `ExecInitQual` is landed; what is missing is the `Node`→`Expr`-
+/// qual-list cast feeding it (`(List *) joinCondition`), which the trimmed
+/// `types-nodes` `Node` enum cannot express. Blocked on that modeling.
 pub fn exec_init_merge_join_condition<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
     _estate: &mut EStateData<'mcx>,
@@ -144,9 +183,10 @@ pub fn exec_init_merge_join_condition<'mcx>(
 /// `build_attrmap_by_name` + `map_variable_attnos` the first plan WCO/RETURNING
 /// list to the root's attnos (when root and first result rel differ),
 /// `ExecInitQual` each WCO qual, and `ExecBuildProjectionInfo` the RETURNING
-/// list. The `build_attrmap_by_name` (attmap.c) and `map_variable_attnos`
-/// (rewriteManip.c) callees have no reachable owner seam, and the execExpr_core
-/// compiler primitives are still `todo!()`.
+/// list. The execExpr_core compiler primitives are landed, but the
+/// `build_attrmap_by_name` (attmap.c) and `map_variable_attnos` (rewriteManip.c)
+/// remap that must run first has no reachable owner seam, so this is blocked on
+/// those unported owners.
 pub fn exec_init_merge_inherited_root<'mcx>(
     _mcx: Mcx<'mcx>,
     _mtstate: &mut ModifyTableState<'mcx>,
@@ -157,9 +197,9 @@ pub fn exec_init_merge_inherited_root<'mcx>(
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::exec_init_merge_inherited_root: inherited-root WCO/RETURNING setup \
-         routes to attmap.c (build_attrmap_by_name), rewriteManip.c (map_variable_attnos) — no \
-         reachable owner seam — and execExpr_core (ExecInitQual/ExecBuildProjectionInfo, still \
-         todo!())"
+         is blocked on attmap.c (build_attrmap_by_name) + rewriteManip.c \
+         (map_variable_attnos) — no reachable owner seam — which must remap the WCO/RETURNING \
+         lists before the (landed) execExpr_core ExecInitQual/ExecBuildProjectionInfo can run"
     )
 }
 
@@ -170,8 +210,9 @@ pub fn exec_init_merge_inherited_root<'mcx>(
 /// firstVarno, 0, attmap, partrel reltype)` the first plan's WCO list into the
 /// leaf partition's attnos, `ExecInitQual` each `WithCheckOption.qual`, and
 /// store `ri_WithCheckOptions` / `ri_WithCheckOptionExprs` on the leaf
-/// `ResultRelInfo`. Routes to attmap.c / rewriteManip.c (no reachable owner
-/// seam) and execExpr_core (ExecInitQual, still `todo!()`).
+/// `ResultRelInfo`. The execExpr_core `ExecInitQual` is landed; the
+/// attmap.c / rewriteManip.c remap that must run first has no reachable owner
+/// seam, so this is blocked on those unported owners.
 pub fn partition_init_with_check_options<'mcx>(
     _mcx: Mcx<'mcx>,
     _mtstate: &mut ModifyTableState<'mcx>,
@@ -183,8 +224,9 @@ pub fn partition_init_with_check_options<'mcx>(
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::partition_init_with_check_options: WCO map-and-build routes to \
-         attmap.c (build_attrmap_by_name), rewriteManip.c (map_variable_attnos) — no reachable \
-         owner seam — and execExpr_core (ExecInitQual, still todo!())"
+         attmap.c (build_attrmap_by_name) + rewriteManip.c (map_variable_attnos) — no reachable \
+         owner seam — which must remap the WCO list before the (landed) execExpr_core \
+         ExecInitQual can run"
     )
 }
 
@@ -195,8 +237,9 @@ pub fn partition_init_with_check_options<'mcx>(
 /// list into the leaf partition's attnos, store `ri_returningList`, and build
 /// `ri_projectReturning` via `ExecBuildProjectionInfo` using
 /// `mtstate->ps.ps_ResultTupleSlot` / `ps_ExprContext` and the partition's
-/// tupdesc. Routes to attmap.c / rewriteManip.c (no reachable owner seam) and
-/// execExpr_core (ExecBuildProjectionInfo, still `todo!()`).
+/// tupdesc. The execExpr_core `ExecBuildProjectionInfo` is landed; the
+/// attmap.c / rewriteManip.c remap that must run first has no reachable owner
+/// seam, so this is blocked on those unported owners.
 pub fn partition_init_returning<'mcx>(
     _mcx: Mcx<'mcx>,
     _mtstate: &mut ModifyTableState<'mcx>,
@@ -208,8 +251,9 @@ pub fn partition_init_returning<'mcx>(
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::partition_init_returning: RETURNING map-and-build routes to attmap.c \
-         (build_attrmap_by_name), rewriteManip.c (map_variable_attnos) — no reachable owner \
-         seam — and execExpr_core (explicit-target-list ExecBuildProjectionInfo, still todo!())"
+         (build_attrmap_by_name) + rewriteManip.c (map_variable_attnos) — no reachable owner \
+         seam — which must remap the RETURNING list before the (landed) execExpr_core \
+         explicit-target-list ExecBuildProjectionInfo can run"
     )
 }
 
@@ -223,8 +267,9 @@ pub fn partition_init_returning<'mcx>(
 /// `ExecBuildUpdateProjection`, and (when present) map + `ExecInitQual` the
 /// WHERE clause. Routes to execPartition.c (ExecGetRootToChildMap /
 /// adjust_partition_colnos), rewriteManip.c (map_variable_attnos), tableam.c
-/// (table_slot_create) — no reachable owner seams — and execExpr_core
-/// (ExecBuildUpdateProjection / ExecInitQual, still `todo!()`).
+/// (table_slot_create) — none with a reachable owner seam. The execExpr_core
+/// ExecBuildUpdateProjection / ExecInitQual it would then call are landed, so
+/// the block is purely those unported owners.
 #[allow(clippy::too_many_arguments)]
 pub fn partition_init_on_conflict_update<'mcx>(
     _mcx: Mcx<'mcx>,
@@ -241,8 +286,9 @@ pub fn partition_init_on_conflict_update<'mcx>(
     panic!(
         "execExpr-modify::partition_init_on_conflict_update: OnConflictSetState build routes to \
          execPartition.c (ExecGetRootToChildMap, adjust_partition_colnos), rewriteManip.c \
-         (map_variable_attnos), tableam.c (table_slot_create) — no reachable owner seam — and \
-         execExpr_core (ExecBuildUpdateProjection/ExecInitQual, still todo!())"
+         (map_variable_attnos), tableam.c (table_slot_create) — no reachable owner seam — which \
+         must remap/create the projection inputs before the (landed) execExpr_core \
+         ExecBuildUpdateProjection/ExecInitQual can run"
     )
 }
 
@@ -255,10 +301,10 @@ pub fn partition_init_on_conflict_update<'mcx>(
 /// partition's `ri_newTupleSlot`; CMD_UPDATE
 /// `adjust_partition_colnos_using_map` + `ExecBuildUpdateProjection`),
 /// map + `ExecInitQual` the action's `qual` into `mas_whenqual`, and append into
-/// `ri_MergeActions[matchKind]`. Routes to attmap.c / rewriteManip.c /
-/// execPartition.c (no reachable owner seam) and execExpr_core
-/// (ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual, still
-/// `todo!()`).
+/// `ri_MergeActions[matchKind]`. The execExpr_core
+/// ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual it would call
+/// are landed; the attmap.c / rewriteManip.c / execPartition.c remap that must
+/// run first has no reachable owner seam, so this is blocked on those owners.
 #[allow(clippy::too_many_arguments)]
 pub fn partition_init_merge_actions<'mcx>(
     _mcx: Mcx<'mcx>,
@@ -274,9 +320,9 @@ pub fn partition_init_merge_actions<'mcx>(
     panic!(
         "execExpr-modify::partition_init_merge_actions: per-partition MERGE action build routes \
          to attmap.c (build_attrmap_by_name), rewriteManip.c (map_variable_attnos), \
-         execPartition.c (adjust_partition_colnos_using_map) — no reachable owner seam — and \
-         execExpr_core (ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual, still \
-         todo!())"
+         execPartition.c (adjust_partition_colnos_using_map) — no reachable owner seam — which \
+         must remap the per-action inputs before the (landed) execExpr_core \
+         ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual can run"
     )
 }
 
@@ -287,8 +333,8 @@ pub fn partition_init_merge_actions<'mcx>(
 /// UPDATE `ecxt_scantuple = old_slot`), then `ExecProject(ri_projectNew)`. The
 /// `ResultRelInfo.ri_projectNew` field is not yet modeled in `types-nodes`
 /// (only its `ri_projectNewInfoValid` flag is), so the projection cannot be read
-/// to evaluate. Routes to the not-yet-modeled `ri_projectNew` field and the
-/// in-unit `execExpr_core::exec_project_info` (ExecProject, still `todo!()`).
+/// to evaluate. The in-unit `execExpr_core::exec_project_info` (`ExecProject`)
+/// is landed; this is blocked on that not-yet-modeled `ri_projectNew` field.
 pub fn exec_project_new_tuple<'mcx>(
     _estate: &mut EStateData<'mcx>,
     _result_rel_info: RriId,
@@ -297,8 +343,8 @@ pub fn exec_project_new_tuple<'mcx>(
 ) -> PgResult<SlotId> {
     panic!(
         "execExpr-modify::exec_project_new_tuple: ExecProject(ri_projectNew) routes to the \
-         not-yet-modeled ResultRelInfo.ri_projectNew field in types-nodes and execExpr_core \
-         (ExecProject, still todo!())"
+         not-yet-modeled ResultRelInfo.ri_projectNew field in types-nodes; the execExpr_core \
+         ExecProject it would evaluate is landed"
     )
 }
 
@@ -308,9 +354,10 @@ pub fn exec_project_new_tuple<'mcx>(
 /// `foreach(ll, wcoList) { wcoExpr = ExecInitQual(wco->qual, &mtstate->ps);
 /// wcoExprs = lappend(wcoExprs, wcoExpr); }` then store `ri_WithCheckOptions` /
 /// `ri_WithCheckOptionExprs` on the pooled `ResultRelInfo`. The
-/// `WithCheckOption.qual` (a `Node`→`Expr` list) is not yet modeled in
-/// `types-nodes` and the in-unit `ExecInitQual` is still `todo!()`. Routes to
-/// execExpr_core and the not-yet-modeled WCO qual view.
+/// in-unit `ExecInitQual` is landed; what is missing is the
+/// `WithCheckOption.qual` (a `Node`→`Expr` list) modeling in `types-nodes`
+/// (`ri_WithCheckOptions` is stored as plain `Node`s with no Expr-list path), so
+/// this is blocked on that not-yet-modeled WCO qual view.
 pub fn exec_init_with_check_options<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
     _estate: &mut EStateData<'mcx>,
@@ -328,55 +375,94 @@ pub fn exec_init_with_check_options<'mcx>(
 /// Build the RETURNING projection for one result relation
 /// (nodeModifyTable.c `ExecInitModifyTable`).
 ///
-/// `ri_projectReturning = ExecBuildProjectionInfo(rlist, econtext,
-/// ps_ResultTupleSlot, &mtstate->ps, rd_att)`, also storing `ri_returningList`.
-/// The scaffold core variant is node-driven and does not accept the explicit
-/// `rlist` the C passes here, and is still `todo!()`. Routes to execExpr_core.
+/// `ri_returningList = rlist; ri_projectReturning =
+/// ExecBuildProjectionInfo(rlist, econtext, ps_ResultTupleSlot, &mtstate->ps,
+/// rd_att)`. `econtext` is `mtstate->ps.ps_ExprContext`; the result slot
+/// (`ps_ResultTupleSlot`) only matters at `ExecProject` time, not during
+/// compilation, so it is not threaded into the build. Stores the compiled
+/// projection and the source list on the pooled `ResultRelInfo` and sets the
+/// `ri_has_project_returning` flag.
 pub fn exec_build_returning_projection<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _rlist: &[TargetEntry<'mcx>],
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    rlist: &[TargetEntry<'mcx>],
 ) -> PgResult<()> {
-    panic!(
-        "execExpr-modify::exec_build_returning_projection: \
-         ExecBuildProjectionInfo(rlist, econtext, ps_ResultTupleSlot, parent, rd_att) routes to \
-         execExpr_core (explicit-target-list ExecBuildProjectionInfo, still todo!())"
-    )
+    let mcx = estate.es_query_cxt;
+    // econtext = mtstate->ps.ps_ExprContext
+    let econtext = mtstate
+        .ps
+        .ps_ExprContext
+        .expect("ExecBuildReturningProjection: mtstate->ps.ps_ExprContext is NULL");
+    // rd_att = resultRelInfo->ri_RelationDesc->rd_att
+    let rd_att = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecBuildReturningProjection: ri_RelationDesc is NULL")
+        .rd_att_clone_in(mcx)?;
+
+    let proj =
+        execExpr_core::exec_build_projection_info_impl(estate, rlist, econtext, Some(&rd_att))?;
+
+    // resultRelInfo->ri_returningList = rlist;
+    let mut stored_list: mcx::PgVec<'mcx, TargetEntry<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, rlist.len())?;
+    for tle in rlist {
+        stored_list.push(tle.clone_in(mcx)?);
+    }
+    let rri = estate.result_rel_mut(result_rel_info);
+    rri.ri_returningList = Some(stored_list);
+    // resultRelInfo->ri_projectReturning = ...
+    rri.ri_projectReturning = Some(proj);
+    rri.ri_has_project_returning = true;
+    Ok(())
 }
 
 /// Build the ON CONFLICT DO UPDATE SET projection for the result relation
 /// (nodeModifyTable.c `ExecInitModifyTable`).
 ///
 /// `ExecBuildUpdateProjection(node->onConflictSet, true, node->onConflictCols,
-/// relationDesc, econtext, onconfl->oc_ProjSlot, &mtstate->ps)`. The scaffold
-/// core variant stores into `ri_projectNew` rather than returning a standalone
-/// `ProjectionInfo`, and the explicit-target-list build it needs is still
-/// `todo!()`. Routes to execExpr_core.
+/// relationDesc, econtext, onconfl->oc_ProjSlot, &mtstate->ps)`, returning the
+/// compiled `OnConflictSetState.oc_ProjInfo`. `relationDesc` is
+/// `result_rel_info`'s `rd_att`; `evalTargetList = true`; the projection slot
+/// (`proj_slot` / `oc_ProjSlot`) only matters at `ExecProject` time, not during
+/// compilation.
 pub fn exec_build_on_conflict_set_projection<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _on_conflict_set: &[TargetEntry<'mcx>],
-    _on_conflict_cols: &[i32],
-    _econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    on_conflict_set: &[TargetEntry<'mcx>],
+    on_conflict_cols: &[i32],
+    econtext: EcxtId,
     _proj_slot: SlotId,
 ) -> PgResult<ProjectionInfo<'mcx>> {
-    panic!(
-        "execExpr-modify::exec_build_on_conflict_set_projection: \
-         ExecBuildUpdateProjection(onConflictSet, true, onConflictCols, relDesc, econtext, \
-         oc_ProjSlot, parent) routes to execExpr_core (explicit-target-list \
-         ExecBuildUpdateProjection, still todo!())"
-    )
+    let mcx = estate.es_query_cxt;
+    let rel_desc = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecBuildOnConflictSetProjection: ri_RelationDesc is NULL")
+        .rd_att_clone_in(mcx)?;
+    let proj = execExpr_core::exec_build_update_projection_impl(
+        estate,
+        on_conflict_set,
+        true,
+        on_conflict_cols,
+        &rel_desc,
+        econtext,
+    )?;
+    Ok(PgBox::into_inner(proj))
 }
 
 /// `ExecInitQual((List *) node->onConflictWhere, &mtstate->ps)`
 /// (nodeModifyTable.c `ExecInitModifyTable`).
 ///
 /// Compile the ON CONFLICT DO UPDATE WHERE clause into an `ExprState`; a `None`
-/// clause yields `None`. The `Node`→`Expr`-qual-list cast is not yet modeled in
-/// `types-nodes` and the in-unit `ExecInitQual` is still `todo!()`. Routes to
-/// execExpr_core.
+/// clause yields `None`. The in-unit `ExecInitQual` is landed; what is missing
+/// is the `Node`→`Expr`-qual-list cast (`(List *) node->onConflictWhere`), which
+/// the trimmed `types-nodes` `Node` enum cannot express. Blocked on that
+/// modeling.
 pub fn exec_init_on_conflict_where<'mcx>(
     _mtstate: &mut ModifyTableState<'mcx>,
     _estate: &mut EStateData<'mcx>,
