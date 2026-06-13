@@ -880,6 +880,12 @@ pub fn init_seams() {
     backend_storage_ipc_procsignal_seams::process_proc_signal_barrier::set(
         ProcessProcSignalBarrier,
     );
+    // `procsignal_sigusr1_handler(SIGNAL_ARGS)`: the C handler ignores the
+    // `postgres_signal_arg` (it only dispatches on the multiplexed proc-signal
+    // flags), so the adapter drops it onto the parameterless implementation.
+    backend_storage_ipc_procsignal_seams::procsignal_sigusr1_handler::set(
+        |_postgres_signal_arg| procsignal_sigusr1_handler(),
+    );
 }
 
 #[cfg(test)]
