@@ -98,8 +98,10 @@ seam_core::seam!(pub fn send_parallel_message_signal(pid: pid_t, procno: ProcNum
 // --- DSM byte helpers (the parallel subsystem owns the segment buffer) ------
 seam_core::seam!(pub fn write_dsm_handle(base: usize, value: dsm_handle) -> PgResult<()>);
 seam_core::seam!(pub fn read_dsm_handle(base: usize) -> PgResult<dsm_handle>);
-seam_core::seam!(pub fn write_entrypoint(base: usize, library: &str, function: &str) -> PgResult<()>);
-seam_core::seam!(pub fn read_entrypoint(base: usize) -> PgResult<(String, String)>);
+// `write_entrypoint`/`read_entrypoint` retired in family `shm-toc-address`: the
+// entrypoint "library\0function\0" bytes are now written/read in place at the
+// real chunk address by parallel.c's own `write_entrypoint`/`read_entrypoint`
+// (strcpy/strlen), not through a seam.
 
 // --- FixedParallelState DSM driver (cross-process spinlock is the hard core)-
 seam_core::seam!(pub fn fps_init(base: usize, state: FixedParallelState) -> PgResult<()>);
