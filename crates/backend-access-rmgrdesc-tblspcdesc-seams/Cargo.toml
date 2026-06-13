@@ -1,0 +1,16 @@
+[package]
+name = "backend-access-rmgrdesc-tblspcdesc-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_rmgrdesc_tblspcdesc_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-wal = { path = "../types-wal" }
+mcx = { path = "../mcx" }

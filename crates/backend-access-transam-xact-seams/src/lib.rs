@@ -55,3 +55,10 @@ seam_core::seam!(
     /// with a valid `CheckXidAlive`. Pure read of backend-local state.
     pub fn bsysscan() -> bool
 );
+
+seam_core::seam!(
+    /// `xact_redo(record)` (xact.c) — WAL redo for RM_XACT_ID records
+    /// (`rm_redo` slot of `RmgrTable`). Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn xact_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> PgResult<()>
+);

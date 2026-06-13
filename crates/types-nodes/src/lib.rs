@@ -17,6 +17,7 @@ pub mod bitmapset;
 pub mod execexpr;
 pub mod execnodes;
 pub mod executor;
+pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod nodeforeigncustom;

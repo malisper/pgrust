@@ -1,0 +1,69 @@
+[package]
+name = "backend-access-transam-rmgr"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_transam_rmgr"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-wal = { path = "../types-wal" }
+# Every non-NULL builtin RmgrTable slot is a callback owned by another
+# subsystem; each is reached through its owner's seam crate (the owners
+# install on landing). One dependency per rmgrlist.h callback owner.
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-access-transam-clog-seams = { path = "../backend-access-transam-clog-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+backend-access-heap-heapam-xlog-seams = { path = "../backend-access-heap-heapam-xlog-seams" }
+backend-access-nbt-xlog-seams = { path = "../backend-access-nbt-xlog-seams" }
+backend-access-hash-xlog-seams = { path = "../backend-access-hash-xlog-seams" }
+backend-access-gin-core-seams = { path = "../backend-access-gin-core-seams" }
+backend-access-gist-core-seams = { path = "../backend-access-gist-core-seams" }
+backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }
+backend-access-spg-xlog-seams = { path = "../backend-access-spg-xlog-seams" }
+backend-access-brin-xlog-seams = { path = "../backend-access-brin-xlog-seams" }
+backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
+backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
+backend-access-transam-generic-xlog-seams = { path = "../backend-access-transam-generic-xlog-seams" }
+backend-replication-logical-message-seams = { path = "../backend-replication-logical-message-seams" }
+backend-replication-logical-decode-seams = { path = "../backend-replication-logical-decode-seams" }
+backend-access-rmgrdesc-xlogdesc-seams = { path = "../backend-access-rmgrdesc-xlogdesc-seams" }
+backend-access-rmgrdesc-xactdesc-seams = { path = "../backend-access-rmgrdesc-xactdesc-seams" }
+backend-access-rmgrdesc-smgrdesc-seams = { path = "../backend-access-rmgrdesc-smgrdesc-seams" }
+backend-access-rmgrdesc-clogdesc-seams = { path = "../backend-access-rmgrdesc-clogdesc-seams" }
+backend-access-rmgrdesc-dbasedesc-seams = { path = "../backend-access-rmgrdesc-dbasedesc-seams" }
+backend-access-rmgrdesc-tblspcdesc-seams = { path = "../backend-access-rmgrdesc-tblspcdesc-seams" }
+backend-access-rmgrdesc-mxactdesc-seams = { path = "../backend-access-rmgrdesc-mxactdesc-seams" }
+backend-access-rmgrdesc-relmapdesc-seams = { path = "../backend-access-rmgrdesc-relmapdesc-seams" }
+backend-access-rmgrdesc-standbydesc-seams = { path = "../backend-access-rmgrdesc-standbydesc-seams" }
+backend-access-rmgrdesc-heapdesc-seams = { path = "../backend-access-rmgrdesc-heapdesc-seams" }
+backend-access-rmgrdesc-nbtdesc-seams = { path = "../backend-access-rmgrdesc-nbtdesc-seams" }
+backend-access-rmgrdesc-hashdesc-seams = { path = "../backend-access-rmgrdesc-hashdesc-seams" }
+backend-access-rmgrdesc-gindesc-seams = { path = "../backend-access-rmgrdesc-gindesc-seams" }
+backend-access-rmgrdesc-gistdesc-seams = { path = "../backend-access-rmgrdesc-gistdesc-seams" }
+backend-access-rmgrdesc-seqdesc-seams = { path = "../backend-access-rmgrdesc-seqdesc-seams" }
+backend-access-rmgrdesc-spgdesc-seams = { path = "../backend-access-rmgrdesc-spgdesc-seams" }
+backend-access-rmgrdesc-brindesc-seams = { path = "../backend-access-rmgrdesc-brindesc-seams" }
+backend-access-rmgrdesc-committsdesc-seams = { path = "../backend-access-rmgrdesc-committsdesc-seams" }
+backend-access-rmgrdesc-replorigindesc-seams = { path = "../backend-access-rmgrdesc-replorigindesc-seams" }
+backend-access-rmgrdesc-genericdesc-seams = { path = "../backend-access-rmgrdesc-genericdesc-seams" }
+backend-access-rmgrdesc-logicalmsgdesc-seams = { path = "../backend-access-rmgrdesc-logicalmsgdesc-seams" }
+# Non-table external calls.
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-error-seams = { path = "../backend-utils-error-seams" }
