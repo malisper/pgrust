@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 use backend_utils_error::ereport;
 use backend_utils_misc_guc_tables::{
     all_settings, config_group_names, GucContext_Names, GucDefaultValue, GucEnumSetting,
-    GucRealSetting, GucSetting,
+    GucSetting,
 };
 use types_error::{PgError, PgResult, ERROR};
 use types_guc::{GUC_DISALLOW_IN_FILE, GUC_NOT_IN_SAMPLE, GUC_NO_SHOW_ALL};
@@ -150,23 +150,40 @@ pub fn config_enum_lookup_by_value(setting: GucEnumSetting, val: i32) -> PgResul
 /// Format the `(TYPE, reset, min, max)` columns for one setting, matching the C
 /// `switch (vartype)` in `printMixedStruct`. Bool/string/enum leave min/max
 /// empty, as the C code prints `\t\t\t` for them.
+///
+/// The `reset` column for BOOL/INT/REAL is the C struct's `reset_val`, **not**
+/// its `boot_val`. `printMixedStruct` is reached only from `GucInfoMain`
+/// (`postgres --describe-config`), which calls `build_guc_variables()`
+/// (guc.c:903) and nothing else. `build_guc_variables` sets `vartype` and the
+/// hash table but never touches `reset_val`; `reset_val` is populated only at
+/// runtime by `InitializeOneGUCOption` (guc.c:1644), which this path never
+/// reaches. The static `ConfigureNames*` initializers leave the trailing
+/// `reset_val` field unspecified, so it is zero-initialized. C therefore prints
+/// the zero-initialized `reset_val` for every option: `FALSE` for every BOOL,
+/// `0` for every INT, `0` for every REAL — regardless of the boot default. We
+/// reproduce that here with constant zero defaults rather than reading
+/// `boot_val`. `min`/`max` (set by the static initializers) and the STRING/ENUM
+/// `boot_val` columns are read from the real fields.
 fn value_columns(setting: GucSetting) -> PgResult<(&'static str, String, String, String)> {
     match setting {
-        GucSetting::Bool(setting) => Ok((
+        // C: `(reset_val == 0) ? "FALSE" : "TRUE"` with reset_val zero-initialized.
+        GucSetting::Bool(_) => Ok((
             "BOOLEAN",
-            format_bool_default(setting.boot_val)?.to_string(),
+            "FALSE".to_string(),
             String::new(),
             String::new(),
         )),
+        // C: `printf("%d", reset_val)` with reset_val zero-initialized.
         GucSetting::Int(setting) => Ok((
             "INTEGER",
-            format_int_default(setting.boot_val)?,
+            0_i32.to_string(),
             setting.min.to_string(),
             setting.max.to_string(),
         )),
+        // C: `printf("%g", reset_val)` with reset_val zero-initialized.
         GucSetting::Real(setting) => Ok((
             "REAL",
-            format_real_default(setting)?,
+            format_real(0.0),
             format_real(setting.min),
             format_real(setting.max),
         )),
@@ -182,31 +199,6 @@ fn value_columns(setting: GucSetting) -> PgResult<(&'static str, String, String,
             String::new(),
             String::new(),
         )),
-    }
-}
-
-/// Format the reset value for an INTEGER row (`printf("%d", ...)`).
-fn format_int_default(value: GucDefaultValue) -> PgResult<String> {
-    match value {
-        GucDefaultValue::Int(value) => Ok(value.to_string()),
-        _ => Err(type_error()),
-    }
-}
-
-/// Format the reset value for a BOOLEAN row (C: `(reset_val == 0) ? "FALSE" : "TRUE"`).
-fn format_bool_default(value: GucDefaultValue) -> PgResult<&'static str> {
-    match value {
-        GucDefaultValue::Bool(false) => Ok("FALSE"),
-        GucDefaultValue::Bool(true) => Ok("TRUE"),
-        _ => Err(type_error()),
-    }
-}
-
-/// Format the reset value for a REAL row (`printf("%g", reset_val)`).
-fn format_real_default(setting: GucRealSetting) -> PgResult<String> {
-    match setting.boot_val {
-        GucDefaultValue::Real(value) => Ok(format_real(value)),
-        _ => Err(type_error()),
     }
 }
 
