@@ -6,6 +6,38 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)` (amapi.c): look up the index
+    /// AM's handler, call it, and project the scalar `IndexAmRoutine` fields
+    /// opclasscmds.c reads (the installer owns and frees the routine). `Err`
+    /// carries the C `cache lookup failed` / `does not have a handler`
+    /// validation.
+    pub fn get_index_am_info(
+        amoid: types_core::Oid,
+    ) -> types_error::PgResult<types_opclass::IndexAmInfo>
+);
+
+seam_core::seam!(
+    /// `amroutine->amadjustmembers(opfamilyoid, opclassoid, operators,
+    /// procedures)` (the AM's member-adjustment callback): set dependency
+    /// strength and optionally validate. The C callback mutates the lists in
+    /// place; here it returns the (possibly mutated) `(operators,
+    /// procedures)`, reallocated in `mcx`. `opclassoid` is `InvalidOid` for
+    /// the ALTER OPERATOR FAMILY case (no specific opclass). `Err` carries the
+    /// AM's validation `ereport(ERROR)`s.
+    pub fn am_adjust_members<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        amoid: types_core::Oid,
+        opfamilyoid: types_core::Oid,
+        opclassoid: types_core::Oid,
+        operators: mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+        procedures: mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+    ) -> types_error::PgResult<(
+        mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+        mcx::PgVec<'mcx, types_opclass::OpFamilyMember>,
+    )>
+);
+
+seam_core::seam!(
     /// `GetIndexAmRoutineByAmId(amoid, noerror = false)->amcanbackward`
     /// (amapi.c): look up the index AM's handler in the syscache, call it, and
     /// project `amcanbackward` out of the returned `IndexAmRoutine` (the
