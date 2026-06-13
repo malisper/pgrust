@@ -974,6 +974,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -1233,7 +1234,7 @@ dependencies = [
  "backend-libpq-pqcomm-seams",
  "backend-postmaster-syslogger-seams",
  "backend-storage-ipc-seams",
- "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "libc",

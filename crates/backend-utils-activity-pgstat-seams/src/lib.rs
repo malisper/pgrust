@@ -100,12 +100,3 @@ seam_core::seam!(
     /// a live entry, so the lookup cannot miss; infallible.
     pub fn pgstat_get_kind_name(kind: types_pgstat::activity_pgstat::PgStat_Kind) -> &'static str
 );
-
-seam_core::seam!(
-    /// elog.c's FATAL path lets the cumulative stats system know the session
-    /// terminated abnormally: `if (pgStatSessionEndCause == DISCONNECT_NORMAL)
-    /// pgStatSessionEndCause = DISCONNECT_FATAL;` (the global lives in
-    /// `pgstat.c`). Only marks the session as terminated by fatal error if
-    /// there is no other known cause.
-    pub fn pgstat_set_session_end_cause_fatal()
-);
