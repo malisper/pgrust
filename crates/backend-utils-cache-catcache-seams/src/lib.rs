@@ -161,3 +161,41 @@ seam_core::seam!(
     /// `SysCacheGetAttr` does.
     pub fn with_cache_tupdesc(cache_id: i32, f: &mut dyn FnMut(&TupleDescData<'_>))
 );
+
+seam_core::seam!(
+    /// `ResetCatalogCachesExt(debug_discard)` (catcache.c): blow away every
+    /// entry of every catcache (the `InvalidateSystemCachesExtended` reset).
+    /// `Err` carries any error raised by a downstream invalidation callback.
+    pub fn reset_catalog_caches_ext(debug_discard: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SysCacheInvalidate(cacheId, hashValue)` (syscache.c → catcache.c):
+    /// invalidate the matching entries of one catcache (the catcache arm of
+    /// `LocalExecuteInvalidationMessage`). `Err` carries callback errors.
+    pub fn syscache_invalidate(cache_id: i32, hash_value: u32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CatalogCacheFlushCatalog(catId)` (catcache.c): flush all catcaches
+    /// derived from one catalog (the `SHAREDINVALCATALOG_ID` arm). It calls
+    /// the registered syscache callbacks as needed. `Err` carries callback
+    /// errors.
+    pub fn catalog_cache_flush_catalog(cat_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PrepareToInvalidateCacheTuple(relation, tuple, newtuple, function,
+    /// context)` (catcache.c): for each catcache the (old and new) tuple
+    /// belongs to, the C code invokes `function(cacheId, hashValue, dbId,
+    /// context)`. The owned model instead returns one
+    /// [`PrepareToInvalidateCacheTuple`] request per invocation, in the same
+    /// order, allocated in `mcx`. `Err` carries OOM / the C `elog(ERROR,
+    /// "bogus call to PrepareToInvalidateCacheTuple")`.
+    pub fn prepare_to_invalidate_cache_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &types_rel::RelationData<'_>,
+        tuple: &types_tuple::HeapTupleData<'_>,
+        newtuple: Option<&types_tuple::HeapTupleData<'_>>,
+    ) -> PgResult<PgVec<'mcx, types_storage::PrepareToInvalidateCacheTuple>>
+);
