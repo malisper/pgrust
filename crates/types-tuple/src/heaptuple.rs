@@ -75,6 +75,24 @@ pub const ANYARRAYOID: Oid = 2277;
 pub const ANYOID: Oid = 2276;
 /// `anycompatiblearray` pseudo-type (`pg_type_d.h`, oid 5078).
 pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+/// `anyelement` pseudo-type (`pg_type_d.h`, oid 2283).
+pub const ANYELEMENTOID: Oid = 2283;
+/// `anynonarray` pseudo-type (`pg_type_d.h`, oid 2776).
+pub const ANYNONARRAYOID: Oid = 2776;
+/// `anyenum` pseudo-type (`pg_type_d.h`, oid 3500).
+pub const ANYENUMOID: Oid = 3500;
+/// `anyrange` pseudo-type (`pg_type_d.h`, oid 3831).
+pub const ANYRANGEOID: Oid = 3831;
+/// `anymultirange` pseudo-type (`pg_type_d.h`, oid 4537).
+pub const ANYMULTIRANGEOID: Oid = 4537;
+/// `anycompatible` pseudo-type (`pg_type_d.h`, oid 5077).
+pub const ANYCOMPATIBLEOID: Oid = 5077;
+/// `anycompatiblenonarray` pseudo-type (`pg_type_d.h`, oid 5079).
+pub const ANYCOMPATIBLENONARRAYOID: Oid = 5079;
+/// `anycompatiblerange` pseudo-type (`pg_type_d.h`, oid 5080).
+pub const ANYCOMPATIBLERANGEOID: Oid = 5080;
+/// `anycompatiblemultirange` pseudo-type (`pg_type_d.h`, oid 4538).
+pub const ANYCOMPATIBLEMULTIRANGEOID: Oid = 4538;
 
 /// Default array element delimiter (`','`, `catalog/pg_type.h`).
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;

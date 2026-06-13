@@ -17,3 +17,14 @@ seam_core::seam!(
         type_oid: Oid,
     ) -> PgResult<mcx::PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `format_type_be(type_oid)` (format_type.c) as consumed by callers that
+    /// only need the printable name to interpolate into an owned
+    /// `errmsg(...)` string (no `Mcx` in scope) — the funcapi polymorphic
+    /// resolvers' `"... but type %s"` messages. Returns an owned `String`
+    /// (the C result is a transient palloc'd cstring the caller copies into
+    /// the error text). `Err` carries the invalid-type cache-lookup
+    /// `elog(ERROR)`.
+    pub fn format_type_be_owned(type_oid: Oid) -> PgResult<String>
+);

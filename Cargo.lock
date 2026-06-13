@@ -4025,7 +4025,6 @@ dependencies = [
 name = "backend-nodes-nodeFuncs-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -7528,18 +7527,16 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
- "backend-commands-functioncmds-seams",
+ "backend-access-common-tupdesc",
  "backend-nodes-nodeFuncs-seams",
- "backend-utils-cache-syscache-seams",
- "backend-utils-cache-typcache-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
- "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
- "types-fmgr",
  "types-namespace",
  "types-nodes",
  "types-tuple",
