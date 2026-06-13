@@ -19,8 +19,10 @@
 
 #![allow(unsafe_code)]
 
+use backend_access_index_genam_seams as genam_seam;
+use backend_utils_cache_relcache_nodexform_seams as nodexform_seam;
 use backend_utils_error::{ereport, PgResult};
-use types_core::primitive::{Oid, RegProcedure};
+use types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{InvalidOid, OidIsValid};
 use types_error::ERROR;
 use types_tuple::{
@@ -670,9 +672,10 @@ fn bms_add_member(set: &mut Vec<i32>, member: i32) {
  * Each `*_seam` below is a single genuine cross-unit boundary the derived
  * orchestration calls into: a catalog scan (genam owner), an index open
  * (relation/indexam owner), a node-tree transform (node owner), or a syscache
- * lookup (lsyscache owner). Per "mirror PG and panic", they `todo!()` (the
- * documented owner-seam boundary) rather than being restructured away; the
- * orchestration above is real and uses their results over the owned store.
+ * lookup (lsyscache owner). Per "mirror PG and panic", each is a real
+ * `seam!()::call` into its owner (panics until the owner installs it) rather
+ * than being restructured away; the orchestration above is real and uses their
+ * results over the owned store.
  * ======================================================================== */
 
 /// One `pg_index` row as the index scan yields it for `RelationGetIndexList`:
@@ -686,22 +689,53 @@ pub(crate) struct ScannedIndex {
 /// `systable_beginscan(pg_index, IndexIndrelidIndexId, indrelid = relid)` then
 /// `systable_getnext` (genam owner). Returns each matching row's form + the
 /// indpred-isnull flag.
-fn scan_pg_index_seam(_relid: Oid) -> PgResult<Vec<ScannedIndex>> {
-    todo!("relcache-derived: pg_index scan for RelationGetIndexList (genam owner seam)")
+fn scan_pg_index_seam(relid: Oid) -> PgResult<Vec<ScannedIndex>> {
+    // The scan + per-row `GETSTRUCT(Form_pg_index)` decode is genam-owned
+    // catalog vocabulary; marshal each owner-vocabulary row into the entry's
+    // owned `FormPgIndex` shape.
+    let rows = genam_seam::relcache_scan_pg_index::call(relid)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ScannedIndex {
+            index: FormPgIndex {
+                indexrelid: r.indexrelid,
+                indrelid: relid,
+                indnatts: r.indnatts,
+                indnkeyatts: r.indnkeyatts,
+                indisunique: r.indisunique,
+                indnullsnotdistinct: r.indnullsnotdistinct,
+                indisprimary: r.indisprimary,
+                indisexclusion: r.indisexclusion,
+                indimmediate: r.indimmediate,
+                indisclustered: r.indisclustered,
+                indisvalid: r.indisvalid,
+                indcheckxmin: r.indcheckxmin,
+                indisready: r.indisready,
+                indislive: r.indislive,
+                indisreplident: r.indisreplident,
+                indkey: r.indkey,
+            },
+            indpred_isnull: r.indpred_isnull,
+        })
+        .collect())
 }
 
 /// `systable_beginscan(pg_statistic_ext, StatisticExtRelidIndexId, stxrelid =
 /// relid)` then `systable_getnext` (genam owner). Returns the matching
 /// statistics-object OIDs.
-fn scan_pg_statistic_ext_seam(_relid: Oid) -> PgResult<Vec<Oid>> {
-    todo!("relcache-derived: pg_statistic_ext scan for RelationGetStatExtList (genam owner seam)")
+fn scan_pg_statistic_ext_seam(relid: Oid) -> PgResult<Vec<Oid>> {
+    genam_seam::relcache_scan_pg_statistic_ext::call(relid)
 }
 
 /// `systable_beginscan(pg_constraint, conrelid = relid)` then the per-row
 /// `ForeignKeyCacheInfo` build via `DeconstructFkConstraintRow` (genam + FK node
 /// owners). Returns the assembled FK cache-info rows.
-fn scan_pg_constraint_fkeys_seam(_relid: Oid) -> PgResult<Vec<ForeignKeyCacheInfo>> {
-    todo!("relcache-derived: pg_constraint FK scan + DeconstructFkConstraintRow (genam + FK node owner seam)")
+fn scan_pg_constraint_fkeys_seam(relid: Oid) -> PgResult<Vec<ForeignKeyCacheInfo>> {
+    let rows = genam_seam::relcache_scan_pg_constraint_fkeys::call(relid)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ForeignKeyCacheInfo { conoid: r.conoid })
+        .collect())
 }
 
 /// `ForeignKeyCacheInfo` (nodes/parsenodes.h) — FK node vocabulary owned
@@ -714,15 +748,21 @@ pub(crate) struct ForeignKeyCacheInfo {
 /// `RelationGetIndexExpressions(relation)`'s node-tree transform: `stringToNode`
 /// of `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`, then cache
 /// into `rd_indexprs` (node owner).
-fn index_expressions_seam(_relation: *mut RelationData) -> PgResult<()> {
-    todo!("relcache-derived: RelationGetIndexExpressions node-tree transform (node owner seam)")
+#[allow(unsafe_code)]
+fn index_expressions_seam(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let relid = unsafe { (*relation).rd_id };
+    nodexform_seam::index_expressions::call(relid)
 }
 
 /// `RelationGetIndexPredicate(relation)`'s node-tree transform: `stringToNode`
 /// of `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
 /// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`.
-fn index_predicate_seam(_relation: *mut RelationData) -> PgResult<()> {
-    todo!("relcache-derived: RelationGetIndexPredicate node-tree transform (node owner seam)")
+#[allow(unsafe_code)]
+fn index_predicate_seam(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let relid = unsafe { (*relation).rd_id };
+    nodexform_seam::index_predicate::call(relid)
 }
 
 /// `RelationGetDummyIndexExpressions(relation)`'s dummy-Const build: read the
@@ -731,11 +771,11 @@ fn index_predicate_seam(_relation: *mut RelationData) -> PgResult<()> {
 /// exprTypmod, exprCollation, 1, (Datum) 0, true /*isnull*/, true /*byval*/)`.
 /// All node vocabulary (`stringToNode`/`makeConst`/`exprType`/`exprTypmod`/
 /// `exprCollation`) + the raw `rd_indextuple` read; node owner.
-fn dummy_index_expressions_seam(_relation: *mut RelationData) -> PgResult<()> {
-    todo!(
-        "relcache-derived: RelationGetDummyIndexExpressions dummy-Const build \
-         (stringToNode/makeConst over exprType/exprTypmod/exprCollation; node owner seam)"
-    )
+#[allow(unsafe_code)]
+fn dummy_index_expressions_seam(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let relid = unsafe { (*relation).rd_id };
+    nodexform_seam::dummy_index_expressions::call(relid)
 }
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
@@ -757,32 +797,59 @@ pub(crate) struct IndexAttrInfo {
 
 /// `index_open(indexOid, AccessShareLock)` + extract indkey / expression+
 /// predicate attrs + `index_close` (relation + node owners).
-fn open_index_attrs_seam(_index_oid: Oid) -> PgResult<IndexAttrInfo> {
-    todo!("relcache-derived: index_open + pull_varattnos for RelationGetIndexAttrBitmap (relation + node owner seam)")
+fn open_index_attrs_seam(index_oid: Oid) -> PgResult<IndexAttrInfo> {
+    let info = nodexform_seam::open_index_attrs::call(index_oid)?;
+    Ok(IndexAttrInfo {
+        indisunique: info.indisunique,
+        indnkeyatts: info.indnkeyatts,
+        amsummarizing: info.amsummarizing,
+        has_expressions: info.has_expressions,
+        has_predicate: info.has_predicate,
+        indkey: info.indkey,
+        expr_attrs: info.expr_attrs,
+        pred_attrs: info.pred_attrs,
+    })
 }
 
 /// `RelationGetExclusionInfo`'s pg_constraint scan + conexclop decode +
 /// `get_opcode`/`get_op_opfamily_strategy` (genam + lsyscache owners). Returns
 /// `(operators, procs, strategies)`, each `indnkeyatts` long.
 fn exclusion_info_seam(
-    _relid: Oid,
-    _indrelid: Oid,
-    _indnkeyatts: usize,
+    relid: Oid,
+    indrelid: Oid,
+    indnkeyatts: usize,
 ) -> PgResult<(Vec<Oid>, Vec<Oid>, Vec<u16>)> {
     let _ = RegProcedure::default;
-    todo!("relcache-derived: RelationGetExclusionInfo pg_constraint scan + opclass lookups (genam + lsyscache owner seam)")
+    // `relid` is the exclusion index's own OID (the constraint's `conindid`);
+    // `indrelid` is the table the index is on (the constraint's `conrelid`).
+    let keys = genam_seam::relcache_exclusion_info::call(relid, indrelid, indnkeyatts)?;
+    let mut ops = Vec::with_capacity(keys.len());
+    let mut procs = Vec::with_capacity(keys.len());
+    let mut strats = Vec::with_capacity(keys.len());
+    for k in keys {
+        ops.push(k.op);
+        procs.push(k.proc);
+        strats.push(k.strat);
+    }
+    Ok((ops, procs, strats))
 }
 
 /// `RelationBuildPublicationDesc`'s `pg_publication*` traversal (publication
 /// owner): build `rd_pubdesc`.
-fn publication_desc_seam(_relation: *mut RelationData) -> PgResult<()> {
-    todo!("relcache-derived: RelationBuildPublicationDesc pg_publication traversal (publication owner seam)")
+#[allow(unsafe_code)]
+fn publication_desc_seam(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let relid = unsafe { (*relation).rd_id };
+    nodexform_seam::publication_desc::call(relid)
 }
 
 /// `RelationBuildRuleLock`'s `pg_rewrite` scan + rule-tree build (rewrite/node
 /// owner): build `rd_rules`.
-fn rule_lock_seam(_relation: *mut RelationData) -> PgResult<()> {
-    todo!("relcache-derived: RelationBuildRuleLock pg_rewrite scan + rule build (rewrite owner seam)")
+#[allow(unsafe_code)]
+fn rule_lock_seam(relation: *mut RelationData) -> PgResult<()> {
+    // SAFETY: live `Relation` pointer.
+    let relid = unsafe { (*relation).rd_id };
+    nodexform_seam::rule_lock::call(relid)
 }
 
 /// `RelationGetIndexAttOptions(relation, copy)` (relcache.c): get/parse the
@@ -790,6 +857,54 @@ fn rule_lock_seam(_relation: *mut RelationData) -> PgResult<()> {
 /// them in `rd_indexcxt`. **Own logic** (the `index_opclass_options`/
 /// `get_attoptions` calls are the cross-unit primitives). Filled with the
 /// derived family; `RelationInitIndexAccessInfo` forces a populate via this.
-pub fn RelationGetIndexAttOptions(_relation: *mut RelationData, _copy: bool) -> PgResult<()> {
-    todo!("relcache-derived: RelationGetIndexAttOptions (own logic)")
+#[allow(unsafe_code)]
+pub fn RelationGetIndexAttOptions(relation: *mut RelationData, _copy: bool) -> PgResult<()> {
+    // SAFETY: live cache-owned (or in-build) `Relation` pointer.
+    let rd = unsafe { &*relation };
+
+    let relid = rd.rd_id;
+    // `RelationGetNumberOfAttributes(relation)` — relnatts (see the XXX in C).
+    let natts = rd.rd_rel.relnatts as usize;
+
+    // Try to copy cached options. The C `copy` flag only governs whether the
+    // caller gets the cache or a fresh copy of the parsed `bytea **`; in this
+    // owned model the parsed options are cached on the entry and the seam
+    // returns `()`, so a present cache is simply a no-op.
+    if rd.rd_opcoptions.is_some() {
+        return Ok(());
+    }
+
+    // Get and parse opclass options. `palloc0(sizeof(*opts) * natts)` →
+    // one `None` (the C NULL element) per attribute.
+    let mut opts: Vec<Option<Vec<u8>>> = vec![None; natts];
+
+    let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
+    for (i, slot) in opts.iter_mut().enumerate() {
+        // `criticalRelcachesBuilt && relid != AttributeRelidNumIndexId` — avoid
+        // recursing through the pg_attribute index's own opclass options before
+        // the critical relcaches are built.
+        if critical_built && relid != ATTRIBUTE_RELID_NUM_INDEX_ID {
+            let attnum = (i + 1) as AttrNumber;
+            // `get_attoptions(relid, i + 1)` — the raw pg_attribute.attoptions
+            // reloptions for this column (lsyscache owner).
+            let attoptions = nodexform_seam::get_attoptions::call(relid, attnum)?;
+            // `index_opclass_options(relation, i + 1, attoptions, false)` — the
+            // AM/opclass-specific parse into the binary `bytea` (indexam owner).
+            *slot = nodexform_seam::index_opclass_options::call(relid, attnum, attoptions)?;
+        }
+    }
+
+    // Copy parsed options to the cache (C: into `rd_indexcxt`; the owned entry
+    // holds them inline).
+    // SAFETY: live cache-owned descriptor.
+    let rd = unsafe { &mut *relation };
+    rd.rd_opcoptions = Some(opts);
+
+    Ok(())
 }
+
+/// `AttributeRelidNumIndexId` (`pg_attribute_relid_attnum_index`) — guards the
+/// per-column opclass-option fetch in [`RelationGetIndexAttOptions`] against
+/// recursing through the pg_attribute index before the critical relcaches are
+/// built.
+const ATTRIBUTE_RELID_NUM_INDEX_ID: Oid = 2659;

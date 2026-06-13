@@ -357,6 +357,11 @@ pub const SINVAL_WRITE_LOCK: usize = 6;
 /// offset of the custom-wait-event lock in `MainLWLockArray`.
 pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
 
+/// `RelCacheInitLock` (`lwlocklist.h`, `PG_LWLOCK(16, RelCacheInit)`): offset of
+/// the relation-cache init-file lock in `MainLWLockArray`. Held while reading or
+/// updating `pg_internal.init`.
+pub const REL_CACHE_INIT_LOCK: usize = 16;
+
 /// Possible values for `huge_pages` and `huge_pages_status`
 /// (`storage/pg_shmem.h`).
 #[repr(i32)]

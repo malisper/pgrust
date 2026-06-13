@@ -15,8 +15,108 @@
 //! resources"). C returns a `HeapTuple` owned by the scan (valid until the
 //! next call); the owned model copies each result tuple out into `mcx`.
 
+use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_scan::genam::SysScanDescData;
+
+/* ==========================================================================
+ * High-level relcache catalog-scan seams.
+ *
+ * `RelationGetIndexList`/`RelationGetStatExtList`/`RelationGetFKeyList`/
+ * `RelationGetExclusionInfo` (relcache.c) each open a system catalog,
+ * `systable_beginscan` it under the conrelid/indrelid/stxrelid key, and
+ * `GETSTRUCT`/`heap_getattr`-decode every matching tuple. The whole scan +
+ * per-row decode is genam-owned catalog vocabulary; the relcache caller only
+ * consumes the decoded rows. These seams package the scan-and-decode that the
+ * genam owner performs, returning plain owner-vocabulary rows (no relcache
+ * types — the relcache caller marshals them into its owned entry fields).
+ * Panic until the genam owner installs them.
+ * ======================================================================== */
+
+/// One decoded `pg_index` row as `RelationGetIndexList` consumes it: the
+/// `Form_pg_index` flags + `int2vector indkey` it needs, plus whether the
+/// `indpred` attribute is null (`heap_attisnull(Anum_pg_index_indpred)`).
+#[derive(Clone, Debug)]
+pub struct ScannedPgIndex {
+    pub indexrelid: Oid,
+    pub indnatts: i16,
+    pub indnkeyatts: i16,
+    pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
+    pub indisprimary: bool,
+    pub indisexclusion: bool,
+    pub indimmediate: bool,
+    pub indisclustered: bool,
+    pub indisvalid: bool,
+    pub indcheckxmin: bool,
+    pub indisready: bool,
+    pub indislive: bool,
+    pub indisreplident: bool,
+    /// `int2vector indkey` — table column numbers of the index columns.
+    pub indkey: Vec<AttrNumber>,
+    /// `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`.
+    pub indpred_isnull: bool,
+}
+
+/// One decoded `pg_constraint` foreign-key row as `RelationGetFKeyList`
+/// consumes it (the `ForeignKeyCacheInfo` payload built by
+/// `DeconstructFkConstraintRow`). Opaque to the relcache caller (it only caches
+/// the list and the presence flag), so only the constraint OID is exposed.
+#[derive(Clone, Debug)]
+pub struct ScannedFkInfo {
+    pub conoid: Oid,
+}
+
+/// One key column's resolved exclusion info as `RelationGetExclusionInfo`
+/// consumes it: the operator OID (`conexclop`), its underlying procedure OID
+/// (`get_opcode`), and its opfamily strategy number
+/// (`get_op_opfamily_strategy`).
+#[derive(Clone, Copy, Debug)]
+pub struct ExclusionKeyInfo {
+    pub op: Oid,
+    pub proc: Oid,
+    pub strat: u16,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexList`'s scan (relcache.c): `systable_beginscan(pg_index,
+    /// IndexIndrelidIndexId, indrelid = relid)` then `systable_getnext` +
+    /// `GETSTRUCT(Form_pg_index)` for each row. Returns every matching decoded
+    /// row. Can `ereport(ERROR)` (catalog read failure), carried on `Err`.
+    pub fn relcache_scan_pg_index(relid: Oid) -> PgResult<Vec<ScannedPgIndex>>
+);
+
+seam_core::seam!(
+    /// `RelationGetStatExtList`'s scan (relcache.c):
+    /// `systable_beginscan(pg_statistic_ext, StatisticExtRelidIndexId,
+    /// stxrelid = relid)` then `systable_getnext`, collecting each object OID.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relcache_scan_pg_statistic_ext(relid: Oid) -> PgResult<Vec<Oid>>
+);
+
+seam_core::seam!(
+    /// `RelationGetFKeyList`'s scan (relcache.c):
+    /// `systable_beginscan(pg_constraint, conrelid = relid)`, keeping the
+    /// foreign keys, then `DeconstructFkConstraintRow` to build each
+    /// `ForeignKeyCacheInfo`. Returns the assembled rows. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn relcache_scan_pg_constraint_fkeys(relid: Oid) -> PgResult<Vec<ScannedFkInfo>>
+);
+
+seam_core::seam!(
+    /// `RelationGetExclusionInfo`'s scan (relcache.c):
+    /// `systable_beginscan(pg_constraint, conrelid = indrelid)`, matching the
+    /// constraint whose `conindid` is `index_relid` and decoding its
+    /// `conexclop` array, then `get_opcode`/`get_op_opfamily_strategy` per key
+    /// column (lsyscache). Returns one [`ExclusionKeyInfo`] per key column
+    /// (`indnkeyatts` long, in column order). Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn relcache_exclusion_info(
+        index_relid: Oid,
+        indrelid: Oid,
+        indnkeyatts: usize,
+    ) -> PgResult<Vec<ExclusionKeyInfo>>
+);
 
 seam_core::seam!(
     /// `systable_beginscan(heapRelation, indexId, indexOK, snapshot, nkeys,
@@ -122,6 +222,77 @@ seam_core::seam!(
         values: &[types_datum::Datum],
         isnull: &[bool],
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+/// One deformed `pg_attrdef` row, as produced by [`scan_pg_attrdef`]: the
+/// `adnum` plus the `adbin` default-expression node-tree text already run
+/// through `TextDatumGetCString` (`None` is the C `isnull`). The owner does
+/// the `table_open(AttrDefaultRelationId)`, the `systable_beginscan` on
+/// `adrelid = relid`, the per-row `GETSTRUCT(Form_pg_attrdef)` deform, and the
+/// `adbin` text detoast; this DTO carries exactly the two fields
+/// `AttrDefaultFetch` consumes.
+#[derive(Debug, Clone)]
+pub struct PgAttrdefRow {
+    /// `attrdef->adnum`.
+    pub adnum: types_core::primitive::AttrNumber,
+    /// `TextDatumGetCString(adbin)`, or `None` for the C `isnull`.
+    pub adbin: Option<String>,
+}
+
+/// One deformed `pg_constraint` row, as produced by
+/// [`scan_pg_constraint_nncheck`]: the `contype` plus the per-kind fields
+/// `CheckNNConstraintFetch` consumes. For a NOT NULL constraint,
+/// `!convalidated` and `extractNotNullColumn(htup)`; for a CHECK constraint,
+/// the enforced/valid/noinherit flags, the name, and the `conbin` node-tree
+/// text already run through `TextDatumGetCString` (`None` is the C `isnull`).
+/// The owner does the `table_open(ConstraintRelationId)`, the
+/// `systable_beginscan` on `conrelid = relid`, the per-row
+/// `GETSTRUCT(Form_pg_constraint)` deform, `extractNotNullColumn`, and the
+/// `conbin` text detoast.
+#[derive(Debug, Clone)]
+pub struct PgConstraintNnCheckRow {
+    /// `conform->contype` (`CONSTRAINT_NOTNULL`/`CONSTRAINT_CHECK`/other).
+    pub contype: i8,
+    /// NOT NULL only: `!conform->convalidated`.
+    pub notnull_invalid: bool,
+    /// NOT NULL only: `extractNotNullColumn(htup)`.
+    pub notnull_attnum: types_core::primitive::AttrNumber,
+    /// CHECK only: `conform->conenforced`.
+    pub ccenforced: bool,
+    /// CHECK only: `conform->convalidated`.
+    pub ccvalid: bool,
+    /// CHECK only: `conform->connoinherit`.
+    pub ccnoinherit: bool,
+    /// CHECK only: `NameStr(conform->conname)`.
+    pub ccname: String,
+    /// CHECK only: `TextDatumGetCString(conbin)`, or `None` for the C `isnull`.
+    pub ccbin: Option<String>,
+}
+
+seam_core::seam!(
+    /// `AttrDefaultFetch`'s `pg_attrdef` scan (relcache.c): `table_open`,
+    /// `systable_beginscan(AttrDefaultIndexId, adrelid = relid)`, then a
+    /// `systable_getnext` loop deforming `Form_pg_attrdef` and running
+    /// `TextDatumGetCString(adbin)`. Returns every matching row in scan order;
+    /// the caller does the per-attribute accounting/sort/install. `Err`
+    /// carries the scan-setup / index-or-heap fetch / detoast error surface.
+    pub fn scan_pg_attrdef(
+        relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Vec<PgAttrdefRow>>
+);
+
+seam_core::seam!(
+    /// `CheckNNConstraintFetch`'s `pg_constraint` scan (relcache.c):
+    /// `table_open`, `systable_beginscan(ConstraintRelidTypidNameIndexId,
+    /// conrelid = relid)`, then a `systable_getnext` loop deforming
+    /// `Form_pg_constraint`, calling `extractNotNullColumn(htup)` for NOT NULL
+    /// rows and `TextDatumGetCString(conbin)` for CHECK rows. Returns every
+    /// matching row in scan order; the caller does the per-kind
+    /// accounting/sort/install + not-null attnullability fixup. `Err` carries
+    /// the scan-setup / fetch / detoast error surface.
+    pub fn scan_pg_constraint_nncheck(
+        relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Vec<PgConstraintNnCheckRow>>
 );
 
 /// The live-scan token returned by [`systable_beginscan`] /

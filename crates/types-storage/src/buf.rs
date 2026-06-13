@@ -20,3 +20,15 @@ pub const fn BufferIsInvalid(buffer: Buffer) -> bool {
 pub const fn BufferIsValid(buffer: Buffer) -> bool {
     buffer != InvalidBuffer
 }
+
+/// `#define BUFFER_LOCK_UNLOCK 0` (storage/bufmgr.h) — release the buffer's
+/// content lock.
+pub const BUFFER_LOCK_UNLOCK: i32 = 0;
+
+/// `#define BUFFER_LOCK_SHARE 1` (storage/bufmgr.h) — acquire a shared
+/// content lock.
+pub const BUFFER_LOCK_SHARE: i32 = 1;
+
+/// `#define BUFFER_LOCK_EXCLUSIVE 2` (storage/bufmgr.h) — acquire an exclusive
+/// content lock.
+pub const BUFFER_LOCK_EXCLUSIVE: i32 = 2;

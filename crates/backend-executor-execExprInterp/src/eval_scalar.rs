@@ -31,6 +31,7 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
+use backend_utils_fmgr_fmgr_seams::{function_call1_coll, function_call2_coll};
 use types_datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -577,100 +578,276 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
     )
 }
 
+/// `saop_element_hash(struct saophash_hash *tb, Datum key)` — the `SH_HASH_KEY`
+/// callback: hash one array element via the SAOP's hash function.
+///
+/// Faithful to `execExprInterp.c:4176-4188`: the C loads `key` into the table's
+/// 1-arg `hash_fcinfo_data`, dispatches `hash_finfo.fn_addr(fcinfo)`, and
+/// returns `DatumGetUInt32`. The owned `FmgrInfo` carries only `fn_oid` (the F0
+/// contract — see [`crate::justs`]), so the dispatch goes through the fmgr seam
+/// `function_call1_coll`, which re-resolves by OID. `hashfuncid` is
+/// `saop->hashfuncid` (`tb->private_data->hash_finfo`); `collation` is
+/// `saop->inputcollid` (the collation `InitFunctionCallInfoData` stamped onto
+/// `hash_fcinfo_data`).
+pub fn saop_element_hash(
+    hashfuncid: types_core::primitive::Oid,
+    collation: types_core::primitive::Oid,
+    key: Datum,
+) -> PgResult<u32> {
+    // fcinfo->args[0].value = key; fcinfo->args[0].isnull = false;
+    // hash = elements_tab->hash_finfo.fn_addr(fcinfo);
+    // return DatumGetUInt32(hash);
+    let hash = function_call1_coll::call(hashfuncid, collation, key)?;
+    Ok(hash.as_u32())
+}
+
+/// `saop_hash_element_match(struct saophash_hash *tb, Datum key1, Datum key2)`
+/// — the `SH_EQUAL` callback: compare two elements via the SAOP's comparison
+/// (equality) operator.
+///
+/// Faithful to `execExprInterp.c:4194-4209`: the C loads `key1`/`key2` into the
+/// step's 2-arg comparison `fcinfo_data`, dispatches `finfo->fn_addr(fcinfo)`,
+/// and returns `DatumGetBool`. `matchfuncid` is the OID of
+/// `op->d.hashedscalararrayop.finfo` (the equality function the compiler stamped
+/// — `opfuncid` for hashed IN, `negfuncid` for hashed NOT IN); `collation` is
+/// `saop->inputcollid`. The dispatch goes through the fmgr seam
+/// `function_call2_coll` (re-resolve by OID), the same pattern `eval_agg` uses
+/// for its equality probe. Both keys are non-null here (hashtable build/probe
+/// never stores NULLs), matching `FunctionCall2Coll`'s non-null-arg contract.
+pub fn saop_hash_element_match(
+    matchfuncid: types_core::primitive::Oid,
+    collation: types_core::primitive::Oid,
+    key1: Datum,
+    key2: Datum,
+) -> PgResult<bool> {
+    // fcinfo->args[0].value = key1; fcinfo->args[0].isnull = false;
+    // fcinfo->args[1].value = key2; fcinfo->args[1].isnull = false;
+    // result = elements_tab->op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
+    // return DatumGetBool(result);
+    let result = function_call2_coll::call(matchfuncid, collation, key1, key2)?;
+    Ok(result.as_bool())
+}
+
 /// `ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op,
 /// ExprContext *econtext)` — `x = ANY (array)` via a built hash table.
+///
+/// Faithful re-port of `execExprInterp.c:4225-4402`. On the first evaluation it
+/// deconstructs the RHS array const (via the arrayfuncs seam, which subsumes the
+/// C `DatumGetArrayTypeP`/`ArrayGetNItems`/`ARR_DATA_PTR`/`ARR_NULLBITMAP`/
+/// `fetch_att` bitmap walk) and builds the [`crate::saophash`] table over the
+/// non-NULL elements, recording `has_nulls`; thereafter it probes the table for
+/// the scalar. The strict-NULL short circuit, the IN/NOT-IN result selection,
+/// and the no-match-with-nulls (strict vs non-strict) branch are transcribed.
+///
+/// One sub-path mirror-PG-and-panics on a genuinely-missing seam capability: the
+/// **non-strict, no-match-with-NULLs** branch dispatches the equality function
+/// with `args[1].isnull = true` (a NULL rhs) and reads back `fcinfo->isnull`.
+/// The `function_call2_coll` seam (C `FunctionCall2Coll`) only models non-null
+/// args and asserts a non-null result, so this single branch needs the
+/// fmgr-widened nullable-arg call frame and panics until that lands. Every other
+/// path — the common one — is real own-logic + real seam `::call`s.
 pub fn ExecEvalHashedScalarArrayOp<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let _ = econtext;
+
     // ScalarArrayOpExprHashTable *elements_tab = op->d.hashedscalararrayop.elements_tab;
-    // FunctionCallInfo fcinfo = op->d.hashedscalararrayop.fcinfo_data;
     // bool inclause = op->d.hashedscalararrayop.inclause;
     // bool strictfunc = op->d.hashedscalararrayop.finfo->fn_strict;
-    // Datum scalar = fcinfo->args[0].value;
-    // bool scalar_isnull = fcinfo->args[0].isnull;
-    // ...
-    // Assert(!*op->resnull);
-    // if (fcinfo->args[0].isnull && strictfunc) { *op->resnull = true; return; }
-    // if (elements_tab == NULL) {   /* build hash table on first evaluation */
-    //     ... fmgr_info(saop->hashfuncid, ...); InitFunctionCallInfoData(...);
-    //     ... saophash_create(...); deconstruct array; saophash_insert(...);
-    //     op->d.hashedscalararrayop.has_nulls = has_nulls;
-    // }
-    // hashfound = NULL != saophash_lookup(elements_tab->hashtab, scalar);
+    // Read the per-step inputs (inclause / strictfunc), the comparison function
+    // OID + collation, the hash function OID, and whether the table is built.
+    let (inclause, strictfunc, matchfuncid, hashfuncid, collation, has_built) = {
+        match step_data(state, op) {
+            ExprEvalStepData::HashedScalarArrayOp {
+                inclause,
+                finfo,
+                saop,
+                elements_tab,
+                ..
+            } => {
+                let finfo = finfo
+                    .as_ref()
+                    .expect("ExecEvalHashedScalarArrayOp: op->d.hashedscalararrayop.finfo not resolved");
+                let saop = saop
+                    .as_ref()
+                    .expect("ExecEvalHashedScalarArrayOp: op->d.hashedscalararrayop.saop missing");
+                (
+                    *inclause,
+                    finfo.fn_strict,
+                    finfo.fn_oid,
+                    saop.hashfuncid,
+                    saop.inputcollid,
+                    elements_tab.is_some(),
+                )
+            }
+            other => unreachable!(
+                "EEOP_HASHED_SCALARARRAYOP step carries the wrong payload: {other:?}"
+            ),
+        }
+    };
+
+    // The scalar arg the compiler recursed into fcinfo->args[0] is modeled as
+    // the step's `scalar_cell` (see execExpr.c's hashed path):
+    //   Datum scalar = fcinfo->args[0].value;
+    //   bool  scalar_isnull = fcinfo->args[0].isnull;
+    let scalar_cell_id = match step_data(state, op) {
+        ExprEvalStepData::HashedScalarArrayOp { scalar_cell, .. } => *scalar_cell,
+        _ => unreachable!(),
+    };
+    let scalar = state.result_cells.get(scalar_cell_id);
+    let (scalar_value, scalar_isnull) = (scalar.value, scalar.isnull);
+
+    let (resvalue_id, resnull_id) = res_cells(state, op);
+
+    // Assert(!*op->resnull);  -- we never set up a hashed SAOP on a NULL array const.
+
+    // If the scalar is NULL and the function is strict, return NULL; no point
+    // searching.
+    //   if (fcinfo->args[0].isnull && strictfunc) { *op->resnull = true; return; }
+    if scalar_isnull && strictfunc {
+        state
+            .result_cells
+            .set(resnull_id, ResultCell { value: scalar_value, isnull: true });
+        return Ok(());
+    }
+
+    // Build the hash table on first evaluation.
+    //   if (elements_tab == NULL) { ... }
+    if !has_built {
+        // saop = op->d.hashedscalararrayop.saop;
+        // arr = DatumGetArrayTypeP(*op->resvalue);
+        // nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+        // get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
+        let arraydatum = state.result_cells.get(resvalue_id).value;
+        let mcx = estate.es_query_cxt;
+
+        let elemtype =
+            backend_utils_adt_arrayfuncs_seams::array_get_elemtype::call(mcx, arraydatum)?;
+        let tlba =
+            backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
+
+        // Deconstruct the array into its per-element (Datum, isnull) pairs. This
+        // seam subsumes C's ARR_DATA_PTR + ARR_NULLBITMAP + fetch_att +
+        // att_addlength_pointer + att_align_nominal bitmap walk over `nitems`.
+        let elements = backend_utils_adt_arrayfuncs_seams::deconstruct_array::call(
+            mcx,
+            arraydatum,
+            elemtype,
+            tlba.typlen,
+            tlba.typbyval,
+            tlba.typalign as core::ffi::c_char,
+        )?;
+        let nitems = elements.len();
+
+        // elements_tab = palloc0(...); op->d.hashedscalararrayop.elements_tab = elements_tab;
+        // elements_tab->op = op;
+        // fmgr_info(saop->hashfuncid, &elements_tab->hash_finfo);
+        // InitFunctionCallInfoData(elements_tab->hash_fcinfo_data, ..., saop->inputcollid, ...);
+        // elements_tab->hashtab = saophash_create(CurrentMemoryContext, nitems, elements_tab);
+        let mut table = crate::saophash::ScalarArrayOpExprHashTable::default();
+        table.hash_finfo.fn_oid = hashfuncid;
+        table.hashtab = crate::saophash::saophash_create(nitems as u32);
+
+        // Walk the elements: NULLs are not stored (record has_nulls); non-NULLs
+        // are inserted. The closures are the SH_HASH_KEY / SH_EQUAL callbacks,
+        // dispatching the hash / equality functions through the fmgr seams.
+        let mut has_nulls = false;
+        for (element, isnull) in elements.iter().copied() {
+            if isnull {
+                has_nulls = true;
+            } else {
+                let mut hash_key =
+                    |k: Datum| saop_element_hash(hashfuncid, collation, k);
+                let mut equal = |a: Datum, b: Datum| {
+                    saop_hash_element_match(matchfuncid, collation, a, b)
+                };
+                crate::saophash::saophash_insert(
+                    &mut table.hashtab,
+                    element,
+                    &mut hash_key,
+                    &mut equal,
+                )?;
+            }
+        }
+
+        // Store the built table + has_nulls back into the step payload.
+        match step_data_mut(state, op) {
+            ExprEvalStepData::HashedScalarArrayOp {
+                elements_tab,
+                has_nulls: hn,
+                ..
+            } => {
+                *elements_tab = Some(Box::new(table));
+                *hn = has_nulls;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Probe the hash table.
+    //   hashfound = NULL != saophash_lookup(elements_tab->hashtab, scalar);
+    let hashfound = {
+        let mut hash_key = |k: Datum| saop_element_hash(hashfuncid, collation, k);
+        let mut equal =
+            |a: Datum, b: Datum| saop_hash_element_match(matchfuncid, collation, a, b);
+        let table = match step_data(state, op) {
+            ExprEvalStepData::HashedScalarArrayOp { elements_tab, .. } => elements_tab
+                .as_ref()
+                .expect("ExecEvalHashedScalarArrayOp: elements_tab just built"),
+            _ => unreachable!(),
+        };
+        crate::saophash::saophash_lookup(&table.hashtab, scalar_value, &mut hash_key, &mut equal)?
+    };
+
     // result = inclause ? BoolGetDatum(hashfound) : BoolGetDatum(!hashfound);
-    // if (!hashfound && op->d.hashedscalararrayop.has_nulls) { ... strict/non-strict ... }
+    let mut result = if inclause { hashfound } else { !hashfound };
+    let mut resultnull = false;
+
+    // If no match, account for NULLs in the array.
+    //   if (!hashfound && op->d.hashedscalararrayop.has_nulls) { ... }
+    let has_nulls = match step_data(state, op) {
+        ExprEvalStepData::HashedScalarArrayOp { has_nulls, .. } => *has_nulls,
+        _ => unreachable!(),
+    };
+    if !hashfound && has_nulls {
+        if strictfunc {
+            // Nulls in the array + non-null lhs + no match => NULL.
+            //   result = (Datum) 0; resultnull = true;
+            result = false;
+            resultnull = true;
+        } else {
+            // Execute the (non-strict) function once with a NULL rhs.
+            //   fcinfo->args[0] = {scalar, scalar_isnull};
+            //   fcinfo->args[1] = {(Datum)0, true};
+            //   result = op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
+            //   resultnull = fcinfo->isnull;
+            //   if (!inclause) result = !result;
+            //
+            // This is the one sub-path that needs the fmgr-widened nullable-arg
+            // call frame (pass args[1].isnull = true, read back fcinfo->isnull):
+            // the function_call2_coll seam (FunctionCall2Coll) only models
+            // non-null args + a non-null result. Mirror-PG-and-panic on the
+            // unported owner.
+            let _ = (scalar_value, scalar_isnull, matchfuncid, collation);
+            panic!(
+                "ExecEvalHashedScalarArrayOp: non-strict no-match-with-nulls branch \
+                 dispatches the equality function with a NULL rhs (args[1].isnull = \
+                 true) and reads back fcinfo->isnull — the function_call2_coll seam \
+                 (FunctionCall2Coll) models only non-null args and a non-null \
+                 result; blocked until the fmgr-widened nullable-arg call frame lands"
+            );
+        }
+    }
+
     // *op->resvalue = result; *op->resnull = resultnull;
-    //
-    // The step payload (inclause / has_nulls / finfo.fn_strict / scalar_cell /
-    // saop / elements_tab) is modeled, but every load-bearing step is blocked on
-    // unported owners: the scalar arg lives in fcinfo->args[0] (trimmed call
-    // frame; fmgr), building the table calls fmgr_info / InitFunctionCallInfoData
-    // and the saophash simplehash (saophash_create/insert/lookup) over a
-    // deconstructed array (arrayfuncs), and the no-match-with-nulls branch
-    // dispatches op->d.hashedscalararrayop.finfo->fn_addr(fcinfo) again.
-    // saop_element_hash / saop_hash_element_match are the simplehash callbacks
-    // for that table. Faithful once fmgr + arrayfuncs (+ a simplehash for the
-    // saophash table) land.
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "ExecEvalHashedScalarArrayOp: the scalar arg is in fcinfo->args[0] and \
-         the build/probe path uses fmgr_info / InitFunctionCallInfoData, the \
-         saophash simplehash, a deconstructed ArrayType, and \
-         op.d.hashedscalararrayop.finfo->fn_addr(fcinfo) — all in the unported \
-         fmgr (widened call frame) + arrayfuncs owners; blocked until they land"
-    )
-}
-
-/// `saop_element_hash(struct saophash_hash *tb, Datum key)` — hash one array
-/// element for the hashed-SAOP table (simplehash callback).
-pub fn saop_element_hash(key: Datum) -> u32 {
-    // ScalarArrayOpExprHashTable *elements_tab = tb->private_data;
-    // FunctionCallInfo fcinfo = &elements_tab->hash_fcinfo_data;
-    // fcinfo->args[0].value = key;
-    // fcinfo->args[0].isnull = false;
-    // hash = elements_tab->hash_finfo.fn_addr(fcinfo);
-    // return DatumGetUInt32(hash);
-    //
-    // Loads the element into the saophash table's hash_fcinfo_data and
-    // dispatches its hash function. The fcinfo call frame (args[0] + fn_addr)
-    // is the fmgr-widened FunctionCallInfoBaseData the trimmed model lacks, and
-    // the ScalarArrayOpExprHashTable (tb->private_data / hash_fcinfo_data /
-    // hash_finfo) is the interpreter-owned simplehash table built in
-    // ExecEvalHashedScalarArrayOp (itself blocked). Faithful once that lands.
-    let _ = key;
-    panic!(
-        "saop_element_hash: loads key into the saophash table's hash_fcinfo_data \
-         and dispatches hash_finfo.fn_addr(fcinfo) — needs the fmgr-widened \
-         FunctionCallInfoBaseData (trimmed model has no args[]/isnull) and the \
-         ScalarArrayOpExprHashTable built in ExecEvalHashedScalarArrayOp; blocked \
-         until fmgr (+ that table) land"
-    )
-}
-
-/// `saop_hash_element_match(struct saophash_hash *tb, Datum key1, Datum key2)`
-/// — equality callback for the hashed-SAOP table.
-pub fn saop_hash_element_match(key1: Datum, key2: Datum) -> bool {
-    // ScalarArrayOpExprHashTable *elements_tab = tb->private_data;
-    // FunctionCallInfo fcinfo = elements_tab->op->d.hashedscalararrayop.fcinfo_data;
-    // fcinfo->args[0].value = key1; fcinfo->args[0].isnull = false;
-    // fcinfo->args[1].value = key2; fcinfo->args[1].isnull = false;
-    // result = elements_tab->op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
-    // return DatumGetBool(result);
-    //
-    // Loads both keys into the op's comparison fcinfo and dispatches its
-    // equality function — same fmgr-widened call-frame blocker as
-    // saop_element_hash, over the same interpreter-owned saophash table.
-    let _ = (key1, key2);
-    panic!(
-        "saop_hash_element_match: loads key1/key2 into \
-         op.d.hashedscalararrayop.fcinfo_data and dispatches finfo->fn_addr \
-         (fcinfo) — needs the fmgr-widened FunctionCallInfoBaseData (trimmed \
-         model has no args[]/isnull) and the ScalarArrayOpExprHashTable; blocked \
-         until fmgr (+ that table) land"
-    )
+    state.result_cells.set(
+        resvalue_id,
+        ResultCell { value: Datum::from_bool(result), isnull: resultnull },
+    );
+    Ok(())
 }
 
 /// Borrow the `ExprEvalStepData` payload of step `op` in `state`. Mirrors the C
@@ -681,6 +858,21 @@ fn step_data<'a, 'mcx>(state: &'a ExprState<'mcx>, op: usize) -> &'a ExprEvalSte
     &state
         .steps
         .as_ref()
+        .expect("eval_scalar: steps not ready")[op]
+        .d
+}
+
+/// Mutably borrow the `ExprEvalStepData` payload of step `op` — the C
+/// `&state->steps[op]->d` for the write-back of `elements_tab`/`has_nulls` in
+/// `ExecEvalHashedScalarArrayOp`.
+#[inline]
+fn step_data_mut<'a, 'mcx>(
+    state: &'a mut ExprState<'mcx>,
+    op: usize,
+) -> &'a mut ExprEvalStepData<'mcx> {
+    &mut state
+        .steps
+        .as_mut()
         .expect("eval_scalar: steps not ready")[op]
         .d
 }

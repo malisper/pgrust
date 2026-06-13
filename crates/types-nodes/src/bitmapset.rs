@@ -9,6 +9,10 @@ use mcx::PgVec;
 /// `bitmapword` — the word the bit storage is built from.
 pub type bitmapword = u64;
 
+/// `BITS_PER_BITMAPWORD` (nodes/bitmapset.h): the number of bits in one
+/// [`bitmapword`]. The 64-bit build (`bitmapword == uint64`).
+pub const BITS_PER_BITMAPWORD: usize = 64;
+
 /// `Bitmapset` (nodes/bitmapset.h):
 ///
 /// ```c

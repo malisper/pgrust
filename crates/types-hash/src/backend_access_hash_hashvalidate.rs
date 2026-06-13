@@ -21,6 +21,11 @@ pub struct OpclassForm<'mcx> {
     pub opcfamily: Oid,
     /// `opcintype` — the opclass's input data type OID.
     pub opcintype: Oid,
+    /// `opckeytype` — the type actually stored in the index, or `InvalidOid`
+    /// (0) when it equals `opcintype`. `hashvalidate` does not consult this, but
+    /// `ginvalidate` does (the GIN `compare`/`comparePartial` signature checks
+    /// run against `opckeytype`, falling back to `opcintype` when unset).
+    pub opckeytype: Oid,
     /// `NameStr(opcname)` — the opclass name (for the missing-operators message).
     pub opcname: PgString<'mcx>,
 }

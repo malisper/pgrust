@@ -1,0 +1,123 @@
+//! Seam declarations for the relcache derived caches whose payload is a raw
+//! `rd_indextuple` node-tree transform, owned cross-unit (the node / optimizer /
+//! publication / rewrite layers).
+//!
+//! `RelationGetIndexExpressions` / `RelationGetIndexPredicate` /
+//! `RelationGetDummyIndexExpressions` / `RelationGetIndexAttrBitmap` /
+//! `RelationBuildPublicationDesc` / `RelationBuildRuleLock` (relcache.c) each
+//! read the *raw* `pg_index` HeapTuple (`rd_indextuple` — the un-decoded
+//! `indexprs`/`indpred` text datums) and run it through node vocabulary
+//! (`stringToNode`, `eval_const_expressions`, `canonicalize_qual`,
+//! `make_ands_implicit`, `fix_opfuncids`, `makeConst`/`exprType`/`exprTypmod`/
+//! `exprCollation`, `pull_varattnos`) or the publication / rewrite owners. The
+//! owned relcache entry carries only the *decoded* `rd_index` form, not the raw
+//! tuple, so the whole transform is a genuine cross-unit boundary keyed by the
+//! relation's OID. Each owner installs its seam from `init_seams()` when it
+//! lands; until then a call panics loudly.
+//!
+//! The relcache caller resolves the result into its owned entry fields
+//! (`rd_indexprs`/`rd_indpred`/`rd_*attr`/`rd_pubdesc`/`rd_rules` presence). The
+//! returns are deliberately coarse — the built node trees live on the relcache
+//! entry behind the seam, so the consumer only needs the attribute
+//! contributions (for the bitmap build) and presence acknowledgements.
+
+use types_core::primitive::{AttrNumber, Oid};
+use types_error::PgResult;
+
+/// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
+/// produced by the owner's `index_open` (relation/indexam) + `pull_varattnos`
+/// (var) over the index's `indexprs`/`indpred` node trees.
+#[derive(Clone, Debug)]
+pub struct IndexAttrInfo {
+    pub indisunique: bool,
+    pub indnkeyatts: i16,
+    pub amsummarizing: bool,
+    pub has_expressions: bool,
+    pub has_predicate: bool,
+    /// `rd_index->indkey.values[0..indnatts]` (raw table column numbers).
+    pub indkey: Vec<AttrNumber>,
+    /// Offset members pulled from the index expressions.
+    pub expr_attrs: Vec<i32>,
+    /// Offset members pulled from the index predicate.
+    pub pred_attrs: Vec<i32>,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexExpressions(relation)` (relcache.c): `stringToNode` of
+    /// the raw `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`,
+    /// then cache the tree into `rd_indexprs` (node + clauses owners).
+    /// Identified by the index relation's OID. Returns once the tree is cached
+    /// on the entry; can `ereport(ERROR)`, carried on `Err`.
+    pub fn index_expressions(index_relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationGetIndexPredicate(relation)` (relcache.c): `stringToNode` of the
+    /// raw `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
+    /// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`
+    /// (node + clauses owners). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn index_predicate(index_relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationGetDummyIndexExpressions(relation)` (relcache.c): read the raw
+    /// `pg_index.indexprs` datum (`heap_getattr` over `GetPgIndexDescriptor`),
+    /// `stringToNode` the expression list, then per sub-tree
+    /// `makeConst(exprType, exprTypmod, exprCollation, 1, 0, true, true)`
+    /// (makefuncs + nodeFuncs owners). The built dummy-Const list lives on the
+    /// entry behind the seam; the consumer only needs the acknowledgement. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn dummy_index_expressions(index_relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationGetIndexAttrBitmap`'s per-index step (relcache.c):
+    /// `index_open(indexOid, AccessShareLock)` (indexam) + extract
+    /// indkey / `indisunique` / `indnkeyatts` / `amsummarizing` +
+    /// `pull_varattnos` (var) over the index's `indexprs`/`indpred`, then
+    /// `index_close`. Returns the one index's attribute contributions. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn open_index_attrs(index_oid: Oid) -> PgResult<IndexAttrInfo>
+);
+
+seam_core::seam!(
+    /// `RelationBuildPublicationDesc(relation)` (relcache.c): traverse
+    /// `pg_publication*` to build `rd_pubdesc` (publication owner). The built
+    /// descriptor lives on the entry behind the seam; the consumer only needs
+    /// the acknowledgement. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn publication_desc(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_attoptions(relid, attnum)` (lsyscache.c, via
+    /// `SearchSysCache2(ATTNUM)` + `SysCacheGetAttr(attoptions)`): the raw
+    /// `pg_attribute.attoptions` reloptions text array for one index column, or
+    /// `None` (the C `(Datum) 0`) when unset. The relcache caller passes the
+    /// returned bytes straight to [`index_opclass_options`]. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn get_attoptions(relid: Oid, attnum: AttrNumber) -> PgResult<Option<Vec<u8>>>
+);
+
+seam_core::seam!(
+    /// `index_opclass_options(indexrel, attnum, attoptions, validate)`
+    /// (indexam.c): parse the AM/opclass-specific per-column options into the
+    /// binary `bytea` form cached in `rd_opcoptions`, or `None` when the column
+    /// has no parsed options. `attoptions` is the raw text array from
+    /// [`get_attoptions`] (`None` is the C `(Datum) 0`). Identified by the index
+    /// relation's OID (the owner re-resolves the open relation for the
+    /// amoptsprocinfo lookup). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn index_opclass_options(
+        index_oid: Oid,
+        attnum: AttrNumber,
+        attoptions: Option<Vec<u8>>,
+    ) -> PgResult<Option<Vec<u8>>>
+);
+
+seam_core::seam!(
+    /// `RelationBuildRuleLock(relation)` (relcache.c): `systable_beginscan` of
+    /// `pg_rewrite` for `ev_class = relid` + per-row `stringToNode` rule-tree
+    /// build into `rd_rules` (rewrite owner). The built rule lock lives on the
+    /// entry behind the seam; the consumer only needs the acknowledgement. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn rule_lock(relid: Oid) -> PgResult<()>
+);

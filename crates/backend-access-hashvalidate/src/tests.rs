@@ -25,6 +25,7 @@ fn opclass_form(mcx: Mcx<'_>, opcfamily: Oid) -> PgResult<OpclassForm<'_>> {
     Ok(OpclassForm {
         opcfamily,
         opcintype: 23,
+        opckeytype: 0,
         opcname: PgString::from_str_in("int4_ops", mcx)?,
     })
 }

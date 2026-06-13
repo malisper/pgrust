@@ -74,3 +74,15 @@ seam_core::seam!(
     /// construction buffers. `Err` carries its OOM surface.
     pub fn init_xlog_insert() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `log_newpage_buffer(buffer, page_std)` (xloginsert.c) — emit an
+    /// `XLOG_FPI` full-page-image WAL record for `buffer` and return the
+    /// record's end LSN. `page_std` is whether the page follows the standard
+    /// layout (the FSM truncate caller passes `false`). `Err` carries the WAL
+    /// insertion `ereport(ERROR)`s.
+    pub fn log_newpage_buffer(
+        buffer: Buffer,
+        page_std: bool,
+    ) -> PgResult<XLogRecPtr>
+);

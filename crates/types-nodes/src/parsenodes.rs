@@ -1,5 +1,8 @@
 //! Parse-tree vocabulary (nodes/parsenodes.h), trimmed.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use mcx::PgBox;
 use types_core::primitive::{Index, Oid};
 use types_storage::lock::LOCKMODE;
@@ -193,4 +196,22 @@ pub struct RoleSpec<'mcx> {
     pub roletype: RoleSpecType,
     /// `rolename` — filled only for `ROLESPEC_CSTRING`.
     pub rolename: Option<mcx::PgString<'mcx>>,
+}
+
+/// `T_CreateAmStmt = 180` (`nodes/nodetags.h`) — verified against PostgreSQL
+/// 18.3.
+pub const T_CreateAmStmt: u32 = 180;
+
+/// `CreateAmStmt` (`nodes/parsenodes.h`) — the `CREATE ACCESS METHOD`
+/// statement. `handler_name` is a `List *` of `String` value nodes (the
+/// qualified handler-function name components); `amtype` is a single-character
+/// `AMTYPE_*` discriminant.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CreateAmStmt {
+    /// `amname` — access method name.
+    pub amname: Option<String>,
+    /// `handler_name` — handler function name (list of String components).
+    pub handler_name: Vec<String>,
+    /// `amtype` — type of access method (`AMTYPE_INDEX` / `AMTYPE_TABLE`).
+    pub amtype: u8,
 }

@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::primitive::Oid;
+use types_core::primitive::{Oid, RelFileNumber};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -43,6 +43,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsCatalogNamespace(namespaceId)` (catalog/catalog.c): true iff the
+    /// namespace is `pg_catalog` (`namespaceId == PG_CATALOG_NAMESPACE`). No
+    /// catalog access — infallible.
+    pub fn is_catalog_namespace(namespace_id: Oid) -> bool
+);
+
+seam_core::seam!(
     /// `RelationInvalidatesSnapshotsOnly(relid)` (catalog/catalog.c): for the
     /// few catalogs whose tuples affect only saved snapshots (not catcache or
     /// relcache), this returns true so inval.c queues a snapshot inval instead.
@@ -58,6 +65,16 @@ seam_core::seam!(
     /// `String` is dropped). Path construction allocates, so the result is
     /// fallible (OOM).
     pub fn get_database_path(db_oid: Oid, spc_oid: Oid) -> PgResult<String>
+);
+
+seam_core::seam!(
+    /// `GetNewRelFileNumber(reltablespace, pg_class, relpersistence)`
+    /// (catalog/catalog.c): allocate a brand-new relfilenumber unused by any
+    /// existing relation in the target tablespace, probing the filesystem to
+    /// avoid collisions. The relcache caller passes `NULL` for the `pg_class`
+    /// argument (it isn't used for the search), so only the tablespace and
+    /// persistence cross. `Err` carries its `ereport(ERROR)`s.
+    pub fn get_new_relfilenumber(reltablespace: Oid, relpersistence: i8) -> PgResult<RelFileNumber>
 );
 
 seam_core::seam!(

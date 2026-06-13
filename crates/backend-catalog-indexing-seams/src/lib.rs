@@ -222,3 +222,37 @@ seam_core::seam!(
         form: &FormData_pg_amproc,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, NamespaceOidIndexId, Anum_pg_namespace_oid)` +
+    /// `namestrcpy` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_namespace row (pg_namespace.c `NamespaceCreate`): assigns and returns
+    /// the new namespace OID, building the row from the schema name, owner, and
+    /// optional default ACL (`acl == None` ⇒ `nulls[Anum_pg_namespace_nspacl
+    /// - 1] = true`). The `acl` varlena (`Acl *` = `ArrayType`) crosses
+    /// unchanged. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_namespace(
+        rel: &RelationData<'_>,
+        nspname: &str,
+        nspowner: Oid,
+        nspacl: Option<types_array::ArrayType>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid)` +
+    /// `namein(amname)` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_am row (amcmds.c `CreateAccessMethod`): assign the row OID, form the
+    /// tuple (`values[]` = oid / `namein(amname)` / amhandler / amtype) against
+    /// the descriptor, insert it with index maintenance, and return the
+    /// assigned OID. pg_am has no shared `FormData_pg_am` mirror in the type
+    /// crates, and the C fills `values[]` inline rather than from a struct, so
+    /// the row's four columns cross as scalars. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_am(
+        rel: &RelationData<'_>,
+        amname: &str,
+        amhandler: Oid,
+        amtype: u8,
+    ) -> PgResult<Oid>
+);
