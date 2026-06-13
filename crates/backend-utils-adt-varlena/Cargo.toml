@@ -20,3 +20,6 @@ backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" 
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+types-wchar = { path = "../types-wchar" }
+common-unicode-norm-bitfields = { path = "../common-unicode-norm-bitfields" }
+common-unicode-category-seams = { path = "../common-unicode-category-seams" }
