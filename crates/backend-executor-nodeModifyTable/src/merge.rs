@@ -15,6 +15,10 @@ extern crate alloc;
 
 /// `MERGE_INSERT` (execnodes.h) — MERGE subcommand mask bit.
 const MERGE_INSERT: i32 = 0x01;
+/// `MERGE_UPDATE` (execnodes.h) — MERGE subcommand mask bit.
+const MERGE_UPDATE: i32 = 0x02;
+/// `MERGE_DELETE` (execnodes.h) — MERGE subcommand mask bit.
+const MERGE_DELETE: i32 = 0x04;
 
 /// `ExecMerge(context, resultRelInfo, tupleid, oldtuple, canSetTag)` — execute
 /// the MERGE actions for one source row: dispatch to the matched or
@@ -285,21 +289,239 @@ pub fn ExecInitMerge<'mcx>(
             join_condition,
         )?;
 
-        // foreach(l, mergeActionList) { build each action's MergeActionState,
-        // its WHEN qual, the INSERT/UPDATE projection, and accumulate the
-        // mt_merge_subcommands bit. } — the per-action projection builders over
-        // explicit target lists/slots/descs and the MergeActionState node
-        // construction are execExpr-owned; the owner appends each state into
-        // resultRelInfo->ri_MergeActions[action->matchKind].
-        backend_executor_execExpr_seams::exec_init_merge_actions_for_rel::call(
-            mcx,
-            mtstate,
-            estate,
-            result_rel_info,
-            root_rel_info,
-            (*merge_action_list).as_slice(),
-            econtext,
-        )?;
+        // foreach(l, mergeActionList) — build each action's MergeActionState
+        // (WHEN qual + per-command projection), append it into
+        // resultRelInfo->ri_MergeActions[action->matchKind], and accumulate the
+        // MERGE_INSERT/UPDATE/DELETE bit into mtstate->mt_merge_subcommands. The
+        // per-action loop, the commandType switch, the mt_merge_subcommands
+        // accumulation, and the CMD_INSERT partitioned-vs-inherited decision are
+        // this unit's own control flow and state and stay in-crate; only the
+        // ExecInitQual / ExecBuildProjectionInfo / ExecBuildUpdateProjection /
+        // ExecSetupPartitionTupleRouting leaf primitives go through their owner
+        // seams.
+        let n_actions = merge_action_list.len();
+        for ai in 0..n_actions {
+            // MergeAction *action = (MergeAction *) lfirst(l);
+            //
+            // Snapshot the action's match kind / command type / qual / target
+            // list / update colnos out of the `&'mcx` plan-tree borrow so the
+            // mtstate/estate borrows are free for the leaf seams.
+            let action = &merge_action_list[ai];
+            let match_kind = action.matchKind;
+            let command_type = action.commandType;
+            let qual: Option<&'mcx types_nodes::nodes::Node<'mcx>> =
+                action.qual.as_ref().map(|q| &**q);
+            let target_list: &'mcx [types_nodes::TargetEntry<'mcx>] = action
+                .targetList
+                .as_ref()
+                .map(|t| t.as_slice())
+                .unwrap_or(&[]);
+            let update_colnos: &'mcx [i32] = action
+                .updateColnos
+                .as_ref()
+                .map(|u| u.as_slice())
+                .unwrap_or(&[]);
+
+            // action_state = makeNode(MergeActionState);
+            // action_state->mas_action = action;
+            // action_state->mas_whenqual = ExecInitQual((List *) action->qual,
+            //                                            &mtstate->ps);
+            let mas_whenqual = backend_executor_execExpr_seams::exec_init_merge_when_qual::call(
+                mtstate, estate, qual,
+            )?;
+
+            // We create three lists - one for each MergeMatchKind - and stick
+            // the MergeActionState into the appropriate list. The projection is
+            // filled in by the switch below before the state is appended.
+            let mas_proj: Option<mcx::PgBox<'mcx, types_nodes::execexpr::ProjectionInfo>>;
+
+            match command_type {
+                CmdType::CMD_INSERT => {
+                    // INSERT actions always use rootRelInfo.
+                    //   ExecCheckPlanOutput(rootRelInfo->ri_RelationDesc,
+                    //                       action->targetList);
+                    let root_rel = estate
+                        .result_rel(root_rel_info)
+                        .ri_RelationDesc
+                        .as_ref()
+                        .expect("MERGE root ResultRelInfo has an open relation")
+                        .alias();
+                    crate::lifecycle::ExecCheckPlanOutput(root_rel, target_list)?;
+
+                    // If the MERGE targets a partitioned table, any INSERT
+                    // actions must be routed through it. Initialize the routing
+                    // struct and the root table's "new" tuple slot, if not done.
+                    // The projection (for all relations) uses the root relation
+                    // descriptor and targets the plan's root slot.
+                    let root_relkind = estate
+                        .result_rel(root_rel_info)
+                        .ri_RelationDesc
+                        .as_ref()
+                        .map(|r| r.rd_rel.relkind)
+                        .unwrap_or(0);
+                    let tgt_slot: types_nodes::SlotId;
+                    if root_relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE {
+                        if mtstate.mt_partition_tuple_routing.is_none() {
+                            // mtstate->mt_root_tuple_slot =
+                            //     table_slot_create(rootRelInfo->ri_RelationDesc, NULL);
+                            // (managed as a standalone ModifyTableState slot — the
+                            // C passes NULL for the tupleTable list.)
+                            let rel = estate
+                                .result_rel(root_rel_info)
+                                .ri_RelationDesc
+                                .as_ref()
+                                .expect("MERGE root ResultRelInfo has an open relation")
+                                .alias();
+                            let root_slot =
+                                backend_access_table_tableam::table_slot_create(mcx, &rel)?;
+                            let root_slot_id = estate.make_slot(root_slot)?;
+                            mtstate.mt_root_tuple_slot = Some(root_slot_id);
+
+                            // mtstate->mt_partition_tuple_routing =
+                            //     ExecSetupPartitionTupleRouting(estate,
+                            //         rootRelInfo->ri_RelationDesc);
+                            let rel2 = estate
+                                .result_rel(root_rel_info)
+                                .ri_RelationDesc
+                                .as_ref()
+                                .expect("MERGE root ResultRelInfo has an open relation")
+                                .alias();
+                            mtstate.mt_partition_tuple_routing = Some(
+                                backend_executor_execPartition_seams::exec_setup_partition_tuple_routing::call(
+                                    mcx, estate, rel2,
+                                )?,
+                            );
+                        }
+                        // tgtslot = mtstate->mt_root_tuple_slot;
+                        // tgtdesc = RelationGetDescr(rootRelInfo->ri_RelationDesc);
+                        tgt_slot = mtstate
+                            .mt_root_tuple_slot
+                            .expect("partitioned-root MERGE has a root tuple slot");
+                    } else {
+                        // If the MERGE targets an inherited table, we insert into
+                        // the root table, so initialize its "new" tuple slot if
+                        // not already done and use its relation descriptor for the
+                        // projection. (For non-inherited tables rootRelInfo and
+                        // resultRelInfo are the same and the slot is set already.)
+                        //   if (rootRelInfo->ri_newTupleSlot == NULL)
+                        //       rootRelInfo->ri_newTupleSlot =
+                        //           table_slot_create(rootRelInfo->ri_RelationDesc,
+                        //                              &estate->es_tupleTable);
+                        if estate.result_rel(root_rel_info).ri_newTupleSlot.is_none() {
+                            let rel = estate
+                                .result_rel(root_rel_info)
+                                .ri_RelationDesc
+                                .as_ref()
+                                .expect("MERGE root ResultRelInfo has an open relation")
+                                .alias();
+                            let new_slot =
+                                backend_access_table_tableam::table_slot_create(mcx, &rel)?;
+                            let new_slot_id = estate.make_slot(new_slot)?;
+                            estate.result_rel_mut(root_rel_info).ri_newTupleSlot =
+                                Some(new_slot_id);
+                        }
+                        // tgtslot = rootRelInfo->ri_newTupleSlot;
+                        // tgtdesc = RelationGetDescr(rootRelInfo->ri_RelationDesc);
+                        tgt_slot = estate
+                            .result_rel(root_rel_info)
+                            .ri_newTupleSlot
+                            .expect("inherited-root MERGE has a root new tuple slot");
+                    }
+
+                    // action_state->mas_proj =
+                    //     ExecBuildProjectionInfo(action->targetList, econtext,
+                    //                             tgtslot, &mtstate->ps, tgtdesc);
+                    mas_proj = Some(
+                        backend_executor_execExpr_seams::exec_build_merge_insert_projection::call(
+                            mtstate,
+                            estate,
+                            target_list,
+                            econtext,
+                            tgt_slot,
+                            root_rel_info,
+                        )?,
+                    );
+
+                    // mtstate->mt_merge_subcommands |= MERGE_INSERT;
+                    mtstate.mt_merge_subcommands |= MERGE_INSERT;
+                }
+                CmdType::CMD_UPDATE => {
+                    // action_state->mas_proj = ExecBuildUpdateProjection(
+                    //     action->targetList, true, action->updateColnos,
+                    //     relationDesc, econtext,
+                    //     resultRelInfo->ri_newTupleSlot, &mtstate->ps);
+                    mas_proj = Some(
+                        backend_executor_execExpr_seams::exec_build_merge_update_projection::call(
+                            mtstate,
+                            estate,
+                            result_rel_info,
+                            target_list,
+                            update_colnos,
+                            econtext,
+                        )?,
+                    );
+                    // mtstate->mt_merge_subcommands |= MERGE_UPDATE;
+                    mtstate.mt_merge_subcommands |= MERGE_UPDATE;
+                }
+                CmdType::CMD_DELETE => {
+                    // mtstate->mt_merge_subcommands |= MERGE_DELETE;
+                    mas_proj = None;
+                    mtstate.mt_merge_subcommands |= MERGE_DELETE;
+                }
+                CmdType::CMD_NOTHING => {
+                    mas_proj = None;
+                }
+                _ => {
+                    // default: elog(ERROR, "unknown action in MERGE WHEN clause");
+                    return Err(types_error::PgError::error(
+                        "unknown action in MERGE WHEN clause",
+                    ));
+                }
+            }
+
+            // resultRelInfo->ri_MergeActions[action->matchKind] =
+            //     lappend(resultRelInfo->ri_MergeActions[action->matchKind],
+            //             action_state);
+            //
+            // Build the owned MergeActionState. The C `mas_action = action`
+            // aliases the plan `MergeAction`; the owned-by-value tree cannot
+            // share the `&'mcx` plan borrow into the pooled state, so `mas_action`
+            // carries the command/match-kind/overriding fields the executor reads
+            // (ExecMergeMatched reads only `commandType`/`matchKind`).
+            let mas_action = mcx::alloc_in(
+                mcx,
+                types_nodes::modifytable::MergeAction {
+                    matchKind: match_kind,
+                    commandType: command_type,
+                    overriding: action.overriding,
+                    qual: None,
+                    targetList: None,
+                    updateColnos: None,
+                },
+            )?;
+            let action_state = mcx::alloc_in(
+                mcx,
+                types_nodes::modifytable::MergeActionState {
+                    type_: types_nodes::nodes::T_MergeActionState,
+                    mas_action: Some(mas_action),
+                    mas_proj,
+                    mas_whenqual,
+                },
+            )?;
+
+            // resultRelInfo->ri_MergeActions[action->matchKind] =
+            //     lappend(.., action_state);
+            let slot = &mut estate.result_rel_mut(result_rel_info).ri_MergeActions
+                [match_kind as usize];
+            match slot {
+                Some(list) => list.push(action_state),
+                None => {
+                    let mut v = mcx::PgVec::new_in(mcx);
+                    v.push(action_state);
+                    *slot = Some(v);
+                }
+            }
+        }
     }
 
     // If the MERGE targets an inherited table, any INSERT actions will use

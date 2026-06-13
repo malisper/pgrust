@@ -18,6 +18,7 @@ backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execReplication-seams = { path = "../backend-executor-execReplication-seams" }
 backend-executor-execPartition-seams = { path = "../backend-executor-execPartition-seams" }
+backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-executor-execIndexing-seams = { path = "../backend-executor-execIndexing-seams" }

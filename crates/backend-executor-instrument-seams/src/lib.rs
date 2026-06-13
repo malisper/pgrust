@@ -13,3 +13,12 @@ seam_core::seam!(
         instr: &mut types_nodes::Instrumentation,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `InstrUpdateTupleCount(instr, nTuples)` (instrument.c): add `n_tuples`
+    /// to the node's running tuple count. Infallible.
+    pub fn instr_update_tuple_count(
+        instr: &mut types_nodes::Instrumentation,
+        n_tuples: f64,
+    )
+);

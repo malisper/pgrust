@@ -546,17 +546,109 @@ pub fn ExecInitModifyTable<'mcx>(
     // If needed, initialize target list, projection and qual for ON CONFLICT
     // DO UPDATE.
     //   if (node->onConflictAction == ONCONFLICT_UPDATE) { ... }
-    //
-    // The DO UPDATE state builds an OnConflictSetState whose
-    // oc_Existing/oc_ProjSlot come from table_slot_create and oc_ProjInfo from
-    // ExecBuildUpdateProjection, then stores it on `ri_onConflict`. The
-    // `ri_onConflict` field is not carried on the trimmed ResultRelInfo, so
-    // this cannot be honored; ON CONFLICT DO UPDATE state lands with that field.
     if node.onConflictAction == OnConflictAction::ONCONFLICT_UPDATE {
-        return Err(unported(
-            "ExecInitModifyTable: ON CONFLICT DO UPDATE state (ri_onConflict / \
-             OnConflictSetState) is not carried on the trimmed ResultRelInfo",
-        ));
+        // resultRelInfo = mtstate->resultRelInfo; (the single INSERT rel)
+        let result_rel_info = mtstate.resultRelInfo[0];
+
+        // already exists if created by RETURNING processing above
+        //   if (mtstate->ps.ps_ExprContext == NULL)
+        //       ExecAssignExprContext(estate, &mtstate->ps);
+        //   econtext = mtstate->ps.ps_ExprContext;
+        if mtstate.ps.ps_ExprContext.is_none() {
+            backend_executor_execUtils_seams::exec_assign_expr_context::call(
+                estate,
+                &mut mtstate.ps,
+            )?;
+        }
+        let econtext = mtstate
+            .ps
+            .ps_ExprContext
+            .expect("ON CONFLICT DO UPDATE node has an expression context");
+
+        // initialize slot for the existing tuple
+        //   onconfl->oc_Existing =
+        //       table_slot_create(resultRelInfo->ri_RelationDesc,
+        //                         &mtstate->ps.state->es_tupleTable);
+        let rel = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ON CONFLICT result relation is open")
+            .alias();
+        let existing_slot = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
+        let oc_existing = estate.make_slot(existing_slot)?;
+
+        // Create the tuple slot for the UPDATE SET projection. We want a slot of
+        // the table's type here, because the slot will be used to insert into
+        // the table, and for RETURNING processing.
+        //   onconfl->oc_ProjSlot =
+        //       table_slot_create(resultRelInfo->ri_RelationDesc,
+        //                         &mtstate->ps.state->es_tupleTable);
+        let rel2 = estate
+            .result_rel(result_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ON CONFLICT result relation is open")
+            .alias();
+        let proj_slot_raw = backend_access_table_tableam::table_slot_create(mcx, &rel2)?;
+        let oc_proj_slot = estate.make_slot(proj_slot_raw)?;
+
+        // build UPDATE SET projection state
+        //   onconfl->oc_ProjInfo =
+        //       ExecBuildUpdateProjection(node->onConflictSet, true,
+        //                                 node->onConflictCols, relationDesc,
+        //                                 econtext, onconfl->oc_ProjSlot,
+        //                                 &mtstate->ps);
+        let on_conflict_set: &'mcx [TargetEntry<'mcx>] = node
+            .onConflictSet
+            .as_ref()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
+        let on_conflict_cols: &'mcx [i32] = node
+            .onConflictCols
+            .as_ref()
+            .map(|c| c.as_slice())
+            .unwrap_or(&[]);
+        let oc_proj_info =
+            backend_executor_execExpr_seams::exec_build_on_conflict_set_projection::call(
+                &mut mtstate,
+                estate,
+                result_rel_info,
+                on_conflict_set,
+                on_conflict_cols,
+                econtext,
+                oc_proj_slot,
+            )?;
+
+        // initialize state to evaluate the WHERE clause, if any
+        //   if (node->onConflictWhere)
+        //       onconfl->oc_WhereClause =
+        //           ExecInitQual((List *) node->onConflictWhere, &mtstate->ps);
+        let on_conflict_where: Option<&'mcx types_nodes::nodes::Node<'mcx>> =
+            node.onConflictWhere.as_ref().map(|w| &**w);
+        let oc_where_clause = if on_conflict_where.is_some() {
+            backend_executor_execExpr_seams::exec_init_on_conflict_where::call(
+                &mut mtstate,
+                estate,
+                on_conflict_where,
+            )?
+        } else {
+            None
+        };
+
+        // OnConflictSetState *onconfl = makeNode(OnConflictSetState);
+        // resultRelInfo->ri_onConflict = onconfl;
+        let onconfl = mcx::alloc_in(
+            mcx,
+            types_nodes::modifytable::OnConflictSetState {
+                type_: types_nodes::nodes::T_OnConflictSetState,
+                oc_Existing: Some(oc_existing),
+                oc_ProjSlot: Some(oc_proj_slot),
+                oc_ProjInfo: Some(oc_proj_info),
+                oc_WhereClause: oc_where_clause,
+            },
+        )?;
+        estate.result_rel_mut(result_rel_info).ri_onConflict = Some(onconfl);
     }
 
     // For a MERGE command, initialize its state.

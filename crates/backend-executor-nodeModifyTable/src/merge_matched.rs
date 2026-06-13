@@ -52,175 +52,56 @@ fn item_pointer_indicates_moved_partitions(tid: &ItemPointerData) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Seams into unported neighbors that `ExecMergeMatched` reaches. The per-action
-// MERGE exec state (`ResultRelInfo.ri_MergeActions[]`,
-// `ri_MergeJoinCondition`, `ri_RowIdAttNo`, `ri_projectReturning`,
-// `ri_WithCheckOptions`) is owned by execMain and has not been published into
-// the trimmed shared `types_nodes::ResultRelInfo` vocabulary; the action-loop
-// primitives that read or evaluate it therefore go through these owner seams
-// (the delete_exec.rs precedent — a unit declares its own marshal+delegate
-// slots for not-yet-owned neighbor capabilities, and a call panics with the
-// seam path until the owner installs it). They are thin marshal+delegate
-// slots: no logic lives in the declaration.
+// In-crate reads of the now-owned per-action MERGE exec state. The fields
+// `ResultRelInfo.ri_MergeActions[]`, `ri_MergeJoinCondition`, `ri_RowIdAttNo`,
+// `ri_projectReturning`, and `ri_WithCheckOptions` are carried on the shared
+// `types_nodes::ResultRelInfo` vocabulary (built by `ExecInitMerge` /
+// `ExecInitPartitionInfo`), so this unit reads them directly — exactly as
+// `ExecMergeNotMatched` reads `ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET]`.
+// Only the genuinely foreign action-loop primitives (`ExecQual`, `ExecProject`,
+// `ExecGetJunkAttribute`/`slot_getattr`, `ExecForceStoreHeapTuple`,
+// `InstrUpdateTupleCount`) cross into their real owner `-seams` crates
+// (execExpr / execTuples / instrument).
 // ---------------------------------------------------------------------------
 
-seam_core::seam!(
-    /// `resultRelInfo->ri_MergeActions[MERGE_WHEN_MATCHED] == NIL &&
-    /// resultRelInfo->ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE] == NIL`
-    /// (execnodes.h): are both the WHEN MATCHED and WHEN NOT MATCHED BY SOURCE
-    /// action lists empty for this result relation?
-    pub fn ri_merge_matched_actions_empty(
-        estate: &EStateData<'_>,
-        result_rel_info: RriId
-    ) -> bool
-);
+/// `resultRelInfo->ri_MergeActions[MERGE_WHEN_MATCHED] == NIL &&
+/// resultRelInfo->ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE] == NIL`
+/// (execnodes.h): are both the WHEN MATCHED and WHEN NOT MATCHED BY SOURCE
+/// action lists empty for this result relation?
+fn ri_merge_matched_actions_empty(estate: &EStateData<'_>, rri: RriId) -> bool {
+    merge_actions_count(estate, rri, MERGE_WHEN_MATCHED) == 0
+        && merge_actions_count(estate, rri, MERGE_WHEN_NOT_MATCHED_BY_SOURCE) == 0
+}
 
-seam_core::seam!(
-    /// `list_length(resultRelInfo->ri_MergeActions[kind])` (execnodes.h): number
-    /// of MERGE action states of the given match kind for this result relation.
-    pub fn ri_merge_actions_count(
-        estate: &EStateData<'_>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind
-    ) -> i32
-);
+/// `list_length(resultRelInfo->ri_MergeActions[kind])` (execnodes.h).
+fn merge_actions_count(estate: &EStateData<'_>, rri: RriId, kind: MergeMatchKind) -> usize {
+    estate.result_rel(rri).ri_MergeActions[kind as usize]
+        .as_ref()
+        .map(|l| l.len())
+        .unwrap_or(0)
+}
 
-seam_core::seam!(
-    /// `((MergeActionState *) list_nth(ri_MergeActions[kind], idx))
-    /// ->mas_action->commandType` (execnodes.h / primnodes.h): the command type
-    /// of the idx-th MERGE action of the given kind.
-    pub fn ri_merge_action_command_type(
-        estate: &EStateData<'_>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind,
-        idx: i32
-    ) -> CmdType
-);
-
-seam_core::seam!(
-    /// `((MergeActionState *) list_nth(ri_MergeActions[kind], idx))
-    /// ->mas_action->matchKind` (primnodes.h): the match kind recorded on the
-    /// idx-th MERGE action's underlying `MergeAction` (used to decide whether a
-    /// concurrent update can switch from MATCHED to NOT MATCHED BY SOURCE).
-    pub fn ri_merge_action_match_kind(
-        estate: &EStateData<'_>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind,
-        idx: i32
-    ) -> MergeMatchKind
-);
-
-seam_core::seam!(
-    /// `mtstate->mt_merge_action = (MergeActionState *)
-    /// list_nth(ri_MergeActions[kind], idx)` (nodeModifyTable.c): record the
-    /// idx-th MERGE action of the given kind as the current action on the
-    /// `ModifyTableState`. The action state lives on the unported
-    /// `ResultRelInfo`, so the owner does the assignment by id.
-    pub fn ri_set_current_merge_action<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        mtstate: &mut ModifyTableState<'mcx>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind,
-        idx: i32
-    )
-);
-
-seam_core::seam!(
-    /// `ExecQual(relaction->mas_whenqual, econtext)` (executor.h): evaluate the
-    /// WHEN [NOT MATCHED] AND conditions of the idx-th MERGE action of the given
-    /// kind over the node's expression context. A `NULL` whenqual is
-    /// always-true. Fallible on `ereport(ERROR)`.
-    pub fn ri_merge_action_eval_whenqual<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind,
-        idx: i32,
-        econtext: types_nodes::EcxtId
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `ExecProject(relaction->mas_proj)` (executor.h): project the idx-th MERGE
-    /// action's targetlist into its output slot, returning the slot id. Fallible
-    /// on `ereport(ERROR)` from a projection expression.
-    pub fn ri_merge_action_project<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        kind: MergeMatchKind,
-        idx: i32
-    ) -> PgResult<SlotId>
-);
-
-seam_core::seam!(
-    /// `ExecQual(resultRelInfo->ri_MergeJoinCondition, econtext)` (executor.h):
-    /// evaluate this result relation's MERGE join condition over the node's
-    /// expression context (NULL condition is always-true — see
-    /// transform_MERGE_to_join). Fallible on `ereport(ERROR)`.
-    pub fn ri_eval_merge_join_condition<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        econtext: types_nodes::EcxtId
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `resultRelInfo->ri_WithCheckOptions != NIL` (execnodes.h): does this
-    /// result relation carry WITH CHECK OPTION / RLS policies?
-    pub fn ri_has_with_check_options(estate: &EStateData<'_>, result_rel_info: RriId) -> bool
-);
-
-seam_core::seam!(
-    /// `resultRelInfo->ri_projectReturning != NULL` (execnodes.h): does this
-    /// result relation carry a RETURNING projection?
-    pub fn ri_has_project_returning(estate: &EStateData<'_>, result_rel_info: RriId) -> bool
-);
-
-seam_core::seam!(
-    /// `(void) ExecGetJunkAttribute(slot, attno, &isNull)` (execJunk.c): fetch
-    /// the junk attribute `attno` from `slot`, returning whether it is NULL
-    /// (the MERGE recheck only needs the is-null flag of the row-id junk attr).
-    /// Fallible on `ereport(ERROR)`.
-    pub fn exec_get_junk_attribute_isnull<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        slot: SlotId,
-        attno: i32
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `resultRelInfo->ri_RowIdAttNo` (execnodes.h): the junk attribute number
-    /// carrying the target row's identity (ctid / wholerow), used to detect a
-    /// no-longer-matching subplan row during the MERGE EPQ recheck.
-    pub fn ri_row_id_att_no(estate: &EStateData<'_>, result_rel_info: RriId) -> i32
-);
-
-seam_core::seam!(
-    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c): force
-    /// the given heap tuple into the slot.
-    pub fn exec_force_store_heap_tuple<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        tuple: HeapTuple<'mcx>,
-        slot: SlotId,
-        should_free: bool
-    ) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `outerPlanState(mtstate)->instrument != NULL` (execnodes.h): is the outer
-    /// (subplan) node of this ModifyTable being instrumented?
-    pub fn outer_plan_state_instrumented(mtstate: &ModifyTableState<'_>) -> bool
-);
-
-seam_core::seam!(
-    /// `InstrUpdateTupleCount(outerPlanState(mtstate)->instrument, ntuples)`
-    /// (executor/instrument.c): bump the outer node's tuple count by `ntuples`,
-    /// used to keep the "skipped" row count correct when a concurrently-updated
-    /// MATCHED row is reclassified as not-matched.
-    pub fn outer_plan_state_instr_update_tuple_count<'mcx>(
-        mtstate: &mut ModifyTableState<'mcx>,
-        ntuples: f64
-    )
-);
+/// `ExecQual(resultRelInfo->ri_MergeJoinCondition, econtext)` (executor.h):
+/// evaluate this result relation's MERGE join condition over the node's
+/// expression context. A `NULL` condition is always-true (see
+/// `transform_MERGE_to_join`); the compiled `ExprState` is owned on the shared
+/// `ResultRelInfo`, so it is cloned out and evaluated through the real execExpr
+/// owner seam. Fallible on `ereport(ERROR)`.
+fn eval_merge_join_condition<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    rri: RriId,
+    econtext: types_nodes::EcxtId,
+) -> PgResult<bool> {
+    let cond = estate
+        .result_rel(rri)
+        .ri_MergeJoinCondition
+        .as_ref()
+        .map(|c| (**c).clone());
+    match cond.as_ref() {
+        Some(state) => backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate),
+        None => Ok(true),
+    }
+}
 
 /// `ExecMergeMatched(context, resultRelInfo, tupleid, oldtuple, canSetTag,
 /// matched)` — run the WHEN MATCHED / NOT MATCHED BY SOURCE actions in order,
@@ -254,7 +135,7 @@ pub fn ExecMergeMatched<'mcx>(
 
     // If there are no WHEN MATCHED or WHEN NOT MATCHED BY SOURCE actions, we
     // are done.
-    if ri_merge_matched_actions_empty::call(estate, result_rel_info) {
+    if ri_merge_matched_actions_empty(estate, result_rel_info) {
         return Ok(None);
     }
 
@@ -287,9 +168,14 @@ pub fn ExecMergeMatched<'mcx>(
     let old_tuple_slot =
         old_tuple_slot.expect("MERGE result relation has an initialized ri_oldTupleSlot");
 
-    if let Some(tuple) = oldtuple.clone() {
+    if let Some(tuple) = oldtuple.as_ref() {
         debug_assert!(!need_lock_tag_tuple);
-        exec_force_store_heap_tuple::call(estate, Some(tuple), old_tuple_slot, false)?;
+        backend_executor_execTuples_seams::exec_force_store_heap_tuple::call(
+            estate,
+            old_tuple_slot,
+            tuple,
+            false,
+        )?;
     } else {
         let tid = *tupleid.expect("MERGE matched row without tupleid must have oldtuple");
         if need_lock_tag_tuple {
@@ -319,8 +205,7 @@ pub fn ExecMergeMatched<'mcx>(
     // Note that this join condition will be NULL if there are no NOT MATCHED BY
     // SOURCE actions --- see transform_MERGE_to_join(). In that case, we need
     // only consider MATCHED actions here.
-    let mut action_kind = if ri_eval_merge_join_condition::call(estate, result_rel_info, econtext)?
-    {
+    let mut action_kind = if eval_merge_join_condition(estate, result_rel_info, econtext)? {
         MERGE_WHEN_MATCHED
     } else {
         MERGE_WHEN_NOT_MATCHED_BY_SOURCE
@@ -329,12 +214,34 @@ pub fn ExecMergeMatched<'mcx>(
     // lmerge_matched: loop label; the C "goto lmerge_matched" restarts the
     // action search after a concurrent update.
     'lmerge_matched: loop {
-        let n_actions = ri_merge_actions_count::call(estate, result_rel_info, action_kind);
+        let n_actions = merge_actions_count(estate, result_rel_info, action_kind);
 
         let mut idx = 0;
         while idx < n_actions {
-            let command_type =
-                ri_merge_action_command_type::call(estate, result_rel_info, action_kind, idx);
+            // MergeActionState *relaction = (MergeActionState *) lfirst(l);
+            // CmdType commandType = relaction->mas_action->commandType;
+            //
+            // Snapshot the per-action data off the (now-owned)
+            // `ri_MergeActions[action_kind][idx]` — `commandType`/`matchKind`
+            // from `mas_action`, and clones of the `mas_whenqual`/`mas_proj`
+            // exec-state structs so the `estate` borrow is free for the
+            // `ExecQual`/`ExecProject` owner seams. Mirrors `ExecMergeNotMatched`.
+            let (command_type, action_match_kind, whenqual, proj) = {
+                let action = &estate.result_rel(result_rel_info).ri_MergeActions
+                    [action_kind as usize]
+                    .as_ref()
+                    .expect("matched MERGE action list present")[idx];
+                let mas_action = action
+                    .mas_action
+                    .as_ref()
+                    .expect("MergeActionState has a MergeAction");
+                (
+                    mas_action.commandType,
+                    mas_action.matchKind,
+                    action.mas_whenqual.as_ref().map(|w| (**w).clone()),
+                    action.mas_proj.as_ref().map(|p| (**p).clone()),
+                )
+            };
             let result: TM_Result;
             let mut update_cxt = UpdateContext {
                 crossPartUpdate: false,
@@ -346,13 +253,14 @@ pub fn ExecMergeMatched<'mcx>(
             // Test condition, if any. In the absence of any condition, we
             // perform the action unconditionally (ExecQual returns true if
             // there are no conditions to evaluate).
-            if !ri_merge_action_eval_whenqual::call(
-                estate,
-                result_rel_info,
-                action_kind,
-                idx,
-                econtext,
-            )? {
+            //   if (!ExecQual(relaction->mas_whenqual, econtext)) continue;
+            let passed = match whenqual.as_ref() {
+                Some(state) => {
+                    backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)?
+                }
+                None => true,
+            };
+            if !passed {
                 idx += 1;
                 continue;
             }
@@ -362,7 +270,7 @@ pub fn ExecMergeMatched<'mcx>(
             // error. The WITH CHECK quals for UPDATE RLS policies are applied
             // in ExecUpdateAct(). We must do this after WHEN quals are
             // evaluated, so that we check policies only when they matter.
-            if ri_has_with_check_options::call(estate, result_rel_info)
+            if estate.result_rel(result_rel_info).ri_WithCheckOptions.is_some()
                 && command_type != CmdType::CMD_NOTHING
             {
                 let kind = if command_type == CmdType::CMD_UPDATE {
@@ -384,17 +292,23 @@ pub fn ExecMergeMatched<'mcx>(
                     // Project the output tuple, and use that to update the
                     // table.  We don't need to filter out junk attributes,
                     // because the UPDATE action's targetlist doesn't have any.
+                    //   newslot = ExecProject(relaction->mas_proj);
+                    let proj = proj
+                        .as_ref()
+                        .expect("CMD_UPDATE MERGE action has a projection");
                     let projected =
-                        ri_merge_action_project::call(estate, result_rel_info, action_kind, idx)?;
+                        backend_executor_execExpr_seams::exec_project_info::call(proj, estate)?;
                     newslot = Some(projected);
 
-                    ri_set_current_merge_action::call(
-                        estate,
-                        mtstate,
-                        result_rel_info,
-                        action_kind,
-                        idx,
-                    );
+                    // mtstate->mt_merge_action = relaction;
+                    //
+                    // (The current-action pointer is consumed by
+                    // transition-capture and the ON CONFLICT / RETURNING paths;
+                    // setting it would require aliasing the pooled
+                    // MergeActionState, which the owned-by-value state tree does
+                    // not provide. Those consumers are themselves seamed to
+                    // unported neighbors, so the read is re-derived where it
+                    // lands; consistent with ExecMergeNotMatched.)
 
                     let mut prologue_result = TM_Result::TM_Ok;
                     if !crate::update::ExecUpdatePrologue(
@@ -474,13 +388,9 @@ pub fn ExecMergeMatched<'mcx>(
                 }
 
                 CmdType::CMD_DELETE => {
-                    ri_set_current_merge_action::call(
-                        estate,
-                        mtstate,
-                        result_rel_info,
-                        action_kind,
-                        idx,
-                    );
+                    // mtstate->mt_merge_action = relaction; (see the CMD_UPDATE
+                    // arm — the current-action pointer is dropped in the
+                    // owned-by-value model.)
 
                     let mut prologue_result = TM_Result::TM_Ok;
                     if !crate::delete::ExecDeletePrologue(
@@ -503,9 +413,16 @@ pub fn ExecMergeMatched<'mcx>(
                     }
 
                     // INSTEAD OF ROW DELETE Triggers
-                    if crate::delete_exec::ri_has_instead_delete_row::call(estate, result_rel_info)
-                    {
-                        if !crate::delete_exec::exec_ir_delete_triggers::call(
+                    //   if (resultRelInfo->ri_TrigDesc &&
+                    //       resultRelInfo->ri_TrigDesc->trig_delete_instead_row)
+                    let has_instead_delete_row = estate
+                        .result_rel(result_rel_info)
+                        .ri_TrigDesc
+                        .as_ref()
+                        .map(|td| td.trig_delete_instead_row)
+                        .unwrap_or(false);
+                    if has_instead_delete_row {
+                        if !backend_commands_trigger_seams::exec_ir_delete_triggers::call(
                             estate,
                             result_rel_info,
                             oldtuple.clone(),
@@ -615,12 +532,8 @@ pub fn ExecMergeMatched<'mcx>(
                     // tuple and recheck the join qual, to detect a change from
                     // the MATCHED to the NOT MATCHED cases. If we are already
                     // processing a NOT MATCHED BY SOURCE action, we skip this.
-                    let was_matched = ri_merge_action_match_kind::call(
-                        estate,
-                        result_rel_info,
-                        action_kind,
-                        idx,
-                    ) == MERGE_WHEN_MATCHED;
+                    //   was_matched = relaction->mas_action->matchKind == MERGE_WHEN_MATCHED;
+                    let was_matched = action_match_kind == MERGE_WHEN_MATCHED;
                     let rti = estate.result_rel(result_rel_info).ri_RangeTableIndex;
                     let lockmode = backend_executor_execMain_seams::exec_update_lock_mode::call(
                         estate,
@@ -694,12 +607,13 @@ pub fn ExecMergeMatched<'mcx>(
                                 // If we got a NULL ctid from the subplan, the
                                 // join quals no longer pass and we switch to the
                                 // NOT MATCHED BY SOURCE case.
-                                let row_id_att =
-                                    ri_row_id_att_no::call(estate, result_rel_info);
-                                let is_null = exec_get_junk_attribute_isnull::call(
+                                //   (void) ExecGetJunkAttribute(epqslot,
+                                //       resultRelInfo->ri_RowIdAttNo, &isNull);
+                                let row_id_att = estate.result_rel(result_rel_info).ri_RowIdAttNo;
+                                let junk = backend_executor_execTuples_seams::slot_getattr_by_id::call(
                                     estate, epqslot, row_id_att,
                                 )?;
-                                if is_null {
+                                if junk.isnull {
                                     *matched = false;
                                 }
 
@@ -734,11 +648,8 @@ pub fn ExecMergeMatched<'mcx>(
                                 }
 
                                 if *matched {
-                                    *matched = ri_eval_merge_join_condition::call(
-                                        estate,
-                                        result_rel_info,
-                                        econtext,
-                                    )?;
+                                    *matched =
+                                        eval_merge_join_condition(estate, result_rel_info, econtext)?;
                                 }
 
                                 // Switch lists, if necessary.
@@ -752,21 +663,32 @@ pub fn ExecMergeMatched<'mcx>(
                                     // as two not-matched tuples; adjust the outer
                                     // node's tuple count, if instrumenting, to
                                     // keep the "skipped" row count correct.
-                                    if outer_plan_state_instrumented::call(mtstate)
-                                        && ri_merge_actions_count::call(
-                                            estate,
-                                            result_rel_info,
-                                            MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
-                                        ) > 0
-                                        && ri_merge_actions_count::call(
+                                    //
+                                    //   if (outerPlanState(mtstate)->instrument &&
+                                    //       mergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE] &&
+                                    //       mergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET])
+                                    //       InstrUpdateTupleCount(
+                                    //           outerPlanState(mtstate)->instrument, 1.0);
+                                    let have_both_not_matched = merge_actions_count(
+                                        estate,
+                                        result_rel_info,
+                                        MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+                                    ) > 0
+                                        && merge_actions_count(
                                             estate,
                                             result_rel_info,
                                             MERGE_WHEN_NOT_MATCHED_BY_TARGET,
-                                        ) > 0
-                                    {
-                                        outer_plan_state_instr_update_tuple_count::call(
-                                            mtstate, 1.0,
-                                        );
+                                        ) > 0;
+                                    if have_both_not_matched {
+                                        if let Some(outer) = mtstate.ps.lefttree.as_mut() {
+                                            if let Some(instr) =
+                                                outer.ps_head_mut().instrument.as_mut()
+                                            {
+                                                backend_executor_instrument_seams::instr_update_tuple_count::call(
+                                                    instr, 1.0,
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -839,7 +761,8 @@ pub fn ExecMergeMatched<'mcx>(
             }
 
             // Process RETURNING if present.
-            if ri_has_project_returning::call(estate, result_rel_info) {
+            //   if (resultRelInfo->ri_projectReturning)
+            if estate.result_rel(result_rel_info).ri_projectReturning.is_some() {
                 match command_type {
                     CmdType::CMD_UPDATE => {
                         rslot = Some(ExecProcessReturning(

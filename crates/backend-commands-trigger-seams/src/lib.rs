@@ -235,6 +235,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecIRDeleteTriggers(estate, relinfo, trigtuple)` (trigger.c): fire
+    /// INSTEAD OF ROW DELETE triggers on a view. Returns `false` when the
+    /// triggers ask for "do nothing"; otherwise `true`. User trigger code can
+    /// `ereport(ERROR)`.
+    pub fn exec_ir_delete_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `ExecARUpdateTriggers(estate, relinfo, src_partinfo, dst_partinfo,
     /// tupleid, fdw_trigtuple, newslot, recheckIndexes, transition_capture,
     /// is_crosspart_update)` (trigger.c): queue AFTER ROW UPDATE trigger

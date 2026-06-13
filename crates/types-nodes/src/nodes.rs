@@ -62,6 +62,12 @@ pub const T_SubqueryScanState: NodeTag = NodeTag(411);
 pub const T_ForeignScanState: NodeTag = NodeTag(418);
 pub const T_CustomScanState: NodeTag = NodeTag(419);
 pub const T_LimitState: NodeTag = NodeTag(437);
+/// `T_OnConflictSetState` (nodes/nodetags.h, PostgreSQL 18.3).
+pub const T_OnConflictSetState: NodeTag = NodeTag(386);
+/// `T_MergeActionState` (nodes/nodetags.h, PostgreSQL 18.3).
+pub const T_MergeActionState: NodeTag = NodeTag(387);
+/// `T_MergeAction` (nodes/nodetags.h, PostgreSQL 18.3).
+pub const T_MergeAction: NodeTag = NodeTag(54);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

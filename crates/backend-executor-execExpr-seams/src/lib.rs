@@ -390,33 +390,57 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The per-result-relation MergeActionState build of `ExecInitMerge`
-    /// (nodeModifyTable.c L3727-3851), and the equivalent inner block of
-    /// `ExecInitPartitionInfo`: for each `MergeAction` in `merge_action_list`,
-    /// `makeNode(MergeActionState)`, compile `mas_whenqual = ExecInitQual(
-    /// action->qual)`, append it into `resultRelInfo->ri_MergeActions[
-    /// action->matchKind]`, and build the per-command projection — for
-    /// CMD_INSERT `ExecCheckPlanOutput(rootRelInfo)` + `ExecBuildProjectionInfo(
-    /// action->targetList, ..., tgtslot, tgtdesc)` (the root slot/desc, or
-    /// `mt_root_tuple_slot` for a partitioned root), for CMD_UPDATE
-    /// `ExecBuildUpdateProjection(action->targetList, action->updateColnos,
-    /// relationDesc, ri_newTupleSlot)` — accumulating the `MERGE_INSERT/UPDATE/
-    /// DELETE` bits into `mtstate->mt_merge_subcommands`. The `ExecInitQual` /
-    /// projection builders over an explicit target list/slot/desc, the
-    /// `MergeAction`/`MergeActionState` node construction, and (for a
-    /// partitioned root) the `ExecSetupPartitionTupleRouting` + `mt_root_tuple_slot`
-    /// create are owned by execExpr/execPartition. `is_root_relation` selects
-    /// whether this is the canonical (root) rel build (using root slot/desc for
-    /// INSERT). Fallible on OOM / `ereport(ERROR)`.
-    pub fn exec_init_merge_actions_for_rel<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+    /// `mas_whenqual = ExecInitQual((List *) action->qual, &mtstate->ps)`
+    /// (execExpr.c): compile one MERGE action's WHEN [NOT MATCHED] AND
+    /// conditions into an `ExprState`. A `None` qual (the C `NIL`) compiles to
+    /// `None` (the C `NULL`, treated as always-true). The qual `Node`→qual-list
+    /// extraction and `ExecInitQual` are owned by execExpr; the per-action
+    /// loop/dispatch stays in nodeModifyTable. Allocated in the per-query
+    /// context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_init_merge_when_qual<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        qual: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>>
+);
+
+seam_core::seam!(
+    /// `ExecBuildProjectionInfo(action->targetList, econtext, tgtslot,
+    /// &mtstate->ps, tgtdesc)` (execExpr.c): build one MERGE INSERT action's
+    /// projection over the explicit `target_list`, projecting into the slot
+    /// `tgt_slot` (the root "new" tuple slot, or the partitioned root's
+    /// `mt_root_tuple_slot`), using `tgt_desc_rel`'s descriptor (the root
+    /// relation's). The slot and the desc-source relation are resolved
+    /// in-crate by `ExecInitMerge`'s partitioned-vs-inherited control flow; this
+    /// seam is a thin `ExecBuildProjectionInfo` leaf. Allocated in the per-query
+    /// context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_build_merge_insert_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        target_list: &[types_nodes::TargetEntry<'mcx>],
+        econtext: types_nodes::EcxtId,
+        tgt_slot: types_nodes::SlotId,
+        tgt_desc_rel: types_nodes::RriId,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ProjectionInfo>>
+);
+
+seam_core::seam!(
+    /// `ExecBuildUpdateProjection(action->targetList, true,
+    /// action->updateColnos, relationDesc, econtext,
+    /// resultRelInfo->ri_newTupleSlot, &mtstate->ps)` (execExpr.c): build one
+    /// MERGE UPDATE action's "new tuple" projection over the explicit
+    /// `target_list` / `update_colnos`, using `result_rel_info`'s relation
+    /// descriptor and its `ri_newTupleSlot`. A thin `ExecBuildUpdateProjection`
+    /// leaf; the per-action loop/dispatch stays in nodeModifyTable. Allocated in
+    /// the per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_build_merge_update_projection<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
-        root_result_rel_info: types_nodes::RriId,
-        merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
+        target_list: &[types_nodes::TargetEntry<'mcx>],
+        update_colnos: &[i32],
         econtext: types_nodes::EcxtId,
-    ) -> types_error::PgResult<()>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ProjectionInfo>>
 );
 
 seam_core::seam!(
@@ -665,6 +689,42 @@ seam_core::seam!(
         result_rel_info: types_nodes::RriId,
         rlist: &[types_nodes::TargetEntry<'mcx>],
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecBuildUpdateProjection(node->onConflictSet, true,
+    /// node->onConflictCols, relationDesc, econtext, onconfl->oc_ProjSlot,
+    /// &mtstate->ps)` (execExpr.c): build the ON CONFLICT DO UPDATE SET
+    /// projection for the (single) result relation from the explicit
+    /// `on_conflict_set` target list and `on_conflict_cols` column map,
+    /// projecting into `proj_slot` (the `oc_ProjSlot` of the table's type) and
+    /// using `result_rel_info`'s relation descriptor. A thin
+    /// `ExecBuildUpdateProjection` leaf; the surrounding `OnConflictSetState`
+    /// construction and field stores stay in nodeModifyTable. Allocated in the
+    /// per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_build_on_conflict_set_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        on_conflict_set: &[types_nodes::TargetEntry<'mcx>],
+        on_conflict_cols: &[i32],
+        econtext: types_nodes::EcxtId,
+        proj_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_nodes::execexpr::ProjectionInfo>
+);
+
+seam_core::seam!(
+    /// `ExecInitQual((List *) node->onConflictWhere, &mtstate->ps)`
+    /// (execExpr.c): compile the ON CONFLICT DO UPDATE WHERE clause into an
+    /// `ExprState`. A `None` clause (the C `NULL`) yields `None`. A thin
+    /// `ExecInitQual` leaf; the `OnConflictSetState` field store stays
+    /// in-crate. Allocated in the per-query context; fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn exec_init_on_conflict_where<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        on_conflict_where: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<Option<types_nodes::execexpr::ExprState>>
 );
 
 seam_core::seam!(
