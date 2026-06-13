@@ -181,7 +181,7 @@ fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> Datum {
         // C: PointerGetDatum(tp + off). The owned slot's tts_values is a
         // PgVec<Datum>; the by-reference value carrier (TupleValue::ByRef) is
         // owned by slot_payload_model and not yet landed.
-        todo!(
+        panic!(
             "execTuples.c slot_deform: by-reference attribute fetch into the \
              owned Datum slot needs the slot_payload_model by-reference value \
              carrier (tts_values cannot hold a raw pointer into the tuple)"
@@ -418,7 +418,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
 /// landed. Routed here so the deform engine has a single, named dependency on
 /// it (mirror-PG-and-panic until the carrier lands).
 fn heap_slot_body(_slot: &HeapTupleTableSlot) -> alloc::vec::Vec<u8> {
-    todo!(
+    panic!(
         "execTuples.c slot_deform: the heap slot's user-data byte area \
          ((char *) tup + tup->t_hoff) is owned by slot_payload_model and not \
          yet carried on HeapTupleTableSlot"
@@ -476,7 +476,7 @@ pub fn slot_getmissingattrs<'mcx>(
                     // C stores attrmiss->am_value (a pointer Datum) directly;
                     // the owned Datum slot needs the by-reference value carrier
                     // owned by slot_payload_model (not yet landed).
-                    todo!(
+                    panic!(
                         "execTuples.c slot_getmissingattrs: by-reference missing \
                          value into the owned Datum slot needs the \
                          slot_payload_model by-reference value carrier"

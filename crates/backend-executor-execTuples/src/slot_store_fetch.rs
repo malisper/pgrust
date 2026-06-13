@@ -459,7 +459,7 @@ fn tts_buffer_heap_store_tuple<'mcx>(
     _buffer: Buffer,
     _transfer_pin: bool,
 ) {
-    todo!(
+    panic!(
         "execTuples.c tts_buffer_heap_store_tuple: buffer-heap store callback (incl. \
          ReleaseBuffer/IncrBufferRefCount pin management) is owned by the slot_ops_vtables family"
     )
@@ -512,7 +512,7 @@ fn deform_foreign_tuple_into_slot<'mcx>(
 ) -> PgResult<()> {
     // The header-only `HeapTuple` carries no data area; the heap-tuple-with-data
     // carrier is the slot payload model's, not yet landed.
-    todo!(
+    panic!(
         "execTuples.c ExecForceStoreHeapTuple: heap_deform_tuple into slot needs the \
          payload model's heap-tuple-data carrier (slot_payload_model/slot_deform owner)"
     )
@@ -526,7 +526,7 @@ fn deform_minimal_tuple_into_slot<'mcx>(
     _mtup: Option<&types_tuple::heaptuple::MinimalTupleData<'mcx>>,
     _minimal_tuple_offset: usize,
 ) -> PgResult<()> {
-    todo!(
+    panic!(
         "execTuples.c ExecForceStoreMinimalTuple: heap_deform_tuple of the minimal tuple \
          into slot needs the payload model's heap-tuple-data carrier \
          (slot_payload_model/slot_deform owner)"
@@ -540,7 +540,7 @@ fn deform_composite_datum_into_slot<'mcx>(
     _slot: &mut SlotData<'mcx>,
     _data: Datum,
 ) -> PgResult<()> {
-    todo!(
+    panic!(
         "execTuples.c ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader + heap_deform_tuple \
          into slot needs the payload model's composite-Datum carrier \
          (slot_payload_model/slot_deform owner)"
@@ -559,7 +559,7 @@ fn heap_copytuple_into_slot_context<'mcx>(
     _mcx: Mcx<'mcx>,
     _tuple: HeapTuple<'mcx>,
 ) -> PgResult<HeapTuple<'mcx>> {
-    todo!(
+    panic!(
         "execTuples.c ExecForceStoreHeapTuple (buffer-heap target): heap_copytuple needs the \
          payload model's heap-tuple-data carrier (slot_payload_model/slot_deform owner)"
     )
@@ -579,7 +579,7 @@ fn heap_copy_tuple_as_datum_carrier<'mcx>(
     _slot: &SlotData<'mcx>,
     _tup: HeapTuple<'mcx>,
 ) -> PgResult<Datum> {
-    todo!(
+    panic!(
         "execTuples.c ExecFetchSlotHeapTupleDatum: heap_copy_tuple_as_datum needs the \
          payload model's heap-tuple-data + composite-Datum carriers \
          (slot_payload_model/slot_deform owner)"

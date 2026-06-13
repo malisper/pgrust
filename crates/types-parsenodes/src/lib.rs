@@ -337,6 +337,40 @@ pub struct AlterRoleSetStmt {
     pub setstmt: Option<Box<Node>>,
 }
 
+/// `typedef enum VariableSetKind` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariableSetKind {
+    /// `SET var = value`
+    SetValue,
+    /// `SET var TO DEFAULT`
+    SetDefault,
+    /// `SET var FROM CURRENT`
+    SetCurrent,
+    /// special case for `SET TRANSACTION ...`
+    SetMulti,
+    /// `RESET var`
+    Reset,
+    /// `RESET ALL`
+    ResetAll,
+}
+
+/// `typedef struct VariableSetStmt` (`nodes/parsenodes.h`), trimmed to the
+/// fields `update_proconfig_value` consumes. The value extraction over the
+/// `args` list (`A_Const` nodes) lives behind the GUC owner's seam
+/// (`ExtractSetVariableArgs`), so the args are carried opaquely for that owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariableSetStmt {
+    pub kind: VariableSetKind,
+    /// variable to be set (None for `RESET ALL`)
+    pub name: Option<String>,
+    /// List of `A_Const` nodes (the SET arguments), carried for the GUC owner.
+    pub args: Vec<Node>,
+    /// `SET LOCAL`?
+    pub is_local: bool,
+    /// token location, or -1 if unknown
+    pub location: ParseLoc,
+}
+
 /// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropRoleStmt {
@@ -408,6 +442,8 @@ pub enum Node {
     RoleSpec(RoleSpec),
     /// `T_AccessPriv`
     AccessPriv(AccessPriv),
+    /// `T_VariableSetStmt` — a SET/RESET subcommand.
+    VariableSetStmt(VariableSetStmt),
     /// `T_List` — a generic `List *` of nodes (e.g. a `DefElem` value that is a
     /// possibly-qualified name list, or `defGetStringList`'s list of `String`s).
     List(Vec<Node>),
@@ -520,6 +556,7 @@ impl Node {
             Node::FunctionParameter(_) => "FunctionParameter",
             Node::RoleSpec(_) => "RoleSpec",
             Node::AccessPriv(_) => "AccessPriv",
+            Node::VariableSetStmt(_) => "VariableSetStmt",
             Node::List(_) => "List",
             Node::A_Star => "A_Star",
         }

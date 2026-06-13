@@ -25,17 +25,17 @@ use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_FUNCTION_DEFINITION,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
+    ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
 use types_parsenodes::{
     AlterFunctionStmt, CreateFunctionStmt, DefElem, FunctionParameter, Node, ProcedureRelationId,
     StringNode, TypeName, FUNC_PARAM_DEFAULT, FUNC_PARAM_IN, FUNC_PARAM_OUT, FUNC_PARAM_TABLE,
     FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROKIND_PROCEDURE, PROKIND_WINDOW, PROPARALLEL_RESTRICTED,
     PROPARALLEL_SAFE, PROPARALLEL_UNSAFE, PROVOLATILE_IMMUTABLE, PROVOLATILE_STABLE,
-    PROVOLATILE_VOLATILE,
+    PROVOLATILE_VOLATILE, VariableSetKind,
 };
-use types_tuple::{ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, RECORDOID, VOIDOID};
+use types_tuple::{ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, INTERNALOID, RECORDOID, VOIDOID};
 
 // ===========================================================================
 // compute_return_type (functioncmds.c:87)
@@ -600,10 +600,80 @@ fn interpret_func_parallel(defel: &DefElem) -> PgResult<i8> {
 // ===========================================================================
 
 fn update_proconfig_value(
-    a: Option<Vec<String>>,
+    mut a: Option<Vec<String>>,
     set_items: Vec<Node>,
 ) -> PgResult<Option<Vec<String>>> {
-    seam::update_proconfig_value::call(a, set_items)
+    for l in set_items {
+        let Node::VariableSetStmt(sstmt) = l else {
+            // lfirst_node(VariableSetStmt, l) — the parser only ever puts a
+            // VariableSetStmt in the proconfig "set" item list.
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg("set_items element is not a VariableSetStmt")
+                .into_error());
+        };
+
+        if sstmt.kind == VariableSetKind::ResetAll {
+            a = None;
+        } else {
+            let name = sstmt.name.clone().unwrap_or_default();
+            let valuestr = seam::extract_set_variable_args::call(sstmt)?;
+
+            if let Some(valuestr) = valuestr {
+                a = Some(seam::guc_array_add::call(a, name, valuestr)?);
+            } else {
+                // RESET
+                a = seam::guc_array_delete::call(a, name)?;
+            }
+        }
+    }
+
+    Ok(a)
+}
+
+// ===========================================================================
+// interpret_func_support (functioncmds.c:684)
+// ===========================================================================
+
+fn interpret_func_support(defel: DefElem) -> PgResult<Oid> {
+    let proc_name = seam::def_get_qualified_name::call(defel)?;
+
+    // Support functions always take one INTERNAL argument and return INTERNAL.
+    let arg_list = vec![INTERNALOID];
+
+    let proc_oid = seam::lookup_func_name::call(proc_name.clone(), 1, arg_list.clone(), true)?;
+    if !OidIsValid(proc_oid) {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "function {} does not exist",
+                seam::func_signature_string::call(proc_name, 1, arg_list)?
+            ))
+            .into_error());
+    }
+
+    if seam::get_func_rettype::call(proc_oid)? != INTERNALOID {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errmsg(format!(
+                "support function {} must return type {}",
+                seam::name_list_to_string::call(proc_name)?,
+                "internal"
+            ))
+            .into_error());
+    }
+
+    // Someday we might want an ACL check here; but for now, we insist that you
+    // be superuser to specify a support function, so privilege on the support
+    // function is moot.
+    if !seam::superuser::call()? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg("must be superuser to specify a support function")
+            .into_error());
+    }
+
+    Ok(proc_oid)
 }
 
 // ===========================================================================
@@ -735,7 +805,7 @@ fn compute_function_attributes(
         }
     }
     if let Some(item) = &common.support_item {
-        attrs.prosupport = seam::interpret_func_support::call(item.clone())?;
+        attrs.prosupport = interpret_func_support(item.clone())?;
     }
     if let Some(item) = &common.parallel_item {
         attrs.parallel = interpret_func_parallel(item)?;
@@ -1190,7 +1260,7 @@ pub fn AlterFunction(stmt: &AlterFunctionStmt) -> PgResult<ObjectAddress> {
     }
     if let Some(item) = &common.support_item {
         /* interpret_func_support handles the privilege check */
-        let newsupport = seam::interpret_func_support::call(item.clone())?;
+        let newsupport = interpret_func_support(item.clone())?;
 
         /* Add or replace dependency on support function */
         if OidIsValid(target.prosupport) {
