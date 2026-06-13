@@ -7079,9 +7079,12 @@ dependencies = [
  "backend-utils-adt-numeric-seams",
  "common-hashfn",
  "mcx",
+ "pg-prng",
+ "seam-core",
  "types-datum",
  "types-error",
  "types-numeric",
+ "types-sortsupport",
 ]
 
 [[package]]

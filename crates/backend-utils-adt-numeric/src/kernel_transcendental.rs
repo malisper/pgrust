@@ -197,7 +197,7 @@ pub fn numericvar_to_int64(var: &NumericVar<'_>) -> PgResult<Option<i64>> {
 /// `get_str_from_var` is this unit's OWN logic (the `io` family); we call it
 /// directly. The string it produces is always a parseable decimal, so the parse
 /// cannot fail (the C "shouldn't happen" branch).
-fn numericvar_to_double_no_overflow(var: &NumericVar<'_>) -> f64 {
+pub(crate) fn numericvar_to_double_no_overflow(var: &NumericVar<'_>) -> f64 {
     let s = crate::io::get_str_from_var(var);
     s.parse::<f64>()
         .expect("get_str_from_var always yields a parseable float")

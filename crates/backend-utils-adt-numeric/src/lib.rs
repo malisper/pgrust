@@ -42,6 +42,8 @@ pub mod io;
 pub mod kernel_transcendental;
 pub mod kernel_var;
 pub mod ops_sql;
+pub mod random;
+pub mod series_srf;
 
 use mcx::{Mcx, PgVec};
 use types_error::PgError;

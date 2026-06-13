@@ -23,3 +23,17 @@ common-hashfn = { path = "../common-hashfn" }
 # Inward seams this crate OWNS and installs from init_seams(); also carries the
 # outbound numeric_abbrev_add_sample seam reached from the sort-support abbrev.
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
+
+# The real backend PRNG (xoroshiro128**) for random_numeric/random_var. The
+# `pg_prng_state` threaded in by the SQL random() setup is `pg_prng::PgPrng`.
+pg-prng = { path = "../pg-prng" }
+
+# seam_core::seam! for the OUTBOUND, owner-unported call frames the SRF /
+# planner-support / sort-support setup reach (the planner Node vocabulary, the
+# SRF FuncCallContext / multi-call context, and the tuplesort abbreviation
+# slots). Declared inline; NOT installed here (no owned X-seams crate -> they do
+# not trip the recurrence guard; they panic until each owner lands).
+seam-core = { path = "../seam-core" }
+
+# The real (merged) trimmed SortSupportData node numeric_sortsupport fills.
+types-sortsupport = { path = "../types-sortsupport" }

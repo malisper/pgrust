@@ -966,6 +966,77 @@ pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupport) -> b
 }
 
 // ---------------------------------------------------------------------------
+// numeric_sortsupport (numeric.c:2130). Sets up the abbreviated-key sort.
+//
+// The comparator/abbrev function *bodies* are this unit's own logic (above:
+// `numeric_fast_cmp`, `numeric_abbrev_convert`, `numeric_cmp_abbrev`,
+// `numeric_abbrev_abort`). What `numeric_sortsupport` does is INSTALL them into
+// the `SortSupport` node's function-pointer slots and, when abbreviation is
+// enabled, allocate the `NumericSortSupport`/HyperLogLog buffer into the sort's
+// `ssup_extra` in `ssup->ssup_cxt`. Those slots (`comparator`,
+// `abbrev_converter`, `abbrev_abort`, `abbrev_full_comparator`, `ssup_extra`)
+// and the HLL state are owned/consumed by the (unported) tuplesort abbreviation
+// machinery; the trimmed `SortSupportData` deliberately carries only
+// `comparator`. So the install + ssup_extra/HLL setup route OUT to that owner
+// through the seams below, threaded over the real `SortSupportData`. Mirror PG
+// and panic there until the tuplesort abbreviation owner lands.
+// ---------------------------------------------------------------------------
+
+use types_sortsupport::SortSupportData;
+
+seam_core::seam!(
+    /// `ssup->comparator = numeric_fast_cmp;` — register this unit's full
+    /// comparator (`numeric_fast_cmp`/`cmp_numerics`) as the sort comparator,
+    /// minting the comparator token the sort engine interprets. Owner: the
+    /// sortsupport comparator-resolution machinery.
+    pub fn install_numeric_comparator(ssup: &mut SortSupportData<'_>)
+);
+
+seam_core::seam!(
+    /// The abbreviation wiring of `numeric_sortsupport` when `ssup->abbreviate`:
+    /// `palloc` a `NumericSortSupport` + the short-varlena reuse buffer
+    /// (`VARATT_SHORT_MAX + VARHDRSZ + 1`) in `ssup->ssup_cxt`, seed it
+    /// (`input_count = 0`, `estimating = true`, `initHyperLogLog(&abbr_card,10)`),
+    /// store it as `ssup->ssup_extra`, then set
+    /// `abbrev_full_comparator = comparator; comparator = numeric_cmp_abbrev;
+    /// abbrev_converter = numeric_abbrev_convert; abbrev_abort =
+    /// numeric_abbrev_abort`. The in-crate seed values are passed in; the
+    /// `ssup_extra`/HLL/abbrev-slot fields live on the (unported) tuplesort
+    /// abbreviation owner. Owner: the tuplesort abbreviation machinery.
+    pub fn install_numeric_abbrev(ssup: &mut SortSupportData<'_>, nss: NumericSortSupport)
+);
+
+/// `numeric_sortsupport(PG_FUNCTION_ARGS)` (numeric.c:2130): set up sort support
+/// for `numeric`, enabling the abbreviated-key optimization when requested.
+///
+/// `ssup` is the `SortSupport` node (C `(SortSupport) PG_GETARG_POINTER(0)`).
+/// Returns `PG_RETURN_VOID()`.
+pub fn numeric_sortsupport(ssup: &mut SortSupportData<'_>) {
+    // ssup->comparator = numeric_fast_cmp;
+    install_numeric_comparator::call(ssup);
+
+    if ssup.abbreviate {
+        // oldcontext = MemoryContextSwitchTo(ssup->ssup_cxt);
+        // nss = palloc(sizeof(NumericSortSupport));
+        // nss->buf = palloc(VARATT_SHORT_MAX + VARHDRSZ + 1);
+        // nss->input_count = 0; nss->estimating = true;
+        // initHyperLogLog(&nss->abbr_card, 10);
+        let nss = NumericSortSupport {
+            input_count: 0,
+            estimating: true,
+        };
+
+        // ssup->ssup_extra = nss;
+        // ssup->abbrev_full_comparator = ssup->comparator;
+        // ssup->comparator = numeric_cmp_abbrev;
+        // ssup->abbrev_converter = numeric_abbrev_convert;
+        // ssup->abbrev_abort = numeric_abbrev_abort;
+        // MemoryContextSwitchTo(oldcontext);
+        install_numeric_abbrev::call(ssup, nss);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hashing (numeric.c hash_numeric/hash_numeric_extended).
 // ---------------------------------------------------------------------------
 
