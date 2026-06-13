@@ -12,7 +12,22 @@ path = "src/lib.rs"
 # Carrier types.
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
+types-tuple = { path = "../types-tuple" }
+types-stringinfo = { path = "../types-stringinfo" }
 mcx = { path = "../mcx" }
+
+# Composite (RECORD) I/O / compare / hash (rowtypes family) substrate.
+# Tuple form/deform is the real heaptuple unit; everything else crosses to its
+# real owner via that owner's seam crate (typcache, fmgr, format_type, datum,
+# pqformat message helpers).
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
 # Inward seam crate this unit owns (expandeddatum EOH surface consumed by
 # backend-access-common-heaptuple). The keystone installs these from
