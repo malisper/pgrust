@@ -22,7 +22,9 @@ use core::cell::{Cell, RefCell};
 use core::fmt;
 use core::ptr::NonNull;
 
-use allocator_api2::alloc::{AllocError, Allocator, Global};
+pub use allocator_api2::alloc::Allocator;
+
+use allocator_api2::alloc::{AllocError, Global};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 mod owned;
