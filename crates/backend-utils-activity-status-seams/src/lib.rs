@@ -28,3 +28,9 @@ seam_core::seam!(
     /// Callers must only call this after [`my_be_entry_present`] returns true.
     pub fn with_my_beentry(f: &mut dyn FnMut(&mut PgBackendStatus))
 );
+
+seam_core::seam!(
+    /// `pgstat_report_activity(STATE_IDLE, NULL)` (`backend_status.c`): mark
+    /// this backend idle and clear the current activity string. Infallible.
+    pub fn pgstat_report_activity_idle()
+);

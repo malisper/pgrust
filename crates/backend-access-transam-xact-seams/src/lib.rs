@@ -104,3 +104,41 @@ seam_core::seam!(
     /// (at any nesting level) and return to default state.
     pub fn abort_out_of_any_transaction() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AbortCurrentTransaction()` (xact.c): abort the current transaction
+    /// command. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn abort_current_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BeginTransactionBlock()` (xact.c): begin a transaction block (the
+    /// `BEGIN`/`START TRANSACTION` driver). Can `ereport(ERROR)`/`WARNING`,
+    /// carried on `Err`.
+    pub fn begin_transaction_block() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EndTransactionBlock(chain)` (xact.c): end a transaction block
+    /// (`COMMIT`/`END`); `chain` requests `AND CHAIN`. Returns whether the
+    /// commit should be fully performed now. Can `ereport`, carried on `Err`.
+    pub fn end_transaction_block(chain: bool) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `DefineSavepoint(name)` (xact.c): define a savepoint with `name`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn define_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RollbackToSavepoint(name)` (xact.c): roll back to the named savepoint.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn rollback_to_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IsTransactionBlock()` (xact.c): true when inside an explicit
+    /// transaction block (`BEGIN`...). Pure read of backend-local state.
+    pub fn is_transaction_block() -> bool
+);

@@ -1277,6 +1277,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqmq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-applyparallel",
+ "types-error",
+]
+
+[[package]]
 name = "backend-libpq-pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -1548,6 +1557,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-applyparallelworker"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-libpq-pqmq-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-logical-applyparallelworker-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-replication-logical-tablesync-seams",
+ "backend-replication-logical-worker-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "seam-core",
+ "types-applyparallel",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-logical-applyparallelworker-seams"
 version = "0.0.0"
 dependencies = [
@@ -1590,6 +1629,24 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-startup",
+]
+
+[[package]]
+name = "backend-replication-logical-tablesync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-replication-logical-worker-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-applyparallel",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2722,6 +2779,7 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-replication-logical-applyparallelworker",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-standby",
@@ -2766,6 +2824,13 @@ version = "0.0.0"
 
 [[package]]
 name = "types-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-applyparallel"
 version = "0.0.0"
 dependencies = [
  "types-core",
