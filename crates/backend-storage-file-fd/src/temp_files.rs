@@ -6,6 +6,8 @@
 //! (`SetTempTablespaces`/`TempTablespacesAreSet`/`GetTempTablespaces`/
 //! `GetNextTempTableSpace`), and the PRNG-based temp-name generation.
 
+use std::path::Path;
+
 use backend_utils_error::ereport;
 use types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use types_core::primitive::MAXPGPATH;
@@ -295,10 +297,10 @@ pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
     // in a cleanup path, we wouldn't actually behave differently: we'll just log
     // failures.
     crate::sync_cleanup::walkdir(
-        dirname,
+        Path::new(dirname),
+        crate::sync_cleanup::WalkAction::UnlinkIfExists,
         false,
         LOG,
-        &mut crate::sync_cleanup::unlink_if_exists_fname,
     )
 }
 
@@ -345,7 +347,7 @@ pub fn PathNameDeleteTemporaryFile(path: &str, error_on_failure: bool) -> PgResu
 
 /// `ReportTemporaryFileUsage(const char *path, off_t size)` (fd.c) — report a
 /// deleted temp file's size to the stats subsystem and the log.
-fn ReportTemporaryFileUsage(path: &str, size: u64) {
+pub(crate) fn ReportTemporaryFileUsage(path: &str, size: u64) {
     backend_utils_activity_stat_seams::pgstat_report_tempfile::call(size);
 
     let log_temp_files = crate::vfd_core::log_temp_files();
@@ -370,14 +372,6 @@ pub fn RegisterTemporaryFile(file: File) {
         vfd.fdstate |= FD_CLOSE_AT_EOXACT;
     });
     with_fd(|fd| fd.have_xact_temporary_files = true);
-}
-
-/// `ReportTemporaryFileUsage(const char *path, off_t size)` (fd.c) — report a
-/// just-removed temp file's size to pgstat and, when `log_temp_files >= 0` and
-/// the file is large enough, emit a LOG line. Part of the temp-file accounting
-/// this family owns; called by `FileClose` and the temp-file delete paths.
-pub(crate) fn ReportTemporaryFileUsage(_path: &str, _size: i64) {
-    todo!("fd.c ReportTemporaryFileUsage: pgstat_report_tempfile + log_temp_files LOG")
 }
 
 // ---------------------------------------------------------------------------

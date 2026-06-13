@@ -125,10 +125,10 @@ pub fn PathNameOpenFilePerm(
         .expect("PathNameOpenFilePerm: non-UTF-8 path")
         .to_owned();
 
-    let file = vfd_core::AllocateVfd()?;
+    let file = vfd_core::with_fd(vfd_core::AllocateVfd)?;
 
     // Close excess kernel FDs.
-    vfd_core::ReleaseLruFiles()?;
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     // Descriptors managed by VFDs are implicitly marked O_CLOEXEC.
     file_flags |= libc::O_CLOEXEC;
@@ -139,7 +139,7 @@ pub fn PathNameOpenFilePerm(
             // BasicOpenFilePerm failed (errno set). Mirror C: free the VFD and
             // return -1 with errno preserved.
             let save_errno = get_errno();
-            vfd_core::FreeVfd(file);
+            vfd_core::with_fd(|fd| vfd_core::FreeVfd(fd, file));
             set_errno(save_errno);
             return Ok(-1);
         }
@@ -159,7 +159,7 @@ pub fn PathNameOpenFilePerm(
     });
     vfd_core::with_fd(|fd| fd.nfile += 1);
 
-    vfd_core::Insert(file);
+    vfd_core::with_fd(|fd| vfd_core::Insert(fd, file));
 
     Ok(file)
 }
@@ -192,7 +192,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
         vfd_core::with_fd(|fd| fd.nfile -= 1);
 
         // Remove the file from the lru ring.
-        vfd_core::Delete(file);
+        vfd_core::with_fd(|fd| vfd_core::Delete(fd, file));
     }
 
     let fdstate = vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].fdstate);
@@ -243,7 +243,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
 
         // And last report the stat results.
         if stat_errno == 0 {
-            crate::temp_files::ReportTemporaryFileUsage(&file_name, statbuf.st_size as i64);
+            crate::temp_files::ReportTemporaryFileUsage(&file_name, statbuf.st_size as u64);
         } else {
             set_errno(stat_errno);
             ereport(types_error::LOG)
@@ -260,7 +260,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
     }
 
     // Return the Vfd slot to the free list.
-    vfd_core::FreeVfd(file);
+    vfd_core::with_fd(|fd| vfd_core::FreeVfd(fd, file));
 
     Ok(())
 }
@@ -291,7 +291,7 @@ pub fn FilePrefetch(
 ) -> PgResult<i32> {
     // macOS uses fcntl(F_RDADVISE); Linux/others with posix_fadvise use
     // POSIX_FADV_WILLNEED. Either way we must first make sure the VFD is open.
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
     }
@@ -355,7 +355,7 @@ pub fn FileWriteback(
         return Ok(());
     }
 
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(());
     }
@@ -387,7 +387,7 @@ pub fn FileReadV(
     offset: i64,
     wait_event_info: u32,
 ) -> PgResult<isize> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code as isize);
     }
@@ -419,7 +419,7 @@ pub fn FileStartReadV(
     offset: i64,
     _wait_event_info: u32,
 ) -> PgResult<i32> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
     }
@@ -438,7 +438,7 @@ pub fn FileWriteV(
     offset: i64,
     wait_event_info: u32,
 ) -> PgResult<isize> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code as isize);
     }
@@ -511,7 +511,7 @@ pub fn FileWriteV(
 
 /// `FileSync(File file, uint32 wait_event_info)` (fd.c).
 pub fn FileSync(file: File, wait_event_info: u32) -> PgResult<()> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(());
     }
@@ -533,7 +533,7 @@ pub fn FileZero(
     amount: i64,
     wait_event_info: u32,
 ) -> PgResult<i32> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
     }
@@ -662,7 +662,7 @@ pub fn FileFallocate(
 ) -> PgResult<i32> {
     #[cfg(target_os = "linux")]
     {
-        let return_code = vfd_core::FileAccess(file)?;
+        let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
         if return_code < 0 {
             return Ok(-1);
         }
@@ -703,7 +703,7 @@ pub fn FileFallocate(
 /// `FileSize(File file)` (fd.c).
 pub fn FileSize(file: File) -> PgResult<i64> {
     if !vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].is_open) {
-        if vfd_core::FileAccess(file)? < 0 {
+        if vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))? < 0 {
             return Ok(-1);
         }
     }
@@ -714,7 +714,7 @@ pub fn FileSize(file: File) -> PgResult<i64> {
 
 /// `FileTruncate(File file, off_t offset, uint32 wait_event_info)` (fd.c).
 pub fn FileTruncate(file: File, offset: i64, wait_event_info: u32) -> PgResult<i32> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
     }
@@ -756,7 +756,7 @@ pub fn FilePathName(file: File) -> String {
 
 /// `FileGetRawDesc(File file)` (fd.c) — the underlying kernel fd.
 pub fn FileGetRawDesc(file: File) -> PgResult<RawFd> {
-    let return_code = vfd_core::FileAccess(file)?;
+    let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
     }

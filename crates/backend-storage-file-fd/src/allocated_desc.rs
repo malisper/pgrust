@@ -144,7 +144,7 @@ pub fn AllocateFile(name: impl AsRef<Path>, mode: &str) -> PgResult<i32> {
     }
 
     // Close excess kernel FDs.
-    vfd_core::ReleaseLruFiles()?;
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     loop {
         match open_stdio(name, mode) {
@@ -162,7 +162,7 @@ pub fn AllocateFile(name: impl AsRef<Path>, mode: &str) -> PgResult<i32> {
                 if errno == libc::EMFILE || errno == libc::ENFILE {
                     let save_errno = errno;
                     ereport_log_out_of_fds()?;
-                    if vfd_core::ReleaseLruFile() {
+                    if vfd_core::with_fd(vfd_core::ReleaseLruFile) {
                         continue;
                     }
                     let _ = save_errno;
@@ -240,7 +240,7 @@ pub fn OpenTransientFilePerm(
     }
 
     // Close excess kernel FDs.
-    vfd_core::ReleaseLruFiles()?;
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     let file = vfd_core::BasicOpenFilePerm(file_name, file_flags, file_mode)?;
     let raw_fd = file.as_raw_fd();
@@ -274,7 +274,7 @@ pub fn OpenPipeStream(command: &str, mode: &str) -> PgResult<i32> {
     }
 
     // Close excess kernel FDs.
-    vfd_core::ReleaseLruFiles()?;
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     // C flushes stdio, sets SIGPIPE to SIG_DFL across the popen, then restores
     // SIG_IGN. std::process::Command spawns a child whose signal disposition is
@@ -296,7 +296,7 @@ pub fn OpenPipeStream(command: &str, mode: &str) -> PgResult<i32> {
             Err(errno) => {
                 if errno == libc::EMFILE || errno == libc::ENFILE {
                     ereport_log_out_of_fds()?;
-                    if vfd_core::ReleaseLruFile() {
+                    if vfd_core::with_fd(vfd_core::ReleaseLruFile) {
                         continue;
                     }
                 }
@@ -355,7 +355,7 @@ pub fn AllocateDir(dirname: impl AsRef<Path>) -> PgResult<Option<Dir>> {
     }
 
     // Close excess kernel FDs.
-    vfd_core::ReleaseLruFiles()?;
+    vfd_core::with_fd(vfd_core::ReleaseLruFiles)?;
 
     loop {
         match std::fs::read_dir(dirname) {
@@ -373,7 +373,7 @@ pub fn AllocateDir(dirname: impl AsRef<Path>) -> PgResult<Option<Dir>> {
                 let errno = e.raw_os_error().unwrap_or(0);
                 if errno == libc::EMFILE || errno == libc::ENFILE {
                     ereport_log_out_of_fds()?;
-                    if vfd_core::ReleaseLruFile() {
+                    if vfd_core::with_fd(vfd_core::ReleaseLruFile) {
                         continue;
                     }
                 }
@@ -522,7 +522,7 @@ pub fn closeAllVfds() -> PgResult<()> {
         for i in 1..size as i32 {
             let is_open = with_fd(|fd| fd.vfd_cache[i as usize].is_open);
             if is_open {
-                vfd_core::LruDelete(i)?;
+                with_fd(|fd| vfd_core::LruDelete(fd, i));
             }
         }
     }

@@ -451,11 +451,10 @@ fn fsync_parent_path(fname: &Path, elevel: ErrorLevel) -> PgResult<()> {
 
 /// The per-entry action a [`walkdir`] applies.
 #[derive(Clone, Copy)]
-enum WalkAction {
+pub(crate) enum WalkAction {
     /// `datadir_fsync_fname` (fd.c:3824).
     DatadirFsync,
     /// `unlink_if_exists_fname` (fd.c:3837).
-    #[allow(dead_code)]
     UnlinkIfExists,
 }
 
@@ -471,7 +470,7 @@ impl WalkAction {
 /// `walkdir(const char *path, void (*action)(...), bool process_symlinks,
 /// int elevel)` (fd.c:3723) — recurse a directory tree applying `action` to
 /// each entry, then to the directory itself.
-fn walkdir(
+pub(crate) fn walkdir(
     path: &Path,
     action: WalkAction,
     process_symlinks: bool,
@@ -541,7 +540,10 @@ fn unlink_if_exists_fname(fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgRe
         }
     } else {
         // fd.c:3850-3857 -- PathNameDeleteTemporaryFile handles its own errors.
-        let _ = crate::temp_files::PathNameDeleteTemporaryFile(fname, false);
+        let fname_str = fname
+            .to_str()
+            .expect("unlink_if_exists_fname: non-UTF-8 path");
+        let _ = crate::temp_files::PathNameDeleteTemporaryFile(fname_str, false);
     }
     Ok(())
 }

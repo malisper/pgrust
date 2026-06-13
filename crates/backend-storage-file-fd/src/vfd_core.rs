@@ -526,8 +526,18 @@ pub(crate) fn FileIsValid(fd: &FdState, file: File) -> bool {
 /// VFD's registration with its `ResourceOwner` (the resowner-> RAII `File`
 /// ownership glue this family owns). Called by `FileClose` when
 /// `Vfd::has_resowner`.
-pub(crate) fn ResourceOwnerForgetFile(_file: File) {
-    todo!("fd.c ResourceOwnerForgetFile: unregister File from its ResourceOwner")
+///
+/// fd.c models a registered file as `vfdP->resowner != NULL`, calls
+/// `ResourceOwnerForget(owner, FileGetDatum(file), &file_resowner_desc)` to
+/// unhook the File from the owner's tracked-array, then clears the back-link
+/// (`vfdP->resowner = NULL`). This crate represents the registration as the
+/// `Vfd::has_resowner` flag (see `RegisterTemporaryFile`); the resowner side
+/// of the bookkeeping is the owner's responsibility, so forgetting the file is
+/// simply clearing that flag.
+pub(crate) fn ResourceOwnerForgetFile(file: File) {
+    with_fd(|fd| {
+        fd.vfd_cache[file as usize].has_resowner = false;
+    });
 }
 
 // ---------------------------------------------------------------------------
