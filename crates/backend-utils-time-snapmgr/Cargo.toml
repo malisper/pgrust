@@ -28,5 +28,8 @@ backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+# `HTAB` — the real dynahash control struct C's `tuplecid_data` points at
+# (`HTAB *`); inherited-opaque body, populated by the dynahash port.
+types-hash = { path = "../types-hash" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }

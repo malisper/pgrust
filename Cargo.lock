@@ -3760,6 +3760,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-snapshot",
  "types-storage",
 ]
 
@@ -4080,6 +4081,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-snapshot",
+ "types-storage",
 ]
 
 [[package]]
@@ -5553,6 +5555,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-time-snapmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-xact",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-snapshot",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-time-snapmgr-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -5793,7 +5816,6 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
- "backend-replication-walreceiver",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -5801,7 +5823,6 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
- "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -5826,6 +5847,7 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
+ "backend-utils-time-snapmgr",
  "interfaces-libpq-legacy-pqsignal",
 ]
 
@@ -6229,6 +6251,9 @@ version = "0.0.0"
 [[package]]
 name = "types-snapshot"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-sortsupport"

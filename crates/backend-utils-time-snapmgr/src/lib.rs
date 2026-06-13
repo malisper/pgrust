@@ -48,7 +48,8 @@ use types_storage::VirtualTransactionId;
 
 mod state;
 
-pub use state::{SnapHandle, TupleCidHandle};
+pub use state::SnapHandle;
+pub use types_hash::hsearch::HTAB;
 use state::{
     new_handle, new_snapshot_data, with_state, ActiveSnapshotElt, ExportedSnapshot, SnapMgrState,
 };
@@ -59,8 +60,8 @@ mod tests;
 /// `#define SNAPSHOT_EXPORT_DIR "pg_snapshots"` (snapmgr.c:202).
 pub const SNAPSHOT_EXPORT_DIR: &str = "pg_snapshots";
 
-/// `InvalidPid` (miscadmin.h) — `0`.
-const INVALID_PID: i32 = 0;
+/// `InvalidPid` (miscadmin.h:32) — `(-1)`.
+const INVALID_PID: i32 = -1;
 
 /// Error location helper, mirroring `__FILE__`/`__func__`.
 fn loc(funcname: &'static str) -> ErrorLocation {
@@ -1009,7 +1010,7 @@ pub fn pg_export_snapshot() -> PgResult<String> {
 pub fn DeleteAllExportedSnapshotFiles() -> PgResult<()> {
     // fd.c reports directory-read problems at LOG and skips them; the names it
     // returns exclude `.`/`..`.
-    let names = fd_seams::read_dir_names::call(SNAPSHOT_EXPORT_DIR);
+    let names = fd_seams::read_dir_names_logged::call(SNAPSHOT_EXPORT_DIR);
     for name in &names {
         let buf = format!("{SNAPSHOT_EXPORT_DIR}/{name}");
         if fd_seams::unlink_file::call(&buf) != 0 {
@@ -1313,7 +1314,7 @@ pub fn HaveRegisteredOrActiveSnapshot() -> bool {
 }
 
 /// `SetupHistoricSnapshot` (snapmgr.c:1666).
-pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: Option<TupleCidHandle>) {
+pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: *mut HTAB) {
     with_state(|s| {
         s.historic = Some(historic_snapshot);
         s.tuplecid_data = tuplecids;
@@ -1324,7 +1325,7 @@ pub fn SetupHistoricSnapshot(historic_snapshot: SnapHandle, tuplecids: Option<Tu
 pub fn TeardownHistoricSnapshot(_is_error: bool) {
     with_state(|s| {
         s.historic = None;
-        s.tuplecid_data = None;
+        s.tuplecid_data = core::ptr::null_mut();
     });
 }
 
@@ -1334,7 +1335,7 @@ pub fn HistoricSnapshotActive() -> bool {
 }
 
 /// `HistoricSnapshotGetTupleCids` (snapmgr.c:1695).
-pub fn HistoricSnapshotGetTupleCids() -> Option<TupleCidHandle> {
+pub fn HistoricSnapshotGetTupleCids() -> *mut HTAB {
     debug_assert!(HistoricSnapshotActive());
     with_state(|s| s.tuplecid_data)
 }

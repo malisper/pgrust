@@ -25,19 +25,13 @@ use std::rc::Rc;
 
 use types_core::FirstNormalTransactionId;
 use types_core::TransactionId;
+use types_hash::hsearch::HTAB;
 use types_snapshot::{SnapshotData, SnapshotType};
 
 /// A shared, mutable, owned snapshot — the replacement for C's `Snapshot`
 /// (`*mut SnapshotData`). Cloning bumps the `Rc` refcount, mirroring how C
 /// stores the same pointer on the active stack / in the registered heap.
 pub type SnapHandle = Rc<RefCell<SnapshotData>>;
-
-/// Opaque handle to the `(table, ctid) => (cmin, cmax)` lookup hash installed
-/// during logical decoding (C's `HTAB *tuplecid_data`). It is owned by the
-/// logical-decoding machinery; the snapshot manager only stores and returns
-/// it, so an opaque token is sufficient (no raw pointer).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TupleCidHandle(pub u64);
 
 /// Construct a zeroed `SnapshotData` of the given type, matching C's
 /// `{SNAPSHOT_MVCC}` aggregate initializer (type set, everything else
@@ -102,8 +96,10 @@ pub struct SnapMgrState {
     pub historic: Option<SnapHandle>,
 
     /// `(table, ctid) => (cmin, cmax)` lookup hash during timetravel
-    /// (`static HTAB *tuplecid_data`), owned by logical decoding.
-    pub tuplecid_data: Option<TupleCidHandle>,
+    /// (`static HTAB *tuplecid_data`), owned by logical decoding. Held as the
+    /// raw `*mut HTAB` C uses (null when no historic snapshot is set up); the
+    /// snapshot manager only stores and returns the pointer.
+    pub tuplecid_data: *mut HTAB,
 
     /// Active snapshot stack (`static ActiveSnapshotElt *ActiveSnapshot`). Top
     /// of stack is the last element.
@@ -142,7 +138,7 @@ impl SnapMgrState {
             secondary: None,
             catalog: None,
             historic: None,
-            tuplecid_data: None,
+            tuplecid_data: core::ptr::null_mut(),
             active: Vec::new(),
             registered: Vec::new(),
             first_snapshot_set: false,
