@@ -49,7 +49,10 @@ pub const PG_UINT32_MAX: Size = u32::MAX as Size;
 /// `BUFFERALIGN(LEN)` — round `len` up to the next `ALIGNOF_BUFFER` boundary.
 #[inline]
 pub const fn BUFFERALIGN(len: Size) -> Size {
-    (len + (ALIGNOF_BUFFER - 1)) & !(ALIGNOF_BUFFER - 1)
+    // C's `TYPEALIGN` is `((uintptr_t)(LEN) + (ALIGNVAL - 1)) & ~(ALIGNVAL - 1)`,
+    // which wraps on overflow; `wrapping_add` reproduces that exactly (a plain
+    // `+` would panic in debug builds where C silently wraps).
+    len.wrapping_add(ALIGNOF_BUFFER - 1) & !(ALIGNOF_BUFFER - 1)
 }
 
 /// `BUFFERALIGN_DOWN(LEN)` — round `len` down to an `ALIGNOF_BUFFER` boundary.
