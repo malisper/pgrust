@@ -101,6 +101,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_strncoll(arg1, len1, arg2, len2, locale)` (pg_locale.c): collation
+    /// comparison of two byte ranges under the resolved locale identified by
+    /// `collid`. C passes the `pg_locale_t` cache pointer directly; the layered
+    /// `PgLocale` flag core does not carry the provider-specific `info` union,
+    /// so this seam re-keys by `collid` (the owner re-resolves the same cache
+    /// entry `pg_newlocale_from_collation` built). Returns the libc/ICU
+    /// `strncoll` sign result (`<0`, `0`, `>0`). The non-greedy / greedy
+    /// substring search and the nondeterministic-collation comparators are the
+    /// callers. `Err` carries the provider's `ereport(ERROR)` surface (e.g. an
+    /// encoding conversion failure inside ICU).
+    pub fn pg_strncoll(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `pg_wc_is*` (regc_pg_locale.c): evaluate one ctype predicate of the
     /// `class` family for wide character `c` under the active non-C-locale
     /// regex `collation`. The regex engine owns the strategy selection and the

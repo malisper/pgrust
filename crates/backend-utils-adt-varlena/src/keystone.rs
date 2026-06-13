@@ -65,7 +65,7 @@ pub const TEXTBUFLEN: usize = 1024;
 /// the lifetime of the search. `locale` is the resolved collation
 /// ([`types_locale::PgLocale`]); the skip table is the 256-entry BMH table.
 #[derive(Debug)]
-pub struct TextPositionState<'a> {
+pub struct TextPositionState<'a, 'mcx> {
     /// `is_multibyte_char_in_char` — need to check char boundaries?
     pub is_multibyte_char_in_char: bool,
     /// `greedy` — find the longest possible (nondeterministic) match?
@@ -93,6 +93,10 @@ pub struct TextPositionState<'a> {
     pub refpoint: usize,
     /// `refpos` — 0-based char offset of `refpoint`.
     pub refpos: i32,
+    /// `locale` — the resolved collation (`pg_locale_t`). C stores a pointer
+    /// into pg_locale.c's permanent cache; the layered carrier is the flag
+    /// core ([`types_locale::PgLocale`]) copied into the working `Mcx`.
+    pub locale: types_locale::PgLocale<'mcx>,
 }
 
 /// C: `VarStringSortSupport` (varlena.c) — abbreviated-key sort state for
