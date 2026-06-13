@@ -173,3 +173,10 @@ seam_core::seam!(
     /// `PreventInTransactionBlock(isTopLevel, stmtType)` (xact.c).
     pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: &str) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h/xact.c): true under REPEATABLE
+    /// READ or SERIALIZABLE (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read
+    /// of the per-backend isolation level.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);

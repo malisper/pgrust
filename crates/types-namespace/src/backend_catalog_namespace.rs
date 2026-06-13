@@ -53,6 +53,9 @@ pub struct ProcRow<'mcx> {
     pub provariadic: Oid,
     pub pronargs: i32,
     pub pronargdefaults: i32,
+    /// `procform->prorettype` — the function's return type (read by
+    /// `assignProcTypes` in opclasscmds.c).
+    pub prorettype: Oid,
     /// `procform->proargtypes.values` (length `pronargs`).
     pub proargtypes: PgVec<'mcx, Oid>,
     /// The `proallargtypes` attribute as a raw array projection if non-null;
@@ -74,6 +77,9 @@ pub struct OperRow<'mcx> {
     pub oprkind: u8,
     pub oprleft: Oid,
     pub oprright: Oid,
+    /// `oprresult` — the operator's result type (read by `assignOperTypes`
+    /// in opclasscmds.c).
+    pub oprresult: Oid,
     pub oprname: PgString<'mcx>,
 }
 

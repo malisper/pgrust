@@ -8,6 +8,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReindexIsProcessingIndex(indexOid)` (catalog/index.c): is the given
+    /// index OID the one currently being reindexed, or pending reindex? Reads
+    /// index.c's backend-local reindex state. Pure lookup; cannot `ereport`.
+    pub fn reindex_is_processing_index(index_oid: types_core::primitive::Oid) -> bool
+);
+
+seam_core::seam!(
     /// `BuildIndexInfo(index)` (catalog/index.c): construct an `IndexInfo`
     /// describing the open index relation. The owned `IndexInfo` is trimmed
     /// to the fields consumers read, so no allocation crosses the seam yet;
