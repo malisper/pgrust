@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
@@ -62,6 +63,7 @@ backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
+backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }

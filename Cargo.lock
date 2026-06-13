@@ -8382,7 +8382,6 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
- "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
@@ -8432,7 +8431,6 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
- "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",

@@ -6,6 +6,7 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
+    backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_reloptions::init_seams();
     backend_access_hashvalidate::init_seams();
@@ -58,6 +59,7 @@ pub fn init_all() {
     backend_timezone_strftime::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_activity_xact::init_seams();
+    backend_utils_adt_acl::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
