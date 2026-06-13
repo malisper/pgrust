@@ -1877,6 +1877,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-latch"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-latch-seams"
 version = "0.0.0"
 dependencies = [
@@ -2934,6 +2946,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-lwlock",
