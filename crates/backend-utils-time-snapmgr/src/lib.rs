@@ -1543,6 +1543,23 @@ pub fn init_seams() {
     seams::at_subcommit_snapshot::set(AtSubCommit_Snapshot);
     seams::at_subabort_snapshot::set(AtSubAbort_Snapshot);
     seams::xact_has_exported_snapshots::set(XactHasExportedSnapshots);
+    seams::unregister_snapshot::set(|snapshot| {
+        // C `UnregisterSnapshot` is void; its only fallible step is the proc
+        // seam inside `SnapshotResetXmin`, which does not `ereport` in C.
+        UnregisterSnapshot(Some(&new_handle(snapshot)))
+            .expect("UnregisterSnapshot: SnapshotResetXmin must not ereport");
+    });
+    seams::get_active_snapshot::set(|| {
+        // The C `Snapshot` is a shared pointer; the seam crosses an owned copy
+        // wrapped in a bare `Rc`. `GetActiveSnapshot` asserts an active
+        // snapshot exists, so the result is always `Some`.
+        Ok(Some(std::rc::Rc::new(GetActiveSnapshot().borrow().clone())))
+    });
+    seams::push_active_snapshot::set(|snapshot| {
+        PushActiveSnapshot(&new_handle((*snapshot).clone()));
+        Ok(())
+    });
+    seams::pop_active_snapshot::set(PopActiveSnapshot);
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket
