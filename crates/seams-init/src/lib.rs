@@ -20,11 +20,15 @@ pub fn init_all() {
     backend_access_rmgrdesc_xactdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_transam_clog::init_seams();
+    backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
     backend_access_transam_parallel::init_seams();
+    backend_access_transam_subtrans::init_seams();
     backend_access_transam_timeline::init_seams();
     backend_access_transam_transam::init_seams();
     backend_access_transam_twophase::init_seams();
+    backend_access_transam_varsup::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
@@ -107,6 +111,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_shmem::init_seams();
+    backend_storage_ipc_sinval::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();
@@ -470,6 +475,7 @@ mod recurrence_guard {
         ("backend_access_transam_xlog", "data_checksums_enabled"),
         ("backend_access_transam_xlog", "enable_fsync"),
         ("backend_access_transam_xlog", "enable_hot_standby"),
+        ("backend_access_transam_xlog", "recovery_in_progress"),
         ("backend_access_transam_xlog", "startup_xlog"),
         ("backend_access_transam_xlog", "wal_level"),
         ("backend_access_transam_xlog", "wal_sync_method"),
@@ -540,6 +546,7 @@ mod recurrence_guard {
         ("backend_utils_init_small", "reserved_connections"),
         ("backend_utils_init_small", "superuser_reserved_connections"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
+        ("backend_utils_misc_guc_file", "guc_check_errdetail"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
     ];

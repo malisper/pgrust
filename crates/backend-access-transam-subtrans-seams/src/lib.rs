@@ -43,3 +43,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn sub_trans_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExtendSUBTRANS(newestXact)` (subtrans.c): zero the pg_subtrans page
+    /// that would hold `newestXact` if it is the first XID of a new page,
+    /// while the caller holds `XidGenLock`. The SLRU page write can
+    /// `ereport(ERROR)`, carried on `Err`. Owner unported; scaffolded slot.
+    pub fn extend_subtrans(newest_xact: TransactionId) -> PgResult<()>
+);

@@ -47,7 +47,7 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{
     PgError, PgResult, SqlState, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
 
@@ -2565,6 +2565,114 @@ pub fn type_cache_typtype(type_id: Oid) -> i8 {
     with_state(|st| st.entry(type_id).typtype)
 }
 
+/* --------------------------------------------------------------------------
+ * Element-type support-function lookups (typcache.c surface used by array /
+ * range ADTs). Each is the C idiom
+ *   lookup_type_cache(elem, TYPECACHE_*_FINFO); read entry->*_finfo.fn_oid
+ * — own typcache logic (lookup + a cached-field read), returning InvalidOid
+ * when the type has no such support function (the caller raises the
+ * ERRCODE_UNDEFINED_FUNCTION ereport, exactly as the C does at the call site).
+ * ------------------------------------------------------------------------ */
+
+/// `lookup_type_cache(type_id, flags)` copy-out (the seam shape): run the cache
+/// lookup, then hand back the `pg_type` storage fields by value (the C returns a
+/// long-lived cache pointer; the safe seam copies the small row out).
+fn lookup_type_cache_copyout(
+    type_id: Oid,
+    flags: i32,
+) -> PgResult<types_typcache::TypeCacheEntry> {
+    lookup_type_cache(type_id, flags)?;
+    Ok(with_state(|st| {
+        let e = st.entry(type_id);
+        types_typcache::TypeCacheEntry {
+            type_id: e.type_id,
+            typlen: e.typlen,
+            typbyval: e.typbyval,
+            typalign: e.typalign,
+            typstorage: e.typstorage,
+            typtype: e.typtype,
+        }
+    }))
+}
+
+/// Build the `types_cache::TypeCacheEntry` copy-out shape (the range/multirange
+/// view: storage fields + rng_*/hash_* finfo + recursively-copied element/range
+/// sub-entries). Pure read of the already-resolved cache entry.
+fn build_types_cache_entry(st: &TypCacheState<'_>, type_id: Oid) -> types_cache::TypeCacheEntry {
+    let e = st.entry(type_id);
+    types_cache::TypeCacheEntry {
+        type_id: e.type_id,
+        typlen: e.typlen,
+        typbyval: e.typbyval,
+        typalign: e.typalign,
+        typstorage: e.typstorage,
+        rng_collation: e.rng_collation,
+        rng_cmp_proc_finfo: e.rng_cmp_proc_finfo,
+        rng_canonical_finfo: e.rng_canonical_finfo,
+        rng_subdiff_finfo: e.rng_subdiff_finfo,
+        hash_proc_finfo: e.hash_proc_finfo,
+        hash_extended_proc_finfo: e.hash_extended_proc_finfo,
+        rngelemtype: e
+            .rngelemtype
+            .map(|oid| Box::new(build_types_cache_entry(st, oid))),
+        rngtype: e
+            .rngtype
+            .map(|oid| Box::new(build_types_cache_entry(st, oid))),
+    }
+}
+
+/// `lookup_type_cache(type_id, flags)` range/multirange-ADT view: resolve the
+/// entry, then hand back the `types_cache::TypeCacheEntry` shape (with the
+/// rng_*/hash_* finfo support fields the range ports read).
+fn lookup_type_cache_entry(type_id: Oid, flags: i32) -> PgResult<types_cache::TypeCacheEntry> {
+    lookup_type_cache(type_id, flags)?;
+    Ok(with_state(|st| build_types_cache_entry(st, type_id)))
+}
+
+/// `lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO)->eq_opr_finfo.fn_oid`.
+fn lookup_element_eq_opr(element_type: Oid) -> PgResult<Oid> {
+    lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO)?;
+    Ok(with_state(|st| st.entry(element_type).eq_opr_finfo.fn_oid))
+}
+
+/// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`.
+fn lookup_element_cmp_proc(element_type: Oid) -> PgResult<Oid> {
+    lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)?;
+    Ok(with_state(|st| st.entry(element_type).cmp_proc_finfo.fn_oid))
+}
+
+/// `lookup_type_cache(element_type, TYPECACHE_HASH_PROC_FINFO)->hash_proc_finfo.fn_oid`.
+fn lookup_element_hash_proc(element_type: Oid) -> PgResult<Oid> {
+    lookup_type_cache(element_type, TYPECACHE_HASH_PROC_FINFO)?;
+    Ok(with_state(|st| st.entry(element_type).hash_proc_finfo.fn_oid))
+}
+
+/// `lookup_type_cache(element_type, TYPECACHE_HASH_EXTENDED_PROC_FINFO)->hash_extended_proc_finfo.fn_oid`.
+fn lookup_element_hash_extended_proc(element_type: Oid) -> PgResult<Oid> {
+    lookup_type_cache(element_type, TYPECACHE_HASH_EXTENDED_PROC_FINFO)?;
+    Ok(with_state(|st| st.entry(element_type).hash_extended_proc_finfo.fn_oid))
+}
+
+/// `lookup_range_elem_hash_proc` — the `hash_range`/`hash_multirange` element
+/// fallback: resolve the (optionally extended) hash support function OID for
+/// the element type. Mirrors the C `lookup_type_cache(elem, TYPECACHE_HASH_*…)`
+/// + `OidIsValid(finfo.fn_oid)` check, raising `ERRCODE_UNDEFINED_FUNCTION`
+/// ("could not identify a hash function for type %s") when none exists.
+fn lookup_range_elem_hash_proc(elem_type_id: Oid, extended: bool) -> PgResult<Oid> {
+    let oid = if extended {
+        lookup_element_hash_extended_proc(elem_type_id)?
+    } else {
+        lookup_element_hash_proc(elem_type_id)?
+    };
+    if !oid_is_valid(oid) {
+        return ereport_error(
+            ERRCODE_UNDEFINED_FUNCTION,
+            format!("could not identify a hash function for type {}", format_type(elem_type_id)?),
+        );
+    }
+    Ok(oid)
+}
+
 /* ==========================================================================
  * Small numeric helpers.
  * ======================================================================== */
@@ -2591,4 +2699,17 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::at_eosubxact_type_cache::set(at_eosubxact_type_cache);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
+    // Element-type support-function lookups (own typcache logic: lookup + finfo
+    // OID read). The array/range ADTs call these across the dep cycle.
+    backend_utils_cache_typcache_seams::lookup_element_eq_opr::set(lookup_element_eq_opr);
+    backend_utils_cache_typcache_seams::lookup_element_cmp_proc::set(lookup_element_cmp_proc);
+    backend_utils_cache_typcache_seams::lookup_element_hash_proc::set(lookup_element_hash_proc);
+    backend_utils_cache_typcache_seams::lookup_element_hash_extended_proc::set(
+        lookup_element_hash_extended_proc,
+    );
+    backend_utils_cache_typcache_seams::lookup_range_elem_hash_proc::set(lookup_range_elem_hash_proc);
+    // Copy-out entry lookups (own typcache logic + a by-value copy of the cache
+    // row). The range/multirange ADTs call these across the dep cycle.
+    backend_utils_cache_typcache_seams::lookup_type_cache::set(lookup_type_cache_copyout);
+    backend_utils_cache_typcache_seams::lookup_type_cache_entry::set(lookup_type_cache_entry);
 }
