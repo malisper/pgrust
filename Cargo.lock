@@ -3316,6 +3316,7 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execAsync-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
@@ -6393,18 +6394,30 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils-seams",
+ "backend-port-pg-sema-seams",
+ "backend-postmaster-autovacuum-ext-seams",
+ "backend-replication-syncrep-seams",
+ "backend-replication-walsender-seams",
  "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-deadlock-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-timeout-seams",
+ "libc",
  "mcx",
  "seam-core",
  "types-core",
@@ -9229,6 +9242,10 @@ dependencies = [
  "hashbrown",
  "types-error",
 ]
+
+[[package]]
+name = "no-todo-guard"
+version = "0.0.0"
 
 [[package]]
 name = "once_cell"
