@@ -65,6 +65,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LockSharedObject(classid, objid, objsubid, lockmode)` (lmgr.c): lock a
+    /// shared-catalog object (a global object visible from every database);
+    /// also accepts pending invalidation messages. Can `ereport(ERROR)`,
+    /// carried on `Err`. On success the lock is held by the returned guard
+    /// (released at transaction end via `keep`, the C default).
+    pub fn lock_shared_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<LockGuard>
+);
+
+seam_core::seam!(
     /// `UnlockRelationOid(relid, lockmode)` (lmgr.c). [`LockGuard`] plumbing
     /// — consumers go through the guard, never call this directly. C can
     /// `elog(WARNING/ERROR)` on a lock-table inconsistency, carried on `Err`.
