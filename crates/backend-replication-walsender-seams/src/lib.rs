@@ -10,3 +10,11 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_wal_snd_init_stopping()
 );
+
+seam_core::seam!(
+    /// `GetStandbyFlushRecPtr(TimeLineID *tli)` (walsender.c) — the most recent
+    /// WAL position safe to send from this standby (max of replay and
+    /// same-timeline receive). The slotsync caller passes `NULL` for `tli`.
+    /// Pure shmem reads; infallible.
+    pub fn get_standby_flush_rec_ptr() -> types_core::primitive::XLogRecPtr
+);

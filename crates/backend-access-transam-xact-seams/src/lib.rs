@@ -15,6 +15,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `StartTransactionCommand()` (xact.c): begin a transaction command,
+    /// starting a transaction if none is active. Can `ereport(ERROR)`.
+    pub fn start_transaction_command() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CommitTransactionCommand()` (xact.c): commit the current transaction
+    /// command. Can `ereport(ERROR)`.
+    pub fn commit_transaction_command() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetCurrentTransactionNestLevel()` (xact.c): the current
     /// (sub)transaction nesting depth (1 = top level). Pure read of
     /// backend-local transaction state; cannot `ereport`.

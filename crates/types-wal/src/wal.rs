@@ -5,6 +5,12 @@ use types_core::{
     pg_crc32c, uint16, uint32, uint8, Oid, RelFileNumber, RmgrId, TransactionId, XLogRecPtr,
 };
 
+/// `WalLevel` enum (`access/xlog.h`): the level of information written to WAL.
+/// Modeled as the C `int` GUC value; comparisons are `>=`.
+pub const WAL_LEVEL_MINIMAL: i32 = 0;
+pub const WAL_LEVEL_REPLICA: i32 = 1;
+pub const WAL_LEVEL_LOGICAL: i32 = 2;
+
 /// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
 /// reserved for xlog-insertion flags; the rmgr's record opcode lives in the
 /// high nibble (`info & ~XLR_INFO_MASK`).

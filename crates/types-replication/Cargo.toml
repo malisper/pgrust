@@ -1,13 +1,12 @@
 [package]
-name = "backend-replication-walsender-seams"
+name = "types-replication"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_replication_walsender_seams"
+name = "types_replication"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

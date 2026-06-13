@@ -188,6 +188,13 @@ pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 /// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
 pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 
+/// `ProcArrayLock` (`lwlocklist.h` offset 4).
+pub const PROC_ARRAY_LOCK: usize = 4;
+/// `ReplicationSlotAllocationLock` (`lwlocklist.h` offset 36).
+pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
+/// `ReplicationSlotControlLock` (`lwlocklist.h` offset 37).
+pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
 pub type dsm_handle = uint32;

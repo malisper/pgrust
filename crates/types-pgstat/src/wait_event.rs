@@ -24,6 +24,15 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN` — 12th entry (index 11) of the
+/// Activity section of `wait_event_names.txt` (see the SYSLOGGER_MAIN list
+/// above). "Waiting in main loop of slot sync worker."
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 11;
+
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN` — 13th entry (index 12) of the
+/// Activity section. "Waiting for slot sync worker to shut down."
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
+
 /// `WAIT_EVENT_SPIN_DELAY` — "Waiting while acquiring a contended spinlock."
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).

@@ -703,6 +703,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogrecovery-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-access-transam-xlogstats"
 version = "0.0.0"
 dependencies = [
@@ -1256,6 +1263,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-logical-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-replication-logical-message-seams"
 version = "0.0.0"
 dependencies = [
@@ -1276,10 +1292,86 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-slotsync"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-snapbuild-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-error-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-pgstat",
+ "types-replication",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-replication-logical-slotsync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
+name = "backend-replication-slot-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
+name = "backend-replication-snapbuild-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-replication-walreceiver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-walsender-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -1360,7 +1452,16 @@ name = "backend-storage-ipc-latch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-procarray-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -1458,6 +1559,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -2000,6 +2102,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
@@ -2246,6 +2356,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-interrupt",
  "backend-postmaster-syslogger",
+ "backend-replication-logical-slotsync",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
  "backend-storage-lmgr-lwlock",
@@ -2398,6 +2509,13 @@ dependencies = [
 [[package]]
 name = "types-reloptions"
 version = "0.0.0"
+
+[[package]]
+name = "types-replication"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-scan"

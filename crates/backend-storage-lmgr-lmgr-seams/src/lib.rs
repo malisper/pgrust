@@ -15,3 +15,25 @@ seam_core::seam!(
         orstronger: bool,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `LockSharedObject(classId, objId, objSubId, lockmode)` (lmgr.c) — take a
+    /// lock on a non-relation shared object (e.g. a `pg_database` row). Can
+    /// `ereport(ERROR)` on deadlock/lock-table exhaustion, carried on `Err`.
+    pub fn lock_shared_object(
+        classid: types_core::primitive::Oid,
+        objid: types_core::primitive::Oid,
+        objsubid: u16,
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockSharedObject(classId, objId, objSubId, lockmode)` (lmgr.c).
+    pub fn unlock_shared_object(
+        classid: types_core::primitive::Oid,
+        objid: types_core::primitive::Oid,
+        objsubid: u16,
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> types_error::PgResult<()>
+);

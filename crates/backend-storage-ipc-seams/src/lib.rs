@@ -33,3 +33,15 @@ seam_core::seam!(
         arg: types_datum::Datum,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `before_shmem_exit(function, arg)` (`storage/ipc/ipc.c`): register a
+    /// callback to run early in `shmem_exit`, before the `on_shmem_exit`
+    /// callbacks, while shared memory is still accessible. The `Err` is the C
+    /// `ereport(FATAL)` past `MAX_ON_EXITS`; callbacks carry the same
+    /// `PgResult` failure surface.
+    pub fn before_shmem_exit(
+        function: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
+        arg: types_datum::Datum,
+    ) -> types_error::PgResult<()>
+);
