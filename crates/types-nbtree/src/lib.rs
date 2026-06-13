@@ -98,6 +98,103 @@ pub enum IndexUniqueCheck {
     Existing,
 }
 
+/// `BTPS_State` (`nbtree.c`) — parallel-scan page status. Drives the
+/// `_bt_parallel_seize` state machine over the shared [`BTParallelScanDescData`].
+///
+/// - `BTPARALLEL_NOT_INITIALIZED`: the scan has not started.
+/// - `BTPARALLEL_NEED_PRIMSCAN`: some process must seize the scan to advance it
+///   via another call to `_bt_first`.
+/// - `BTPARALLEL_ADVANCING`: some process is advancing the scan to a new page;
+///   others must wait.
+/// - `BTPARALLEL_IDLE`: no backend is advancing the scan; some process can start.
+/// - `BTPARALLEL_DONE`: the scan is complete (including error exit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+#[allow(non_camel_case_types)]
+pub enum BTPS_State {
+    BTPARALLEL_NOT_INITIALIZED = 0,
+    BTPARALLEL_NEED_PRIMSCAN = 1,
+    BTPARALLEL_ADVANCING = 2,
+    BTPARALLEL_IDLE = 3,
+    BTPARALLEL_DONE = 4,
+}
+
+/// `BTParallelScanDescData` (`nbtree.c`) — btree-specific shared information
+/// required for a parallel scan. Lives in the DSM region the parallel
+/// index-scan infrastructure (`indexam.c` `ParallelIndexScanDesc` +
+/// `OffsetToPointer(parallel_scan, ps_offset_am)`) sets up; the nbtree
+/// `_bt_parallel_*` state machine in `backend-access-nbtree-nbtree` operates on
+/// it. The flexible-array tail (`btps_arrElems[]` plus a flattened skip-array
+/// datum region) is modelled as a separate byte buffer `btps_arrtail` so the
+/// fixed header fields stay addressable; the serialize/restore code indexes it
+/// exactly as C indexes the FAM.
+#[derive(Debug)]
+pub struct BTParallelScanDescData {
+    /// next page to be scanned
+    pub btps_nextScanPage: BlockNumber,
+    /// page whose sibling link was copied into `btps_nextScanPage`
+    pub btps_lastCurrPage: BlockNumber,
+    /// indicates whether next page is available for scan
+    pub btps_pageStatus: BTPS_State,
+    /// protects shared parallel state
+    pub btps_lock: types_storage::storage::LWLock,
+    /// used to synchronize parallel scan
+    pub btps_cv: types_condvar::ConditionVariable,
+    /// `btps_arrElems[FLEXIBLE_ARRAY_MEMBER]` plus the trailing flattened
+    /// skip-array datum region, as a raw byte buffer in the DSM area. Indexed
+    /// by [`btps_arr_elem`]/[`set_btps_arr_elem`] for the `int` cur_elem slots
+    /// and by raw offset for the serialized datums.
+    pub btps_arrtail: *mut u8,
+}
+
+/// `offsetof(BTParallelScanDescData, btps_arrElems)` — the size of the fixed
+/// header preceding the flexible-array tail in the C DSM struct, used by
+/// `btestimateparallelscan` as the base shared-state size. Two `BlockNumber`
+/// (4+4), the `BTPS_State` enum (4), then the `LWLock` and `ConditionVariable`
+/// (both `MAXALIGN`-padded), with the FAM `int[]` 4-byte aligned. Verified
+/// against the C struct layout: `4+4+4 + sizeof(LWLock) + sizeof(ConditionVariable)`
+/// rounded to the FAM alignment. (Consumed only by the DSM allocator, which is
+/// indexam-owned; the value mirrors the C `offsetof`.)
+pub const BTPARALLEL_HEADER_SIZE: usize = {
+    // BlockNumber x2 + BTPS_State(i32) = 12, then LWLock + ConditionVariable.
+    let base = 4 + 4 + 4;
+    let sync = core::mem::size_of::<types_storage::storage::LWLock>()
+        + core::mem::size_of::<types_condvar::ConditionVariable>();
+    base + sync
+};
+
+impl BTParallelScanDescData {
+    /// Read `btps_arrElems[i]` (the i-th `int` cur_elem slot at the head of the
+    /// flexible-array tail).
+    ///
+    /// # Safety
+    /// `i` must be within the `btps_arrElems[]` region sized by
+    /// `btestimateparallelscan`, and `btps_arrtail` must point at the DSM tail.
+    pub unsafe fn btps_arr_elem(&self, i: usize) -> i32 {
+        let p = self.btps_arrtail as *const i32;
+        core::ptr::read_unaligned(p.add(i))
+    }
+
+    /// Write `btps_arrElems[i] = v`.
+    ///
+    /// # Safety
+    /// See [`btps_arr_elem`].
+    pub unsafe fn set_btps_arr_elem(&mut self, i: usize, v: i32) {
+        let p = self.btps_arrtail as *mut i32;
+        core::ptr::write_unaligned(p.add(i), v);
+    }
+
+    /// Pointer to the serialized-datum region: `(char *) &btps_arrElems[n]`,
+    /// where `n == so->numArrayKeys`.
+    ///
+    /// # Safety
+    /// `n` must equal the scan's `numArrayKeys`; the returned pointer aliases
+    /// the DSM tail.
+    pub unsafe fn btps_datumshared(&self, n: usize) -> *mut u8 {
+        (self.btps_arrtail as *mut i32).add(n) as *mut u8
+    }
+}
+
 /// `BTSkipSupport` opclass sentinels for a skip array (`access/nbtree.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct BTSkipSupport {

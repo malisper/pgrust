@@ -34,6 +34,10 @@ backend-storage-freespace-seams = { path = "../backend-storage-freespace-seams" 
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 
 # Ported owner, direct dep (progress-update is already in backend-utils-activity-small).
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }

@@ -331,9 +331,13 @@ dependencies = [
  "backend-storage-aio-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
+ "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-small",
+ "backend-utils-adt-datum-seams",
  "backend-utils-cache-relcache-seams",
+ "backend-utils-init-small-seams",
  "mcx",
  "types-amapi",
  "types-core",
@@ -352,6 +356,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-nbtree",
  "types-rel",
 ]
@@ -2907,6 +2912,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-datum-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -3828,6 +3842,7 @@ name = "types-nbtree"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-condvar",
  "types-core",
  "types-datum",
  "types-scan",

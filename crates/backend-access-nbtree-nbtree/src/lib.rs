@@ -27,16 +27,19 @@ use types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
 use types_core::InvalidOid;
 use types_error::PgResult;
 use types_nbtree::{
-    BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned, BTScanPosIsValid, BTVacState,
-    BTVacuumPosting, BTCycleId, IndexBulkDeleteResult, IndexUniqueCheck, BTMaxStrategyNumber,
-    BTNProcs, BTOPTIONS_PROC, BTP_DELETED, BTP_HALF_DEAD, BTP_LEAF, BTP_SPLIT_END, BTREE_METAPAGE,
-    MaxIndexTuplesPerPage, MaxTIDsPerBTreePage, P_FIRSTKEY, P_HIKEY, P_NONE,
+    BTParallelScanDescData, BTPS_State, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
+    BTScanPosIsValid, BTVacState, BTVacuumPosting, BTCycleId, IndexBulkDeleteResult,
+    IndexUniqueCheck, BTMaxStrategyNumber, BTNProcs, BTOPTIONS_PROC, BTP_DELETED, BTP_HALF_DEAD,
+    BTP_LEAF, BTP_SPLIT_END, BTREE_METAPAGE, MaxIndexTuplesPerPage, MaxTIDsPerBTreePage, P_FIRSTKEY,
+    P_HIKEY, P_NONE,
 };
 use types_rel::Relation;
 use types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
+    SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_SKIP, SK_ISNULL, SK_SEARCHNULL,
 };
+use types_storage::storage::LWLockMode;
 use types_scan::sdir::ScanDirection;
 use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
 use types_tuple::heaptuple::ItemPointerData;
@@ -44,6 +47,9 @@ use types_tuple::heaptuple::ItemPointerData;
 use backend_access_common_indextuple_seams::index_form_tuple;
 use backend_access_index_indexam_seams as parallel;
 use backend_access_nbtree_core_seams as core;
+use backend_storage_lmgr_condition_variable_seams as condvar;
+use backend_storage_lmgr_lwlock_seams as lwlock;
+use backend_utils_adt_datum_seams as datumser;
 use backend_nodes_core_seams::{tbm_add_tuple, TbmHandle};
 use backend_storage_aio_seams as readstream;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
@@ -554,66 +560,469 @@ fn bt_scan_pos_unpin_if_pinned_mark(so: &mut BTScanOpaqueData) {
 // btestimateparallelscan / btinitparallelscan / btparallelrescan
 // ===========================================================================
 
+/// `BTMaxItemSize` (`access/nbtree.h`):
+/// `MAXALIGN_DOWN((BLCKSZ - MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) -
+///   MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - MAXALIGN(sizeof(ItemPointerData))`
+///   = `MAXALIGN_DOWN((8192 - 40 - 16) / 3) - 8` = `2712 - 8` = `2704`.
+const BTMaxItemSize: Size = 2704;
+
+/// `WAIT_EVENT_BTREE_PAGE` (`PG_WAIT_IPC | 7`) — verified `= 134217735`.
+const WAIT_EVENT_BTREE_PAGE: u32 = 0x0800_0000 | 7;
+
+/// `IndexRelationGetNumberOfKeyAttributes(rel)` — `rel->rd_index->indnkeyatts`.
+fn index_relation_get_number_of_key_attributes(rel: &Relation) -> i16 {
+    rel.rd_index
+        .as_ref()
+        .expect("nbtree relation has no rd_index")
+        .indnkeyatts
+}
+
+/// Resolve the DSM handle to the `BTParallelScanDescData` it carries
+/// (`(BTParallelScanDesc) OffsetToPointer(parallel_scan, ps_offset_am)`), then
+/// run `f` over the resolved struct. The pointer aliases shared memory the
+/// (unported) parallel index-scan infrastructure owns; until it lands the
+/// resolver panics, so a serial scan never reaches this.
+fn with_btscan<R>(parallel_handle: u64, f: impl FnOnce(&mut BTParallelScanDescData) -> R) -> R {
+    let ptr = parallel::bt_resolve_parallel_scan::call(parallel_handle);
+    // SAFETY: the resolver returns the live DSM pointer for this scan, exactly
+    // as the C `OffsetToPointer` macro does; the embedded `btps_lock` serializes
+    // concurrent access at the call sites below.
+    let btscan = unsafe { &mut *ptr };
+    f(btscan)
+}
+
 /// `btestimateparallelscan` — estimate storage for `BTParallelScanDescData`.
-pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, norderbys: i32) -> Size {
-    parallel::bt_estimate_parallel_scan::call(rel, nkeys, norderbys)
+pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> PgResult<Size> {
+    let nkeyatts = index_relation_get_number_of_key_attributes(rel);
+
+    // Pessimistically assume that every input scan key will be output with its
+    // own SAOP array.
+    let mut estnbtreeshared: Size =
+        BTParallelScanDescData_offsetof_btps_arrElems() + ::core::mem::size_of::<i32>() * nkeys as usize;
+
+    // Single column indexes cannot possibly use a skip array.
+    if nkeyatts == 1 {
+        return Ok(estnbtreeshared);
+    }
+
+    // Pessimistically assume that all attributes prior to the least significant
+    // attribute require a skip array (and an associated key).
+    let genericattrspace = datumser::datum_estimate_space::call(
+        types_datum::Datum::null(),
+        false,
+        true,
+        ::core::mem::size_of::<types_datum::Datum>() as i32,
+    );
+    for attnum in 1..nkeyatts {
+        // Every skip array must have space to store its scan key's sk_flags.
+        estnbtreeshared = add_size(estnbtreeshared, ::core::mem::size_of::<i32>())?;
+
+        // Consider space required to store a datum of opclass input type.
+        let attr = &rel
+            .rd_att
+            .compact_attrs[(attnum - 1) as usize];
+        if attr.attbyval {
+            // This index attribute stores pass-by-value datums.
+            let estfixed =
+                datumser::datum_estimate_space::call(types_datum::Datum::null(), false, true, attr.attlen as i32);
+            estnbtreeshared = add_size(estnbtreeshared, estfixed)?;
+            continue;
+        }
+
+        // Pass-by-reference: assume a pass-by-value datum's worth plus the
+        // largest possible whole index tuple.
+        estnbtreeshared = add_size(estnbtreeshared, genericattrspace)?;
+        estnbtreeshared = add_size(estnbtreeshared, BTMaxItemSize)?;
+    }
+
+    Ok(estnbtreeshared)
+}
+
+/// `offsetof(BTParallelScanDescData, btps_arrElems)`.
+#[inline]
+fn BTParallelScanDescData_offsetof_btps_arrElems() -> Size {
+    types_nbtree::BTPARALLEL_HEADER_SIZE
+}
+
+/// `add_size(s1, s2)` (shmem.c) — overflow-checked size addition. The C version
+/// `ereport(ERROR)`s on overflow; here that surfaces as the context OOM-shaped
+/// error via a checked add.
+fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
+    s1.checked_add(s2)
+        .ok_or_else(|| types_error::PgError::error("requested shared memory size overflows size_t"))
+}
+
+/// `_bt_parallel_serialize_arrays()` — serialize parallel array state. Caller
+/// must hold `btscan->btps_lock` exclusively.
+fn _bt_parallel_serialize_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTScanOpaqueData) {
+    let numkeys = so.numArrayKeys as usize;
+    // Space for serialized datums begins immediately after btps_arrElems[].
+    // SAFETY: numkeys == so->numArrayKeys, the FAM sizing assumption.
+    let mut datumshared = unsafe { btscan.btps_datumshared(numkeys) };
+    for i in 0..so.numArrayKeys as usize {
+        let array = &so.arrayKeys[i];
+        let skey = &so.keyData[array.scan_key as usize];
+
+        if array.num_elems != -1 {
+            // Save SAOP array's cur_elem (no need to copy key/datum).
+            debug_assert!((skey.sk_flags & SK_BT_SKIP) == 0);
+            // SAFETY: i < numkeys.
+            unsafe { btscan.set_btps_arr_elem(i, array.cur_elem) };
+            continue;
+        }
+
+        // Save all mutable state associated with skip array's key.
+        debug_assert!((skey.sk_flags & SK_BT_SKIP) != 0);
+        // memcpy(datumshared, &skey->sk_flags, sizeof(int)); datumshared += 4.
+        // SAFETY: datumshared points into the DSM datum region sized by estimate.
+        unsafe {
+            ::core::ptr::write_unaligned(datumshared as *mut i32, skey.sk_flags);
+            datumshared = datumshared.add(::core::mem::size_of::<i32>());
+        }
+
+        if (skey.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) != 0 {
+            // No sk_argument datum to serialize.
+            debug_assert!(skey.sk_argument.as_usize() == 0);
+            continue;
+        }
+
+        datumshared = datumser::datum_serialize::call(
+            skey.sk_argument,
+            (skey.sk_flags & SK_ISNULL) != 0,
+            array.attbyval,
+            array.attlen as i32,
+            datumshared,
+        );
+    }
+}
+
+/// `_bt_parallel_restore_arrays()` — restore serialized parallel array state.
+/// Caller must hold `btscan->btps_lock` exclusively.
+fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTScanOpaqueData) {
+    let numkeys = so.numArrayKeys as usize;
+    // Space for serialized datums begins immediately after btps_arrElems[].
+    // SAFETY: numkeys == so->numArrayKeys.
+    let mut datumshared = unsafe { btscan.btps_datumshared(numkeys) };
+    for i in 0..so.numArrayKeys as usize {
+        let num_elems;
+        let attbyval;
+        let scan_key;
+        let cur_elem_saved;
+        {
+            let array = &so.arrayKeys[i];
+            num_elems = array.num_elems;
+            attbyval = array.attbyval;
+            scan_key = array.scan_key as usize;
+        }
+        // SAFETY: i < numkeys.
+        cur_elem_saved = unsafe { btscan.btps_arr_elem(i) };
+
+        if num_elems != -1 {
+            // Restore SAOP array using its saved cur_elem.
+            debug_assert!((so.keyData[scan_key].sk_flags & SK_BT_SKIP) == 0);
+            so.arrayKeys[i].cur_elem = cur_elem_saved;
+            let ce = so.arrayKeys[i].cur_elem as usize;
+            so.keyData[scan_key].sk_argument = so.arrayKeys[i].elem_values[ce];
+            continue;
+        }
+
+        // Restore skip array by restoring its key directly.
+        {
+            let skey = &mut so.keyData[scan_key];
+            if !attbyval && skey.sk_argument.as_usize() != 0 {
+                // pfree(DatumGetPointer(skey->sk_argument)): the C frees the old
+                // pass-by-ref datum; under mcx ownership it is released when the
+                // owning context resets. (Pointer is into another context.)
+            }
+            skey.sk_argument = types_datum::Datum::null();
+            // memcpy(&skey->sk_flags, datumshared, sizeof(int)); datumshared += 4.
+            // SAFETY: datumshared in the DSM datum region.
+            unsafe {
+                skey.sk_flags = ::core::ptr::read_unaligned(datumshared as *const i32);
+                datumshared = datumshared.add(::core::mem::size_of::<i32>());
+            }
+            debug_assert!((skey.sk_flags & SK_BT_SKIP) != 0);
+        }
+
+        if (so.keyData[scan_key].sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) != 0 {
+            // No sk_argument datum to restore.
+            continue;
+        }
+
+        let (val, isnull, adv) = datumser::datum_restore::call(datumshared);
+        datumshared = adv;
+        so.keyData[scan_key].sk_argument = val;
+        if isnull {
+            debug_assert!(so.keyData[scan_key].sk_argument.as_usize() == 0);
+            debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHNULL) != 0);
+            debug_assert!((so.keyData[scan_key].sk_flags & SK_ISNULL) != 0);
+        }
+    }
 }
 
 /// `btinitparallelscan` — initialize `BTParallelScanDesc` for parallel scan.
 pub fn btinitparallelscan(target_handle: u64) {
-    parallel::bt_init_parallel_scan::call(target_handle);
+    with_btscan(target_handle, |bt_target| {
+        lwlock::lwlock_initialize::call(
+            &mut bt_target.btps_lock,
+            types_storage::storage::LWTRANCHE_PARALLEL_BTREE_SCAN,
+        );
+        bt_target.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
+        bt_target.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+        bt_target.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
+        condvar::condition_variable_init::call(&mut bt_target.btps_cv);
+    });
 }
 
 /// `btparallelrescan()` — reset parallel scan.
-pub fn btparallelrescan(scan: &mut NbtScan) {
+pub fn btparallelrescan(scan: &mut NbtScan) -> PgResult<()> {
     let parallel_handle = scan.parallel_scan.expect("btparallelrescan: parallel_scan");
-    parallel::bt_parallel_rescan::call(&mut scan.opaque, parallel_handle);
+    // In theory we don't need the LWLock here (no other workers yet), but take
+    // it for consistency.
+    with_btscan(parallel_handle, |btscan| -> PgResult<()> {
+        let guard = acquire_btps_lock(btscan)?;
+        btscan.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
+        btscan.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+        btscan.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
+        guard.release()
+    })
 }
 
 // ===========================================================================
 // _bt_parallel_seize / _release / _done / _primscan_schedule
 // ===========================================================================
 
-/// `_bt_parallel_seize()` — begin advancing the parallel scan to a new page.
-/// Returns `(status, next_scan_page, last_curr_page)`.
-pub fn _bt_parallel_seize(scan: &mut NbtScan, first: bool) -> (bool, BlockNumber, BlockNumber) {
-    let rel = scan.indexRelation.alias();
-    let parallel_handle = scan.parallel_scan.expect("_bt_parallel_seize: parallel_scan");
-    parallel::bt_parallel_seize_dsm::call(&rel, &mut scan.opaque, parallel_handle, first)
+/// `MyProcNumber` — the caller's per-backend proc number, read through the
+/// init-small seam (passed explicitly to the LWLock seam per the no-ambient
+/// rule).
+fn my_proc_number() -> types_core::ProcNumber {
+    backend_utils_init_small_seams::my_proc_number::call()
 }
 
-/// `_bt_parallel_release()` — publish the new `btps_nextScanPage`.
-pub fn _bt_parallel_release(scan: &mut NbtScan, next_scan_page: BlockNumber, curr_page: BlockNumber) {
+/// `LWLockAcquire(&btscan->btps_lock, LW_EXCLUSIVE)` — the parallel-scan lock
+/// guards a field disjoint from the rest of `BTParallelScanDescData`, but a
+/// borrow of `&btscan.btps_lock` would (per Rust's whole-struct view) block the
+/// mutations the critical section performs. The guard is taken over a raw
+/// reborrow of the lock field so it does not freeze `btscan`; the lock object
+/// outlives the guard (it lives in the DSM struct), so this is sound and the
+/// `Drop` backstop still fires.
+fn acquire_btps_lock(
+    btscan: &BTParallelScanDescData,
+) -> PgResult<lwlock::LWLockGuard<'static>> {
+    let lock_ptr: *const types_storage::storage::LWLock = &btscan.btps_lock;
+    // SAFETY: the lock lives in the DSM struct for the whole scan; the guard's
+    // synthetic 'static borrow never outlives `btscan` in practice (every call
+    // site releases it before the closure returns).
+    let lock: &'static types_storage::storage::LWLock = unsafe { &*lock_ptr };
+    lwlock::lwlock_acquire::call(lock, LWLockMode::LW_EXCLUSIVE, my_proc_number())
+}
+
+/// `_bt_parallel_seize()` — begin advancing the parallel scan to a new page.
+/// AM-facing wrapper over the projected core (`scan->indexRelation`,
+/// `scan->opaque`, `scan->parallel_scan`).
+pub fn _bt_parallel_seize(scan: &mut NbtScan, first: bool) -> PgResult<(bool, BlockNumber, BlockNumber)> {
+    let rel = scan.indexRelation.alias();
+    let parallel_handle = scan.parallel_scan.expect("_bt_parallel_seize: parallel_scan");
+    bt_parallel_seize_core(&rel, &mut scan.opaque, parallel_handle, first)
+}
+
+/// Projected `_bt_parallel_seize` core over `(rel, so, parallel_handle)`.
+/// Returns `(status, next_scan_page, last_curr_page)`.
+fn bt_parallel_seize_core<'mcx>(
+    _rel: &Relation<'mcx>,
+    so: &mut BTScanOpaqueData<'mcx>,
+    parallel_handle: u64,
+    first: bool,
+) -> PgResult<(bool, BlockNumber, BlockNumber)> {
+    let mut next_scan_page = types_core::primitive::InvalidBlockNumber;
+    let mut last_curr_page = types_core::primitive::InvalidBlockNumber;
+
+    // Reset so->currPos, and initialize moreLeft/moreRight.
+    BTScanPosInvalidate(&mut so.currPos);
+    so.currPos.moreLeft = true;
+    so.currPos.moreRight = true;
+
+    if first {
+        // Initialize array state when called from _bt_first.
+        so.needPrimScan = false;
+        so.scanBehind = false;
+        so.oppositeDirCheck = false;
+    } else {
+        // Don't seize when another primitive index scan is required.
+        if so.needPrimScan {
+            return Ok((false, next_scan_page, last_curr_page));
+        }
+    }
+
+    let mut status = true;
+    let mut endscan = false;
+
+    with_btscan(parallel_handle, |btscan| -> PgResult<()> {
+        let mut exit_loop = false;
+        loop {
+            let guard = acquire_btps_lock(btscan)?;
+
+            if btscan.btps_pageStatus == BTPS_State::BTPARALLEL_DONE {
+                // We're done with this parallel index scan.
+                status = false;
+            } else if btscan.btps_pageStatus == BTPS_State::BTPARALLEL_IDLE
+                && btscan.btps_nextScanPage == P_NONE
+            {
+                // End this parallel index scan.
+                status = false;
+                endscan = true;
+            } else if btscan.btps_pageStatus == BTPS_State::BTPARALLEL_NEED_PRIMSCAN {
+                debug_assert!(so.numArrayKeys != 0);
+
+                if first {
+                    // Can start scheduled primitive scan right away.
+                    btscan.btps_pageStatus = BTPS_State::BTPARALLEL_ADVANCING;
+                    // Restore scan's array keys from serialized values.
+                    _bt_parallel_restore_arrays(btscan, so);
+                    exit_loop = true;
+                } else {
+                    // Can't start it right now.
+                    status = false;
+                }
+
+                // Either way, mark that a pending primitive scan is required.
+                so.needPrimScan = true;
+                so.scanBehind = false;
+                so.oppositeDirCheck = false;
+            } else if btscan.btps_pageStatus != BTPS_State::BTPARALLEL_ADVANCING {
+                // We have seized control of the scan to advance it.
+                btscan.btps_pageStatus = BTPS_State::BTPARALLEL_ADVANCING;
+                debug_assert!(btscan.btps_nextScanPage != P_NONE);
+                next_scan_page = btscan.btps_nextScanPage;
+                last_curr_page = btscan.btps_lastCurrPage;
+                exit_loop = true;
+            }
+            guard.release()?;
+            if exit_loop || !status {
+                break;
+            }
+            condvar::condition_variable_sleep::call(&btscan.btps_cv, WAIT_EVENT_BTREE_PAGE)?;
+        }
+        condvar::condition_variable_cancel_sleep::call();
+        Ok(())
+    })?;
+
+    // When the scan has reached the rightmost (or leftmost) page, end it.
+    if endscan {
+        bt_parallel_done_core(so, Some(parallel_handle))?;
+    }
+
+    Ok((status, next_scan_page, last_curr_page))
+}
+
+/// `_bt_parallel_release()` — publish the new `btps_nextScanPage`. AM-facing
+/// wrapper over the projected core.
+pub fn _bt_parallel_release(
+    scan: &mut NbtScan,
+    next_scan_page: BlockNumber,
+    curr_page: BlockNumber,
+) -> PgResult<()> {
     let parallel_handle = scan.parallel_scan.expect("_bt_parallel_release: parallel_scan");
-    parallel::bt_parallel_release_dsm::call(&mut scan.opaque, parallel_handle, next_scan_page, curr_page);
+    bt_parallel_release_core(&mut scan.opaque, parallel_handle, next_scan_page, curr_page)
+}
+
+/// Projected `_bt_parallel_release` core.
+fn bt_parallel_release_core<'mcx>(
+    _so: &mut BTScanOpaqueData<'mcx>,
+    parallel_handle: u64,
+    next_scan_page: BlockNumber,
+    curr_page: BlockNumber,
+) -> PgResult<()> {
+    debug_assert!(next_scan_page != types_core::primitive::InvalidBlockNumber);
+
+    with_btscan(parallel_handle, |btscan| -> PgResult<()> {
+        let guard = acquire_btps_lock(btscan)?;
+        btscan.btps_nextScanPage = next_scan_page;
+        btscan.btps_lastCurrPage = curr_page;
+        btscan.btps_pageStatus = BTPS_State::BTPARALLEL_IDLE;
+        guard.release()?;
+        condvar::condition_variable_signal::call(&btscan.btps_cv);
+        Ok(())
+    })
 }
 
 /// `_bt_parallel_done()` — mark the parallel scan as complete. For non-parallel
-/// scans the in-crate guard short-circuits without touching the seam.
-pub fn _bt_parallel_done(scan: &mut NbtScan) {
-    debug_assert!(!BTScanPosIsValid(&scan.opaque.currPos));
+/// scans the in-crate guard short-circuits without touching the resolver.
+pub fn _bt_parallel_done(scan: &mut NbtScan) -> PgResult<()> {
+    bt_parallel_done_core(&mut scan.opaque, scan.parallel_scan)
+}
+
+/// Projected `_bt_parallel_done` core. `parallel_handle == None` is the C
+/// non-parallel-scan short-circuit (`scan->parallel_scan == NULL`).
+fn bt_parallel_done_core<'mcx>(
+    so: &mut BTScanOpaqueData<'mcx>,
+    parallel_handle: Option<u64>,
+) -> PgResult<()> {
+    debug_assert!(!BTScanPosIsValid(&so.currPos));
 
     // Do nothing, for non-parallel scans.
-    let parallel_handle = match scan.parallel_scan {
+    let parallel_handle = match parallel_handle {
         Some(h) => h,
-        None => return,
+        None => return Ok(()),
     };
 
     // Should not mark done when a primitive index scan is still pending.
-    if scan.opaque.needPrimScan {
-        return;
+    if so.needPrimScan {
+        return Ok(());
     }
-    parallel::bt_parallel_done_dsm::call(&mut scan.opaque, parallel_handle);
+
+    with_btscan(parallel_handle, |btscan| -> PgResult<()> {
+        // Mark the parallel scan as done, unless some other process did already.
+        let guard = acquire_btps_lock(btscan)?;
+        debug_assert!(btscan.btps_pageStatus != BTPS_State::BTPARALLEL_NEED_PRIMSCAN);
+        let mut status_changed = false;
+        if btscan.btps_pageStatus != BTPS_State::BTPARALLEL_DONE {
+            btscan.btps_pageStatus = BTPS_State::BTPARALLEL_DONE;
+            status_changed = true;
+        }
+        guard.release()?;
+
+        // Wake up all the workers associated with this parallel scan.
+        if status_changed {
+            condvar::condition_variable_broadcast::call(&btscan.btps_cv);
+        }
+        Ok(())
+    })
 }
 
 /// `_bt_parallel_primscan_schedule()` — schedule another primitive index scan.
-pub fn _bt_parallel_primscan_schedule(scan: &mut NbtScan, curr_page: BlockNumber) {
-    debug_assert!(scan.opaque.numArrayKeys != 0);
+/// AM-facing wrapper over the projected core.
+pub fn _bt_parallel_primscan_schedule(scan: &mut NbtScan, curr_page: BlockNumber) -> PgResult<()> {
     let rel = scan.indexRelation.alias();
     let parallel_handle = scan
         .parallel_scan
         .expect("_bt_parallel_primscan_schedule: parallel_scan");
-    parallel::bt_parallel_primscan_schedule_dsm::call(&rel, &mut scan.opaque, parallel_handle, curr_page);
+    bt_parallel_primscan_schedule_core(&rel, &mut scan.opaque, parallel_handle, curr_page)
+}
+
+/// Projected `_bt_parallel_primscan_schedule` core.
+fn bt_parallel_primscan_schedule_core<'mcx>(
+    _rel: &Relation<'mcx>,
+    so: &mut BTScanOpaqueData<'mcx>,
+    parallel_handle: u64,
+    curr_page: BlockNumber,
+) -> PgResult<()> {
+    debug_assert!(so.numArrayKeys != 0);
+
+    with_btscan(parallel_handle, |btscan| -> PgResult<()> {
+        let guard = acquire_btps_lock(btscan)?;
+        if btscan.btps_lastCurrPage == curr_page
+            && btscan.btps_pageStatus == BTPS_State::BTPARALLEL_IDLE
+        {
+            btscan.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
+            btscan.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+            btscan.btps_pageStatus = BTPS_State::BTPARALLEL_NEED_PRIMSCAN;
+
+            // Serialize scan's current array keys.
+            _bt_parallel_serialize_arrays(btscan, so);
+        }
+        guard.release()
+    })
 }
 
 // ===========================================================================
@@ -1250,8 +1659,8 @@ fn seam_bt_parallel_seize<'mcx>(
     so: &mut BTScanOpaqueData<'mcx>,
     parallel_handle: u64,
     first: bool,
-) -> (bool, BlockNumber, BlockNumber) {
-    parallel::bt_parallel_seize_dsm::call(rel, so, parallel_handle, first)
+) -> PgResult<(bool, BlockNumber, BlockNumber)> {
+    bt_parallel_seize_core(rel, so, parallel_handle, first)
 }
 
 fn seam_bt_parallel_release<'mcx>(
@@ -1259,12 +1668,15 @@ fn seam_bt_parallel_release<'mcx>(
     parallel_handle: u64,
     next_scan_page: BlockNumber,
     curr_page: BlockNumber,
-) {
-    parallel::bt_parallel_release_dsm::call(so, parallel_handle, next_scan_page, curr_page);
+) -> PgResult<()> {
+    bt_parallel_release_core(so, parallel_handle, next_scan_page, curr_page)
 }
 
-fn seam_bt_parallel_done<'mcx>(so: &mut BTScanOpaqueData<'mcx>, parallel_handle: u64) {
-    parallel::bt_parallel_done_dsm::call(so, parallel_handle);
+fn seam_bt_parallel_done<'mcx>(
+    so: &mut BTScanOpaqueData<'mcx>,
+    parallel_handle: Option<u64>,
+) -> PgResult<()> {
+    bt_parallel_done_core(so, parallel_handle)
 }
 
 fn seam_bt_parallel_primscan_schedule<'mcx>(
@@ -1272,8 +1684,8 @@ fn seam_bt_parallel_primscan_schedule<'mcx>(
     so: &mut BTScanOpaqueData<'mcx>,
     parallel_handle: u64,
     curr_page: BlockNumber,
-) {
-    parallel::bt_parallel_primscan_schedule_dsm::call(rel, so, parallel_handle, curr_page);
+) -> PgResult<()> {
+    bt_parallel_primscan_schedule_core(rel, so, parallel_handle, curr_page)
 }
 
 #[cfg(test)]
