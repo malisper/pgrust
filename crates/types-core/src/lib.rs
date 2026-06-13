@@ -12,6 +12,7 @@ pub mod fmgr;
 pub mod geo;
 pub mod init;
 pub mod instrument;
+pub mod keywords;
 pub mod primitive;
 pub mod xact;
 
@@ -20,5 +21,6 @@ pub use fmgr::*;
 pub use geo::*;
 pub use init::*;
 pub use instrument::*;
+pub use keywords::*;
 pub use primitive::*;
 pub use xact::*;
