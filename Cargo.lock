@@ -2447,6 +2447,8 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
+ "backend-executor-execMain-seams",
+ "backend-nodes-nodeFuncs-seams",
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "mcx",
@@ -2926,9 +2928,14 @@ name = "backend-executor-execExprInterp"
 version = "0.0.0"
 dependencies = [
  "backend-executor-execExpr-seams",
+ "backend-executor-execExprInterp-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-nodeSubplan-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "backend-utils-sort-tuplesort-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -2982,6 +2989,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
  "types-portal",
  "types-rel",
  "types-scan",
@@ -3907,6 +3915,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-datum",
  "types-error",
  "types-nodes",
 ]
@@ -4309,6 +4318,8 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
