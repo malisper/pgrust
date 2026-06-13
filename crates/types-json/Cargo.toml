@@ -1,16 +1,13 @@
 [package]
-name = "backend-utils-adt-timestamp-seams"
+name = "types-json"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_utils_adt_timestamp_seams"
+name = "types_json"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
-mcx = { path = "../mcx" }
-types-error = { path = "../types-error" }

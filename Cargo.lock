@@ -6765,12 +6765,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-json"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-timestamp-seams",
+ "common-hashfn-seams",
+ "common-jsonapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-json",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-json-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-json",
 ]
 
 [[package]]
@@ -7046,6 +7076,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
 ]
 
@@ -8463,6 +8494,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-jsonapi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-json",
+]
+
+[[package]]
 name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
@@ -8805,6 +8845,7 @@ dependencies = [
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-json",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",
@@ -9114,6 +9155,14 @@ dependencies = [
  "mcx",
  "types-amvalidate",
  "types-core",
+]
+
+[[package]]
+name = "types-json"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
 ]
 
 [[package]]

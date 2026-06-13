@@ -56,3 +56,19 @@ seam_core::seam!(
         stop_time: TimestampTz
     ) -> i64
 );
+
+seam_core::seam!(
+    /// `JsonEncodeDateTime(buf, value, typid, tzp)` (json.c:309) — encode a
+    /// date/time `Datum` into ISO format (forcing XSD date style), returning the
+    /// formatted string. `tzp`, if `Some`, is the time-zone offset in seconds
+    /// for `timestamptz`. The body is entirely the
+    /// `backend/utils/adt/{date,time,timestamp}.c` field conversions
+    /// (`j2date`/`time2tm`/`timetz2tm`/`timestamp2tm`) plus the `Encode*`
+    /// routines, so the whole operation is owned by the datetime subsystem.
+    /// `Err` carries the C `DTERR_*` → `ereport(ERROR, "... out of range")`.
+    pub fn json_encode_datetime(
+        value: types_datum::Datum,
+        typid: types_core::Oid,
+        tzp: Option<i32>,
+    ) -> types_error::PgResult<String>
+);

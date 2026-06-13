@@ -114,6 +114,7 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
+    backend_utils_adt_json::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numutils::init_seams();
