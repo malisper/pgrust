@@ -10,7 +10,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_core::XLogRecPtr;
+use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
 use types_wal::WalLevel;
 
@@ -114,4 +114,35 @@ seam_core::seam!(
     /// next checkpoint, and by `CheckPointTwoPhase`). Returns the rmgr data
     /// bytes. Can `ereport(ERROR)`, carried on `Err`.
     pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>>
+);
+
+seam_core::seam!(
+    /// `GetFlushRecPtr(*insertTLI)` (xlog.c) — the LSN up to which WAL is
+    /// flushed, with the corresponding insert timeline. Returns `(lsn, tli)`.
+    pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
+);
+
+seam_core::seam!(
+    /// `GetWALInsertionTimeLineIfSet()` (xlog.c) — the insert TLI once it has
+    /// been initialized in shared memory, else `0` (the C `InvalidTimeLineID`
+    /// / 0 sentinel before recovery finishes).
+    pub fn get_wal_insertion_timeline_if_set() -> TimeLineID
+);
+
+seam_core::seam!(
+    /// `GetRedoRecPtr()` (xlog.c) — the current redo pointer (`RedoRecPtr`),
+    /// refreshed from shared memory.
+    pub fn get_redo_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `XLogGetOldestSegno(tli)` (xlog.c) — the oldest WAL segment number that
+    /// still exists on disk for `tli`, or `0` if none.
+    pub fn xlog_get_oldest_segno(tli: TimeLineID) -> XLogSegNo
+);
+
+seam_core::seam!(
+    /// `wal_segment_size` (xlog.c GUC) — the configured WAL segment size in
+    /// bytes.
+    pub fn wal_segment_size() -> i32
 );

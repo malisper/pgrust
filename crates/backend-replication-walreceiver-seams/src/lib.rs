@@ -7,3 +7,11 @@ seam_core::seam!(
     /// point invoked by `postmaster_child_launch`; never returns.
     pub fn wal_receiver_main(startup_data: &types_startup::StartupData) -> !
 );
+
+seam_core::seam!(
+    /// `GetWalRcvFlushRecPtr(*latestChunkStart, *receiveTLI)` (walreceiver.c)
+    /// — the last WAL byte + 1 received and flushed to disk by the
+    /// walreceiver, and the timeline it was received on. Returns
+    /// `(lsn, tli)`.
+    pub fn get_wal_rcv_flush_rec_ptr() -> (types_core::XLogRecPtr, types_core::TimeLineID)
+);
