@@ -1537,17 +1537,36 @@ fn rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
 /* ===========================================================================
  * Seam installation
  *
- * This crate's public command drivers are reached from utility processing
- * (`ProcessUtility`), which is not yet ported, so foreigncmds declares no
- * inward seams of its own. `init_seams()` is the standard no-op installer
- * (nothing in `*-foreigncmds-seams` to wire) so the aggregator can call it
- * uniformly.
+ * Most of this crate's public command drivers are reached from utility
+ * processing (`ProcessUtility`), which is not yet ported. But the
+ * `*_oid` owner-change entry points are reached from REASSIGN OWNED in
+ * `backend-catalog-pg-shdepend`, a direct dependency cycle, so they are
+ * declared as inward seams in `backend-commands-foreigncmds-seams` and must be
+ * installed here.
+ *
+ * The seam contract for the REASSIGN-OWNED owner-oid family is `Mcx`-free
+ * (matching the neighbor `alter_type_owner_oid` / `alter_schema_owner_oid` /
+ * `at_exec_change_owner` seams, all called from the same shdepend dispatch
+ * with no `Mcx` in scope). The ported functions need an `Mcx` for the
+ * syscache-row allocation, so each installer wrapper creates a local
+ * `MemoryContext` and runs the ported function in it — the established
+ * bridging idiom (cf. backend-commands-matview::init_seams).
  * ======================================================================== */
 
-/// Install this crate's seams. foreigncmds owns no inward seams yet (its
-/// drivers are called directly by utility processing once that lands), so this
-/// is a no-op kept for aggregator uniformity.
-pub fn init_seams() {}
+/// Install this crate's inward seams: the two REASSIGN-OWNED owner-change
+/// entry points reached from `backend-catalog-pg-shdepend`.
+pub fn init_seams() {
+    use backend_commands_foreigncmds_seams as s;
+
+    s::alter_foreign_server_owner_oid::set(|srv_id, new_owner_id| {
+        let ctx = mcx::MemoryContext::new("AlterForeignServerOwner_oid");
+        AlterForeignServerOwner_oid(ctx.mcx(), srv_id, new_owner_id)
+    });
+    s::alter_foreign_data_wrapper_owner_oid::set(|fdw_id, new_owner_id| {
+        let ctx = mcx::MemoryContext::new("AlterForeignDataWrapperOwner_oid");
+        AlterForeignDataWrapperOwner_oid(ctx.mcx(), fdw_id, new_owner_id)
+    });
+}
 
 #[cfg(test)]
 mod tests;
