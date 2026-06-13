@@ -55,3 +55,19 @@ seam_core::seam!(
         b: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+// === tidbitmap (tidbitmap.c) ===============================================
+
+/// Opaque token standing in for C's `TIDBitmap *` while the executor owns the
+/// live bitmap (it outlives a single `btgetbitmap` call).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TbmHandle(pub u64);
+
+seam_core::seam!(
+    /// `tbm_add_tuples(tbm, &tid, 1, false)` (tidbitmap.c): add one heap TID
+    /// to the bitmap. `Err` carries OOM from growing the bitmap.
+    pub fn tbm_add_tuple(
+        tbm: TbmHandle,
+        tid: types_tuple::heaptuple::ItemPointerData,
+    ) -> types_error::PgResult<()>
+);

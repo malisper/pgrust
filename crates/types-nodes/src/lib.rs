@@ -24,8 +24,10 @@ pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
 pub mod nodegather;
+pub mod nodehashjoin;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
+pub mod noderesult;
 pub mod nodes;
 pub mod parsenodes;
 pub mod pathnodes;
@@ -43,14 +45,18 @@ pub use execnodes::{
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
-    JOIN_RIGHT_ANTI, JOIN_SEMI,
+    JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
 };
 pub use nodegather::{Gather, GatherStateData};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use noderesult::{ResultStateData, T_ResultState};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
+pub use nodehashjoin::{
+    HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
+};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};

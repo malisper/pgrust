@@ -75,30 +75,42 @@ pub use CmdType::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
+    /// `T_Result`.
+    Result(crate::noderesult::Result<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Gather`.
     Gather(crate::nodegather::Gather<'mcx>),
+    /// `T_HashJoin`.
+    HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
+    /// `T_Hash` — the inner child of a HashJoin.
+    Hash(crate::nodehashjoin::Hash<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            Node::Result(_) => T_Result,
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Gather(_) => T_Gather,
+            Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
+            Node::Hash(_) => crate::nodehashjoin::T_Hash,
         }
     }
 
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
+            Node::Result(m) => &m.plan,
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Gather(m) => &m.plan,
+            Node::HashJoin(h) => &h.join.plan,
+            Node::Hash(h) => &h.plan,
         }
     }
 
@@ -111,9 +123,12 @@ impl<'mcx> Node<'mcx> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
+            Node::Result(m) => Ok(Node::Result(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Gather(m) => Ok(Node::Gather(m.clone_in(mcx)?)),
+            Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
+            Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
         }
     }
 }
