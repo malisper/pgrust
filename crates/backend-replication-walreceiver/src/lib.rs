@@ -410,7 +410,8 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     } else {
         "walreceiver".to_string()
     };
-    let conn = match libpqwalrcv::walrcv_connect::call(conninfo, appname.clone()) {
+    let conn = match libpqwalrcv::walrcv_connect::call(conninfo, true, false, false, appname.clone())
+    {
         Ok(c) => c,
         Err(err) => {
             return Err(ereport(ERROR)

@@ -1,0 +1,47 @@
+[package]
+name = "backend-executor-nodeBitmapHeapscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_nodeBitmapHeapscan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-tableam = { path = "../types-tableam" }
+types-tidbitmap = { path = "../types-tidbitmap" }
+types-condvar = { path = "../types-condvar" }
+types-storage = { path = "../types-storage" }
+types-execparallel = { path = "../types-execparallel" }
+
+# Inward seam crate: the executor parallel dispatch reaches this node's
+# parallel methods through these declarations.
+backend-executor-nodeBitmapHeapscan-seams = { path = "../backend-executor-nodeBitmapHeapscan-seams" }
+
+# Outward seam crates (callees owned by other units, reached across a cycle).
+backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
+backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+
+# Direct deps on ported owners (acyclic).
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+
+[dev-dependencies]
+mcx = { path = "../mcx" }

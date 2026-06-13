@@ -88,3 +88,22 @@ seam_core::seam!(
     /// installs as `work_mem` for its validation query.
     pub fn maintenance_work_mem() -> i32
 );
+
+seam_core::seam!(
+    /// `ProcessConfigFile(PGC_SIGHUP)` (guc.c): re-read postgresql.conf on a
+    /// SIGHUP. `Err` carries a parse/apply `ereport(ERROR)`.
+    pub fn process_config_file_sighup() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `set_config_option("search_path", "", PGC_SUSET, PGC_S_OVERRIDE, ...)`
+    /// (slotsync.c): force an empty search_path for the worker's catalog
+    /// access. `Err` carries the option-set `ereport(ERROR)`.
+    pub fn set_config_option_search_path_empty() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `cluster_name` (guc_tables.c GUC string): the configured cluster name,
+    /// `""` when unset. Backend-local GUC state.
+    pub fn cluster_name() -> String
+);

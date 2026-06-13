@@ -89,3 +89,11 @@ seam_core::seam!(
     /// `max_wal_senders` (walsender.c GUC).
     pub fn max_wal_senders() -> i32
 );
+
+seam_core::seam!(
+    /// `GetStandbyFlushRecPtr(NULL)` (walsender.c): on a standby, the most
+    /// recent WAL position known to be safely flushed/replayed (the max of the
+    /// receiver's flushed and the startup process's replayed LSN). Callers
+    /// that don't need the timeline pass `NULL`; this seam discards it.
+    pub fn get_standby_flush_rec_ptr() -> XLogRecPtr
+);

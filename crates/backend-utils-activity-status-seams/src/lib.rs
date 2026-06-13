@@ -41,6 +41,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_report_activity(STATE_IDLE, NULL)` (`backend_status.c`): mark
+    /// this backend idle and clear the current activity string. Infallible.
+    pub fn pgstat_report_activity_idle()
+);
+
+seam_core::seam!(
     /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
     pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
 );

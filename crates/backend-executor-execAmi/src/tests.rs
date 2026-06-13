@@ -143,6 +143,7 @@ fn exec_re_scan_walks_params_and_dispatches() {
             )
             .unwrap(),
         ),
+        ..Default::default()
     };
     let mut init_plan = vec_with_capacity_in(mcx, 1).unwrap();
     init_plan.push(init_state);

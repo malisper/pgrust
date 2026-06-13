@@ -99,6 +99,42 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `LockApplyTransactionForSession(suboid, xid, objid, lockmode)` (lmgr.c):
+    /// take a *session-level* lock on a transaction being applied on a logical
+    /// replication subscriber (the parallel-apply deadlock-detection STREAM and
+    /// XACT locks). `MyDatabaseId` is read internally by the owner.
+    ///
+    /// These are deliberately session-scoped and held across the streaming
+    /// protocol's state machine — the leader holds the stream lock for the
+    /// whole streamed transaction while parallel-apply workers block on it, and
+    /// the matching `Unlock*` is an explicit call later in the protocol, never
+    /// a function-scoped `Drop`. They are therefore explicit lock/unlock seams
+    /// mirroring the C control flow, not [`LockGuard`]s; release on
+    /// proc/session exit is the lmgr owner's responsibility. Can
+    /// `ereport(ERROR)` (deadlock, cancel), carried on `Err`.
+    pub fn lock_apply_transaction_for_session(
+        suboid: Oid,
+        xid: types_core::TransactionId,
+        objid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockApplyTransactionForSession(suboid, xid, objid, lockmode)`
+    /// (lmgr.c): release the matching session-level apply-transaction lock.
+    /// `MyDatabaseId` is read internally by the owner. Explicit counterpart to
+    /// [`lock_apply_transaction_for_session`]; can `elog(WARNING/ERROR)` on a
+    /// lock-table inconsistency, carried on `Err`.
+    pub fn unlock_apply_transaction_for_session(
+        suboid: Oid,
+        xid: types_core::TransactionId,
+        objid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
 /// What a [`LockGuard`] holds — the lmgr-level identity of the lock, enough
 /// to delegate the matching `Unlock*` call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,14 +262,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `VirtualXactLockTableInsert(vxid)` — lock our virtual transaction id
-    /// before advertising it in the proc array.
-    pub fn virtual_xact_lock_table_insert(vxid: VirtualTransactionId) -> PgResult<()>
-);
-
-seam_core::seam!(
     /// `DescribeLockTag(buf, tag)` (lmgr.c) — render a `LOCKTAG` to a human
     /// description for the deadlock report. C appends to a `StringInfo`; the
     /// seam returns the rendered `String` (the detector appends it itself).
     pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `CheckRelationOidLockedByMe(relid, lockmode, orstronger)` (lmgr.c).
+    pub fn check_relation_oid_locked_by_me(
+        relid: Oid,
+        lockmode: LOCKMODE,
+        orstronger: bool,
+    ) -> bool
 );

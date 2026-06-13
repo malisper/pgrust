@@ -34,8 +34,15 @@ pub struct Plan<'mcx> {
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *qual` — implicitly-ANDed qual conditions (`None` = the C `NIL`).
     pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `Cardinality plan_rows` — estimated number of rows this node emits.
+    pub plan_rows: f64,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `bool async_capable` — engage asynchronous-capable logic?
+    pub async_capable: bool,
+    /// `int plan_node_id` — unique across the entire final plan tree; used as
+    /// the DSM TOC key for a node's parallel state.
+    pub plan_node_id: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -74,8 +81,11 @@ impl Plan<'_> {
         Ok(Plan {
             startup_cost: self.startup_cost,
             total_cost: self.total_cost,
+            async_capable: self.async_capable,
+            plan_node_id: self.plan_node_id,
             targetlist,
             qual,
+            plan_rows: self.plan_rows,
             parallel_aware: self.parallel_aware,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
@@ -97,14 +107,11 @@ impl Plan<'_> {
     }
 }
 
-/// `Scan` (nodes/plannodes.h) — the base every scan plan node embeds first:
+/// `Scan` (nodes/plannodes.h) — the abstract base every scan plan node embeds:
 ///
 /// ```c
 /// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
 /// ```
-/// `Scan` (nodes/plannodes.h) — the abstract base for all scan plan nodes:
-/// the embedded `Plan` followed by the range-table index of the scanned
-/// relation. Trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct Scan<'mcx> {
     /// `Plan plan` — the abstract plan-node base.
@@ -116,11 +123,45 @@ pub struct Scan<'mcx> {
 impl Scan<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
-    /// Deep copy of the scan base into `mcx`. Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
         Ok(Scan {
             plan: self.plan.clone_in(mcx)?,
             scanrelid: self.scanrelid,
+        })
+    }
+}
+
+/// `TidScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct TidScan { Scan scan; List *tidquals; } TidScan;
+/// ```
+#[derive(Debug, Default)]
+pub struct TidScan<'mcx> {
+    /// `Scan scan` — the abstract scan base.
+    pub scan: Scan<'mcx>,
+    /// `List *tidquals` — qual(s) involving CTID = something, or CTID = ANY
+    /// (...), or CURRENT OF cursor. `None` = the C `NIL`.
+    pub tidquals: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+}
+
+impl TidScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TidScan<'b>> {
+        let tidquals = match &self.tidquals {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(TidScan {
+            scan: self.scan.clone_in(mcx)?,
+            tidquals,
         })
     }
 }
@@ -131,12 +172,19 @@ pub struct PlannedStmt<'mcx> {
     /// `List *resultRelations` — integer list of RT indexes of the query's
     /// target relations (`None` = the C `NIL`).
     pub resultRelations: Option<PgVec<'mcx, i32>>,
+    /// `List *relationOids` — OIDs of relations the plan depends on, used by
+    /// COPY-(query)-TO's RLS double-check (`None` = the C `NIL`).
+    pub relationOids: Option<PgVec<'mcx, types_core::Oid>>,
     /// `struct Plan *planTree` — tree of `Plan` nodes (`None` = the C `NULL`).
     pub planTree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `List *rowMarks` — a list of `PlanRowMark` nodes (`None` = the C `NIL`).
     /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
     /// planner port.
     pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `bool canSetTag` — do we set the command result tag/es_processed?
+    /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
+    /// the first stmt with this set.
+    pub canSetTag: bool,
 }
 
 impl PlannedStmt<'_> {
@@ -163,13 +211,25 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let relationOids = match &self.relationOids {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             resultRelations,
+            relationOids,
             planTree: match &self.planTree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
             },
             rowMarks,
+            canSetTag: self.canSetTag,
         })
     }
 }

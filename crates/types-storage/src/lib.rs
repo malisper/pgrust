@@ -11,6 +11,8 @@
 extern crate alloc;
 
 pub mod buf;
+pub mod bufpage;
+pub mod ilist;
 pub mod inval;
 pub mod latch;
 pub mod lock;

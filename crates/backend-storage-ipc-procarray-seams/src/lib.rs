@@ -8,11 +8,53 @@
 use mcx::{Mcx, PgVec};
 use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
 use types_error::PgResult;
+use types_snapshot::SnapshotData;
 use types_storage::{
 
     ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
 
 };
+
+seam_core::seam!(
+    /// `GetSnapshotData(snapshot)` (procarray.c) — fill an MVCC snapshot's
+    /// xmin/xmax/xip/subxip from the running-transactions state. C writes into
+    /// a caller-provided static struct and also advances the per-backend
+    /// `MyProc->xmin`/`TransactionXmin`/`RecentXmin`; this seam returns only
+    /// the computed snapshot fields, and snapmgr replays the xmin updates via
+    /// the proc seam. Allocates the XID arrays and can `ereport(ERROR)`.
+    pub fn get_snapshot_data() -> PgResult<SnapshotData>
+);
+
+seam_core::seam!(
+    /// `ProcArrayInstallImportedXmin(xmin, sourcevxid)` (procarray.c) — make
+    /// our `MyProc->xmin` safe to set from an imported snapshot, verifying the
+    /// source vxid is still running. Returns false when the source vanished.
+    pub fn proc_array_install_imported_xmin(
+        xmin: TransactionId,
+        sourcevxid: VirtualTransactionId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ProcArrayInstallRestoredXmin(xmin, proc)` (procarray.c) — like above
+    /// but the source is identified by a PGPROC (parallel-worker restore).
+    pub fn proc_array_install_restored_xmin(
+        xmin: TransactionId,
+        source_proc: ProcNumber,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GetMaxSnapshotXidCount()` (procarray.c) — the largest possible xip[]
+    /// length. Pure shared-config read; cannot `ereport`.
+    pub fn get_max_snapshot_xid_count() -> i32
+);
+
+seam_core::seam!(
+    /// `GetMaxSnapshotSubxidCount()` (procarray.c) — the largest possible
+    /// subxip[] length. Pure shared-config read; cannot `ereport`.
+    pub fn get_max_snapshot_subxid_count() -> i32
+);
 
 seam_core::seam!(
     /// `GetConflictingVirtualXIDs(limitXmin, dbOid)` — VXIDs of backends whose
@@ -99,6 +141,14 @@ seam_core::seam!(
     /// proc->tempNamespaceId))`, or `None` when the slot is empty (backend
     /// not alive). Shared-memory read; cannot `ereport`.
     pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
+);
+
+seam_core::seam!(
+    /// `TransactionIdIsInProgress(xid)` (procarray.c) — is the given XID still
+    /// shown running in the ProcArray (or a still-running subxact)? Allocates a
+    /// scratch xids array via palloc on first use, so its OOM `ereport` surface
+    /// is carried on `Err`.
+    pub fn transaction_id_is_in_progress(xid: TransactionId) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -213,4 +263,11 @@ seam_core::seam!(
     /// currently connected to `databaseid`. `Err` carries its `ereport`
     /// surface.
     pub fn count_db_connections(databaseid: types_core::Oid) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)` (procarray.c): the
+    /// oldest xid it is safe to start decoding from. `catalogOnly` restricts
+    /// the horizon to catalog tables. Called with `ProcArrayLock` held.
+    pub fn get_oldest_safe_decoding_transaction_id(catalog_only: bool) -> TransactionId
 );

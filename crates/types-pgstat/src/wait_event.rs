@@ -15,6 +15,11 @@ pub const PG_WAIT_TIMEOUT: u32 = 0x09000000;
 pub const PG_WAIT_IO: u32 = 0x0A000000;
 pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 
+/// `WAIT_EVENT_ARCHIVER_MAIN` — 1st entry (index 0) of the Activity section
+/// of `wait_event_names.txt`, so `PG_WAIT_ACTIVITY + 0` (= 0x05000000,
+/// matching c2rust's 83886080).
+pub const WAIT_EVENT_ARCHIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 0;
+
 /// `WAIT_EVENT_SYSLOGGER_MAIN` — 14th entry (index 13) of the Activity
 /// section of `wait_event_names.txt` (ARCHIVER_MAIN, AUTOVACUUM_MAIN,
 /// BGWRITER_HIBERNATE, BGWRITER_MAIN, CHECKPOINTER_MAIN,
@@ -23,6 +28,21 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// REPLICATION_SLOTSYNC_MAIN, REPLICATION_SLOTSYNC_SHUTDOWN,
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
+
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN` — "Waiting in main loop of slot sync
+/// worker." 12th entry (0-based 11) of the Activity section of
+/// `wait_event_names.txt`, so `PG_WAIT_ACTIVITY + 11`.
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 11;
+
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN` — "Waiting for slot sync worker to
+/// shut down." 13th entry (0-based 12) of the Activity section, so
+/// `PG_WAIT_ACTIVITY + 12`.
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
+
+/// `WAIT_EVENT_APPEND_READY` — "Waiting for subplan nodes of an Append plan
+/// node to be ready." 1st entry (0-based 0) of the IPC section, so
+/// `PG_WAIT_IPC | 0` (= 134217728, matching c2rust).
+pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
 
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
@@ -41,6 +61,19 @@ pub const WAIT_EVENT_MESSAGE_QUEUE_SEND: u32 = PG_WAIT_IPC | 36;
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
 pub const WAIT_EVENT_SPIN_DELAY: u32 = PG_WAIT_TIMEOUT | 6;
+
+/// `WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN` — 10th entry (index 9) of the
+/// `WaitEventActivity` section. The parallel-apply worker's idle wait in
+/// `LogicalParallelApplyLoop`.
+pub const WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN: u32 = PG_WAIT_ACTIVITY + 9;
+
+/// `WAIT_EVENT_LOGICAL_APPLY_SEND_DATA` — index 29 of the `WaitEventIPC`
+/// section. The leader's wait in `pa_send_data` while the queue is full.
+pub const WAIT_EVENT_LOGICAL_APPLY_SEND_DATA: u32 = PG_WAIT_IPC + 29;
+
+/// `WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE` — index 30 of the
+/// `WaitEventIPC` section. The leader's wait in `pa_wait_for_xact_state`.
+pub const WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE: u32 = PG_WAIT_IPC + 30;
 
 /// `WAIT_EVENT_RELATION_MAP_READ` — 41st entry (0-based 40) of the
 /// `WaitEventIO` section of `wait_event_names.txt`. (= 167772200, matching
