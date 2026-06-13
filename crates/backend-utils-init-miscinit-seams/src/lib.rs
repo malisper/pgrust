@@ -89,6 +89,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
+    /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
+    /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
+    /// rather than `SetDatabasePath`, which is one-shot for normal backends.
+    pub fn set_database_path(path: &str)
+);
+
+seam_core::seam!(
+    /// Clear the `DatabasePath` global back to NULL (pairs with
+    /// [`set_database_path`] in the recovery hack of
+    /// `ProcessCommittedInvalidationMessages`).
+    pub fn clear_database_path()
+);
+
+seam_core::seam!(
     /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
     /// process-type description string for `backendType` (a static table
     /// lookup; the C returns a `const char *` into static text). Infallible.

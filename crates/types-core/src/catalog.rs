@@ -11,6 +11,12 @@ pub const NAMESPACE_RELATION_ID: Oid = 2615;
 pub const RELATION_RELATION_ID: Oid = 1259;
 /// `DatabaseRelationId` (`catalog/pg_database.h`) — pg_database's OID.
 pub const DATABASE_RELATION_ID: Oid = 1262;
+/// `AttributeRelationId` (`catalog/pg_attribute.h`) — pg_attribute's OID.
+pub const ATTRIBUTE_RELATION_ID: Oid = 1249;
+/// `IndexRelationId` (`catalog/pg_index.h`) — pg_index's OID.
+pub const INDEX_RELATION_ID: Oid = 2610;
+/// `ConstraintRelationId` (`catalog/pg_constraint.h`) — pg_constraint's OID.
+pub const CONSTRAINT_RELATION_ID: Oid = 2606;
 
 /// `PG_CATALOG_NAMESPACE` (`catalog/pg_namespace_d.h`) — OID of the
 /// `pg_catalog` namespace.
@@ -41,6 +47,11 @@ pub const INTERNALOID: Oid = 2281;
 
 /// `BTREE_AM_OID` (`catalog/pg_am_d.h`) — the OID of the btree access method.
 pub const BTREE_AM_OID: Oid = 403;
+
+/// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation. The
+/// `ScanKeyInit` shorthand always stamps this into `sk_collation` (correct
+/// for all collation-aware catalog columns, ignored for the rest).
+pub const C_COLLATION_OID: Oid = 950;
 
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
