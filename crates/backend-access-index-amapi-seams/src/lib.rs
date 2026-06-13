@@ -17,6 +17,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetIndexAmRoutine(amhandler)` (amapi.c): call the index AM's handler
+    /// function (`OidFunctionCall0(amhandler)` returning an `IndexAmRoutine*`)
+    /// and hand back the vtable for the relcache to cache in `rd_indam`. In C
+    /// the relcache `memcpy`s it into the index's `rd_indexcxt`; here the owner
+    /// returns the routine by value. `Err` carries the AM handler's
+    /// `ereport(ERROR)` (e.g. wrong magic number).
+    pub fn get_index_am_routine(
+        amhandler: types_core::Oid,
+    ) -> types_error::PgResult<types_tableam::amapi::IndexAmRoutine>
+);
+
+seam_core::seam!(
     /// `amroutine->amadjustmembers(opfamilyoid, opclassoid, operators,
     /// procedures)` (the AM's member-adjustment callback): set dependency
     /// strength and optionally validate. The C callback mutates the lists in

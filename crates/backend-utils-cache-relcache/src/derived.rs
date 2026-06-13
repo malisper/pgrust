@@ -104,3 +104,12 @@ pub fn RelationBuildPublicationDesc(_relation: *mut RelationData) -> PgResult<()
 pub fn RelationBuildRuleLock(_relation: *mut RelationData) -> PgResult<()> {
     todo!("relcache-derived: RelationBuildRuleLock (rewrite vocab seamed)")
 }
+
+/// `RelationGetIndexAttOptions(relation, copy)` (relcache.c): get/parse the
+/// AM/opclass-specific per-column index options into `rd_opcoptions`, caching
+/// them in `rd_indexcxt`. **Own logic** (the `index_opclass_options`/
+/// `get_attoptions` calls are the cross-unit primitives). Filled with the
+/// derived family; `RelationInitIndexAccessInfo` forces a populate via this.
+pub fn RelationGetIndexAttOptions(_relation: *mut RelationData, _copy: bool) -> PgResult<()> {
+    todo!("relcache-derived: RelationGetIndexAttOptions (own logic)")
+}
