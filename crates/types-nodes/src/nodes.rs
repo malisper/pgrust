@@ -80,6 +80,10 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_HashJoin`.
+    HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
+    /// `T_Hash` — the inner child of a HashJoin.
+    Hash(crate::nodehashjoin::Hash<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -89,6 +93,8 @@ impl<'mcx> Node<'mcx> {
             Node::Result(_) => T_Result,
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
+            Node::Hash(_) => crate::nodehashjoin::T_Hash,
         }
     }
 
@@ -98,6 +104,8 @@ impl<'mcx> Node<'mcx> {
             Node::Result(m) => &m.plan,
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::HashJoin(h) => &h.join.plan,
+            Node::Hash(h) => &h.plan,
         }
     }
 
@@ -113,6 +121,8 @@ impl<'mcx> Node<'mcx> {
             Node::Result(m) => Ok(Node::Result(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
+            Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
         }
     }
 }

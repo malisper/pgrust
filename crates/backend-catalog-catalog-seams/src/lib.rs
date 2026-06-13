@@ -12,3 +12,10 @@ seam_core::seam!(
     /// infallible.
     pub fn is_pinned_object(class_id: Oid, object_id: Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation a
+    /// shared catalog (lives in the global tablespace, visible from every
+    /// database)? Lookup against a fixed OID set — infallible.
+    pub fn is_shared_relation(relation_id: Oid) -> bool
+);

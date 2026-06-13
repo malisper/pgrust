@@ -27,6 +27,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid))`
+    /// (utils/cache/syscache.c): does a pg_authid row for this role OID exist?
+    /// Used to confirm a role wasn't concurrently dropped. `Err` carries the
+    /// catcache lookup's own error surface.
+    pub fn auth_oid_exists(roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the
     /// `Form_pg_opclass` fields the hash validator reads, copied into `mcx`.
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
