@@ -59,6 +59,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CacheInvalidateRelmap(databaseId)` (inval.c): register a relmap
+    /// invalidation to be sent to other backends after a relation-map file
+    /// rewrite (`databaseId == InvalidOid` for the shared map). Sent inside a
+    /// critical section by relmapper; a failure forces a database-wide PANIC.
+    pub fn cache_invalidate_relmap(database_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AtEOXact_Inval(isCommit)` — process/discard pending invalidations at
     /// top-level transaction end.
     pub fn at_eoxact_inval(is_commit: bool) -> PgResult<()>

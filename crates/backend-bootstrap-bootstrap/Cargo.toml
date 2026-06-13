@@ -1,0 +1,44 @@
+[package]
+name = "backend-bootstrap-bootstrap"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_bootstrap_bootstrap"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
+types-nodes = { path = "../types-nodes" }
+types-rel = { path = "../types-rel" }
+types-signal = { path = "../types-signal" }
+types-storage = { path = "../types-storage" }
+types-startup = { path = "../types-startup" }
+types-tuple = { path = "../types-tuple" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-bootstrap-bootparse-seams = { path = "../backend-bootstrap-bootparse-seams" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-common-link-canary-seams = { path = "../backend-common-link-canary-seams" }
+backend-main-main-seams = { path = "../backend-main-main-seams" }
+backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-ipc-ipc-seams = { path = "../backend-storage-ipc-ipc-seams" }
+backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }

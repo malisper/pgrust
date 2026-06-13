@@ -43,6 +43,8 @@ use types_nodes::{EStateData, PlanStateNode};
 /// Install this crate's implementations into its seam slots.
 pub fn init_seams() {
     backend_executor_execAmi_seams::exec_re_scan::set(exec_re_scan);
+    backend_executor_execAmi_seams::exec_mark_pos::set(|node, _estate| exec_mark_pos(node));
+    backend_executor_execAmi_seams::exec_restr_pos::set(|node, _estate| exec_restr_pos(node));
 }
 
 /// `elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node))` — carries

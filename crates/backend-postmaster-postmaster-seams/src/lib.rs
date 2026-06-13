@@ -8,3 +8,21 @@ seam_core::seam!(
     /// postmaster-only file descriptors.
     pub fn close_postmaster_ports(am_syslogger: bool)
 );
+
+seam_core::seam!(
+    /// `PreAuthDelay` (`postmaster.c` GUC) — seconds to sleep before
+    /// authentication, a debugging aid. Pure read of backend-local GUC state.
+    pub fn pre_auth_delay() -> i32
+);
+
+seam_core::seam!(
+    /// `AuthenticationTimeout` (`postmaster.c` GUC) — seconds to wait for the
+    /// startup packet / authentication exchange. Pure read.
+    pub fn authentication_timeout() -> i32
+);
+
+seam_core::seam!(
+    /// `log_hostname` (`postmaster.c` GUC) — whether to log/resolve the
+    /// client's host name (vs. numeric address). Pure read.
+    pub fn log_hostname() -> bool
+);

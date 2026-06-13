@@ -132,6 +132,10 @@ pub struct TableAmRoutine {
     pub index_fetch_begin:
         for<'mcx> fn(rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
 
+    /// `index_fetch_reset(data)` — release resources (buffer pins) held by
+    /// the index fetch, without ending it.
+    pub index_fetch_reset: fn(data: &mut IndexFetchTableData<'_>) -> PgResult<()>,
+
     /// `index_fetch_end(scan)` — release index-fetch resources.
     pub index_fetch_end: fn(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>,
 

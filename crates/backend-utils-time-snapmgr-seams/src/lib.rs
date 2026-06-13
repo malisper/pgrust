@@ -29,6 +29,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnregisterSnapshot(snapshot)` (snapmgr.c): drop the resource-owner
+    /// registration taken by [`register_snapshot`], freeing the snapshot when
+    /// its last registration goes away. The owned `SnapshotData` is consumed.
+    /// Cannot `ereport` in C; modeled infallible bare.
+    pub fn unregister_snapshot(snapshot: types_snapshot::SnapshotData)
+);
+
+seam_core::seam!(
     /// `EstimateSnapshotSpace(snapshot)` (snapmgr.c): bytes needed to
     /// serialize the snapshot. Pure size computation; cannot `ereport`.
     pub fn estimate_snapshot_space(snapshot: &types_snapshot::SnapshotData) -> usize
@@ -89,4 +97,26 @@ seam_core::seam!(
     /// `XactHasExportedSnapshots()` — true after `pg_export_snapshot`, which
     /// forbids PREPARE.
     pub fn xact_has_exported_snapshots() -> bool
+);
+
+seam_core::seam!(
+    /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
+    /// `None` (the C may return NULL when no snapshot is active). Snapshots
+    /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
+    /// pointer the snapshot stack and callers alias).
+    pub fn get_active_snapshot() -> PgResult<Option<std::rc::Rc<types_snapshot::SnapshotData>>>
+);
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(snap)` (snapmgr.c) — make `snap` the active
+    /// snapshot (copies it onto the active-snapshot stack). Allocates; can
+    /// `ereport(ERROR)`.
+    pub fn push_active_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
+    pub fn pop_active_snapshot() -> PgResult<()>
 );
