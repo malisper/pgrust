@@ -136,7 +136,7 @@ pub fn calculate_shmem_size() -> PgResult<(Size, i32)> {
     size = shmem::add_size::call(size, xc::clog_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::commit_ts_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::sub_trans_shmem_size()?)?;
-    size = shmem::add_size::call(size, xc::two_phase_shmem_size()?)?;
+    size = shmem::add_size::call(size, xc::two_phase_shmem_size())?;
     size = shmem::add_size::call(size, bg::background_worker_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::multi_xact_shmem_size()?)?;
     size = shmem::add_size::call(size, lwlock::lwlock_shmem_size::call()?)?;

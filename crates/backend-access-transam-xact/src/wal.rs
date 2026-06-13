@@ -28,7 +28,7 @@ fn oom() -> PgError {
 
 /// Serialize a `RelFileLocator` array (`{ Oid spcOid; Oid dbOid;
 /// RelFileNumber relNumber; }` each).
-fn rels_bytes(rels: &[RelFileLocator]) -> PgResult<Vec<u8>> {
+pub(crate) fn rels_bytes(rels: &[RelFileLocator]) -> PgResult<Vec<u8>> {
     let mut buf = Vec::new();
     buf.try_reserve(rels.len() * 12).map_err(|_| oom())?;
     for rel in rels {
@@ -41,7 +41,7 @@ fn rels_bytes(rels: &[RelFileLocator]) -> PgResult<Vec<u8>> {
 
 /// Serialize an `xl_xact_stats_item` array. The struct is exactly 16 bytes:
 /// `{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`.
-fn stats_bytes(items: &[XlXactStatsItem]) -> PgResult<Vec<u8>> {
+pub(crate) fn stats_bytes(items: &[XlXactStatsItem]) -> PgResult<Vec<u8>> {
     let mut buf = Vec::new();
     buf.try_reserve(items.len() * 16).map_err(|_| oom())?;
     for item in items {
@@ -55,7 +55,7 @@ fn stats_bytes(items: &[XlXactStatsItem]) -> PgResult<Vec<u8>> {
 
 /// Serialize the `SharedInvalidationMessage` array to its raw C-union form
 /// (the byte layout the redo side and xactdesc expect).
-fn inval_msgs_bytes(msgs: &[SharedInvalidationMessage]) -> PgResult<Vec<u8>> {
+pub(crate) fn inval_msgs_bytes(msgs: &[SharedInvalidationMessage]) -> PgResult<Vec<u8>> {
     let mut buf = Vec::new();
     buf.try_reserve(msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE)
         .map_err(|_| oom())?;
