@@ -552,14 +552,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_compatible_hash_operators(opno, &lhs_opno, &rhs_opno)` (lsyscache.c):
-    /// the hash equality operator(s) compatible with `opno` on its LHS and RHS
-    /// datatypes. This seam always requests both. Returns `Some((lhs, rhs))`
-    /// when found (the C `true`), `None` when not (the C `false`).
-    pub fn get_compatible_hash_operators(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
-);
-
-seam_core::seam!(
     /// `get_op_index_interpretation(opno)` (lsyscache.c): the amcanorder
     /// opfamilies `opno` belongs to and its properties within each, as a list
     /// allocated in `mcx` (empty == the C `NIL`).

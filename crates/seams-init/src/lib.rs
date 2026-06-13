@@ -116,6 +116,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_format_type::init_seams();
+    backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
@@ -124,7 +125,10 @@ pub fn init_all() {
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_ri_triggers::init_seams();
     backend_utils_cache_attoptcache::init_seams();
+    backend_utils_cache_catcache::init_seams();
     backend_utils_cache_inval::init_seams();
+    backend_utils_cache_lsyscache::init_seams();
+    backend_utils_cache_relcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_relmapper::init_seams();
     backend_utils_cache_spccache::init_seams();
