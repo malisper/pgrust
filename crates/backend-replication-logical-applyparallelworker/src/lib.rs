@@ -225,6 +225,11 @@ struct Globals {
     next_shared_token: SharedToken,
     /// `volatile sig_atomic_t ParallelApplyMessagePending` (C line 245).
     parallel_apply_message_pending: bool,
+    /// `static List *subxactlist = NIL;` (C line 255) — a list of subtransaction
+    /// xids maintained by this file. In C it is allocated in
+    /// `TopTransactionContext` and freed at transaction end; here it is a plain
+    /// `Vec<TransactionId>` reset by `pa_reset_subtrans`.
+    subxactlist: Vec<TransactionId>,
 }
 
 impl Globals {
@@ -237,6 +242,7 @@ impl Globals {
             shared_registry: BTreeMap::new(),
             next_shared_token: 1,
             parallel_apply_message_pending: false,
+            subxactlist: Vec::new(),
         }
     }
 }
@@ -1281,7 +1287,7 @@ fn pa_savepoint_name(suboid: Oid, xid: TransactionId, szsp: Size) -> String {
 
 /// `void pa_start_subtrans(TransactionId current_xid, TransactionId top_xid)`.
 pub fn pa_start_subtrans(current_xid: TransactionId, top_xid: TransactionId) -> PgResult<()> {
-    if current_xid != top_xid && !worker::subxact_member::call(current_xid) {
+    if current_xid != top_xid && !with_globals(|g| g.subxactlist.contains(&current_xid)) {
         let spname =
             pa_savepoint_name(worker::my_subscription_oid::call(), current_xid, NAMEDATALEN);
 
@@ -1309,7 +1315,8 @@ pub fn pa_start_subtrans(current_xid: TransactionId, top_xid: TransactionId) -> 
          */
         backend_access_transam_xact_seams::commit_transaction_command::call()?;
 
-        worker::subxact_append::call(current_xid);
+        /* subxactlist = lappend_xid(subxactlist, current_xid); (C 1402) */
+        with_globals(|g| g.subxactlist.push(current_xid));
     }
     Ok(())
 }
@@ -1324,7 +1331,7 @@ pub fn pa_reset_subtrans() {
      * We don't need to free this explicitly as the allocated memory will be
      * freed at the transaction end.
      */
-    worker::subxact_reset::call(); /* subxactlist = NIL; */
+    with_globals(|g| g.subxactlist.clear()); /* subxactlist = NIL; */
 }
 
 // ===========================================================================
@@ -1395,14 +1402,15 @@ pub fn pa_stream_abort(abort_data: &LogicalRepStreamAbortData) -> PgResult<()> {
          * Search the subxactlist, determine the offset tracked for the subxact,
          * and truncate the list.
          */
-        let mut i = worker::subxact_length::call() - 1;
+        let mut i = with_globals(|g| g.subxactlist.len() as i32) - 1;
         while i >= 0 {
-            let xid_tmp = worker::subxact_nth::call(i);
+            let xid_tmp = with_globals(|g| g.subxactlist[i as usize]);
 
             if xid_tmp == subxid {
                 backend_access_transam_xact_seams::rollback_to_savepoint::call(&spname)?;
                 backend_access_transam_xact_seams::commit_transaction_command::call()?;
-                worker::subxact_truncate::call(i);
+                /* subxactlist = list_truncate(subxactlist, i); keeps first i. */
+                with_globals(|g| g.subxactlist.truncate(i as usize));
                 break;
             }
             i -= 1;

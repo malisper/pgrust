@@ -6,7 +6,7 @@
 //! reaches across a dependency cycle: the apply-worker / subscription identity
 //! and state (`MyLogicalRepWorker` / `MySubscription` fields, GUCs read through
 //! the worker), the change/spool dispatch, the apply error-context stack, the
-//! stream-file machinery, the `TopTransactionContext` subxact list, the
+//! stream-file machinery, the
 //! parallel-apply DSM segment + `shm_mq` glue, and the `ParallelApplyWorkerShared`
 //! header (which lives in the DSM segment, shared between leader and worker, and
 //! is reached through opaque `u64` handles the runtime resolves against the
@@ -61,14 +61,6 @@ seam_core::seam!(pub fn logicalrep_worker_launch_parallel_apply(
 // header) and passes them in; the launcher-owned stop sequence (LWLock +
 // generation/proc check + SIGUSR2) lives in launcher.c.
 seam_core::seam!(pub fn logicalrep_pa_worker_stop(generation: u16, slot_no: i32) -> PgResult<()>);
-
-// --- subxact list (TopTransactionContext-allocated) -----------------------
-seam_core::seam!(pub fn subxact_member(xid: TransactionId) -> bool);
-seam_core::seam!(pub fn subxact_append(xid: TransactionId));
-seam_core::seam!(pub fn subxact_reset());
-seam_core::seam!(pub fn subxact_length() -> i32);
-seam_core::seam!(pub fn subxact_nth(i: i32) -> TransactionId);
-seam_core::seam!(pub fn subxact_truncate(n: i32));
 
 // --- parallel-apply DSM segment + shm_mq glue -----------------------------
 // The DSM segment, `shm_toc`, and the two `shm_mq`s are owned by the DSM/shm_mq
