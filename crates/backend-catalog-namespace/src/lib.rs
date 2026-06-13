@@ -115,6 +115,83 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::get_namespace_oid::set(crate::get_namespace_oid);
     backend_catalog_namespace_seams::range_var_get_relid::set(crate::RangeVarGetRelid);
     backend_catalog_namespace_seams::lookup_explicit_namespace::set(crate::LookupExplicitNamespace);
+    backend_catalog_namespace_seams::funcname_get_candidates::set(seam_funcname_get_candidates);
+    backend_catalog_namespace_seams::opername_get_candidates::set(seam_opername_get_candidates);
+    backend_catalog_namespace_seams::opername_get_oprid::set(seam_opername_get_oprid);
+    backend_catalog_namespace_seams::get_collation_oid::set(seam_get_collation_oid);
+    backend_catalog_namespace_seams::get_ts_dict_oid::set(seam_get_ts_dict_oid);
+    backend_catalog_namespace_seams::make_range_var_from_name_list::set(seam_make_range_var_from_name_list);
+    backend_catalog_namespace_seams::relation_is_visible::set(crate::RelationIsVisible);
+    backend_catalog_namespace_seams::function_is_visible::set(crate::FunctionIsVisible);
+    backend_catalog_namespace_seams::operator_is_visible::set(crate::OperatorIsVisible);
+    backend_catalog_namespace_seams::collation_is_visible::set(crate::CollationIsVisible);
+    backend_catalog_namespace_seams::ts_config_is_visible::set(crate::TSConfigIsVisible);
+    backend_catalog_namespace_seams::ts_dictionary_is_visible::set(crate::TSDictionaryIsVisible);
+}
+
+/// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
+/// image (`&[Option<String>]`) the in-crate functions take.
+fn name_list_owned(names: &[&str]) -> Vec<Option<String>> {
+    names.iter().map(|s| Some((*s).to_string())).collect()
+}
+
+fn seam_funcname_get_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[&str],
+    nargs: i32,
+    argnames: &[&str],
+    expand_variadic: bool,
+    expand_defaults: bool,
+    include_out_arguments: bool,
+    missing_ok: bool,
+) -> PgResult<FuncCandidateList<'mcx>> {
+    let owned = name_list_owned(names);
+    let argnames_owned: Vec<String> = argnames.iter().map(|s| (*s).to_string()).collect();
+    FuncnameGetCandidates(
+        mcx,
+        &owned,
+        nargs,
+        &argnames_owned,
+        expand_variadic,
+        expand_defaults,
+        include_out_arguments,
+        missing_ok,
+    )
+}
+
+fn seam_opername_get_candidates<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[&str],
+    oprkind: u8,
+    missing_schema_ok: bool,
+) -> PgResult<FuncCandidateList<'mcx>> {
+    let owned = name_list_owned(names);
+    OpernameGetCandidates(mcx, &owned, oprkind, missing_schema_ok)
+}
+
+fn seam_opername_get_oprid(
+    mcx: Mcx<'_>,
+    names: &[&str],
+    oprleft: Oid,
+    oprright: Oid,
+) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    OpernameGetOprid(mcx, &owned, oprleft, oprright)
+}
+
+fn seam_get_collation_oid(mcx: Mcx<'_>, collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(collname);
+    get_collation_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_get_ts_dict_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    get_ts_dict_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar> {
+    let owned = name_list_owned(names);
+    makeRangeVarFromNameList(&owned)
 }
 
 /// `FUNC_PARAM_IN` / `FUNC_PARAM_INOUT` / `FUNC_PARAM_VARIADIC`

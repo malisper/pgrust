@@ -17,3 +17,14 @@ seam_core::seam!(
         type_oid: Oid,
     ) -> PgResult<mcx::PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `format_type_be_qualified(type_oid)` (format_type.c): like
+    /// [`format_type_be`] but always schema-qualifies the type name
+    /// (`FORMAT_TYPE_FORCE_QUALIFY`), palloc'd in `mcx`. `Err` carries the
+    /// invalid-type cache-lookup `elog(ERROR)` and OOM.
+    pub fn format_type_be_qualified<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_oid: Oid,
+    ) -> PgResult<mcx::PgString<'mcx>>
+);
