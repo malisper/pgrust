@@ -19,3 +19,25 @@ seam_core::seam!(
     /// Infallible in C.
     pub fn reset_latch(latch: types_storage::latch::LatchHandle)
 );
+
+seam_core::seam!(
+    /// `SetLatch(latch)`: set the given latch (possibly another backend's —
+    /// e.g. `SetLatch(&proc->procLatch)`), waking any wait on it. Infallible
+    /// in C.
+    pub fn set_latch(latch: types_storage::latch::LatchHandle)
+);
+
+seam_core::seam!(
+    /// `WaitLatch(latch, wakeEvents, timeout, wait_event_info)`
+    /// (`storage/ipc/latch.c`): wait for the latch to be set or for one of
+    /// the other requested events; returns the bitmask of events that
+    /// occurred. C call sites that pass `MyLatch` translate to an explicit
+    /// handle the caller holds. Can `elog/ereport(ERROR)` (bad flags, kernel
+    /// event-queue failure in the underlying WaitEventSet machinery).
+    pub fn wait_latch(
+        latch: types_storage::latch::LatchHandle,
+        wake_events: u32,
+        timeout: i64,
+        wait_event_info: u32,
+    ) -> types_error::PgResult<i32>
+);

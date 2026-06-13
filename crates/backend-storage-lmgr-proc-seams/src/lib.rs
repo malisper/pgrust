@@ -52,3 +52,10 @@ seam_core::seam!(
     /// backend's wait semaphore.
     pub fn pg_semaphore_unlock(procno: ProcNumber)
 );
+
+seam_core::seam!(
+    /// `&GetPGProcByNumber(procno)->procLatch` — the process latch embedded
+    /// in a backend's PGPROC entry, as a handle usable with the latch seams
+    /// (`set_latch` to wake that backend). Pure array lookup; infallible.
+    pub fn proc_latch(procno: ProcNumber) -> types_storage::latch::LatchHandle
+);
