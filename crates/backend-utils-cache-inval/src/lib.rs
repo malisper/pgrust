@@ -2,18 +2,17 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
-// SCAFFOLD: the seam re-exports and shared-state plumbing are referenced only
-// from the `todo!()` bodies that will land in the full port, so the unused-*
-// lints fire crate-wide until then.
+// Not every outward seam re-export / shared-state field is exercised on every
+// code path, so the unused-* lints fire crate-wide.
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
 //! `backend/utils/cache/inval.c` — transactional cache invalidation dispatcher.
 //!
-//! SCAFFOLD: this crate is decomposed into family modules mirroring the
-//! structure of `inval.c`, with every public entry point present and a
-//! `todo!()` body. The shared transaction-local state types (the chunked
+//! This crate is decomposed into family modules mirroring the structure of
+//! `inval.c`, with every public entry point present. The shared
+//! transaction-local state types (the chunked
 //! [`msgs::InvalMessageArray`] storage, the [`msgs::InvalidationMsgsGroup`]
 //! index bookkeeping, the command/subtransaction stack of
 //! [`registration::TransInvalidationInfo`], the inplace
@@ -167,8 +166,44 @@ thread_local! {
 
 /// Run `f` over the backend-local state, creating it (and its owning
 /// `CacheInvalidation` context) on first use.
-pub(crate) fn with_state<R>(_f: impl for<'mcx> FnOnce(&mut InvalState<'mcx>) -> R) -> R {
-    todo!("with_state: lazily build McxOwned<InvalStateTy> (pre-size callback tables to MAX_*_CALLBACKS), then with_mut(f)")
+///
+/// The C statics live in `TopMemoryContext`/`CacheMemoryContext` and are simply
+/// present for the life of the backend; allocation failure here corresponds to
+/// the process-start `MemoryContextAlloc` that C treats as `FATAL`, so this
+/// keeps the infallible `-> R` shape and `.expect()`s the one-time build.
+pub(crate) fn with_state<R>(f: impl for<'mcx> FnOnce(&mut InvalState<'mcx>) -> R) -> R {
+    STATE.with(|cell| {
+        {
+            // Lazily build the owned state + its context on first use.
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                let owned = McxOwned::<InvalStateTy>::try_new(
+                    MemoryContext::new("CacheInvalidation"),
+                    |mcx| {
+                        Ok(InvalState {
+                            mcx,
+                            message_arrays: [
+                                msgs::InvalMessageArray::new(mcx),
+                                msgs::InvalMessageArray::new(mcx),
+                            ],
+                            trans_inval_stack: PgVec::new_in(mcx),
+                            inplace_inval_info: None,
+                            syscache_callback_list: PgVec::new_in(mcx),
+                            // C zero-inits the links; 0 means "no entry", and a
+                            // populated link stores (index + 1).
+                            syscache_callback_links: [0; SYS_CACHE_SIZE],
+                            relcache_callback_list: PgVec::new_in(mcx),
+                            relsync_callback_list: PgVec::new_in(mcx),
+                        })
+                    },
+                )
+                .expect("CacheInvalidation context allocation");
+                *slot = Some(owned);
+            }
+        }
+        let mut slot = cell.borrow_mut();
+        slot.as_mut().unwrap().with_mut(f)
+    })
 }
 
 thread_local! {
