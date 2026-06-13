@@ -156,6 +156,81 @@ seam_core::seam!(
     ) -> bool
 );
 
+// ---- STATEMENT-trigger firing (commands/trigger.c), called by nodeModifyTable.c ----
+
+seam_core::seam!(
+    /// `ExecBSInsertTriggers(estate, relinfo)` (trigger.c): fire BEFORE
+    /// STATEMENT INSERT triggers. Reads `relinfo->ri_TrigDesc` and, when
+    /// `trig_insert_before_statement`, runs each before-statement trigger as
+    /// user code (can `ereport(ERROR)`). `relinfo` addresses the target in
+    /// `estate`'s result-rel pool.
+    pub fn exec_bs_insert_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecBSUpdateTriggers(estate, relinfo)` (trigger.c): fire BEFORE
+    /// STATEMENT UPDATE triggers (user code; can `ereport(ERROR)`).
+    pub fn exec_bs_update_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecBSDeleteTriggers(estate, relinfo)` (trigger.c): fire BEFORE
+    /// STATEMENT DELETE triggers (user code; can `ereport(ERROR)`).
+    pub fn exec_bs_delete_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecASInsertTriggers(estate, relinfo, transition_capture)` (trigger.c):
+    /// queue AFTER STATEMENT INSERT trigger events (with the statement-level
+    /// transition capture, when present). `transition_capture` is owned by the
+    /// caller's `ModifyTableState`; `None` is the C `NULL`.
+    pub fn exec_as_insert_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecASUpdateTriggers(estate, relinfo, transition_capture)` (trigger.c):
+    /// queue AFTER STATEMENT UPDATE trigger events.
+    pub fn exec_as_update_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ExecASDeleteTriggers(estate, relinfo, transition_capture)` (trigger.c):
+    /// queue AFTER STATEMENT DELETE trigger events.
+    pub fn exec_as_delete_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MakeTransitionCaptureState(trigdesc, relid, cmdType)` (trigger.c):
+    /// build the `TransitionCaptureState` for `relinfo`'s trigger descriptor
+    /// when transition tables are wanted for `cmd_type`, else the C `NULL`
+    /// ([`None`]). The result is allocated in `mcx` (the C uses the per-query
+    /// AfterTriggers `cxt`); `relinfo` names the root target in `estate`'s
+    /// result-rel pool, from which the owner reads `ri_TrigDesc` and
+    /// `RelationGetRelid(ri_RelationDesc)`.
+    pub fn make_transition_capture_state<'mcx>(
+        mcx: Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        cmd_type: types_nodes::nodes::CmdType,
+    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::modifytable::TransitionCaptureState>>>
+);
+
 // ---- ROW-trigger firing (commands/trigger.c), called by nodeModifyTable.c ----
 
 seam_core::seam!(

@@ -27,5 +27,6 @@ backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-s
 # arrayfuncs depends only on arrayutils-seams, not on this impl crate).
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 
-# byref-payload (cstring element) resolution for ArrayGetIntegerTypmods.
-backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+[dev-dependencies]
+# ArrayType on-disk layout constant for the cstring[] roundtrip test.
+types-array = { path = "../types-array" }
