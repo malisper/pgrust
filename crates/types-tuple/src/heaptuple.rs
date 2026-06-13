@@ -51,6 +51,14 @@ pub const CIDOID: Oid = 29;
 /// `refcursor` — reference to a cursor (portal name); uses `text`'s I/O routines
 /// (`catalog/pg_type.dat`, oid 1790).
 pub const REFCURSOROID: Oid = 1790;
+/// `internal` pseudo-type (`pg_type_d.h`, oid 2281).
+pub const INTERNALOID: Oid = 2281;
+/// `anyarray` pseudo-type (`pg_type_d.h`, oid 2277).
+pub const ANYARRAYOID: Oid = 2277;
+/// `any` pseudo-type (`pg_type_d.h`, oid 2276).
+pub const ANYOID: Oid = 2276;
+/// `anycompatiblearray` pseudo-type (`pg_type_d.h`, oid 5078).
+pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
 
 /// Default array element delimiter (`','`, `catalog/pg_type.h`).
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;

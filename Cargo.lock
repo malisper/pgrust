@@ -1234,6 +1234,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-functioncmds"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-commands-functioncmds-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-functioncmds-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-sequence-seams"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3578,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-functioncmds",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3740,6 +3776,14 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-parsenodes"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-nodes",
 ]
 
 [[package]]
