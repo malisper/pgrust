@@ -1643,6 +1643,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-objectaccess"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-objectaccess-seams",
+ "types-catalog",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-objectaccess-seams"
 version = "0.0.0"
 dependencies = [
@@ -7864,6 +7874,7 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
+ "backend-catalog-objectaccess",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
