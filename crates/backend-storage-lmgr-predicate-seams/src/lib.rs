@@ -3,6 +3,28 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 seam_core::seam!(
+    /// `GetSerializableTransactionSnapshot(snapshot)` (predicate.c) — get a
+    /// snapshot for a serializable transaction, registering it with the
+    /// predicate-locking machinery. C fills the caller's `SnapshotData`; here
+    /// the seam takes the freshly-fetched snapshot and returns the registered
+    /// (possibly adjusted) one. Allocates / can `ereport(ERROR)`.
+    pub fn get_serializable_transaction_snapshot(
+        snapshot: types_snapshot::SnapshotData,
+    ) -> types_error::PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `SetSerializableTransactionSnapshot(snapshot, sourcevxid, sourcepid)`
+    /// (predicate.c) — adopt an imported snapshot into the serializable
+    /// machinery (used by `SET TRANSACTION SNAPSHOT`).
+    pub fn set_serializable_transaction_snapshot(
+        snapshot: types_snapshot::SnapshotData,
+        sourcevxid: types_storage::VirtualTransactionId,
+        sourcepid: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `predicatelock_twophase_recover(xid, info, recdata, len)` — restore a
     /// prepared transaction's SIREAD predicate locks at recovery (slot
     /// `TWOPHASE_RM_PREDICATELOCK_ID` of `twophase_recover_callbacks`).

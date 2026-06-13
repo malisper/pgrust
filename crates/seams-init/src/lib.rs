@@ -66,5 +66,6 @@ pub fn init_all() {
     backend_utils_misc_sampling::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_time_combocid::init_seams();
+    backend_utils_time_snapmgr::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
 }
