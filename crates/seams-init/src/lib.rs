@@ -9,6 +9,7 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heaptoast::init_seams();
+    backend_access_rmgrdesc_small::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_transam_xlogstats::init_seams();

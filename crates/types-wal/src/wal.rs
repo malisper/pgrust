@@ -1,7 +1,14 @@
 //! WAL record types and resource-manager constants.
 
 use mcx::PgVec;
-use types_core::{pg_crc32c, uint16, uint32, uint8, RmgrId, TransactionId, XLogRecPtr};
+use types_core::{
+    pg_crc32c, uint16, uint32, uint8, Oid, RelFileNumber, RmgrId, TransactionId, XLogRecPtr,
+};
+
+/// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
+/// reserved for xlog-insertion flags; the rmgr's record opcode lives in the
+/// high nibble (`info & ~XLR_INFO_MASK`).
+pub const XLR_INFO_MASK: uint8 = 0x0F;
 
 /// `MAX_XLINFO_TYPES` (access/xlogstats.h) — sixteen per-record buckets per
 /// rmgr (the four xl_info bits in the rmgr's domain).
@@ -14,6 +21,53 @@ pub const RM_MAX_ID: usize = u8::MAX as usize;
 
 /// `RM_XACT_ID` — the Transaction resource manager (rmgrlist.h entry 1).
 pub const RM_XACT_ID: RmgrId = 1;
+
+/// `RelFileLocator` (storage/relfilelocator.h) — the physical identity of a
+/// relation: tablespace, database, relfilenumber.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RelFileLocator {
+    spcOid: Oid,
+    dbOid: Oid,
+    relNumber: RelFileNumber,
+}
+
+impl RelFileLocator {
+    pub const fn new(spcOid: Oid, dbOid: Oid, relNumber: RelFileNumber) -> Self {
+        Self {
+            spcOid,
+            dbOid,
+            relNumber,
+        }
+    }
+
+    /// Bounds-checked read at the C `#[repr(C)]` offsets (three `Oid`s, no
+    /// padding — the header requires that for hashtable keys): spcOid@0,
+    /// dbOid@4, relNumber@8. `None` when fewer than 12 bytes are present.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let word = |off: usize| -> Option<uint32> {
+            Some(uint32::from_ne_bytes(
+                data.get(off..off + 4)?.try_into().ok()?,
+            ))
+        };
+        Some(Self {
+            spcOid: word(0)?,
+            dbOid: word(4)?,
+            relNumber: word(8)?,
+        })
+    }
+
+    pub const fn spc_oid(&self) -> Oid {
+        self.spcOid
+    }
+
+    pub const fn db_oid(&self) -> Oid {
+        self.dbOid
+    }
+
+    pub const fn rel_number(&self) -> RelFileNumber {
+        self.relNumber
+    }
+}
 
 /// The fixed-size WAL record header (`XLogRecord`, access/xlogrecord.h).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,24 +147,46 @@ impl DecodedBkpBlock {
 }
 
 /// A decoded WAL record (`DecodedXLogRecord`, access/xlogreader.h). Trimmed to
-/// the header plus the block references `0..=max_block_id`. The block array
-/// is context-allocated (C pallocs the decode buffer in the reader's
-/// context), so the record carries its allocator lifetime.
+/// the header, the main-data portion, and the block references
+/// `0..=max_block_id`. The main data and block array are context-allocated
+/// (C pallocs the decode buffer in the reader's context), so the record
+/// carries its allocator lifetime.
 #[derive(Debug)]
 pub struct DecodedXLogRecord<'mcx> {
     header: XLogRecord,
+    main_data: PgVec<'mcx, u8>,
     blocks: PgVec<'mcx, DecodedBkpBlock>,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
-    /// `blocks` must hold the block references `0..=max_block_id` (in-use or
-    /// not), mirroring the C array indexed by block id.
-    pub const fn new(header: XLogRecord, blocks: PgVec<'mcx, DecodedBkpBlock>) -> Self {
-        Self { header, blocks }
+    /// `main_data` is the record's main data portion (`main_data` /
+    /// `main_data_len`); `blocks` must hold the block references
+    /// `0..=max_block_id` (in-use or not), mirroring the C array indexed by
+    /// block id.
+    pub const fn new(
+        header: XLogRecord,
+        main_data: PgVec<'mcx, u8>,
+        blocks: PgVec<'mcx, DecodedBkpBlock>,
+    ) -> Self {
+        Self {
+            header,
+            main_data,
+            blocks,
+        }
     }
 
     pub const fn header(&self) -> &XLogRecord {
         &self.header
+    }
+
+    /// `XLogRecGetInfo` — the header's `xl_info`.
+    pub const fn info(&self) -> uint8 {
+        self.header.info()
+    }
+
+    /// `XLogRecGetData` (with `XLogRecGetDataLen` == `.len()`).
+    pub fn main_data(&self) -> &[u8] {
+        &self.main_data
     }
 
     pub fn blocks(&self) -> &[DecodedBkpBlock] {

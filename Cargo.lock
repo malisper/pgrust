@@ -408,6 +408,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-small"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-smgrdesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2089,6 +2099,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xlogstats",

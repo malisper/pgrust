@@ -238,6 +238,7 @@ mod tests {
     ) -> DecodedXLogRecord<'mcx> {
         DecodedXLogRecord::new(
             XLogRecord::new(tot_len, 0, 0, info, rmid, 0),
+            mcx::PgVec::new_in(mcx),
             slice_in(mcx, blocks).unwrap(),
         )
     }
