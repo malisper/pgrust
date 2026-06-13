@@ -74,6 +74,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
     };
     Relation::open(data, None)
 }

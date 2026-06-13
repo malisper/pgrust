@@ -6,6 +6,11 @@ use types_core::{
     RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
 };
 
+// `WAL_LEVEL_MINIMAL`/`WAL_LEVEL_REPLICA`/`WAL_LEVEL_LOGICAL` are the canonical
+// `WalLevel` enum aliases in `xlog_consts` (main's authoritative `wal_level`
+// vocabulary, re-exported at the crate root). The earlier `int`-typed copies
+// here were the slotsync branch's divergence and collided with them on merge.
+
 /// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
 /// reserved for xlog-insertion flags; the rmgr's record opcode lives in the
 /// high nibble (`info & ~XLR_INFO_MASK`).

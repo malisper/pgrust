@@ -15,6 +15,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Accumulate a finishing parallel worker's local index-scan search count
+    /// into its slot of the DSM `SharedIndexScanInstrumentation`
+    /// (`winstrument[ParallelWorkerNumber].nsearches += nsearches`, the
+    /// `ExecEndIndex(Only)Scan` parallel-worker path). `ParallelWorkerNumber`
+    /// is parallel.c's per-backend global, so the owner picks the slot; the
+    /// node passes its shared info and local count.
+    pub fn accumulate_shared_index_searches(
+        shared_info: &mut types_nodes::SharedIndexScanInstrumentation,
+        nsearches: u64,
+    )
+);
+
+seam_core::seam!(
     /// `HandleParallelMessageInterrupt()` (parallel.c) — the
     /// PROCSIG_PARALLEL_MESSAGE arm of `procsignal_sigusr1_handler`.
     /// Signal-handler-safe flag flipping; infallible.

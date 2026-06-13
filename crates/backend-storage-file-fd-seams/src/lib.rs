@@ -80,12 +80,14 @@ seam_core::seam!(
     /// outcome; the relmapper algorithm validates magic/num_mappings/CRC.
     pub fn relmap_read_file(dbpath: &str) -> PgResult<RelmapReadOutcome>
 );
+
 seam_core::seam!(
     /// First store step behind `write_relmap_file`: open
     /// `dbpath/pg_filenode.map.tmp` (O_WRONLY|O_CREAT|O_TRUNC|PG_BINARY),
     /// `write()` `bytes`, close. Returns the raw outcome.
     pub fn relmap_write_temp(dbpath: &str, bytes: &[u8]) -> PgResult<RelmapWriteOutcome>
 );
+
 seam_core::seam!(
     /// Final store step behind `write_relmap_file`:
     /// `durable_rename(dbpath/pg_filenode.map.tmp, dbpath/pg_filenode.map,
@@ -272,6 +274,39 @@ seam_core::seam!(
     /// classify a directory entry. Returns the `PGFileType` code
     /// (`PGFILETYPE_ERROR`=0, `_UNKNOWN`=1, `_REG`=2, `_DIR`=3, `_LNK`=4).
     pub fn get_dirent_type(path: &str) -> i32
+);
+
+// --- backend-utils-init-postinit consumers (fd.c) ---
+
+seam_core::seam!(
+    /// `InitFileAccess()` (fd.c): initialize the virtual file descriptor cache.
+    /// `Err` carries its `ereport` surface.
+    pub fn init_file_access() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitTemporaryFileAccess()` (fd.c): set up temporary-file accounting
+    /// (after pgstat). `Err` carries its `ereport` surface.
+    pub fn init_temporary_file_access() -> types_error::PgResult<()>
+);
+
+/// Result of `access(path, F_OK)` (postinit.c database-directory check).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessResult {
+    /// `access() == 0` — the path exists.
+    Ok,
+    /// `errno == ENOENT` — the path does not exist.
+    NoEnt,
+    /// Any other `errno` (carried as the raw value).
+    Other(i32),
+}
+
+seam_core::seam!(
+    /// `access(path, F_OK)` (unistd, used by InitPostgres): probe whether the
+    /// database directory exists. Returns the classified outcome (the C `== -1`
+    /// + `errno` branch). `Err` is reserved for the seam's own failure surface
+    /// (none expected; OS errno is returned in [`AccessResult::Other`]).
+    pub fn access_f_ok(path: &str) -> types_error::PgResult<AccessResult>
 );
 
 seam_core::seam!(

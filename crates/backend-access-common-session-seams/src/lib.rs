@@ -60,3 +60,10 @@ seam_core::seam!(
     /// `SharedRecordTypmodRegistryEstimate()` — `sizeof(struct)`. Pure read.
     pub fn shared_registry_estimate() -> usize
 );
+
+seam_core::seam!(
+    /// `InitializeSession()` (session.c): initialize this backend's session
+    /// state (the per-session DSM/typmod registry). `Err` carries its
+    /// `ereport` surface.
+    pub fn initialize_session() -> PgResult<()>
+);

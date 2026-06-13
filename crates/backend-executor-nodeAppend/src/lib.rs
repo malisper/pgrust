@@ -154,6 +154,7 @@ pub fn ExecInitAppend<'mcx>(
         let (prunestate, initially_valid) = execPartition::exec_init_partition_exec_pruning::call(
             mcx,
             &mut appendstate.ps,
+            estate,
             n_total,
             append.part_prune_index,
             append.apprelids.as_deref(),
@@ -680,7 +681,7 @@ fn choose_next_subplan_locally<'mcx>(
             // We'd have filled as_valid_subplans already.
             debug_assert!(node.as_valid_subplans_identified);
         } else if !node.as_valid_subplans_identified {
-            node.as_valid_subplans = find_matching_subplans(mcx, node)?;
+            node.as_valid_subplans = find_matching_subplans(mcx, node, estate)?;
             node.as_valid_subplans_identified = true;
         }
 
@@ -735,7 +736,7 @@ fn choose_next_subplan_for_leader<'mcx>(
         // run-time pruning is disabled then the valid subplans will always be
         // set to all subplans.
         if !node.as_valid_subplans_identified {
-            node.as_valid_subplans = find_matching_subplans(mcx, node)?;
+            node.as_valid_subplans = find_matching_subplans(mcx, node, estate)?;
             node.as_valid_subplans_identified = true;
 
             // Mark each invalid plan as finished to allow the loop below to
@@ -793,7 +794,7 @@ fn choose_next_subplan_for_worker<'mcx>(
     }
     // If we've yet to determine the valid subplans then do so now.
     else if !node.as_valid_subplans_identified {
-        node.as_valid_subplans = find_matching_subplans(mcx, node)?;
+        node.as_valid_subplans = find_matching_subplans(mcx, node, estate)?;
         node.as_valid_subplans_identified = true;
 
         mark_invalid_subplans_as_finished(node)?;
@@ -918,7 +919,7 @@ fn ExecAppendAsyncBegin<'mcx>(
 
     // If we've yet to determine the valid subplans then do so now.
     if !node.as_valid_subplans_identified {
-        node.as_valid_subplans = find_matching_subplans(mcx, node)?;
+        node.as_valid_subplans = find_matching_subplans(mcx, node, estate)?;
         node.as_valid_subplans_identified = true;
 
         classify_matching_subplans(mcx, node)?;
@@ -1264,12 +1265,13 @@ fn classify_matching_subplans<'mcx>(
 fn find_matching_subplans<'mcx>(
     mcx: Mcx<'mcx>,
     node: &mut AppendStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     let prune = node
         .as_prune_state
         .as_deref_mut()
         .ok_or_else(|| elog_error("Append has no partition prune state"))?;
-    execPartition::exec_find_matching_subplans::call(mcx, prune, false)
+    execPartition::exec_find_matching_subplans::call(mcx, prune, estate, false)
 }
 
 /// `ExecClearTuple(node->ps.ps_ResultTupleSlot)` — clear the node's result slot

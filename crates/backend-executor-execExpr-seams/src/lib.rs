@@ -209,6 +209,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitExprWithParams(node, ext_params)` (execExpr.c): compile a
+    /// standalone expression tree with no parent `PlanState`, using only the
+    /// supplied external params (C: `econtext->ecxt_param_list_info`). The owned
+    /// model passes the evaluating `ExprContext`'s id and the estate so the
+    /// owner reads `ecxt_param_list_info` off it; the compiled `ExprState` is
+    /// allocated in the per-query context. Fallible on OOM and on unsupported
+    /// expression shapes (`ereport(ERROR)`).
+    pub fn exec_init_expr_with_params<'mcx>(
+        node: &types_nodes::primnodes::Expr,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+);
+
+seam_core::seam!(
     /// `ExecInitQual(qual, parent)` (execExpr.c): compile an implicitly-ANDed
     /// list of qual clauses into a single `ExprState`. A `None`/empty qual
     /// compiles to `None` (the C `NULL` ExprState, treated as always-true).
@@ -240,6 +255,46 @@ seam_core::seam!(
     /// evaluation reads the econtext's linked tuples and runs in its per-tuple
     /// memory; fallible on `ereport(ERROR)` from the expression.
     pub fn exec_eval_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecPrepareExprList(exprList, estate)` (execExpr.c): compile a list of
+    /// expression trees into a parallel list of executable `ExprState`s,
+    /// allocated in the EState's per-query context. Fallible on OOM and on
+    /// unsupported expression shapes (`ereport(ERROR)`).
+    pub fn exec_prepare_expr_list<'mcx>(
+        expr_list: &[types_nodes::primnodes::Expr],
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<
+        mcx::PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>,
+    >
+);
+
+seam_core::seam!(
+    /// `(ItemPointer) DatumGetPointer(ExecEvalExprSwitchContext(state,
+    /// econtext, &isnull))` (executor.h): evaluate a compiled scalar
+    /// TID-yielding `ExprState` in the given expression context and dereference
+    /// the resulting `Datum` as an `ItemPointer`, returning the pointed-to
+    /// `ItemPointerData` and the is-null flag. (The owned model cannot
+    /// reinterpret a `Datum` pointer word itself, so the dereference happens in
+    /// the interpreter that produced it.) Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_tid_expr_switch_context<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_tuple::heaptuple::ItemPointerData, bool)>
+);
+
+seam_core::seam!(
+    /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` evaluating a
+    /// `tid[]`-yielding `ExprState` (executor.h): return the resulting array
+    /// `Datum` and is-null flag, for the caller to deconstruct via
+    /// `deconstruct_array_builtin`. Fallible on `ereport(ERROR)`.
+    pub fn exec_eval_array_expr_switch_context<'mcx>(
         state: &types_nodes::execexpr::ExprState,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,

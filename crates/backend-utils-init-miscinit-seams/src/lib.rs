@@ -100,7 +100,8 @@ seam_core::seam!(
     /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
     /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
     /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
-    /// rather than `SetDatabasePath`, which is one-shot for normal backends.
+    /// rather than [`set_database_path_once`] (`SetDatabasePath`), which is
+    /// one-shot for normal backends.
     pub fn set_database_path(path: &str)
 );
 
@@ -241,4 +242,134 @@ seam_core::seam!(
     /// `AmWalSummarizerProcess()` (miscadmin.h): `MyBackendType ==
     /// B_WAL_SUMMARIZER`. Pure backend-local read.
     pub fn am_wal_summarizer_process() -> bool
+);
+
+// --- backend-utils-init-postinit consumers (miscinit.c) ---
+
+seam_core::seam!(
+    /// `GetSessionUserId()` (miscinit.c): the session user's role OID.
+    pub fn get_session_user_id() -> types_core::Oid
+);
+
+
+seam_core::seam!(
+    /// `InitializeSessionUserIdStandalone()` (miscinit.c): set the session user
+    /// to the bootstrap superuser (standalone/aux processes). `Err` carries its
+    /// `ereport` surface.
+    pub fn initialize_session_user_id_standalone() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSessionUserId(rolename, roleid, bypass_login_check)`
+    /// (miscinit.c): set the session user from name or OID, checking
+    /// rolcanlogin/rolconnlimit. `Err` carries its `ereport(FATAL)` surface.
+    pub fn initialize_session_user_id(
+        rolename: Option<&str>,
+        roleid: types_core::Oid,
+        bypass_login_check: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSystemUser(authn_id, auth_method)` (miscinit.c): set the
+    /// `system_user` SQL value from the authenticated identity and method.
+    /// `Err` carries its `ereport` surface.
+    pub fn initialize_system_user(
+        authn_id: &str,
+        auth_method: &str,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ValidatePgVersion(path)` (miscinit.c): verify the database
+    /// directory's PG_VERSION matches the server. `Err` carries its
+    /// `ereport(FATAL)` surface.
+    pub fn validate_pg_version(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetDatabasePath(path)` (miscinit.c): record the database directory
+    /// path globally, copying `path` into `TopMemoryContext`. This is the
+    /// one-shot setter normal backends call once during `InitPostgres`; it is
+    /// distinct from [`set_database_path`]/[`clear_database_path`], which are
+    /// the inval.c recovery quick-hack that pokes `DatabasePath` directly.
+    /// `Err` carries its OOM surface (the `MemoryContextStrdup`).
+    pub fn set_database_path_once(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `process_session_preload_libraries()` (miscinit.c): load the libraries
+    /// named by `session_preload_libraries`/`local_preload_libraries`. `Err`
+    /// carries the loader's `ereport` surface.
+    pub fn process_session_preload_libraries() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pg_usleep(microsec)` (port; PostAuthDelay application): sleep the given
+    /// number of microseconds.
+    pub fn pg_usleep(microsec: i64)
+);
+
+// ---------------------------------------------------------------------------
+// Worker-bootstrap group used by the slot-sync worker entry point
+// (`ReplSlotSyncWorkerMain`, slotsync.c). These mirror the auxiliary/background
+// worker startup sequence; their true owners (proc.c, ps_status.c, postinit.c,
+// interrupt.c, globals.c) are not yet ported, so a call panics loudly until
+// installed.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `MyBackendType = B_SLOTSYNC_WORKER` (miscadmin.h / globals.c).
+    pub fn set_my_backend_type_slotsync() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AmLogicalSlotSyncWorkerProcess()` (miscadmin.h): is this process the
+    /// dedicated slot-sync worker (`B_SLOTSYNC_WORKER`)?
+    pub fn am_logical_slot_sync_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `MyProcPid` (globals.c): this backend's process id.
+    pub fn my_proc_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `init_ps_display("")` (ps_status.c): set up the process-title display.
+    pub fn init_ps_display() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c): set up the PGPROC entry for this process.
+    pub fn init_process() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BaseInit()` (postinit.c): early per-backend subsystem initialization.
+    pub fn base_init() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The slot-sync worker's signal-handler setup block (slotsync.c
+    /// `ReplSlotSyncWorkerMain`): `pqsignal(...)`, `procsignal_sigusr1_handler`,
+    /// etc. installed before unblocking signals.
+    pub fn setup_signal_handlers() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeTimeouts()` (timeout.c): register the standard timeout
+    /// handlers for this process.
+    pub fn initialize_timeouts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BackgroundWorkerUnblockSignals()` / `sigprocmask(SIG_SETMASK, &UnBlockSig,
+    /// NULL)` (slotsync.c): unblock signals once handlers are installed.
+    pub fn unblock_signals() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitPostgres(dbname, InvalidOid, ..., NULL)` (postinit.c): bind this
+    /// backend to the given database so `walrcv_exec` catalog queries can run.
+    pub fn init_postgres(dbname: &str) -> PgResult<()>
 );

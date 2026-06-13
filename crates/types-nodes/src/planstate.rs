@@ -8,6 +8,7 @@ use mcx::PgBox;
 use crate::nodes::NodeTag;
 
 use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
+use crate::nodeindexonlyscan::T_IndexOnlyScanState;
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
 use crate::execstate_tags::T_SortState;
@@ -31,6 +32,8 @@ pub enum PlanStateNode<'mcx> {
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_IndexOnlyScanState`.
+    IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
     /// `T_SortState`.
@@ -51,6 +54,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
@@ -67,6 +71,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
@@ -82,6 +87,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,

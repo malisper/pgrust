@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h): if an interrupt is pending,
     /// service it via `ProcessInterrupts()` (tcop/postgres.c). A query-cancel
@@ -32,6 +34,35 @@ seam_core::seam!(
     /// PROCSIG_RECOVERY_CONFLICT_* arms of `procsignal_sigusr1_handler`.
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_recovery_conflict_interrupt(reason: types_storage::ProcSignalReason)
+);
+
+seam_core::seam!(
+    /// `ProcSleep`'s `ereport(LOG, errmsg(msg), errdetail_log_plural(detail_s,
+    /// detail_p, n, ...))` for the lock-wait progress messages. `detail_*` are
+    /// `None` for the "acquired" case (a bare `errmsg`); when present they are
+    /// the singular/plural errdetail_log forms selected by `holders_num`.
+    pub fn report_lock_wait_log(
+        message: alloc::string::String,
+        detail_singular: Option<alloc::string::String>,
+        detail_plural: Option<alloc::string::String>,
+        holders_num: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcSleep`'s autovac-cancel `ereport(DEBUG1, errmsg_internal("sending
+    /// cancel to blocking autovacuum PID %d", pid), errdetail_log("%s", logbuf))`.
+    pub fn report_autovac_cancel(
+        pid: i32,
+        detail_log: alloc::string::String,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `kill(pid, SIGINT)` against a blocking autovacuum worker. `ESRCH` (the
+    /// worker already exited) is ignored inside the impl; any other errno warns
+    /// (`ereport(WARNING, "could not send signal to process %d: %m")`).
+    pub fn signal_autovacuum_worker(pid: i32) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -84,4 +115,48 @@ seam_core::seam!(
         cursor_options: i32,
         bound_params: types_nodes::portalcmds::ParamListInfo,
     ) -> types_error::PgResult<types_nodes::nodeindexscan::PlannedStmt<'mcx>>
+);
+
+// --- backend-utils-init-postinit consumers (postgres.c) ---
+
+seam_core::seam!(
+    /// `process_postgres_switches(argc, argv, ctx, NULL)` (postgres.c): apply
+    /// the command-line switches from the startup packet as GUC settings under
+    /// context `ctx`. `argv` is the already-split argument vector (excluding the
+    /// trailing NULL). `Err` carries its `ereport(ERROR)` surface.
+    pub fn process_postgres_switches(
+        argv: &[String],
+        ctx: types_guc::GucContext,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PostAuthDelay` (postgres.c GUC): seconds to sleep after authentication
+    /// (debugging aid).
+    pub fn post_auth_delay() -> i32
+);
+
+seam_core::seam!(
+    /// `TransactionTimeoutPending = value` (postgres.c interrupt flag).
+    pub fn set_transaction_timeout_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `IdleInTransactionSessionTimeoutPending = value` (postgres.c flag).
+    pub fn set_idle_in_transaction_session_timeout_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `IdleSessionTimeoutPending = value` (postgres.c flag).
+    pub fn set_idle_session_timeout_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `IdleStatsUpdateTimeoutPending = value` (postgres.c flag).
+    pub fn set_idle_stats_update_timeout_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `CheckClientConnectionPending = value` (postgres.c flag).
+    pub fn set_check_client_connection_pending(value: bool)
 );

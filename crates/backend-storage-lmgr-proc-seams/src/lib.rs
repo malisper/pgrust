@@ -239,6 +239,104 @@ seam_core::seam!(
     pub fn set_delay_chkpt_start(on: bool)
 );
 
+// --- PGPROC accessors used by proc.c's own wait-queue machinery -------------
+//
+// These read/write the `PGPROC` array entries and `MyProc` that the sibling
+// `proc_lifecycle` / `proc_shmem` families own; until `InitProcGlobal` /
+// `InitProcess` land, the installed bodies panic (the wait-queue family routes
+// through them rather than restructuring around the unported neighbor).
+
+seam_core::seam!(
+    /// `GetNumberFromPGProc(proc)` — the proc's index in `ProcGlobal->allProcs`.
+    pub fn pgproc_number(proc: &types_storage::storage::PGPROC) -> ProcNumber
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->lockGroupLeader` as a `ProcNumber`
+    /// (`INVALID_PROC_NUMBER` if `NULL`).
+    pub fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber
+);
+
+seam_core::seam!(
+    /// Set `GetPGProcByNumber(procno)->heldLocks`.
+    pub fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK)
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->heldLocks`.
+    pub fn proc_held_locks(procno: ProcNumber) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->waitLockMode`.
+    pub fn proc_wait_lock_mode(procno: ProcNumber) -> types_storage::lock::LOCKMODE
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->waitStatus`.
+    pub fn proc_wait_status(procno: ProcNumber) -> types_storage::storage::ProcWaitStatus
+);
+
+seam_core::seam!(
+    /// Set `MyProc->{waitLock, waitProcLock, waitLockMode}` and
+    /// `waitStatus = PROC_WAIT_STATUS_WAITING` for the proc joining the queue
+    /// (`lock` keyed by its LOCKTAG, `holder` the owning backend's ProcNumber).
+    pub fn set_proc_wait_fields(
+        procno: ProcNumber,
+        lock: types_storage::lock::LOCKTAG,
+        holder: ProcNumber,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// Set `pg_atomic_write_u64(&GetPGProcByNumber(procno)->waitStart, value)`.
+    pub fn set_proc_wait_start(procno: ProcNumber, value: u64)
+);
+
+seam_core::seam!(
+    /// `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`.
+    pub fn proc_wait_link_is_detached(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `ProcWakeup`'s state reset: clear `waitLock`/`waitProcLock`, set
+    /// `waitStatus = status`, and `pg_atomic_write_u64(&MyProc->waitStart, 0)`.
+    pub fn wakeup_proc_clear_wait(procno: ProcNumber, status: types_storage::storage::ProcWaitStatus)
+);
+
+seam_core::seam!(
+    /// `CheckDeadLock`'s awoken test: `MyProc->links.prev == NULL ||
+    /// MyProc->links.next == NULL` (we've been unlinked from the wait queue).
+    pub fn proc_unlinked_from_wait_queue(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `MyProc->waitLock != NULL` (the proc is on a lock's wait queue).
+    pub fn proc_is_waiting_on_lock(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `MyProc->waitLock->tag` — the LOCKTAG of the lock the proc awaits.
+    pub fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->pgxactoff`.
+    pub fn proc_pgxactoff(procno: ProcNumber) -> i32
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->statusFlags[pgxactoff]` — the dense per-proc status-flag
+    /// mirror in this unit's `ProcGlobal` (protected by ProcArrayLock).
+    pub fn proc_global_status_flags(pgxactoff: i32) -> u8
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->pid`.
+    pub fn proc_pid(procno: ProcNumber) -> i32
+);
+
 seam_core::seam!(
     /// `&MyProc->procLatch` (`storage/proc.c`) — this backend's PGPROC shared
     /// latch, the latch `SwitchToSharedLatch` points `MyLatch` at.
@@ -256,4 +354,46 @@ seam_core::seam!(
     /// claiming a slot from the shared `ProcGlobal` free list. `ereport(FATAL)`
     /// when no slot is available ("sorry, too many clients already").
     pub fn init_process() -> types_error::PgResult<()>
+);
+
+// --- backend-utils-init-postinit consumers (proc.c) ---
+
+seam_core::seam!(
+    /// `InitProcessPhase2()` (proc.c): add MyProc to the ProcArray; after this
+    /// the backend is visible to others. `Err` carries its `ereport` surface.
+    pub fn init_process_phase2() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CheckDeadLockAlert()` (proc.c): the DEADLOCK_TIMEOUT handler body.
+    pub fn check_dead_lock_alert()
+);
+
+seam_core::seam!(
+    /// `HaveNFreeProcs(n, &nfree)` (proc.c): are at least `n` PGPROC slots
+    /// free? Returns `(have_n, nfree)` where `nfree` is the actual free count
+    /// (the C out-parameter).
+    pub fn have_n_free_procs(n: i32) -> types_error::PgResult<(bool, i32)>
+);
+
+seam_core::seam!(
+    /// `AmRegularBackendProcess()` (miscadmin.h): is this a regular client
+    /// backend (not an aux/background process)?
+    pub fn am_regular_backend_process() -> bool
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend` (proc.c global): the current value.
+    pub fn fast_path_lock_groups_per_backend() -> i32
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend = value` (proc.c global).
+    pub fn set_fast_path_lock_groups_per_backend(value: i32)
+);
+
+seam_core::seam!(
+    /// `MyProc->databaseId = dboid` (proc.c): mark this backend's PGPROC entry
+    /// with the database OID.
+    pub fn set_my_proc_database_id(dboid: types_core::Oid)
 );

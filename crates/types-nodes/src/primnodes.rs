@@ -290,6 +290,19 @@ pub struct OpExpr {
     pub args: Vec<Expr>,
 }
 
+/// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
+/// trimmed to the fields ports consume (the TID-scan node reads only `args`,
+/// via `linitial`/`lsecond`).
+#[derive(Clone, Debug)]
+pub struct ScalarArrayOpExpr {
+    /// `Oid opno` — PG_OPERATOR OID of the operator.
+    pub opno: Oid,
+    /// `bool useOr` — true for ANY, false for ALL.
+    pub useOr: bool,
+    /// `List *args` — the scalar and array operands.
+    pub args: Vec<Expr>,
+}
+
 /// `CurrentOfExpr` (nodes/primnodes.h) — the `WHERE CURRENT OF cursor`
 /// expression. Either `cursor_name` (a literal cursor name) or `cursor_param`
 /// (a refcursor parameter number, > 0) identifies the cursor.
@@ -315,6 +328,10 @@ pub enum Expr {
     Const(Const),
     /// `T_OpExpr`.
     OpExpr(OpExpr),
+    /// `T_ScalarArrayOpExpr`.
+    ScalarArrayOpExpr(ScalarArrayOpExpr),
+    /// `T_CurrentOfExpr`.
+    CurrentOfExpr(CurrentOfExpr),
 }
 
 /// `TargetEntry` (nodes/primnodes.h), trimmed.

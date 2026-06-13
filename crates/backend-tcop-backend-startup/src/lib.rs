@@ -313,7 +313,7 @@ fn backend_initialize_inner(
     backend_utils_misc_timeout_seams::enable_timeout_after::call(
         TimeoutId::STARTUP_PACKET_TIMEOUT,
         auth_timeout * 1000,
-    );
+    )?;
 
     // status = ProcessSSLStartup(port);
     let mut status = process_ssl_startup()?;

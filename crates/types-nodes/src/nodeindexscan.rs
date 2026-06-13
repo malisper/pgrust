@@ -40,7 +40,8 @@ pub struct Plan<'mcx> {
     pub parallel_aware: bool,
     /// `bool async_capable` — engage asynchronous-capable logic?
     pub async_capable: bool,
-    /// `int plan_node_id` — unique across the entire final plan tree.
+    /// `int plan_node_id` — unique across the entire final plan tree; used as
+    /// the DSM TOC key for a node's parallel state.
     pub plan_node_id: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
@@ -106,14 +107,11 @@ impl Plan<'_> {
     }
 }
 
-/// `Scan` (nodes/plannodes.h) — the base every scan plan node embeds first:
+/// `Scan` (nodes/plannodes.h) — the abstract base every scan plan node embeds:
 ///
 /// ```c
 /// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
 /// ```
-/// `Scan` (nodes/plannodes.h) — the abstract base for all scan plan nodes:
-/// the embedded `Plan` followed by the range-table index of the scanned
-/// relation. Trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct Scan<'mcx> {
     /// `Plan plan` — the abstract plan-node base.
@@ -125,11 +123,45 @@ pub struct Scan<'mcx> {
 impl Scan<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
-    /// Deep copy of the scan base into `mcx`. Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
         Ok(Scan {
             plan: self.plan.clone_in(mcx)?,
             scanrelid: self.scanrelid,
+        })
+    }
+}
+
+/// `TidScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct TidScan { Scan scan; List *tidquals; } TidScan;
+/// ```
+#[derive(Debug, Default)]
+pub struct TidScan<'mcx> {
+    /// `Scan scan` — the abstract scan base.
+    pub scan: Scan<'mcx>,
+    /// `List *tidquals` — qual(s) involving CTID = something, or CTID = ANY
+    /// (...), or CURRENT OF cursor. `None` = the C `NIL`.
+    pub tidquals: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+}
+
+impl TidScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TidScan<'b>> {
+        let tidquals = match &self.tidquals {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(TidScan {
+            scan: self.scan.clone_in(mcx)?,
+            tidquals,
         })
     }
 }

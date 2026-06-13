@@ -22,31 +22,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `object_ownercheck(classid, objectid, roleid)` (aclchk.c): is `roleid`
-    /// owner of (or member of the owning role of) the object? Can
-    /// `ereport(ERROR)` on cache lookup failure, carried on `Err`.
-    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
-);
-
-seam_core::seam!(
     /// `pg_class_aclcheck(table_oid, roleid, mode)` (aclchk.c): check
-    /// table-level privilege bits. Returns `ACLCHECK_OK` / `ACLCHECK_NO_PRIV`
-    /// (no ereport on a privilege miss); a syscache lookup failure can
-    /// `ereport(ERROR)`, carried on `Err`.
+    /// privilege bits on a relation. Can `ereport(ERROR)` on cache lookup
+    /// failure, carried on `Err`.
     pub fn pg_class_aclcheck(table_oid: Oid, roleid: Oid, mode: AclMode) -> PgResult<AclResult>
 );
 
 seam_core::seam!(
     /// `pg_attribute_aclcheck(table_oid, attnum, roleid, mode)` (aclchk.c):
-    /// check column-level privilege bits. Returns `ACLCHECK_OK` /
-    /// `ACLCHECK_NO_PRIV`; a syscache lookup failure can `ereport(ERROR)`,
-    /// carried on `Err`.
+    /// check privilege bits on a single relation column. Can `ereport(ERROR)`
+    /// on cache lookup failure, carried on `Err`.
     pub fn pg_attribute_aclcheck(
         table_oid: Oid,
-        attnum: i16,
+        attnum: types_core::AttrNumber,
         roleid: Oid,
         mode: AclMode,
     ) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
+    /// `object_ownercheck(classid, objectid, roleid)` (aclchk.c): is `roleid`
+    /// owner of (or member of the owning role of) the object? Can
+    /// `ereport(ERROR)` on cache lookup failure, carried on `Err`.
+    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(

@@ -11,9 +11,11 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{Oid, TransactionId, XLogRecPtr, XLogSegNo};
+use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
-use types_replication_slot::{ReplicationSlotInvalidationCause, ReplicationSlotPersistency};
+use types_replication_slot::{
+    ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
+};
 use types_tuple::heaptuple::NameData;
 
 seam_core::seam!(
@@ -207,62 +209,81 @@ seam_core::seam!(
     /// `MyReplicationSlot != NULL`.
     pub fn my_replication_slot_is_set() -> bool
 );
+
 seam_core::seam!(
     /// `SlotIsPhysical(MyReplicationSlot)` — `data.database == InvalidOid`.
     pub fn slot_is_physical() -> bool
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.database`.
     pub fn slot_database() -> Oid
 );
+
 seam_core::seam!(
     /// `NameStr(MyReplicationSlot->data.name)`.
     pub fn slot_name() -> String
 );
+
 seam_core::seam!(
     /// `NameStr(MyReplicationSlot->data.plugin)`.
     pub fn slot_plugin() -> String
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.synced`.
     pub fn slot_synced() -> bool
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.invalidated`.
     pub fn slot_invalidated() -> ReplicationSlotInvalidationCause
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.restart_lsn`.
     pub fn slot_restart_lsn() -> XLogRecPtr
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.confirmed_flush`.
     pub fn slot_confirmed_flush() -> XLogRecPtr
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.two_phase`.
     pub fn slot_two_phase() -> bool
+);
+
+seam_core::seam!(
+    /// `MyReplicationSlot->data.failover`.
+    pub fn slot_failover() -> bool
 );
 seam_core::seam!(
     /// `MyReplicationSlot->data.two_phase_at`.
     pub fn slot_two_phase_at() -> XLogRecPtr
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.catalog_xmin`.
     pub fn slot_catalog_xmin() -> TransactionId
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_xmin_lsn`.
     pub fn slot_candidate_xmin_lsn() -> XLogRecPtr
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_catalog_xmin`.
     pub fn slot_candidate_catalog_xmin() -> TransactionId
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_restart_lsn`.
     pub fn slot_candidate_restart_lsn() -> XLogRecPtr
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_restart_valid`.
     pub fn slot_candidate_restart_valid() -> XLogRecPtr
@@ -272,6 +293,7 @@ seam_core::seam!(
     /// `SpinLockAcquire(&MyReplicationSlot->mutex)`.
     pub fn slot_mutex_acquire()
 );
+
 seam_core::seam!(
     /// `SpinLockRelease(&MyReplicationSlot->mutex)`.
     pub fn slot_mutex_release()
@@ -281,55 +303,87 @@ seam_core::seam!(
     /// `namestrcpy(&MyReplicationSlot->data.plugin, plugin)`.
     pub fn slot_set_plugin(plugin: String)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.restart_lsn = lsn` (caller holds the mutex).
     pub fn slot_set_restart_lsn(lsn: XLogRecPtr)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->effective_catalog_xmin = xid` (caller holds mutex).
     pub fn slot_set_effective_catalog_xmin(xid: TransactionId)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.catalog_xmin = xid` (caller holds mutex).
     pub fn slot_set_catalog_xmin(xid: TransactionId)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->effective_xmin = xid` (caller holds mutex).
     pub fn slot_set_effective_xmin(xid: TransactionId)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.confirmed_flush = lsn` (caller holds mutex).
     pub fn slot_set_confirmed_flush(lsn: XLogRecPtr)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.two_phase = value` (caller holds mutex).
     pub fn slot_set_two_phase(value: bool)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->data.two_phase_at = lsn` (caller holds mutex).
     pub fn slot_set_two_phase_at(lsn: XLogRecPtr)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_catalog_xmin = xid` (caller holds mutex).
     pub fn slot_set_candidate_catalog_xmin(xid: TransactionId)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_xmin_lsn = lsn` (caller holds mutex).
     pub fn slot_set_candidate_xmin_lsn(lsn: XLogRecPtr)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_restart_lsn = lsn` (caller holds mutex).
     pub fn slot_set_candidate_restart_lsn(lsn: XLogRecPtr)
 );
+
 seam_core::seam!(
     /// `MyReplicationSlot->candidate_restart_valid = lsn` (caller holds mutex).
     pub fn slot_set_candidate_restart_valid(lsn: XLogRecPtr)
+);
+
+// MyReplicationSlot field accessors/mutators additionally needed by the
+// slotsync consumer (slot.c owns `MyReplicationSlot`).
+seam_core::seam!(
+    /// `MyReplicationSlot->data.persistency`.
+    pub fn slot_persistency() -> ReplicationSlotPersistency
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.invalidated = cause` (under the per-slot
+    /// spinlock, held by the caller).
+    pub fn slot_set_invalidated(cause: ReplicationSlotInvalidationCause)
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.database = dbid` (under the per-slot spinlock).
+    pub fn slot_set_database(dbid: Oid)
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.failover = value` (under the per-slot spinlock).
+    pub fn slot_set_failover(value: bool)
 );
 
 seam_core::seam!(
     /// `LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE)`.
     pub fn replication_slot_control_lock_acquire_exclusive()
 );
+
 seam_core::seam!(
     /// `LWLockRelease(ReplicationSlotControlLock)`.
     pub fn replication_slot_control_lock_release()
@@ -349,4 +403,59 @@ seam_core::seam!(
     /// (logical.c:1983). The owner resolves `MyReplicationSlot`'s index and
     /// forwards the decoding stats to `pgstat_replslot.c`.
     pub fn pgstat_report_replslot(stats: types_logical::ReorderBufferStats)
+);
+
+// ---------------------------------------------------------------------------
+// By-handle slot accessors (slot.c owns the array; a `ReplicationSlotHandle`
+// is the index into `ReplicationSlotCtl->replication_slots[]`). Consumers that
+// genuinely operate on slots OTHER than `MyReplicationSlot` — e.g. slotsync's
+// `get_local_synced_slots` array scan and `update_synced_slots_inactive_since`
+// — reach those slots' fields and per-slot spinlock through these. The owner
+// maps the handle back to `&replication_slots[i]`. ADDED for the slotsync
+// consumer; installed by `backend-replication-slot`'s `init_seams()`.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `int max_replication_slots` GUC (slot.c).
+    pub fn max_replication_slots() -> i32
+);
+seam_core::seam!(
+    /// `&ReplicationSlotCtl->replication_slots[i]` (slot.c) — the handle for
+    /// array slot `i`.
+    pub fn replication_slot(i: i32) -> ReplicationSlotHandle
+);
+seam_core::seam!(
+    /// `SearchNamedReplicationSlot(name, need_lock)` (slot.c:646). Returns
+    /// [`ReplicationSlotHandle::NONE`] when no slot of that name exists.
+    pub fn search_named_replication_slot(
+        name: &str,
+        need_lock: bool,
+    ) -> PgResult<ReplicationSlotHandle>
+);
+seam_core::seam!(
+    /// `ReplicationSlotSetInactiveSince(slot, now, acquire_lock)` (slot.c:306).
+    pub fn replication_slot_set_inactive_since(
+        slot: ReplicationSlotHandle,
+        now: TimestampTz,
+        acquire_lock: bool,
+    )
+);
+
+seam_core::seam!(
+    /// `SpinLockAcquire(&slot->mutex)` for an arbitrary array slot.
+    pub fn slot_spin_acquire(slot: ReplicationSlotHandle)
+);
+seam_core::seam!(
+    /// `SpinLockRelease(&slot->mutex)` for an arbitrary array slot.
+    pub fn slot_spin_release(slot: ReplicationSlotHandle)
+);
+
+seam_core::seam!(pub fn slot_in_use(slot: ReplicationSlotHandle) -> bool);
+seam_core::seam!(pub fn slot_is_logical(slot: ReplicationSlotHandle) -> bool);
+seam_core::seam!(pub fn slot_data_synced(slot: ReplicationSlotHandle) -> bool);
+seam_core::seam!(pub fn slot_data_name(slot: ReplicationSlotHandle) -> String);
+seam_core::seam!(pub fn slot_data_database(slot: ReplicationSlotHandle) -> Oid);
+seam_core::seam!(pub fn slot_active_pid(slot: ReplicationSlotHandle) -> i32);
+seam_core::seam!(
+    pub fn slot_data_invalidated(slot: ReplicationSlotHandle) -> ReplicationSlotInvalidationCause
 );

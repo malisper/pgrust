@@ -50,6 +50,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_mbcliplen(mbstr, len, limit)` (mbutils.c): the byte length of the
+    /// longest prefix of the first `len` bytes of `mbstr` that does not exceed
+    /// `limit` bytes and does not split a multibyte character, in the current
+    /// database encoding. C takes `const char *` bytes in the database
+    /// encoding. Infallible.
+    pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32
+);
+
+seam_core::seam!(
     /// `pg_mb2wchar_with_len(from, to, len)` (mbutils.c): convert the first
     /// `len` (here: all) bytes of a database-encoding string to `pg_wchar`
     /// code points. In C the caller pallocs the `(len + 1) * sizeof(pg_wchar)`
@@ -107,6 +116,20 @@ seam_core::seam!(
     /// `is_encoding_supported_by_icu(encoding)` (mbutils.c): whether ICU
     /// collations work with the encoding. Pure table lookup.
     pub fn is_encoding_supported_by_icu(encoding: i32) -> bool
+);
+
+// --- backend-utils-init-postinit consumers (mbutils.c) ---
+
+seam_core::seam!(
+    /// `SetDatabaseEncoding(encoding)` (mbutils.c): set the server (database)
+    /// encoding. `Err` carries its `ereport` surface.
+    pub fn set_database_encoding(encoding: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeClientEncoding()` (mbutils.c): finalize the client_encoding
+    /// conversion setup. `Err` carries its `ereport` surface.
+    pub fn initialize_client_encoding() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

@@ -161,6 +161,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `log_recovery_conflict_waits` (the GUC, owned by xlog.c) — whether the
+    /// startup process should log long recovery-conflict waits.
+    pub fn log_recovery_conflict_waits() -> bool
+);
+
+seam_core::seam!(
     /// `GetFlushRecPtr(*insertTLI)` (xlog.c) — the LSN up to which WAL is
     /// flushed, with the corresponding insert timeline. Returns `(lsn, tli)`.
     pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
@@ -291,4 +297,11 @@ seam_core::seam!(
         count: i32,
         tli: TimeLineID,
     ) -> WalReadOutcome
+);
+
+seam_core::seam!(
+    /// `XLogGetReplicationSlotMinimumLSN()` (xlog.c): the oldest LSN required
+    /// by any replication slot, or `InvalidXLogRecPtr` if none. Read under the
+    /// `info_lck` spinlock by the owner.
+    pub fn xlog_get_replication_slot_minimum_lsn() -> XLogRecPtr
 );

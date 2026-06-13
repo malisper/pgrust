@@ -70,6 +70,26 @@ seam_core::seam!(
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
 
+seam_core::seam!(
+    /// `bms_copy(a)` (bitmapset.c): a palloc'd duplicate of `a` (a `None` input
+    /// is the C NULL, copied as `None`). Allocates in `mcx`, so fallible on OOM.
+    pub fn bms_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_add_members(a, b)` (bitmapset.c): add every member of `b` to `a`,
+    /// recycling `a` (the C extends `a` in place and returns it; a `None` input
+    /// is the C NULL set). Growth allocates in `mcx`, so fallible on OOM.
+    pub fn bms_add_members<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
 // === tidbitmap (tidbitmap.c) ===============================================
 
 /// Opaque token standing in for C's `TIDBitmap *` while the executor owns the
@@ -133,8 +153,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `bms_free(a)` (bitmapset.c): free the set's storage. The owned model
-    /// drops the `PgBox`, so this seam only consumes the value; no-op for a
-    /// `None` (NULL) set. Infallible.
+    /// `bms_equal(a, b)` (bitmapset.c): do `a` and `b` contain the same
+    /// members? (`None`/empty sets are equal to each other.) Infallible.
+    pub fn bms_equal(
+        a: Option<&types_nodes::Bitmapset<'_>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_free(a)` (bitmapset.c): free the bitmapset (a `None` input is the C
+    /// NULL, a no-op). The owned model consumes the set; infallible.
     pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
 );

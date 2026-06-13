@@ -5,6 +5,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+
 seam_core::seam!(
     /// `work_mem` (globals.c): the `work_mem` GUC — per-operation memory
     /// budget in kilobytes.
@@ -36,9 +37,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MaxConnections` (globals.c): the `max_connections` GUC — number of
+    /// regular-backend slots.
+    pub fn max_connections() -> i32
+);
+
+seam_core::seam!(
     /// `max_worker_processes` (globals.c): the GUC capping the number of
     /// background-worker slots.
     pub fn max_worker_processes() -> i32
+);
+
+seam_core::seam!(
+    /// `max_prepared_xacts` (globals.c): the GUC bounding the number of
+    /// concurrently-prepared transactions (dummy PGPROC slots).
+    pub fn max_prepared_xacts() -> i32
+);
+
+seam_core::seam!(
+    /// `autovacuum_worker_slots` (globals.c): the GUC bounding the number of
+    /// autovacuum-worker slots.
+    pub fn autovacuum_worker_slots() -> i32
+);
+
+seam_core::seam!(
+    /// `FastPathLockGroupsPerBackend` (globals.c): the number of fast-path
+    /// lock groups per backend, computed at startup from `max_locks_per_xact`.
+    pub fn fast_path_lock_groups_per_backend() -> i32
 );
 
 seam_core::seam!(
@@ -203,4 +228,80 @@ seam_core::seam!(
     /// logical-replication launcher in this mode. Pure read of backend-local
     /// state.
     pub fn is_binary_upgrade() -> bool
+);
+
+// --- backend-utils-init-postinit consumers (globals.c per-backend state) ---
+
+seam_core::seam!(
+    /// `MaxBackends = value` (globals.c): set the computed total backend count.
+    pub fn set_max_backends(value: i32)
+);
+
+seam_core::seam!(
+    /// `MyProcPort != NULL` (globals.c): does this backend have a client Port?
+    pub fn has_my_proc_port() -> bool
+);
+
+seam_core::seam!(
+    /// `SuperuserReservedConnections` (globals.c GUC).
+    pub fn superuser_reserved_connections() -> i32
+);
+
+seam_core::seam!(
+    /// `ReservedConnections` (globals.c GUC).
+    pub fn reserved_connections() -> i32
+);
+
+seam_core::seam!(
+    /// `MyDatabaseId = dboid` (globals.c): set the backend's database OID.
+    pub fn set_my_database_id(dboid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
+    /// `MyDatabaseTableSpace = spcoid` (globals.c).
+    pub fn set_my_database_table_space(spcoid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
+    /// `MyDatabaseHasLoginEventTriggers = value` (globals.c).
+    pub fn set_my_database_has_login_event_triggers(value: bool)
+);
+
+seam_core::seam!(
+    /// `MyProcPort->cmdline_options` (globals.c Port): the `-c`-style command
+    /// line options string from the startup packet, copied into `mcx`, or
+    /// `None` if absent.
+    pub fn my_proc_port_cmdline_options<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `MyProcPort->guc_options` (globals.c Port): the alternating
+    /// name/value GUC settings from the startup packet, copied into `mcx`.
+    pub fn my_proc_port_guc_options<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `MyProcPort->user_name` (globals.c Port), copied into `mcx`.
+    pub fn my_proc_port_user_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `MyProcPort->database_name` (globals.c Port), copied into `mcx`.
+    pub fn my_proc_port_database_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `MyProcPort->application_name` (globals.c Port), copied into `mcx`, or
+    /// `None` if not set.
+    pub fn my_proc_port_application_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
