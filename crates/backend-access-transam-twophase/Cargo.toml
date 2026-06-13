@@ -18,6 +18,9 @@ backend-access-transam-transam = { path = "../backend-access-transam-transam" }
 backend-access-transam-twophase-rmgr = { path = "../backend-access-transam-twophase-rmgr" }
 backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
 backend-access-transam-twophase-fileio-seams = { path = "../backend-access-transam-twophase-fileio-seams" }
+backend-storage-file-fd = { path = "../backend-storage-file-fd" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+libc = "0.2"
 backend-access-transam-commit-ts-seams = { path = "../backend-access-transam-commit-ts-seams" }
 backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }
 port-crc32c-seams = { path = "../port-crc32c-seams" }

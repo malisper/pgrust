@@ -92,6 +92,9 @@ pub const XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK: i32 = 1 << 1;
 /// `MaxAllocSize` (memutils.h) = 0x3fffffff.
 pub const MAX_ALLOC_SIZE: u32 = 0x3fff_ffff;
 
+/// `TWOPHASE_DIR` (twophase.c:112) — the subdirectory holding 2PC state files.
+pub const TWOPHASE_DIR: &str = "pg_twophase";
+
 /// Two-phase resource-manager ids (twophase_rmgr.h).
 pub const TWOPHASE_RM_END_ID: u8 = 0;
 pub const TWOPHASE_RM_MAX_ID: u8 = 4;
@@ -2130,6 +2133,251 @@ pub fn two_phase_file_basename(epoch: u32, xid: TransactionId) -> String {
     alloc::format!("{:08X}{:08X}", epoch, xid)
 }
 
+/// `TwoPhaseFilePath` (twophase.c:945) — the full `pg_twophase/%08X%08X` path
+/// for `xid`. The epoch is `EpochFromFullTransactionId(AdjustToFullTransactionId
+/// (xid))`, where `AdjustToFullTransactionId` =
+/// `FullTransactionIdFromAllowableAt(ReadNextFullTransactionId(), xid)`
+/// (twophase.c:938). This path-format + epoch-adjustment is twophase.c's OWN
+/// logic; only the raw filesystem syscalls below are delegated to fd.c.
+fn two_phase_file_path(xid: TransactionId) -> String {
+    let fxid = adjust_to_full_transaction_id(xid);
+    alloc::format!(
+        "{}/{}",
+        TWOPHASE_DIR,
+        two_phase_file_basename(fxid.epoch(), fxid.xid())
+    )
+}
+
+/// `AdjustToFullTransactionId(xid)` / `FullTransactionIdFromAllowableAt(
+/// ReadNextFullTransactionId(), xid)` (transam.h:380, twophase.c:938) — recover
+/// the full xid (epoch) for a bare `xid` that is known to precede-or-equal the
+/// next full xid.
+fn adjust_to_full_transaction_id(xid: TransactionId) -> types_core::FullTransactionId {
+    use types_core::xact::TransactionIdIsNormal;
+    use types_core::FullTransactionId;
+
+    // Special transaction ID.
+    if !TransactionIdIsNormal(xid) {
+        return FullTransactionId::from_epoch_and_xid(0, xid);
+    }
+
+    let next_full_xid = varsup::read_next_full_transaction_id::call();
+    let mut epoch = next_full_xid.epoch();
+    // xid must be from the epoch of nextFullXid or the epoch before.
+    if xid > next_full_xid.xid() {
+        debug_assert!(epoch != 0);
+        epoch -= 1;
+    }
+    FullTransactionId::from_epoch_and_xid(epoch, xid)
+}
+
+// ---------------------------------------------------------------------------
+// pg_twophase state-file raw I/O — fileio-seam bodies.
+//
+// These are twophase.c's own `ReadTwoPhaseFile` / `RecreateTwoPhaseFile` /
+// `RemoveTwoPhaseFile` / `restoreTwoPhaseData`-scan / `CheckPointTwoPhase`-fsync
+// / `PrepareRedoAdd`-probe syscall glue. The path format + epoch adjustment and
+// (in the read/recreate callers above) the magic/length/CRC validation stay
+// in-crate; only the raw filesystem syscalls are delegated to fd.c's installed
+// primitives (`OpenTransientFile`/`CloseTransientFile`/`pg_fsync`/`fsync_fname`/
+// `AllocateDir`/`ReadDir`/`FreeDir`, and the `unlink_file`/`access_f_ok` seams).
+// ---------------------------------------------------------------------------
+
+use backend_storage_file_fd as fd;
+use backend_storage_file_fd_seams as fd_seams;
+
+/// fd-access ereport at `here()` with the live errno's SQLSTATE.
+fn file_access_error<T>(level: types_error::ErrorLevel, msg: String) -> PgResult<T> {
+    Err(ereport(level)
+        .errcode_for_file_access()
+        .errmsg(msg)
+        .into_error()
+        .with_error_location(here()))
+}
+
+/// `ReadTwoPhaseFile`'s raw read (twophase.c:1288) — `OpenTransientFile + fstat
+/// + read + close`. Returns the raw file bytes, or `None` when `missing_ok` and
+/// the file does not exist (`ENOENT`).
+fn seam_read_twophase_file(
+    xid: TransactionId,
+    missing_ok: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+
+    let path = two_phase_file_path(xid);
+
+    // C: fd = OpenTransientFile(path, O_RDONLY); if (fd < 0) { if (missing_ok &&
+    // errno == ENOENT) return NULL; ereport(ERROR, ...). fd.c's OpenTransientFile
+    // raises the open ERROR eagerly, so to honour `missing_ok` we probe for
+    // existence first (access(path, F_OK)) and report any non-ENOENT errno here.
+    if missing_ok {
+        match fd_seams::access_f_ok::call(&path)? {
+            fd_seams::AccessResult::Ok => {}
+            fd_seams::AccessResult::NoEnt => return Ok(None),
+            fd_seams::AccessResult::Other(_) => {
+                return file_access_error(
+                    ERROR,
+                    alloc::format!("could not access file \"{}\": %m", path),
+                );
+            }
+        }
+    }
+
+    let raw = fd::allocated_desc::OpenTransientFile(&path, libc::O_RDONLY)?;
+    // Borrow the kernel fd as a std File without taking ownership (the close is
+    // CloseTransientFile's job, mirroring C's CloseTransientFile(fd)).
+    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+
+    let mut read_body = || -> PgResult<Vec<u8>> {
+        // C: fstat(fd, &stat) for the length; here std::fs::Metadata.
+        let st_size = file
+            .metadata()
+            .map_err(|_| {
+                ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(alloc::format!("could not stat file \"{}\": %m", path))
+                    .into_error()
+                    .with_error_location(here())
+            })?
+            .len() as usize;
+
+        // The lower/upper size bounds and all format validation live in the
+        // caller (`read_twophase_file`); here we just slurp the file.
+        let mut buf = alloc::vec![0u8; st_size];
+        let r = file.read(&mut buf).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not read file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        if r != st_size {
+            return raise(ereport(ERROR).errmsg(alloc::format!(
+                "could not read file \"{}\": read {} of {}",
+                path,
+                r,
+                st_size
+            )));
+        }
+        Ok(buf)
+    };
+
+    let result = read_body();
+    // C: if (CloseTransientFile(fd) != 0) ereport(ERROR, ...). Close on every
+    // path; surface a close error only when the read itself succeeded.
+    let close = fd::allocated_desc::CloseTransientFile(raw);
+    let buf = result?;
+    close.map_err(|e| e.with_error_location(here()))?;
+    Ok(Some(buf))
+}
+
+/// `RecreateTwoPhaseFile`'s store (twophase.c:1727) — `OpenTransientFile(O_CREAT
+/// |O_TRUNC|O_WRONLY) + write(content) + write(crc) + pg_fsync + close`. The CRC
+/// is computed in-crate by the caller (`recreate_two_phase_file`) and passed in.
+fn seam_recreate_twophase_file(xid: TransactionId, content: &[u8], crc: u32) -> PgResult<()> {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+
+    let path = two_phase_file_path(xid);
+
+    let raw = fd::allocated_desc::OpenTransientFile(
+        &path,
+        libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY,
+    )
+    .map_err(|_| {
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(alloc::format!("could not recreate file \"{}\": %m", path))
+            .into_error()
+            .with_error_location(here())
+    })?;
+    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+
+    let mut write_body = || -> PgResult<()> {
+        // C: write(fd, content, len); write(fd, &statefile_crc, sizeof(crc)).
+        file.write_all(content).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not write file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        file.write_all(&crc.to_ne_bytes()).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not write file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        // C: if (pg_fsync(fd) != 0) ereport(ERROR, ...).
+        fd::sync_cleanup::pg_fsync(&file).map_err(|e| e.with_error_location(here()))?;
+        Ok(())
+    };
+
+    let result = write_body();
+    let close = fd::allocated_desc::CloseTransientFile(raw);
+    result?;
+    close.map_err(|e| e.with_error_location(here()))?;
+    Ok(())
+}
+
+/// `RemoveTwoPhaseFile(xid, giveWarning)` (twophase.c:1707) — `unlink(path)`;
+/// a missing file warns only when `give_warning`.
+fn seam_remove_twophase_file(xid: TransactionId, give_warning: bool) -> PgResult<()> {
+    let path = two_phase_file_path(xid);
+    let rc = fd_seams::unlink_file::call(&path);
+    if rc != 0 {
+        // rc is -errno; C: if (errno != ENOENT || giveWarning) ereport(WARNING).
+        let errno = -rc;
+        if errno != backend_utils_error::errno::ENOENT || give_warning {
+            return file_access_error(
+                WARNING,
+                alloc::format!("could not remove file \"{}\": %m", path),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `restoreTwoPhaseData`'s scan (twophase.c:1895) — `AllocateDir/ReadDir(
+/// TWOPHASE_DIR)`, keeping the 16-hex-char basenames decoded to their full-xid
+/// `u64` values.
+fn seam_scan_twophase_dir() -> PgResult<Vec<u64>> {
+    let mut out: Vec<u64> = Vec::new();
+    fd::allocated_desc::with_allocated_dir(TWOPHASE_DIR, &mut |name: &str| {
+        // C: strlen == 16 && strspn(name, "0123456789ABCDEF") == 16.
+        if name.len() == 16 && name.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        {
+            // C: FullTransactionIdFromU64(strtou64(name, NULL, 16)).
+            if let Ok(v) = u64::from_str_radix(name, 16) {
+                out.push(v);
+            }
+        }
+        Ok(false)
+    })?;
+    Ok(out)
+}
+
+/// `CheckPointTwoPhase`'s `fsync_fname(TWOPHASE_DIR, true)` (twophase.c:1866).
+fn seam_fsync_twophase_dir() -> PgResult<()> {
+    fd::sync_cleanup::fsync_fname(TWOPHASE_DIR, true).map_err(|e| e.with_error_location(here()))
+}
+
+/// `PrepareRedoAdd`'s `access(TwoPhaseFilePath(xid), F_OK)` probe
+/// (twophase.c:2509). `Ok(true)` if it exists, `Ok(false)` on `ENOENT`, `Err`
+/// for any other errno.
+fn seam_twophase_file_exists(xid: TransactionId) -> PgResult<bool> {
+    let path = two_phase_file_path(xid);
+    match fd_seams::access_f_ok::call(&path)? {
+        fd_seams::AccessResult::Ok => Ok(true),
+        fd_seams::AccessResult::NoEnt => Ok(false),
+        fd_seams::AccessResult::Other(_) => {
+            file_access_error(ERROR, alloc::format!("could not access file \"{}\": %m", path))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exit-hook registration (AtProcExit_Twophase / before_shmem_exit)
 // ---------------------------------------------------------------------------
@@ -2375,6 +2623,16 @@ pub fn init_seams() {
     // (consumed by ipci.c when it lands).
     seams::two_phase_shmem_size::set(two_phase_shmem_size_seam);
     seams::two_phase_shmem_init::set(two_phase_shmem_init);
+
+    // pg_twophase state-file raw I/O (`backend-access-transam-twophase-fileio-
+    // seams`). These are twophase.c's own file helpers; the path-format/CRC/
+    // scan logic is in-crate and only the raw syscalls are seamed to fd.c.
+    files::read_twophase_file::set(seam_read_twophase_file);
+    files::recreate_twophase_file::set(seam_recreate_twophase_file);
+    files::remove_twophase_file::set(seam_remove_twophase_file);
+    files::scan_twophase_dir::set(seam_scan_twophase_dir);
+    files::fsync_twophase_dir::set(seam_fsync_twophase_dir);
+    files::twophase_file_exists::set(seam_twophase_file_exists);
 }
 
 /// Read this backend's `MyLockedGxact` slot, panicking if unset (the prepare

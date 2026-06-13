@@ -2,11 +2,11 @@
 //! `twophase.c`'s static file helpers (`ReadTwoPhaseFile`,
 //! `RecreateTwoPhaseFile`, `RemoveTwoPhaseFile`, `restoreTwoPhaseData`'s
 //! directory scan, `CheckPointTwoPhase`'s dir fsync). These are the
-//! `OpenTransientFile`/`read`/`write`/`pg_fsync`/`durable_unlink`/`ReadDir`
+//! `OpenTransientFile`/`read`/`write`/`pg_fsync`/`unlink`/`ReadDir`
 //! syscall glue (fd.c-backed); the magic/CRC/length validation and the record
 //! format live in the twophase crate itself. Installed by the owning unit's
-//! `init_seams()` when the file-I/O glue lands; until then a call panics
-//! loudly.
+//! `init_seams()` (`backend-access-transam-twophase`) over the now-merged
+//! `backend-storage-file-fd` primitives.
 
 extern crate alloc;
 

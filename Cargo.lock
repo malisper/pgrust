@@ -1251,6 +1251,8 @@ dependencies = [
  "backend-catalog-storage-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-syncrep-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-seams",
  "backend-storage-ipc-shmem-seams",
@@ -1262,6 +1264,7 @@ dependencies = [
  "backend-utils-cache-inval-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
+ "libc",
  "port-crc32c-seams",
  "types-core",
  "types-datum",
@@ -4106,6 +4109,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-extensible"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-nodes-extensible-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-extensible",
+ "types-hash",
+]
+
+[[package]]
+name = "backend-nodes-extensible-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-extensible",
+]
+
+[[package]]
 name = "backend-nodes-makefuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -6146,6 +6173,20 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-page"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-page-checksum",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8681,6 +8722,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-string"
+version = "0.0.0"
+dependencies = [
+ "common-string-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-string-seams"
 version = "0.0.0"
 dependencies = [
@@ -8696,6 +8746,13 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-wchar",
+]
+
+[[package]]
+name = "common-wchar"
+version = "0.0.0"
+dependencies = [
  "types-wchar",
 ]
 
@@ -8943,6 +9000,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-nodes-extensible",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
@@ -8978,6 +9036,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
+ "backend-storage-page",
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
@@ -9034,6 +9093,7 @@ dependencies = [
  "common-hashfn",
  "common-ip",
  "common-pglz",
+ "common-string",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",
  "port-pgsleep",
@@ -9255,6 +9315,13 @@ name = "types-explain"
 version = "0.0.0"
 dependencies = [
  "mcx",
+]
+
+[[package]]
+name = "types-extensible"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
