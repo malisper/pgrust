@@ -7877,6 +7877,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-version"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-varlena-seams",
+ "mcx",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-xml-seams"
 version = "0.0.0"
 dependencies = [
@@ -9757,6 +9767,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-adt-varlena",
+ "backend-utils-adt-version",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",

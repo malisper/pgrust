@@ -145,6 +145,7 @@ backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
+backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
