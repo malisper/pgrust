@@ -10,6 +10,7 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_common_relation::init_seams();
     backend_access_common_reloptions::init_seams();
+    backend_access_common_tidstore::init_seams();
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
     backend_access_hashvalidate::init_seams();
