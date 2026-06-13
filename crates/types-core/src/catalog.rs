@@ -19,6 +19,12 @@ pub const AUTH_ID_OID_INDEX_ID: Oid = 2677;
 pub const AUTH_MEM_RELATION_ID: Oid = 1261;
 /// `AuthMemOidIndexId` (`catalog/pg_auth_members.h`) — pg_auth_members_oid_index's OID.
 pub const AUTH_MEM_OID_INDEX_ID: Oid = 6303;
+/// `AttributeRelationId` (`catalog/pg_attribute.h`) — pg_attribute's OID.
+pub const ATTRIBUTE_RELATION_ID: Oid = 1249;
+/// `IndexRelationId` (`catalog/pg_index.h`) — pg_index's OID.
+pub const INDEX_RELATION_ID: Oid = 2610;
+/// `ConstraintRelationId` (`catalog/pg_constraint.h`) — pg_constraint's OID.
+pub const CONSTRAINT_RELATION_ID: Oid = 2606;
 
 /// `PG_CATALOG_NAMESPACE` (`catalog/pg_namespace_d.h`) — OID of the
 /// `pg_catalog` namespace.
