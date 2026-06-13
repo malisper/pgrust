@@ -815,5 +815,5 @@ seam_core::seam!(
         param_exprs: &[types_nodes::primnodes::Expr],
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
