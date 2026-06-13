@@ -14,3 +14,19 @@ seam_core::seam!(
     /// method %u`, `index access method "%s" does not have a handler`, ...).
     pub fn index_am_canbackward(amoid: types_core::Oid) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `amoptions(reloptions, validate)` — the index AM's options parser
+    /// (`IndexAmRoutine.amoptions`), invoked by `index_reloptions`
+    /// (reloptions.c). `amoptions` is dispatched by the AM option-parser
+    /// function's OID. `reloptions` is the verbatim `text[]` catalog bytes;
+    /// the result is the AM-defined option `bytea` payload (the AM owns its
+    /// layout), allocated in `mcx`. `Err` carries the AM's option-validation
+    /// `ereport(ERROR)`s; `None` mirrors the AM returning a NULL bytea.
+    pub fn am_reloptions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        amoptions: types_core::Oid,
+        reloptions: &[u8],
+        validate: bool,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);

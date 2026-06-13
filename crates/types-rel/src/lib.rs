@@ -56,17 +56,13 @@ pub struct FormData_pg_class<'mcx> {
     pub relispartition: bool,
 }
 
-/// `StdRdOptions` (`utils/rel.h`), trimmed: the parsed heap reloptions the
-/// ports consume. `None` on [`RelationData::rd_options`] is the C NULL
+/// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
+/// parser builds and `RelationData::rd_options` carries. Re-exported from
+/// `types-reloptions`, the designated home of the parsed option-struct
+/// vocabulary. `None` on [`RelationData::rd_options`] is the C NULL
 /// `rd_options` (no reloptions set); when present, the parse filled every
 /// field (defaults included), as in C.
-#[derive(Clone, Copy, Debug)]
-pub struct StdRdOptions {
-    /// `int fillfactor`.
-    pub fillfactor: i32,
-    /// `int toast_tuple_target`.
-    pub toast_tuple_target: i32,
-}
+pub use types_reloptions::StdRdOptions;
 
 /// `RelationData` (`utils/rel.h`), trimmed: the consumed slice of a relcache
 /// entry, copied into the opening caller's memory context. (`rd_tableam` is
