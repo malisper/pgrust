@@ -23,6 +23,7 @@ backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-s
 # Outward seams to unported neighbors.
 backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
