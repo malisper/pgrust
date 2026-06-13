@@ -281,6 +281,33 @@ pub(crate) fn eoxact_list_reset(st: &mut RelcacheState) {
     st.eoxact_list_overflowed = false;
 }
 
+/// Collect every `Oid` currently keyed in `RelationIdCache` (the C
+/// `hash_seq_init`/`hash_seq_search` walk over `RelIdCacheEnt`). Used by the
+/// init-file write and the Phase3 finish loop, which snapshot the keys before
+/// mutating/restarting (mirroring the C `restart` reseed).
+#[allow(unsafe_code)]
+pub(crate) fn id_cache_oids(st: &mut RelcacheState) -> Vec<Oid> {
+    let mut out = Vec::new();
+    if st.id_cache.is_null() {
+        return out;
+    }
+    let mut status = HASH_SEQ_STATUS::new();
+    hash_seq_init(&mut status, st.id_cache);
+    loop {
+        let ptr = match hash_seq_search(&mut status) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if ptr.is_null() {
+            break;
+        }
+        // SAFETY: the scan yields live `RelIdCacheEnt` element buffers.
+        let hentry = unsafe { &*(ptr as *const RelIdCacheEnt) };
+        out.push(hentry.reloid);
+    }
+    out
+}
+
 /* ==========================================================================
  * `eoxact_list` bookkeeping (relcache.c `EOXactListAdd` macro).
  * ======================================================================== */
