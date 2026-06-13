@@ -32,6 +32,7 @@ backend-replication-logical-origin-seams = { path = "../backend-replication-logi
 backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
