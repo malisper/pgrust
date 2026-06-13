@@ -899,9 +899,9 @@ pub(crate) fn CleanupTempFiles(is_commit: bool, is_proc_exit: bool) {
                     && v.file_name.is_some()
                 {
                     if is_proc_exit {
-                        result.push(ToClose { file: i as types_storage::File, warn: false });
+                        result.push(ToClose { file: types_storage::File(i as i32), warn: false });
                     } else if fdstate & crate::vfd_core::FD_CLOSE_AT_EOXACT != 0 {
-                        result.push(ToClose { file: i as types_storage::File, warn: true });
+                        result.push(ToClose { file: types_storage::File(i as i32), warn: true });
                     }
                 }
             }

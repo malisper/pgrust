@@ -63,7 +63,7 @@ const PG_IOV_MAX: usize = 32;
 // ---------------------------------------------------------------------------
 
 /// The kernel fd backing an *open* VFD (the C `VfdCache[file].fd`).
-fn vfd_raw_fd(file: File) -> RawFd {
+fn vfd_raw_fd(file: i32) -> RawFd {
     vfd_core::with_fd(|fd| {
         fd.vfd_cache[file as usize]
             .handle
@@ -153,7 +153,7 @@ pub fn PathNameOpenFilePerm(
             let save_errno = get_errno();
             vfd_core::with_fd(|fd| vfd_core::FreeVfd(fd, file));
             set_errno(save_errno);
-            return Ok(-1);
+            return Ok(File(-1));
         }
     };
 
@@ -173,7 +173,7 @@ pub fn PathNameOpenFilePerm(
 
     vfd_core::with_fd(|fd| vfd_core::Insert(fd, file));
 
-    Ok(file)
+    Ok(File(file))
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +183,7 @@ pub fn PathNameOpenFilePerm(
 /// `FileClose(File file)` (fd.c) — close the VFD, deleting the file if
 /// `FD_DELETE_AT_CLOSE`, and free the slot.
 pub fn FileClose(file: File) -> PgResult<()> {
+    let file = file.0;
     // If the kernel handle is open, hand off any in-flight AIO, close it, and
     // remove from the LRU ring.
     let is_open = vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].is_open);
@@ -301,6 +302,7 @@ pub fn FilePrefetch(
     amount: i64,
     wait_event_info: u32,
 ) -> PgResult<i32> {
+    let file = file.0;
     // macOS uses fcntl(F_RDADVISE); Linux/others with posix_fadvise use
     // POSIX_FADV_WILLNEED. Either way we must first make sure the VFD is open.
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
@@ -359,6 +361,7 @@ pub fn FileWriteback(
     nbytes: i64,
     wait_event_info: u32,
 ) -> PgResult<()> {
+    let file = file.0;
     if nbytes <= 0 {
         return Ok(());
     }
@@ -383,7 +386,7 @@ pub fn FileWriteback(
 /// Materialize a borrowed `StdFile` view over a VFD's kernel fd without owning
 /// it (the cache keeps ownership). The caller wraps it in `ManuallyDrop` so the
 /// fd is never closed here.
-unsafe fn take_borrowed(file: File) -> std::fs::File {
+unsafe fn take_borrowed(file: i32) -> std::fs::File {
     std::fs::File::from_raw_fd(vfd_raw_fd(file))
 }
 
@@ -399,6 +402,7 @@ pub fn FileReadV(
     offset: i64,
     wait_event_info: u32,
 ) -> PgResult<isize> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code as isize);
@@ -431,6 +435,7 @@ pub fn FileStartReadV(
     offset: i64,
     _wait_event_info: u32,
 ) -> PgResult<i32> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
@@ -450,6 +455,7 @@ pub fn FileWriteV(
     offset: i64,
     wait_event_info: u32,
 ) -> PgResult<isize> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code as isize);
@@ -523,6 +529,7 @@ pub fn FileWriteV(
 
 /// `FileSync(File file, uint32 wait_event_info)` (fd.c).
 pub fn FileSync(file: File, wait_event_info: u32) -> PgResult<()> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(());
@@ -545,6 +552,7 @@ pub fn FileZero(
     amount: i64,
     wait_event_info: u32,
 ) -> PgResult<i32> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
@@ -672,6 +680,7 @@ pub fn FileFallocate(
     amount: i64,
     wait_event_info: u32,
 ) -> PgResult<i32> {
+    let file = file.0;
     #[cfg(target_os = "linux")]
     {
         let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
@@ -705,7 +714,7 @@ pub fn FileFallocate(
     }
 
     // No posix_fallocate (e.g. macOS) or it reported unsupported: zero-fill.
-    FileZero(file, offset, amount, wait_event_info)
+    FileZero(File(file), offset, amount, wait_event_info)
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +723,7 @@ pub fn FileFallocate(
 
 /// `FileSize(File file)` (fd.c).
 pub fn FileSize(file: File) -> PgResult<i64> {
+    let file = file.0;
     if !vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].is_open) {
         if vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))? < 0 {
             return Ok(-1);
@@ -726,6 +736,7 @@ pub fn FileSize(file: File) -> PgResult<i64> {
 
 /// `FileTruncate(File file, off_t offset, uint32 wait_event_info)` (fd.c).
 pub fn FileTruncate(file: File, offset: i64, wait_event_info: u32) -> PgResult<i32> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
@@ -758,6 +769,7 @@ pub fn FileTruncate(file: File, offset: i64, wait_event_info: u32) -> PgResult<i
 
 /// `FilePathName(File file)` (fd.c) — the file name behind a VFD.
 pub fn FilePathName(file: File) -> String {
+    let file = file.0;
     vfd_core::with_fd(|fd| {
         fd.vfd_cache[file as usize]
             .file_name
@@ -768,6 +780,7 @@ pub fn FilePathName(file: File) -> String {
 
 /// `FileGetRawDesc(File file)` (fd.c) — the underlying kernel fd.
 pub fn FileGetRawDesc(file: File) -> PgResult<RawFd> {
+    let file = file.0;
     let return_code = vfd_core::with_fd(|fd| vfd_core::FileAccess(fd, file))?;
     if return_code < 0 {
         return Ok(return_code);
@@ -777,10 +790,12 @@ pub fn FileGetRawDesc(file: File) -> PgResult<RawFd> {
 
 /// `FileGetRawFlags(File file)` (fd.c).
 pub fn FileGetRawFlags(file: File) -> i32 {
+    let file = file.0;
     vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].file_flags)
 }
 
 /// `FileGetRawMode(File file)` (fd.c).
 pub fn FileGetRawMode(file: File) -> u32 {
+    let file = file.0;
     vfd_core::with_fd(|fd| fd.vfd_cache[file as usize].file_mode)
 }

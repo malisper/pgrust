@@ -55,11 +55,11 @@ pub(crate) struct Vfd {
     /// whether this VFD is registered with a `ResourceOwner`.
     pub has_resowner: bool,
     /// `nextFree` — link to the next free VFD on the free list.
-    pub next_free: File,
+    pub next_free: i32,
     /// `lruMoreRecently` — doubly linked recency-of-use list.
-    pub lru_more_recently: File,
+    pub lru_more_recently: i32,
     /// `lruLessRecently`.
-    pub lru_less_recently: File,
+    pub lru_less_recently: i32,
     /// `fileSize` — current size of file (0 if not temporary).
     pub file_size: i64,
     /// `fileName` — name of file, or `None` for an unused VFD.
@@ -347,7 +347,7 @@ pub fn vfd_cache_is_initialized() -> bool {
 // ---------------------------------------------------------------------------
 
 /// `Delete(File file)` (fd.c) — unlink a VFD from the LRU ring.
-pub(crate) fn Delete(fd: &mut FdState, file: File) {
+pub(crate) fn Delete(fd: &mut FdState, file: i32) {
     debug_assert!(file != 0);
 
     let cache = &mut fd.vfd_cache;
@@ -359,7 +359,7 @@ pub(crate) fn Delete(fd: &mut FdState, file: File) {
 }
 
 /// `LruDelete(File file)` (fd.c) — close the kernel handle and remove from ring.
-pub(crate) fn LruDelete(fd: &mut FdState, file: File) {
+pub(crate) fn LruDelete(fd: &mut FdState, file: i32) {
     debug_assert!(file != 0);
 
     // pgaio_closing_fd(vfdP->fd): let the AIO subsystem drain in-flight IO that
@@ -401,7 +401,7 @@ pub(crate) fn LruDelete(fd: &mut FdState, file: File) {
 }
 
 /// `Insert(File file)` (fd.c) — insert a VFD at the head of the LRU ring.
-pub(crate) fn Insert(fd: &mut FdState, file: File) {
+pub(crate) fn Insert(fd: &mut FdState, file: i32) {
     debug_assert!(file != 0);
 
     let cache = &mut fd.vfd_cache;
@@ -415,7 +415,7 @@ pub(crate) fn Insert(fd: &mut FdState, file: File) {
 /// `LruInsert(File file)` (fd.c) — (re)open the kernel handle and insert.
 ///
 /// Returns 0 on success, -1 on re-open failure (with errno set).
-pub(crate) fn LruInsert(fd: &mut FdState, file: File) -> PgResult<i32> {
+pub(crate) fn LruInsert(fd: &mut FdState, file: i32) -> PgResult<i32> {
     debug_assert!(file != 0);
 
     if FileIsNotOpen(fd, file) {
@@ -478,7 +478,7 @@ pub(crate) fn ReleaseLruFiles(fd: &mut FdState) -> PgResult<()> {
 }
 
 /// `AllocateVfd(void)` (fd.c) — grab a free VFD slot, growing the cache as needed.
-pub(crate) fn AllocateVfd(fd: &mut FdState) -> PgResult<File> {
+pub(crate) fn AllocateVfd(fd: &mut FdState) -> PgResult<i32> {
     debug_assert!(fd.size_vfd_cache() > 0); // InitFileAccess not called?
 
     if fd.vfd_cache[0].next_free == 0 {
@@ -495,12 +495,12 @@ pub(crate) fn AllocateVfd(fd: &mut FdState) -> PgResult<File> {
         fd.vfd_cache.reserve(new_cache_size - old_size);
         for i in old_size..new_cache_size {
             let mut v = Vfd::zeroed();
-            v.next_free = (i + 1) as File;
+            v.next_free = (i + 1) as i32;
             // VfdCache[i].fd = VFD_CLOSED  ==>  is_open = false / handle = None
             fd.vfd_cache.push(v);
         }
         fd.vfd_cache[new_cache_size - 1].next_free = 0;
-        fd.vfd_cache[0].next_free = old_size as File;
+        fd.vfd_cache[0].next_free = old_size as i32;
     }
 
     let file = fd.vfd_cache[0].next_free;
@@ -510,7 +510,7 @@ pub(crate) fn AllocateVfd(fd: &mut FdState) -> PgResult<File> {
 }
 
 /// `FreeVfd(File file)` (fd.c) — return a VFD slot to the free list.
-pub(crate) fn FreeVfd(fd: &mut FdState, file: File) {
+pub(crate) fn FreeVfd(fd: &mut FdState, file: i32) {
     fd.vfd_cache[file as usize].file_name = None;
     fd.vfd_cache[file as usize].fdstate = 0x0;
 
@@ -522,7 +522,7 @@ pub(crate) fn FreeVfd(fd: &mut FdState, file: File) {
 /// mark it most-recently-used.
 ///
 /// Returns 0 on success, -1 on re-open failure (with errno set).
-pub(crate) fn FileAccess(fd: &mut FdState, file: File) -> PgResult<i32> {
+pub(crate) fn FileAccess(fd: &mut FdState, file: i32) -> PgResult<i32> {
     // Is the file open?  If not, open it and put it at the head of the LRU ring
     // (possibly closing the least recently used file to get an FD).
     if FileIsNotOpen(fd, file) {
@@ -543,6 +543,7 @@ pub(crate) fn FileAccess(fd: &mut FdState, file: File) -> PgResult<i32> {
 /// `FileInvalidate(File file)` (fd.c, `#ifdef NOT_USED`) — force a VFD's kernel
 /// handle closed.
 pub fn FileInvalidate(file: File) -> PgResult<()> {
+    let file = file.0;
     with_fd(|fd| {
         debug_assert!(FileIsValid(fd, file));
         if !FileIsNotOpen(fd, file) {
@@ -553,12 +554,12 @@ pub fn FileInvalidate(file: File) -> PgResult<()> {
 }
 
 /// `FileIsNotOpen(file)` (fd.c:192) — `VfdCache[file].fd == VFD_CLOSED`.
-pub(crate) fn FileIsNotOpen(fd: &FdState, file: File) -> bool {
+pub(crate) fn FileIsNotOpen(fd: &FdState, file: i32) -> bool {
     !fd.vfd_cache[file as usize].is_open
 }
 
 /// `FileIsValid(file)` (fd.c:189).
-pub(crate) fn FileIsValid(fd: &FdState, file: File) -> bool {
+pub(crate) fn FileIsValid(fd: &FdState, file: i32) -> bool {
     file > 0
         && (file as usize) < fd.size_vfd_cache()
         && fd.vfd_cache[file as usize].file_name.is_some()
@@ -576,7 +577,7 @@ pub(crate) fn FileIsValid(fd: &FdState, file: File) -> bool {
 /// `Vfd::has_resowner` flag (see `RegisterTemporaryFile`); the resowner side
 /// of the bookkeeping is the owner's responsibility, so forgetting the file is
 /// simply clearing that flag.
-pub(crate) fn ResourceOwnerForgetFile(file: File) {
+pub(crate) fn ResourceOwnerForgetFile(file: i32) {
     with_fd(|fd| {
         fd.vfd_cache[file as usize].has_resowner = false;
     });

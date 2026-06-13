@@ -26,8 +26,6 @@ pub const DATABASE_OID_INDEX_ID: Oid = 2672;
 pub const TEMPLATE1_DB_OID: Oid = 1;
 /// `DEFAULTTABLESPACE_OID` — the `pg_default` tablespace (`pg_tablespace_d.h`).
 pub const DEFAULTTABLESPACE_OID: Oid = 1663;
-/// `GLOBALTABLESPACE_OID` — the `pg_global` tablespace (`pg_tablespace_d.h`).
-pub const GLOBALTABLESPACE_OID: Oid = 1664;
 /// `ROLE_PG_USE_RESERVED_CONNECTIONS` (`pg_authid_d.h`).
 pub const ROLE_PG_USE_RESERVED_CONNECTIONS: Oid = 4550;
 

@@ -30,14 +30,14 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 /// The VFD-cache layer surfaces that silent failure as `Err`, which we collapse
 /// back to `0` here so the C control flow is preserved exactly.
 fn open_or_zero(result: PgResult<File>) -> File {
-    result.unwrap_or(0)
+    result.unwrap_or(File(0))
 }
 
 /// `OpenTemporaryFile(bool interXact)` (fd.c) — open an anonymous temp file in
 /// a temp tablespace, registered for end-of-transaction (or end-of-query)
 /// cleanup.
 pub fn OpenTemporaryFile(inter_xact: bool) -> PgResult<File> {
-    let mut file: File = 0;
+    let mut file: File = File(0);
 
     debug_assert!(temporary_files_allowed(), "check temp file access is up");
 
@@ -66,7 +66,7 @@ pub fn OpenTemporaryFile(inter_xact: bool) -> PgResult<File> {
     // If not, or if tablespace is bad, create in database's default tablespace.
     // MyDatabaseTableSpace should normally be set before we get here, but just
     // in case it isn't, fall back to pg_default tablespace.
-    if file <= 0 {
+    if file.0 <= 0 {
         let my_tblspc = my_database_table_space();
         let tblspc = if my_tblspc != InvalidOid {
             my_tblspc
@@ -78,7 +78,7 @@ pub fn OpenTemporaryFile(inter_xact: bool) -> PgResult<File> {
 
     // Mark it for deletion at close and temporary file size limit.
     with_fd(|fd| {
-        fd.vfd_cache[file as usize].fdstate |= FD_DELETE_AT_CLOSE | FD_TEMP_FILE_LIMIT;
+        fd.vfd_cache[file.0 as usize].fdstate |= FD_DELETE_AT_CLOSE | FD_TEMP_FILE_LIMIT;
     });
 
     // Register it with the current resource owner.
@@ -115,7 +115,7 @@ pub(crate) fn OpenTemporaryFileInTablespace(
         &tempfilepath,
         o_rdwr() | o_creat() | o_trunc() | pg_binary(),
     ));
-    if file <= 0 {
+    if file.0 <= 0 {
         // We might need to create the tablespace's tempfile directory, if no one
         // has yet done so.
         //
@@ -128,7 +128,7 @@ pub(crate) fn OpenTemporaryFileInTablespace(
             &tempfilepath,
             o_rdwr() | o_creat() | o_trunc() | pg_binary(),
         ));
-        if file <= 0 && reject_error {
+        if file.0 <= 0 && reject_error {
             // C: elog(ERROR, "could not create temporary file \"%s\": %m", ...).
             ereport(ERROR)
                 .with_saved_errno(last_errno())
@@ -189,7 +189,7 @@ pub fn PathNameCreateTemporaryFile(path: &str, error_on_failure: bool) -> PgResu
         path,
         o_rdwr() | o_creat() | o_trunc() | pg_binary(),
     ));
-    if file <= 0 {
+    if file.0 <= 0 {
         if error_on_failure {
             ereport(ERROR)
                 .with_saved_errno(last_errno())
@@ -203,7 +203,7 @@ pub fn PathNameCreateTemporaryFile(path: &str, error_on_failure: bool) -> PgResu
 
     // Mark it for temp_file_limit accounting.
     with_fd(|fd| {
-        fd.vfd_cache[file as usize].fdstate |= FD_TEMP_FILE_LIMIT;
+        fd.vfd_cache[file.0 as usize].fdstate |= FD_TEMP_FILE_LIMIT;
     });
 
     // Register it for automatic close.
@@ -222,7 +222,7 @@ pub fn PathNameOpenTemporaryFile(path: &str, mode: i32) -> PgResult<File> {
     let file = open_or_zero_ref(&open);
 
     // If no such file, then we don't raise an error.
-    if file <= 0 && last_errno() != enoent() {
+    if file.0 <= 0 && last_errno() != enoent() {
         ereport(ERROR)
             .with_saved_errno(last_errno())
             .errcode_for_file_access()
@@ -230,7 +230,7 @@ pub fn PathNameOpenTemporaryFile(path: &str, mode: i32) -> PgResult<File> {
             .finish(loc("PathNameOpenTemporaryFile"))?;
     }
 
-    if file > 0 {
+    if file.0 > 0 {
         // Register it for automatic close.
         RegisterTemporaryFile(file);
     }
@@ -244,7 +244,7 @@ pub fn PathNameOpenTemporaryFile(path: &str, mode: i32) -> PgResult<File> {
 fn open_or_zero_ref(result: &PgResult<File>) -> File {
     match result {
         Ok(f) => *f,
-        Err(_) => 0,
+        Err(_) => File(0),
     }
 }
 
@@ -365,7 +365,7 @@ pub fn RegisterTemporaryFile(file: File) {
     // owner is the RAII ownership glue: the VFD records that it is owned by the
     // current resource owner.
     with_fd(|fd| {
-        let vfd = &mut fd.vfd_cache[file as usize];
+        let vfd = &mut fd.vfd_cache[file.0 as usize];
         vfd.has_resowner = true;
 
         // Backup mechanism for closing at end of xact.
