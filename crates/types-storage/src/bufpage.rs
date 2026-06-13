@@ -177,6 +177,14 @@ pub const SizeofHeapTupleHeader: usize = 23;
 pub const MaxHeapTuplesPerPage: usize =
     (BLCKSZ - SizeOfPageHeaderData) / (24 + core::mem::size_of::<ItemIdData>());
 
+/// `MaxHeapTupleSize` (`access/htup_details.h`):
+/// `(BLCKSZ - MAXALIGN(SizeOfPageHeaderData + sizeof(ItemIdData)))`.
+/// `MAXALIGN(24 + 4) == 32` on the 8-byte-aligned build.
+pub const MaxHeapTupleSize: Size = BLCKSZ - {
+    let raw = SizeOfPageHeaderData + core::mem::size_of::<ItemIdData>();
+    (raw + 7) & !7
+};
+
 /// `PG_IO_ALIGN_SIZE` (`c.h`): the alignment, in bytes, that PostgreSQL likes
 /// for page-sized I/O buffers.
 pub const PG_IO_ALIGN_SIZE: usize = 4096;
