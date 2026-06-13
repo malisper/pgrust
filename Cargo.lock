@@ -1439,6 +1439,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-timezone-localtime"
+version = "0.0.0"
+dependencies = [
+ "backend-timezone-pgtz-seams",
+ "types-core",
+ "types-pgtime",
+]
+
+[[package]]
 name = "backend-timezone-pgtz-seams"
 version = "0.0.0"
 dependencies = [
@@ -2118,6 +2127,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
@@ -2238,6 +2248,9 @@ dependencies = [
 [[package]]
 name = "types-pgtime"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-rel"

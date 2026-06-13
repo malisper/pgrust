@@ -32,6 +32,7 @@ backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
