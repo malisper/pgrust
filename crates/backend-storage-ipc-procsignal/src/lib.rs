@@ -42,7 +42,9 @@
 //! - `pss_barrierCV` is a [`types_condvar::ConditionVariable`]; the sleep /
 //!   broadcast protocol is `condition_variable.c`'s and is reached through
 //!   `backend-storage-lmgr-condition-variable-seams`.
-//! - `MyProcSignalSlot` (a per-process static) is a thread-local slot index.
+//! - `MyProcSignalSlot` (a per-process static) is a thread-local slot index,
+//!   stored together with the registering backend's pid (C's `MyProcPid`)
+//!   so the fixed-signature exit callback needs no ambient getter.
 //! - `ProcSignalBarrierPending` is C-defined in `globals.c`, but procsignal
 //!   owns its whole lifecycle (set by `HandleProcSignalBarrierInterrupt` /
 //!   `ResetProcSignalBarrierBits`, cleared by `ProcessProcSignalBarrier`),
@@ -69,8 +71,10 @@ use types_storage::{
 };
 
 /// `WAIT_EVENT_PROC_SIGNAL_BARRIER` (generated `utils/wait_event_types.h`):
-/// `PG_WAIT_IPC | 0x2A` — `PROC_SIGNAL_BARRIER` is the 42nd name in the
-/// alphabetized `WaitEventIPC` section of `wait_event_names.txt`.
+/// `PG_WAIT_IPC | 0x2A` — `PROC_SIGNAL_BARRIER` is at 0-based index 42 (the
+/// 43rd name) in the alphabetized `WaitEventIPC` section of
+/// `wait_event_names.txt`; the generator assigns the first name the class
+/// value `PG_WAIT_IPC` itself.
 const WAIT_EVENT_PROC_SIGNAL_BARRIER: u32 = 0x0800_0000 | 0x2A;
 
 /// The fields of a slot protected by `pss_mutex` that are not independently
@@ -107,8 +111,11 @@ static PROC_SIGNAL: OnceLock<ProcSignalHeader> = OnceLock::new();
 
 thread_local! {
     /// `static ProcSignalSlot *MyProcSignalSlot = NULL;` — our index into
-    /// `psh_slot`.
-    static MY_PROC_SIGNAL_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// `psh_slot`, paired with the registering backend's pid (the C reads
+    /// `MyProcPid` again in `CleanupProcSignalState`; the fixed-signature
+    /// `on_shmem_exit` callback has no parameter source, so the pid is
+    /// stashed here at registration instead of going through a getter seam).
+    static MY_PROC_SIGNAL_SLOT: Cell<Option<(usize, i32)>> = const { Cell::new(None) };
 
     /// `volatile sig_atomic_t ProcSignalBarrierPending = false;`
     static PROC_SIGNAL_BARRIER_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -190,15 +197,20 @@ pub fn ProcSignalShmemInit() -> PgResult<()> {
 
 /// `ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)` — register
 /// the current process in the ProcSignal array. The `Err`s are the two
-/// `elog(ERROR)`s on a bad `MyProcNumber`.
-pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
+/// `elog(ERROR)`s on a bad `MyProcNumber` and `on_shmem_exit`'s FATAL slot
+/// overflow. The C reads the `MyProcNumber`/`MyProcPid` globals; here the
+/// caller passes its own values explicitly.
+pub fn ProcSignalInit(
+    my_proc_number: ProcNumber,
+    my_proc_pid: i32,
+    cancel_key: &[u8],
+) -> PgResult<()> {
     let cancel_key_len = cancel_key.len() as i32;
 
     // Assert(cancel_key_len >= 0 && cancel_key_len <= MAX_CANCEL_KEY_LENGTH)
     // (>= 0 is implicit in a slice length).
     debug_assert!(cancel_key.len() <= MAX_CANCEL_KEY_LENGTH);
 
-    let my_proc_number: ProcNumber = backend_utils_init_small_seams::my_proc_number::call();
     if my_proc_number < 0 {
         return elog(ERROR, "MyProcNumber not set");
     }
@@ -214,8 +226,6 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
         );
     }
     let slot = &header.psh_slot[my_proc_number as usize];
-
-    let my_proc_pid = backend_utils_init_small_seams::my_proc_pid::call();
 
     // SpinLockAcquire(&slot->pss_mutex)
     let mut key = slot.pss_mutex.lock().unwrap();
@@ -261,14 +271,15 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
         )?;
     }
 
-    // Remember slot location for CheckProcSignal
-    MY_PROC_SIGNAL_SLOT.set(Some(my_proc_number as usize));
+    // Remember slot location for CheckProcSignal (and our pid for
+    // CleanupProcSignalState).
+    MY_PROC_SIGNAL_SLOT.set(Some((my_proc_number as usize, my_proc_pid)));
 
     // Set up to release the slot on process exit
     backend_storage_ipc_seams::on_shmem_exit::call(
         CleanupProcSignalState,
         types_datum::Datum::from_usize(0),
-    );
+    )?;
 
     Ok(())
 }
@@ -276,17 +287,16 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
 /// `CleanupProcSignalState(int status, Datum arg)` — remove current process
 /// from the ProcSignal mechanism. Called via `on_shmem_exit()` during
 /// backend shutdown.
-fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
+fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) -> PgResult<()> {
     // Clear MyProcSignalSlot, so that a SIGUSR1 received after this point
     // won't try to access it after it's no longer ours.
-    let slot_index = MY_PROC_SIGNAL_SLOT
+    let (slot_index, my_proc_pid) = MY_PROC_SIGNAL_SLOT
         .get()
         .expect("CleanupProcSignalState called without a ProcSignal slot");
     MY_PROC_SIGNAL_SLOT.set(None);
 
     let header = proc_signal();
     let slot = &header.psh_slot[slot_index];
-    let my_proc_pid = backend_utils_init_small_seams::my_proc_pid::call();
 
     // sanity check
     let mut key = slot.pss_mutex.lock().unwrap();
@@ -303,7 +313,7 @@ fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
                 my_proc_pid, slot_index, old_pid as i32
             ),
         );
-        return; /* XXX better to zero the slot anyway? */
+        return Ok(()); /* XXX better to zero the slot anyway? */
     }
 
     // Mark the slot as unused
@@ -319,6 +329,8 @@ fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) {
     backend_storage_lmgr_condition_variable_seams::condition_variable_broadcast::call(
         &slot.pss_barrierCV,
     );
+
+    Ok(())
 }
 
 /// `SendProcSignal(pid, reason, procNumber)` — send a signal to a Postgres
@@ -516,7 +528,8 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
     let header = proc_signal();
     let my_slot = &header.psh_slot[MY_PROC_SIGNAL_SLOT
         .get()
-        .expect("ProcessProcSignalBarrier called without a ProcSignal slot")];
+        .expect("ProcessProcSignalBarrier called without a ProcSignal slot")
+        .0];
 
     // It's not unlikely to process multiple barriers at once, before the
     // signals for all the barriers have arrived. To avoid unnecessary work
@@ -633,7 +646,8 @@ fn ResetProcSignalBarrierBits(flags: u32) {
     let header = proc_signal();
     let my_slot = &header.psh_slot[MY_PROC_SIGNAL_SLOT
         .get()
-        .expect("ResetProcSignalBarrierBits called without a ProcSignal slot")];
+        .expect("ResetProcSignalBarrierBits called without a ProcSignal slot")
+        .0];
     my_slot.pss_barrierCheckMask.fetch_or(flags, SeqCst);
     SetProcSignalBarrierPending(true);
     backend_utils_init_small_seams::set_interrupt_pending::call(true);
@@ -643,7 +657,7 @@ fn ResetProcSignalBarrierBits(flags: u32) {
 /// signaled, and clear the signal flag. Should be called after receiving
 /// SIGUSR1.
 fn CheckProcSignal(reason: ProcSignalReason) -> bool {
-    if let Some(index) = MY_PROC_SIGNAL_SLOT.get() {
+    if let Some((index, _)) = MY_PROC_SIGNAL_SLOT.get() {
         let slot = &proc_signal().psh_slot[index];
 
         // Careful here --- don't clear flag if we haven't seen it set.

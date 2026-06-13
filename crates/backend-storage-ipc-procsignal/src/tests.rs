@@ -20,8 +20,6 @@ thread_local! {
 
 #[derive(Default)]
 pub(crate) struct Env {
-    proc_number: Cell<i32>,
-    proc_pid: Cell<i32>,
     interrupt_pending: Cell<bool>,
     latch_set_count: Cell<u32>,
     notify_calls: Cell<u32>,
@@ -30,7 +28,13 @@ pub(crate) struct Env {
     smgr_release_result: Cell<Option<bool>>, // None => Err
     smgr_release_calls: Cell<u32>,
     cv_broadcasts: Cell<u32>,
-    shmem_exit_callback: Cell<Option<(fn(i32, types_datum::Datum), types_datum::Datum)>>,
+    #[allow(clippy::type_complexity)]
+    shmem_exit_callback: Cell<
+        Option<(
+            fn(i32, types_datum::Datum) -> types_error::PgResult<()>,
+            types_datum::Datum,
+        )>,
+    >,
 }
 
 fn install_seams_once() {
@@ -39,8 +43,6 @@ fn install_seams_once() {
         super::init_seams();
 
         backend_utils_init_small_seams::max_backends::set(|| TEST_MAX_BACKENDS);
-        backend_utils_init_small_seams::my_proc_number::set(|| ENV.with(|e| e.proc_number.get()));
-        backend_utils_init_small_seams::my_proc_pid::set(|| ENV.with(|e| e.proc_pid.get()));
         backend_utils_init_small_seams::set_interrupt_pending::set(|v| {
             ENV.with(|e| e.interrupt_pending.set(v))
         });
@@ -49,7 +51,8 @@ fn install_seams_once() {
         backend_storage_ipc_shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
 
         backend_storage_ipc_seams::on_shmem_exit::set(|f, arg| {
-            ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))))
+            ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))));
+            Ok(())
         });
 
         backend_storage_ipc_latch_seams::set_latch_my_latch::set(|| {
@@ -116,8 +119,6 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
     ProcSignalShmemInit().unwrap();
 
     ENV.with(|e| {
-        e.proc_number.set(slot);
-        e.proc_pid.set(pid);
         e.interrupt_pending.set(false);
         e.smgr_release_result.set(Some(true));
         e.smgr_release_calls.set(0);
@@ -128,7 +129,7 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
     SetProcSignalBarrierPending(false);
     MY_PROC_SIGNAL_SLOT.set(None);
 
-    ProcSignalInit(cancel_key).unwrap();
+    ProcSignalInit(slot, pid, cancel_key).unwrap();
     guard
 }
 
@@ -136,7 +137,7 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
 /// shmem_exit would.
 fn teardown() {
     let (f, arg) = ENV.with(|e| e.shmem_exit_callback.get()).unwrap();
-    f(0, arg);
+    f(0, arg).unwrap();
 }
 
 /// A fake pid no real process can have (macOS caps pids at 99998; Linux
