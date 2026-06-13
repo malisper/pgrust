@@ -182,17 +182,49 @@ pub fn removeconstraints(_nfa: &mut Nfa, _start: StateId, _stop: StateId) {
     todo!("regc_nfa.c:removeconstraints")
 }
 
+/// `single_color_transition(struct state *s1, struct state *s2)` — does getting
+/// from `s1` to `s2` cross a single PLAIN match (possibly any of a set of
+/// colors)? Returns the possessor state of the relevant out-arcs, or `None`.
+pub fn single_color_transition(_nfa: &Nfa, _s1: StateId, _s2: StateId) -> Option<StateId> {
+    todo!("regc_nfa.c:single_color_transition")
+}
+
+/// Cross-NFA `dupnfa`: copy the sub-NFA reachable from `start`..`stop` in `src`
+/// into `dst`, hanging it from `from`..`to`. Both NFAs share the colormap `cm`.
+///
+/// In C, `dupnfa(struct nfa *nfa, start, stop, from, to)` is inherently
+/// cross-NFA — `start`/`stop` may be states of a *different* NFA than `nfa`
+/// (this is exactly how `nfanode` copies a parent sub-NFA into a fresh child
+/// NFA), because states are heap pointers and `duptraverse` scribbles `s->tmp`
+/// on the source states. The arena split forces the two NFAs to be distinct
+/// arguments; the single-NFA [`dupnfa`] is the `src == dst` special case.
+#[allow(clippy::too_many_arguments)]
+pub fn dupnfa_cross<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _dst: &mut Nfa,
+    _src: &mut Nfa,
+    _cm: &mut ColorMap,
+    _start: StateId,
+    _stop: StateId,
+    _from: StateId,
+    _to: StateId,
+) -> RegResult<()> {
+    todo!("regc_nfa.c:dupnfa (cross-NFA)")
+}
+
 // ---------------------------------------------------------------------------
 // optimization / analysis passes
 // ---------------------------------------------------------------------------
 
-/// `specialcolors(struct nfa *nfa)` — assign BOS/EOS pseudocolors.
-pub fn specialcolors<'mcx>(_mcx: Mcx<'mcx>, _nfa: &mut Nfa) -> RegResult<()> {
+/// `specialcolors(struct nfa *nfa)` — assign BOS/EOS pseudocolors. The colormap
+/// is threaded in (C reaches it via `nfa->cm`).
+pub fn specialcolors<'mcx>(_mcx: Mcx<'mcx>, _nfa: &mut Nfa, _cm: &mut ColorMap) -> RegResult<()> {
     todo!("regc_nfa.c:specialcolors")
 }
 
-/// `optimize(struct nfa *nfa, FILE *f)` — top-level NFA optimization driver.
-pub fn optimize<'mcx>(_mcx: Mcx<'mcx>, _nfa: &mut Nfa) -> RegResult<i64> {
+/// `optimize(struct nfa *nfa, FILE *f)` — top-level NFA optimization driver. The
+/// colormap is threaded in (C reaches it via `nfa->cm`).
+pub fn optimize<'mcx>(_mcx: Mcx<'mcx>, _nfa: &mut Nfa, _cm: &mut ColorMap) -> RegResult<i64> {
     todo!("regc_nfa.c:optimize")
 }
 
@@ -240,8 +272,10 @@ pub fn checkmatchall(_nfa: &mut Nfa) {
     todo!("regc_nfa.c:checkmatchall")
 }
 
-/// `compact(struct nfa *nfa, struct cnfa *cnfa)` — build the compacted NFA.
-pub fn compact<'mcx>(_mcx: Mcx<'mcx>, _nfa: &Nfa, _cnfa: &mut Cnfa) -> RegResult<()> {
+/// `compact(struct nfa *nfa, struct cnfa *cnfa)` — build the compacted NFA. The
+/// colormap is threaded in (C reaches it via `nfa->cm`; `compact` reads
+/// `cm->max` for `cnfa->ncolors`).
+pub fn compact<'mcx>(_mcx: Mcx<'mcx>, _nfa: &Nfa, _cm: &ColorMap, _cnfa: &mut Cnfa) -> RegResult<()> {
     todo!("regc_nfa.c:compact")
 }
 

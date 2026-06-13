@@ -15,7 +15,7 @@
 use mcx::Mcx;
 
 use crate::regex_error::RegResult;
-use crate::regguts::{chr, color, ColorMap, Cvec};
+use crate::regguts::{chr, color, ColorMap, Cvec, Nfa, StateId};
 
 // ---------------------------------------------------------------------------
 // regc_cvec.c — character-vector utilities
@@ -133,21 +133,56 @@ pub fn newhicolorcols<'mcx>(_mcx: Mcx<'mcx>, _cm: &mut ColorMap) -> RegResult<()
 /// `subcolorcvec(struct vars *v, struct cvec *cv, struct state *lp,
 /// struct state *rp)` — apply a cvec's chrs/ranges/cclass as subcolors and emit
 /// arcs between two NFA states. Routes arc emission through the NFA family.
-pub fn subcolorcvec(_cv: &Cvec) -> RegResult<()> {
+pub fn subcolorcvec<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _nfa: &mut Nfa,
+    _cm: &mut ColorMap,
+    _cv: &Cvec,
+    _lp: StateId,
+    _rp: StateId,
+) -> RegResult<()> {
     todo!("regc_color.c:subcolorcvec")
 }
 
 /// `subcoloronechr(...)` — subcolor a single chr and emit its arc.
-pub fn subcoloronechr(_c: chr) -> RegResult<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn subcoloronechr<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _nfa: &mut Nfa,
+    _cm: &mut ColorMap,
+    _ch: chr,
+    _lp: StateId,
+    _rp: StateId,
+    _lastsubcolor: &mut color,
+) -> RegResult<()> {
     todo!("regc_color.c:subcoloronechr")
 }
 
 /// `subcoloronerange(...)` — subcolor a chr range and emit its arcs.
-pub fn subcoloronerange(_from: chr, _to: chr) -> RegResult<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn subcoloronerange<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _nfa: &mut Nfa,
+    _cm: &mut ColorMap,
+    _from: chr,
+    _to: chr,
+    _lp: StateId,
+    _rp: StateId,
+    _lastsubcolor: &mut color,
+) -> RegResult<()> {
     todo!("regc_color.c:subcoloronerange")
 }
 
 /// `subcoloronerow(...)` — subcolor a high-colormap row and emit its arcs.
-pub fn subcoloronerow(_row: i32) -> RegResult<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn subcoloronerow<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _nfa: &mut Nfa,
+    _cm: &mut ColorMap,
+    _row: i32,
+    _lp: StateId,
+    _rp: StateId,
+    _lastsubcolor: &mut color,
+) -> RegResult<()> {
     todo!("regc_color.c:subcoloronerow")
 }
