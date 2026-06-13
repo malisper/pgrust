@@ -23,12 +23,17 @@ pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
+pub mod nodehashjoin;
 pub mod nodeindexscan;
+pub mod nodemergeappend;
 pub mod nodemergejoin;
+pub mod nodenestloop;
 pub mod nodes;
 pub mod nodetablefuncscan;
+pub mod nodetidrangescan;
 pub mod parsenodes;
 pub mod pathnodes;
+pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
 pub mod queryenvironment;
@@ -43,9 +48,14 @@ pub use execnodes::{
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
-    JOIN_RIGHT_ANTI, JOIN_SEMI,
+    JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
+};
+pub use nodemergeappend::{
+    BinaryHeap, MergeAppend, MergeAppendStateData, PartitionPruneState, T_MergeAppend,
+    T_MergeAppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
@@ -54,6 +64,9 @@ pub use nodetablefuncscan::{
     TableFuncRoutineKind, TableFuncScan, TableFuncScanState, T_TableFuncScanState,
 };
 pub use primnodes::{TableFunc, TableFuncType, TFT_JSON_TABLE, TFT_XMLTABLE};
+pub use nodehashjoin::{
+    HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
+};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};

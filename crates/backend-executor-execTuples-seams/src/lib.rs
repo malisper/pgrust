@@ -185,6 +185,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch a regular
+    /// (positive) attribute `attnum` (1-based) of the slot's current tuple as
+    /// `(datum, isnull)`, deforming up to `attnum` first via
+    /// `slot_getsomeattrs`/`slot_getsomeattrs_int` (`slot->tts_ops->getsomeattrs`
+    /// dispatch). The slot is borrowed mutably because deforming populates the
+    /// slot's `tts_values`/`tts_isnull`/`tts_nvalid`; deforming can
+    /// detoast/allocate, so the call is fallible. System (non-positive) attnums
+    /// take the `slot_getsysattr` path instead and are never passed here.
+    pub fn slot_getattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
     /// `ExecInitNullTupleSlot(estate, tupledesc, tts_ops)` (execTuples.c):
     /// create a slot in the EState slot pool and store an all-NULL virtual
     /// tuple of the given descriptor in it (the null-padding slot for outer
@@ -216,4 +231,42 @@ seam_core::seam!(
     pub fn exec_get_result_slot_ops<'mcx>(
         planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
     ) -> types_nodes::TupleSlotKind
+);
+
+seam_core::seam!(
+    /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
+    /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
+    /// taking ownership when `should_free`. Fallible on OOM.
+    pub fn exec_force_store_minimal_tuple<'mcx>(
+        slot: types_nodes::SlotId,
+        mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        should_free: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): materialize
+    /// the slot's contents as a `MinimalTuple` (copied into `mcx`), returning it
+    /// and whether the caller must free it. Fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<(
+        mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        bool,
+    )>
+);
+
+seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch ordinary
+    /// attribute `attnum` (1-based) from `slot`, deforming the tuple as needed
+    /// (`slot_getsomeattrs` → `slot_getsomeattrs_int`), returning
+    /// `(value, isnull)`. The merge-append comparator only ever asks for
+    /// ordinary columns (`attnum >= 1`). Deforming can detoast / allocate and
+    /// the underlying ops can `ereport(ERROR)`, hence `PgResult`.
+    pub fn slot_getattr(
+        slot: &mut types_nodes::TupleTableSlot,
+        attnum: types_core::primitive::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
 );

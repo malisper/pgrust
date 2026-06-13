@@ -59,3 +59,14 @@ seam_core::seam!(
     /// delete. Can `ereport(ERROR)`, carried on `Err`.
     pub fn drop_relation_files(rels: &[types_wal::RelFileLocator]) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationPreserveStorage(rlocator, atCommit)` (storage.c) — protect the
+    /// physical file named by `rlocator` from deletion at transaction
+    /// end/abort. relmapper calls this with `atCommit=false` for each mapped
+    /// file when committing a relmap update, inside a critical section.
+    pub fn relation_preserve_storage(
+        rlocator: RelFileLocator,
+        at_commit: bool,
+    ) -> PgResult<()>
+);
