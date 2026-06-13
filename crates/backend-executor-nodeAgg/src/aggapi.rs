@@ -11,7 +11,9 @@ use mcx::MemoryContext;
 use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::nodeagg::{Aggref, AggStateData, AggregateInstrumentation, SharedAggInfo};
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
+use types_execparallel::{
+    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
+};
 
 use backend_access_transam_parallel_seams as parallel_seams;
 
@@ -299,3 +301,65 @@ fn shared_agg_info_sinstrument_offset() -> usize {
 // this family even while the DSM store/copy paths route through the owner.
 #[allow(dead_code)]
 fn _shared_agg_info_marker(_: &SharedAggInfo<'_>) {}
+
+// ---------------------------------------------------------------------------
+// Seam shims installed into `backend-executor-nodeAgg-pq-seams`.
+//
+// `execParallel` dispatches the per-node parallel hooks generically, holding a
+// `PlanState *` (here the opaque [`PlanStateHandle`]); the C `ExecAggEstimate`
+// etc. begin with the `(AggState *) node` cast. Recovering the live
+// `AggStateData` from the handle is the executor's `PlanState`-pointer registry
+// — that pointer-table is the unported executor surface, so each shim performs
+// the C cast through `resolve_agg_state` (which panics until that registry
+// lands) and then runs the real, ported entry point above.
+// ---------------------------------------------------------------------------
+
+/// `(AggState *) node` — recover the live `AggStateData` a `PlanStateHandle`
+/// refers to. The executor's `PlanState` pointer registry that backs this
+/// lookup is not yet ported.
+fn resolve_agg_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut AggStateData<'mcx> {
+    panic!(
+        "backend-executor-nodeAgg: resolving a PlanStateHandle to the live AggState needs the \
+         executor PlanState pointer registry (unported); the (AggState *) node cast in the \
+         ExecAgg* parallel hooks cannot run yet"
+    );
+}
+
+/// Seam shim for `ExecAggEstimate`.
+fn exec_agg_estimate_shim(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
+    ExecAggEstimate(resolve_agg_state(node), pcxt)
+}
+
+/// Seam shim for `ExecAggInitializeDSM`.
+fn exec_agg_initialize_dsm_shim(
+    node: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    ExecAggInitializeDSM(resolve_agg_state(node), pcxt)
+}
+
+/// Seam shim for `ExecAggInitializeWorker`.
+fn exec_agg_initialize_worker_shim(
+    node: PlanStateHandle,
+    pwcxt: ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    ExecAggInitializeWorker(resolve_agg_state(node), pwcxt)
+}
+
+/// Seam shim for `ExecAggRetrieveInstrumentation`.
+fn exec_agg_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()> {
+    ExecAggRetrieveInstrumentation(resolve_agg_state(node))
+}
+
+/// Install the `aggapi` parallel-instrumentation seams this unit owns
+/// (`backend-executor-nodeAgg-pq-seams`).
+pub fn init_seams() {
+    backend_executor_nodeAgg_pq_seams::exec_agg_estimate::set(exec_agg_estimate_shim);
+    backend_executor_nodeAgg_pq_seams::exec_agg_initialize_dsm::set(exec_agg_initialize_dsm_shim);
+    backend_executor_nodeAgg_pq_seams::exec_agg_initialize_worker::set(
+        exec_agg_initialize_worker_shim,
+    );
+    backend_executor_nodeAgg_pq_seams::exec_agg_retrieve_instrumentation::set(
+        exec_agg_retrieve_instrumentation_shim,
+    );
+}

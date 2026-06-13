@@ -12,9 +12,9 @@ use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodeagg::{
     do_aggsplit_combine, do_aggsplit_deserialize, do_aggsplit_serialize, do_aggsplit_skipfinal,
     Agg, AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerHashData,
-    AggStatePerPhaseData, AggStatePerTransData, Sort, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+    AggStatePerPhaseData, AggStatePerTransData, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
-use types_nodes::{AggStrategy, EStateData, TupleSlotKind};
+use types_nodes::{AggStrategy, EStateData, Sort, TupleSlotKind};
 
 use crate::hash_grouping::{hash_agg_entry_size, hash_create_memory};
 use crate::node_lifecycle::{

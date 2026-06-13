@@ -2124,6 +2124,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeAgg"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeAgg-pq-seams",
+ "backend-lib-hyperloglog-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-sort-storage-seams",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeAgg-pq-seams"
 version = "0.0.0"
 dependencies = [
@@ -2507,6 +2537,14 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-lib-hyperloglog-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
 ]
 
 [[package]]
@@ -5539,6 +5577,7 @@ dependencies = [
  "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeAgg",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",

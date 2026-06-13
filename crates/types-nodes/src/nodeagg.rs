@@ -8,8 +8,8 @@
 //!   `execnodes`);
 //! - `ExprContext *` → an owned [`ExprContext`] (or, where C aliases one of
 //!   the EState-owned contexts, an index into the owning array);
-//! - `Tuplesortstate *` (utils/sort/tuplesort.c, not ported) → the opaque
-//!   [`TuplesortstateHandle`] the sort owner names when it lands;
+//! - `Tuplesortstate *` (utils/sort/tuplesort.c) → the real
+//!   [`crate::nodesort::Tuplesortstate`] (carried in an owning `PgBox`);
 //! - `LogicalTapeSet *` / `LogicalTape *` (utils/sort/logtape.c) →
 //!   [`LogicalTapeSetHandle`] / [`LogicalTapeHandle`];
 //! - `TupleHashTable` / `TupleHashIterator` / `TupleHashEntry`
@@ -31,6 +31,7 @@ use crate::execexpr::ExprState;
 use crate::execnodes::{ExprContext, ScanStateData, SlotId};
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodeindexscan::Plan;
+use crate::nodesort::{Sort, Tuplesortstate};
 use crate::primnodes::{Expr, TargetEntry};
 
 // ---------------------------------------------------------------------------
@@ -190,31 +191,17 @@ pub struct Agg<'mcx> {
     pub chain: Option<PgVec<'mcx, PgBox<'mcx, Agg<'mcx>>>>,
 }
 
-/// `Sort` plan node (nodes/plannodes.h), trimmed.
-#[derive(Debug, Default)]
-pub struct Sort<'mcx> {
-    /// `Plan plan` — the abstract plan-node base.
-    pub plan: Plan<'mcx>,
-    /// `int numCols` — number of sort-key columns.
-    pub num_cols: i32,
-    /// `AttrNumber *sortColIdx` — their indexes in the target list.
-    pub sort_col_idx: Option<PgVec<'mcx, AttrNumber>>,
-    /// `Oid *sortOperators` — OIDs of operators to sort them by.
-    pub sort_operators: Option<PgVec<'mcx, Oid>>,
-    /// `Oid *collations` — OIDs of collations.
-    pub collations: Option<PgVec<'mcx, Oid>>,
-    /// `bool *nullsFirst` — NULLS FIRST/LAST directions.
-    pub nulls_first: Option<PgVec<'mcx, bool>>,
-}
+// The `Sort` plan node (nodes/plannodes.h) is owned by `nodesort`; the agg
+// `AggStatePerPhaseData.sortnode` field references that shared type
+// ([`crate::nodesort::Sort`]).
 
 // ---------------------------------------------------------------------------
 // Sibling-subsystem handles (collapse onto real types when owners land)
 // ---------------------------------------------------------------------------
 
-/// `Tuplesortstate *` (utils/sort/tuplesort.c, not ported) — opaque sort
-/// object handle the sort owner names when it lands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TuplesortstateHandle(pub usize);
+// `Tuplesortstate *` (utils/sort/tuplesort.c) is owned by `nodesort`; the agg
+// sort fields hold the real [`crate::nodesort::Tuplesortstate`] (carried in an
+// owning `PgBox`, the owned-model shape for a `Tuplesortstate *`).
 
 /// `LogicalTapeSet *` (utils/sort/logtape.c) — opaque spill tape-set handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -316,7 +303,7 @@ pub struct AggStatePerTransData<'mcx> {
     /// `bool haslast`.
     pub haslast: bool,
     /// `Tuplesortstate **sortstates` — one per grouping set, if DISTINCT/ORDER BY.
-    pub sortstates: Option<PgVec<'mcx, Option<TuplesortstateHandle>>>,
+    pub sortstates: Option<PgVec<'mcx, Option<PgBox<'mcx, Tuplesortstate<'mcx>>>>>,
     /// `FunctionCallInfo transfn_fcinfo` — pre-initialized transfn call info.
     pub transfn_fcinfo: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
     /// `FunctionCallInfo serialfn_fcinfo`.
@@ -504,9 +491,9 @@ pub struct AggStateData<'mcx> {
     /// `AggStatePerPhase phases` — array of all phases.
     pub phases: Option<PgVec<'mcx, AggStatePerPhaseData<'mcx>>>,
     /// `Tuplesortstate *sort_in`.
-    pub sort_in: Option<TuplesortstateHandle>,
+    pub sort_in: Option<PgBox<'mcx, Tuplesortstate<'mcx>>>,
     /// `Tuplesortstate *sort_out`.
-    pub sort_out: Option<TuplesortstateHandle>,
+    pub sort_out: Option<PgBox<'mcx, Tuplesortstate<'mcx>>>,
     /// `TupleTableSlot *sort_slot`.
     pub sort_slot: Option<SlotId>,
     /// `AggStatePerGroup *pergroups` — grouping-set-indexed per-group arrays.

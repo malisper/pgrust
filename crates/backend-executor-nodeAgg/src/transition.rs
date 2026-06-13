@@ -2,7 +2,7 @@
 //! it. Covers the simple transfn driver and the ordered/distinct paths that
 //! feed sorted input through the transition function.
 
-use mcx::Mcx;
+use mcx::{alloc_in, Mcx};
 use types_error::PgResult;
 use types_nodes::nodeagg::{
     AggStateData, AggStatePerGroupData, AggStatePerTransData,
@@ -34,8 +34,8 @@ pub fn initialize_aggregate<'mcx>(
         // operation? Clean it up if so.
         //   if (pertrans->sortstates[aggstate->current_set])
         //       tuplesort_end(pertrans->sortstates[aggstate->current_set]);
-        if let Some(sortstates) = pertrans.sortstates.as_ref() {
-            if let Some(state) = sortstates[current_set] {
+        if let Some(sortstates) = pertrans.sortstates.as_mut() {
+            if let Some(state) = sortstates[current_set].take() {
                 backend_utils_sort_tuplesort_seams::tuplesort_end::call(state)?;
             }
         }
@@ -111,6 +111,8 @@ pub fn initialize_aggregate<'mcx>(
             )?
         };
 
+        // The Tuplesortstate * lives in the aggregate context (`mcx`).
+        let new_state = alloc_in(mcx, new_state)?;
         let sortstates = pertrans
             .sortstates
             .as_mut()
@@ -370,14 +372,18 @@ pub fn process_ordered_aggregate_single<'mcx>(
     debug_assert!(pertrans.num_distinct_cols < 2);
 
     let current_set = aggstate.current_set as usize;
-    let state = pertrans
+    // Take the sort out of the per-set array for the duration of the drain so
+    // the transition function can borrow `pertrans` mutably; it is dropped
+    // (tuplesort_end) and the slot left NULL when we are done.
+    let mut state = pertrans
         .sortstates
-        .as_ref()
+        .as_mut()
         .expect("process_ordered_aggregate_single: sortstates not built")[current_set]
+        .take()
         .expect("process_ordered_aggregate_single: sortstate for set is NULL");
 
     // tuplesort_performsort(pertrans->sortstates[aggstate->current_set]);
-    backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(state)?;
+    backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(&mut state)?;
 
     // Load the column into argument 1 (arg 0 will be transition value):
     //   newVal = &fcinfo->args[1].value; isNull = &fcinfo->args[1].isnull;
@@ -388,12 +394,14 @@ pub fn process_ordered_aggregate_single<'mcx>(
     //
     // while (tuplesort_getdatum(..., true, false, newVal, isNull, &newAbbrevVal))
     loop {
-        let (found, new_val, new_is_null, abbrev) =
-            backend_utils_sort_tuplesort_seams::tuplesort_getdatum::call(state, true, false)?;
+        let (found, new_val, new_is_null) =
+            backend_utils_sort_tuplesort_seams::tuplesort_getdatum::call(&mut state, true, false)?;
         if !found {
             break;
         }
-        new_abbrev_val = abbrev.unwrap_or(types_datum::Datum::null());
+        // The tuplesort seam does not surface the abbreviated key, so the
+        // abbreviated-equality fast path always falls through to equalfnOne.
+        new_abbrev_val = types_datum::Datum::null();
 
         // Load the fetched datum into the transfn's argument 1.
         fcinfo_set_arg(pertrans, 1, new_val, new_is_null);
@@ -459,12 +467,8 @@ pub fn process_ordered_aggregate_single<'mcx>(
     }
 
     // tuplesort_end(pertrans->sortstates[aggstate->current_set]);
-    // pertrans->sortstates[aggstate->current_set] = NULL;
+    // pertrans->sortstates[aggstate->current_set] = NULL; (already taken out)
     backend_utils_sort_tuplesort_seams::tuplesort_end::call(state)?;
-    pertrans
-        .sortstates
-        .as_mut()
-        .expect("process_ordered_aggregate_single: sortstates not built")[current_set] = None;
 
     Ok(())
 }
@@ -501,14 +505,17 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     let save = tmpcontext_outertuple(aggstate);
 
     let current_set = aggstate.current_set as usize;
-    let state = pertrans
+    // Take the sort out of the per-set array for the drain (see the single
+    // variant); dropped via tuplesort_end and left NULL when done.
+    let mut state = pertrans
         .sortstates
-        .as_ref()
+        .as_mut()
         .expect("process_ordered_aggregate_multi: sortstates not built")[current_set]
+        .take()
         .expect("process_ordered_aggregate_multi: sortstate for set is NULL");
 
     // tuplesort_performsort(pertrans->sortstates[aggstate->current_set]);
-    backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(state)?;
+    backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(&mut state)?;
 
     // ExecClearTuple(slot1); if (slot2) ExecClearTuple(slot2);
     exec_clear_tuple_slot(slot1)?;
@@ -518,14 +525,18 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 
     // while (tuplesort_gettupleslot(..., true, true, slot1, &newAbbrevVal))
     loop {
-        let (found, abbrev) =
-            backend_utils_sort_tuplesort_seams::tuplesort_gettupleslot::call(
-                state, true, true, slot1,
-            )?;
+        let found = backend_utils_sort_tuplesort_seams::tuplesort_gettupleslot::call(
+            &mut state,
+            true,
+            true,
+            resolve_slot_mut(slot1),
+        )?;
         if !found {
             break;
         }
-        new_abbrev_val = abbrev.unwrap_or(types_datum::Datum::null());
+        // The tuplesort seam does not surface the abbreviated key, so the
+        // abbreviated-equality fast path always falls through to equalfnMulti.
+        new_abbrev_val = types_datum::Datum::null();
 
         // CHECK_FOR_INTERRUPTS();
         backend_tcop_postgres_seams::check_for_interrupts::call()?;
@@ -585,12 +596,8 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     }
 
     // tuplesort_end(pertrans->sortstates[aggstate->current_set]);
-    // pertrans->sortstates[aggstate->current_set] = NULL;
+    // pertrans->sortstates[aggstate->current_set] = NULL; (already taken out)
     backend_utils_sort_tuplesort_seams::tuplesort_end::call(state)?;
-    pertrans
-        .sortstates
-        .as_mut()
-        .expect("process_ordered_aggregate_multi: sortstates not built")[current_set] = None;
 
     // restore previous slot, potentially in use for grouping sets:
     //   tmpcontext->ecxt_outertuple = save;
@@ -815,6 +822,19 @@ fn exec_clear_tuple_slot(_slot: types_nodes::SlotId) -> PgResult<()> {
         "backend-executor-nodeAgg::process_ordered_aggregate_multi: ExecClearTuple needs the \
          EState slot-pool lookup to resolve the slot id to a TupleTableSlot; that pool is \
          owned by the not-yet-ported execTuples/EState surface"
+    );
+}
+
+/// Resolve a sort slot id (`pertrans->sortslot`) to the live `TupleTableSlot`
+/// that `tuplesort_gettupleslot` writes into. The multi-column DISTINCT drain
+/// addresses slots by pool id only and does not thread the owning `EState`
+/// here, so the lookup is the EState slot pool's (the surface that assigns
+/// these per-trans slots at ExecInitAgg is not threaded into this path yet).
+fn resolve_slot_mut<'a>(_slot: types_nodes::SlotId) -> &'a mut types_nodes::TupleTableSlot {
+    panic!(
+        "backend-executor-nodeAgg::process_ordered_aggregate_multi: tuplesort_gettupleslot \
+         needs the EState slot-pool lookup to resolve the sortslot id to a TupleTableSlot; \
+         that pool is owned by the not-yet-ported execTuples/EState surface"
     );
 }
 

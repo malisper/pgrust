@@ -95,7 +95,8 @@ pub struct FindColsContext<'mcx> {
 }
 
 /// Install this unit's seams. This unit owns `backend-executor-nodeAgg-pq-seams`
-/// (the `ExecAgg*` parallel-instrumentation methods); the installers are added
-/// in the body phase once those functions have real bodies. Empty for the
-/// scaffold.
-pub fn init_seams() {}
+/// (the `ExecAgg*` parallel-instrumentation methods); `aggapi::init_seams`
+/// installs all four.
+pub fn init_seams() {
+    aggapi::init_seams();
+}

@@ -63,7 +63,7 @@ pub use nodelimit::{
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
-    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo, Sort,
+    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
     AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};

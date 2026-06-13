@@ -1,10 +1,13 @@
 //! Finalize family: running final functions to produce aggregate results
 //! (full and partial) and projecting the group's output tuple.
 
+use types_core::primitive::OidIsValid;
 use types_datum::Datum;
 use types_error::PgResult;
+use types_nodes::execexpr::ExprState;
 use types_nodes::nodeagg::{
-    AggStateData, AggStatePerAggData, AggStatePerGroupData, AGG_HASHED, AGG_MIXED,
+    AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerTransData, AGG_HASHED,
+    AGG_MIXED,
 };
 use types_nodes::nodeagg::do_aggsplit_skipfinal;
 use types_nodes::{EStateData, SlotId};
@@ -67,12 +70,104 @@ pub fn finalize_aggregate<'mcx>(
     peragg: &AggStatePerAggData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData,
 ) -> PgResult<(Datum, bool)> {
-    let _ = (aggstate, peragg, pergroupstate);
-    panic!(
-        "finalize_aggregate: the finalfn fmgr call frame \
-         (InitFunctionCallInfoData / FunctionCallInvoke / ExecEvalExpr on the \
-         direct args) and MakeExpandedObjectReadOnly are not yet ported"
-    );
+    // LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
+    // bool anynull = false;
+    // AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
+    let mut anynull = false;
+    let pertrans = pertrans_for(aggstate, peragg.transno);
+    let transtype_len = pertrans.transtype_len;
+
+    // oldContext = MemoryContextSwitchTo(
+    //     aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+    // (the per-tuple context switch is the ExprContext owner's; the finalfn /
+    // direct-arg eval below allocates there.)
+
+    // i = 1;
+    // foreach(lc, peragg->aggdirectargs) {
+    //     ExprState *expr = (ExprState *) lfirst(lc);
+    //     fcinfo->args[i].value =
+    //         ExecEvalExpr(expr, aggstate->ss.ps.ps_ExprContext, &args[i].isnull);
+    //     anynull |= fcinfo->args[i].isnull;
+    //     i++;
+    // }
+    let mut i: i32 = 1;
+    if let Some(directargs) = peragg.aggdirectargs.as_ref() {
+        for expr in directargs.iter() {
+            let (value, isnull) = exec_eval_expr_direct_arg(aggstate, expr);
+            local_fcinfo_set_arg(i, value, isnull);
+            anynull |= isnull;
+            i += 1;
+        }
+    }
+
+    let result_val;
+    let result_is_null;
+
+    // if (OidIsValid(peragg->finalfn_oid))
+    if OidIsValid(peragg.finalfn_oid) {
+        // int numFinalArgs = peragg->numFinalArgs;
+        let num_final_args = peragg.num_final_args;
+
+        // aggstate->curperagg = peragg; (model: index; set for AggGetAggref)
+        // InitFunctionCallInfoData(*fcinfo, &peragg->finalfn, numFinalArgs,
+        //                          pertrans->aggCollation, (void *) aggstate, NULL);
+        init_finalfn_fcinfo(aggstate, peragg, num_final_args);
+
+        // fcinfo->args[0].value = MakeExpandedObjectReadOnly(
+        //     pergroupstate->transValue, pergroupstate->transValueIsNull,
+        //     pertrans->transtypeLen);
+        // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
+        // anynull |= pergroupstate->transValueIsNull;
+        let arg0 = make_expanded_object_read_only(
+            pergroupstate.trans_value,
+            pergroupstate.trans_value_is_null,
+            transtype_len,
+        );
+        local_fcinfo_set_arg(0, arg0, pergroupstate.trans_value_is_null);
+        anynull |= pergroupstate.trans_value_is_null;
+
+        // for (; i < numFinalArgs; i++) {
+        //     fcinfo->args[i].value = (Datum) 0;
+        //     fcinfo->args[i].isnull = true;
+        //     anynull = true;
+        // }
+        while i < num_final_args {
+            local_fcinfo_set_arg(i, Datum::null(), true);
+            anynull = true;
+            i += 1;
+        }
+
+        // if (fcinfo->flinfo->fn_strict && anynull)
+        if finalfn_is_strict(peragg) && anynull {
+            // *resultVal = (Datum) 0; *resultIsNull = true;
+            result_val = Datum::null();
+            result_is_null = true;
+        } else {
+            // result = FunctionCallInvoke(fcinfo);
+            // *resultIsNull = fcinfo->isnull;
+            // *resultVal = MakeExpandedObjectReadOnly(result, fcinfo->isnull,
+            //                                         peragg->resulttypeLen);
+            let (result, isnull) = invoke_finalfn(aggstate, peragg);
+            result_is_null = isnull;
+            result_val =
+                make_expanded_object_read_only(result, isnull, peragg.resulttype_len);
+        }
+        // aggstate->curperagg = NULL;
+    } else {
+        // *resultVal = MakeExpandedObjectReadOnly(pergroupstate->transValue,
+        //                                         pergroupstate->transValueIsNull,
+        //                                         pertrans->transtypeLen);
+        // *resultIsNull = pergroupstate->transValueIsNull;
+        result_val = make_expanded_object_read_only(
+            pergroupstate.trans_value,
+            pergroupstate.trans_value_is_null,
+            transtype_len,
+        );
+        result_is_null = pergroupstate.trans_value_is_null;
+    }
+
+    // MemoryContextSwitchTo(oldContext);
+    Ok((result_val, result_is_null))
 }
 
 /// `finalize_partialaggregate(aggstate, peragg, pergroupstate, &resultVal,
@@ -111,11 +206,190 @@ pub fn finalize_partialaggregate<'mcx>(
     peragg: &AggStatePerAggData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData,
 ) -> PgResult<(Datum, bool)> {
-    let _ = (aggstate, peragg, pergroupstate);
+    // AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
+    let pertrans = pertrans_for(aggstate, peragg.transno);
+    let serialfn_oid = pertrans.serialfn_oid;
+    let transtype_len = pertrans.transtype_len;
+
+    // oldContext = MemoryContextSwitchTo(
+    //     aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+
+    let result_val;
+    let result_is_null;
+
+    // if (OidIsValid(pertrans->serialfn_oid))
+    if OidIsValid(serialfn_oid) {
+        // Don't call a strict serialization function with NULL input.
+        // if (pertrans->serialfn.fn_strict && pergroupstate->transValueIsNull)
+        if serialfn_is_strict(aggstate, peragg.transno) && pergroupstate.trans_value_is_null {
+            // *resultVal = (Datum) 0; *resultIsNull = true;
+            result_val = Datum::null();
+            result_is_null = true;
+        } else {
+            // FunctionCallInfo fcinfo = pertrans->serialfn_fcinfo;
+            // fcinfo->args[0].value = MakeExpandedObjectReadOnly(
+            //     pergroupstate->transValue, pergroupstate->transValueIsNull,
+            //     pertrans->transtypeLen);
+            // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
+            // fcinfo->isnull = false;
+            let arg0 = make_expanded_object_read_only(
+                pergroupstate.trans_value,
+                pergroupstate.trans_value_is_null,
+                transtype_len,
+            );
+            set_serialfn_arg0(aggstate, peragg.transno, arg0, pergroupstate.trans_value_is_null);
+
+            // *resultVal = FunctionCallInvoke(fcinfo);
+            // *resultIsNull = fcinfo->isnull;
+            let (result, isnull) = invoke_serialfn(aggstate, peragg.transno);
+            result_val = result;
+            result_is_null = isnull;
+        }
+    } else {
+        // *resultVal = MakeExpandedObjectReadOnly(pergroupstate->transValue,
+        //                                         pergroupstate->transValueIsNull,
+        //                                         pertrans->transtypeLen);
+        // *resultIsNull = pergroupstate->transValueIsNull;
+        result_val = make_expanded_object_read_only(
+            pergroupstate.trans_value,
+            pergroupstate.trans_value_is_null,
+            transtype_len,
+        );
+        result_is_null = pergroupstate.trans_value_is_null;
+    }
+
+    // MemoryContextSwitchTo(oldContext);
+    Ok((result_val, result_is_null))
+}
+
+/// `&aggstate->pertrans[transno]` — the per-trans state the finalfn / serialfn
+/// reads its strictness, collation, transtype, and call frame from.
+fn pertrans_for<'a, 'mcx>(
+    aggstate: &'a AggStateData<'mcx>,
+    transno: i32,
+) -> &'a AggStatePerTransData<'mcx> {
+    &aggstate
+        .pertrans
+        .as_ref()
+        .expect("finalize: pertrans array built by ExecInitAgg")[transno as usize]
+}
+
+/// `ExecEvalExpr(expr, aggstate->ss.ps.ps_ExprContext, &isnull)` for a finalfn
+/// direct argument (ordered-set aggregates). The compiled-expression evaluator
+/// is the execExpr owner's; no seam carries it into this path yet.
+fn exec_eval_expr_direct_arg<'mcx>(
+    _aggstate: &AggStateData<'mcx>,
+    _expr: &ExprState,
+) -> (Datum, bool) {
     panic!(
-        "finalize_partialaggregate: the serialfn FunctionCallInvoke over \
-         pertrans->serialfn_fcinfo and MakeExpandedObjectReadOnly are not yet \
-         ported"
+        "backend-executor-nodeAgg::finalize_aggregate: ExecEvalExpr of a finalfn direct \
+         argument is owned by the not-yet-ported execExpr unit; no seam yet"
+    );
+}
+
+/// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` on the
+/// `LOCAL_FCINFO` finalfn call frame. The fmgr call-frame args payload is owned
+/// by the not-yet-ported fmgr unit; the trimmed call frame carries no `args`.
+fn local_fcinfo_set_arg(_i: i32, _value: Datum, _isnull: bool) {
+    panic!(
+        "backend-executor-nodeAgg::finalize_aggregate: writing the LOCAL_FCINFO finalfn args \
+         is part of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
+         FunctionCallInfoBaseData carries no args"
+    );
+}
+
+/// `InitFunctionCallInfoData(*fcinfo, &peragg->finalfn, numFinalArgs,
+/// pertrans->aggCollation, (void *) aggstate, NULL)` — initialize the finalfn
+/// call frame. Owned by the fmgr unit; no seam yet.
+fn init_finalfn_fcinfo<'mcx>(
+    _aggstate: &AggStateData<'mcx>,
+    _peragg: &AggStatePerAggData<'mcx>,
+    _num_final_args: i32,
+) {
+    panic!(
+        "backend-executor-nodeAgg::finalize_aggregate: InitFunctionCallInfoData for the finalfn \
+         is owned by the not-yet-ported fmgr unit; no seam yet"
+    );
+}
+
+/// `peragg->finalfn.fn_strict` — the finalfn's strictness, read off the
+/// resolved `FmgrInfo`. The trimmed `FmgrInfo` carries only the lookup key, so
+/// the strict flag comes from the fmgr owner.
+fn finalfn_is_strict(_peragg: &AggStatePerAggData<'_>) -> bool {
+    panic!(
+        "backend-executor-nodeAgg::finalize_aggregate: peragg->finalfn.fn_strict comes from the \
+         resolved FmgrInfo, owned by the not-yet-ported fmgr unit; the trimmed FmgrInfo carries \
+         only fn_oid"
+    );
+}
+
+/// `FunctionCallInvoke(fcinfo)` for the finalfn; returns `(result, fcinfo->isnull)`.
+/// The fmgr call dispatch is owned by the not-yet-ported fmgr unit.
+fn invoke_finalfn<'mcx>(
+    _aggstate: &mut AggStateData<'mcx>,
+    _peragg: &AggStatePerAggData<'mcx>,
+) -> (Datum, bool) {
+    panic!(
+        "backend-executor-nodeAgg::finalize_aggregate: FunctionCallInvoke of the finalfn is \
+         owned by the not-yet-ported fmgr unit; no seam yet"
+    );
+}
+
+/// `pertrans->serialfn.fn_strict` — the serialfn's strictness from its resolved
+/// `FmgrInfo` (fmgr-owned; the trimmed `FmgrInfo` carries only the lookup key).
+fn serialfn_is_strict<'mcx>(_aggstate: &AggStateData<'mcx>, _transno: i32) -> bool {
+    panic!(
+        "backend-executor-nodeAgg::finalize_partialaggregate: pertrans->serialfn.fn_strict comes \
+         from the resolved FmgrInfo, owned by the not-yet-ported fmgr unit; the trimmed FmgrInfo \
+         carries only fn_oid"
+    );
+}
+
+/// `fcinfo->args[0].value = v; fcinfo->args[0].isnull = isnull; fcinfo->isnull
+/// = false;` on `pertrans->serialfn_fcinfo`. The fmgr call-frame args payload
+/// is owned by the not-yet-ported fmgr unit.
+fn set_serialfn_arg0<'mcx>(
+    _aggstate: &mut AggStateData<'mcx>,
+    _transno: i32,
+    _value: Datum,
+    _isnull: bool,
+) {
+    panic!(
+        "backend-executor-nodeAgg::finalize_partialaggregate: writing pertrans->serialfn_fcinfo \
+         args is part of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
+         FunctionCallInfoBaseData carries no args"
+    );
+}
+
+/// `FunctionCallInvoke(pertrans->serialfn_fcinfo)`; returns `(result,
+/// fcinfo->isnull)`. The fmgr call dispatch is owned by the not-yet-ported fmgr
+/// unit.
+fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum, bool) {
+    panic!(
+        "backend-executor-nodeAgg::finalize_partialaggregate: FunctionCallInvoke of the serialfn \
+         is owned by the not-yet-ported fmgr unit; no seam yet"
+    );
+}
+
+/// `MakeExpandedObjectReadOnly(d, isnull, typlen)` (utils/expandeddatum.h):
+/// returns `d` unchanged for a NULL, a non-expanded datum, or a pass-by-value
+/// type; for a read-write expanded datum it returns a read-only pointer to the
+/// same object. The expanded-datum machinery (`utils/adt/expandeddatum.c`) is
+/// not yet ported and carries no seam, so only the trivial cases are handled
+/// here and the expanded-pointer case panics until that owner lands.
+fn make_expanded_object_read_only(d: Datum, isnull: bool, typlen: i16) -> Datum {
+    // if (isnull || typlen != -1 || !VARATT_IS_EXTERNAL_EXPANDED_RW(d)) return d;
+    // A NULL or a fixed-length (typlen != -1) datum is never an expanded
+    // object, so it passes through unchanged.
+    if isnull || typlen != -1 {
+        return d;
+    }
+    // The varlena case needs VARATT_IS_EXTERNAL_EXPANDED_RW inspection and the
+    // expanded-object read-only conversion, both owned by the unported
+    // expandeddatum unit.
+    panic!(
+        "backend-executor-nodeAgg::finalize: MakeExpandedObjectReadOnly on a varlena datum needs \
+         the expanded-datum machinery (utils/adt/expandeddatum.c), unported with no seam"
     );
 }
 

@@ -3,7 +3,7 @@
 //! analysis that decides which outer-plan columns are needed, and the
 //! per-trans build that reads the catalog for each aggregate).
 
-use mcx::{Mcx, PgBox};
+use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::Oid;
 use types_datum::Datum;
 use types_error::PgResult;
@@ -60,7 +60,7 @@ pub fn initialize_phase<'mcx>(
         // right time to actually sort it.
         aggstate.sort_in = aggstate.sort_out.take();
         debug_assert!(aggstate.sort_in.is_some());
-        let sort_in = aggstate.sort_in.expect("sort_in set above");
+        let sort_in = aggstate.sort_in.as_mut().expect("sort_in set above");
         backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(sort_in)?;
     }
 
@@ -76,17 +76,11 @@ pub fn initialize_phase<'mcx>(
             .sortnode
             .as_ref()
             .expect("next phase has a Sort node");
-        let num_cols = sortnode.num_cols;
-        let sort_col_idx = sortnode
-            .sort_col_idx
-            .as_ref()
-            .expect("Sort has sortColIdx");
-        let sort_operators = sortnode
-            .sort_operators
-            .as_ref()
-            .expect("Sort has sortOperators");
-        let collations = sortnode.collations.as_ref().expect("Sort has collations");
-        let nulls_first = sortnode.nulls_first.as_ref().expect("Sort has nullsFirst");
+        let num_cols = sortnode.numCols;
+        let sort_col_idx = &sortnode.sortColIdx;
+        let sort_operators = &sortnode.sortOperators;
+        let collations = &sortnode.collations;
+        let nulls_first = &sortnode.nullsFirst;
 
         // TupleDesc tupDesc = ExecGetResultType(outerPlanState(aggstate));
         let outer = aggstate
@@ -100,7 +94,7 @@ pub fn initialize_phase<'mcx>(
                 .expect("outer plan result type set at init");
 
         let work_mem = work_mem();
-        aggstate.sort_out = Some(backend_utils_sort_tuplesort_seams::tuplesort_begin_heap::call(
+        let sort_out = backend_utils_sort_tuplesort_seams::tuplesort_begin_heap::call(
             estate.es_query_cxt,
             tup_desc,
             num_cols,
@@ -110,7 +104,9 @@ pub fn initialize_phase<'mcx>(
             nulls_first,
             work_mem,
             TUPLESORT_NONE,
-        )?);
+        )?;
+        // The Tuplesortstate * lives in the EState per-query context.
+        aggstate.sort_out = Some(alloc_in(estate.es_query_cxt, sort_out)?);
     }
 
     aggstate.current_phase = newphase;
@@ -136,12 +132,15 @@ pub fn fetch_input_tuple<'mcx>(
 ) -> PgResult<Option<SlotId>> {
     let slot: Option<SlotId>;
 
-    if let Some(sort_in) = aggstate.sort_in {
+    if let Some(sort_in) = aggstate.sort_in.as_mut() {
         // make sure we check for interrupts in either path through here
         backend_tcop_postgres_seams::check_for_interrupts::call()?;
         let sort_slot = aggstate.sort_slot.expect("sort_slot set when sorting");
-        let (found, _abbrev) = backend_utils_sort_tuplesort_seams::tuplesort_gettupleslot::call(
-            sort_in, true, false, sort_slot,
+        let found = backend_utils_sort_tuplesort_seams::tuplesort_gettupleslot::call(
+            sort_in,
+            true,
+            false,
+            estate.slot_mut(sort_slot),
         )?;
         if !found {
             return Ok(None);
@@ -158,8 +157,11 @@ pub fn fetch_input_tuple<'mcx>(
     }
 
     // if (!TupIsNull(slot) && aggstate->sort_out)
-    if let (Some(s), Some(sort_out)) = (slot, aggstate.sort_out) {
-        backend_utils_sort_tuplesort_seams::tuplesort_puttupleslot::call(sort_out, s)?;
+    if let (Some(s), Some(sort_out)) = (slot, aggstate.sort_out.as_mut()) {
+        backend_utils_sort_tuplesort_seams::tuplesort_puttupleslot::call(
+            sort_out,
+            estate.slot(s),
+        )?;
     }
 
     Ok(slot)
