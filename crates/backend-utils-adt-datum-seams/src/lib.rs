@@ -34,3 +34,24 @@ seam_core::seam!(
     /// returns `(value, isnull, advanced_cursor)`.
     pub fn datum_restore(cursor: *mut u8) -> (Datum, bool, *mut u8)
 );
+
+seam_core::seam!(
+    /// `datum_image_hash(value, typByVal, typLen)` (datum.c) — a hash of the
+    /// in-memory image of one datum, keyed off the type's by-value/length
+    /// properties. The binary-mode per-key hash leaf used by Memoize's
+    /// `MemoizeHash_hash`.
+    pub fn datum_image_hash(value: Datum, typ_byval: bool, typ_len: i16) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `datum_image_eq(value1, value2, typByVal, typLen)` (datum.c) — whether the
+    /// in-memory images of two datums are bit-for-bit equal, keyed off the type's
+    /// by-value/length properties. The binary-mode per-key equality leaf used by
+    /// Memoize's `MemoizeHash_equal`.
+    pub fn datum_image_eq(
+        value1: Datum,
+        value2: Datum,
+        typ_byval: bool,
+        typ_len: i16,
+    ) -> types_error::PgResult<bool>
+);

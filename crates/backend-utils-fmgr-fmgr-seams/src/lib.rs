@@ -173,6 +173,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCall1Coll(flinfo, collation, arg1)` (fmgr.c): call the function
+    /// identified by `function_id` (the caller's cached `FmgrInfo`, re-resolved
+    /// by OID) with one argument under the given input `collation`, returning its
+    /// `Datum` result. Used by Memoize's `MemoizeHash_hash` to invoke a cache
+    /// key's hash function (`DatumGetUInt32` applied by the caller). Can
+    /// `ereport(ERROR)`.
+    pub fn function_call1_coll(
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// Render the given (1-based, relation) `attnums` of a violator
     /// `TupleTableSlot` into printable [`ResultColumn`]s for
     /// `ri_ReportViolation` (`getTypeOutputInfo` + `OidOutputFunctionCall`;
