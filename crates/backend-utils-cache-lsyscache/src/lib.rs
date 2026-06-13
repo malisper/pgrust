@@ -185,6 +185,7 @@ pub fn init_seams() {
     seams::get_typsubscript::set(type_::get_typsubscript);
     seams::get_subscripting_routines::set(type_::get_subscripting_routines);
     seams::get_typavgwidth::set(type_::get_typavgwidth);
+    seams::get_typdefault::set(type_::get_typdefault);
 
     // -- statistics ---------------------------------------------------------
     seams::get_attstatsslot::set(statistics::get_attstatsslot);

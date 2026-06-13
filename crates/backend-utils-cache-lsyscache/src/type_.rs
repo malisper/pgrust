@@ -14,10 +14,14 @@
 //! typcache-driven `RANGETYPE` / `TYPEOID` row probes and the arrayfuncs.c
 //! element-I/O projection.
 
+use backend_nodes_makefuncs_seams as makefuncs;
+use backend_nodes_read_seams as nodes_read;
 use backend_utils_adt_format_type_seams as format_type;
 use backend_utils_cache_lsyscache_seams::{IOFuncSelector, TypLenByValAlign, TypeIoData};
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
+use mcx::{Mcx, PgBox};
+use types_nodes::nodes::Node;
 use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
 use types_cache::typcache::{PgRangeRow, PgTypeRow};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
@@ -758,4 +762,68 @@ pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32> {
 
     // Oops, we have no idea ... wild guess time.
     Ok(32)
+}
+
+/// `get_typdefault(typid)` (lsyscache.c): the type's default-value expression
+/// node tree, or `None` if there is no defined default.
+///
+/// ```c
+/// typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+/// if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", typid);
+/// type = (Form_pg_type) GETSTRUCT(typeTuple);
+/// datum = SysCacheGetAttr(TYPEOID, typeTuple, Anum_pg_type_typdefaultbin, &isNull);
+/// if (!isNull) {
+///     expr = stringToNode(TextDatumGetCString(datum));
+/// } else {
+///     datum = SysCacheGetAttr(TYPEOID, typeTuple, Anum_pg_type_typdefault, &isNull);
+///     if (!isNull) {
+///         strDefaultVal = TextDatumGetCString(datum);
+///         datum = OidInputFunctionCall(type->typinput, strDefaultVal, getTypeIOParam(typeTuple), -1);
+///         expr = (Node *) makeConst(typid, -1, type->typcollation, type->typlen,
+///                                   datum, false, type->typbyval);
+///         pfree(strDefaultVal);
+///     } else {
+///         expr = NULL;
+///     }
+/// }
+/// ReleaseSysCache(typeTuple);
+/// return expr;
+/// ```
+///
+/// The two `SysCacheGetAttr` + `TextDatumGetCString` extractions are folded
+/// into the syscache `pg_type_default` projection (they return owned default
+/// text); the `stringToNode` / `OidInputFunctionCall` / `makeConst` callees
+/// route through their owners' seams. The branch structure is reproduced here.
+pub fn get_typdefault<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
+    let t = match syscache::pg_type_default::call(mcx, typid)? {
+        Some(t) => t,
+        None => return cache_lookup_failed_for_type(typid),
+    };
+
+    // typdefaultbin and typdefault are potentially null; the projection carries
+    // each as Option<String> (the C SysCacheGetAttr + isNull test).
+    if let Some(bin) = t.typdefaultbin {
+        // We have an expression default.
+        let expr = nodes_read::string_to_node::call(mcx, &bin)?;
+        Ok(Some(expr))
+    } else if let Some(str_default_val) = t.typdefault {
+        // Perhaps we have a plain literal default. Convert the string to a value
+        // of the given type, then build a Const node containing it.
+        let datum =
+            fmgr::oid_input_function_call::call(t.typinput, &str_default_val, t.typioparam, -1)?;
+        let expr = makefuncs::make_const_node::call(
+            mcx,
+            typid,
+            -1,
+            t.typcollation,
+            t.typlen as i32,
+            datum,
+            false,
+            t.typbyval,
+        )?;
+        Ok(Some(expr))
+    } else {
+        // No default
+        Ok(None)
+    }
 }

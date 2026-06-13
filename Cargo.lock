@@ -4045,6 +4045,8 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
 ]
@@ -7148,6 +7150,8 @@ dependencies = [
  "backend-catalog-namespace-seams",
  "backend-catalog-pg-opclass-seams",
  "backend-nodes-copyfuncs-pc-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-read-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -7162,6 +7166,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-hash",
+ "types-nodes",
  "types-opclass",
  "types-selfuncs",
  "types-tuple",
@@ -7178,6 +7183,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-selfuncs",
 ]
 

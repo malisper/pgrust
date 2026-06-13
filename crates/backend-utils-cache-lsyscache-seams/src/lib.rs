@@ -892,6 +892,18 @@ seam_core::seam!(
     pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32>
 );
 
+seam_core::seam!(
+    /// `get_typdefault(typid)` (lsyscache.c): the type's default-value
+    /// expression node tree (`stringToNode(typdefaultbin)` if present, else a
+    /// `makeConst` over the literal `typdefault`), allocated in `mcx`, or
+    /// `Ok(None)` when the type has no default (the C `NULL`). A missing type is
+    /// `elog(ERROR, "cache lookup failed for type %u")`.
+    pub fn get_typdefault<'mcx>(
+        mcx: Mcx<'mcx>,
+        typid: Oid,
+    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>>
+);
+
 // ---- statistics (pg_statistic) --------------------------------------------
 
 seam_core::seam!(

@@ -1249,3 +1249,42 @@ seam_core::seam!(
         attnum: types_core::AttrNumber,
     ) -> PgResult<Option<i32>>
 );
+
+/// The `pg_type` row fields `get_typdefault` reads off `SearchSysCache1(
+/// TYPEOID, ...)`: the two potentially-null default columns
+/// (`SysCacheGetAttr` + `text_to_cstring`, folded into owned `String`s) plus
+/// the `Form_pg_type` fields `makeConst` needs.
+#[derive(Clone, Debug, Default)]
+pub struct PgTypeDefault {
+    /// `SysCacheGetAttr(Anum_pg_type_typdefaultbin)` rendered via
+    /// `text_to_cstring`, or `None` for SQL null. When present it is a
+    /// `pg_node_tree` string the caller feeds to `stringToNode`.
+    pub typdefaultbin: Option<String>,
+    /// `SysCacheGetAttr(Anum_pg_type_typdefault)` via `text_to_cstring`, or
+    /// `None` for SQL null. The plain literal default text.
+    pub typdefault: Option<String>,
+    /// `type->typinput` — the type's input function OID.
+    pub typinput: Oid,
+    /// `getTypeIOParam(typeTuple)` — the I/O parameter OID `makeConst`'s value
+    /// conversion uses.
+    pub typioparam: Oid,
+    /// `type->typcollation`.
+    pub typcollation: Oid,
+    /// `type->typlen`.
+    pub typlen: i16,
+    /// `type->typbyval`.
+    pub typbyval: bool,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid))` +
+    /// `SysCacheGetAttr(Anum_pg_type_typdefaultbin / typdefault)` +
+    /// `text_to_cstring`, projected for `get_typdefault`. `Ok(None)` on a cache
+    /// miss (the caller raises `cache lookup failed for type %u`). The default
+    /// text columns ride as owned `String`s in `mcx`; `Err` carries OOM and the
+    /// catcache surface.
+    pub fn pg_type_default<'mcx>(
+        mcx: Mcx<'mcx>,
+        typid: Oid,
+    ) -> PgResult<Option<PgTypeDefault>>
+);
