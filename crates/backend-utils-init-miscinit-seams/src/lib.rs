@@ -108,3 +108,10 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `InSecurityRestrictedOperation()` (miscinit.c) — true while a
+    /// SECURITY_RESTRICTED_OPERATION context is in effect (e.g. inside an
+    /// index expression). Pure read of `SecurityRestrictionContext`.
+    pub fn in_security_restricted_operation() -> bool
+);

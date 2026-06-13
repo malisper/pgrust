@@ -130,3 +130,10 @@ seam_core::seam!(
     /// `replorigin_session_advance`. Pure read of backend-local state.
     pub fn xact_last_rec_end() -> types_core::XLogRecPtr
 );
+
+seam_core::seam!(
+    /// `RequireTransactionBlock(isTopLevel, stmtType)` (xact.c) — `ereport`s if
+    /// the statement is not running inside a transaction block (so it would
+    /// have no user-visible effect). The C arg is `const char *stmtType`.
+    pub fn require_transaction_block(is_top_level: bool, stmt_type: &str) -> types_error::PgResult<()>
+);

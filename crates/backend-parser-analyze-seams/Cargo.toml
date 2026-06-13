@@ -1,16 +1,14 @@
 [package]
-name = "backend-tcop-postgres-seams"
+name = "backend-parser-analyze-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_tcop_postgres_seams"
+name = "backend_parser_analyze_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
-types-storage = { path = "../types-storage" }

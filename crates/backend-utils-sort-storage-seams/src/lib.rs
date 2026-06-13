@@ -112,3 +112,15 @@ seam_core::seam!(
     /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.
     pub fn tuplestore_end(state: mcx::PgBox<'_, types_nodes::Tuplestorestate<'_>>)
 );
+
+seam_core::seam!(
+    /// `tuplestore_skiptuples(state, ntuples, forward)` (tuplestore.c): skip
+    /// over `ntuples` tuples in the given direction without fetching them;
+    /// returns false if it ran off the end before skipping them all. Can
+    /// `ereport(ERROR)` (read path).
+    pub fn tuplestore_skiptuples(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        ntuples: i64,
+        forward: bool,
+    ) -> types_error::PgResult<bool>
+);

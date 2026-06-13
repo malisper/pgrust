@@ -28,6 +28,7 @@ pub mod nodemergejoin;
 pub mod nodes;
 pub mod parsenodes;
 pub mod pathnodes;
+pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
 pub mod queryenvironment;

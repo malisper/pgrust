@@ -25,3 +25,17 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_recovery_conflict_interrupt(reason: types_storage::ProcSignalReason)
 );
+
+seam_core::seam!(
+    /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
+    /// (tcop/postgres.c) — plan a single already-rewritten query, returning a
+    /// `PlannedStmt` allocated in `mcx`. Runs the planner; can
+    /// `ereport(ERROR)`.
+    pub fn pg_plan_query<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        querytree: types_nodes::portalcmds::Query,
+        query_string: std::string::String,
+        cursor_options: i32,
+        bound_params: types_nodes::portalcmds::ParamListInfo,
+    ) -> types_error::PgResult<types_nodes::nodeindexscan::PlannedStmt<'mcx>>
+);

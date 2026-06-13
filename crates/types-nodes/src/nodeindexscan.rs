@@ -96,4 +96,45 @@ pub struct PlannedStmt<'mcx> {
     /// `List *resultRelations` — integer list of RT indexes of the query's
     /// target relations (`None` = the C `NIL`).
     pub resultRelations: Option<PgVec<'mcx, i32>>,
+    /// `struct Plan *planTree` — tree of `Plan` nodes (`None` = the C `NULL`).
+    pub planTree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `List *rowMarks` — a list of `PlanRowMark` nodes (`None` = the C `NIL`).
+    /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
+    /// planner port.
+    pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+}
+
+impl PlannedStmt<'_> {
+    /// `copyObject(plannedstmt)` shape — deep copy into `mcx`. Fallible:
+    /// copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PlannedStmt<'b>> {
+        let resultRelations = match &self.resultRelations {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let rowMarks = match &self.rowMarks {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(x.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(PlannedStmt {
+            resultRelations,
+            planTree: match &self.planTree {
+                Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                None => None,
+            },
+            rowMarks,
+        })
+    }
 }

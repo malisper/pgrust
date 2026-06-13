@@ -1234,6 +1234,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-portalcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-commands-portalcmds-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-tstorereceiver-seams",
+ "backend-nodes-queryjumble-seams",
+ "backend-parser-analyze-seams",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-postgres-seams",
+ "backend-tcop-pquery-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-resowner-resowner-seams",
+ "backend-utils-sort-storage-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+ "types-scan",
+ "types-snapshot",
+]
+
+[[package]]
+name = "backend-commands-portalcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-commands-sequence-seams"
 version = "0.0.0"
 dependencies = [
@@ -1330,7 +1369,9 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-portal",
  "types-rel",
+ "types-scan",
  "types-tuple",
 ]
 
@@ -1688,6 +1729,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-tstorereceiver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
 name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
@@ -1786,6 +1836,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-queryjumble-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
@@ -1799,6 +1858,15 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-parser-analyze-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2220,6 +2288,16 @@ name = "backend-replication-walsender-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-rewrite-rewritehandler-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2661,9 +2739,22 @@ dependencies = [
 name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
+ "types-nodes",
  "types-storage",
+]
+
+[[package]]
+name = "backend-tcop-pquery-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-portal",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -3337,6 +3428,17 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-portal",
+]
+
+[[package]]
+name = "backend-utils-resowner-resowner-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-portal",
 ]
 
 [[package]]
@@ -3543,6 +3645,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-portalcmds",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3755,6 +3858,18 @@ name = "types-pgtime"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-portal"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-dest",
+ "types-nodes",
+ "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]
