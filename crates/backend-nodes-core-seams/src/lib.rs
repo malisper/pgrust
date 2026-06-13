@@ -55,3 +55,70 @@ seam_core::seam!(
         b: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `bms_copy(a)` (bitmapset.c): a palloc'd duplicate of `a` (a `None` input
+    /// is the C NULL, copied as `None`). Allocates in `mcx`, so fallible on OOM.
+    pub fn bms_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_add_members(a, b)` (bitmapset.c): add every member of `b` to `a`,
+    /// recycling `a` (the C extends `a` in place and returns it; a `None` input
+    /// is the C NULL set). Growth allocates in `mcx`, so fallible on OOM.
+    pub fn bms_add_members<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_add_range(a, lower, upper)` (bitmapset.c): add all members in the
+    /// range `lower..=upper` to `a`, recycling it (a `None` input is the C NULL
+    /// set; an empty range returns `a` unchanged). Growth allocates in `mcx`,
+    /// so fallible on OOM.
+    pub fn bms_add_range<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        lower: i32,
+        upper: i32,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_num_members(a)` (bitmapset.c): the number of members in `a` (a
+    /// `None` set is the C NULL/empty set, count 0). Infallible.
+    pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_next_member(a, prevbit)` (bitmapset.c): the next member of `a`
+    /// greater than `prevbit`, or -2 if none (start with `prevbit = -1`). A
+    /// `None` set is the C NULL/empty set. Infallible.
+    pub fn bms_next_member(a: Option<&types_nodes::Bitmapset<'_>>, prevbit: i32) -> i32
+);
+
+seam_core::seam!(
+    /// `bms_equal(a, b)` (bitmapset.c): do `a` and `b` contain the same
+    /// members? (`None`/empty sets are equal to each other.) Infallible.
+    pub fn bms_equal(
+        a: Option<&types_nodes::Bitmapset<'_>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_is_empty(a)` (bitmapset.c): does `a` contain no members? (A `None`
+    /// set is the C NULL/empty set, so `true`.) Infallible.
+    pub fn bms_is_empty(a: Option<&types_nodes::Bitmapset<'_>>) -> bool
+);
+
+seam_core::seam!(
+    /// `bms_free(a)` (bitmapset.c): free the bitmapset (a `None` input is the C
+    /// NULL, a no-op). The owned model consumes the set; infallible.
+    pub fn bms_free<'mcx>(a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>)
+);
