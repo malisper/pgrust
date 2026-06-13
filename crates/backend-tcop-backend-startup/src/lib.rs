@@ -867,28 +867,30 @@ fn write_negotiation_byte(byte: u8, which: &str) -> PgResult<bool> {
     loop {
         let result =
             with_proc_port(|port| backend_libpq_be_secure_seams::secure_write::call(port, &buf));
-        match result? {
+        // The errno the failing write left behind; threaded into the report so
+        // `errcode_for_socket_access()` picks the SQLSTATE off it and `%m`
+        // expands against it (C: ambient `errno` set by secure_write).
+        let saved_errno = match result? {
             Ok(1) => return Ok(true),
-            Ok(_) => {
-                // A 1-byte secure_write returns 1 on success; any other Ok is
-                // the never-in-practice 0. Treat as the C `!= 1` failure path.
-                ereport(COMMERROR)
-                    .errcode_for_socket_access()
-                    .errmsg(format!("failed to send {which} negotiation response: "))
-                    .finish(loc(607, "ProcessStartupPacket"))?;
-                return Ok(false);
-            }
+            // A 1-byte secure_write returns 1 on success; any other Ok is the
+            // never-in-practice 0. Treat as the C `!= 1` failure path. No errno
+            // is associated, so fall through to the ambient-errno report.
+            Ok(_) => None,
             Err(SockError::Errno(e)) if e == EINTR => continue, // if interrupted, retry
-            Err(_) => {
-                // errcode_for_socket_access() + "failed to send %s negotiation
-                // response: %m" — COMMERROR, then close.
-                ereport(COMMERROR)
-                    .errcode_for_socket_access()
-                    .errmsg(format!("failed to send {which} negotiation response: "))
-                    .finish(loc(607, "ProcessStartupPacket"))?;
-                return Ok(false);
-            }
+            // errcode_for_socket_access() + "failed to send %s negotiation
+            // response: %m" — COMMERROR, then close.
+            Err(SockError::Errno(e)) => Some(e),
+            Err(_) => None,
+        };
+        let mut builder = ereport(COMMERROR);
+        if let Some(e) = saved_errno {
+            builder = builder.with_saved_errno(e);
         }
+        builder
+            .errcode_for_socket_access()
+            .errmsg(format!("failed to send {which} negotiation response: %m"))
+            .finish(loc(607, "ProcessStartupPacket"))?;
+        return Ok(false);
     }
 }
 
@@ -1138,9 +1140,19 @@ fn read_bytes(mcx: Mcx<'_>, n: usize) -> PgResult<Option<mcx::PgVec<'_, u8>>> {
     backend_libpq_pqcomm_seams::pq_getbytes::call(mcx, n)
 }
 
-/// `gai_strerror(code)` — render a getaddrinfo error code.
+/// `gai_strerror(code)` — render a getaddrinfo error code via the libc
+/// function (the same text C's `gai_strerror` produces).
 fn gai_strerror(code: i32) -> String {
-    format!("EAI error {code}")
+    // SAFETY: gai_strerror returns a pointer to a static, NUL-terminated C
+    // string for any input; it is never NULL.
+    let ptr = unsafe { libc::gai_strerror(code) };
+    if ptr.is_null() {
+        return format!("EAI error {code}");
+    }
+    // SAFETY: `ptr` is a valid NUL-terminated C string owned by libc.
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// `pqsignal(SIGTERM, process_startup_packet_die)`.
