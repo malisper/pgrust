@@ -8,7 +8,6 @@
 //! test resets the flags it uses).
 
 use super::*;
-use types_signal::SigDisposition;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard, Once};
 
@@ -191,7 +190,6 @@ fn install_mocks() -> MutexGuard<'static, ()> {
         });
         port_pqsignal_seams::pqsignal::set(|signo, _func| {
             record(Call::Pqsignal { signo });
-            SigDisposition::Default
         });
         backend_access_transam_xlog_seams::startup_xlog::set(|| {
             record(Call::StartupXlog);
