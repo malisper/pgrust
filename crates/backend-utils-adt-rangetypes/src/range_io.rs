@@ -10,8 +10,27 @@
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_rangetypes::RangeTypeP;
+use types_error::{
+    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
+};
+use types_rangetypes::{
+    RangeBound, RangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL, RANGE_LB_INC, RANGE_LB_INF,
+    RANGE_LB_NULL, RANGE_UB_INC, RANGE_UB_INF, RANGE_UB_NULL,
+};
+
+use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
+
+/// `RANGE_HAS_LBOUND(flags)` (rangetypes.h:48).
+#[inline]
+fn range_has_lbound(flags: u8) -> bool {
+    flags & (RANGE_EMPTY | RANGE_LB_NULL | RANGE_LB_INF) == 0
+}
+
+/// `RANGE_HAS_UBOUND(flags)` (rangetypes.h:52).
+#[inline]
+fn range_has_ubound(flags: u8) -> bool {
+    flags & (RANGE_EMPTY | RANGE_UB_NULL | RANGE_UB_INF) == 0
+}
 
 /// `RangeIOData` (rangetypes.c:50): the cached per-range-type I/O support: the
 /// element type's typcache entry plus its in/out/recv/send function infos. The
@@ -42,65 +61,532 @@ pub enum IOFuncSelector {
 
 /// `get_range_io_data(fcinfo, rngtypid, func)` (rangetypes.c:319): resolve and
 /// cache the element I/O support for one direction.
+///
+/// C resolves three unported neighbors: `lookup_type_cache(rngtypid,
+/// TYPECACHE_RANGE_INFO)` (typcache.c, with the "type %u is not a range type"
+/// elog when `rngelemtype == NULL`), `get_type_io_data(rngelemtype, func, ...)`
+/// (lsyscache.c), and `fmgr_info_cxt(typiofunc, ...)` (fmgr.c) — plus the
+/// `ERRCODE_UNDEFINED_FUNCTION` "no binary {in,out}put function" ereport when
+/// `typiofunc` is invalid. None of those owners are ported into this unit's
+/// dependency set yet, so the resolution is seamed off here: mirror PG and
+/// panic (loud, naming the owner) rather than restructure or silently stub.
 pub fn get_range_io_data(_rngtypid: Oid, _func: IOFuncSelector) -> PgResult<RangeIOData> {
-    todo!("get_range_io_data")
+    // C: cache = MemoryContextAlloc(..., sizeof(RangeIOData));
+    //    cache->typcache = lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO);
+    //    if (cache->typcache->rngelemtype == NULL)
+    //        elog(ERROR, "type %u is not a range type", rngtypid);
+    //    get_type_io_data(cache->typcache->rngelemtype->type_id, func, &typlen,
+    //                     &typbyval, &typalign, &typdelim, &cache->typioparam,
+    //                     &typiofunc);
+    //    if (!OidIsValid(typiofunc)) ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION, ...);
+    //    fmgr_info_cxt(typiofunc, &cache->typioproc, ...);
+    panic!(
+        "get_range_io_data: lookup_type_cache (backend-utils-cache-typcache) / \
+         get_type_io_data (backend-utils-cache-lsyscache) / fmgr_info \
+         (backend-utils-fmgr-fmgr) not ported into this unit yet"
+    );
 }
 
 /// `range_in(input, typioparam, typmod)` body (rangetypes.c:90).
 pub fn range_in<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _cache: &RangeIOData,
-    _input: &str,
+    mcx: Mcx<'mcx>,
+    cache: &RangeIOData,
+    input: &str,
     _typmod: i32,
 ) -> PgResult<RangeTypeP<'mcx>> {
-    todo!("range_in")
+    // check_stack_depth(); -- recursion guard, owned by the C runtime.
+
+    // C: cache = get_range_io_data(fcinfo, rngtypoid, IOFunc_input); -- the
+    // caller resolved it; we receive the resolved cache.
+
+    // parse
+    let (flags, lbound_str, ubound_str) = range_parse(input)?;
+
+    // call element type's input function
+    let mut lower = RangeBound::default();
+    let mut upper = RangeBound::default();
+
+    if range_has_lbound(flags) {
+        let _lbound_str = lbound_str.expect("RANGE_HAS_LBOUND implies a parsed lower bound string");
+        // C: InputFunctionCallSafe(&cache->typioproc, lbound_str,
+        //                          cache->typioparam, typmod, escontext, &lower.val)
+        let _ = (&cache.typiofunc, &cache.typioparam, &_lbound_str);
+        panic!(
+            "range_in: InputFunctionCallSafe on element typioproc \
+             (backend-utils-fmgr-fmgr) not ported into this unit yet"
+        );
+    }
+    if range_has_ubound(flags) {
+        let _ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
+        // C: InputFunctionCallSafe(&cache->typioproc, ubound_str,
+        //                          cache->typioparam, typmod, escontext, &upper.val)
+        let _ = &_ubound_str;
+        panic!(
+            "range_in: InputFunctionCallSafe on element typioproc \
+             (backend-utils-fmgr-fmgr) not ported into this unit yet"
+        );
+    }
+
+    #[allow(unreachable_code)]
+    {
+        lower.infinite = flags & RANGE_LB_INF != 0;
+        lower.inclusive = flags & RANGE_LB_INC != 0;
+        lower.lower = true;
+        upper.infinite = flags & RANGE_UB_INF != 0;
+        upper.inclusive = flags & RANGE_UB_INC != 0;
+        upper.lower = false;
+
+        // serialize and canonicalize
+        make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
+    }
 }
 
 /// `range_out(range)` body (rangetypes.c:139): the canonical text form.
-pub fn range_out(_cache: &RangeIOData, _range: RangeTypeP<'_>) -> PgResult<String> {
-    todo!("range_out")
+pub fn range_out(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<String> {
+    // check_stack_depth();
+
+    // C: cache = get_range_io_data(fcinfo, RangeTypeGetOid(range), IOFunc_output);
+    // -- the caller resolved it; we receive the resolved cache.
+
+    // deserialize
+    let (lower, upper, _empty) = range_deserialize(&cache.typcache, range)?;
+    let flags = range_get_flags(range);
+
+    // call element type's output function
+    let lbound_str: Option<String> = if range_has_lbound(flags) {
+        // C: lbound_str = OutputFunctionCall(&cache->typioproc, lower.val);
+        let _ = (&cache.typiofunc, &lower.val);
+        panic!(
+            "range_out: OutputFunctionCall on element typioproc \
+             (backend-utils-fmgr-fmgr) not ported into this unit yet"
+        );
+    } else {
+        None
+    };
+    let ubound_str: Option<String> = if range_has_ubound(flags) {
+        // C: ubound_str = OutputFunctionCall(&cache->typioproc, upper.val);
+        let _ = &upper.val;
+        panic!(
+            "range_out: OutputFunctionCall on element typioproc \
+             (backend-utils-fmgr-fmgr) not ported into this unit yet"
+        );
+    } else {
+        None
+    };
+
+    // construct result string
+    range_deparse(flags, lbound_str.as_deref(), ubound_str.as_deref())
 }
 
 /// `range_recv(buf, typioparam, typmod)` body (rangetypes.c:179).
+///
+/// Binary representation: the first byte is the flags, then the lower bound (if
+/// present), then the upper bound (if present). Each bound is a 4-byte length
+/// header and the subtype send function's binary image.
+#[allow(unused_variables, unreachable_code)]
 pub fn range_recv<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _cache: &RangeIOData,
-    _buf: &[u8],
+    mcx: Mcx<'mcx>,
+    cache: &RangeIOData,
+    buf: &[u8],
     _typmod: i32,
 ) -> PgResult<RangeTypeP<'mcx>> {
-    todo!("range_recv")
+    // check_stack_depth();
+
+    // C: cache = get_range_io_data(fcinfo, rngtypoid, IOFunc_receive);
+
+    // receive the flags ...
+    // C: flags = (unsigned char) pq_getmsgbyte(buf);
+    // The wire-buffer read (pq_getmsgbyte / pq_getmsgint / pq_getmsgbytes /
+    // pq_getmsgend) is owned by pqformat (backend-libpq-pqformat), unported
+    // into this unit. Mirror PG and panic rather than re-derive the reader.
+    let flags: u8 = panic!(
+        "range_recv: pq_getmsgbyte/pq_getmsgint/pq_getmsgbytes \
+         (backend-libpq-pqformat) not ported into this unit yet"
+    );
+
+    {
+        // Mask out any unsupported flags, particularly RANGE_xB_NULL which would
+        // confuse following tests. range_serialize cleans up the rest.
+        let flags = flags
+            & (RANGE_EMPTY | RANGE_LB_INC | RANGE_LB_INF | RANGE_UB_INC | RANGE_UB_INF);
+
+        let mut lower = RangeBound::default();
+        let mut upper = RangeBound::default();
+
+        // receive the bounds ...
+        if range_has_lbound(flags) {
+            // C: bound_len = pq_getmsgint(buf, 4);
+            //    bound_data = pq_getmsgbytes(buf, bound_len);
+            //    initStringInfo(&bound_buf); appendBinaryStringInfo(...);
+            //    lower.val = ReceiveFunctionCall(&cache->typioproc, &bound_buf,
+            //                                    cache->typioparam, typmod);
+            let _ = (&cache.typiofunc, &cache.typioparam);
+            lower.val = panic!(
+                "range_recv: pq_getmsgint/pq_getmsgbytes \
+                 (backend-libpq-pqformat) + ReceiveFunctionCall \
+                 (backend-utils-fmgr-fmgr) not ported into this unit yet"
+            );
+        } else {
+            lower.val = types_datum::datum::Datum::from_usize(0);
+        }
+
+        if range_has_ubound(flags) {
+            // C: same as above for upper.val
+            upper.val = panic!(
+                "range_recv: pq_getmsgint/pq_getmsgbytes \
+                 (backend-libpq-pqformat) + ReceiveFunctionCall \
+                 (backend-utils-fmgr-fmgr) not ported into this unit yet"
+            );
+        } else {
+            upper.val = types_datum::datum::Datum::from_usize(0);
+        }
+
+        // C: pq_getmsgend(buf);
+
+        // finish constructing RangeBound representation
+        lower.infinite = flags & RANGE_LB_INF != 0;
+        lower.inclusive = flags & RANGE_LB_INC != 0;
+        lower.lower = true;
+        upper.infinite = flags & RANGE_UB_INF != 0;
+        upper.inclusive = flags & RANGE_UB_INC != 0;
+        upper.lower = false;
+
+        // serialize and canonicalize
+        make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
+    }
 }
 
 /// `range_send(range)` body (rangetypes.c:263): the binary wire image.
-pub fn range_send(_cache: &RangeIOData, _range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
-    todo!("range_send")
+pub fn range_send(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
+    // check_stack_depth();
+
+    // C: cache = get_range_io_data(fcinfo, RangeTypeGetOid(range), IOFunc_send);
+
+    // deserialize
+    let (lower, upper, _empty) = range_deserialize(&cache.typcache, range)?;
+    let flags = range_get_flags(range);
+
+    // construct output
+    // C: pq_begintypsend(buf); pq_sendbyte(buf, flags);
+    let mut buf: Vec<u8> = Vec::new();
+    buf.push(flags);
+
+    if range_has_lbound(flags) {
+        // C: bound = PointerGetDatum(SendFunctionCall(&cache->typioproc, lower.val));
+        //    bound_len = VARSIZE(bound) - VARHDRSZ; bound_data = VARDATA(bound);
+        //    pq_sendint32(buf, bound_len); pq_sendbytes(buf, bound_data, bound_len);
+        let _ = (&cache.typiofunc, &lower.val);
+        let _: () = panic!(
+            "range_send: SendFunctionCall on element typioproc \
+             (backend-utils-fmgr-fmgr) + pq_sendint32/pq_sendbytes \
+             (backend-libpq-pqformat) not ported into this unit yet"
+        );
+    }
+
+    if range_has_ubound(flags) {
+        // C: same as above for upper.val
+        let _ = &upper.val;
+        let _: () = panic!(
+            "range_send: SendFunctionCall on element typioproc \
+             (backend-utils-fmgr-fmgr) + pq_sendint32/pq_sendbytes \
+             (backend-libpq-pqformat) not ported into this unit yet"
+        );
+    }
+
+    // C: PG_RETURN_BYTEA_P(pq_endtypsend(buf));
+    #[allow(unreachable_code)]
+    Ok(buf)
 }
 
 /// `range_parse(string, &flags, &lbound, &ubound)` (rangetypes.c:2386): split a
 /// text literal into its flags byte and bound substrings (`None` = infinite).
-pub fn range_parse(_string: &str) -> PgResult<(u8, Option<String>, Option<String>)> {
-    todo!("range_parse")
+///
+/// The scaffold signature carries no `escontext`, so this is the hard-error
+/// path (C `escontext == NULL`): every malformed-literal `ereturn` becomes a
+/// returned `Err`.
+pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>)> {
+    let bytes = string.as_bytes();
+    let mut ptr = 0usize;
+    let mut flags: u8 = 0;
+
+    // consume whitespace
+    while ptr < bytes.len() && is_space(bytes[ptr]) {
+        ptr += 1;
+    }
+
+    // check for empty range (pg_strncasecmp against "empty")
+    let empty_lit = RANGE_EMPTY_LITERAL.as_bytes();
+    if strncasecmp_prefix(&bytes[ptr..], empty_lit) {
+        flags = RANGE_EMPTY;
+        ptr += empty_lit.len();
+
+        // the rest should be whitespace
+        while ptr < bytes.len() && is_space(bytes[ptr]) {
+            ptr += 1;
+        }
+
+        // should have consumed everything
+        if ptr < bytes.len() {
+            return Err(malformed_literal(string).with_detail("Junk after \"empty\" key word."));
+        }
+
+        return Ok((flags, None, None));
+    }
+
+    if ptr < bytes.len() && bytes[ptr] == b'[' {
+        flags |= RANGE_LB_INC;
+        ptr += 1;
+    } else if ptr < bytes.len() && bytes[ptr] == b'(' {
+        ptr += 1;
+    } else {
+        return Err(
+            malformed_literal(string).with_detail("Missing left parenthesis or bracket.")
+        );
+    }
+
+    // C: ptr = range_parse_bound(string, ptr, lbound_str, &infinite, escontext);
+    //    if (ptr == NULL) return false;  -- here the Err already propagated via `?`.
+    //    if (infinite) *flags |= RANGE_LB_INF;
+    // range_parse_bound returns "" for the infinite case; C leaves *lbound_str
+    // NULL then, which `range_deparse`/`RANGE_HAS_LBOUND` never reads anyway.
+    let (lbound_str, infinite, next) = range_parse_bound(string, ptr)?;
+    ptr = next;
+    let lbound_str = if infinite { None } else { Some(lbound_str) };
+    if infinite {
+        flags |= RANGE_LB_INF;
+    }
+
+    if ptr < bytes.len() && bytes[ptr] == b',' {
+        ptr += 1;
+    } else {
+        return Err(malformed_literal(string).with_detail("Missing comma after lower bound."));
+    }
+
+    let (ubound_str, infinite, next) = range_parse_bound(string, ptr)?;
+    ptr = next;
+    let ubound_str = if infinite { None } else { Some(ubound_str) };
+    if infinite {
+        flags |= RANGE_UB_INF;
+    }
+
+    if ptr < bytes.len() && bytes[ptr] == b']' {
+        flags |= RANGE_UB_INC;
+        ptr += 1;
+    } else if ptr < bytes.len() && bytes[ptr] == b')' {
+        ptr += 1;
+    } else {
+        // must be a comma
+        return Err(malformed_literal(string).with_detail("Too many commas."));
+    }
+
+    // consume whitespace
+    while ptr < bytes.len() && is_space(bytes[ptr]) {
+        ptr += 1;
+    }
+
+    if ptr < bytes.len() {
+        return Err(
+            malformed_literal(string).with_detail("Junk after right parenthesis or bracket.")
+        );
+    }
+
+    Ok((flags, lbound_str, ubound_str))
 }
 
 /// `range_parse_flags(flags_str)` (rangetypes.c:2311): the `[)`/`(]`/... flags.
-pub fn range_parse_flags(_flags_str: &str) -> PgResult<u8> {
-    todo!("range_parse_flags")
+pub fn range_parse_flags(flags_str: &str) -> PgResult<u8> {
+    let bytes = flags_str.as_bytes();
+    let mut flags: u8 = 0;
+
+    // C tests flags_str[0]/[1]/[2] against '\0'. flags_str is NUL-terminated;
+    // here the `&str` length plays the role of the NUL position.
+    //   flags_str[0] == '\0'  -> len == 0
+    //   flags_str[1] == '\0'  -> len == 1
+    //   flags_str[2] != '\0'  -> len > 2
+    if bytes.is_empty() || bytes.len() == 1 || bytes.len() > 2 {
+        return Err(PgError::error("invalid range bound flags")
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+            .with_hint("Valid values are \"[]\", \"[)\", \"(]\", and \"()\"."));
+    }
+
+    match bytes[0] {
+        b'[' => flags |= RANGE_LB_INC,
+        b'(' => {}
+        _ => {
+            return Err(PgError::error("invalid range bound flags")
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+                .with_hint("Valid values are \"[]\", \"[)\", \"(]\", and \"()\"."));
+        }
+    }
+
+    match bytes[1] {
+        b']' => flags |= RANGE_UB_INC,
+        b')' => {}
+        _ => {
+            return Err(PgError::error("invalid range bound flags")
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+                .with_hint("Valid values are \"[]\", \"[)\", \"(]\", and \"()\"."));
+        }
+    }
+
+    Ok(flags)
 }
 
 /// `range_parse_bound(string, ptr, &bound, &infinite)` (rangetypes.c:2502):
 /// scan one bound substring, returning `(bound_text, infinite, next_offset)`.
-pub fn range_parse_bound(_string: &str, _ptr: usize) -> PgResult<(String, bool, usize)> {
-    todo!("range_parse_bound")
+///
+/// Hard-error path (scaffold carries no `escontext`): the "Unexpected end of
+/// input" `ereturn`s become a returned `Err`.
+pub fn range_parse_bound(string: &str, ptr: usize) -> PgResult<(String, bool, usize)> {
+    let bytes = string.as_bytes();
+    let mut ptr = ptr;
+
+    // Check for null: a bound terminator right here means no bound.
+    if ptr < bytes.len() && (bytes[ptr] == b',' || bytes[ptr] == b')' || bytes[ptr] == b']') {
+        return Ok((String::new(), true, ptr));
+    }
+    // C also enters the else branch when at end-of-string ('\0'); the scan loop
+    // then immediately hits ch == '\0' and ereturns. Mirror that.
+
+    // Extract string for this bound.
+    let mut inquote = false;
+    let mut buf: Vec<u8> = Vec::new();
+
+    loop {
+        let at_terminator = ptr < bytes.len()
+            && (bytes[ptr] == b',' || bytes[ptr] == b')' || bytes[ptr] == b']');
+        if !(inquote || !at_terminator) {
+            break;
+        }
+
+        // char ch = *ptr++;
+        let ch = if ptr < bytes.len() { bytes[ptr] } else { 0 };
+        ptr += 1;
+
+        if ch == 0 {
+            return Err(malformed_literal(string).with_detail("Unexpected end of input."));
+        }
+        if ch == b'\\' {
+            // if (*ptr == '\0') ereturn; appendStringInfoChar(&buf, *ptr++);
+            if ptr >= bytes.len() {
+                return Err(malformed_literal(string).with_detail("Unexpected end of input."));
+            }
+            buf.push(bytes[ptr]);
+            ptr += 1;
+        } else if ch == b'"' {
+            if !inquote {
+                inquote = true;
+            } else if ptr < bytes.len() && bytes[ptr] == b'"' {
+                // doubled quote within quote sequence
+                buf.push(bytes[ptr]);
+                ptr += 1;
+            } else {
+                inquote = false;
+            }
+        } else {
+            buf.push(ch);
+        }
+    }
+
+    // buf is built from input bytes (which were valid UTF-8 in `string`); the
+    // escaping only ever copies whole input bytes, so the result is valid too.
+    let bound_str = String::from_utf8(buf).expect("bound bytes are a subsequence of valid UTF-8");
+    Ok((bound_str, false, ptr))
 }
 
 /// `range_deparse(flags, lbound, ubound)` (rangetypes.c:2571): assemble the
 /// text literal from a flags byte and the two escaped bound strings.
-pub fn range_deparse(_flags: u8, _lbound: Option<&str>, _ubound: Option<&str>) -> PgResult<String> {
-    todo!("range_deparse")
+pub fn range_deparse(flags: u8, lbound: Option<&str>, ubound: Option<&str>) -> PgResult<String> {
+    if flags & RANGE_EMPTY != 0 {
+        return Ok(RANGE_EMPTY_LITERAL.to_string());
+    }
+
+    let mut buf = String::new();
+
+    buf.push(if flags & RANGE_LB_INC != 0 { '[' } else { '(' });
+
+    if range_has_lbound(flags) {
+        let lb = lbound.expect("RANGE_HAS_LBOUND implies a lower bound string");
+        buf.push_str(&range_bound_escape(lb)?);
+    }
+
+    buf.push(',');
+
+    if range_has_ubound(flags) {
+        let ub = ubound.expect("RANGE_HAS_UBOUND implies an upper bound string");
+        buf.push_str(&range_bound_escape(ub)?);
+    }
+
+    buf.push(if flags & RANGE_UB_INC != 0 { ']' } else { ')' });
+
+    Ok(buf)
 }
 
 /// `range_bound_escape(value)` (rangetypes.c:2601): quote/escape one bound
 /// value for the text representation.
-pub fn range_bound_escape(_value: &str) -> PgResult<String> {
-    todo!("range_bound_escape")
+pub fn range_bound_escape(value: &str) -> PgResult<String> {
+    let bytes = value.as_bytes();
+    let mut buf = String::new();
+
+    // Detect whether we need double quotes for this value.
+    // nq = (value[0] == '\0');  -- force quotes for empty string
+    let mut nq = bytes.is_empty();
+    for &ch in bytes {
+        if ch == b'"'
+            || ch == b'\\'
+            || ch == b'('
+            || ch == b')'
+            || ch == b'['
+            || ch == b']'
+            || ch == b','
+            || is_space(ch)
+        {
+            nq = true;
+            break;
+        }
+    }
+
+    // And emit the string.
+    if nq {
+        buf.push('"');
+    }
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            buf.push(ch);
+        }
+        buf.push(ch);
+    }
+    if nq {
+        buf.push('"');
+    }
+
+    Ok(buf)
+}
+
+// --- private helpers --------------------------------------------------------
+
+/// C `isspace((unsigned char) ch)` over the "C" locale set used by the parser.
+#[inline]
+fn is_space(ch: u8) -> bool {
+    matches!(ch, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r')
+}
+
+/// `pg_strncasecmp(ptr, lit, strlen(lit)) == 0`: case-insensitive (ASCII)
+/// prefix match of `lit` at the start of `haystack`.
+fn strncasecmp_prefix(haystack: &[u8], lit: &[u8]) -> bool {
+    if haystack.len() < lit.len() {
+        return false;
+    }
+    haystack[..lit.len()]
+        .iter()
+        .zip(lit.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// The shared `errmsg("malformed range literal: \"%s\"", string)` with
+/// `ERRCODE_INVALID_TEXT_REPRESENTATION`; callers attach the per-site
+/// `errdetail`.
+fn malformed_literal(string: &str) -> PgError {
+    PgError::error(format!("malformed range literal: \"{string}\""))
+        .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
