@@ -88,3 +88,37 @@ seam_core::seam!(
     /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.
     pub fn get_relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `get_op_opfamily_properties(opno, opfamily, missing_ok, &strategy,
+    /// &lefttype, &righttype)` (lsyscache.c): look up the operator's membership
+    /// in the opfamily, returning its `(strategy, op_lefttype, op_righttype)`.
+    /// With `missing_ok = false` a missing pg_amop row is the C `elog(ERROR,
+    /// "operator %u is not a member of opfamily %u")`, carried on `Err`; with
+    /// `missing_ok = true` a miss returns `Ok(None)`.
+    pub fn get_op_opfamily_properties(
+        opno: Oid,
+        opfamily: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<(i32, Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `get_opfamily_method(opfid)` (lsyscache.c): the access-method OID
+    /// (`opfmethod`) of the opfamily. A missing opfamily is the C `elog(ERROR,
+    /// "cache lookup failed for operator family %u")`, carried on `Err`.
+    pub fn get_opfamily_method(opfid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_opfamily_proc(opfamily, lefttype, righttype, procnum)`
+    /// (lsyscache.c): the support function OID registered for the given
+    /// procnum/type pair, or `InvalidOid` (0) if none. `Err` carries the
+    /// syscache machinery's `ereport(ERROR)`s.
+    pub fn get_opfamily_proc(
+        opfamily: Oid,
+        lefttype: Oid,
+        righttype: Oid,
+        procnum: i16,
+    ) -> PgResult<Oid>
+);

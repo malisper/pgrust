@@ -226,6 +226,9 @@ pub struct PlanStateData<'mcx> {
     pub ExecProcNode: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
+    /// `ExprState *qual` — boolean qual condition (compiled `plan.qual`).
+    /// `None` = the C `NULL` (always-true).
+    pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState>>,
     /// `struct PlanState *lefttree` — input plan tree (`outerPlanState`).
     pub lefttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
     /// `struct PlanState *righttree` — `innerPlanState`.

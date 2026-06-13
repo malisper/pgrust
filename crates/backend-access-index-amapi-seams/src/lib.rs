@@ -30,3 +30,18 @@ seam_core::seam!(
         validate: bool,
     ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
 );
+
+seam_core::seam!(
+    /// `IndexAmTranslateStrategy(strategy, amoid, opfamily, missing_ok)`
+    /// (amapi.c): translate an AM-specific strategy number into the
+    /// AM-independent `CompareType` (returned as its `i32` value, e.g.
+    /// `COMPARE_EQ`). The owning unit reaches the AM's
+    /// `amtranslatestrategy`. Errors carry the C lookup/validation `ereport`s
+    /// when `missing_ok = false`.
+    pub fn index_am_translate_strategy(
+        strategy: i32,
+        amoid: types_core::Oid,
+        opfamily: types_core::Oid,
+        missing_ok: bool,
+    ) -> types_error::PgResult<i32>
+);
