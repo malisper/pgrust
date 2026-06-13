@@ -41,7 +41,7 @@
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use types_core::Oid;
 use types_datum::Datum;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, BITMAPLEN, RECORDOID};
 
@@ -91,8 +91,8 @@ pub const ER_FLAGS_NON_DATA: i32 =
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 /// `TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO` flag bits (typcache.h);
 /// passed through to the unported `lookup_type_cache` owner.
-const TYPECACHE_TUPDESC: i32 = 0x0040;
-const TYPECACHE_DOMAIN_BASE_INFO: i32 = 0x4000;
+const TYPECACHE_TUPDESC: i32 = 0x00100;
+const TYPECACHE_DOMAIN_BASE_INFO: i32 = 0x01000;
 
 // ---------------------------------------------------------------------------
 // The carrier struct (utils/expandedrecord.h: ExpandedRecordHeader)
@@ -309,10 +309,19 @@ fn system_attribute_by_name(_fieldname: &str) -> Option<FormData_pg_attribute> {
     panic!("expandedrecord: SystemAttributeByName: unported owner (catalog/heap.c)")
 }
 
-/// `format_type_be(type_oid)` (utils/adt/format_type.c) — used only inside the
-/// "type is not composite" ereport message. Owner not yet ported.
-fn format_type_be(_type_oid: Oid) -> ! {
-    panic!("expandedrecord: format_type_be: unported owner (utils/adt/format_type.c)")
+/// `ereport(ERROR, errcode(ERRCODE_WRONG_OBJECT_TYPE), errmsg("type %s is not
+/// composite", format_type_be(type_id)))` (expandedrecord.c:98 / :230) — the
+/// "type is not composite" error raised by the builders when the typcache has
+/// no tupdesc for the given type. `format_type_be` is a real merged owner
+/// (`backend-utils-adt-format-type-seams`, same slot rowtypes.rs uses), so this
+/// is a catchable user error, not an unported boundary.
+fn type_is_not_composite(mcx: Mcx<'_>, type_oid: Oid) -> PgError {
+    let name = match backend_utils_adt_format_type_seams::format_type_be::call(mcx, type_oid) {
+        Ok(s) => alloc::string::String::from(s.as_str()),
+        Err(e) => return e,
+    };
+    PgError::error(alloc::format!("type {name} is not composite"))
+        .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +605,7 @@ pub fn make_expanded_record_from_typeid<'mcx>(
         }
         let Some(td) = typentry.tup_desc else {
             // ereport(ERROR, type %s is not composite)
-            format_type_be(type_id);
+            return Err(type_is_not_composite(mcx, type_id));
         };
         tupdesc = td;
         tupdesc_id = typentry.tup_desc_identifier;
@@ -647,7 +656,7 @@ pub fn make_expanded_record_from_tupdesc<'mcx>(
         // Prefer the typcache's refcounted copy; consult it for the identifier.
         let typentry = lookup_type_cache(tupdesc.tdtypeid, TYPECACHE_TUPDESC);
         let Some(td) = typentry.tup_desc else {
-            format_type_be(tupdesc.tdtypeid);
+            return Err(type_is_not_composite(mcx, tupdesc.tdtypeid));
         };
         chosen = td.clone_in(mcx)?;
         tupdesc_id = typentry.tup_desc_identifier;
@@ -751,6 +760,56 @@ pub fn make_expanded_record_from_datum<'mcx>(
     // Shouldn't need to set ER_FLAG_HAVE_EXTERNAL (Assert !HasExternal).
 
     Ok(erh)
+}
+
+/// `DatumGetExpandedRecord(d)` (expandedrecord.c:926):
+///
+/// ```c
+/// ExpandedRecordHeader *
+/// DatumGetExpandedRecord(Datum d)
+/// {
+///     if (VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(d)))
+///     {
+///         ExpandedRecordHeader *erh = (ExpandedRecordHeader *) DatumGetEOHP(d);
+///         Assert(erh->er_magic == ER_MAGIC);
+///         return erh;
+///     }
+///     d = make_expanded_record_from_datum(d, CurrentMemoryContext);
+///     return (ExpandedRecordHeader *) DatumGetEOHP(d);
+/// }
+/// ```
+///
+/// Get a writable expanded record from an input argument. If the input is
+/// already a read-write expanded pointer, C returns the *existing* in-memory
+/// `ExpandedRecordHeader` (chasing `DatumGetEOHP`); otherwise it expands the
+/// flat composite datum the hard way.
+///
+/// The composite datum crosses in the owned model as `record`: the flat
+/// `FormedTuple` carrier of the on-disk composite image (`DatumGetHeapTupleHeader`)
+/// when the input is a plain/flat value, or `is_rw_expanded = true` when the
+/// input is already a read-write expanded pointer. The latter "return the
+/// existing header" path needs to reach the live `ExpandedRecordHeader` behind
+/// the datum's TOAST pointer — exactly the keystone `DatumGetEOHP` materialize
+/// step the owned model cannot perform from bytes alone (the header is a
+/// memory-resident value its owner holds, not reconstructible from the pointer
+/// payload). So per mirror-PG-and-panic we stop loud at that boundary; the
+/// reachable flat-input path is the faithful "expand the hard way" branch.
+pub fn datum_get_expanded_record<'mcx>(
+    mcx: Mcx<'mcx>,
+    record: &FormedTuple<'_>,
+    is_rw_expanded: bool,
+) -> PgResult<ExpandedRecordHeader<'mcx>> {
+    if is_rw_expanded {
+        // C: return the existing ExpandedRecordHeader behind the R/W pointer.
+        panic!(
+            "expandedrecord: DatumGetExpandedRecord: reaching the live \
+             ExpandedRecordHeader behind a read-write expanded pointer requires \
+             DatumGetEOHP materialization, which the owned mcx model cannot do from \
+             a datum-pointer handle (the header is an owned in-memory value)"
+        );
+    }
+    // Else expand the hard way.
+    make_expanded_record_from_datum(mcx, record)
 }
 
 /// `HeapTupleHeaderGetTypeId`/`GetTypMod` over a formed tuple's datum header.

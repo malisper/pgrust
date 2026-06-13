@@ -19,8 +19,8 @@
 //! * `admin`          — `genfile`/`hbafuncs`/`lockfuncs`/`partitionfuncs`/
 //!   `pg_upgrade_support` SRF / admin glue.
 //!
-//! Each non-keystone module carries fixed public signatures with `todo!()`
-//! bodies; the keystone is ported. DESIGN HINT (the adt-infra
+//! All families are ported with real bodies (no `todo!()`/`unimplemented!()`);
+//! the keystone `expandeddatum.c` is complete. DESIGN HINT (the adt-infra
 //! SortSupportData / SRF FuncCallContext / pg_prng substrate the window/SRF
 //! families build on) is confirmed available on main, so those families seam
 //! into the real owners, not stubs. Genuinely-unported owners (hba.c parser,
