@@ -1,0 +1,18 @@
+[package]
+name = "backend-access-transam-xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_transam_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-wal = { path = "../types-wal" }
+types-control = { path = "../types-control" }
+types-error = { path = "../types-error" }
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }

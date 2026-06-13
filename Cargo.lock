@@ -868,6 +868,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "mcx",
+ "types-control",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -3148,6 +3161,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
+ "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
@@ -3257,6 +3271,13 @@ name = "types-condvar"
 version = "0.0.0"
 dependencies = [
  "types-storage",
+]
+
+[[package]]
+name = "types-control"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

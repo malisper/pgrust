@@ -344,13 +344,6 @@ pub const RM_STANDBY_ID: RmgrId = 8;
 /// durability decisions (checkpoint / archive-timeout triggering).
 pub const XLOG_MARK_UNIMPORTANT: uint8 = 0x02;
 
-/// `WalLevel` (access/xlog.h) — the `wal_level` GUC.
-pub type WalLevel = i32;
-pub const WAL_LEVEL_MINIMAL: WalLevel = 0;
-pub const WAL_LEVEL_REPLICA: WalLevel = 1;
-pub const WAL_LEVEL_LOGICAL: WalLevel = 2;
-
-
 /// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
 /// invalidation causes.
 pub type ReplicationSlotInvalidationCause = u32;
