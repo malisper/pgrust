@@ -198,10 +198,42 @@ fn build_auth_logmsg(mcx: Mcx<'_>) -> PgResult<PgString<'_>> {
         logmsg.try_push_str(app.as_str())?;
     }
 
-    // USE_SSL / ENABLE_GSS transport-security fragment (be-secure owns the TLS
-    // version/cipher/bits and GSS principal accessors).
-    if let Some(frag) = backend_libpq_be_secure_seams::transport_security_logfrag::call(mcx)? {
-        logmsg.try_push_str(frag.as_str())?;
+    // #ifdef USE_SSL (compiled in this build): append the SSL fragment when
+    // the connection is using TLS. The TLS version/cipher/bits accessors read
+    // be-secure's SSL state (seamed); the `port->ssl_in_use` branch and the
+    // format assembly are postinit's own logic, mirroring C 283-287.
+    //
+    // (#ifdef ENABLE_GSS is not compiled in this build, so the GSS fragment at
+    // C 288-307 is omitted.)
+    let mut ssl_frag: Option<(PgString<'_>, PgString<'_>, i32)> = None;
+    let mut ssl_err: Option<types_error::PgError> = None;
+    backend_utils_init_small_seams::with_my_proc_port::call(&mut |port| {
+        if let Some(port) = port {
+            if port.ssl_in_use {
+                let r = (|| {
+                    let version = backend_libpq_be_secure_seams::be_tls_get_version::call(mcx, port)?;
+                    let cipher = backend_libpq_be_secure_seams::be_tls_get_cipher::call(mcx, port)?;
+                    let bits = backend_libpq_be_secure_seams::be_tls_get_cipher_bits::call(port);
+                    Ok((version, cipher, bits))
+                })();
+                match r {
+                    Ok(v) => ssl_frag = Some(v),
+                    Err(e) => ssl_err = Some(e),
+                }
+            }
+        }
+    });
+    if let Some(e) = ssl_err {
+        return Err(e);
+    }
+    if let Some((version, cipher, bits)) = ssl_frag {
+        logmsg.try_push_str(" SSL enabled (protocol=")?;
+        logmsg.try_push_str(version.as_str())?;
+        logmsg.try_push_str(", cipher=")?;
+        logmsg.try_push_str(cipher.as_str())?;
+        logmsg.try_push_str(", bits=")?;
+        logmsg.try_push_str(&bits.to_string())?;
+        logmsg.try_push_str(")")?;
     }
 
     Ok(logmsg)
@@ -296,7 +328,7 @@ fn CheckMyDatabase(
     let encname = backend_utils_mb_mbutils_seams::get_database_encoding_name::call();
     backend_utils_misc_guc_seams::set_config_option::call(
         "server_encoding",
-        Some(encname),
+        encname,
         GucContext::PGC_INTERNAL,
         GucSource::PGC_S_DYNAMIC_DEFAULT,
     )?;
@@ -304,7 +336,7 @@ fn CheckMyDatabase(
     let encname = backend_utils_mb_mbutils_seams::get_database_encoding_name::call();
     backend_utils_misc_guc_seams::set_config_option::call(
         "client_encoding",
-        Some(encname),
+        encname,
         GucContext::PGC_BACKEND,
         GucSource::PGC_S_DYNAMIC_DEFAULT,
     )?;
@@ -562,7 +594,12 @@ pub fn BaseInit() -> PgResult<()> {
     backend_storage_aio_seams::pgaio_init_backend::call()?;
 
     // Do local initialization of storage and buffer managers.
-    backend_storage_sync_seams::init_sync::call()?;
+    // `InitSync()` creates the pending-operations table iff this process tracks
+    // sync requests: `!IsUnderPostmaster || AmCheckpointerProcess()` (sync.c).
+    let create_pending_ops = !backend_utils_init_small_seams::is_under_postmaster::call()
+        || backend_utils_init_small_seams::my_backend_type::call()
+            == types_core::init::BackendType::Checkpointer;
+    backend_storage_sync_seams::init_sync::call(create_pending_ops);
     backend_storage_smgr_seams::smgrinit::call()?;
     backend_storage_buffer_bufmgr_seams::init_buffer_manager_access::call()?;
 
@@ -824,7 +861,7 @@ pub fn InitPostgres(
         debug_assert!(!bootstrap);
 
         let userid = backend_utils_init_miscinit_seams::get_user_id::call();
-        if !backend_utils_init_miscinit_seams::has_rolreplication::call(userid)? {
+        if !backend_utils_init_miscinit_seams::has_rolreplication::call(userid) {
             return ereport(FATAL)
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                 .errmsg("permission denied to start WAL sender")
@@ -1090,10 +1127,12 @@ fn process_startup_options(mcx: Mcx<'_>, am_superuser: bool) -> PgResult<()> {
     // These are handled exactly like command-line variables.
     let mut it = guc_options.iter();
     while let Some(name) = it.next() {
-        let value = it.next();
+        // The startup-packet GUC options arrive as (name, value) pairs, so the
+        // value is always present (mirrors C's `lnext` walk in postinit.c).
+        let value = it.next().expect("guc_options must contain name/value pairs");
         backend_utils_misc_guc_seams::set_config_option::call(
             name.as_str(),
-            value.map(|v| v.as_str()),
+            value.as_str(),
             gucctx,
             GucSource::PGC_S_CLIENT,
         )?;

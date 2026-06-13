@@ -46,6 +46,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `toast_compress_datum(value, cmethod)` (toast_internals.c): try to
+    /// compress the varlena `value` (its verbatim on-disk bytes, header
+    /// included) with the given compression method (`InvalidCompressionMethod`
+    /// == -1 means use the type default). Returns `Some(compressed bytes in
+    /// mcx)` on a worthwhile compression, or `None` (C's
+    /// `PointerGetDatum(NULL)`) when compression did not shrink the value
+    /// enough. `Err` carries OOM and the unsupported-method `elog(ERROR)`.
+    pub fn toast_compress_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        value: &[u8],
+        cmethod: i8,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
     /// `get_toast_snapshot()` (toast_internals.c): the snapshot to use for
     /// reading toast data — the oldest registered/active snapshot. `Err`
     /// carries `elog(ERROR, "cannot fetch toast data without an active

@@ -15,16 +15,18 @@ seam_core::seam!(
     pub fn member_can_set_role(member: Oid, role: Oid) -> PgResult<bool>
 );
 
-// --- backend-utils-init-postinit consumers (acl.c) ---
+seam_core::seam!(
+    /// `has_privs_of_role(member, role)` (acl.c): whether `member` has the
+    /// privileges of `role` (is a member with `inherit`, or is the role).
+    /// Catalog/syscache lookups can `ereport(ERROR)`.
+    pub fn has_privs_of_role(member: Oid, role: Oid) -> PgResult<bool>
+);
 
 seam_core::seam!(
-    /// `has_privs_of_role(member, role)` (acl.c): does `member` have the
-    /// privileges of `role` (directly or transitively, INHERIT)? `Err` carries
-    /// its catcache `ereport` surface.
-    pub fn has_privs_of_role(
-        member: types_core::Oid,
-        role: types_core::Oid,
-    ) -> types_error::PgResult<bool>
+    /// `has_bypassrls_privilege(roleid)` (acl.c): whether `roleid` has the
+    /// BYPASSRLS attribute (superusers always do). Performs catalog/syscache
+    /// lookups, which can `ereport(ERROR)`.
+    pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(

@@ -1,0 +1,9 @@
+# Append-only registries: both sides' added lines should concatenate, not
+# conflict. git's built-in `union` merge driver auto-resolves these, removing
+# the most repetitive hand-resolution step during integration.
+#
+# NOT for files with in-place edits (e.g. CATALOG.tsv has per-row status
+# edits that union would duplicate) — only genuinely append-only files.
+crates/seams-init/src/lib.rs   merge=union
+crates/seams-init/Cargo.toml   merge=union
+DESIGN_DEBT.md                 merge=union

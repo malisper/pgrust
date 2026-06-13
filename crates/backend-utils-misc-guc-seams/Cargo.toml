@@ -12,3 +12,4 @@ path = "src/lib.rs"
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
 seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }

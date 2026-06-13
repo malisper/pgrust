@@ -5,6 +5,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+
 seam_core::seam!(
     /// `work_mem` (globals.c): the `work_mem` GUC — per-operation memory
     /// budget in kilobytes.
@@ -110,6 +111,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatabasePath` (globals.c): the path to the current database's data
+    /// directory, set up at backend startup. Returns an owned copy of the
+    /// backend-global string (the caller uses it transiently). `Err` carries
+    /// the OOM surface of copying the global.
+    pub fn database_path() -> types_error::PgResult<String>
+);
+
+seam_core::seam!(
     /// Read `IsPostmasterEnvironment` (`globals.c`).
     pub fn is_postmaster_environment() -> bool
 );
@@ -124,6 +133,13 @@ seam_core::seam!(
     /// `MyClientSocket = palloc(...); memcpy(...)` (`globals.c` global): store
     /// this child's inherited client socket.
     pub fn set_my_client_socket(client_sock: types_net::ClientSocket)
+);
+
+seam_core::seam!(
+    /// `*MyClientSocket` (`globals.c` global): the inherited accepted client
+    /// socket, copied out. `None` when `MyClientSocket == NULL`. Pure read of
+    /// process-identity state.
+    pub fn my_client_socket() -> Option<types_net::ClientSocket>
 );
 
 seam_core::seam!(
@@ -156,6 +172,14 @@ seam_core::seam!(
     pub fn my_backend_type() -> types_core::init::BackendType
 );
 
+seam_core::seam!(
+    /// `IsBinaryUpgrade` (globals.c / miscadmin.h): true during a
+    /// `pg_upgrade`-driven binary upgrade. The launcher refuses to register the
+    /// logical-replication launcher in this mode. Pure read of backend-local
+    /// state.
+    pub fn is_binary_upgrade() -> bool
+);
+
 // --- backend-utils-init-postinit consumers (globals.c per-backend state) ---
 
 seam_core::seam!(
@@ -171,11 +195,6 @@ seam_core::seam!(
 seam_core::seam!(
     /// `MyProcPort != NULL` (globals.c): does this backend have a client Port?
     pub fn has_my_proc_port() -> bool
-);
-
-seam_core::seam!(
-    /// `IsBinaryUpgrade` (globals.c): are we in binary-upgrade mode?
-    pub fn is_binary_upgrade() -> bool
 );
 
 seam_core::seam!(

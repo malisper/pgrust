@@ -42,17 +42,74 @@ seam_core::seam!(
     pub fn secure_close(port: &mut types_net::Port)
 );
 
-// --- backend-utils-init-postinit consumer (be-secure.c TLS/GSS reads) ---
+// --- backend-utils-init-postinit consumer (be-secure.c TLS accessors) ---
 
 seam_core::seam!(
-    /// The `#ifdef USE_SSL` / `#ifdef ENABLE_GSS` fragment of
-    /// `PerformAuthentication`'s authorized-connection log line: " SSL enabled
-    /// (protocol=%s, cipher=%s, bits=%d)" and/or the GSS "(authenticated=...,
-    /// encrypted=..., delegated_credentials=..., principal=...)" suffix,
-    /// assembled by the be-secure owner (which holds the TLS version/cipher/bits
-    /// and GSS principal accessors over the ambient `MyProcPort`). `None` when
-    /// neither transport is in use. Copied into `mcx`.
-    pub fn transport_security_logfrag<'mcx>(
+    /// `const char *be_tls_get_version(Port *port)` (`libpq/be-secure.c`) — the
+    /// negotiated TLS protocol version string for the connection, used by
+    /// `PerformAuthentication`'s `" SSL enabled (protocol=%s, ...)"` log line.
+    /// Reads SSL state postinit does not own.
+    pub fn be_tls_get_version<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `const char *be_tls_get_cipher(Port *port)` (`libpq/be-secure.c`) — the
+    /// negotiated TLS cipher name string for the connection.
+    pub fn be_tls_get_cipher<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        port: &mut types_net::Port,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `int be_tls_get_cipher_bits(Port *port)` (`libpq/be-secure.c`) — the
+    /// number of effective bits in the negotiated TLS cipher.
+    pub fn be_tls_get_cipher_bits(port: &mut types_net::Port) -> i32
+);
+
+// ---------------------------------------------------------------------------
+//  Negotiation guards + handshake openers (backend_startup.c crossings).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// Whether this build supports SSL (`#ifdef USE_SSL`). A compile-in guard
+    /// backend_startup.c branches on; infallible.
+    pub fn ssl_supported() -> bool
+);
+
+seam_core::seam!(
+    /// Whether this build supports GSSAPI encryption (`#ifdef ENABLE_GSS`).
+    /// A compile-in guard; infallible.
+    pub fn gss_supported() -> bool
+);
+
+seam_core::seam!(
+    /// `!LoadedSSL || port->laddr.addr.ss_family == AF_UNIX` — SSL is not
+    /// offered for this connection (SSL disabled at runtime, or a Unix-domain
+    /// socket). Infallible.
+    pub fn ssl_negotiation_disabled(port: &mut types_net::Port) -> bool
+);
+
+seam_core::seam!(
+    /// `port->laddr.addr.ss_family == AF_UNIX` — GSSAPI encryption is not
+    /// offered over a Unix-domain socket. Infallible.
+    pub fn gss_negotiation_disabled(port: &mut types_net::Port) -> bool
+);
+
+seam_core::seam!(
+    /// `secure_open_server(Port *port)` (`libpq/be-secure.c`) — perform the
+    /// server-side TLS handshake. Returns `0` on success or `-1` on failure
+    /// (an appropriate TLS alert was already sent). Infallible at the ereport
+    /// level.
+    pub fn secure_open_server(port: &mut types_net::Port) -> i32
+);
+
+seam_core::seam!(
+    /// `secure_open_gssapi(Port *port)` (`libpq/be-secure-gssapi.c`) — perform
+    /// the server-side GSSAPI encryption handshake. Returns `0` on success or
+    /// `-1` on failure. Infallible at the ereport level.
+    pub fn secure_open_gssapi(port: &mut types_net::Port) -> i32
 );

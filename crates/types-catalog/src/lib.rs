@@ -9,5 +9,6 @@
 
 pub mod catalog;
 pub mod catalog_dependency;
+pub mod catalog_shdepend;
 pub mod pg_database;
 pub mod pg_publication;

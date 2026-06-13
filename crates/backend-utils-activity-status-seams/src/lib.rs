@@ -11,11 +11,22 @@
 //! unit installs these from its `init_seams()` when it lands; until then a
 //! call panics loudly.
 
+extern crate alloc;
+
 use types_pgstat::backend_status::PgBackendStatus;
 
 seam_core::seam!(
     /// `MyBEEntry != NULL` — is the backend status entry initialized?
     pub fn my_be_entry_present() -> bool
+);
+
+seam_core::seam!(
+    /// `pgstat_get_backend_current_activity(pid, checkUser)` (backend_status.c)
+    /// — the current query string of backend `pid`, for the server-log deadlock
+    /// detail. `check_user` is C's `checkUser` (redact for permission); the
+    /// deadlock detector passes `false`. Returns the activity string (the C
+    /// pointer into the backend's status entry).
+    pub fn backend_current_activity(pid: i32, check_user: bool) -> alloc::string::String
 );
 
 seam_core::seam!(

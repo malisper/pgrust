@@ -2,6 +2,8 @@
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
     /// transaction's locks at recovery startup (slot `TWOPHASE_RM_LOCK_ID` of
@@ -127,10 +129,15 @@ impl Drop for LockGuard {
 /// available (`LOCKACQUIRE_NOT_AVAIL`), the returned guard holds nothing —
 /// check [`LockGuard::result`].
 pub fn lock_acquire(
+
     locktag: &types_storage::lock::LOCKTAG,
+
     lockmode: types_storage::lock::LOCKMODE,
+
     session_lock: bool,
+
     dont_wait: bool,
+
 ) -> types_error::PgResult<LockGuard> {
     let result = lock_acquire_impl::call(locktag, lockmode, session_lock, dont_wait)?;
     Ok(LockGuard {
@@ -219,6 +226,36 @@ seam_core::seam!(
     pub fn post_prepare_locks(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// locks this backend holds in the given lock method. Used by the logical
+    /// apply worker on exit to drop session-level locks; can `ereport` on a
+    /// corrupt lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the display name of a
+    /// lock mode, used by the deadlock report.
+    pub fn get_lockmode_name(
+        lockmethodid: types_storage::lock::LOCKMETHODID,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
 );
 
 // --- backend-utils-init-postinit consumers (lock.c) ---
