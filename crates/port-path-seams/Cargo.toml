@@ -1,0 +1,12 @@
+[package]
+name = "port-path-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "port_path_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }

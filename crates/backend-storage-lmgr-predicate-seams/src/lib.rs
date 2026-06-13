@@ -93,3 +93,9 @@ seam_core::seam!(
         is_commit: bool,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TransferPredicateLocksToHeapRelation(relation)` (predicate.c): promote
+    /// tuple/page predicate locks to a relation lock before the rewrite.
+    pub fn transfer_predicate_locks_to_heap_relation(relid: types_core::Oid) -> types_error::PgResult<()>
+);

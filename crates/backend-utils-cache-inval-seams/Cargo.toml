@@ -17,3 +17,5 @@ types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-syscache = { path = "../types-syscache" }
+types-cluster = { path = "../types-cluster" }
+types-tuple = { path = "../types-tuple" }
