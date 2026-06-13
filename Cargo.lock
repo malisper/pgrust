@@ -7355,6 +7355,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-varlena"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-locale",
+ "types-sortsupport",
+]
+
+[[package]]
 name = "backend-utils-adt-varlena-seams"
 version = "0.0.0"
 dependencies = [
@@ -9216,6 +9233,7 @@ dependencies = [
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
+ "backend-utils-adt-varlena",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
