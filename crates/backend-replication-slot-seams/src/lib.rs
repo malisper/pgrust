@@ -154,6 +154,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchNamedReplicationSlot(name, need_lock)` (slot.c): whether a
+    /// replication slot with the given name currently exists in shared memory.
+    /// `genfile.c::pg_ls_replslotdir` calls it with `need_lock = true` to
+    /// validate the slot before listing its directory.
+    pub fn SearchNamedReplicationSlot(name: &str, need_lock: bool) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `CheckSlotRequirements()` — `ereport`s on misconfiguration.
+    pub fn CheckSlotRequirements() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `void CheckPointReplicationSlots(bool)` (slot.c:2119).
     pub fn checkpoint_replication_slots(is_shutdown: bool) -> PgResult<()>
 );

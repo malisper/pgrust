@@ -93,10 +93,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ReplicationOriginShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
-    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
-    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn replication_origin_shmem_size() -> types_error::PgResult<types_core::Size>
+    /// `ReplicationOriginShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
+    /// shared-memory bytes this subsystem needs. Infallible in C, so the seam
+    /// returns a bare `Size`.
+    pub fn replication_origin_shmem_size() -> types_core::Size
 );
 
 seam_core::seam!(

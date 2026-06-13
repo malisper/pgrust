@@ -24,6 +24,14 @@ use types_core::PgWChar;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `pg_verifymbstr(mbstr, len, noError)` (`utils/mb/mbutils.c`): verify
+    /// that `mbstr` is valid in the database encoding. With `no_error = false`
+    /// an invalid byte sequence raises `ereport(ERROR)` (carried on `Err`);
+    /// the seam returns whether the string is valid (the C `bool`).
+    pub fn pg_verifymbstr(mbstr: &[u8], no_error: bool) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `pg_server_to_client(s, len)` — convert from the server encoding to the
     /// current client encoding.
     pub fn pg_server_to_client<'mcx>(

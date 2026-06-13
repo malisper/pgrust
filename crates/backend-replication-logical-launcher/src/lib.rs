@@ -1496,4 +1496,7 @@ pub fn init_seams() {
     });
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     s::apply_launcher_shmem_init::set(ApplyLauncherShmemInit);
+    // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
+    // is now the infallible `-> Size` shape, matching the C `Size` return.
+    s::apply_launcher_shmem_size::set(ApplyLauncherShmemSize);
 }

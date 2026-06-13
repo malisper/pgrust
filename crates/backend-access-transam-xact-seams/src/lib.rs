@@ -55,6 +55,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsAbortedTransactionBlockState()` (xact.c): true when the current
+    /// transaction block is in the failed/aborted state
+    /// (`TBLOCK_ABORT` / `TBLOCK_SUBABORT`), so only `ROLLBACK`-class commands
+    /// may run. Pure read of backend-local transaction state.
+    pub fn is_aborted_transaction_block_state() -> bool
+);
+
+seam_core::seam!(
     /// `IsolationUsesXactSnapshot()` (xact.h): true when the current
     /// transaction isolation level is REPEATABLE READ or higher
     /// (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read of the backend-local

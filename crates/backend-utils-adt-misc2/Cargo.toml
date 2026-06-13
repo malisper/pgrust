@@ -1,0 +1,74 @@
+[package]
+name = "backend-utils-adt-misc2"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_misc2"
+path = "src/lib.rs"
+
+[dependencies]
+# Carrier types.
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+types-stringinfo = { path = "../types-stringinfo" }
+types-storage = { path = "../types-storage" }
+types-nodes = { path = "../types-nodes" }
+mcx = { path = "../mcx" }
+
+# Real owners the expandedrecord family reuses (the adt-infra confirmed
+# available on main): the tuple form/deform/copy core, and the typcache
+# rowtype-tupdesc lookup seam.
+# Composite (RECORD) I/O / compare / hash (rowtypes family) substrate crosses
+# to its real owner via that owner's seam crate (typcache, fmgr, format_type,
+# datum, pqformat message helpers). The `domains` family reaches the typcache
+# domain-constraint engine and the base type's fmgr I/O via those same seams.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+
+# Inward seam crates this unit owns. The expandeddatum EOH surface (consumed
+# by backend-access-common-heaptuple) and the regproc.c printable-name /
+# name-parsing helpers (consumed by funcapi etc.); both installed from
+# init_seams().
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+
+# Outward seam crate for the per-type ExpandedObjectMethods table that the
+# keystone EOH_get_flat_size / EOH_flatten_into dispatch through. Owned by the
+# concrete expanded types (expanded record / expanded array), still unported.
+backend-utils-adt-expanded-methods-seams = { path = "../backend-utils-adt-expanded-methods-seams" }
+
+# Outward seams the regproc family reaches its (genuinely-unported or
+# cross-unit-cycle) catalog / type / role owners through.
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-adt-oid-seams = { path = "../backend-utils-adt-oid-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+
+# Outward seams the `admin` family consumes (real owners; genuinely-unported
+# owners panic until they land).
+backend-common-path-seams = { path = "../backend-common-path-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
+backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }

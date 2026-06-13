@@ -11,6 +11,22 @@
 use types_walreceiver::WalRcvData;
 
 seam_core::seam!(
+    /// `WalRcvShmemSize()` (walreceiverfuncs.c; ipci.c `CalculateShmemSize`
+    /// accumulator) — shared-memory bytes the `WalRcvData` control block needs.
+    /// `Err` carries the `add_size`/`mul_size` overflow `ereport(ERROR)`. Owner
+    /// (`backend-replication-walreceiverfuncs`) unported; scaffolded slot.
+    pub fn wal_rcv_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `WalRcvShmemInit()` (walreceiverfuncs.c; ipci.c
+    /// `CreateOrAttachShmemStructs`) — allocate-or-attach the `WalRcvData`
+    /// shared-memory block. `Err` carries the out-of-shared-memory
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn wal_rcv_shmem_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `SpinLockAcquire(&WalRcv->mutex); f(WalRcv); SpinLockRelease(...)`.
     /// Runs the caller's closure with exclusive access to the spinlock-guarded
     /// fields of the shared block; the lock is released on return.

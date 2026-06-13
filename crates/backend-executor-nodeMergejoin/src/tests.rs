@@ -21,6 +21,7 @@ fn check_constant_qual_const_true() {
         consttype: 16, // BOOLOID
         constvalue: Datum::from_bool(true),
         constisnull: false,
+        ..Default::default()
     })];
     let mut cf = false;
     assert!(check_constant_qual(Some(&quals), &mut cf));
@@ -35,11 +36,13 @@ fn check_constant_qual_const_false_and_null() {
             consttype: 16,
             constvalue: Datum::from_bool(false),
             constisnull: false,
+            ..Default::default()
         }),
         Expr::Const(Const {
             consttype: 16,
             constvalue: Datum::null(),
             constisnull: true,
+            ..Default::default()
         }),
     ];
     let mut cf = false;
