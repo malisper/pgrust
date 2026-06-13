@@ -14,3 +14,11 @@ seam_core::seam!(
     /// cannot `ereport`.
     pub fn clamp_row_est(nrows: f64) -> f64
 );
+
+seam_core::seam!(
+    /// `clamp_cardinality_to_long(x)` (costsize.c): cast a `Cardinality`
+    /// (`double`) to a sane `long` (here `i64`). `NaN` -> `i64::MAX`; `x <= 0`
+    /// -> 0; otherwise `x` if it is strictly below `i64::MAX` as a double, else
+    /// `i64::MAX`. Pure math; cannot `ereport`.
+    pub fn clamp_cardinality_to_long(x: f64) -> i64
+);
