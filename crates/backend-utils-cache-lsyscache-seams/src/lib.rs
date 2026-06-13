@@ -8,6 +8,33 @@ use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
 
+/// The `(typlen, typbyval, typalign)` triple `get_typlenbyvalalign` reports.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypLenByValAlign {
+    /// `typlen` — `pg_type.typlen`.
+    pub typlen: i16,
+    /// `typbyval` — `pg_type.typbyval`.
+    pub typbyval: bool,
+    /// `typalign` — `pg_type.typalign`.
+    pub typalign: i8,
+}
+
+seam_core::seam!(
+    /// `get_typlenbyvalalign(typid, &typlen, &typbyval, &typalign)`
+    /// (lsyscache.c): the type's length, by-value flag, and alignment from
+    /// its `pg_type` row. A missing type is the C `elog(ERROR, "cache lookup
+    /// failed for type %u")`, carried on `Err`.
+    pub fn get_typlenbyvalalign(typid: Oid) -> PgResult<TypLenByValAlign>
+);
+
+seam_core::seam!(
+    /// `get_rel_relispartition(relid)` (lsyscache.c): whether the relation is
+    /// a partition (`pg_class.relispartition`); `false` if there is no such
+    /// pg_class row. `Err` carries the syscache machinery's
+    /// `ereport(ERROR)`s.
+    pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool>
+);
+
 seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
     /// name, copied out of the syscache into `mcx` (C: `pstrdup` in the

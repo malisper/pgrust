@@ -33,6 +33,56 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read the relation's cached partition key (`relation->rd_partkey`),
+    /// returning a copy in `mcx`, or `Ok(None)` when it has not been built
+    /// yet (the C NULL). `partcache.c`'s `RelationGetPartitionKey` builds the
+    /// key lazily and the relcache caches it on the entry, preserved across
+    /// relcache rebuilds; this is the relcache-owned read half (partcache
+    /// owns the build). Pure cache read; cannot `ereport` (OOM from the copy
+    /// is carried on `Err`).
+    pub fn relation_get_partkey<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+    ) -> types_error::PgResult<Option<types_partition::PartitionKeyData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// Store the freshly built partition key on the relation's relcache entry
+    /// (`relation->rd_partkey = key`, in the entry's own `rd_partkeycxt`
+    /// child of `CacheMemoryContext`). The relcache owner copies `key` into
+    /// that long-lived context; `partcache.c`'s `RelationBuildPartitionKey`
+    /// is the builder. `Err` carries OOM from the copy into cache memory.
+    pub fn relation_set_partkey<'mcx>(
+        relid: types_core::Oid,
+        key: types_partition::PartitionKeyData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Read the relation's cached partition CHECK qual list
+    /// (`relation->rd_partcheck`), returning a copy in `mcx`, plus the
+    /// `relation->rd_partcheckvalid` flag. When the flag is false the cache is
+    /// stale and the caller rebuilds; partcache owns the build/recursion.
+    /// OOM from the copy is carried on `Err`.
+    pub fn relation_get_partcheck<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+    ) -> types_error::PgResult<(bool, mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// Store the freshly built partition CHECK qual list on the relation's
+    /// relcache entry (`relation->rd_partcheck = copyObject(result)` in
+    /// `rd_partcheckcxt`, then `rd_partcheckvalid = true`). An empty list is
+    /// the C NIL (no context made). The relcache owner copies into cache
+    /// memory; `Err` carries OOM.
+    pub fn relation_set_partcheck<'mcx>(
+        relid: types_core::Oid,
+        partcheck: mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `RelationGetIdentityKeyBitmap(relation)` (relcache.c): the bitmap of
     /// replica-identity-index key columns, offset by
     /// `FirstLowInvalidHeapAttributeNumber`, or `None` when the relation has

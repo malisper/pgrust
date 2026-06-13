@@ -16,3 +16,4 @@ types-rel = { path = "../types-rel" }
 types-tableam = { path = "../types-tableam" }
 mcx = { path = "../mcx" }
 types-nodes = { path = "../types-nodes" }
+types-partition = { path = "../types-partition" }

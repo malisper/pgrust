@@ -1108,6 +1108,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -1786,6 +1788,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-makefuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-nodes-nodeFuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
@@ -1815,6 +1837,18 @@ name = "backend-partitioning-core-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-partitioning-partbounds-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -2957,6 +2991,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-partcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-catalog-partition-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-partitioning-partbounds-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-partition",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -2965,6 +3025,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-partition",
  "types-rel",
  "types-tableam",
 ]
@@ -3040,6 +3101,7 @@ dependencies = [
  "types-error",
  "types-hash",
  "types-namespace",
+ "types-partition",
 ]
 
 [[package]]
@@ -3576,6 +3638,7 @@ dependencies = [
  "backend-utils-adt-numutils",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-partcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
@@ -3740,6 +3803,16 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-partition"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
