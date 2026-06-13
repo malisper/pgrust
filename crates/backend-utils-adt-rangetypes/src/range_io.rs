@@ -7,11 +7,15 @@
 //! element type's typio support fns (fmgr seam); the wire buffer through the
 //! pqformat seam.
 
+use backend_utils_adt_format_type_seams as format_type_seams;
+use backend_utils_cache_lsyscache_seams as lsyscache_seams;
+use backend_utils_cache_typcache_seams as typcache_seams;
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_FUNCTION,
 };
 use types_rangetypes::{
     RangeBound, RangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL, RANGE_LB_INC, RANGE_LB_INF,
@@ -59,32 +63,86 @@ pub enum IOFuncSelector {
     Send,
 }
 
+/// `TYPECACHE_RANGE_INFO` (typcache.h): the flag selecting the range-info fields
+/// (`rngelemtype` / `rng_collation` / `rng_cmp_proc_finfo` /
+/// `rng_canonical_finfo` / `rng_subdiff_finfo`) when resolving a range type's
+/// `TypeCacheEntry`. Value matches `backend-utils-cache-typcache`'s
+/// `TYPECACHE_RANGE_INFO`.
+const TYPECACHE_RANGE_INFO: i32 = 0x00800;
+
 /// `get_range_io_data(fcinfo, rngtypid, func)` (rangetypes.c:319): resolve and
 /// cache the element I/O support for one direction.
 ///
-/// C resolves three unported neighbors: `lookup_type_cache(rngtypid,
+/// Mirrors the `cache == NULL` build path: `lookup_type_cache(rngtypid,
 /// TYPECACHE_RANGE_INFO)` (typcache.c, with the "type %u is not a range type"
-/// elog when `rngelemtype == NULL`), `get_type_io_data(rngelemtype, func, ...)`
-/// (lsyscache.c), and `fmgr_info_cxt(typiofunc, ...)` (fmgr.c) — plus the
+/// elog when `rngelemtype == NULL`), `get_type_io_data(rngelemtype->type_id,
+/// func, ...)` (lsyscache.c) for the element I/O proc + I/O param, and the
 /// `ERRCODE_UNDEFINED_FUNCTION` "no binary {in,out}put function" ereport when
-/// `typiofunc` is invalid. None of those owners are ported into this unit's
-/// dependency set yet, so the resolution is seamed off here: mirror PG and
-/// panic (loud, naming the owner) rather than restructure or silently stub.
-pub fn get_range_io_data(_rngtypid: Oid, _func: IOFuncSelector) -> PgResult<RangeIOData> {
-    // C: cache = MemoryContextAlloc(..., sizeof(RangeIOData));
-    //    cache->typcache = lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO);
-    //    if (cache->typcache->rngelemtype == NULL)
-    //        elog(ERROR, "type %u is not a range type", rngtypid);
-    //    get_type_io_data(cache->typcache->rngelemtype->type_id, func, &typlen,
-    //                     &typbyval, &typalign, &typdelim, &cache->typioparam,
-    //                     &typiofunc);
-    //    if (!OidIsValid(typiofunc)) ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION, ...);
-    //    fmgr_info_cxt(typiofunc, &cache->typioproc, ...);
-    panic!(
-        "get_range_io_data: lookup_type_cache (backend-utils-cache-typcache) / \
-         get_type_io_data (backend-utils-cache-lsyscache) / fmgr_info \
-         (backend-utils-fmgr-fmgr) not ported into this unit yet"
-    );
+/// `typiofunc` is invalid. The `fmgr_info_cxt` step folds into carrying the
+/// resolved `typiofunc` OID (the I/O wrappers dispatch by OID through the
+/// element type's fmgr seams). `lookup_type_cache` / `get_type_io_data` are
+/// owned by the genuinely-unported `backend-utils-cache-typcache` /
+/// `backend-utils-cache-lsyscache`; the resolution routes through their seams
+/// (mirroring the sibling `multirangetypes::get_multirange_io_data`).
+pub fn get_range_io_data(rngtypid: Oid, func: IOFuncSelector) -> PgResult<RangeIOData> {
+    // cache->typcache = lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO);
+    let typcache =
+        typcache_seams::lookup_type_cache_entry::call(rngtypid, TYPECACHE_RANGE_INFO)?;
+
+    // if (cache->typcache->rngelemtype == NULL)
+    //     elog(ERROR, "type %u is not a range type", rngtypid);
+    let rngelemtype = match typcache.rngelemtype.as_deref() {
+        Some(e) => e,
+        None => {
+            return Err(PgError::error(format!(
+                "type {rngtypid} is not a range type"
+            )));
+        }
+    };
+
+    // get_type_io_data(cache->typcache->rngelemtype->type_id, func, &typlen,
+    //                  &typbyval, &typalign, &typdelim, &cache->typioparam,
+    //                  &typiofunc);
+    let which = match func {
+        IOFuncSelector::Input => lsyscache_seams::IOFuncSelector::Input,
+        IOFuncSelector::Output => lsyscache_seams::IOFuncSelector::Output,
+        IOFuncSelector::Receive => lsyscache_seams::IOFuncSelector::Receive,
+        IOFuncSelector::Send => lsyscache_seams::IOFuncSelector::Send,
+    };
+    let io = lsyscache_seams::get_type_io_data::call(rngelemtype.type_id, which)?;
+
+    // if (!OidIsValid(typiofunc)) -- can only happen for receive or send.
+    if io.func == 0 {
+        // C: ereport(ERROR, errcode(ERRCODE_UNDEFINED_FUNCTION),
+        //            errmsg("no binary {input,output} function available for
+        //            type %s", format_type_be(cache->typcache->rngelemtype->type_id)));
+        let elem_oid = rngelemtype.type_id;
+        let cx = mcx::MemoryContext::new("get_range_io_data error");
+        let name = match format_type_seams::format_type_be::call(cx.mcx(), elem_oid) {
+            Ok(s) => s.as_str().to_string(),
+            Err(_) => elem_oid.to_string(),
+        };
+        if func == IOFuncSelector::Receive {
+            return Err(PgError::error(format!(
+                "no binary input function available for type {name}"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+        } else {
+            return Err(PgError::error(format!(
+                "no binary output function available for type {name}"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+        }
+    }
+
+    // fmgr_info_cxt(typiofunc, &cache->typioproc, ...) -- the owned cache carries
+    // the resolved proc OID; the I/O wrappers re-resolve / dispatch by OID
+    // through the element type's fmgr seams.
+    Ok(RangeIOData {
+        typcache,
+        typiofunc: io.func,
+        typioparam: io.typioparam,
+    })
 }
 
 /// `range_in(input, typioparam, typmod)` body (rangetypes.c:90).

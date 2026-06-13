@@ -34,6 +34,16 @@ pub const RM_XACT_ID: RmgrId = 1;
 /// `RM_SMGR_ID` — the Storage resource manager (rmgrlist.h entry 2).
 pub const RM_SMGR_ID: RmgrId = 2;
 
+/// `RM_CLOG_ID` — the CLOG resource manager (rmgrlist.h entry 3).
+pub const RM_CLOG_ID: RmgrId = 3;
+
+/// `CLOG_ZEROPAGE` (access/clog.h) — clog rmgr opcode for "a new page was
+/// zeroed" (`info & ~XLR_INFO_MASK`).
+pub const CLOG_ZEROPAGE: u8 = 0x00;
+
+/// `CLOG_TRUNCATE` (access/clog.h) — clog rmgr opcode for "segments truncated".
+pub const CLOG_TRUNCATE: u8 = 0x10;
+
 /// `RM_DBASE_ID` — the Database resource manager (rmgrlist.h entry 4).
 pub const RM_DBASE_ID: RmgrId = 4;
 
