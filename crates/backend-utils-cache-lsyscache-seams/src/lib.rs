@@ -80,6 +80,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output function OID and whether it is varlena,
+    /// returned as `(typoutput, typisvarlena)`. A non-output type is the C
+    /// `ereport(ERROR, ...cannot display a value of type...)`; cache lookup
+    /// failure is `elog(ERROR)`. Both carried on `Err`.
+    pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
     /// name, copied out of the syscache into `mcx` (C: `pstrdup` in the
     /// current context). With `missing_ok = false` a missing opfamily raises
@@ -170,6 +179,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
     /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
     /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
@@ -226,6 +243,13 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -324,4 +348,13 @@ seam_core::seam!(
     /// syscache hash value stored as `TypeCacheEntry.type_id_hash`. `Err`
     /// carries the catcache failure surface.
     pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
 );

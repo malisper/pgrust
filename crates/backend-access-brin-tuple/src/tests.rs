@@ -103,6 +103,9 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
             reltuples: 0.0,
             relallvisible: 0,
             reltoastrelid: 0,
+            reltablespace: 0,
+            relfilenode: 0,
+            relisshared: false,
             relhassubclass: false,
             relpersistence: b'p',
             relkind: b'i',
@@ -113,6 +116,7 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
         rd_att: index_tupdesc(mcx, natts),
         rd_options: None,
         rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
     };
     types_rel::Relation::open(rd, None)
 }

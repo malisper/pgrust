@@ -73,3 +73,15 @@ seam_core::seam!(
     /// otherwise PANIC.
     pub fn data_sync_elevel(elevel: types_error::ErrorLevel) -> types_error::ErrorLevel
 );
+
+seam_core::seam!(
+    /// `durable_rename(oldfile, newfile, elevel)` (`storage/file/fd.c`) —
+    /// rename a file durably (fsync old + new + containing directory). The C
+    /// callers in timeline.c pass `ERROR`; a failure surfaces as `Err` at the
+    /// effective `data_sync_elevel`. Returns `Ok(())` on success.
+    pub fn durable_rename(
+        oldfile: &str,
+        newfile: &str,
+        elevel: ErrorLevel,
+    ) -> PgResult<()>
+);

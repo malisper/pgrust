@@ -29,6 +29,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyLatch` (globals.c): this backend's own process-latch identity. The
+    /// latch unit resolves it when installing, matching the existing
+    /// [`set_latch_my_latch`]/[`reset_latch_my_latch`] convention (a few C
+    /// callers — e.g. `AddWaitEventToSet(set, WL_LATCH_SET, …, MyLatch, …)` —
+    /// need the handle, not just an action on it). Infallible.
+    pub fn my_latch() -> types_storage::latch::LatchHandle
+);
+
+seam_core::seam!(
     /// `SetLatch(latch)`: set the given latch (possibly another backend's —
     /// e.g. `SetLatch(&proc->procLatch)`), waking any wait on it. Infallible
     /// in C.
@@ -121,4 +130,11 @@ seam_core::seam!(
     /// no-ambient-global rule forbids a getter for the foreign latch, so the
     /// procno is passed explicitly. Infallible in C.
     pub fn set_latch_by_proc_number(pgprocno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// `kill(pid, SIGUSR1)` (slotsync.c `ShutDownSlotSync`): signal the
+    /// slot-sync worker so it notices the stop request. `Err` carries a failed
+    /// `kill(2)`.
+    pub fn kill_sigusr1(pid: i32) -> types_error::PgResult<()>
 );

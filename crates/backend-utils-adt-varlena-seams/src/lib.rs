@@ -72,6 +72,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SplitDirectoriesString(rawstring, ',', &elemlist)` (varlena.c) — split
+    /// a comma-separated, possibly-quoted directory list into canonicalized
+    /// path elements, each allocated in `mcx`. `Ok(None)` is the C `false`
+    /// return (syntax error); `Ok(Some(list))` carries the parsed elements.
+    pub fn split_directories_string<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rawstring: &str,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `text_to_cstring(t)` (varlena.c), reached via the `TextDatumGetCString(d)`
     /// macro (`text_to_cstring((text *) DatumGetPointer(d))`): detoast the
     /// `text` varlena `d` points at and copy its payload out as a NUL-free

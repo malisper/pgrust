@@ -1,8 +1,10 @@
 //! Seam declarations for the `backend-utils-init-miscinit` unit
 //! (`utils/init/miscinit.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! The owning unit installs these from its `init_seams()`; until then a call
+//! panics loudly. Only `miscinit.c`'s own functions are declared here — outward
+//! calls miscinit makes (syscache, guc, superuser, ...) live in their owners'
+//! seam crates.
 
 #![allow(non_snake_case)]
 
@@ -11,10 +13,9 @@ use types_core::Oid;
 use types_error::PgResult;
 
 seam_core::seam!(
-    /// `CreateSocketLockFile(socketfile, amPostmaster, socketDir)` — create
-    /// the interlock file for a Unix socket path and arrange for it to be
-    /// removed at exit. Failure paths `ereport(FATAL)` inside
-    /// `CreateLockFile`.
+    /// `CreateSocketLockFile(socketfile, amPostmaster, socketDir)` — create the
+    /// interlock file for a Unix socket path and arrange for it to be removed at
+    /// exit. Failure paths `ereport(FATAL)` inside `CreateLockFile`.
     pub fn create_socket_lock_file(
         socketfile: &str,
         am_postmaster: bool,
@@ -29,15 +30,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `process_shared_preload_libraries_in_progress` (miscinit.c) — whether
-    /// the backend is currently inside the `shared_preload_libraries`
-    /// initialization window. A backend-local global read.
+    /// `process_shared_preload_libraries_in_progress` (miscinit.c) — whether the
+    /// backend is currently inside the `shared_preload_libraries` initialization
+    /// window. A backend-local global read.
     pub fn process_shared_preload_libraries_in_progress() -> bool
 );
 
 seam_core::seam!(
-    /// `IsBootstrapProcessingMode()` (miscadmin.h): `Mode ==
-    /// BootstrapProcessing`. A plain global read — infallible.
+    /// `IsBootstrapProcessingMode()` (miscadmin.h): `Mode == BootstrapProcessing`.
+    /// A plain global read — infallible.
     pub fn is_bootstrap_processing_mode() -> bool
 );
 
@@ -55,19 +56,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `SetUserIdAndSecContext(userid, sec_context)` (miscinit.c): install a
-    /// new current user ID and security-context bitmask. Writes
-    /// backend-local state; infallible.
+    /// `SetUserIdAndSecContext(userid, sec_context)` (miscinit.c): install a new
+    /// current user ID and security-context bitmask. Writes backend-local state;
+    /// infallible.
     pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32)
 );
 
 seam_core::seam!(
     /// `GetUserNameFromId(roleid, noerr)` (miscinit.c): the role name for
-    /// `roleid`, copied into `mcx` (C: `pstrdup` in the current context).
-    /// With `noerr = false` a missing role raises
-    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `noerr = true` it is
-    /// `Ok(None)`. `Err` includes OOM from the copy and syscache lookup
-    /// errors.
+    /// `roleid`, copied into `mcx` (C: `pstrdup` in the current context). With
+    /// `noerr = false` a missing role raises `ERRCODE_UNDEFINED_OBJECT`; with
+    /// `noerr = true` it is `Ok(None)`. `Err` includes OOM and syscache errors.
     pub fn get_user_name_from_id<'mcx>(
         mcx: Mcx<'mcx>,
         roleid: Oid,
@@ -78,21 +77,31 @@ seam_core::seam!(
 seam_core::seam!(
     /// `InitPostmasterChild()` (`miscinit.c`): initialization common to all
     /// postmaster children — detangle the child from the postmaster (signal
-    /// handling, process group, postmaster-death watch, etc.).
-    pub fn init_postmaster_child()
+    /// handling, process group, postmaster-death watch, etc.). Failure paths
+    /// `elog/ereport(FATAL)`.
+    pub fn init_postmaster_child() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `GetUserId()` (miscinit.c): the current effective user id. Pure
-    /// global read (asserts validity in C); cannot `ereport`.
+    /// `GetUserId()` (miscinit.c): the current effective user id. Pure global
+    /// read (asserts validity in C); cannot `ereport`.
     pub fn get_user_id() -> Oid
 );
 
+// ---- critical-section / interrupt brackets + superuser check ----
+//
+// These are not miscinit.c's own functions (`START_CRIT_SECTION` etc. are
+// miscadmin.h macros over globals.c counters; `superuser_arg` is superuser.c).
+// They were declared here by an earlier consumer (twophase); miscinit installs
+// them by delegating to their real owners until those owners land here, rather
+// than break the existing call sites. New consumers should prefer the owners'
+// own seam crates.
 seam_core::seam!(
     /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
     /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
     /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
-    /// rather than `SetDatabasePath`, which is one-shot for normal backends.
+    /// rather than [`set_database_path_once`] (`SetDatabasePath`), which is
+    /// one-shot for normal backends.
     pub fn set_database_path(path: &str)
 );
 
@@ -113,32 +122,29 @@ seam_core::seam!(
 // ---- critical-section / interrupt brackets + superuser check (miscadmin.h) ----
 
 seam_core::seam!(
-    /// `START_CRIT_SECTION()` — bump `CritSectionCount`; an `ereport(ERROR)`
-    /// inside a critical section is promoted to PANIC. Pure backend-local
-    /// counter write.
+    /// `START_CRIT_SECTION()` (miscadmin.h) — `CritSectionCount++`.
     pub fn start_crit_section()
 );
 
 seam_core::seam!(
-    /// `END_CRIT_SECTION()` — decrement `CritSectionCount`.
+    /// `END_CRIT_SECTION()` (miscadmin.h) — `CritSectionCount--`.
     pub fn end_crit_section()
 );
 
 seam_core::seam!(
-    /// `HOLD_INTERRUPTS()` — increment `InterruptHoldoffCount`.
+    /// `HOLD_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount++`.
     pub fn hold_interrupts()
 );
 
 seam_core::seam!(
-    /// `RESUME_INTERRUPTS()` — decrement `InterruptHoldoffCount`.
+    /// `RESUME_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount--`.
     pub fn resume_interrupts()
 );
 
 seam_core::seam!(
-    /// `superuser_arg(roleid)` (superuser.c, reached via miscinit) — true if
-    /// `roleid` has superuser privilege. Reads the catalog cache; pure for the
-    /// twophase caller's purposes.
-    pub fn superuser_arg(roleid: types_core::Oid) -> bool
+    /// `superuser_arg(roleid)` (superuser.c) — true if `roleid` has superuser
+    /// privilege. Reads the catalog cache, so `Err` carries a lookup failure.
+    pub fn superuser_arg(roleid: types_core::Oid) -> types_error::PgResult<bool>
 );
 
 // ---- bootstrap-mode backend startup (miscinit.c) ----
@@ -147,8 +153,9 @@ seam_core::seam!(
     /// `InitStandaloneProcess(argv0)` (miscinit.c): set up the fake-shared
     /// state a standalone (non-postmaster) backend needs — `MyProcPid`,
     /// `MyStartTime`, shared-memory disposition, fake `LocalProcessControl`.
-    /// Backend-local writes; infallible.
-    pub fn init_standalone_process(argv0: &str)
+    /// `elog(FATAL)`s if the executable path cannot be located
+    /// (`find_my_exec` failure), so `Err` carries that failure.
+    pub fn init_standalone_process(argv0: &str) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -188,9 +195,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `bool has_rolreplication(Oid roleid)` (`utils/adt/acl.c`) — whether the
-    /// role has the REPLICATION attribute.
-    pub fn has_rolreplication(roleid: types_core::Oid) -> bool
+    /// `bool has_rolreplication(Oid roleid)` (`miscinit.c:739`) — whether the
+    /// role has the REPLICATION attribute. Superusers bypass the check; the
+    /// non-superuser path does an `AUTHOID` syscache lookup, so it takes an
+    /// `Mcx` and returns `PgResult` (the lookup / `superuser_arg` can
+    /// `ereport(ERROR)`).
+    pub fn has_rolreplication(mcx: mcx::Mcx<'_>, roleid: types_core::Oid) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -215,8 +225,10 @@ seam_core::seam!(
     /// `superuser()` (superuser.c) — true if the *current* user
     /// (`GetUserId()`) has superuser privilege. Used by
     /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when
-    /// applying a function's `proconfig` SET items. Reads the catalog cache.
-    pub fn superuser() -> bool
+    /// applying a function's `proconfig` SET items. Equals
+    /// `superuser_arg(GetUserId())`; reads the catalog cache, so it takes an
+    /// `Mcx` and returns `PgResult` (the syscache read can `ereport(ERROR)`).
+    pub fn superuser(mcx: mcx::Mcx<'_>) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -230,4 +242,134 @@ seam_core::seam!(
     /// `AmWalSummarizerProcess()` (miscadmin.h): `MyBackendType ==
     /// B_WAL_SUMMARIZER`. Pure backend-local read.
     pub fn am_wal_summarizer_process() -> bool
+);
+
+// --- backend-utils-init-postinit consumers (miscinit.c) ---
+
+seam_core::seam!(
+    /// `GetSessionUserId()` (miscinit.c): the session user's role OID.
+    pub fn get_session_user_id() -> types_core::Oid
+);
+
+
+seam_core::seam!(
+    /// `InitializeSessionUserIdStandalone()` (miscinit.c): set the session user
+    /// to the bootstrap superuser (standalone/aux processes). `Err` carries its
+    /// `ereport` surface.
+    pub fn initialize_session_user_id_standalone() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSessionUserId(rolename, roleid, bypass_login_check)`
+    /// (miscinit.c): set the session user from name or OID, checking
+    /// rolcanlogin/rolconnlimit. `Err` carries its `ereport(FATAL)` surface.
+    pub fn initialize_session_user_id(
+        rolename: Option<&str>,
+        roleid: types_core::Oid,
+        bypass_login_check: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSystemUser(authn_id, auth_method)` (miscinit.c): set the
+    /// `system_user` SQL value from the authenticated identity and method.
+    /// `Err` carries its `ereport` surface.
+    pub fn initialize_system_user(
+        authn_id: &str,
+        auth_method: &str,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ValidatePgVersion(path)` (miscinit.c): verify the database
+    /// directory's PG_VERSION matches the server. `Err` carries its
+    /// `ereport(FATAL)` surface.
+    pub fn validate_pg_version(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetDatabasePath(path)` (miscinit.c): record the database directory
+    /// path globally, copying `path` into `TopMemoryContext`. This is the
+    /// one-shot setter normal backends call once during `InitPostgres`; it is
+    /// distinct from [`set_database_path`]/[`clear_database_path`], which are
+    /// the inval.c recovery quick-hack that pokes `DatabasePath` directly.
+    /// `Err` carries its OOM surface (the `MemoryContextStrdup`).
+    pub fn set_database_path_once(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `process_session_preload_libraries()` (miscinit.c): load the libraries
+    /// named by `session_preload_libraries`/`local_preload_libraries`. `Err`
+    /// carries the loader's `ereport` surface.
+    pub fn process_session_preload_libraries() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pg_usleep(microsec)` (port; PostAuthDelay application): sleep the given
+    /// number of microseconds.
+    pub fn pg_usleep(microsec: i64)
+);
+
+// ---------------------------------------------------------------------------
+// Worker-bootstrap group used by the slot-sync worker entry point
+// (`ReplSlotSyncWorkerMain`, slotsync.c). These mirror the auxiliary/background
+// worker startup sequence; their true owners (proc.c, ps_status.c, postinit.c,
+// interrupt.c, globals.c) are not yet ported, so a call panics loudly until
+// installed.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `MyBackendType = B_SLOTSYNC_WORKER` (miscadmin.h / globals.c).
+    pub fn set_my_backend_type_slotsync() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AmLogicalSlotSyncWorkerProcess()` (miscadmin.h): is this process the
+    /// dedicated slot-sync worker (`B_SLOTSYNC_WORKER`)?
+    pub fn am_logical_slot_sync_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `MyProcPid` (globals.c): this backend's process id.
+    pub fn my_proc_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `init_ps_display("")` (ps_status.c): set up the process-title display.
+    pub fn init_ps_display() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c): set up the PGPROC entry for this process.
+    pub fn init_process() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BaseInit()` (postinit.c): early per-backend subsystem initialization.
+    pub fn base_init() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The slot-sync worker's signal-handler setup block (slotsync.c
+    /// `ReplSlotSyncWorkerMain`): `pqsignal(...)`, `procsignal_sigusr1_handler`,
+    /// etc. installed before unblocking signals.
+    pub fn setup_signal_handlers() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeTimeouts()` (timeout.c): register the standard timeout
+    /// handlers for this process.
+    pub fn initialize_timeouts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BackgroundWorkerUnblockSignals()` / `sigprocmask(SIG_SETMASK, &UnBlockSig,
+    /// NULL)` (slotsync.c): unblock signals once handlers are installed.
+    pub fn unblock_signals() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitPostgres(dbname, InvalidOid, ..., NULL)` (postinit.c): bind this
+    /// backend to the given database so `walrcv_exec` catalog queries can run.
+    pub fn init_postgres(dbname: &str) -> PgResult<()>
 );

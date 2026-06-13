@@ -2,6 +2,7 @@
 //! (`storage/aio/aio.c` et al.). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+
 seam_core::seam!(
     /// `AtEOXact_Aio(isCommit)` — error out about leaked AIO handles at
     /// commit (Assert-side checks).
@@ -67,4 +68,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `read_stream_end(stream)` (read_stream.c): finish and free the stream.
     pub fn read_stream_end(stream: ReadStreamHandle)
+);
+
+// --- backend-utils-init-postinit consumer (aio_init.c) ---
+
+seam_core::seam!(
+    /// `pgaio_init_backend()` (aio_init.c): initialize this backend's AIO
+    /// subsystem. `Err` carries its `ereport` surface.
+    pub fn pgaio_init_backend() -> types_error::PgResult<()>
 );

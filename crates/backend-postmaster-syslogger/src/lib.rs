@@ -379,8 +379,8 @@ pub fn SysLoggerMain(
     // because we want to collect final log output from all backends and exit
     // last — we run until we see EOF on the syslog pipe.
     let wes = WaitEventSet::create(2)?;
-    wes.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch))?;
-    wes.add_event(WL_SOCKET_READABLE, config::syslog_pipe()[0], None)?;
+    wes.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch), None)?;
+    wes.add_event(WL_SOCKET_READABLE, config::syslog_pipe()[0], None, None)?;
 
     // main worker loop
     loop {

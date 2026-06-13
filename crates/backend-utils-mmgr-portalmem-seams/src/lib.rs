@@ -171,3 +171,11 @@ seam_core::seam!(
     /// memory of the portal's context.
     pub fn memory_context_delete_children(portal: &types_portal::Portal) -> types_error::PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumer (portalmem.c) ---
+
+seam_core::seam!(
+    /// `EnablePortalManager()` (portalmem.c): set up the portal hashtable and
+    /// memory context. `Err` carries its OOM surface.
+    pub fn enable_portal_manager() -> types_error::PgResult<()>
+);

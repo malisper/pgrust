@@ -53,3 +53,5 @@ seam_core::seam!(
     /// invalidation messages this backend has processed. Pure global read.
     pub fn shared_invalid_message_counter() -> u64
 );
+
+// shared_inval_backend_init already declared above (used by postinit).
