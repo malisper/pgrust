@@ -1667,6 +1667,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-acl-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -1953,9 +1962,26 @@ dependencies = [
 name = "backend-utils-init-miscinit-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-init-small"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-net",
+ "types-storage",
 ]
 
 [[package]]
@@ -2262,6 +2288,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",

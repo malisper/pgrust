@@ -25,3 +25,46 @@ impl LatchHandle {
         self.0
     }
 }
+
+use core::sync::atomic::AtomicI32;
+
+use types_core::sig_atomic_t;
+
+/// `struct Latch` (`storage/latch.h`).
+///
+/// In C a latch is always reached through a pointer (`MyLatch`,
+/// `&proc->procLatch`) and is mutated concurrently: `SetLatch` runs from
+/// signal handlers and, for shared latches living in PGPROC shared memory,
+/// from other backends. The `volatile sig_atomic_t` wait/set fields are
+/// therefore atomics here, and a latch is shared by handle
+/// (e.g. `Arc<Latch>`), never copied by value. `is_shared` / `owner_pid` are
+/// written only by `InitLatch`/`InitSharedLatch`/`OwnLatch` before the latch
+/// is visible to other parties.
+#[derive(Debug)]
+pub struct Latch {
+    /// `sig_atomic_t is_set;`
+    pub is_set: AtomicI32,
+    /// `sig_atomic_t maybe_sleeping;`
+    pub maybe_sleeping: AtomicI32,
+    /// `bool is_shared;`
+    pub is_shared: bool,
+    /// `int owner_pid;`
+    pub owner_pid: i32,
+}
+
+impl Latch {
+    /// A cleared latch (`is_set`/`maybe_sleeping` zero), as `InitLatch`
+    /// leaves the flag fields.
+    pub fn new(is_shared: bool, owner_pid: i32) -> Latch {
+        Latch {
+            is_set: AtomicI32::new(0),
+            maybe_sleeping: AtomicI32::new(0),
+            is_shared,
+            owner_pid,
+        }
+    }
+}
+
+/// Assert the C field widths: `sig_atomic_t` is `int` on every supported
+/// target and `AtomicI32` has the same in-memory representation.
+const _: () = assert!(core::mem::size_of::<AtomicI32>() == core::mem::size_of::<sig_atomic_t>());

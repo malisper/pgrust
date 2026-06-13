@@ -10,3 +10,16 @@ seam_core::seam!(
     /// parse/apply paths can `ereport(ERROR)`.
     pub fn process_config_file(context: types_guc::GucContext) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `NewGUCNestLevel()` (guc.c): open a new GUC nesting level and return
+    /// it (`++GUCNestLevel`). Infallible.
+    pub fn new_guc_nest_level() -> i32
+);
+
+seam_core::seam!(
+    /// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c): pop GUC stack entries at
+    /// transaction / subtransaction / nest-level end, restoring or
+    /// propagating values. Restore paths allocate and can `ereport`.
+    pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> types_error::PgResult<()>
+);

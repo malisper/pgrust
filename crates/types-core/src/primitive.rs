@@ -45,6 +45,10 @@ pub type RelFileNumber = Oid;
 pub type OffsetNumber = uint16;
 /// `RepOriginId` (`xlogdefs.h`) — a `uint16`.
 pub type RepOriginId = uint16;
+/// POSIX `pid_t`, used as an `int`-width process id throughout PostgreSQL.
+pub type pid_t = i32;
+/// Platform `sig_atomic_t` (`int` on every supported target).
+pub type sig_atomic_t = i32;
 
 pub const BLCKSZ: usize = 8192;
 pub const InvalidOid: Oid = 0;
@@ -95,3 +99,12 @@ pub const PGINVALID_SOCKET: pgsocket = -1;
 pub const STATUS_OK: i32 = 0;
 /// `STATUS_ERROR` (`c.h`).
 pub const STATUS_ERROR: i32 = -1;
+
+/// `PG_DIR_MODE_OWNER` — `0700`, was C `int` (`common/file_perm.h`).
+pub const PG_DIR_MODE_OWNER: i32 = 0o700;
+/// `USE_ISO_DATES` (`miscadmin.h`).
+pub const USE_ISO_DATES: i32 = 1;
+/// `DATEORDER_MDY` (`miscadmin.h`).
+pub const DATEORDER_MDY: i32 = 2;
+/// `INTSTYLE_POSTGRES` (`miscadmin.h`).
+pub const INTSTYLE_POSTGRES: i32 = 0;
