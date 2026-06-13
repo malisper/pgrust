@@ -1,24 +1,112 @@
-//! On-disk byte-view vocabulary for the PostgreSQL `numeric` type.
+//! Carrier vocabulary for the PostgreSQL `numeric` type
+//! (`postgres-18.3/src/backend/utils/adt/numeric.c`).
 //!
-//! Mirrors the `NumericData`/`NumericChoice`/`NumericLong`/`NumericShort` layout
-//! and the `NUMERIC_*` macros of `postgres-18.3/src/backend/utils/adt/numeric.c`
-//! (~lines 130-260). Only the safe byte-view accessors needed by consumers that
-//! read an on-disk `numeric` image (e.g. the `jsonb` hash path) live here; the
-//! arithmetic engine is the `backend-utils-adt-numeric` unit's. The slice passed
-//! to every accessor is the entire on-disk value, starting at its varlena
-//! header.
+//! This crate is the KEYSTONE of the `backend-utils-adt-numeric` decomposition:
+//! the shared types / on-disk ABI / lifetime foundation that every numeric
+//! family compiles against.
+//!
+//! Two layers live here:
+//!
+//! * the **on-disk storage ABI** (`NumericData`/`NumericChoice`/`NumericLong`/
+//!   `NumericShort`, the `NUMERIC_*` flag constants, `DEC_DIGITS`/`NBASE`, the
+//!   typmod pack/unpack helpers, and the safe byte-view accessors over a varlena
+//!   `&[u8]`). This mirrors numeric.c ~lines 58-260 + numeric.h. It is alloc-
+//!   free and `no_std`-friendly; the existing `jsonb_util` hash/compare path
+//!   reads it.
+//! * the **in-memory working types** ([`var`]): the arithmetic-time
+//!   [`NumericVar`]`<'mcx>` (whose digit buffer is a *charged*
+//!   `mcx::PgVec<'mcx, NumericDigit>` — the `'mcx` lifetime threaded through
+//!   every family) plus the aggregate-transition states. These bear `PgVec`s
+//!   and so depend on `mcx`.
 
 #![no_std]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 use core::mem::size_of;
 use types_datum::VARHDRSZ;
+
+pub mod var;
+
+// ---------------------------------------------------------------------------
+// Digit type and base (numeric.c:58-110).
+// ---------------------------------------------------------------------------
 
 /// A single base-NBASE digit (`int16` in the canonical build).
 pub type NumericDigit = i16;
 
+/// Base for the digit representation. Values other than 10000 are historical
+/// only and unsupported.
+pub const NBASE: i32 = 10000;
+pub const HALF_NBASE: i32 = 5000;
+/// Decimal digits per NBASE digit.
+pub const DEC_DIGITS: i32 = 4;
+/// Guard digits (measured in NBASE digits) for `mul_var`.
+pub const MUL_GUARD_DIGITS: i32 = 2;
+/// Guard digits (measured in NBASE digits) for `div_var`.
+pub const DIV_GUARD_DIGITS: i32 = 4;
+/// `NBASE * NBASE`; must fit in an `i32`.
+pub const NBASE_SQR: i32 = NBASE * NBASE; // 100_000_000
+
 // ---------------------------------------------------------------------------
-// Header bit-packing constants (numeric.c).
+// On-disk vocabulary types (numeric.c:136-159).
+//
+// The C `union NumericChoice { n_header, n_long, n_short }` becomes a Rust enum;
+// the flexible digit arrays become owned `Vec<NumericDigit>`. These are the
+// structured-codec carrier (read/written via the byte-view accessors + the
+// owning crate's `struct_codec`); the on-disk byte image is the source of truth.
+// ---------------------------------------------------------------------------
+
+use alloc::vec::Vec;
+
+/// `struct NumericShort`: a 2-byte header (sign + display scale + weight)
+/// followed by the digit array.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NumericShort {
+    /// Sign + display scale + weight.
+    pub n_header: u16,
+    /// Digit array (`NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]`).
+    pub n_data: Vec<NumericDigit>,
+}
+
+/// `struct NumericLong`: a 2-byte sign/dscale word and a separate 2-byte weight,
+/// followed by the digit array.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NumericLong {
+    /// Sign + display scale.
+    pub n_sign_dscale: u16,
+    /// Weight of the first digit.
+    pub n_weight: i16,
+    /// Digit array (`NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]`).
+    pub n_data: Vec<NumericDigit>,
+}
+
+/// `union NumericChoice`: the header-word / long form / short form. Which
+/// variant is active is determined by the high bits of the first word (see the
+/// `NUMERIC_*` flag constants).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NumericChoice {
+    /// Raw header word (`n_header`).
+    NHeader(u16),
+    /// Long form, 4-byte header (`n_long`).
+    NLong(NumericLong),
+    /// Short form, 2-byte header (`n_short`).
+    NShort(NumericShort),
+}
+
+/// `struct NumericData`: the `numeric` type as stored on disk — a varlena
+/// length header followed by a `NumericChoice`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumericData {
+    /// Varlena length header. Do not touch directly.
+    pub vl_len_: i32,
+    /// Choice of storage format.
+    pub choice: NumericChoice,
+}
+
+// ---------------------------------------------------------------------------
+// Header bit-packing constants (numeric.c:163-200).
 // ---------------------------------------------------------------------------
 
 /// Mask selecting the two high (sign/format) bits.
@@ -28,7 +116,12 @@ pub const NUMERIC_NEG: u16 = 0x4000;
 pub const NUMERIC_SHORT: u16 = 0x8000;
 pub const NUMERIC_SPECIAL: u16 = 0xC000;
 
-/// Special-value sign/format bits.
+/// `VARHDRSZ` (4) + `sizeof(uint16)` (2) + `sizeof(int16)` (2).
+pub const NUMERIC_HDRSZ: usize = 8;
+/// `VARHDRSZ` (4) + `sizeof(uint16)` (2).
+pub const NUMERIC_HDRSZ_SHORT: usize = 6;
+
+// Special-value sign/format bits (NaN, +Inf, -Inf).
 pub const NUMERIC_EXT_SIGN_MASK: u16 = 0xF000;
 pub const NUMERIC_NAN: u16 = 0xC000;
 pub const NUMERIC_PINF: u16 = 0xD000;
@@ -39,14 +132,44 @@ pub const NUMERIC_INF_SIGN_MASK: u16 = 0x2000;
 pub const NUMERIC_SHORT_SIGN_MASK: u16 = 0x2000;
 pub const NUMERIC_SHORT_DSCALE_MASK: u16 = 0x1F80;
 pub const NUMERIC_SHORT_DSCALE_SHIFT: u16 = 7;
+pub const NUMERIC_SHORT_DSCALE_MAX: u16 = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
 pub const NUMERIC_SHORT_WEIGHT_SIGN_MASK: u16 = 0x0040;
 pub const NUMERIC_SHORT_WEIGHT_MASK: u16 = 0x003F;
+pub const NUMERIC_SHORT_WEIGHT_MAX: i32 = NUMERIC_SHORT_WEIGHT_MASK as i32;
+pub const NUMERIC_SHORT_WEIGHT_MIN: i32 = -(NUMERIC_SHORT_WEIGHT_MASK as i32 + 1);
 
 // Long-format field definitions.
 pub const NUMERIC_DSCALE_MASK: u16 = 0x3FFF;
+pub const NUMERIC_DSCALE_MAX: u16 = NUMERIC_DSCALE_MASK;
+
+/// Maximum stored weight (`int16` weight in `NumericLong`).
+pub const NUMERIC_WEIGHT_MAX: i32 = i16::MAX as i32;
+
+// Typmod/precision/scale limits (numeric.h).
+pub const NUMERIC_MAX_PRECISION: i32 = 1000;
+pub const NUMERIC_MIN_SCALE: i32 = -1000;
+pub const NUMERIC_MAX_SCALE: i32 = 1000;
+pub const NUMERIC_MAX_DISPLAY_SCALE: i32 = NUMERIC_MAX_PRECISION;
+pub const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
+pub const NUMERIC_MAX_RESULT_SCALE: i32 = NUMERIC_MAX_PRECISION * 2;
+pub const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
+
+// Sort-support abbreviation constants (numeric.c:404-415). On a 64-bit Datum
+// the abbreviation is a 64-bit signed integer; special values use the int64
+// extremes (the abbreviation is negated relative to the value, so NaN sorts
+// last).
+pub const NUMERIC_ABBREV_BITS: i32 = 64;
+pub const NUMERIC_ABBREV_NAN: i64 = i64::MIN;
+pub const NUMERIC_ABBREV_PINF: i64 = -i64::MAX;
+pub const NUMERIC_ABBREV_NINF: i64 = i64::MAX;
 
 // ---------------------------------------------------------------------------
 // Safe byte-view accessors over the varlena payload (`&[u8]`).
+//
+// The slice is the entire on-disk `numeric` value, starting at the varlena
+// header. The first header word (byte offset VARHDRSZ) determines the format.
+// These mirror the `NUMERIC_*` macros from numeric.c but read the header word
+// directly from bytes, so no raw pointers are needed.
 // ---------------------------------------------------------------------------
 
 /// Read the 16-bit header word (`choice.n_header`) from a numeric byte slice.
@@ -59,7 +182,7 @@ fn header_word(num: &[u8]) -> u16 {
 /// Read the long-form weight word (`choice.n_long.n_weight`).
 #[inline]
 fn long_weight_word(num: &[u8]) -> i16 {
-    debug_assert!(num.len() >= VARHDRSZ + 4);
+    debug_assert!(num.len() >= NUMERIC_HDRSZ);
     i16::from_ne_bytes([num[VARHDRSZ + 2], num[VARHDRSZ + 3]])
 }
 
@@ -85,6 +208,62 @@ pub fn numeric_is_special(num: &[u8]) -> bool {
 #[inline]
 pub fn numeric_header_is_short(num: &[u8]) -> bool {
     (header_word(num) & 0x8000) != 0
+}
+
+/// `NUMERIC_EXT_FLAGBITS`.
+#[inline]
+pub fn numeric_ext_flagbits(num: &[u8]) -> u16 {
+    header_word(num) & NUMERIC_EXT_SIGN_MASK
+}
+
+/// `NUMERIC_IS_NAN`.
+#[inline]
+pub fn numeric_is_nan(num: &[u8]) -> bool {
+    header_word(num) == NUMERIC_NAN
+}
+
+/// `NUMERIC_IS_PINF`.
+#[inline]
+pub fn numeric_is_pinf(num: &[u8]) -> bool {
+    header_word(num) == NUMERIC_PINF
+}
+
+/// `NUMERIC_IS_NINF`.
+#[inline]
+pub fn numeric_is_ninf(num: &[u8]) -> bool {
+    header_word(num) == NUMERIC_NINF
+}
+
+/// `NUMERIC_IS_INF`: positive or negative infinity.
+#[inline]
+pub fn numeric_is_inf(num: &[u8]) -> bool {
+    (header_word(num) & !NUMERIC_INF_SIGN_MASK) == NUMERIC_PINF
+}
+
+/// `NUMERIC_SIGN`: one of `NUMERIC_POS`/`NEG`/`NAN`/`PINF`/`NINF`.
+#[inline]
+pub fn numeric_sign(num: &[u8]) -> u16 {
+    if numeric_is_short(num) {
+        if (header_word(num) & NUMERIC_SHORT_SIGN_MASK) != 0 {
+            NUMERIC_NEG
+        } else {
+            NUMERIC_POS
+        }
+    } else if numeric_is_special(num) {
+        numeric_ext_flagbits(num)
+    } else {
+        numeric_flagbits(num)
+    }
+}
+
+/// `NUMERIC_DSCALE`: display scale.
+#[inline]
+pub fn numeric_dscale(num: &[u8]) -> u16 {
+    if numeric_header_is_short(num) {
+        (header_word(num) & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT
+    } else {
+        header_word(num) & NUMERIC_DSCALE_MASK
+    }
 }
 
 /// `NUMERIC_WEIGHT`: weight of the first digit.
@@ -140,4 +319,70 @@ pub fn numeric_digits(num: &[u8]) -> &[u8] {
 pub fn numeric_digit_at(digits: &[u8], i: usize) -> NumericDigit {
     let off = i * size_of::<NumericDigit>();
     NumericDigit::from_ne_bytes([digits[off], digits[off + 1]])
+}
+
+// ---------------------------------------------------------------------------
+// Typmod pack/unpack helpers (numeric.c make_numeric_typmod et al.).
+// ---------------------------------------------------------------------------
+
+/// `make_numeric_typmod`: pack precision (upper 16 bits) and scale (lower 11
+/// bits) into a typmod, offset by `VARHDRSZ`.
+#[inline]
+pub fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
+    ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ as i32
+}
+
+/// `is_valid_numeric_typmod`: valid typmods are at least `VARHDRSZ`.
+#[inline]
+pub fn is_valid_numeric_typmod(typmod: i32) -> bool {
+    typmod >= VARHDRSZ as i32
+}
+
+/// `numeric_typmod_precision`: extract precision from a typmod.
+#[inline]
+pub fn numeric_typmod_precision(typmod: i32) -> i32 {
+    ((typmod - VARHDRSZ as i32) >> 16) & 0xffff
+}
+
+/// `numeric_typmod_scale`: extract scale from a typmod. The scale may be
+/// negative; sign-extend the 11-bit two's-complement field via `(x^1024)-1024`.
+#[inline]
+pub fn numeric_typmod_scale(typmod: i32) -> i32 {
+    (((typmod - VARHDRSZ as i32) & 0x7ff) ^ 1024) - 1024
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-size aggregate-transition states (numeric.c). These are alloc-free, so
+// they live in this `no_std` ABI module; the Vec-bearing states are in `var`.
+// ---------------------------------------------------------------------------
+
+/// `Int128AggState` (numeric.c:5586-5592) -- 128-bit transition state used by
+/// the `numeric_poly_*` / `int*_accum` fast paths (PolyNumAggState on 128-bit
+/// platforms).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Int128AggState {
+    pub calc_sum_x2: bool,
+    pub n: i64,
+    pub sum_x: i128,
+    pub sum_x2: i128,
+}
+
+/// `Int8TransTypeData` -- the 2-element int8 array transition value
+/// (count, sum) used by avg(int2)/avg(int4) and moving sum(int2)/sum(int4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Int8TransTypeData {
+    pub count: i64,
+    pub sum: i64,
+}
+
+/// `NumericSortSupport` (numeric.c:340-347) -- the `ssup_extra` payload for the
+/// numeric abbreviated-key sort, minus the HyperLogLog estimator/scratch buffer
+/// (those live behind the sort-support seams). Carries only the in-crate
+/// computation fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NumericSortSupport {
+    /// Number of non-null values seen.
+    pub input_count: i64,
+    /// True while cardinality is still being estimated.
+    pub estimating: bool,
 }

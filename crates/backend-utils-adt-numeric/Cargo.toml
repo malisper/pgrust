@@ -1,0 +1,19 @@
+[package]
+name = "backend-utils-adt-numeric"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_numeric"
+path = "src/lib.rs"
+
+[dependencies]
+# Keystone carrier: on-disk ABI + in-memory NumericVar<'mcx> + agg states.
+types-numeric = { path = "../types-numeric" }
+mcx = { path = "../mcx" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+
+# Inward seams this crate OWNS and installs from init_seams().
+backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }

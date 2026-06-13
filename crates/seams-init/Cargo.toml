@@ -130,6 +130,7 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }

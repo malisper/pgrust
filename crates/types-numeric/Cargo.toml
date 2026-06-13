@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 types-datum = { path = "../types-datum" }
+# In-memory NumericVar<'mcx> / aggregate states carry charged digit buffers
+# (PgVec<'mcx, NumericDigit>); the lifetime threads through every family.
+mcx = { path = "../mcx" }
