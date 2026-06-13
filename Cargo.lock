@@ -6393,8 +6393,11 @@ dependencies = [
 name = "backend-utils-adt-multirangetypes"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
  "backend-utils-adt-multirangetypes-seams",
  "backend-utils-adt-rangetypes-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
  "mcx",
  "types-cache",
  "types-core",
@@ -7081,6 +7084,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-cache",
  "types-core",
  "types-error",
  "types-rel",

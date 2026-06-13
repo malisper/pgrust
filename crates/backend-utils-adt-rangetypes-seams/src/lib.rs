@@ -250,3 +250,56 @@ seam_core::seam!(
         r2: RangeTypeP<'mcx>,
     ) -> PgResult<Option<(RangeTypeP<'mcx>, RangeTypeP<'mcx>)>>
 );
+
+// ---------------------------------------------------------------------------
+// Range type I/O procs, invoked generically by `multirange_in`/`out`/`recv`/
+// `send` (multirangetypes.c) through the cached `typioproc` FmgrInfo. All
+// built-in range types register the generic `range_in`/`range_out`/
+// `range_recv`/`range_send` (rangetypes.c) as their I/O procs, so the
+// multirange ADT reaches them through these owner seams keyed by the range
+// type OID + typmod. The owning unit installs them from `init_seams()`; until
+// then a call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `range_in(cstring, rngtypoid, typmod)` (rangetypes.c) invoked via
+    /// `InputFunctionCallSafe`: parse one range literal into a serialized
+    /// `RangeType`, allocated in `mcx`. A soft (`escontext`) error yields
+    /// `Ok(None)` (the C `InputFunctionCallSafe` returning `false`); a hard
+    /// `ereport(ERROR)` is carried on `Err`. `rngtypoid` is the cached
+    /// `typioparam` (the range type OID).
+    pub fn range_in<'mcx>(
+        mcx: Mcx<'mcx>,
+        input: &str,
+        rngtypoid: Oid,
+        typmod: i32,
+    ) -> PgResult<Option<RangeTypeP<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `range_out(anyrange)` (rangetypes.c) invoked via `OutputFunctionCall`:
+    /// render one serialized `RangeType` to its text representation. `Err`
+    /// carries the output proc's `ereport(ERROR)`s.
+    pub fn range_out(range: RangeTypeP<'_>) -> PgResult<String>
+);
+
+seam_core::seam!(
+    /// `range_recv(internal, rngtypoid, typmod)` (rangetypes.c) invoked via
+    /// `ReceiveFunctionCall`: decode one range from its binary wire form
+    /// (`buf` is the per-range sub-message bytes), allocated in `mcx`. `Err`
+    /// carries the receive proc's `ereport(ERROR)`s.
+    pub fn range_recv<'mcx>(
+        mcx: Mcx<'mcx>,
+        buf: &[u8],
+        rngtypoid: Oid,
+        typmod: i32,
+    ) -> PgResult<RangeTypeP<'mcx>>
+);
+
+seam_core::seam!(
+    /// `range_send(anyrange)` (rangetypes.c) invoked via `SendFunctionCall`:
+    /// encode one serialized `RangeType` into its binary wire form, returning
+    /// the `bytea` payload bytes with the varlena header stripped (`VARDATA`,
+    /// `VARSIZE - VARHDRSZ`). `Err` carries the send proc's `ereport(ERROR)`s.
+    pub fn range_send(range: RangeTypeP<'_>) -> PgResult<Vec<u8>>
+);
