@@ -12,7 +12,15 @@ path = "src/lib.rs"
 # Carrier types.
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
+types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+
+# Real owners the expandedrecord family reuses (the adt-infra confirmed
+# available on main): the tuple form/deform/copy core, and the typcache
+# rowtype-tupdesc lookup seam.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 
 # Inward seam crate this unit owns (expandeddatum EOH surface consumed by
 # backend-access-common-heaptuple). The keystone installs these from

@@ -2943,11 +2943,15 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-utils-adt-expanded-methods-seams",
  "backend-utils-adt-misc2-seams",
+ "backend-utils-cache-typcache-seams",
  "mcx",
+ "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
