@@ -105,6 +105,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_shmem::init_seams();
+    backend_storage_ipc_sinval::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();

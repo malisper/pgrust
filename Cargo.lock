@@ -6114,6 +6114,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-sinval"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-sinval-seams"
 version = "0.0.0"
 dependencies = [
@@ -9435,6 +9458,7 @@ dependencies = [
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-shmem",
+ "backend-storage-ipc-sinval",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",

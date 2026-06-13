@@ -340,6 +340,13 @@ pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
 /// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
 pub const SHMEM_INDEX_LOCK: usize = 1;
 
+/// `SInvalReadLock` (`lwlocklist.h`, `PG_LWLOCK(5, SInvalRead)`): offset of the
+/// shared-invalidation read lock in `MainLWLockArray`.
+pub const SINVAL_READ_LOCK: usize = 5;
+/// `SInvalWriteLock` (`lwlocklist.h`, `PG_LWLOCK(6, SInvalWrite)`): offset of
+/// the shared-invalidation write lock in `MainLWLockArray`.
+pub const SINVAL_WRITE_LOCK: usize = 6;
+
 /// `WaitEventCustomLock` (`lwlocklist.h`, `PG_LWLOCK(48, WaitEventCustom)`):
 /// offset of the custom-wait-event lock in `MainLWLockArray`.
 pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
