@@ -49,6 +49,13 @@ pub const fn dsa_pointer_is_valid(x: DsaPointer) -> bool {
     x != INVALID_DSA_POINTER
 }
 
+/// `DSA_ALLOC_HUGE` (`utils/dsa.h:73`) — allow huge allocation (> 1 GB).
+pub const DSA_ALLOC_HUGE: i32 = 0x01;
+/// `DSA_ALLOC_NO_OOM` (`utils/dsa.h:74`) — no failure if out-of-memory.
+pub const DSA_ALLOC_NO_OOM: i32 = 0x02;
+/// `DSA_ALLOC_ZERO` (`utils/dsa.h:75`) — zero allocated memory.
+pub const DSA_ALLOC_ZERO: i32 = 0x04;
+
 /// Tuple-bound value (`int64 tuples_needed`).
 pub type TuplesNeeded = int64;
 
@@ -223,6 +230,12 @@ handle!(
     /// In-DSM `SharedFileSet *` (`storage/sharedfileset.h`) — names a group of
     /// shared temp files, owned by `storage/file/sharedfileset.c`.
     SharedFileSetHandle);
+handle!(
+    /// `FileSet *` (`storage/fileset.h`) — names a group of temporary files
+    /// shared by a set of backends, owned by `storage/file/fileset.c`. A
+    /// fileset-backed `BufFile` borrows this pointer (never owns the body), so
+    /// it is an inherited-opacity handle here.
+    FileSetHandle);
 
 /// Cursor over a serialized buffer in DSA/DSM storage that the
 /// (de)serialization helpers advance as they read/write
