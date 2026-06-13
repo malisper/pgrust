@@ -52,15 +52,16 @@ use backend_access_common_detoast_seams as detoast_seam;
 /// `makeVar(varno, varattno, vartype, vartypmod, varcollid, varlevelsup)`
 /// (makefuncs.c) — create a `Var` node.
 ///
-/// The trimmed [`Var`] carries the fields executor/optimizer readers consume;
-/// `varcollid`, `varreturningtype`, `varnullingrels`, `varnosyn`/`varattnosyn`
-/// and `location` (which the C also sets to defaults) are not modeled here.
+/// The trimmed [`Var`] carries the fields executor/optimizer readers consume
+/// (including `varcollid`); `varreturningtype`, `varnullingrels`,
+/// `varnosyn`/`varattnosyn` and `location` (which the C also sets to defaults)
+/// are not modeled here.
 pub fn make_var(
     varno: i32,
     varattno: AttrNumber,
     vartype: Oid,
     vartypmod: i32,
-    _varcollid: Oid,
+    varcollid: Oid,
     varlevelsup: Index,
 ) -> Var {
     Var {
@@ -68,6 +69,7 @@ pub fn make_var(
         varattno,
         vartype,
         vartypmod,
+        varcollid,
         varlevelsup,
     }
 }
@@ -79,15 +81,16 @@ pub fn make_var(
 /// non-expanded/non-toasted format (`PG_DETOAST_DATUM`) for representation
 /// consistency, delegating the fetch/decompress to the `detoast` owner.
 ///
-/// The trimmed [`Const`] carries `consttype`/`constvalue`/`constisnull`;
-/// `consttypmod`/`constcollid`/`constlen`/`constbyval`/`location` (also set by
-/// the C) are not modeled here, but `constlen`/`constbyval` still drive the
-/// detoast decision exactly as in the C.
+/// The trimmed [`Const`] carries
+/// `consttype`/`consttypmod`/`constcollid`/`constvalue`/`constisnull`;
+/// `constlen`/`constbyval`/`location` (also set by the C) are not modeled as
+/// fields, but `constlen`/`constbyval` still drive the detoast decision exactly
+/// as in the C.
 pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
     consttype: Oid,
-    _consttypmod: i32,
-    _constcollid: Oid,
+    consttypmod: i32,
+    constcollid: Oid,
     constlen: i32,
     mut constvalue: Datum,
     constisnull: bool,
@@ -101,6 +104,8 @@ pub fn make_const<'mcx>(
 
     Ok(Const {
         consttype,
+        consttypmod,
+        constcollid,
         constvalue,
         constisnull,
     })
@@ -118,6 +123,8 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
     // makeConst(BOOLOID, -1, InvalidOid, 1, BoolGetDatum(value), isnull, true)
     Const {
         consttype: BOOLOID,
+        consttypmod: -1,
+        constcollid: InvalidOid,
         constvalue: Datum::from_bool(value),
         constisnull: isnull,
     }
