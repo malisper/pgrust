@@ -147,6 +147,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h, via execTuples.c's
+    /// `slot_getsomeattrs`): fetch a user attribute (`attnum >= 1`) of the
+    /// slot's current tuple as `(value, isnull)`, materializing the slot up to
+    /// `attnum` if needed. This is the bare-`Datum` accessor the merge/set
+    /// comparison loops read (C: `slot_getallattrs` then `tts_values[i]` /
+    /// `tts_isnull[i]`). Deforming can detoast/allocate, so the call is
+    /// fallible.
+    ///
+    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
+    /// (no descriptor/values payload), so this contract cannot yet be
+    /// implemented as promised. It must be re-signed when the slot payload
+    /// model lands (same caveat as `slot_getallattrs` / `exec_copy_slot`).
+    pub fn slot_getattr(
+        slot: &types_nodes::TupleTableSlot,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);
+
+seam_core::seam!(
     /// `slot_getsysattr(slot, attnum, &isnull)` (tuptable.h/execTuples.c):
     /// fetch a system attribute of the slot's current tuple as
     /// `(datum, isnull)` (`slot->tts_ops->getsysattr` dispatch). A slot class

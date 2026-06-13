@@ -9,6 +9,7 @@ use crate::nodes::NodeTag;
 
 use crate::execnodes::PlanStateData;
 use crate::execnodes::T_MaterialState;
+use crate::execstate_tags::T_SetOpState;
 use crate::nodemergejoin::T_MergeJoinState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
@@ -21,6 +22,8 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_SetOpState`.
+    SetOp(PgBox<'mcx, crate::nodesetop::SetOpStateData<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -29,6 +32,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::SetOp(_) => T_SetOpState,
         }
     }
 
@@ -38,6 +42,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::SetOp(s) => &s.ps,
         }
     }
 
@@ -46,6 +51,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::SetOp(s) => &mut s.ps,
         }
     }
 }

@@ -41,6 +41,7 @@ pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
+pub const T_SetOp: NodeTag = NodeTag(371);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,6 +79,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_SetOp`.
+    SetOp(crate::nodesetop::SetOp<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -86,6 +89,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::SetOp(_) => T_SetOp,
         }
     }
 
@@ -94,6 +98,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::SetOp(s) => &s.plan,
         }
     }
 
@@ -102,12 +107,18 @@ impl<'mcx> Node<'mcx> {
         self.plan_head().lefttree.as_deref()
     }
 
+    /// `innerPlan(node)` (plannodes.h) — `node->plan.righttree`.
+    pub fn inner_plan(&self) -> Option<&Node<'mcx>> {
+        self.plan_head().righttree.as_deref()
+    }
+
     /// Deep copy of the node (and its plan subtree) into `mcx`
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
         }
     }
 }

@@ -53,3 +53,13 @@ seam_core::seam!(
         input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecGetCommonChildSlotOps(ps)` (execUtils.c): the common slot-ops class
+    /// of the node's standard children (`outerPlanState`/`innerPlanState`), or
+    /// `None` when the children disagree (the C `NULL`, "any slot type
+    /// possible"). Reads only the children's `resultops`.
+    pub fn exec_get_common_child_slot_ops<'mcx>(
+        ps: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> Option<types_nodes::TupleSlotKind>
+);
