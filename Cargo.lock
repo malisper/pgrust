@@ -7796,6 +7796,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pgsleep"
+version = "0.0.0"
+dependencies = [
+ "port-pgsleep-seams",
+]
+
+[[package]]
 name = "port-pgsleep-seams"
 version = "0.0.0"
 dependencies = [
@@ -7919,6 +7926,7 @@ dependencies = [
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
+ "port-pgsleep",
 ]
 
 [[package]]
