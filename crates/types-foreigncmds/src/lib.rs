@@ -15,6 +15,7 @@
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_plancache::UtilityStmtHandle;
 
 /* ---------------------------------------------------------------------------
  * Catalog relation OIDs (`catalog/pg_*_d.h`).
@@ -357,3 +358,79 @@ pub struct ServerUpdateRow {
     pub serverid: Oid,
     pub srvfdw: Oid,
 }
+
+/* ---------------------------------------------------------------------------
+ * IMPORT FOREIGN SCHEMA loop carriers.
+ *
+ * `ImportForeignSchema` parses each FDW-returned command into a list of
+ * `RawStmt *` (`pg_parse_query`, tcop-owned) and processes each. The raw parse
+ * trees and the embedded `CreateForeignTableStmt`/`CreateStmt`/`RangeVar` are
+ * unported parser nodes, so they ride as the established opaque handles; the
+ * fields the loop branches on (the node tag, the table name, the
+ * `stmt_location`/`stmt_len`, the embedded statement node) are projected by the
+ * parse-node seam, and the in-crate loop owns the type-check `elog`, the
+ * `IsImportableForeignTable` filter, the schema-name rewrite, the `PlannedStmt`
+ * construction, and the inter-subcommand command-counter advance.
+ * ------------------------------------------------------------------------- */
+
+/// `nodeTag(rs->stmt)` classification of one raw parse tree produced by an
+/// IMPORT FOREIGN SCHEMA command: either the expected `CreateForeignTableStmt`
+/// (with the fields the loop reads/writes), or some other node (carrying its
+/// `NodeTag` value for the C `elog` message). The wrapped statement node rides
+/// as a [`UtilityStmtHandle`] (the C `rs->stmt`, set as `pstmt->utilityStmt`).
+#[derive(Clone, Debug)]
+pub enum ImportRawStmt {
+    /// `IsA(cstmt, CreateForeignTableStmt)` — the importable case.
+    CreateForeignTable {
+        /// `cstmt->base.relation->relname` — the IMPORT-filter / error-context
+        /// table name.
+        relname: String,
+        /// `rs->stmt_location`.
+        stmt_location: i32,
+        /// `rs->stmt_len`.
+        stmt_len: i32,
+        /// `rs->stmt` (`= (Node *) cstmt`) — the node `pstmt->utilityStmt`
+        /// points at and `ProcessUtility` executes.
+        utility_stmt: UtilityStmtHandle,
+    },
+    /// Any other node type the FDW (incorrectly) returned; carries
+    /// `(int) nodeTag(cstmt)` for the `elog(ERROR, "...incorrect statement
+    /// type %d")` message.
+    Other {
+        /// `(int) nodeTag(cstmt)`.
+        node_tag: i32,
+    },
+}
+
+/// The wrapper `PlannedStmt` `ImportForeignSchema` builds for each importable
+/// command (`makeNode(PlannedStmt)` with `commandType = CMD_UTILITY`,
+/// `canSetTag = false`, `utilityStmt = (Node *) cstmt`, and the raw stmt's
+/// location/length). Constructed in-crate and handed to `ProcessUtility`; the
+/// remaining `PlannedStmt` fields are zero/NULL as `makeNode` leaves them.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportPlannedStmt {
+    /// `pstmt->commandType` — always `CMD_UTILITY` here.
+    pub command_type: CmdType,
+    /// `pstmt->canSetTag` — always `false` here.
+    pub can_set_tag: bool,
+    /// `pstmt->utilityStmt` — the `CreateForeignTableStmt` node.
+    pub utility_stmt: UtilityStmtHandle,
+    /// `pstmt->stmt_location`.
+    pub stmt_location: i32,
+    /// `pstmt->stmt_len`.
+    pub stmt_len: i32,
+}
+
+/// `CmdType` (`nodes/nodes.h`) — the subset `ImportForeignSchema` uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CmdType {
+    /// `CMD_UTILITY`.
+    Utility = 6,
+}
+
+pub use CmdType::Utility as CMD_UTILITY;
+
+/// Re-export of the raw-parse-tree handle the IMPORT loop threads
+/// (`pg_parse_query` → `RawStmt *`).
+pub use types_plancache::RawStmtHandle;

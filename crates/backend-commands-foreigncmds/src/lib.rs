@@ -24,11 +24,12 @@ use types_catalog::catalog_dependency::{
 };
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::error::{
-    ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_DUPLICATE_OBJECT, ERRCODE_FDW_NO_SCHEMAS, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR, NOTICE, WARNING,
 };
-use types_error::pg_error::ErrorLocation;
+use types_error::pg_error::{ErrorLocation, PgError};
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     RoleSpec, ROLESPEC_PUBLIC, DROP_CASCADE, OBJECT_FDW, OBJECT_FOREIGN_SERVER,
@@ -36,8 +37,9 @@ use types_nodes::parsenodes::{
 use types_foreigncmds::{
     AlterFdwStmt, AlterForeignServerStmt, AlterUserMappingStmt, CreateFdwStmt,
     CreateForeignServerStmt, CreateForeignTableStmt, CreateUserMappingStmt, DefElem, DefElemArg,
-    DefElemAction, DropUserMappingStmt, FdwOwnerRow, ImportForeignSchemaStmt, ServerOwnerRow,
-    ACL_ID_PUBLIC,
+    DefElemAction, DropUserMappingStmt, FdwOwnerRow, ImportForeignSchemaStmt, ImportPlannedStmt,
+    ImportRawStmt, ServerOwnerRow,
+    ACL_ID_PUBLIC, CMD_UTILITY,
     FDW_HANDLEROID, ForeignDataWrapperRelationId, ForeignServerRelationId, ForeignTableRelationId,
     OIDOID, ProcedureRelationId, TEXTARRAYOID, UserMappingRelationId,
 };
@@ -49,6 +51,8 @@ use backend_catalog_objectaccess_seams as objectaccess_seams;
 use backend_catalog_pg_depend_seams as pg_depend_seams;
 use backend_catalog_pg_shdepend_seams as shdepend_seams;
 use backend_foreign_foreign_seams as foreign_seams;
+use backend_tcop_postgres_seams as postgres_seams;
+use backend_tcop_utility_fc_seams as utility_seams;
 use backend_parser_parse_func_seams as parse_func_seams;
 use backend_parser_parse_type_seams as parse_type_seams;
 use backend_utils_adt_acl_seams as acl_seams;
@@ -1285,12 +1289,45 @@ pub fn CreateForeignTable<'mcx>(
  * ImportForeignSchema (foreigncmds.c:1494-1605)
  * ======================================================================== */
 
+/// `import_error_callback_arg` (foreigncmds.c:42-47) — the state the IMPORT
+/// error-context callback reads: the failing command text and (once known) the
+/// foreign table being imported.
+struct ImportErrorCallbackArg<'a> {
+    /// `tablename` — the current table's name, or `None` (not known yet).
+    tablename: Option<String>,
+    /// `cmd` — the SQL string being parsed/executed.
+    cmd: &'a str,
+}
+
+/// `import_error_callback(arg)` (foreigncmds.c:1610, static) — error-context
+/// callback supplying the failing SQL statement's text. In the owned tree C's
+/// `error_context_stack` push/pop is the attach-on-propagation idiom
+/// (docs/query-lifecycle-raii.md): this transforms the in-flight `PgError` the
+/// same way the C callback edits the `errordata` at `errfinish` time.
+fn import_error_callback(mut err: PgError, callback_arg: &ImportErrorCallbackArg<'_>) -> PgError {
+    /* If it's a syntax error, convert to internal syntax error report */
+    let syntaxerrposition = err.cursor_position().unwrap_or(0);
+    if syntaxerrposition > 0 {
+        err = err
+            .with_cursor_position(0)
+            .with_internal_position(syntaxerrposition)
+            .with_internal_query(callback_arg.cmd.to_string());
+    }
+
+    if let Some(tablename) = &callback_arg.tablename {
+        err.add_context_line(format!("importing foreign table \"{tablename}\""));
+    }
+    err
+}
+
 /// `ImportForeignSchema` — IMPORT FOREIGN SCHEMA.  The USAGE/CREATE permission
-/// checks and the no-handler guard are ported here; the FDW callback
-/// invocation plus the parse/execute of the returned commands (including the
-/// per-command error-context callback and the IMPORT-table filter) crosses the
-/// [`foreign_seams::import_foreign_schema_exec`] seam.
-///
+/// checks and the no-handler guard, the FDW-routine IMPORT-support guard, and
+/// the per-command parse/execute loop — including the statement-type check, the
+/// `IsImportableForeignTable` filter, the schema-name rewrite, the wrapper
+/// `PlannedStmt` construction, the inter-subcommand `CommandCounterIncrement`,
+/// and the error-context callback — are all owned here. `GetFdwRoutine` + the
+/// FDW callback, `pg_parse_query`, the filter predicate, and `ProcessUtility`
+/// cross their owners' seams.
 pub fn ImportForeignSchema<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ImportForeignSchemaStmt<'mcx>,
@@ -1337,19 +1374,131 @@ pub fn ImportForeignSchema<'mcx>(
     }
 
     /*
-     * Get a list of commands from the FDW and parse/execute each (with the
-     * IMPORT-table filter applied and the per-command error context); this
-     * machinery (GetFdwRoutine / pg_parse_query / ProcessUtility) crosses the
-     * seam. The `fdw_routine->ImportForeignSchema == NULL` check
-     * (ERRCODE_FDW_NO_SCHEMAS) lives inside the seam owner, alongside
-     * GetFdwRoutine.
+     * GetFdwRoutine + the `fdw_routine->ImportForeignSchema == NULL` guard and
+     * the FDW callback (`fdw_routine->ImportForeignSchema(stmt, server->serverid)`)
+     * cross the seam: a `None` result is the C NULL callback, raising
+     * ERRCODE_FDW_NO_SCHEMAS here; a `Some(cmd_list)` is the FDW's command list.
      */
-    foreign_seams::import_foreign_schema_exec::call(
+    let cmd_list = match foreign_seams::fdw_import_foreign_schema::call(
+        mcx,
         stmt,
         server.serverid,
         fdw.fdwhandler,
-        fdw.fdwname.as_str(),
-    )?;
+    )? {
+        Some(cmds) => cmds,
+        None => {
+            return ereport(ERROR)
+                .errcode(ERRCODE_FDW_NO_SCHEMAS)
+                .errmsg(format!(
+                    "foreign-data wrapper \"{}\" does not support IMPORT FOREIGN SCHEMA",
+                    fdw.fdwname
+                ))
+                .finish(errloc(1522, "ImportForeignSchema"));
+        }
+    };
+
+    /* Parse and execute each command */
+    for cmd in cmd_list.iter() {
+        let cmd = cmd.as_str();
+        import_one_command(mcx, stmt, &fdw.fdwname, local_schema, cmd)?;
+    }
+
+    Ok(())
+}
+
+/// One iteration of `ImportForeignSchema`'s `foreach (lc, cmd_list)` body: set
+/// up the error-context callback for this command, parse it, and process each
+/// resulting `CREATE FOREIGN TABLE`. Split out so the error-context callback
+/// (C's `error_context_stack` push for the duration of the command) attaches to
+/// every `PgError` raised while this command is in flight, then unwinds at the
+/// end of the scope — mirroring `error_context_stack = sqlerrcontext.previous`.
+fn import_one_command<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ImportForeignSchemaStmt<'mcx>,
+    fdwname: &str,
+    local_schema: &str,
+    cmd: &str,
+) -> PgResult<()> {
+    /*
+     * Setup error traceback support for ereport(). This is so that any error
+     * in the generated SQL will be displayed nicely. The current table name is
+     * not known yet.
+     */
+    let mut callback_arg = ImportErrorCallbackArg {
+        tablename: None,
+        cmd,
+    };
+
+    /*
+     * Parse the SQL string into a list of raw parse trees. The error-context
+     * callback applies to this parse step as well.
+     */
+    let raw_parsetree_list = postgres_seams::pg_parse_query::call(mcx, cmd)
+        .map_err(|e| import_error_callback(e, &callback_arg))?;
+
+    /*
+     * Process each parse tree (we allow the FDW to put more than one command
+     * per string, though this isn't really advised).
+     */
+    for rs in raw_parsetree_list.iter() {
+        /*
+         * Because we only allow CreateForeignTableStmt, we can skip parse
+         * analysis, rewrite, and planning steps here.
+         */
+        let info = foreign_seams::import_classify_raw_stmt::call(*rs)
+            .map_err(|e| import_error_callback(e, &callback_arg))?;
+        let (relname, stmt_location, stmt_len, utility_stmt) = match info {
+            ImportRawStmt::CreateForeignTable {
+                relname,
+                stmt_location,
+                stmt_len,
+                utility_stmt,
+            } => (relname, stmt_location, stmt_len, utility_stmt),
+            ImportRawStmt::Other { node_tag } => {
+                let err = ereport(ERROR)
+                    .errcode(ERRCODE_INTERNAL_ERROR)
+                    .errmsg(format!(
+                        "foreign-data wrapper \"{fdwname}\" returned incorrect statement type {node_tag}"
+                    ))
+                    .into_error()
+                    .with_error_location(errloc(1570, "ImportForeignSchema"));
+                return Err(import_error_callback(err, &callback_arg));
+            }
+        };
+
+        /* Ignore commands for tables excluded by filter options */
+        if !foreign_seams::is_importable_foreign_table::call(&relname, stmt)
+            .map_err(|e| import_error_callback(e, &callback_arg))?
+        {
+            continue;
+        }
+
+        /* Enable reporting of current table's name on error */
+        callback_arg.tablename = Some(relname);
+
+        /* Ensure creation schema is the one given in IMPORT statement */
+        foreign_seams::import_set_schemaname::call(*rs, local_schema)
+            .map_err(|e| import_error_callback(e, &callback_arg))?;
+
+        /* No planning needed, just make a wrapper PlannedStmt */
+        let pstmt = ImportPlannedStmt {
+            command_type: CMD_UTILITY,
+            can_set_tag: false,
+            utility_stmt,
+            stmt_location,
+            stmt_len,
+        };
+
+        /* Execute statement */
+        utility_seams::process_utility_import_subcommand::call(pstmt, cmd)
+            .map_err(|e| import_error_callback(e, &callback_arg))?;
+
+        /* Be sure to advance the command counter between subcommands */
+        backend_access_transam_xact_seams::command_counter_increment::call()
+            .map_err(|e| import_error_callback(e, &callback_arg))?;
+
+        callback_arg.tablename = None;
+    }
 
     Ok(())
 }

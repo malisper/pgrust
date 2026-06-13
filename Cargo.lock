@@ -1653,6 +1653,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-foreigncmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-foreign-foreign-seams",
+ "backend-parser-parse-func-seams",
+ "backend-parser-parse-type-seams",
+ "backend-tcop-postgres-seams",
+ "backend-tcop-utility-fc-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-foreigncmds",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-commands-foreigncmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -2494,6 +2523,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-foreign-foreign-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-foreigncmds",
+]
+
+[[package]]
 name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
@@ -2728,6 +2768,25 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-parse-func-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-parser-parse-type-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -4060,6 +4119,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-plancache",
  "types-storage",
 ]
 
@@ -4082,6 +4142,15 @@ dependencies = [
  "types-nodes",
  "types-portal",
  "types-snapshot",
+]
+
+[[package]]
+name = "backend-tcop-utility-fc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-foreigncmds",
 ]
 
 [[package]]
@@ -4255,6 +4324,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -5535,6 +5605,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-foreigncmds",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -5747,6 +5818,17 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-tuple",
+]
+
+[[package]]
+name = "types-foreigncmds"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-plancache",
 ]
 
 [[package]]

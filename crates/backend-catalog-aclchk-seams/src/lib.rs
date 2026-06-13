@@ -80,5 +80,4 @@ seam_core::seam!(
         objid: Oid,
         objsubid: i32,
     ) -> PgResult<()>
->>>>>>> main
 );

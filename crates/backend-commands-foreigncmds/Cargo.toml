@@ -33,3 +33,5 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-tcop-utility-fc-seams = { path = "../backend-tcop-utility-fc-seams" }

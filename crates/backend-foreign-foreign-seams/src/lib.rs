@@ -22,7 +22,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_foreigncmds::{
     DefElem, FdwOwnerRow, FdwUpdateRow, ForeignDataWrapper, ForeignServer, ImportForeignSchemaStmt,
-    ServerOwnerRow, ServerUpdateRow,
+    ImportRawStmt, RawStmtHandle, ServerOwnerRow, ServerUpdateRow,
 };
 
 /* ---- read accessors (foreign/foreign.c) ---- */
@@ -80,19 +80,49 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `GetFdwRoutine(fdwhandler)`, the `fdw_routine->ImportForeignSchema ==
-    /// NULL` guard (`ERRCODE_FDW_NO_SCHEMAS`), the FDW `ImportForeignSchema`
-    /// callback, `pg_parse_query`, the IMPORT-table filter
-    /// (`IsImportableForeignTable`, owned by foreign.c), and `ProcessUtility`
-    /// of the returned `CREATE FOREIGN TABLE` commands (foreigncmds.c:1520-1604).
-    /// `stmt` carries `list_type`/`table_list` for the filter and the
-    /// schema-name rewrite target. Raises on any failure.
-    pub fn import_foreign_schema_exec(
+    /// `GetFdwRoutine(fdwhandler)` then the FDW `ImportForeignSchema(stmt,
+    /// serverid)` callback (fdwapi.c). Returns the FDW-generated command
+    /// strings (the C `List *` of `char *`), or `None` when the routine's
+    /// `ImportForeignSchema` field is NULL — the C `fdw_routine->
+    /// ImportForeignSchema == NULL` test, whose `ERRCODE_FDW_NO_SCHEMAS`
+    /// `ereport` the command driver raises in-crate. Allocated in `mcx`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn fdw_import_foreign_schema<'mcx>(
+        mcx: Mcx<'mcx>,
         stmt: &ImportForeignSchemaStmt<'_>,
         serverid: Oid,
         fdwhandler: Oid,
-        fdwname: &str,
-    ) -> PgResult<()>
+    ) -> PgResult<Option<PgVec<'mcx, PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `IsImportableForeignTable(tablename, stmt)` (foreign.c): apply the IMPORT
+    /// FOREIGN SCHEMA `LIMIT TO`/`EXCEPT` table-list filter — `true` if the
+    /// table should be imported. `stmt` carries `list_type`/`table_list`. Pure;
+    /// returns the filter decision.
+    pub fn is_importable_foreign_table(
+        tablename: &str,
+        stmt: &ImportForeignSchemaStmt<'_>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// Project one raw parse tree (`RawStmt *`) the IMPORT loop received from
+    /// `pg_parse_query` into the fields the command driver branches on: the
+    /// `nodeTag(rs->stmt)` classification ([`ImportRawStmt`]), the table name
+    /// (`cstmt->base.relation->relname`), the `stmt_location`/`stmt_len`, and
+    /// the embedded statement node (`rs->stmt`). The driver owns the
+    /// type-check `elog`, the filter `continue`, and the `PlannedStmt` build;
+    /// this seam only reads the unported parser node's fields.
+    pub fn import_classify_raw_stmt(raw: RawStmtHandle) -> PgResult<ImportRawStmt>
+);
+
+seam_core::seam!(
+    /// `cstmt->base.relation->schemaname = pstrdup(local_schema)` — the IMPORT
+    /// loop's schema-name rewrite, applied to the embedded
+    /// `CreateForeignTableStmt`'s `RangeVar` before the command is executed.
+    /// Mutates the unported parser node in place.
+    pub fn import_set_schemaname(raw: RawStmtHandle, local_schema: &str) -> PgResult<()>
 );
 
 /* ---- pg_foreign_data_wrapper catalog DML ---- */
