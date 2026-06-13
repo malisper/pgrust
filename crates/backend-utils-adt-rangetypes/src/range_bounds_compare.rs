@@ -48,12 +48,13 @@ pub fn range_get_typcache(_rngtypid: Oid) -> PgResult<TypeCacheEntry> {
     // not-yet-ported `backend-utils-cache-typcache`; its current inward seam
     // hands back the storage-only `types_typcache::TypeCacheEntry`, which lacks
     // the range-support fields (`rng_cmp_proc_finfo` / `rng_collation` /
-    // `rngelemtype`) this entry must carry. Route through the typcache owner
-    // and panic loudly until that owner exposes a range-bearing lookup seam.
-    todo!(
+    // `rngelemtype`) this entry must carry. Mirror PG and panic loudly (naming
+    // the owner, as the sibling `get_range_io_data` does) until that owner
+    // exposes a range-bearing `TYPECACHE_RANGE_INFO` lookup seam.
+    panic!(
         "range_get_typcache: lookup_type_cache(rngtypid, TYPECACHE_RANGE_INFO) \
-         seam (backend-utils-cache-typcache) does not yet return a range-bearing \
-         TypeCacheEntry"
+         (backend-utils-cache-typcache) not ported into this unit yet — its \
+         current seam does not return a range-bearing TypeCacheEntry"
     )
 }
 
