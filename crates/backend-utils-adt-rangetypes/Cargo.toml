@@ -18,3 +18,5 @@ types-fmgr = { path = "../types-fmgr" }
 types-cache = { path = "../types-cache" }
 types-rangetypes = { path = "../types-rangetypes" }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
