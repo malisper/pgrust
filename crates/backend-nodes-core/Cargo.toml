@@ -21,6 +21,8 @@ types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-tidbitmap = { path = "../types-tidbitmap" }
 types-execparallel = { path = "../types-execparallel" }
+types-pathnodes = { path = "../types-pathnodes" }
+backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

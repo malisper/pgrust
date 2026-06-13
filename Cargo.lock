@@ -4224,17 +4224,15 @@ name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core-seams",
- "backend-nodes-core-tidbitmap-seams",
+ "backend-utils-error",
  "common-hashfn",
  "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
- "types-execparallel",
  "types-nodes",
- "types-storage",
- "types-tidbitmap",
+ "types-pathnodes",
  "types-tuple",
 ]
 
@@ -4246,6 +4244,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-tuple",
 ]
 
