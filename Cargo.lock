@@ -7747,6 +7747,14 @@ name = "pg-prng"
 version = "0.0.0"
 
 [[package]]
+name = "port-crc32c"
+version = "0.0.0"
+dependencies = [
+ "port-crc32c-seams",
+ "port-pg-crc32c-seams",
+]
+
+[[package]]
 name = "port-crc32c-seams"
 version = "0.0.0"
 dependencies = [
@@ -7919,6 +7927,7 @@ dependencies = [
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
+ "port-crc32c",
 ]
 
 [[package]]
