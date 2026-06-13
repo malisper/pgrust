@@ -11,9 +11,31 @@ use types_core::LocalTransactionId;
 use types_core::Oid;
 use types_core::ProcNumber;
 use types_core::TimestampTz;
+use types_core::TransactionId;
 use types_deadlock::{LockId, LockSpace};
 use types_error::PgResult;
-use types_storage::{proclist_node, LWLockMode, LWLockWaitState};
+use types_storage::{proclist_node, LWLockMode, LWLockWaitState, VirtualTransactionId};
+
+seam_core::seam!(
+    /// Read `MyProc->xmin` — this backend's advertised oldest-visible xmin in
+    /// shared memory. Snapmgr reads it to decide whether to advance it. Plain
+    /// atomic read; cannot `ereport`.
+    pub fn my_proc_xmin() -> TransactionId
+);
+
+seam_core::seam!(
+    /// Write `MyProc->xmin = value` — snapmgr advances/resets the backend's
+    /// advertised xmin as its registered-snapshot set changes. Shared-memory
+    /// store; cannot `ereport`.
+    pub fn set_my_proc_xmin(value: TransactionId)
+);
+
+seam_core::seam!(
+    /// Read `MyProc->vxid` (`{procNumber, lxid}`) — snapmgr uses it to name an
+    /// exported snapshot's file and label the serialized transaction. Plain
+    /// shared-memory read; cannot `ereport`.
+    pub fn my_proc_vxid() -> VirtualTransactionId
+);
 
 seam_core::seam!(
     /// `ProcLockWakeup(GetLocksMethodTable(lock), lock)` (proc.c) — after the
@@ -215,6 +237,104 @@ seam_core::seam!(
     /// ~DELAY_CHKPT_START` (on=false) — the checkpoint-delay bracket around the
     /// prepare/commit WAL insert. Plain shared-memory field write.
     pub fn set_delay_chkpt_start(on: bool)
+);
+
+// --- PGPROC accessors used by proc.c's own wait-queue machinery -------------
+//
+// These read/write the `PGPROC` array entries and `MyProc` that the sibling
+// `proc_lifecycle` / `proc_shmem` families own; until `InitProcGlobal` /
+// `InitProcess` land, the installed bodies panic (the wait-queue family routes
+// through them rather than restructuring around the unported neighbor).
+
+seam_core::seam!(
+    /// `GetNumberFromPGProc(proc)` — the proc's index in `ProcGlobal->allProcs`.
+    pub fn pgproc_number(proc: &types_storage::storage::PGPROC) -> ProcNumber
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->lockGroupLeader` as a `ProcNumber`
+    /// (`INVALID_PROC_NUMBER` if `NULL`).
+    pub fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber
+);
+
+seam_core::seam!(
+    /// Set `GetPGProcByNumber(procno)->heldLocks`.
+    pub fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK)
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->heldLocks`.
+    pub fn proc_held_locks(procno: ProcNumber) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->waitLockMode`.
+    pub fn proc_wait_lock_mode(procno: ProcNumber) -> types_storage::lock::LOCKMODE
+);
+
+seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->waitStatus`.
+    pub fn proc_wait_status(procno: ProcNumber) -> types_storage::storage::ProcWaitStatus
+);
+
+seam_core::seam!(
+    /// Set `MyProc->{waitLock, waitProcLock, waitLockMode}` and
+    /// `waitStatus = PROC_WAIT_STATUS_WAITING` for the proc joining the queue
+    /// (`lock` keyed by its LOCKTAG, `holder` the owning backend's ProcNumber).
+    pub fn set_proc_wait_fields(
+        procno: ProcNumber,
+        lock: types_storage::lock::LOCKTAG,
+        holder: ProcNumber,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// Set `pg_atomic_write_u64(&GetPGProcByNumber(procno)->waitStart, value)`.
+    pub fn set_proc_wait_start(procno: ProcNumber, value: u64)
+);
+
+seam_core::seam!(
+    /// `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`.
+    pub fn proc_wait_link_is_detached(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `ProcWakeup`'s state reset: clear `waitLock`/`waitProcLock`, set
+    /// `waitStatus = status`, and `pg_atomic_write_u64(&MyProc->waitStart, 0)`.
+    pub fn wakeup_proc_clear_wait(procno: ProcNumber, status: types_storage::storage::ProcWaitStatus)
+);
+
+seam_core::seam!(
+    /// `CheckDeadLock`'s awoken test: `MyProc->links.prev == NULL ||
+    /// MyProc->links.next == NULL` (we've been unlinked from the wait queue).
+    pub fn proc_unlinked_from_wait_queue(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `MyProc->waitLock != NULL` (the proc is on a lock's wait queue).
+    pub fn proc_is_waiting_on_lock(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `MyProc->waitLock->tag` — the LOCKTAG of the lock the proc awaits.
+    pub fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->pgxactoff`.
+    pub fn proc_pgxactoff(procno: ProcNumber) -> i32
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->statusFlags[pgxactoff]` — the dense per-proc status-flag
+    /// mirror in this unit's `ProcGlobal` (protected by ProcArrayLock).
+    pub fn proc_global_status_flags(pgxactoff: i32) -> u8
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->pid`.
+    pub fn proc_pid(procno: ProcNumber) -> i32
 );
 
 seam_core::seam!(

@@ -55,10 +55,16 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_rel: FormData_pg_class {
             relname: PgString::from_str_in("t", mcx).unwrap(),
             relnamespace: 0,
+            relowner: 0,
+            relrowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             relallvisible: 0,
             reltoastrelid: 0,
+            reltablespace: 0,
+            relowner: 0,
+            relfilenode: 0,
+            relisshared: false,
             relhassubclass: false,
             relpersistence: b'p',
             relkind: b'r',
@@ -69,6 +75,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
     };
     Relation::open(data, None)
 }

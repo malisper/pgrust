@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h): if an interrupt is pending,
     /// service it via `ProcessInterrupts()` (tcop/postgres.c). A query-cancel
@@ -35,6 +37,35 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ProcSleep`'s `ereport(LOG, errmsg(msg), errdetail_log_plural(detail_s,
+    /// detail_p, n, ...))` for the lock-wait progress messages. `detail_*` are
+    /// `None` for the "acquired" case (a bare `errmsg`); when present they are
+    /// the singular/plural errdetail_log forms selected by `holders_num`.
+    pub fn report_lock_wait_log(
+        message: alloc::string::String,
+        detail_singular: Option<alloc::string::String>,
+        detail_plural: Option<alloc::string::String>,
+        holders_num: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcSleep`'s autovac-cancel `ereport(DEBUG1, errmsg_internal("sending
+    /// cancel to blocking autovacuum PID %d", pid), errdetail_log("%s", logbuf))`.
+    pub fn report_autovac_cancel(
+        pid: i32,
+        detail_log: alloc::string::String,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `kill(pid, SIGINT)` against a blocking autovacuum worker. `ESRCH` (the
+    /// worker already exited) is ignored inside the impl; any other errno warns
+    /// (`ereport(WARNING, "could not send signal to process %d: %m")`).
+    pub fn signal_autovacuum_worker(pid: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `PostgresMain(dbname, username)` (tcop/postgres.c) — the regular
     /// backend's main loop, entered after the startup packet is processed and
     /// the PGPROC is set up. Never returns (it exits the process through
@@ -57,6 +88,19 @@ seam_core::seam!(
     /// it with `pqsignal(SIGTERM, ...)`; tcop owns the handler body, so this
     /// resolves only once tcop lands.
     pub fn die_signal_handler() -> fn(i32)
+);
+
+seam_core::seam!(
+    /// `pg_parse_query(query_string)` (tcop/postgres.c) — run the raw parser on
+    /// a single SQL string, returning the `List *` of `RawStmt *` as their
+    /// opaque handles (the raw parse trees are owned by the parser). The IMPORT
+    /// FOREIGN SCHEMA loop parses each FDW-returned command this way. Can
+    /// `ereport(ERROR)` on a syntax error, carried on `Err`. Allocated in
+    /// `mcx`.
+    pub fn pg_parse_query<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query_string: &str,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_plancache::RawStmtHandle>>
 );
 
 seam_core::seam!(

@@ -136,7 +136,7 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
     // Assert(startup_data_len == sizeof(BackendStartupData));
     let bsdata: BackendStartupData = match startup_data {
         StartupData::Backend(b) => *b,
-        StartupData::None => {
+        StartupData::None | StartupData::BgWorker(_) => {
             unreachable!("BackendMain requires a BackendStartupData payload (StartupData::Backend)")
         }
     };
@@ -313,7 +313,7 @@ fn backend_initialize_inner(
     backend_utils_misc_timeout_seams::enable_timeout_after::call(
         TimeoutId::STARTUP_PACKET_TIMEOUT,
         auth_timeout * 1000,
-    );
+    )?;
 
     // status = ProcessSSLStartup(port);
     let mut status = process_ssl_startup()?;

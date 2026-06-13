@@ -60,6 +60,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `errorConflictingDefElem(defel, pstate)` (aclchk.c): always raises
+    /// `ERRCODE_SYNTAX_ERROR` ("conflicting or redundant options") at the
+    /// `DefElem`'s parse location. `defname` carries the conflicting option
+    /// name for the message.
+    pub fn error_conflicting_def_elem(defname: String) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `RemoveRoleFromObjectACL(roleid, classid, objid)` (aclchk.c): during
     /// DROP OWNED, revoke any privileges the role holds on the object — a
     /// REVOKE-equivalent that rewrites the object's ACL. Can `ereport(ERROR)`,

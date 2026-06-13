@@ -39,6 +39,10 @@ pub struct FormData_pg_class<'mcx> {
     /// `Oid relnamespace` — OID of the namespace containing this relation
     /// (`RelationGetNamespace`).
     pub relnamespace: Oid,
+    /// `Oid relowner` — the relation's owning role OID.
+    pub relowner: Oid,
+    /// `bool relrowsecurity` — row-level security is enabled on the relation.
+    pub relrowsecurity: bool,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
@@ -47,6 +51,15 @@ pub struct FormData_pg_class<'mcx> {
     pub relallvisible: i32,
     /// `Oid reltoastrelid` — OID of the TOAST table, or `InvalidOid`.
     pub reltoastrelid: Oid,
+    /// `Oid reltablespace` — the relation's tablespace, or `InvalidOid` for
+    /// the database's default tablespace.
+    pub reltablespace: Oid,
+    /// `RelFileNumber relfilenode` — the on-disk file OID, or
+    /// `InvalidRelFileNumber` for a relation that uses the relfilenumber map.
+    pub relfilenode: Oid,
+    /// `bool relisshared` — is the relation shared across all databases in
+    /// the cluster?
+    pub relisshared: bool,
     /// `bool relhassubclass` — has (or once had) inheritance children.
     pub relhassubclass: bool,
     /// `char relpersistence` — `RELPERSISTENCE_*`.
@@ -66,8 +79,9 @@ pub struct FormData_pg_class<'mcx> {
 /// consume (the `rd_index` payload of an index's relcache entry).
 #[derive(Clone, Copy, Debug)]
 pub struct FormData_pg_index {
-    /// `int16 indnkeyatts` — number of key columns in the index
-    /// (`IndexRelationGetNumberOfKeyAttributes`).
+    /// `int16 indnkeyatts` — number of key columns in the index (excludes
+    /// INCLUDE columns; `IndexRelationGetNumberOfKeyAttributes`). `0` for a
+    /// non-index relation's absent `rd_index`.
     pub indnkeyatts: i16,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
@@ -104,9 +118,41 @@ pub struct RelationData<'mcx> {
     /// `Form_pg_index rd_index` — the pg_index row (trimmed); `None` (the C
     /// NULL) for non-index relations.
     pub rd_index: Option<FormData_pg_index>,
+    /// `Oid *rd_opcintype` — the input type OID of each index column's
+    /// operator class (`RelationGetIndexRawAttOptions` cache). Empty for a
+    /// non-index relation. Indexed by attribute number (0-based).
+    pub rd_opcintype: mcx::PgVec<'mcx, Oid>,
 }
 
 impl<'mcx> RelationData<'mcx> {
+    /// `indexRelation->rd_index->indnkeyatts` — the index's number of key
+    /// attributes; `0` when this is not an index (`rd_index` is NULL).
+    pub fn indnkeyatts(&self) -> i32 {
+        self.rd_index.map(|i| i.indnkeyatts as i32).unwrap_or(0)
+    }
+
+    /// `TupleDescAttr(rel->rd_att, attnum)->atttypid == CSTRINGOID &&
+    ///  rel->rd_opcintype[attnum] == NAMEOID` (nodeIndexonlyscan.c): does this
+    /// index key column store cstrings for a name-type opclass (btree
+    /// `name_ops`)?
+    pub fn index_attr_is_namecstring(&self, attnum: i32) -> bool {
+        let idx = attnum as usize;
+        if idx >= self.rd_att.attrs.len() || idx >= self.rd_opcintype.len() {
+            return false;
+        }
+        self.rd_att.attr(idx).atttypid == types_tuple::heaptuple::CSTRINGOID
+            && self.rd_opcintype[idx] == types_tuple::heaptuple::NAMEOID
+    }
+
+    /// `RelationGetDescr(relation)` deep-copied into `mcx` — the table slot's
+    /// descriptor for an index-only scan's recheck slot.
+    pub fn rd_att_clone_in<'b>(
+        &self,
+        mcx: mcx::Mcx<'b>,
+    ) -> PgResult<PgBox<'b, TupleDescData<'b>>> {
+        mcx::alloc_in(mcx, self.rd_att.clone_in(mcx)?)
+    }
+
     /// `RelationGetRelationName(relation)` (utils/rel.h):
     /// `NameStr(relation->rd_rel->relname)`.
     pub fn name(&self) -> &str {
@@ -139,6 +185,22 @@ impl<'mcx> RelationData<'mcx> {
     /// `relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP`.
     pub fn uses_local_buffers(&self) -> bool {
         self.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+    }
+
+    /// `RelationIsMapped(relation)` (utils/rel.h): true if the relation uses
+    /// the relfilenumber map —
+    /// `RELKIND_HAS_STORAGE(relkind) && relfilenode == InvalidRelFileNumber`.
+    pub fn is_mapped(&self) -> bool {
+        use types_tuple::access::{
+            RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+        };
+        let relkind = self.rd_rel.relkind;
+        let has_storage = relkind == RELKIND_RELATION
+            || relkind == RELKIND_INDEX
+            || relkind == RELKIND_SEQUENCE
+            || relkind == RELKIND_TOASTVALUE
+            || relkind == RELKIND_MATVIEW;
+        has_storage && self.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber
     }
 }
 

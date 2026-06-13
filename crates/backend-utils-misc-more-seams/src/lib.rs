@@ -12,12 +12,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `check_enable_rls(relid, checkAsUser, noError)` (`rls.c`): whether
-    /// row-level security applies to `relid` for `check_as_user`
-    /// (`InvalidOid` means the current user). With `no_error = true` a
-    /// permission problem returns `RLS_ENABLED` instead of raising; with
-    /// `no_error = false` it can `ereport(ERROR)`, carried on `Err`. Performs
-    /// catalog/syscache lookups.
+    /// `check_enable_rls(relid, checkAsUser, noError)` (`rls.c`) — decide
+    /// whether row-level security applies to `relid` for the given (or
+    /// current) user. Can `ereport(ERROR, ERRCODE_INSUFFICIENT_PRIVILEGE)`
+    /// when `noError` is false and `row_security` is off (and via the syscache
+    /// lookups it performs), carried on `Err`.
     pub fn check_enable_rls(
         relid: types_core::Oid,
         check_as_user: types_core::Oid,

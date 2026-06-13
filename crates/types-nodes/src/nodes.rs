@@ -108,12 +108,16 @@ pub use OnConflictAction::{ONCONFLICT_NONE, ONCONFLICT_NOTHING, ONCONFLICT_UPDAT
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
+    /// `T_Append`.
+    Append(crate::nodeappend::Append<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeAppend`.
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_IndexOnlyScan`.
+    IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
     /// `T_Sort`.
@@ -134,9 +138,11 @@ impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
             Node::Sort(_) => T_Sort,
             Node::TableFuncScan(_) => T_TableFuncScan,
@@ -150,9 +156,11 @@ impl<'mcx> Node<'mcx> {
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
+            Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
@@ -172,9 +180,11 @@ impl<'mcx> Node<'mcx> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
+            Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),

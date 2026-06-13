@@ -37,18 +37,15 @@ pub use AclResult::{
     AclcheckOk as ACLCHECK_OK,
 };
 
-/// Result of `check_enable_rls` (`utils/rls.h`) — whether row-level security
-/// applies to a relation for the current query. Values verified against the
-/// header.
+/// `CheckEnableRlsResult` (`utils/rls.h`) — outcome of `check_enable_rls`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum CheckEnableRlsResult {
-    /// `RLS_NONE` — RLS is not enabled on the table.
+    /// `RLS_NONE` — RLS is not enabled for this query.
     RlsNone = 0,
-    /// `RLS_NONE_ENV` — RLS is not in force given the environment, but would
-    /// be if it changed (e.g. row_security off but the table forces it).
+    /// `RLS_NONE_ENV` — RLS disabled now, but could enable if env changes.
     RlsNoneEnv = 1,
-    /// `RLS_ENABLED` — RLS is in force and must be applied.
+    /// `RLS_ENABLED` — RLS applies; row-security quals must be added.
     RlsEnabled = 2,
 }
 

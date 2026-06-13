@@ -198,6 +198,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, mode)` — acquire the built-in ProcArrayLock
+    /// (its `MainLWLockArray` offset is owned by lwlock; the named slot avoids
+    /// transcribing the individual-lock offset here). `Err` carries the C
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_proc_array(mode: LWLockMode) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn lwlock_release_proc_array() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
     /// hold the built-in lock at `lock_offset` (in any mode)? Used in
     /// `Assert`s; the lock is named by offset since `MainLWLockArray` is
