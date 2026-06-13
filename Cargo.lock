@@ -2921,6 +2921,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-datum-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-expanded-methods-seams"
 version = "0.0.0"
 dependencies = [
@@ -2944,13 +2953,19 @@ name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-libpq-pqformat",
+ "backend-utils-adt-datum-seams",
  "backend-utils-adt-expanded-methods-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-adt-misc2-seams",
  "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
+ "types-stringinfo",
  "types-tuple",
 ]
 
