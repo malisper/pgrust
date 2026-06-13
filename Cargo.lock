@@ -2099,6 +2099,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-array-more-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -2149,6 +2158,54 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-adt-tsginidx"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-tsvector-core-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-tsgistidx"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions-seams",
+ "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-hash-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-reloptions",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-tsrank"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-array-more-seams",
+ "backend-utils-adt-tsvector-core-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-tsvector-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
 ]
 
 [[package]]
@@ -2386,6 +2443,13 @@ dependencies = [
  "types-error",
  "types-namespace",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-utils-hash-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -2950,6 +3014,13 @@ dependencies = [
 
 [[package]]
 name = "types-timeout"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-tsearch"
 version = "0.0.0"
 dependencies = [
  "types-core",

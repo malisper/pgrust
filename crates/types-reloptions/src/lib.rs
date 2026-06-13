@@ -7,9 +7,14 @@
 
 #![no_std]
 #![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+
+extern crate alloc;
 
 pub mod attoptcache;
 pub mod tablespace;
+pub mod local;
 
 pub use attoptcache::*;
 pub use tablespace::*;
+pub use local::*;
