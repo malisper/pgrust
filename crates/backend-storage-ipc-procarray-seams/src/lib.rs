@@ -1,6 +1,9 @@
 //! Seam declarations for the `backend-storage-ipc-procarray` unit
-//! (`storage/ipc/procarray.c`). The owning unit installs these from its
-//! `init_seams()` when it lands; until then a call panics loudly.
+//! (`storage/ipc/procarray.c`), incl. the subset consumed by logical decoding.
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+#![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
 use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
@@ -141,4 +144,25 @@ seam_core::seam!(
     /// PREPARED, advancing the latest-completed xid to `latest_xid`. Takes
     /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
     pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
+);
+
+// --- Subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)`.
+    pub fn GetOldestSafeDecodingTransactionId(catalog_only: bool) -> TransactionId
+);
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE)`.
+    pub fn ProcArrayLock_acquire_exclusive()
+);
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn ProcArrayLock_release()
+);
+seam_core::seam!(
+    /// `MyProc->statusFlags |= PROC_IN_LOGICAL_DECODING;
+    /// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;`
+    /// performed while holding `ProcArrayLock`.
+    pub fn mark_proc_in_logical_decoding()
 );
