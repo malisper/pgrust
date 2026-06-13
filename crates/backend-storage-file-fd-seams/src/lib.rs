@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use types_core::SubTransactionId;
 use types_error::PgResult;
+use types_storage::file::File;
 
 seam_core::seam!(
     /// `AllocateFile(path, PG_BINARY_W)` + `fwrite` + `FreeFile` (fd.c) — write
@@ -333,4 +334,67 @@ seam_core::seam!(
     /// the `errno` the C caller inspects (e.g. `ENOENT`) to choose its
     /// `ereport` message.
     pub fn basic_open_file(path: &str) -> Result<i32, i32>
+);
+
+// --- backend-storage-file-buffile consumers: the VFD temp-file API (fd.c) ---
+//
+// `File` is fd.c's virtual file descriptor (`typedef int File`); these are the
+// primitives `buffile.c` builds its buffered I/O on. Each `ereport`s on a hard
+// failure (carried on `Err`); the success values mirror the C return contract.
+
+seam_core::seam!(
+    /// `File OpenTemporaryFile(bool interXact)` (fd.c) — open an anonymous
+    /// temporary file in a temp tablespace, registered with the current
+    /// resource owner. `interXact` keeps it open across transaction end.
+    /// Returns the VFD (`> 0`); open failures `ereport(ERROR)`, carried on `Err`.
+    pub fn open_temporary_file(inter_xact: bool) -> types_error::PgResult<File>
+);
+
+seam_core::seam!(
+    /// `void FileClose(File file)` (fd.c) — close the VFD and, for a temp file,
+    /// unlink its backing file. Infallible at the ereport level (errors are
+    /// logged at LOG inside fd.c).
+    pub fn file_close(file: File)
+);
+
+seam_core::seam!(
+    /// `ssize_t FileRead(File file, void *buffer, size_t amount, off_t offset,
+    /// uint32 wait_event_info)` (fd.c, the single-buffer read buffile uses).
+    /// Reads up to `buf.len()` bytes at `offset` into `buf`. Returns the byte
+    /// count read (`>= 0`) on success or a negative value on an OS read error
+    /// (C returns `-1` with `errno` set); buffile reports `Err` on `< 0`.
+    pub fn file_read(file: File, buf: &mut [u8], offset: i64, wait_event_info: u32)
+        -> types_error::PgResult<isize>
+);
+
+seam_core::seam!(
+    /// `ssize_t FileWrite(File file, const void *buffer, size_t amount,
+    /// off_t offset, uint32 wait_event_info)` (fd.c, single-buffer write).
+    /// Writes `buf` at `offset`. Returns bytes written (`> 0`) or `<= 0` on a
+    /// write error (out of space etc.); buffile reports `Err` on `<= 0`. A hard
+    /// fd.c failure (e.g. enlarging the temp-file accounting beyond the limit)
+    /// is itself an `ereport(ERROR)`, carried on `Err`.
+    pub fn file_write(file: File, buf: &[u8], offset: i64, wait_event_info: u32)
+        -> types_error::PgResult<isize>
+);
+
+seam_core::seam!(
+    /// `off_t FileSize(File file)` (fd.c) — the current size of the underlying
+    /// OS file. Returns the size (`>= 0`) or a negative value on a stat error
+    /// (C returns `-1` with `errno` set).
+    pub fn file_size(file: File) -> types_error::PgResult<i64>
+);
+
+seam_core::seam!(
+    /// `int FileTruncate(File file, off_t offset, uint32 wait_event_info)`
+    /// (fd.c) — truncate the underlying OS file to `offset`. Returns `0` on
+    /// success or a negative value on failure (C returns `-1` with `errno`).
+    pub fn file_truncate(file: File, offset: i64, wait_event_info: u32)
+        -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `char *FilePathName(File file)` (fd.c) — the path of the underlying OS
+    /// file, used only to build `%m` error messages. Infallible.
+    pub fn file_path_name(file: File) -> String
 );
