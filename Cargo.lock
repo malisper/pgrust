@@ -1204,6 +1204,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-copyfrom-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-copy",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+]
+
+[[package]]
+name = "backend-commands-copyfromparse"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-copyfrom-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-copy",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3572,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-copyfromparse",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3660,6 +3690,15 @@ name = "types-control"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-copy"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+ "types-rel",
 ]
 
 [[package]]
