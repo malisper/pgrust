@@ -2,7 +2,7 @@
 //! `backend-utils-cache-syscache-seams`: catcache lookup + attribute
 //! extraction + field projection, copied into the caller's `mcx`.
 
-use mcx::{vec_with_capacity_in, Mcx, PgString, PgVec};
+use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_cache::SysCacheKey;
 use types_core::Oid;
 use types_datum::Datum;
@@ -12,8 +12,11 @@ use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 
 use crate::{
     ReleaseSysCache, SearchSysCache1, SearchSysCacheList1, SysCacheGetAttrNotNull, AMOPSTRATEGY,
-    AMPROCNUM, CLAOID,
+    AMPROCNUM, CLAOID, RELOID,
 };
+
+/// `Anum_pg_class_relam` (`catalog/pg_class.h`).
+const Anum_pg_class_relam: i32 = 7;
 
 // `catalog/pg_opclass.h` attribute numbers.
 const Anum_pg_opclass_opcname: i32 = 3;
@@ -72,6 +75,22 @@ fn getattr_name<'mcx>(
     // NameStr(): the NUL-padded fixed-size buffer up to the first NUL.
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     PgString::from_str_in(&String::from_utf8_lossy(&bytes[..len]), mcx)
+}
+
+/// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+/// `Form_pg_class.relam` field. `Ok(None)` on a cache miss
+/// (`!HeapTupleIsValid`). The projection is by-value, so the tuple copy
+/// lives in a scratch context dropped before returning.
+pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache relam projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(Datum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relam = getattr_oid(mcx, RELOID, &tup, Anum_pg_class_relam)?;
+    ReleaseSysCache(tup);
+    Ok(Some(relam))
 }
 
 /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the

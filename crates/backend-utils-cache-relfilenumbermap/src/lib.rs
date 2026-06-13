@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use backend_access_index_genam_seams as genam_seams;
 use backend_utils_cache_inval_seams as inval_seams;
 use backend_utils_cache_relmapper_seams as relmapper_seams;
-use backend_utils_init_small_seams as globals_seams;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use types_cache::{BTEqualStrategyNumber, ScanKeyInit, F_OIDEQ};
 use types_core::{InvalidOid, Oid, RelFileNumber};
@@ -124,9 +123,13 @@ fn InitializeRelfilenumberMap() -> PgResult<()> {
 /// we do not know about. Hence, this function ignores this case.
 ///
 /// Returns `InvalidOid` if no relation matching the criteria could be found.
+///
+/// `my_database_tablespace` is C's `MyDatabaseTableSpace` (globals.c),
+/// passed explicitly — no ambient-global seams.
 pub fn RelidByRelfilenumber(
     mut reltablespace: Oid,
     relfilenumber: RelFileNumber,
+    my_database_tablespace: Oid,
 ) -> PgResult<Oid> {
     let initialized = RELFILENUMBER_MAP.with(|cell| cell.borrow().is_some());
     if !initialized {
@@ -134,7 +137,7 @@ pub fn RelidByRelfilenumber(
     }
 
     // pg_class will show 0 when the value is actually MyDatabaseTableSpace
-    if reltablespace == globals_seams::my_database_tablespace::call() {
+    if reltablespace == my_database_tablespace {
         reltablespace = 0;
     }
 

@@ -17,8 +17,5 @@ types-error = { path = "../types-error" }
 types-reloptions = { path = "../types-reloptions" }
 types-tuple = { path = "../types-tuple" }
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
-backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
-backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
-backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

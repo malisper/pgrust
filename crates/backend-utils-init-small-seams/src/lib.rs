@@ -84,17 +84,9 @@ seam_core::seam!(
     pub fn resume_interrupts()
 );
 
-seam_core::seam!(
-    /// `MyDatabaseId` (globals.c): the OID of the database this backend is
-    /// connected to (`InvalidOid` before `InitPostgres` selects one).
-    pub fn my_database_id() -> types_core::primitive::Oid
-);
-
-seam_core::seam!(
-    /// `MyDatabaseTableSpace` (globals.c): the default tablespace of the
-    /// connected database.
-    pub fn my_database_tablespace() -> types_core::primitive::Oid
-);
+// `MyDatabaseId` / `MyDatabaseTableSpace` deliberately have no getter seams:
+// per the no-ambient-global-seams rule, consumers take the value as an
+// explicit parameter and read it off this unit's state when it lands.
 
 seam_core::seam!(
     /// `MyStartTime` (globals.c): this process's start time (`pg_time_t`,

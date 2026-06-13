@@ -1,18 +1,12 @@
 //! Seam declarations for the `backend-storage-buffer-bufmgr` unit
-//! (`storage/buffer/bufmgr.c`): reads of its GUC-assigned globals.
+//! (`storage/buffer/bufmgr.c`).
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
-
-seam_core::seam!(
-    /// `effective_io_concurrency` (bufmgr.c): the GUC of the same name.
-    pub fn effective_io_concurrency() -> i32
-);
-
-seam_core::seam!(
-    /// `maintenance_io_concurrency` (bufmgr.c): the GUC of the same name.
-    pub fn maintenance_io_concurrency() -> i32
-);
+//!
+//! The `effective_io_concurrency` / `maintenance_io_concurrency` GUC globals
+//! deliberately have no getter seams: per the no-ambient-global-seams rule,
+//! consumers take the values as explicit parameters.
 
 seam_core::seam!(
     /// `RelationGetNumberOfBlocksInFork(relation, forkNum)` (bufmgr.c): the

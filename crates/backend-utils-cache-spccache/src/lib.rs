@@ -17,11 +17,8 @@
 use std::cell::RefCell;
 
 use backend_access_common_reloptions_seams as reloptions_seams;
-use backend_optimizer_path_costsize_seams as costsize_seams;
-use backend_storage_buffer_bufmgr_seams as bufmgr_seams;
 use backend_utils_cache_inval_seams as inval_seams;
 use backend_utils_cache_syscache as syscache;
-use backend_utils_init_small_seams as globals_seams;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use types_cache::SysCacheKey;
 use types_core::{InvalidOid, Oid};
@@ -88,11 +85,14 @@ fn InitializeTableSpaceCache() -> PgResult<()> {
 
 /// `get_tablespace` — fetch the cached entry for a specified tablespace OID,
 /// reading pg_tablespace on a cache miss.
-fn get_tablespace(mut spcid: Oid) -> PgResult<Option<TableSpaceOpts>> {
+///
+/// `my_database_tablespace` is C's `MyDatabaseTableSpace` (globals.c),
+/// passed explicitly by the public entry points — no ambient-global seams.
+fn get_tablespace(mut spcid: Oid, my_database_tablespace: Oid) -> PgResult<Option<TableSpaceOpts>> {
     // Since spcid is always from a pg_class tuple, InvalidOid implies the
     // default.
     if spcid == InvalidOid {
-        spcid = globals_seams::my_database_tablespace::call();
+        spcid = my_database_tablespace;
     }
 
     // Find existing cache entry, if any.
@@ -164,19 +164,32 @@ fn get_tablespace(mut spcid: Oid) -> PgResult<Option<TableSpaceOpts>> {
     Ok(opts)
 }
 
+/// The GUC fallbacks `get_tablespace_page_costs` uses when the tablespace
+/// carries no override: costsize.c's `random_page_cost` / `seq_page_cost`
+/// globals. Passed explicitly (no ambient-global seams); callers read them
+/// off the costsize unit's state when it lands.
+#[derive(Clone, Copy, Debug)]
+pub struct PageCostDefaults {
+    pub random_page_cost: f64,
+    pub seq_page_cost: f64,
+}
+
 /// `get_tablespace_page_costs` — return random and/or sequential page costs
 /// for a given tablespace.
 ///
 /// This value is not locked by the transaction, so it may be changed while a
 /// SELECT that has used these values for planning is still executing. The C
 /// nullable out-pointers are optional mutable borrows.
+/// `my_database_tablespace` is C's `MyDatabaseTableSpace` (globals.c).
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the C predicate, complemented exactly
 pub fn get_tablespace_page_costs(
     spcid: Oid,
+    my_database_tablespace: Oid,
+    defaults: &PageCostDefaults,
     spc_random_page_cost: Option<&mut f64>,
     spc_seq_page_cost: Option<&mut f64>,
 ) -> PgResult<()> {
-    let spc = get_tablespace(spcid)?;
+    let spc = get_tablespace(spcid, my_database_tablespace)?;
     // Assert(spc != NULL) — get_tablespace always produces an entry; `spc`
     // here is the entry's opts (None == C spc->opts == NULL).
 
@@ -185,14 +198,14 @@ pub fn get_tablespace_page_costs(
         // (written as the exact complement so NaN behaves identically).
         *out = match &spc {
             Some(opts) if !(opts.random_page_cost < 0.0) => opts.random_page_cost,
-            _ => costsize_seams::random_page_cost::call(),
+            _ => defaults.random_page_cost,
         };
     }
 
     if let Some(out) = spc_seq_page_cost {
         *out = match &spc {
             Some(opts) if !(opts.seq_page_cost < 0.0) => opts.seq_page_cost,
-            _ => costsize_seams::seq_page_cost::call(),
+            _ => defaults.seq_page_cost,
         };
     }
 
@@ -203,20 +216,32 @@ pub fn get_tablespace_page_costs(
 ///
 /// This value is not locked by the transaction, so it may be changed while a
 /// SELECT that has used these values for planning is still executing.
-pub fn get_tablespace_io_concurrency(spcid: Oid) -> PgResult<i32> {
-    let spc = get_tablespace(spcid)?;
+/// `effective_io_concurrency` is bufmgr.c's GUC of the same name, passed
+/// explicitly; `my_database_tablespace` is C's `MyDatabaseTableSpace`.
+pub fn get_tablespace_io_concurrency(
+    spcid: Oid,
+    my_database_tablespace: Oid,
+    effective_io_concurrency: i32,
+) -> PgResult<i32> {
+    let spc = get_tablespace(spcid, my_database_tablespace)?;
     Ok(match spc {
         Some(opts) if opts.effective_io_concurrency >= 0 => opts.effective_io_concurrency,
-        _ => bufmgr_seams::effective_io_concurrency::call(),
+        _ => effective_io_concurrency,
     })
 }
 
 /// `get_tablespace_maintenance_io_concurrency`.
-pub fn get_tablespace_maintenance_io_concurrency(spcid: Oid) -> PgResult<i32> {
-    let spc = get_tablespace(spcid)?;
+/// `maintenance_io_concurrency` is bufmgr.c's GUC of the same name, passed
+/// explicitly; `my_database_tablespace` is C's `MyDatabaseTableSpace`.
+pub fn get_tablespace_maintenance_io_concurrency(
+    spcid: Oid,
+    my_database_tablespace: Oid,
+    maintenance_io_concurrency: i32,
+) -> PgResult<i32> {
+    let spc = get_tablespace(spcid, my_database_tablespace)?;
     Ok(match spc {
         Some(opts) if opts.maintenance_io_concurrency >= 0 => opts.maintenance_io_concurrency,
-        _ => bufmgr_seams::maintenance_io_concurrency::call(),
+        _ => maintenance_io_concurrency,
     })
 }
 
