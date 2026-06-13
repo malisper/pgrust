@@ -8125,6 +8125,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-tuple",
+ "types-typcache",
 ]
 
 [[package]]
