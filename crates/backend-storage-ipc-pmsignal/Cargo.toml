@@ -1,0 +1,44 @@
+[package]
+name = "backend-storage-ipc-pmsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_ipc_pmsignal"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-error = { path = "../backend-utils-error" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-condvar = { path = "../types-condvar" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-pgstat = { path = "../types-pgstat" }
+types-storage = { path = "../types-storage" }
+libc = "0.2"
+
+# Inward seam crates this unit owns and installs.
+backend-storage-ipc-barrier-seams = { path = "../backend-storage-ipc-barrier-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+
+# Direct dependency: spinlock primitives for the Barrier mutex.
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+
+# Outward seam crates (callees owned by other units / not yet ported).
+backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+types-signal = { path = "../types-signal" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }

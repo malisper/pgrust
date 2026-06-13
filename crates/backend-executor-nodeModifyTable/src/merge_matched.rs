@@ -226,7 +226,7 @@ pub fn ExecMergeMatched<'mcx>(
             // from `mas_action`, and clones of the `mas_whenqual`/`mas_proj`
             // exec-state structs so the `estate` borrow is free for the
             // `ExecQual`/`ExecProject` owner seams. Mirrors `ExecMergeNotMatched`.
-            let (command_type, action_match_kind, whenqual, proj) = {
+            let (command_type, action_match_kind, action_overriding, whenqual, proj) = {
                 let action = &estate.result_rel(result_rel_info).ri_MergeActions
                     [action_kind as usize]
                     .as_ref()
@@ -238,6 +238,7 @@ pub fn ExecMergeMatched<'mcx>(
                 (
                     mas_action.commandType,
                     mas_action.matchKind,
+                    mas_action.overriding,
                     action.mas_whenqual.as_ref().map(|w| (**w).clone()),
                     action.mas_proj.as_ref().map(|p| (**p).clone()),
                 )
@@ -302,13 +303,34 @@ pub fn ExecMergeMatched<'mcx>(
 
                     // mtstate->mt_merge_action = relaction;
                     //
-                    // (The current-action pointer is consumed by
-                    // transition-capture and the ON CONFLICT / RETURNING paths;
-                    // setting it would require aliasing the pooled
-                    // MergeActionState, which the owned-by-value state tree does
-                    // not provide. Those consumers are themselves seamed to
-                    // unported neighbors, so the read is re-derived where it
-                    // lands; consistent with ExecMergeNotMatched.)
+                    // The C aliases the active pooled `MergeActionState` so the
+                    // executor can attribute the running WHEN clause (consumed by
+                    // ExecInsert's RLS WCO-kind selection, EXPLAIN, and error
+                    // context). The owned-by-value tree can't share the `&'mcx`
+                    // borrow into the pooled state, so we materialize an owned
+                    // `MergeActionState` carrying the active action's identity —
+                    // exactly the fields any consumer reads (`mas_action`'s
+                    // commandType/matchKind/overriding), mirroring how
+                    // ExecInitMerge builds the pooled state.
+                    mtstate.mt_merge_action = Some(mcx::alloc_in(
+                        mcx,
+                        types_nodes::modifytable::MergeActionState {
+                            type_: types_nodes::nodes::T_MergeActionState,
+                            mas_action: Some(mcx::alloc_in(
+                                mcx,
+                                types_nodes::modifytable::MergeAction {
+                                    matchKind: action_match_kind,
+                                    commandType: command_type,
+                                    overriding: action_overriding,
+                                    qual: None,
+                                    targetList: None,
+                                    updateColnos: None,
+                                },
+                            )?),
+                            mas_proj: None,
+                            mas_whenqual: None,
+                        },
+                    )?);
 
                     let mut prologue_result = TM_Result::TM_Ok;
                     if !crate::update::ExecUpdatePrologue(
@@ -389,8 +411,27 @@ pub fn ExecMergeMatched<'mcx>(
 
                 CmdType::CMD_DELETE => {
                     // mtstate->mt_merge_action = relaction; (see the CMD_UPDATE
-                    // arm — the current-action pointer is dropped in the
-                    // owned-by-value model.)
+                    // arm — materialize an owned MergeActionState for the active
+                    // action so consumers attribute the running WHEN clause.)
+                    mtstate.mt_merge_action = Some(mcx::alloc_in(
+                        mcx,
+                        types_nodes::modifytable::MergeActionState {
+                            type_: types_nodes::nodes::T_MergeActionState,
+                            mas_action: Some(mcx::alloc_in(
+                                mcx,
+                                types_nodes::modifytable::MergeAction {
+                                    matchKind: action_match_kind,
+                                    commandType: command_type,
+                                    overriding: action_overriding,
+                                    qual: None,
+                                    targetList: None,
+                                    updateColnos: None,
+                                },
+                            )?),
+                            mas_proj: None,
+                            mas_whenqual: None,
+                        },
+                    )?);
 
                     let mut prologue_result = TM_Result::TM_Ok;
                     if !crate::delete::ExecDeletePrologue(

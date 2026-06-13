@@ -8,7 +8,7 @@ use types_array::ArrayElementDatum;
 use types_core::Oid;
 use types_datum::datum::Datum;
 use types_error::{
-    PgResult, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    PgError, PgResult, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERROR,
 };
@@ -886,52 +886,322 @@ pub fn trim_array<'mcx>(mcx: Mcx<'mcx>, array: &[u8], n: i32) -> PgResult<PgVec<
 // Iterator (arrayfuncs.c).
 // ---------------------------------------------------------------------------
 
-/// `array_create_iterator(arr, slice_ndim, mstate)` (arrayfuncs.c:4602).
+/// `ArrayIteratorData` (arrayfuncs.c:68) — working state for `array_iterate()`.
 ///
-/// The C builds a heap-allocated `ArrayIteratorData` (data pointer cursor,
-/// null-bitmap cursor, `nitems`, element typlen/byval/align, slice workspace)
-/// and threads it through `array_iterate` / `array_free_iterator`. The
-/// scaffold signature returns `()` and the iterate/free helpers carry no
-/// iterator argument, so there is no place to hold that cross-call state. The
-/// real `ArrayIterator` / `ArrayIteratorData` vocabulary type is not yet
-/// defined; introducing one here would be an invented opaque handle. Mirror the
-/// C entry point and panic loudly until the iterator type lands.
+/// `ArrayIteratorData` is private to arrayfuncs.c (the C `array.h` exposes only
+/// the opaque `typedef struct ArrayIteratorData *ArrayIterator`), so the struct
+/// lives here in the porting crate rather than in `types-array`, exactly where C
+/// keeps it. The byte model substitutes byte offsets for the C raw `char *` /
+/// `bits8 *` cursors and owns the slice workspace in `mcx`-allocated `PgVec`s
+/// instead of bare `palloc`'d arrays; the borrowed array buffer carries `'mcx`
+/// (the C contract requires the array to outlive the iterator).
+pub struct ArrayIteratorData<'mcx> {
+    /* basic info about the array, set up during array_create_iterator() */
+    /// `arr` — array we're iterating through (borrowed for the iterator's life).
+    arr: &'mcx [u8],
+    /// `nullbitmap` — its null bitmap offset, if any (`ARR_NULLBITMAP`).
+    nullbitmap: Option<usize>,
+    /// `nitems` — total number of elements in array.
+    nitems: i32,
+    /// `typlen` — element type's length.
+    typlen: i16,
+    /// `typbyval` — element type's byval property.
+    typbyval: bool,
+    /// `typalign` — element type's align property.
+    typalign: u8,
+
+    /* information about the requested slice size */
+    /// `slice_ndim` — slice dimension, or 0 if not slicing.
+    slice_ndim: i32,
+    /// `slice_len` — number of elements per slice.
+    slice_len: i32,
+    /// `slice_dims` — slice dims array (rightmost N dims of `arr`).
+    slice_dims: PgVec<'mcx, i32>,
+    /// `slice_lbound` — slice lbound array (rightmost N lbounds of `arr`).
+    slice_lbound: PgVec<'mcx, i32>,
+    /// `slice_values` — workspace of length `slice_len`.
+    slice_values: PgVec<'mcx, Datum>,
+    /// `slice_nulls` — workspace of length `slice_len`.
+    slice_nulls: PgVec<'mcx, bool>,
+
+    /* current position information, updated on each iteration */
+    /// `data_ptr` — our current position (byte offset) in the array.
+    data_ptr: usize,
+    /// `current_item` — the item # we're at in the array.
+    current_item: i32,
+}
+
+/// `array_create_iterator(arr, slice_ndim, mstate)` (arrayfuncs.c:4602): set up
+/// to iterate through an array.
+///
+/// If `slice_ndim` is zero, we iterate element-by-element; the returned datums
+/// are of the array's element type. If `slice_ndim` is `1..ARR_NDIM(arr)`, we
+/// iterate by slices (datums of the same array type, sized to the rightmost N
+/// dimensions). The passed-in `array` must remain valid for the iterator's life
+/// (`'mcx`).
+///
+/// `mstate` (C `ArrayMetaState *`) supplies a cached element storage triple; the
+/// iterator only ever reads its `typlen`/`typbyval`/`typalign`, so it is modeled
+/// as `Option<TypLenByValAlign>` (the lsyscache seam's existing vocabulary)
+/// rather than inventing the full `ArrayMetaState` I/O-function record the
+/// iterator never touches. `None` mirrors the C `mstate == NULL` arm
+/// (`get_typlenbyvalalign(ARR_ELEMTYPE(arr), ...)`).
 pub fn array_create_iterator<'mcx>(
     mcx: Mcx<'mcx>,
-    array: &[u8],
+    array: &'mcx [u8],
     slice_ndim: i32,
-) -> PgResult<()> {
-    let _ = (mcx, array, slice_ndim);
-    panic!(
-        "array_create_iterator: needs the ArrayIteratorData state type (data/bitmap cursors, \
-         nitems, slice workspace) which the simplified scaffold signature cannot carry and \
-         types-array does not yet define; lands with the iterator vocabulary \
-         (mirror-and-panic per Opacity-inherited-never-introduced)"
-    )
+    mstate: Option<lsyscache::TypLenByValAlign>,
+) -> PgResult<ArrayIteratorData<'mcx>> {
+    // Sanity-check inputs --- caller should have got this right already.
+    // Assert(PointerIsValid(arr));
+    let ndim = foundation::arr_ndim(array);
+    if slice_ndim < 0 || slice_ndim > ndim {
+        // elog(ERROR, "invalid arguments to array_create_iterator");
+        return Err(PgError::error("invalid arguments to array_create_iterator")
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR));
+    }
+
+    // Remember basic info about the array and its element type.
+    //   iterator->arr = arr;
+    //   iterator->nullbitmap = ARR_NULLBITMAP(arr);
+    //   iterator->nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+    let nullbitmap = foundation::arr_nullbitmap_off(array);
+    let dims = foundation::arr_dims(mcx, array)?;
+    let nitems = arrayutils::array_get_n_items::call(ndim, &dims)?;
+
+    let (typlen, typbyval, typalign) = if let Some(ms) = mstate {
+        // Assert(mstate->element_type == ARR_ELEMTYPE(arr));
+        // iterator->typlen/typbyval/typalign = mstate->...;
+        (ms.typlen, ms.typbyval, ms.typalign as u8)
+    } else {
+        // get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
+        let s = lsyscache::get_typlenbyvalalign::call(foundation::arr_elemtype(array))?;
+        (s.typlen, s.typbyval, s.typalign as u8)
+    };
+
+    // Remember the slicing parameters.
+    //   iterator->slice_ndim = slice_ndim;
+    let mut slice_len: i32 = 0;
+    let mut slice_dims: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let mut slice_lbound: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let mut slice_values: PgVec<'mcx, Datum> = PgVec::new_in(mcx);
+    let mut slice_nulls: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+
+    if slice_ndim > 0 {
+        // Get pointers into the array's dims and lbound arrays to represent the
+        // dims/lbound arrays of a slice. These are the same as the rightmost N
+        // dimensions of the array.
+        //   iterator->slice_dims = ARR_DIMS(arr) + ARR_NDIM(arr) - slice_ndim;
+        //   iterator->slice_lbound = ARR_LBOUND(arr) + ARR_NDIM(arr) - slice_ndim;
+        let base = (ndim - slice_ndim) as usize;
+        for i in 0..slice_ndim as usize {
+            slice_dims.push(foundation::arr_dim(array, base + i));
+            slice_lbound.push(foundation::arr_lbound(array, base + i));
+        }
+
+        // Compute number of elements in a slice.
+        //   iterator->slice_len = ArrayGetNItems(slice_ndim, iterator->slice_dims);
+        slice_len = arrayutils::array_get_n_items::call(slice_ndim, &slice_dims)?;
+
+        // Create workspace for building sub-arrays.
+        //   iterator->slice_values = palloc(slice_len * sizeof(Datum));
+        //   iterator->slice_nulls  = palloc(slice_len * sizeof(bool));
+        slice_values = vec_with_capacity_in::<Datum>(mcx, slice_len.max(0) as usize)?;
+        slice_values.resize(slice_len.max(0) as usize, Datum::null());
+        slice_nulls = vec_with_capacity_in::<bool>(mcx, slice_len.max(0) as usize)?;
+        slice_nulls.resize(slice_len.max(0) as usize, false);
+    }
+
+    // Initialize our data pointer and linear element number. These will advance
+    // through the array during array_iterate().
+    //   iterator->data_ptr = ARR_DATA_PTR(arr);
+    //   iterator->current_item = 0;
+    Ok(ArrayIteratorData {
+        arr: array,
+        nullbitmap,
+        nitems,
+        typlen,
+        typbyval,
+        typalign,
+        slice_ndim,
+        slice_len,
+        slice_dims,
+        slice_lbound,
+        slice_values,
+        slice_nulls,
+        data_ptr: foundation::arr_data_ptr_off(array),
+        current_item: 0,
+    })
 }
 
-/// `array_iterate(iterator, &value, &isnull)` (arrayfuncs.c): yield the next
-/// element (or slice); `Ok(None)` at exhaustion (C: returns `false`).
+/// One item yielded by [`array_iterate`] — the two arms of the C
+/// `*value`/`*isnull` out-params.
 ///
-/// Cannot advance without the `ArrayIteratorData` cursor state described on
-/// [`array_create_iterator`]; mirror-and-panic until that type lands.
-pub fn array_iterate(/* iterator: &mut ArrayIterator */) -> PgResult<Option<(Datum, bool)>> {
-    panic!(
-        "array_iterate: needs the ArrayIteratorData cursor state (not yet defined); see \
-         array_create_iterator (mirror-and-panic)"
-    )
+/// The C function writes a single `Datum`/`bool` pair for both arms, but the
+/// slice arm's `Datum` is `PointerGetDatum(result)` for a freshly `palloc`'d
+/// sub-array; the owned byte model has no global address space, so the built
+/// buffer is carried out by value here (`Slice`) instead of as a dangling
+/// pointer word. The scalar arm matches C directly (`Scalar`): a by-value Datum,
+/// or — for by-reference element types — the `fetch_att` byte offset into the
+/// iterator's array buffer.
+pub enum ArrayIterateItem<'mcx> {
+    /// `slice_ndim == 0`: one element value (`*value`, `*isnull`).
+    Scalar { value: Datum, isnull: bool },
+    /// `slice_ndim > 0`: a freshly built sub-array (C: `PointerGetDatum(result)`,
+    /// `*isnull = false`).
+    Slice(PgVec<'mcx, u8>),
 }
 
-/// `array_free_iterator(iterator)` (arrayfuncs.c).
+/// `array_iterate(iterator, &value, &isnull)` (arrayfuncs.c:4682): iterate
+/// through the array referenced by `iterator`.
 ///
-/// Frees the iterator's slice workspace and the iterator itself; with no
-/// iterator state type defined there is nothing to free. Mirror-and-panic until
-/// the type lands.
-pub fn array_free_iterator() {
-    panic!(
-        "array_free_iterator: needs the ArrayIteratorData state type (not yet defined); see \
-         array_create_iterator (mirror-and-panic)"
-    )
+/// As long as there is another element (or slice), return it as `Some(item)`
+/// (C: `true`); return `Ok(None)` when no more data (C: `false`). For the
+/// by-reference scalar case the returned `Datum` is a byte offset into the
+/// iterator's array buffer (the byte-model `fetch_att` convention); the slice
+/// case returns the freshly built sub-array buffer by value.
+pub fn array_iterate<'mcx>(
+    mcx: Mcx<'mcx>,
+    iterator: &mut ArrayIteratorData<'mcx>,
+) -> PgResult<Option<ArrayIterateItem<'mcx>>> {
+    // Done if we have reached the end of the array.
+    if iterator.current_item >= iterator.nitems {
+        return Ok(None);
+    }
+
+    if iterator.slice_ndim == 0 {
+        // Scalar case: return one element.
+        let is_null = foundation::array_get_isnull(
+            iterator.arr,
+            iterator.nullbitmap,
+            iterator.current_item,
+        );
+        iterator.current_item += 1;
+        if is_null {
+            Ok(Some(ArrayIterateItem::Scalar {
+                value: Datum::null(),
+                isnull: true,
+            }))
+        } else {
+            // non-NULL, so fetch the individual Datum to return.
+            let p = iterator.data_ptr;
+            let value = foundation::fetch_att(
+                iterator.arr,
+                p,
+                iterator.typbyval,
+                iterator.typlen as i32,
+            );
+            // Move our data pointer forward to the next element.
+            //   p = att_addlength_pointer(p, typlen, p);
+            //   p = att_align_nominal(p, typalign);
+            let p = foundation::att_addlength_pointer(p, iterator.typlen as i32, iterator.arr, p);
+            iterator.data_ptr = foundation::att_align_nominal(p, iterator.typalign);
+            Ok(Some(ArrayIterateItem::Scalar {
+                value,
+                isnull: false,
+            }))
+        }
+    } else {
+        // Slice case: build and return an array of the requested size.
+        let mut p = iterator.data_ptr;
+        // Record per-element byte windows for the by-ref construct path; the
+        // workspace `slice_values` carries the C `fetch_att` Datums (mirroring
+        // the persistent workspace), and the windows feed `construct_md_array`'s
+        // by-reference element bytes exactly as `array_replace_internal` does.
+        let mut windows: PgVec<'mcx, Option<&'mcx [u8]>> =
+            vec_with_capacity_in(mcx, iterator.slice_len.max(0) as usize)?;
+        for i in 0..iterator.slice_len as usize {
+            let is_null = foundation::array_get_isnull(
+                iterator.arr,
+                iterator.nullbitmap,
+                iterator.current_item,
+            );
+            iterator.current_item += 1;
+            if is_null {
+                iterator.slice_nulls[i] = true;
+                iterator.slice_values[i] = Datum::null();
+                windows.push(None);
+            } else {
+                iterator.slice_nulls[i] = false;
+                iterator.slice_values[i] = foundation::fetch_att(
+                    iterator.arr,
+                    p,
+                    iterator.typbyval,
+                    iterator.typlen as i32,
+                );
+                // Move our data pointer forward to the next element.
+                let after =
+                    foundation::att_addlength_pointer(p, iterator.typlen as i32, iterator.arr, p);
+                if !iterator.typbyval {
+                    // SAFETY-of-model: the element window lives in the iterator's
+                    // `'mcx` array buffer; tie it to `'mcx` (the by-ref element
+                    // convention shared with `array_unnest`/`array_replace`).
+                    let window: &'mcx [u8] = unsafe {
+                        core::slice::from_raw_parts(
+                            iterator.arr[p..after].as_ptr(),
+                            after - p,
+                        )
+                    };
+                    windows.push(Some(window));
+                } else {
+                    windows.push(None);
+                }
+                p = foundation::att_align_nominal(after, iterator.typalign);
+            }
+        }
+        iterator.data_ptr = p;
+
+        // result = construct_md_array(values, nulls, slice_ndim, slice_dims,
+        //                             slice_lbound, ARR_ELEMTYPE(arr),
+        //                             typlen, typbyval, typalign);
+        let elmtype = foundation::arr_elemtype(iterator.arr);
+        // The by-reference element Datums handed to construct_md_array must carry
+        // the element bytes (the construct family reads them via the detoast
+        // seam, keyed by the pointer word); recover the pointer word from each
+        // saved window exactly as `elem_as_datum` does on the rebuild path.
+        let values: PgVec<'mcx, Datum> = {
+            let mut v = vec_with_capacity_in::<Datum>(mcx, iterator.slice_len.max(0) as usize)?;
+            for i in 0..iterator.slice_len as usize {
+                if let Some(w) = windows[i] {
+                    v.push(Datum::from_usize(w.as_ptr() as usize));
+                } else {
+                    v.push(iterator.slice_values[i]);
+                }
+            }
+            v
+        };
+        let result = construct::construct_md_array(
+            mcx,
+            &values,
+            Some(&iterator.slice_nulls[..]),
+            iterator.slice_ndim,
+            &iterator.slice_dims,
+            &iterator.slice_lbound,
+            elmtype,
+            iterator.typlen as i32,
+            iterator.typbyval,
+            iterator.typalign,
+        )?;
+
+        // *isnull = false; *value = PointerGetDatum(result);
+        // The owned byte model returns the freshly built sub-array buffer by
+        // value rather than as a dangling pointer word.
+        Ok(Some(ArrayIterateItem::Slice(result)))
+    }
+}
+
+/// `array_free_iterator(iterator)` (arrayfuncs.c:4765): release an
+/// `ArrayIteratorData`.
+///
+/// The C frees the slice workspace (`slice_values`/`slice_nulls`) and the
+/// iterator itself with `pfree`. In the owned model the iterator and its
+/// `mcx`-allocated workspace are dropped when ownership ends; consuming
+/// `iterator` by value mirrors the C teardown (drop runs the `PgVec`
+/// destructors, releasing the workspace).
+pub fn array_free_iterator(iterator: ArrayIteratorData<'_>) {
+    // if (iterator->slice_ndim > 0) { pfree(slice_values); pfree(slice_nulls); }
+    // pfree(iterator);
+    drop(iterator);
 }
 
 // ---------------------------------------------------------------------------
@@ -988,4 +1258,91 @@ fn dims_vec(a: &[u8]) -> Vec<i32> {
 /// boundary where the C `PG_DETOAST_DATUM(value)` reads through the pointer.
 fn datum_as_byte_window<'a>(_value: Datum) -> &'a [u8] {
     &[]
+}
+
+#[cfg(test)]
+mod iterator_tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    /// Install the pure `arrayutils.c` integer-math seams the iterator drives
+    /// (`ArrayGetNItems`), with the faithful overflow-checked product. Idempotent
+    /// across tests via the seam's set-once semantics tolerating re-set.
+    fn install_arrayutils_seams() {
+        // ArrayGetNItems(ndim, dims): product of dims (bounded by MaxArraySize in
+        // C; the small fixtures here never approach it). `set` is set-once, so
+        // guard against the second test installing it again.
+        if !arrayutils::array_get_n_items::is_installed() {
+            arrayutils::array_get_n_items::set(|ndim: i32, dims: &[i32]| {
+                let mut ret: i32 = 1;
+                for i in 0..ndim.max(0) as usize {
+                    ret = ret.checked_mul(dims[i]).expect("ArrayGetNItems overflow");
+                }
+                Ok(ret)
+            });
+        }
+    }
+
+    /// Build a 1-D no-nulls `int4[]` buffer holding `vals` (lbound 1).
+    fn build_int4_array(vals: &[i32]) -> Vec<u8> {
+        let ndim = 1i32;
+        let dataoff = foundation::arr_overhead_nonulls(ndim); // MAXALIGN(16+8)=24
+        let total = dataoff + vals.len() * 4;
+        let mut a = vec![0u8; total];
+        foundation::set_header(&mut a, total, ndim, 0, foundation::INT4OID);
+        foundation::write_dims(&mut a, &[vals.len() as i32]);
+        foundation::write_lbounds(&mut a, ndim, &[1]);
+        for (i, &v) in vals.iter().enumerate() {
+            let off = dataoff + i * 4;
+            a[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        a
+    }
+
+    #[test]
+    fn element_iteration_int4() {
+        install_arrayutils_seams();
+        let ctx = MemoryContext::new("array_iterate_test");
+        let mcx = ctx.mcx();
+
+        let buf = build_int4_array(&[10, 20, 30]);
+        let mstate = lsyscache::TypLenByValAlign {
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+        };
+        let mut it = array_create_iterator(mcx, &buf, 0, Some(mstate)).unwrap();
+
+        let mut got = Vec::new();
+        while let Some(item) = array_iterate(mcx, &mut it).unwrap() {
+            match item {
+                ArrayIterateItem::Scalar { value, isnull } => {
+                    assert!(!isnull);
+                    got.push(value.as_i32());
+                }
+                ArrayIterateItem::Slice(_) => panic!("unexpected slice item"),
+            }
+        }
+        assert_eq!(got, vec![10, 20, 30]);
+        // No more items after exhaustion.
+        assert!(array_iterate(mcx, &mut it).unwrap().is_none());
+        array_free_iterator(it);
+    }
+
+    #[test]
+    fn invalid_slice_ndim_errors() {
+        install_arrayutils_seams();
+        let ctx = MemoryContext::new("array_iterate_test2");
+        let mcx = ctx.mcx();
+        let buf = build_int4_array(&[1, 2]);
+        let mstate = lsyscache::TypLenByValAlign {
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+        };
+        // slice_ndim > ARR_NDIM(arr) (== 1) is rejected.
+        assert!(array_create_iterator(mcx, &buf, 2, Some(mstate)).is_err());
+        // negative slice_ndim is rejected.
+        assert!(array_create_iterator(mcx, &buf, -1, Some(mstate)).is_err());
+    }
 }

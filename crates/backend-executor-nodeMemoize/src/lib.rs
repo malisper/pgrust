@@ -33,11 +33,12 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{Oid, Size};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
-use types_nodes::execnodes::EStateData;
+use types_nodes::execnodes::{EStateData, ScanStateData, SlotId};
 use types_nodes::nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
-    MemoizeScanState,
+    MemoizeKeyAttr, MemoizeScanState,
 };
+use types_nodes::TupleSlotKind;
 use types_tuple::heaptuple::MinimalTupleData;
 
 use backend_access_transam_parallel_seams as parallel;
@@ -148,8 +149,7 @@ fn prepare_probe_slot<'mcx>(
             // ExecStoreMinimalTuple(key->params, tslot, false); slot_getallattrs(tslot);
             // memcpy(pslot->tts_values, tslot->tts_values, sizeof(Datum) * numKeys);
             // memcpy(pslot->tts_isnull, tslot->tts_isnull, sizeof(bool) * numKeys);
-            let mcx = estate.es_query_cxt;
-            let (values, isnull) = deform_key_params(params, num_keys, mcx)?;
+            let (values, isnull) = deform_key_params(mstate, params, num_keys, estate)?;
             // tableslot also holds the deformed values (used by MemoizeHash_equal
             // in non-binary mode via the cache_eq_expr ecxt_innertuple).
             mstate.table_values.clear();
@@ -234,8 +234,7 @@ fn memoize_hash_equal<'mcx>(
     // owned table slot.
     let numkeys = mstate.nkeys as usize;
     {
-        let mcx = estate.es_query_cxt;
-        let (values, isnull) = deform_key_params(params, numkeys, mcx)?;
+        let (values, isnull) = deform_key_params(mstate, params, numkeys, estate)?;
         mstate.table_values.clear();
         mstate.table_isnull.clear();
         for i in 0..numkeys {
@@ -789,10 +788,16 @@ pub fn ExecMemoize<'mcx>(
 
 /// `ExecInitMemoize(node, estate, eflags)` — initialize the node and subnodes.
 pub fn ExecInitMemoize<'mcx>(
-    node: &'mcx Memoize<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<alloc::boxed::Box<MemoizeScanState<'mcx>>> {
+    // MemoizeState *mstate = makeNode(MemoizeState);
+    let node: &'mcx Memoize<'mcx> = match plan_node {
+        types_nodes::nodes::Node::Memoize(m) => m,
+        other => panic!("castNode(Memoize, node) failed: {other:?}"),
+    };
+
     let mut mstate = make_memoize_state(estate)?;
 
     // check for unsupported flags.
@@ -800,7 +805,7 @@ pub fn ExecInitMemoize<'mcx>(
 
     // mstate->ss.ps.plan = (Plan *) node; ->state = estate;
     // ->ExecProcNode = ExecMemoize.
-    init_plan_state_links(&mut mstate, node, estate)?;
+    init_plan_state_links(&mut mstate, plan_node, estate)?;
 
     // Miscellaneous initialization: create expression context for node.
     //   ExecAssignExprContext(estate, &mstate->ss.ps);
@@ -851,7 +856,7 @@ pub fn ExecInitMemoize<'mcx>(
     let eqfuncoids = build_eqfuncoids(&mut mstate, node, estate)?;
 
     // mstate->cache_eq_expr = ExecBuildParamSetEqual(...).
-    build_cache_eq_expr(&mut mstate, node, &eqfuncoids)?;
+    build_cache_eq_expr(&mut mstate, node, &eqfuncoids, estate)?;
     // pfree(eqfuncoids): the PgVec drops here, releasing its per-query charge.
     drop(eqfuncoids);
 
@@ -1492,114 +1497,282 @@ fn init_outer_plan<'mcx>(
     Ok(())
 }
 
-// --- Genuinely Memoize-owned operations (no owner-type leaf fits this port's
-// owned-vector data model) -------------------------------------------------
+// --- ExecInitMemoize builders ----------------------------------------------
 //
-// The Memoize port models the executor's slot/expr substrate as owned value
-// vectors (`probe_values`/`table_values`/`key_attrs`, `param_exprs`,
-// `cache_eq_expr`) rather than real `TupleTableSlot`s threaded by id, and does
-// not register the node in the `PlanStateNode` enum. The node factory, the
-// PlanState wiring, the hashkeydesc/slot sizing, the cache-equality expression
-// build, and the raw minimal-tuple deform/form over the owned vectors therefore
-// have no genuine owner-type leaf to route to (the executor substrate they would
-// consume — `makeNode`, the `ExecProcNode` install, `ExecTypeFromExprList` /
-// `MakeSingleTupleTableSlot`, `ExecBuildParamSetEqual`, and a TupleDesc to
-// deform/form a MinimalTuple against — is not wired into this owned model, and
-// threading it would be a data-model rewrite). They are Memoize-owned and, per
-// "mirror PG and panic", remain seam-and-panic here as in-crate plain functions
-// until that executor substrate lands for this port.
+// These mirror the `makeNode(MemoizeState)` / PlanState wiring / hashkeydesc +
+// slot setup / `ExecBuildParamSetEqual` / minimal-tuple deform-form of
+// `ExecInitMemoize` and `prepare_probe_slot`. The owned model carries the real
+// `hashkeydesc` `TupleDesc` and the `tableslot`/`probeslot` as ids in the
+// EState slot pool (created by `MakeSingleTupleTableSlot`), so the deform/form
+// run through the execTuples owner seams exactly as the C does
+// (`ExecStoreMinimalTuple` + `slot_getattr`, virtual store + `ExecCopySlotMinimalTuple`).
+// The per-key `attbyval`/`attlen` the binary-mode hash/equal loops need are
+// distilled from `hashkeydesc` into `key_attrs` at init time.
 
-/// `makeNode(MemoizeState)` — allocate and zero the executor-state node. Genuine
-/// Memoize-owned node factory; panics until the executor node substrate is wired
-/// into this port's owned model.
+/// The `PlanState.ExecProcNode` callback installed by [`ExecInitMemoize`]:
+/// `castNode(MemoizeState, pstate)` then run [`ExecMemoize`], returning the
+/// result slot's id (the C `return slot`) or `None`.
+fn exec_memoize_node<'mcx>(
+    pstate: &mut types_nodes::planstate::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let node = match pstate {
+        types_nodes::planstate::PlanStateNode::Memoize(node) => node,
+        other => panic!("castNode(MemoizeState, pstate) failed: {other:?}"),
+    };
+    if ExecMemoize(node, estate)? {
+        Ok(node.ss.ps.ps_ResultTupleSlot)
+    } else {
+        Ok(None)
+    }
+}
+
+/// `makeNode(MemoizeState)` — allocate and zero the executor-state node. C
+/// `makeNode` palloc0s the state in `CurrentMemoryContext` (the per-query
+/// context); here the owned `MemoizeScanState` is boxed with its embedded
+/// `ScanState`/`PlanState` heads default-initialized and the owned value
+/// vectors empty (sized later by `init_hashkeydesc_and_slots`). Fallible on OOM.
 fn make_memoize_state<'mcx>(
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<alloc::boxed::Box<MemoizeScanState<'mcx>>> {
-    unimplemented!(
-        "make_memoize_state: makeNode(MemoizeState) substrate is not wired into \
-         this port's owned model yet"
-    )
+    let mcx = estate.es_query_cxt;
+    let state = MemoizeScanState {
+        ss: ScanStateData::default(),
+        mstatus: MemoStatus::CacheLookup,
+        nkeys: 0,
+        hashkeydesc: None,
+        key_attrs: mcx::vec_with_capacity_in(mcx, 0)?,
+        tableslot: None,
+        probeslot: None,
+        table_values: mcx::vec_with_capacity_in(mcx, 0)?,
+        table_isnull: mcx::vec_with_capacity_in(mcx, 0)?,
+        probe_values: mcx::vec_with_capacity_in(mcx, 0)?,
+        probe_isnull: mcx::vec_with_capacity_in(mcx, 0)?,
+        cache_eq_expr: None,
+        param_exprs: mcx::vec_with_capacity_in(mcx, 0)?,
+        hashfunctions: mcx::vec_with_capacity_in(mcx, 0)?,
+        hashtable: None,
+        est_entries: 0,
+        collations: mcx::vec_with_capacity_in(mcx, 0)?,
+        mem_used: 0,
+        mem_limit: 0,
+        entry: None,
+        last_tuple: None,
+        singlerow: false,
+        binary_mode: false,
+        stats: MemoizeInstrumentation::default(),
+        shared_info: None,
+        keyparamids: None,
+        plan_node_id: 0,
+        table_context_name: None,
+    };
+    Ok(alloc::boxed::Box::new(state))
 }
 
-/// `mstate->ss.ps.plan = (Plan *) node; ->state = estate; ->ExecProcNode =
-/// ExecMemoize` — wire the PlanState back-links and install the execution
-/// callback. Genuine Memoize-owned wiring; panics until the `PlanStateNode`
-/// registration / `ExecProcNode` install is wired into this port's owned model.
+/// `mstate->ss.ps.plan = (Plan *) node; mstate->ss.ps.state = estate;
+/// mstate->ss.ps.ExecProcNode = ExecMemoize` — wire the PlanState back-link to
+/// the shared plan node and install the execution callback. (`state` is the
+/// `estate` the node init threads explicitly in the owned model; the
+/// `plan_node_id` DSM key is copied off the plan node.)
 fn init_plan_state_links<'mcx>(
-    _mstate: &mut MemoizeScanState<'mcx>,
-    _node: &Memoize<'mcx>,
+    mstate: &mut MemoizeScanState<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    unimplemented!(
-        "init_plan_state_links: PlanState back-link / ExecProcNode install is not \
-         wired into this port's owned model yet"
-    )
+    mstate.ss.ps.plan = Some(plan_node);
+    mstate.ss.ps.ExecProcNode = Some(exec_memoize_node);
+    mstate.plan_node_id = plan_node.plan_head().plan_node_id;
+    Ok(())
 }
 
-/// `mstate->hashkeydesc = ExecTypeFromExprList(node->param_exprs)` plus the
-/// `tableslot`/`probeslot` creation, resolved in the owned model into
-/// `key_attrs` and the sized owned value/null vectors and the
-/// `param_exprs`/`hashfunctions` arrays. Genuine Memoize-owned setup; panics
-/// until `ExecTypeFromExprList` / `MakeSingleTupleTableSlot` are wired in.
+/// `mstate->hashkeydesc = ExecTypeFromExprList(node->param_exprs)` then
+/// `mstate->tableslot = MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsMinimalTuple)`
+/// and `mstate->probeslot = MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsVirtual)`,
+/// plus the `param_exprs`/`hashfunctions` array allocations. The owned model
+/// also distills each key column's `attbyval`/`attlen` from `hashkeydesc` into
+/// `key_attrs` (the `TupleDescCompactAttr(hashkeydesc, i)` reads the binary-mode
+/// hash/equal loops perform) and presizes the `tts_values`/`tts_isnull` mirrors
+/// of the two slots. Fallible on OOM / type-lookup `ereport(ERROR)`.
 fn init_hashkeydesc_and_slots<'mcx>(
-    _mstate: &mut MemoizeScanState<'mcx>,
-    _node: &Memoize<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    mstate: &mut MemoizeScanState<'mcx>,
+    node: &Memoize<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    unimplemented!(
-        "init_hashkeydesc_and_slots: ExecTypeFromExprList / slot sizing substrate \
-         is not wired into this port's owned model yet"
-    )
+    let mcx = estate.es_query_cxt;
+    let nkeys = node.numKeys as usize;
+
+    // mstate->hashkeydesc = ExecTypeFromExprList(node->param_exprs);
+    let hashkeydesc =
+        execTuples::exec_type_from_expr_list::call(mcx, node.param_exprs.as_slice())?;
+
+    // Distill the per-key attbyval/attlen the binary-mode hash/equal loops read
+    // via TupleDescCompactAttr(hashkeydesc, i).
+    let mut key_attrs = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    {
+        let desc = hashkeydesc
+            .as_ref()
+            .ok_or_else(|| elog_internal("Memoize hashkeydesc is NULL"))?;
+        for i in 0..nkeys {
+            let attr = desc.compact_attr(i);
+            key_attrs.push(MemoizeKeyAttr {
+                attbyval: attr.attbyval,
+                attlen: attr.attlen,
+            });
+        }
+    }
+    mstate.key_attrs = key_attrs;
+
+    // mstate->tableslot = MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsMinimalTuple);
+    let tableslot = {
+        let desc_copy = clone_hashkeydesc(&hashkeydesc, mcx)?;
+        let slot =
+            execTuples::make_single_tuple_table_slot::call(mcx, desc_copy, TupleSlotKind::MinimalTuple)?;
+        estate.make_slot(slot)?
+    };
+    // mstate->probeslot = MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsVirtual);
+    let probeslot = {
+        let desc_copy = clone_hashkeydesc(&hashkeydesc, mcx)?;
+        let slot =
+            execTuples::make_single_tuple_table_slot::call(mcx, desc_copy, TupleSlotKind::Virtual)?;
+        estate.make_slot(slot)?
+    };
+    mstate.tableslot = Some(tableslot);
+    mstate.probeslot = Some(probeslot);
+    mstate.hashkeydesc = hashkeydesc;
+
+    // mstate->param_exprs = (ExprState **) palloc(nkeys * sizeof(ExprState *));
+    // mstate->hashfunctions = (FmgrInfo *) palloc(nkeys * sizeof(FmgrInfo));
+    // build_eqfuncoids fills these per key; here we presize the spines so the
+    // per-key writes (`mstate->param_exprs[i] = ...`) can index in place.
+    let mut param_exprs = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for _ in 0..nkeys {
+        // Placeholder ExprState; overwritten in build_eqfuncoids's per-key loop.
+        param_exprs.push(mcx::alloc_in(mcx, types_nodes::execexpr::ExprState::default())?);
+    }
+    mstate.param_exprs = param_exprs;
+
+    let mut hashfunctions = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    hashfunctions.resize(nkeys, types_core::fmgr::FmgrInfo::default());
+    mstate.hashfunctions = hashfunctions;
+
+    // Presize the tts_values/tts_isnull mirrors of the two slots.
+    let mut tv = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    tv.resize(nkeys, types_datum::Datum::null());
+    mstate.table_values = tv;
+    let mut ti = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    ti.resize(nkeys, false);
+    mstate.table_isnull = ti;
+    let mut pv = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    pv.resize(nkeys, types_datum::Datum::null());
+    mstate.probe_values = pv;
+    let mut pi = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    pi.resize(nkeys, false);
+    mstate.probe_isnull = pi;
+
+    Ok(())
 }
 
-/// `mstate->cache_eq_expr = ExecBuildParamSetEqual(...)` — compile the
-/// non-binary key-equality expression. Genuine Memoize-owned setup; panics until
-/// `ExecBuildParamSetEqual` is wired into this port's owned model.
+/// `CreateTupleDescCopy(hashkeydesc)` — a fresh owned copy of the cache-key row
+/// type for a slot to take ownership of (each `MakeSingleTupleTableSlot` fixes
+/// the slot to its own descriptor; the C node shares one `TupleDesc *`, the
+/// owned model gives each slot its own copy in `mcx`).
+fn clone_hashkeydesc<'mcx>(
+    hashkeydesc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    match hashkeydesc {
+        Some(desc) => Ok(Some(mcx::alloc_in(mcx, desc.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// `mstate->cache_eq_expr = ExecBuildParamSetEqual(mstate->hashkeydesc,
+/// &TTSOpsMinimalTuple, &TTSOpsVirtual, eqfuncoids, node->collations,
+/// node->param_exprs, (PlanState *) mstate)` — compile the non-binary
+/// key-equality expression. Routed through the execExpr owner seam.
 fn build_cache_eq_expr<'mcx>(
-    _mstate: &mut MemoizeScanState<'mcx>,
-    _node: &Memoize<'mcx>,
-    _eqfuncoids: &[Oid],
+    mstate: &mut MemoizeScanState<'mcx>,
+    node: &Memoize<'mcx>,
+    eqfuncoids: &[Oid],
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    unimplemented!(
-        "build_cache_eq_expr: ExecBuildParamSetEqual substrate is not wired into \
-         this port's owned model yet"
-    )
+    let desc_box = {
+        let desc = mstate
+            .hashkeydesc
+            .as_ref()
+            .ok_or_else(|| elog_internal("Memoize hashkeydesc is NULL"))?;
+        // The seam borrows the descriptor; clone the data out of the PgBox into a
+        // local owned copy whose borrow we lend (the C passes the live TupleDesc).
+        desc.clone_in(estate.es_query_cxt)?
+    };
+    let collations: Vec<Oid> = node.collations.iter().copied().collect();
+    let state = execExpr::exec_build_param_set_equal::call(
+        &desc_box,
+        TupleSlotKind::MinimalTuple,
+        TupleSlotKind::Virtual,
+        eqfuncoids,
+        &collations,
+        node.param_exprs.as_slice(),
+        &mut mstate.ss.ps,
+        estate,
+    )?;
+    mstate.cache_eq_expr = Some(state);
+    Ok(())
 }
 
-/// `ExecStoreMinimalTuple(params, tslot, false); slot_getallattrs(tslot)` —
-/// deform a cached entry's key `params` into `numkeys` values/nulls. Genuine
-/// Memoize-owned deform over a raw `MinimalTupleData` into plain `Vec<Datum>`;
-/// the owner `slot_getallattrs` leaf deforms a real `TupleTableSlot` by id into
-/// `DeformedColumn`, which does not fit this owned-vector shape and would need a
-/// threaded `TupleDesc` (the hashkeydesc) this model resolved away. Panics until
-/// that deform substrate is wired in.
+/// `ExecStoreMinimalTuple(params, mstate->tableslot, false); slot_getallattrs(
+/// mstate->tableslot)` then read the first `numkeys` `tts_values`/`tts_isnull` —
+/// deform a cached entry's key `params` into `numkeys` `(value, isnull)` pairs.
+/// Routed through the execTuples owner seams against the real `tableslot`.
 fn deform_key_params<'mcx>(
-    _params: &MinimalTupleData<'mcx>,
-    _numkeys: usize,
-    _mcx: Mcx<'mcx>,
+    mstate: &mut MemoizeScanState<'mcx>,
+    params: &MinimalTupleData<'mcx>,
+    numkeys: usize,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Vec<types_datum::Datum>, Vec<bool>)> {
-    unimplemented!(
-        "deform_key_params: minimal-tuple deform substrate (a threaded hashkeydesc \
-         TupleDesc) is not wired into this port's owned model yet"
-    )
+    let tableslot = mstate
+        .tableslot
+        .ok_or_else(|| elog_internal("Memoize tableslot not initialized"))?;
+    let mcx = estate.es_query_cxt;
+
+    // ExecStoreMinimalTuple(key->params, tslot, false): store a borrowed copy.
+    let mtup = mcx::alloc_in(mcx, params.clone_in(mcx)?)?;
+    execTuples::exec_force_store_minimal_tuple::call(tableslot, mtup, false, estate)?;
+
+    // slot_getallattrs(tslot); read tts_values[i]/tts_isnull[i] for the keys.
+    let mut values = Vec::with_capacity(numkeys);
+    let mut isnull = Vec::with_capacity(numkeys);
+    for i in 0..numkeys {
+        let attr = execTuples::slot_getattr_by_id::call(estate, tableslot, (i + 1) as i16)?;
+        values.push(attr.value);
+        isnull.push(attr.isnull);
+    }
+    Ok((values, isnull))
 }
 
-/// `ExecCopySlotMinimalTuple(mstate->probeslot)` — copy the prepared probe slot's
+/// `ExecStoreVirtualTuple(mstate->probeslot); ExecCopySlotMinimalTuple(
+/// mstate->probeslot)` — materialize the prepared probe slot's `numkeys`
 /// parameter values into a fresh owned `MinimalTuple` used as a cache entry's
-/// key. Genuine Memoize-owned form over the owned `probe_values`/`probe_isnull`
-/// vectors; the owner `exec_copy_slot` / fetch-minimal leaves operate on real
-/// `TupleTableSlot`s, which does not fit this owned-vector shape and would need a
-/// threaded `TupleDesc` to form the tuple. Panics until that form substrate is
-/// wired in.
+/// key. Routed through the execTuples owner seams against the real `probeslot`.
 fn copy_probe_slot_minimal_tuple<'mcx>(
-    _mstate: &mut MemoizeScanState<'mcx>,
-    _mcx: Mcx<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    mstate: &mut MemoizeScanState<'mcx>,
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<MinimalTupleData<'mcx>> {
-    unimplemented!(
-        "copy_probe_slot_minimal_tuple: minimal-tuple form substrate (a threaded \
-         hashkeydesc TupleDesc) is not wired into this port's owned model yet"
-    )
+    let probeslot = mstate
+        .probeslot
+        .ok_or_else(|| elog_internal("Memoize probeslot not initialized"))?;
+
+    // The probe slot's tts_values/tts_isnull were filled by prepare_probe_slot;
+    // mirror them into the real slot and ExecStoreVirtualTuple.
+    let values: Vec<types_datum::Datum> = mstate.probe_values.iter().copied().collect();
+    let isnull: Vec<bool> = mstate.probe_isnull.iter().copied().collect();
+    execTuples::store_virtual_values::call(estate, probeslot, &values, &isnull)?;
+
+    // ExecCopySlotMinimalTuple(probeslot): materialize as an owned MinimalTuple.
+    let (mtup, _should_free) =
+        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate.slot_mut(probeslot))?;
+    mtup.clone_in(mcx)
 }
 
 // ===========================================================================
@@ -1628,18 +1801,21 @@ fn out_of_memory(what: &str) -> PgError {
 /// Install every seam declared in `backend-executor-nodeMemoize-seams` that this
 /// crate owns: the four parallel-executor entry points.
 ///
-/// Every other operation the node performs is either an outward call to an
-/// owner subsystem's `-seams` crate (the expression engine `execExpr`, the
-/// tuple-slot ops `execTuples`, the context substrate `execUtils`, the
-/// outer-child dispatch `execProcnode`/`execAmi`, the `datum.c` hash/equality
-/// leaves, the `lsyscache` catalog lookups, the `fmgr` invocation, the
-/// `nodeHash` memory budget, the `tcop/postgres` interrupt check, and the
-/// handle-addressed parallel-instrumentation accessors in the execParallel
-/// support seams), or an in-crate plain function over the owned
-/// `MemoizeScanState` for the genuinely Memoize-owned operations that have no
-/// owner-type leaf matching this port's owned-vector data model
-/// (`make_memoize_state`, `init_plan_state_links`, `init_hashkeydesc_and_slots`,
-/// `build_cache_eq_expr`, `deform_key_params`, `copy_probe_slot_minimal_tuple`).
+/// Every other operation the node performs is an outward call to an owner
+/// subsystem's `-seams` crate (the expression engine `execExpr` — incl.
+/// `ExecBuildParamSetEqual`; the tuple-slot ops `execTuples` — incl.
+/// `ExecTypeFromExprList`, `MakeSingleTupleTableSlot`, the minimal-tuple
+/// store/fetch and the virtual-store/`slot_getattr` deform-form the node's
+/// `tableslot`/`probeslot` round-trip its cache keys through; the context
+/// substrate `execUtils`; the outer-child dispatch `execProcnode`/`execAmi`;
+/// the `datum.c` hash/equality leaves; the `lsyscache` catalog lookups; the
+/// `fmgr` invocation; the `nodeHash` memory budget; the `tcop/postgres`
+/// interrupt check; and the handle-addressed parallel-instrumentation accessors
+/// in the execParallel support seams), with the node-side marshaling (the C
+/// `makeNode(MemoizeState)`, the PlanState back-link/`ExecProcNode` install, and
+/// the `ExecInitMemoize` builders `init_hashkeydesc_and_slots`/`build_cache_eq_expr`
+/// /`deform_key_params`/`copy_probe_slot_minimal_tuple`) living in this crate as
+/// plain functions over the owned `MemoizeScanState`.
 pub fn init_seams() {
     seam::exec_memoize_estimate::set(exec_memoize_estimate);
     seam::exec_memoize_initialize_dsm::set(exec_memoize_initialize_dsm);

@@ -569,86 +569,71 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> Option<Token> {
+        // flex rule `[ \t\r]+` eats whitespace (the per-line `\n` rule is the
+        // GUC_EOL boundary we split on; here `\n` never appears mid-line).
         self.skip_ws();
         let first = self.line.get(self.pos).copied()?;
+        // flex rule `#.*` eats a comment to end of line → GUC_EOL (no token).
         if first == b'#' {
-            // comment: eat to end of line (GUC_EOL)
             self.pos = self.line.len();
             return None;
         }
-        if first == b'=' {
-            self.pos += 1;
-            return Some(Token {
-                kind: TokenKind::Equals,
-                text: "=".into(),
-            });
-        }
-        if first == b'\'' {
-            return Some(self.scan_quoted());
+
+        // Faithful flex maximal munch: at this position, find the longest match
+        // among every `%%` rule, breaking length ties by rule order. The rule
+        // order in guc-file.l is: ID, QUALIFIED_ID, STRING, UNQUOTED_STRING,
+        // INTEGER, REAL, EQUALS, then the catch-all `.` (a single byte). flex
+        // chooses the rule with the longest match; on equal length the rule
+        // listed first wins. `.` never matches `\n`, but mid-line input has none.
+        let rest = &self.line[self.pos..];
+        let candidates = [
+            (match_id(rest), TokenKind::Id),
+            (match_qualified_id(rest), TokenKind::QualifiedId),
+            (match_string(rest), TokenKind::String),
+            (match_unquoted_string(rest), TokenKind::UnquotedString),
+            (match_integer(rest), TokenKind::Integer),
+            (match_real(rest), TokenKind::Real),
+            (match_equals(rest), TokenKind::Equals),
+        ];
+
+        // Pick the longest; first-listed rule wins ties (so a strictly-greater
+        // length is required to displace an earlier rule).
+        let mut best_len = 0usize;
+        let mut best_kind = TokenKind::Error;
+        for (len, kind) in candidates {
+            if len > best_len {
+                best_len = len;
+                best_kind = kind;
+            }
         }
 
-        // Longest non-delimiter run, then classify against the token regexes.
-        let start = self.pos;
-        while self.pos < self.line.len() {
-            let b = self.line[self.pos];
-            if matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'#' | b'=') {
-                break;
-            }
-            self.pos += 1;
-        }
-        let text = &self.line[start..self.pos];
-        if text.is_empty() {
-            // A byte that matches no rule but the catch-all "." → GUC_ERROR.
+        if best_len == 0 {
+            // No rule matched: the catch-all `.` consumes exactly one byte and
+            // returns GUC_ERROR (this is also the unterminated-`'` path, since a
+            // `'` with no valid STRING match falls through to `.`).
             self.pos += 1;
             return Some(Token {
                 kind: TokenKind::Error,
                 text: String::from_utf8_lossy(&[first]).into_owned(),
             });
         }
+
+        let text = &rest[..best_len];
+        self.pos += best_len;
         Some(Token {
-            kind: classify_token(text),
+            kind: best_kind,
             text: String::from_utf8_lossy(text).into_owned(),
         })
-        // NB: `classify_token` runs on the raw bytes (so high-bit `LETTER`s
+        // NB: the match_* helpers run on raw bytes (so high-bit `LETTER`s
         // \200-\377 classify correctly); `text` is only lossy-stringified for
         // storage in the `ConfigVariable`.
     }
 
     fn skip_ws(&mut self) {
+        // flex `[ \t\r]+` whitespace class (the `\n` boundary is handled by the
+        // logical-line split; flex also eats a stray `\r`).
         while self.pos < self.line.len() && matches!(self.line[self.pos], b' ' | b'\t' | b'\r') {
             self.pos += 1;
-        }
-    }
-
-    fn scan_quoted(&mut self) -> Token {
-        // STRING: \'([^'\\\n]|\\.|\'\')*\'
-        let start = self.pos;
-        self.pos += 1;
-        while self.pos < self.line.len() {
-            match self.line[self.pos] {
-                b'\\' => {
-                    // \\. — a backslash escapes the next byte
-                    self.pos = (self.pos + 2).min(self.line.len());
-                }
-                b'\'' => {
-                    self.pos += 1;
-                    if self.pos < self.line.len() && self.line[self.pos] == b'\'' {
-                        // '' — doubled quote stays inside the string
-                        self.pos += 1;
-                    } else {
-                        return Token {
-                            kind: TokenKind::String,
-                            text: String::from_utf8_lossy(&self.line[start..self.pos]).into_owned(),
-                        };
-                    }
-                }
-                _ => self.pos += 1,
-            }
-        }
-        // Unterminated quote: the catch-all "." matches the lone '.
-        Token {
-            kind: TokenKind::Error,
-            text: "'".into(),
         }
     }
 }
@@ -689,104 +674,164 @@ fn parse_line(
     Ok(Some((name, value)))
 }
 
-fn classify_token(text: &[u8]) -> TokenKind {
-    // flex picks the longest match, breaking ties by rule order: ID,
-    // QUALIFIED_ID, STRING, UNQUOTED_STRING, INTEGER, REAL. ID and
-    // QUALIFIED_ID are disjoint; an all-letter token is ID, a LETTER.LETTER
-    // token is QUALIFIED_ID. We test the more specific classes first.
-    if is_qualified_id(text) {
-        TokenKind::QualifiedId
-    } else if is_id(text) {
-        TokenKind::Id
-    } else if is_integer(text) {
-        TokenKind::Integer
-    } else if is_real(text) {
-        TokenKind::Real
-    } else if is_unquoted_string(text) {
-        TokenKind::UnquotedString
-    } else {
-        TokenKind::Error
+// ----------------------------------------------------------------------------
+// `match_*`: the per-rule longest-match functions, one per flex `%%` token
+// regex. Each returns the length (in bytes) of the longest prefix of `rest`
+// that the rule matches, or 0 if the rule does not match at this position. The
+// scanner picks the rule with the greatest length, ties broken by rule order
+// (guc-file.l listing order). This reproduces flex maximal munch exactly,
+// including the token boundaries that drive the `near token "..."` diagnostics
+// and the single-byte GUC_ERROR catch-all.
+//
+// LETTER         = [A-Za-z_\200-\377]
+// LETTER_OR_DIGIT = [A-Za-z_0-9\200-\377]
+// SIGN           = ("-"|"+")
+// DIGIT          = [0-9]
+// HEXDIGIT       = [0-9a-fA-F]
+// UNIT_LETTER    = [a-zA-Z]
+// ----------------------------------------------------------------------------
+
+/// `ID = {LETTER}{LETTER_OR_DIGIT}*`
+fn match_id(rest: &[u8]) -> usize {
+    let Some((&first, tail)) = rest.split_first() else {
+        return 0;
+    };
+    if !is_letter(first) {
+        return 0;
     }
+    1 + tail.iter().take_while(|&&b| is_letter_or_digit(b)).count()
 }
 
-fn is_id(text: &[u8]) -> bool {
-    let Some((first, rest)) = text.split_first() else {
-        return false;
-    };
-    is_letter(*first) && rest.iter().copied().all(is_letter_or_digit)
-}
-
-fn is_qualified_id(text: &[u8]) -> bool {
-    let mut parts = text.split(|&b| b == b'.');
-    let Some(left) = parts.next() else {
-        return false;
-    };
-    let Some(right) = parts.next() else {
-        return false;
-    };
-    parts.next().is_none() && is_id(left) && is_id(right)
-}
-
-fn is_unquoted_string(text: &[u8]) -> bool {
-    let Some((first, rest)) = text.split_first() else {
-        return false;
-    };
-    is_letter(*first)
-        && rest
-            .iter()
-            .all(|&b| is_letter_or_digit(b) || matches!(b, b'-' | b'.' | b':' | b'/'))
-}
-
-fn is_integer(text: &[u8]) -> bool {
-    let Some(text) = strip_sign(text) else {
-        return false;
-    };
-    let (digits, unit_start) = if let Some(rest) = text.strip_prefix(b"0x") {
-        let len = rest.iter().take_while(|b| b.is_ascii_hexdigit()).count();
-        (len > 0, 2 + len)
-    } else {
-        let len = text.iter().take_while(|b| b.is_ascii_digit()).count();
-        (len > 0, len)
-    };
-    digits && text[unit_start..].iter().all(|b| b.is_ascii_alphabetic())
-}
-
-fn is_real(text: &[u8]) -> bool {
-    let Some(text) = strip_sign(text) else {
-        return false;
-    };
-    let Some(dot) = text.iter().position(|&b| b == b'.') else {
-        return false;
-    };
-    if !text[..dot].iter().all(|b| b.is_ascii_digit()) {
-        return false;
+/// `QUALIFIED_ID = {ID}"."{ID}` — exactly one dot, an ID on each side. Because
+/// `.` is not in `LETTER_OR_DIGIT`, the leading `{ID}` stops at the first dot;
+/// the trailing `{ID}` then runs maximally (stopping at a second dot).
+fn match_qualified_id(rest: &[u8]) -> usize {
+    let left = match_id(rest);
+    if left == 0 || rest.get(left) != Some(&b'.') {
+        return 0;
     }
-    let after_dot = &text[dot + 1..];
-    let exponent_at = after_dot.iter().position(|&b| b == b'e' || b == b'E');
-    let (fraction, exponent) = match exponent_at {
-        Some(pos) => (&after_dot[..pos], Some(&after_dot[pos + 1..])),
-        None => (after_dot, None),
-    };
-    if !fraction.iter().all(|b| b.is_ascii_digit()) {
-        return false;
+    let right = match_id(&rest[left + 1..]);
+    if right == 0 {
+        return 0;
     }
-    match exponent {
-        Some(exponent) => {
-            let Some(exponent) = strip_sign(exponent) else {
-                return false;
-            };
-            !exponent.is_empty() && exponent.iter().all(|b| b.is_ascii_digit())
+    left + 1 + right
+}
+
+/// `STRING = \'([^'\\\n]|\\.|\'\')*\'`
+///
+/// Maximal munch with the subtlety that flex returns the longest match that
+/// reaches a *closing* quote. A doubled `''` is body content only when the
+/// string still terminates afterwards; otherwise the inner `'` is the closing
+/// quote of a shorter (still valid) STRING. We scan greedily but remember the
+/// most recent position at which a complete STRING ends, and return that.
+fn match_string(rest: &[u8]) -> usize {
+    if rest.first() != Some(&b'\'') {
+        return 0;
+    }
+    let mut i = 1;
+    let mut best = 0; // longest length ending in a closing quote
+    while i < rest.len() {
+        match rest[i] {
+            b'\n' => break, // [^'\\\n] excludes newline; \\. and \'\' can't start with it
+            b'\\' => {
+                // \\. — backslash escapes exactly one following byte. A trailing
+                // backslash (no following byte) matches nothing further.
+                if i + 1 >= rest.len() {
+                    break;
+                }
+                i += 2;
+            }
+            b'\'' => {
+                // This quote can close the string: record a complete match...
+                best = i + 1;
+                // ...and `''` may instead be a doubled quote inside a longer
+                // string, so keep scanning past it.
+                if rest.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1, // [^'\\\n]
         }
-        None => true,
     }
+    best
 }
 
-fn strip_sign(text: &[u8]) -> Option<&[u8]> {
-    let text = text
-        .strip_prefix(b"-")
-        .or_else(|| text.strip_prefix(b"+"))
-        .unwrap_or(text);
-    (!text.is_empty()).then_some(text)
+/// `UNQUOTED_STRING = {LETTER}({LETTER_OR_DIGIT}|[-._:/])*`
+fn match_unquoted_string(rest: &[u8]) -> usize {
+    let Some((&first, tail)) = rest.split_first() else {
+        return 0;
+    };
+    if !is_letter(first) {
+        return 0;
+    }
+    1 + tail
+        .iter()
+        .take_while(|&&b| is_letter_or_digit(b) || matches!(b, b'-' | b'.' | b':' | b'/'))
+        .count()
+}
+
+/// `INTEGER = {SIGN}?({DIGIT}+|0x{HEXDIGIT}+){UNIT_LETTER}*`
+fn match_integer(rest: &[u8]) -> usize {
+    let mut i = match_sign(rest);
+    let body = &rest[i..];
+    let mantissa = if let Some(hex) = body.strip_prefix(b"0x") {
+        let n = hex.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if n == 0 {
+            return 0; // `0x` with no hex digits is not an INTEGER
+        }
+        2 + n
+    } else {
+        let n = body.iter().take_while(|b| b.is_ascii_digit()).count();
+        if n == 0 {
+            return 0;
+        }
+        n
+    };
+    i += mantissa;
+    // UNIT_LETTER* = [a-zA-Z]*
+    i += rest[i..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphabetic())
+        .count();
+    i
+}
+
+/// `REAL = {SIGN}?{DIGIT}*"."{DIGIT}*{EXPONENT}?`, `EXPONENT = [Ee]{SIGN}?{DIGIT}+`
+fn match_real(rest: &[u8]) -> usize {
+    let mut i = match_sign(rest);
+    // {DIGIT}*
+    i += rest[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+    // required "."
+    if rest.get(i) != Some(&b'.') {
+        return 0;
+    }
+    i += 1;
+    // {DIGIT}*
+    i += rest[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+    // optional {EXPONENT}: only consumed if it fully matches [Ee]{SIGN}?{DIGIT}+
+    if matches!(rest.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        j += match_sign(&rest[j..]);
+        let digits = rest[j..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if digits > 0 {
+            i = j + digits;
+        }
+        // else: leave `i` before the bare exponent letter; REAL ends at the
+        // mantissa, the [Ee] is a separate token (flex maximal munch).
+    }
+    i
+}
+
+/// `EQUALS = "="`
+fn match_equals(rest: &[u8]) -> usize {
+    usize::from(rest.first() == Some(&b'='))
+}
+
+/// `{SIGN}?` — length of an optional leading `-`/`+`.
+fn match_sign(rest: &[u8]) -> usize {
+    usize::from(matches!(rest.first(), Some(b'-' | b'+')))
 }
 
 fn is_letter(b: u8) -> bool {

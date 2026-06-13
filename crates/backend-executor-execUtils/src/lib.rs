@@ -123,6 +123,9 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_create_scan_slot_from_outer_plan::set(
         ExecCreateScanSlotFromOuterPlan,
     );
+    backend_executor_execUtils_seams::exec_get_common_child_slot_ops::set(
+        ExecGetCommonChildSlotOps,
+    );
     backend_executor_execUtils_seams::exec_assign_expr_context::set(ExecAssignExprContext);
     backend_executor_execUtils_seams::create_expr_context::set(CreateExprContext);
     backend_executor_execUtils_seams::exec_assign_projection_info::set(ExecAssignProjectionInfo);
@@ -170,6 +173,12 @@ pub fn init_seams() {
     // `ExecGetAllNullSlot(estate, relInfo)` (execUtils.c): the result
     // relation's lazily-created all-NULL slot.
     backend_executor_execUtils_seams::exec_get_all_null_slot::set(ExecGetAllNullSlot);
+
+    backend_executor_execUtils_seams::exec_get_result_slot_ops_isfixed::set(|planstate, estate| {
+        let mut isfixed = false;
+        let ops = ExecGetResultSlotOps(planstate, estate, Some(&mut isfixed));
+        (ops, isfixed)
+    });
 }
 
 // ===========================================================================

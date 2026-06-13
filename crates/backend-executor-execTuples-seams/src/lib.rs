@@ -118,6 +118,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecCopySlotMinimalTuple(slot)` (tuptable.h): produce a freshly-palloc'd
+    /// `MinimalTuple` copy of the slot's current tuple (the C
+    /// `slot->tts_ops->copy_minimal_tuple`), owned by the caller. The copy lands
+    /// in `mcx` (C: `CurrentMemoryContext`). Fallible on OOM.
+    pub fn exec_copy_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_tuple::heaptuple::MinimalTuple<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (tuptable.h / execTuples.c):
+    /// store the `MinimalTuple` into the slot (forcing it through the slot's
+    /// minimal-tuple ops), the C returning the same slot. `should_free` records
+    /// whether the slot owns and should later free the tuple. Fallible on OOM.
+    pub fn exec_store_minimal_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        mtup: types_tuple::heaptuple::MinimalTuple<'mcx>,
+        slot: types_nodes::SlotId,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
     /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
     /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.
@@ -195,6 +220,37 @@ seam_core::seam!(
     pub fn exec_drop_single_tuple_table_slot(
         slot: types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecClearTuple(slot); memcpy(slot->tts_values, values); memcpy(
+    /// slot->tts_isnull, isnull); ExecStoreVirtualTuple(slot)` (tuptable.h):
+    /// fill a virtual slot's per-column `tts_values`/`tts_isnull` payload with
+    /// the given `values`/`isnull` (which must be `slot`'s descriptor's `natts`
+    /// long) and mark it as holding a valid virtual tuple. The N-column analogue
+    /// of `exec_store_single_datum_virtual`; used by Memoize's
+    /// `prepare_probe_slot` to materialize the probe slot before
+    /// `ExecCopySlotMinimalTuple`. Targets the slot by pool id. Fallible on OOM /
+    /// the slot-ops `ereport(ERROR)` paths.
+    pub fn store_virtual_values<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        values: &[types_datum::Datum],
+        isnull: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecTypeFromExprList(exprList)` (execTuples.c): build a `TupleDesc` (a
+    /// RECORD type, no column names) describing the result types of a bare list
+    /// of expressions. Used to derive a Memoize node's `hashkeydesc` from its
+    /// `param_exprs`. The descriptor is allocated in `mcx` (C: `palloc` in
+    /// `CurrentMemoryContext`); fallible on OOM / `ereport(ERROR)` from a type
+    /// lookup.
+    pub fn exec_type_from_expr_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr_list: &[types_nodes::primnodes::Expr],
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
 
 seam_core::seam!(

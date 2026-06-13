@@ -18,6 +18,8 @@ pub fn init_seams() {
     backend_utils_init_small_seams::my_proc_pid::set(globals::MyProcPid);
     backend_utils_init_small_seams::my_proc_number::set(globals::MyProcNumber);
     backend_utils_init_small_seams::is_under_postmaster::set(globals::IsUnderPostmaster);
+    backend_utils_init_small_seams::postmaster_pid::set(globals::PostmasterPid);
+    backend_utils_init_small_seams::my_pm_child_slot::set(globals::MyPMChildSlot);
     backend_utils_init_small_seams::max_backends::set(globals::MaxBackends);
     backend_utils_init_small_seams::with_my_proc_port::set(globals::with_my_proc_port_seam);
     backend_utils_init_small_seams::set_my_proc_port::set(|port| {

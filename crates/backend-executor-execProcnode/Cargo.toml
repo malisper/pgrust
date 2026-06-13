@@ -20,6 +20,9 @@ mcx = { path = "../mcx" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+# Landed leaf node unit this dispatch routes ExecInitNode/ExecEndNode to
+# directly (nodeLimit depends only on *-seams crates, so this is acyclic).
+backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
 # Per-owner seam crates for the unported neighbours this dispatch routes through
 # (loud panic until each owner wires its init_seams()).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

@@ -35,6 +35,14 @@ pub mod dsm;
 pub mod dsm_impl;
 pub mod ipc;
 
+/// Reusable in-process DSM control-segment bring-up for unit tests. Gated
+/// behind the `test-bringup` feature so the substrate-owner dependencies it
+/// wires (the merged LWLock manager + FreePageManager owners) are pulled in
+/// only for test builds, never for the production dependency graph. Enabled
+/// automatically under `cfg(test)` for this crate's own gating test.
+#[cfg(any(test, feature = "test-bringup"))]
+pub mod test_bringup;
+
 /// Install this crate's implementations into the seam crates it owns, plus
 /// its GUC option array and storage variables into the GUC tables' slots.
 pub fn init_seams() {
@@ -70,3 +78,6 @@ pub fn init_seams() {
         set: dsm_impl::set_min_dynamic_shared_memory,
     });
 }
+
+#[cfg(test)]
+mod tests;
