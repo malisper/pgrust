@@ -56,3 +56,11 @@ seam_core::seam!(
     /// for the single reason varsup.c sends (XID wraparound pressure).
     pub fn send_postmaster_signal_start_autovac()
 );
+
+seam_core::seam!(
+    /// `RegisterPostmasterChildActive()` (pmsignal.c): mark this child's
+    /// `PMChild` slot ACTIVE in the postmaster's `PMSignalState`. Called from
+    /// `InitProcess` / `InitAuxiliaryProcess` once a `PGPROC` is claimed. C is
+    /// void; the port threads its callees' `ereport` surface as `PgResult`.
+    pub fn register_postmaster_child_active() -> types_error::PgResult<()>
+);
