@@ -19,3 +19,5 @@ types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-tuple = { path = "../types-tuple" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
