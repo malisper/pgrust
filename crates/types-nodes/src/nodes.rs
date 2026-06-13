@@ -41,6 +41,7 @@ pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
+pub const T_Limit: NodeTag = NodeTag(373);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,6 +79,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Limit`.
+    Limit(crate::nodelimit::Limit<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -86,6 +89,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Limit(_) => T_Limit,
         }
     }
 
@@ -94,6 +98,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Limit(m) => &m.plan,
         }
     }
 
@@ -108,6 +113,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
         }
     }
 }

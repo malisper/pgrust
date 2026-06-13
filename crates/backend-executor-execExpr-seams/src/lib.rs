@@ -73,6 +73,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecQualAndReset(state, econtext)` (executor.h): evaluate a compiled
+    /// boolean qual `ExprState` over the econtext (id into the EState pool),
+    /// then reset the econtext's per-tuple memory (`ResetExprContext`). Returns
+    /// whether the qual passed. Fallible on `ereport(ERROR)`.
+    pub fn exec_qual_and_reset<'mcx>(
+        state: &types_nodes::execexpr::ExprState,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `ExecProject(projInfo)` (executor.h): form a projected result tuple
     /// using the node's compiled projection info and its expression context,
     /// storing the result in the projection's output slot. The owned model

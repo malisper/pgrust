@@ -24,6 +24,7 @@ pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
+pub mod nodelimit;
 pub mod nodemergejoin;
 pub mod nodes;
 pub mod parsenodes;
@@ -43,6 +44,9 @@ pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,
+};
+pub use nodelimit::{
+    Limit, LimitOption, LimitStateCond, LimitStateData, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;
