@@ -45,7 +45,7 @@ use std::time::Instant;
 use backend_utils_error::ereport;
 use types_error::{DEBUG1, ERROR, ErrorLocation, PgError, PgResult, WARNING};
 
-use types_sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
+use types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
 
 // ===========================================================================
 // Constants transcribed 1:1 from sync.c.
@@ -190,20 +190,22 @@ fn sync_location(funcname: &'static str) -> ErrorLocation {
 
 fn sync_filetag(handler: SyncRequestHandler, ftag: FileTag) -> PgResult<FileTagOpResult> {
     match handler {
-        SyncRequestHandler::Md => backend_storage_smgr_md_seams::mdsyncfiletag::call(ftag),
-        SyncRequestHandler::Clog => {
+        SyncRequestHandler::SYNC_HANDLER_MD => {
+            backend_storage_smgr_md_seams::mdsyncfiletag::call(ftag)
+        }
+        SyncRequestHandler::SYNC_HANDLER_CLOG => {
             backend_access_transam_clog_seams::clogsyncfiletag::call(ftag)
         }
-        SyncRequestHandler::CommitTs => {
+        SyncRequestHandler::SYNC_HANDLER_COMMIT_TS => {
             backend_access_transam_commit_ts_seams::committssyncfiletag::call(ftag)
         }
-        SyncRequestHandler::MultiXactOffset => {
+        SyncRequestHandler::SYNC_HANDLER_MULTIXACT_OFFSET => {
             backend_access_transam_multixact_seams::multixactoffsetssyncfiletag::call(ftag)
         }
-        SyncRequestHandler::MultiXactMember => {
+        SyncRequestHandler::SYNC_HANDLER_MULTIXACT_MEMBER => {
             backend_access_transam_multixact_seams::multixactmemberssyncfiletag::call(ftag)
         }
-        SyncRequestHandler::None => Err(PgError::error(
+        SyncRequestHandler::SYNC_HANDLER_NONE => Err(PgError::error(
             "sync_filetag: SYNC_HANDLER_NONE has no syncsw row",
         )),
     }
@@ -211,7 +213,9 @@ fn sync_filetag(handler: SyncRequestHandler, ftag: FileTag) -> PgResult<FileTagO
 
 fn unlink_filetag(handler: SyncRequestHandler, ftag: FileTag) -> PgResult<FileTagOpResult> {
     match handler {
-        SyncRequestHandler::Md => backend_storage_smgr_md_seams::mdunlinkfiletag::call(ftag),
+        SyncRequestHandler::SYNC_HANDLER_MD => {
+            backend_storage_smgr_md_seams::mdunlinkfiletag::call(ftag)
+        }
         // Only SYNC_HANDLER_MD populates .sync_unlinkfiletag; the others leave
         // it NULL, so C would call through a null pointer if reached. sync.c
         // only ever issues unlink requests for md-handled tags.
@@ -227,7 +231,7 @@ fn filetag_matches(
     candidate: FileTag,
 ) -> PgResult<bool> {
     match handler {
-        SyncRequestHandler::Md => {
+        SyncRequestHandler::SYNC_HANDLER_MD => {
             backend_storage_smgr_md_seams::mdfiletagmatches::call(ftag, candidate)
         }
         // Only SYNC_HANDLER_MD populates .sync_filetagmatches.
@@ -305,10 +309,10 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
             break;
         }
 
-        // Unlink the file.
-        let handler = SyncRequestHandler::from_raw(entry.tag.handler).ok_or_else(|| {
-            PgError::error("SyncPostCheckpoint: FileTag.handler out of range in pendingUnlinks")
-        })?;
+        // Unlink the file. `FileTag.handler` is a typed `SyncRequestHandler`
+        // (the C `int16` index into `syncsw[]`, now a checked enum), so no
+        // range check is needed.
+        let handler = entry.tag.handler;
         let op = unlink_filetag(handler, entry.tag)?;
         if op.result < 0 {
             // Race: DROP DATABASE may have deleted the file first, yielding
@@ -453,9 +457,9 @@ fn process_sync_requests(
                 absorb_counter = FSYNCS_PER_ABSORB;
             }
 
-            let handler = SyncRequestHandler::from_raw(tag.handler).ok_or_else(|| {
-                PgError::error("ProcessSyncRequests: FileTag.handler out of range in pendingOps")
-            })?;
+            // `FileTag.handler` is a typed `SyncRequestHandler` (the checked
+            // `syncsw[]` index), so it needs no range check.
+            let handler = tag.handler;
 
             // The fsync table may name segments since deleted/unlinked. On
             // error, absorb pending requests and retry: mdunlink() queues a
@@ -575,7 +579,7 @@ fn remember_sync_request(
     debug_assert!(state.pending_ops.is_some());
 
     match request_type {
-        SyncRequestType::SyncForgetRequest => {
+        SyncRequestType::SYNC_FORGET_REQUEST => {
             // Cancel a previously entered request.
             if let Some(entry) = state
                 .pending_ops
@@ -585,12 +589,9 @@ fn remember_sync_request(
                 entry.canceled = true;
             }
         }
-        SyncRequestType::SyncFilterRequest => {
-            let handler = SyncRequestHandler::from_raw(ftag.handler).ok_or_else(|| {
-                PgError::error(
-                    "RememberSyncRequest: FileTag.handler out of range in SYNC_FILTER_REQUEST",
-                )
-            })?;
+        SyncRequestType::SYNC_FILTER_REQUEST => {
+            // `FileTag.handler` is a typed `SyncRequestHandler`; no range check.
+            let handler = ftag.handler;
 
             // Cancel matching fsync requests. The filetag-match callback lives
             // behind a seam, so collect the same-handler candidate keys first,
@@ -640,7 +641,7 @@ fn remember_sync_request(
                 }
             }
         }
-        SyncRequestType::SyncUnlinkRequest => {
+        SyncRequestType::SYNC_UNLINK_REQUEST => {
             // Unlink request: put it on the list (charged to pendingOpsCxt in C
             // via MemoryContextSwitchTo). Reserve fallibly on growth.
             let entry = PendingUnlinkEntry {
@@ -651,7 +652,7 @@ fn remember_sync_request(
             state.pending_unlinks.try_reserve(1).map_err(|_| oom())?;
             state.pending_unlinks.push(entry);
         }
-        SyncRequestType::SyncRequest => {
+        SyncRequestType::SYNC_REQUEST => {
             // Normal case: enter a request to fsync this segment.
             let cycle_ctr = state.sync_cycle_ctr;
             // hash_search(pendingOps, ftag, HASH_ENTER, &found): inspect the

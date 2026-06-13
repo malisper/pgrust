@@ -12,7 +12,7 @@ path = "src/lib.rs"
 libc = { version = "0.2", default-features = false }
 backend-utils-error = { path = "../backend-utils-error" }
 types-error = { path = "../types-error" }
-types-sync = { path = "../types-sync" }
+types-storage = { path = "../types-storage" }
 
 # Own inward seams (installed by init_seams()).
 backend-storage-sync-seams = { path = "../backend-storage-sync-seams" }
@@ -29,4 +29,3 @@ backend-access-transam-multixact-seams = { path = "../backend-access-transam-mul
 [dev-dependencies]
 libc = { version = "0.2", default-features = false }
 types-core = { path = "../types-core" }
-types-storage = { path = "../types-storage" }

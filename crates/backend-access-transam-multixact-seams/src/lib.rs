@@ -66,7 +66,7 @@ seam_core::seam!(
     /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_OFFSET]` sync callback)
     /// — fsync the `pg_multixact/offsets` SLRU segment the tag names, returning
     /// the `0`/`<0` code, resolved path, and saved `errno`.
-    pub fn multixactoffsetssyncfiletag(ftag: types_sync::FileTag) -> types_error::PgResult<types_sync::FileTagOpResult>
+    pub fn multixactoffsetssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
 );
 
 seam_core::seam!(
@@ -74,5 +74,5 @@ seam_core::seam!(
     /// (multixact.c, the `syncsw[SYNC_HANDLER_MULTIXACT_MEMBER]` sync callback)
     /// — fsync the `pg_multixact/members` SLRU segment the tag names, returning
     /// the `0`/`<0` code, resolved path, and saved `errno`.
-    pub fn multixactmemberssyncfiletag(ftag: types_sync::FileTag) -> types_error::PgResult<types_sync::FileTagOpResult>
+    pub fn multixactmemberssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
 );

@@ -8,11 +8,14 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 pub mod latch;
 pub mod lock;
 pub mod relfilelocator;
 pub mod sinval;
 pub mod storage;
+pub mod sync;
 pub mod waiteventset;
 
 pub use lock::*;

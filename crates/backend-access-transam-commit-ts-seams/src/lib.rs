@@ -48,5 +48,5 @@ seam_core::seam!(
     /// `syncsw[SYNC_HANDLER_COMMIT_TS]` sync callback) — fsync the SLRU segment
     /// the tag names, returning the `0`/`<0` code, resolved path, and saved
     /// `errno`.
-    pub fn committssyncfiletag(ftag: types_sync::FileTag) -> types_error::PgResult<types_sync::FileTagOpResult>
+    pub fn committssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
 );

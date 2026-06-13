@@ -14,7 +14,7 @@
 //! handle, exactly like the C globals their call sites reference.
 
 use types_error::PgResult;
-use types_sync::{FileTag, SyncRequestType};
+use types_storage::sync::{FileTag, SyncRequestType};
 
 seam_core::seam!(
     /// `InitSync(void)` (sync.c) — create the pending-operations table iff this

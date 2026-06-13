@@ -8,7 +8,7 @@
 //! loudly.
 
 use types_error::PgResult;
-use types_sync::{FileTag, FileTagOpResult};
+use types_storage::sync::{FileTag, FileTagOpResult};
 
 seam_core::seam!(
     /// `mdsyncfiletag(const FileTag *ftag, char *path)` (md.c) — fsync the

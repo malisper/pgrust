@@ -21,8 +21,8 @@ seam_core::seam!(
     /// request onto the checkpointer's shmem queue. Returns `true` if queued,
     /// `false` if the queue was full (caller may retry).
     pub fn forward_sync_request(
-        ftag: types_sync::FileTag,
-        request_type: types_sync::SyncRequestType,
+        ftag: types_storage::sync::FileTag,
+        request_type: types_storage::sync::SyncRequestType,
     ) -> types_error::PgResult<bool>
 );
 
