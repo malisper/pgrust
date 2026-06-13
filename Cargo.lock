@@ -6988,6 +6988,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-encode-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type"
 version = "0.0.0"
 dependencies = [
@@ -7422,6 +7431,36 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-tsearch",
+]
+
+[[package]]
+name = "backend-utils-adt-varlena"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-lib-hyperloglog-seams",
+ "backend-libpq-pqformat",
+ "backend-regex-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-encode-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-adt-regexp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc-tables",
+ "common-hashfn-seams",
+ "common-unicode-category-seams",
+ "common-unicode-norm-bitfields",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-locale",
+ "types-regex",
+ "types-sortsupport",
+ "types-stringinfo",
+ "types-wchar",
 ]
 
 [[package]]
@@ -8950,6 +8989,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-unicode-category-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "common-unicode-norm-bitfields"
 version = "0.0.0"
 dependencies = [
@@ -9289,6 +9336,7 @@ dependencies = [
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
+ "backend-utils-adt-varlena",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",

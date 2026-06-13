@@ -19,21 +19,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange view:
-    /// the same cache build as [`lookup_type_cache`] but returning the trimmed
-    /// `types_cache::typcache::TypeCacheEntry` the range/multirange ADTs read
-    /// (carrying the `rngtype` / `rngelemtype` sub-entries and the range
-    /// `cmp`/`subdiff` support `FmgrInfo`s). The owning typcache unit installs
-    /// this when it lands; until then a call panics loudly. `Err` carries
-    /// `ereport(ERROR, ERRCODE_UNDEFINED_OBJECT, "type ... does not exist")`
-    /// and the catalog-lookup surface.
-    pub fn lookup_type_cache_range(
-        type_id: types_core::primitive::Oid,
-        flags: i32,
-    ) -> types_error::PgResult<types_cache::typcache::TypeCacheEntry>
-);
-
-seam_core::seam!(
     /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange-ADT
     /// view: same as [`lookup_type_cache`] but hands back the
     /// `types_cache::TypeCacheEntry` shape the range/multirange ports use
@@ -51,8 +36,9 @@ seam_core::seam!(
     /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
     /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
     /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`
-    /// element-type fallback re-lookup, rangetypes.c:1419 / :1482): resolve the
-    /// element type's (extended, when `extended`) hash support function and
+    /// element-type fallback re-lookup, rangetypes.c:1419 / :1482; also the
+    /// `hash_multirange` / `hash_multirange_extended` subtype fallback): resolve
+    /// the element type's (extended, when `extended`) hash support function and
     /// return its OID. `Err` carries the C `ereport(ERROR,
     /// ERRCODE_UNDEFINED_FUNCTION, "could not identify a hash function for type
     /// %s")` raised when no hash function exists.
