@@ -1855,6 +1855,8 @@ dependencies = [
 name = "backend-commands-opclasscmds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
@@ -1885,6 +1887,8 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-opclass",
+ "types-rel",
+ "types-scan",
  "types-storage",
  "types-tuple",
 ]
