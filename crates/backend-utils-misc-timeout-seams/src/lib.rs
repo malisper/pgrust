@@ -4,6 +4,8 @@
 
 use types_error::PgResult;
 use types_timeout::EnableTimeoutParams;
+use types_core::TimestampTz;
+use types_timeout::{TimeoutHandlerProc, TimeoutId};
 
 seam_core::seam!(
     /// `enable_timeouts(timeouts, count)` — arm multiple timeouts at once.
@@ -13,4 +15,28 @@ seam_core::seam!(
 seam_core::seam!(
     /// `disable_all_timeouts(keep_indicators)`.
     pub fn disable_all_timeouts(keep_indicators: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeTimeouts()` (timeout.c) — initialize the timeout subsystem
+    /// and establish the SIGALRM handler.
+    pub fn initialize_timeouts()
+);
+
+seam_core::seam!(
+    /// `RegisterTimeout(id, handler)` (timeout.c) — register a timeout
+    /// reason. Returns the (possibly assigned, for `USER_TIMEOUT`) id.
+    pub fn register_timeout(id: TimeoutId, handler: TimeoutHandlerProc) -> TimeoutId
+);
+
+seam_core::seam!(
+    /// `enable_timeout_every(id, fin_time, delay_ms)` (timeout.c) — arm a
+    /// periodic timeout, first firing at `fin_time`.
+    pub fn enable_timeout_every(id: TimeoutId, fin_time: TimestampTz, delay_ms: i32)
+);
+
+seam_core::seam!(
+    /// `disable_timeout(id, keep_indicator)` (timeout.c) — cancel a timeout,
+    /// optionally preserving its already-fired indicator.
+    pub fn disable_timeout(id: TimeoutId, keep_indicator: bool)
 );

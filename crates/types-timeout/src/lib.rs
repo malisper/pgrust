@@ -30,6 +30,8 @@ pub enum TimeoutId {
     USER_TIMEOUT = 13,
 }
 
+pub use TimeoutId::*;
+
 /// `MAX_TIMEOUTS` — `USER_TIMEOUT + 10`.
 pub const MAX_TIMEOUTS: usize = TimeoutId::USER_TIMEOUT as usize + 10;
 
@@ -62,3 +64,7 @@ pub struct DisableTimeoutParams {
     /// Keep the indicator flag?
     pub keep_indicator: bool,
 }
+
+/// `timeout_handler_proc` (`utils/timeout.h`): callback fired when a timeout
+/// expires. Runs in signal-handler context.
+pub type TimeoutHandlerProc = fn();

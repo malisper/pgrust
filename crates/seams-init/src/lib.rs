@@ -23,6 +23,7 @@ pub fn init_all() {
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_interrupt::init_seams();
+    backend_postmaster_startup::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_procsignal::init_seams();

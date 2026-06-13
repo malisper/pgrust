@@ -741,8 +741,10 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1230,6 +1232,14 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-postmaster-auxprocess-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-postmaster-interrupt"
 version = "0.0.0"
 dependencies = [
@@ -1250,6 +1260,46 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-postmaster-startup"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-libpq-pqsignal",
+ "backend-postmaster-auxprocess-seams",
+ "backend-postmaster-startup-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-timeout-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "libc",
+ "mcx",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-signal",
+ "types-timeout",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-postmaster-startup-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1422,6 +1472,13 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-pmsignal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -2198,6 +2255,7 @@ name = "backend-utils-misc-timeout-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-timeout",
 ]
@@ -2405,6 +2463,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
+ "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",

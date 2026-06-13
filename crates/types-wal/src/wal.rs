@@ -266,14 +266,6 @@ pub const WAL_LEVEL_MINIMAL: WalLevel = 0;
 pub const WAL_LEVEL_REPLICA: WalLevel = 1;
 pub const WAL_LEVEL_LOGICAL: WalLevel = 2;
 
-/// `HotStandbyState` (access/xlogutils.h) — the hot-standby state machine
-/// driven by the startup process (`standbyState` global, owned by the
-/// xlogutils unit).
-pub type HotStandbyState = u32;
-pub const STANDBY_DISABLED: HotStandbyState = 0;
-pub const STANDBY_INITIALIZED: HotStandbyState = 1;
-pub const STANDBY_SNAPSHOT_PENDING: HotStandbyState = 2;
-pub const STANDBY_SNAPSHOT_READY: HotStandbyState = 3;
 
 /// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
 /// invalidation causes.
