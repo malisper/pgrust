@@ -17,6 +17,25 @@ use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, OperRow, ProcRow};
+use types_partition::PartrelTupleData;
+
+seam_core::seam!(
+    /// `SearchSysCache1(PARTRELID, ObjectIdGetDatum(relid))` +
+    /// `GETSTRUCT(Form_pg_partitioned_table)` +
+    /// `SysCacheGetAttrNotNull(partclass/partcollation)` +
+    /// `SysCacheGetAttr(partexprs)`, with the `partexprs` `pg_node_tree`
+    /// de-stringized (`stringToNode`), const-simplified
+    /// (`eval_const_expressions`), opfuncid-fixed (`fix_opfuncids`), then
+    /// `copyObject` (partcache.c:94-166). The `int2vector`/`oidvector` columns
+    /// are decoded to value slices, all allocated in `mcx`. Returns `Ok(None)`
+    /// when `!HeapTupleIsValid(tuple)` so the caller raises the exact
+    /// `elog(ERROR, "cache lookup failed for partition key of relation %u")`.
+    /// The `ReleaseSysCache` is subsumed by returning the data by value.
+    pub fn open_partrel_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<PartrelTupleData<'mcx>>>
+);
 
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
@@ -24,6 +43,14 @@ seam_core::seam!(
     /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
     /// `ReleaseSysCache`.
     pub fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid))`
+    /// (utils/cache/syscache.c): does a pg_authid row for this role OID exist?
+    /// Used to confirm a role wasn't concurrently dropped. `Err` carries the
+    /// catcache lookup's own error surface.
+    pub fn auth_oid_exists(roleid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(

@@ -15,6 +15,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `set_ps_display(activity)` — set the ps activity display string.
+    pub fn set_ps_display(activity: String)
+);
+
+seam_core::seam!(
     /// `update_process_title` (ps_status.c GUC).
     pub fn update_process_title() -> bool
 );

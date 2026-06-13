@@ -15,6 +15,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation a
+    /// shared catalog (lives in the global tablespace, visible from every
+    /// database)? Lookup against a fixed OID set — infallible.
+    pub fn is_shared_relation(relation_id: Oid) -> bool
+);
+
+seam_core::seam!(
     /// `GetDatabasePath(dbOid, spcOid)` (catalog/catalog.c): build the
     /// filesystem path to the directory holding `dbOid`'s relations in
     /// tablespace `spcOid`. relmapper's `relmap_redo` calls it during WAL
