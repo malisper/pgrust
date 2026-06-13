@@ -17,16 +17,17 @@
 //!
 //! In this codebase a heap tuple's user-data area is a separate byte slice
 //! (`backend_access_common_heaptuple::FormedTuple::data`), not bytes hanging
-//! off the `HeapTupleData` header. The heap slot's body-byte carrier is part
-//! of the [`slot_payload_model`](crate::slot_payload_model) family and is not
-//! yet landed, so the one place this engine needs `(char *) tup + t_hoff` —
-//! [`heap_slot_body`] — routes to that owner and loudly panics until it does
-//! (mirror-PG-and-panic). Everything else here is complete.
+//! off the `HeapTupleData` header. After the keystone the heap slot carries the
+//! body-bearing [`FormedTuple`], so the one place this engine needs
+//! `(char *) tup + t_hoff` — [`heap_slot_body`] — returns the slot's owned data
+//! body directly, and the by-reference [`fetchatt`] writes a
+//! `TupleValue::ByRef` over the verbatim on-disk field bytes into the
+//! by-reference `tts_values` lane. Everything here is complete.
 
 extern crate alloc;
 use alloc::format;
 
-use mcx::Mcx;
+use mcx::{slice_in, Mcx};
 use types_core::primitive::AttrNumber;
 use types_datum::Datum;
 use types_error::{PgError, PgResult};
@@ -167,25 +168,28 @@ fn fetch_att_byval(data: &[u8], off: usize, attlen: i16) -> Datum {
 
 /// `values[attnum] = fetchatt(thisatt, tp + *offp)` (tupmacs.h `fetchatt`).
 ///
-/// For a by-value att, read the scalar word. For a by-reference att, C yields a
-/// pointer into the tuple data — the owned-`Datum` slot can only carry a word,
-/// so converting the on-disk by-reference bytes into a slot Datum is the
-/// owned-payload-model's job (it must carry a by-reference value alongside the
-/// `Datum`). That carrier is not yet landed, so by-reference fetch routes there
-/// and panics (mirror-PG-and-panic).
+/// For a by-value att, read the scalar word (`TupleValue::ByVal`). For a
+/// by-reference att, C yields `PointerGetDatum(tp + off)` — a pointer into the
+/// tuple data; the faithful idiomatic carrier is `TupleValue::ByRef` over the
+/// verbatim on-disk bytes the field spans (the C contract that the pointer
+/// "points into the given tuple" is preserved by copying the exact bytes). The
+/// field's length is the same one the byte engine advances `off` by, computed
+/// here via `att_addlength_pointer` — `[off, end)` is the field's span.
 #[inline]
-fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> Datum {
+fn fetchatt<'mcx>(
+    mcx: Mcx<'mcx>,
+    att: &CompactAttribute,
+    data: &[u8],
+    off: usize,
+) -> PgResult<TupleValue<'mcx>> {
     if att.attbyval {
-        fetch_att_byval(data, off, att.attlen)
+        Ok(TupleValue::ByVal(fetch_att_byval(data, off, att.attlen)))
     } else {
-        // C: PointerGetDatum(tp + off). The owned slot's tts_values is a
-        // PgVec<Datum>; the by-reference value carrier (TupleValue::ByRef) is
-        // owned by slot_payload_model and not yet landed.
-        panic!(
-            "execTuples.c slot_deform: by-reference attribute fetch into the \
-             owned Datum slot needs the slot_payload_model by-reference value \
-             carrier (tts_values cannot hold a raw pointer into the tuple)"
-        )
+        // C: PointerGetDatum(tp + off). Copy out the exact byte span the field
+        // occupies: end == att_addlength_pointer(off, attlen, tp, off), the very
+        // advance the deform loop applies to `off` right after this fetch.
+        let end = att_addlength_pointer(off, att.attlen, data, off);
+        Ok(TupleValue::ByRef(slice_in(mcx, &data[off..end])?))
     }
 }
 
@@ -199,8 +203,9 @@ fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> Datum {
 ///
 /// `data` is the tuple's user-data area (`(char *) tup + tup->t_hoff`).
 #[allow(clippy::too_many_arguments)]
-fn slot_deform_heap_tuple_internal(
-    values: &mut [Datum],
+fn slot_deform_heap_tuple_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &mut [TupleValue<'mcx>],
     isnull: &mut [bool],
     compact_attrs: &[CompactAttribute],
     bp: &[u8],
@@ -211,18 +216,18 @@ fn slot_deform_heap_tuple_internal(
     hasnulls: bool,
     off: &mut usize,
     slowp: &mut bool,
-) -> i32 {
+) -> PgResult<i32> {
     let mut slownext = false;
 
     while attnum < natts {
         let thisatt = &compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
-            values[attnum as usize] = Datum::null();
+            values[attnum as usize] = TupleValue::ByVal(Datum::null());
             isnull[attnum as usize] = true;
             if !slow {
                 *slowp = true;
-                return attnum + 1;
+                return Ok(attnum + 1);
             } else {
                 attnum += 1;
                 continue;
@@ -256,7 +261,7 @@ fn slot_deform_heap_tuple_internal(
             // if (!slow) thisatt->attcacheoff = *off; (cache write omitted)
         }
 
-        values[attnum as usize] = fetchatt(thisatt, data, *off);
+        values[attnum as usize] = fetchatt(mcx, thisatt, data, *off)?;
 
         *off = att_addlength_pointer(*off, thisatt.attlen, data, *off);
 
@@ -266,14 +271,14 @@ fn slot_deform_heap_tuple_internal(
             // 'slownext', or if this isn't a fixed-width attribute.
             if slownext || thisatt.attlen <= 0 {
                 *slowp = true;
-                return attnum + 1;
+                return Ok(attnum + 1);
             }
         }
 
         attnum += 1;
     }
 
-    natts
+    Ok(natts)
 }
 
 /// `slot_deform_heap_tuple(slot, tuple, &offp, natts)` (execTuples.c:1122): the
@@ -284,7 +289,7 @@ fn slot_deform_heap_tuple_internal(
 /// The C caller (`tts_heap_getsomeattrs` etc.) passes `&hslot->off`; here the
 /// heap slot owns that `off` field directly, so we read/write `slot.off`.
 pub fn slot_deform_heap_tuple<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     slot: &mut HeapTupleTableSlot<'mcx>,
     mut natts: i32,
 ) -> PgResult<()> {
@@ -293,6 +298,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
         .as_ref()
         .ok_or_else(|| PgError::error("slot_deform_heap_tuple: slot has no physical tuple"))?;
     let tup = tuple
+        .tuple
         .t_data
         .as_ref()
         .ok_or_else(|| PgError::error("slot_deform_heap_tuple: tuple has no t_data"))?;
@@ -348,6 +354,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
         if !slow {
             if !hasnulls {
                 attnum = slot_deform_heap_tuple_internal(
+                    mcx,
                     values,
                     isnull,
                     &compact_attrs,
@@ -359,9 +366,10 @@ pub fn slot_deform_heap_tuple<'mcx>(
                     false, // hasnulls
                     &mut off,
                     &mut slowp,
-                );
+                )?;
             } else {
                 attnum = slot_deform_heap_tuple_internal(
+                    mcx,
                     values,
                     isnull,
                     &compact_attrs,
@@ -373,7 +381,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
                     true, // hasnulls
                     &mut off,
                     &mut slowp,
-                );
+                )?;
             }
             // slowp reflects whether a switch to slow mode is now required.
             slow = slowp;
@@ -382,6 +390,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
         // If there's still work to do then we must be in slow mode
         if attnum < natts {
             attnum = slot_deform_heap_tuple_internal(
+                mcx,
                 values,
                 isnull,
                 &compact_attrs,
@@ -393,7 +402,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
                 hasnulls,
                 &mut off,
                 &mut slowp,
-            );
+            )?;
             slow = slowp;
         }
     }
@@ -412,17 +421,23 @@ pub fn slot_deform_heap_tuple<'mcx>(
 
 /// `(char *) tup + tup->t_hoff` — the heap slot's user-data byte area.
 ///
-/// In this codebase the body bytes travel separately from the `HeapTupleData`
-/// header (`FormedTuple::data`); the heap slot's body-byte carrier is part of
-/// the [`slot_payload_model`](crate::slot_payload_model) family and not yet
-/// landed. Routed here so the deform engine has a single, named dependency on
-/// it (mirror-PG-and-panic until the carrier lands).
-fn heap_slot_body(_slot: &HeapTupleTableSlot) -> alloc::vec::Vec<u8> {
-    panic!(
-        "execTuples.c slot_deform: the heap slot's user-data byte area \
-         ((char *) tup + tup->t_hoff) is owned by slot_payload_model and not \
-         yet carried on HeapTupleTableSlot"
-    )
+/// In C this is a pointer into the contiguous `HeapTupleHeaderData` chunk just
+/// past the (aligned, null-bitmap-bearing) header. In this codebase the body
+/// bytes travel separately from the `HeapTupleData` header as the heap slot's
+/// owned [`FormedTuple::data`] (`= (char *) tup + t_hoff`), set up when the
+/// tuple was stored. Hand the deform engine that owned body slice directly.
+///
+/// The caller has already established the slot has a physical tuple (it reads
+/// `slot.tuple` for the header/natts just above), so the body carrier is
+/// present too.
+fn heap_slot_body(slot: &HeapTupleTableSlot) -> alloc::vec::Vec<u8> {
+    slot.tuple
+        .as_ref()
+        .expect("heap_slot_body: heap slot has no physical tuple")
+        .data
+        .iter()
+        .copied()
+        .collect()
 }
 
 /// `slot_getmissingattrs(slot, startAttNum, lastAttNum)` (execTuples.c:2056):
@@ -453,7 +468,7 @@ pub fn slot_getmissingattrs<'mcx>(
         //   memset(tts_values + start, 0, (last - start) * sizeof(Datum));
         //   memset(tts_isnull + start, 1, (last - start) * sizeof(bool));
         for i in start_att_num..last_att_num {
-            base.tts_values[i as usize] = Datum::null();
+            base.tts_values[i as usize] = TupleValue::ByVal(Datum::null());
             base.tts_isnull[i as usize] = true;
         }
     } else {
@@ -466,28 +481,17 @@ pub fn slot_getmissingattrs<'mcx>(
             .expect("slot_getmissingattrs: slot has no tuple descriptor");
         let constr = desc.constr.as_ref().unwrap();
         // Snapshot the (value, present) pairs to avoid borrowing the descriptor
-        // and the tts arrays simultaneously.
-        let mut pairs: alloc::vec::Vec<(Datum, bool)> = alloc::vec::Vec::new();
+        // and the tts arrays simultaneously. With the expanded tts_values
+        // (`TupleValue`), the missing value — by-value or by-reference — is
+        // carried verbatim: C's `tts_values[missattnum] = attrmiss->am_value`.
+        let mut pairs: alloc::vec::Vec<(TupleValue<'mcx>, bool)> = alloc::vec::Vec::new();
         for missattnum in start_att_num..last_att_num {
             let am = &constr.missing[missattnum as usize];
-            let v = match &am.am_value {
-                TupleValue::ByVal(d) => *d,
-                TupleValue::ByRef(_) => {
-                    // C stores attrmiss->am_value (a pointer Datum) directly;
-                    // the owned Datum slot needs the by-reference value carrier
-                    // owned by slot_payload_model (not yet landed).
-                    panic!(
-                        "execTuples.c slot_getmissingattrs: by-reference missing \
-                         value into the owned Datum slot needs the \
-                         slot_payload_model by-reference value carrier"
-                    )
-                }
-            };
-            pairs.push((v, !am.am_present));
+            pairs.push((am.am_value.clone(), !am.am_present));
         }
         let base = slot.base_mut();
         for (idx, missattnum) in (start_att_num..last_att_num).enumerate() {
-            base.tts_values[missattnum as usize] = pairs[idx].0;
+            base.tts_values[missattnum as usize] = pairs[idx].0.clone();
             base.tts_isnull[missattnum as usize] = pairs[idx].1;
         }
     }
@@ -583,9 +587,32 @@ pub fn slot_getattr<'mcx>(
         }
         // *isnull = slot->tts_isnull[attnum - 1];
         // return slot->tts_values[attnum - 1];
+        //
+        // Project the stored `TupleValue` back to a single `Datum`. A by-value
+        // column is the word itself (C's scalar Datum). A by-reference column is
+        // C's `PointerGetDatum(tp + off)` — a pointer into the tuple's owned
+        // bytes; the owned `Datum` (`types-datum`, a bare machine word) has NO
+        // by-reference / pointer lane, and the workspace has no pointer-bytes
+        // (datum-arena) convention to mint a stable pointer word from owned
+        // bytes (the `TupleValue` model is precisely what avoids needing one;
+        // every deform consumer in this codebase works over `TupleValue`, not a
+        // bare Datum, for exactly this reason). Projecting a by-reference column
+        // to a bare `Datum` is therefore unrepresentable in the owned model —
+        // genuinely blocked on the unported pointer-bytes Datum convention, not
+        // on own-logic. Mirror PG and panic. (This `Datum`-returning form is the
+        // pool seam's contract, still in CONTRACT_RECONCILE_PENDING; in-crate
+        // callers read the `TupleValue` directly.)
         let base = slot.base();
         let isnull = base.tts_isnull[(attnum - 1) as usize];
-        let value = base.tts_values[(attnum - 1) as usize];
+        let value = match &base.tts_values[(attnum - 1) as usize] {
+            TupleValue::ByVal(d) => *d,
+            TupleValue::ByRef(_) => panic!(
+                "execTuples.c slot_getattr: a by-reference column is C's PointerGetDatum \
+                 (pointer into tuple bytes); the bare-word owned Datum has no pointer lane \
+                 and the workspace has no pointer-bytes Datum-arena convention to mint one \
+                 — genuinely unported, not own-logic"
+            ),
+        };
         Ok((value, isnull))
     } else {
         // slot_getsysattr(slot, attnum, &isnull) (tuptable.h:420):
