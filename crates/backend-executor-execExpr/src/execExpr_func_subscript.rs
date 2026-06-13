@@ -25,6 +25,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_nodes::execnodes::Opaque;
+use types_nodes::primnodes::Expr;
 use types_nodes::{EStateData, EcxtId, SlotId};
 
 use backend_executor_execExpr_seams::{ProjectionKind, SlotAttr};
@@ -298,4 +299,260 @@ pub fn eval_testexpr_switch_context<'mcx>(
     // `ExecEvalExprSwitchContext` is owned by execExpr-core; route through its
     // seam over the compiled combining ExprState.
     crate::execExpr_core::exec_eval_expr_switch_context(&carrier.state, econtext, estate)
+}
+
+// ===========================================================================
+// ExecInitExprRec helper functions — execExpr.c's own compilation routines for
+// FuncExpr/OpExpr, WholeRowVar, SubscriptingRef and SubPlan nodes. These are
+// invoked by the (execExpr-core-owned) `ExecInitExprRec` dispatch switch once it
+// learns to model the corresponding `Expr` enum variants. They emit
+// `ExprEvalStep`s into the `ExprState` under construction.
+//
+// Result-location reality (see execExpr_core's module note): C threads raw
+// `Datum *resv`/`bool *resnull` pointers through `ExecInitExprRec`, and these
+// routines recurse into *distinct* output cells (`&fcinfo->args[i].value`,
+// `&sbsrefstate->upperindex[i]`, `&sbsrefstate->replacevalue`, …). The owned
+// keystone models a step's output as `ExprEvalStep::{resvalue,resnull}:
+// Option<PgBox<Datum/bool>>` where `None` means "the ExprState's own
+// resvalue/resnull"; it grew a `ResultCellId`/`ResultCellArena`, but
+// `ExprEvalStep`'s result fields are not yet keyed off that arena, so a step
+// cannot yet *name* a distinct cell, and execExpr-core's `exec_init_expr_rec`
+// neither takes a result-cell target nor is exported. Per "mirror PG and
+// panic", these routines carry the full faithful C structure for the logic this
+// family owns (the aclcheck/strict classification, the sbsrefstate layout, the
+// jump backpatching, the param-set/subplan step emission) and route the
+// recursive-descent-into-a-distinct-cell points — execExpr-core's own,
+// not-yet-landed `ExecInitExprRec` result-cell-target model — to a loud panic,
+// exactly as `exec_init_expr_rec` already does for OpExpr/FuncExpr.
+
+/// `#define FUNC_MAX_ARGS 100` (pg_config_manual.h).
+const FUNC_MAX_ARGS: i32 = types_core::primitive::FUNC_MAX_ARGS as i32;
+
+/// `isAssignmentIndirectionExpr(expr)` (execExpr.c:3489) — recognize a nested
+/// assignment-indirection expression: `FieldStore`/`SubscriptingRef` whose
+/// innermost arg is a `CaseTestExpr` (the placeholder the planner installs for
+/// the to-be-modified container), peeling `CoerceToDomain`/`RelabelType`. A
+/// fully faithful port — pure node inspection, no step emission.
+pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
+    let expr = match expr {
+        // C: if (expr == NULL) return false;
+        None => return false,
+        Some(e) => e,
+    };
+    match expr {
+        // C: if (IsA(expr, FieldStore)) { ... if arg is CaseTestExpr ... }
+        Expr::FieldStore(fstore) => {
+            if matches!(fstore.arg.as_deref(), Some(Expr::CaseTestExpr(_))) {
+                return true;
+            }
+        }
+        // C: else if (IsA(expr, SubscriptingRef)) { ... if refexpr is CaseTestExpr }
+        Expr::SubscriptingRef(sbs_ref) => {
+            if matches!(sbs_ref.refexpr.as_deref(), Some(Expr::CaseTestExpr(_))) {
+                return true;
+            }
+        }
+        // C: else if (IsA(expr, CoerceToDomain)) return recurse(cd->arg);
+        Expr::CoerceToDomain(cd) => {
+            return is_assignment_indirection_expr(cd.arg.as_deref());
+        }
+        // C: else if (IsA(expr, RelabelType)) return recurse(r->arg);
+        Expr::RelabelType(r) => {
+            return is_assignment_indirection_expr(r.arg.as_deref());
+        }
+        _ => {}
+    }
+    // C: return false;
+    false
+}
+
+/// `ExecInitFunc(scratch, node, args, funcid, inputcollid, state)`
+/// (execExpr.c:2716) — set up the [`Func`] step for a function/operator call:
+/// ACL-check `funcid`, look up its `FmgrInfo`/`FunctionCallInfo`, recurse each
+/// non-Const argument into its `fcinfo->args[i]` cell, then pick the
+/// `EEOP_FUNCEXPR*` opcode by strictness × pg_stat_function-tracking.
+///
+/// [`Func`]: types_nodes::execexpr::ExprEvalStepData::Func
+pub(crate) fn exec_init_func<'mcx>(
+    _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    _node: &Expr,
+    args: &[Expr],
+    _funcid: types_core::Oid,
+    _inputcollid: types_core::Oid,
+    _state: &mut ExprState<'mcx>,
+) -> PgResult<()> {
+    let nargs = args.len() as i32;
+    // C: aclresult = object_aclcheck(ProcedureRelationId, funcid, GetUserId(),
+    //                                ACL_EXECUTE);
+    //    if (aclresult != ACLCHECK_OK) aclcheck_error(...);
+    //    InvokeFunctionExecuteHook(funcid);
+    //
+    // The catalog ACL check (backend-catalog-aclchk), the object-access hook,
+    // and fmgr_info (backend-utils-fmgr) are cross-unit callees that route
+    // through their owner seams. The keystone result-cell model that the
+    // per-argument `ExecInitExprRec(arg, state, &fcinfo->args[i].value, ...)`
+    // descent and the `scratch.d.func.{finfo,fcinfo_data,fn_addr}` wiring need
+    // (a step naming a distinct fcinfo arg cell) has not landed — see the
+    // module note. Faithful structure, in-unit dep not yet modeled.
+    if nargs > FUNC_MAX_ARGS {
+        // C: ereport(ERROR, errcode(ERRCODE_TOO_MANY_ARGUMENTS),
+        //            errmsg_plural("cannot pass more than %d argument(s)...", ...));
+        panic!(
+            "execExpr-func-subscript: ExecInitFunc — too many function arguments \
+             ({nargs} > {FUNC_MAX_ARGS}) (faithful errpath; the ereport sink is threaded \
+             with the core compiler)"
+        );
+    }
+    panic!(
+        "execExpr-func-subscript: ExecInitFunc not fully ported — needs the execExpr-core \
+         ExecInitExprRec per-argument result-cell target model (each argument compiles into \
+         its own fcinfo->args[i] cell) plus the object_aclcheck / fmgr_info owner seams"
+    );
+}
+
+/// `ExecInitSubPlanExpr(subplan, state, resv, resnull)` (execExpr.c:2820) —
+/// compile a `SubPlan` reference: recurse each `parParam`/`args` pair into the
+/// param it sets, emit an `EEOP_PARAM_SET` step per pair, create the
+/// `SubPlanState` (nodeSubplan) and register it on the parent, then emit the
+/// `EEOP_SUBPLAN` step.
+pub(crate) fn exec_init_sub_plan_expr<'mcx>(
+    _subplan: &types_nodes::primnodes::SubPlan<'mcx>,
+    state: &mut ExprState<'mcx>,
+    _resv: Option<&mut Datum>,
+    _resnull: Option<&mut bool>,
+) -> PgResult<()> {
+    // C: if (state->parent == NULL)
+    //        elog(ERROR, "SubPlan found with no parent plan");
+    if state.parent.is_none() {
+        panic!("execExpr-func-subscript: ExecInitSubPlanExpr — SubPlan found with no parent plan");
+    }
+    // C: forboth(l, subplan->parParam, pvar, subplan->args) {
+    //        ExecInitExprRec(arg, state, resv, resnull);
+    //        scratch.opcode = EEOP_PARAM_SET; scratch.d.param.paramid = paramid;
+    //        scratch.d.param.paramtype = exprType(arg); ExprEvalPushStep(...);
+    //    }
+    //    sstate = ExecInitSubPlan(subplan, state->parent);
+    //    state->parent->subPlan = lappend(state->parent->subPlan, sstate);
+    //    scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
+    //    ExprEvalPushStep(...);
+    //
+    // The per-arg descent needs execExpr-core's not-yet-landed ExecInitExprRec
+    // result-cell-target model (it recurses into the shared resv/resnull cell);
+    // `ExecInitSubPlan` is owned by nodeSubplan (cross-unit seam). Faithful
+    // structure; in-unit + cross-unit deps not yet modeled.
+    panic!(
+        "execExpr-func-subscript: ExecInitSubPlanExpr not fully ported — needs the execExpr-core \
+         ExecInitExprRec recursion entry (for the EEOP_PARAM_SET argument descent) and the \
+         nodeSubplan ExecInitSubPlan owner seam"
+    );
+}
+
+/// `ExecInitWholeRowVar(scratch, variable, state)` (execExpr.c:3206) — set up an
+/// `EEOP_WHOLEROW` step for a whole-row `Var`. Records the OLD/NEW
+/// returning-type flags on the `ExprState`, and — for a SubqueryScan/CteScan
+/// parent whose subplan emits junk columns — attaches a `JunkFilter`.
+pub(crate) fn exec_init_whole_row_var<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    variable: &types_nodes::primnodes::Var,
+    state: &mut ExprState<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{
+        ExprEvalOp, ExprEvalStepData, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
+    };
+    use types_nodes::primnodes::VarReturningType;
+
+    // C: scratch->opcode = EEOP_WHOLEROW;
+    //    scratch->d.wholerow.var = variable;
+    //    scratch->d.wholerow.first = true;
+    //    scratch->d.wholerow.slow = false;
+    //    scratch->d.wholerow.tupdesc = NULL;
+    //    scratch->d.wholerow.junkFilter = NULL;
+    scratch.opcode = ExprEvalOp::EEOP_WHOLEROW;
+    scratch.d = ExprEvalStepData::WholeRow {
+        // The keystone `wholerow.var` is an owned `PgBox<Var>` back-pointer;
+        // mirror the C `scratch->d.wholerow.var = variable` by boxing a copy of
+        // the (small, scalar-only) plan node in the EState per-query context.
+        var: Some(mcx::alloc_in(mcx, variable.clone())?),
+        first: true,
+        slow: false,
+        tupdesc: None,
+        junk_filter: 0,
+    };
+
+    // C: if (variable->varreturningtype == VAR_RETURNING_OLD)
+    //        state->flags |= EEO_FLAG_HAS_OLD;
+    //    else if (variable->varreturningtype == VAR_RETURNING_NEW)
+    //        state->flags |= EEO_FLAG_HAS_NEW;
+    //
+    // The keystone `Var` does not yet carry `varreturningtype`; it defaults to
+    // VAR_RETURNING_DEFAULT, so neither flag is set (matching the common path).
+    let varreturningtype = VarReturningType::VAR_RETURNING_DEFAULT;
+    match varreturningtype {
+        VarReturningType::VAR_RETURNING_OLD => state.flags |= EEO_FLAG_HAS_OLD,
+        VarReturningType::VAR_RETURNING_NEW => state.flags |= EEO_FLAG_HAS_NEW,
+        VarReturningType::VAR_RETURNING_DEFAULT => {}
+    }
+
+    // C: if (parent) { ... SubqueryScanState/CteScanState junk-filter setup,
+    //        scratch->d.wholerow.junkFilter = ExecInitJunkFilter(...); }
+    //
+    // The parent PlanState's SubqueryScan/CteScan subplan-targetlist
+    // introspection and ExecInitJunkFilter / ExecInitExtraTupleSlot are owned
+    // by execProcnode / execJunk / execTuples (cross-unit). With no parent the
+    // C skips the whole block; that is the only shape this family compiles
+    // standalone, so leave junkFilter NULL — exactly the C `!parent` path.
+    if state.parent.is_some() {
+        panic!(
+            "execExpr-func-subscript: ExecInitWholeRowVar — parent-bearing junk-filter setup \
+             not ported (needs the SubqueryScan/CteScan subplan-targetlist introspection and \
+             the ExecInitJunkFilter / ExecInitExtraTupleSlot owner seams)"
+        );
+    }
+
+    Ok(())
+}
+
+/// `ExecInitSubscriptingRef(scratch, sbsref, state, resv, resnull)`
+/// (execExpr.c:3252) — compile a container `SubscriptingRef` (array/jsonb
+/// element fetch or assignment): resolve the type's subscript routines, lay out
+/// the `SubscriptingRefState` index workspace, recurse the container expression
+/// and each subscript expression, emit the SUBSCRIPTS/OLD/ASSIGN/FETCH steps,
+/// and backpatch the null-jump targets.
+pub(crate) fn exec_init_subscripting_ref<'mcx>(
+    _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    _state: &mut ExprState<'mcx>,
+    _resv: Option<&mut Datum>,
+    _resnull: Option<&mut bool>,
+) -> PgResult<()> {
+    // C: bool isAssignment = (sbsref->refassgnexpr != NULL);
+    //    int nupper = list_length(sbsref->refupperindexpr);
+    //    int nlower = list_length(sbsref->reflowerindexpr);
+    //    sbsroutines = getSubscriptingRoutines(sbsref->refcontainertype, NULL);
+    //    if (!sbsroutines) ereport(ERROR, "cannot subscript type %s ...");
+    let _is_assignment = sbsref.refassgnexpr.is_some();
+    let _nupper = sbsref.refupperindexpr.len() as i32;
+    let _nlower = sbsref.reflowerindexpr.len() as i32;
+
+    // The subscript-handler resolution (getSubscriptingRoutines ->
+    // backend-utils-adt subscripting), the SubscriptExecSteps method install
+    // (sbsroutines->exec_setup), and the per-subscript / container / assign
+    // descent (ExecInitExprRec into the sbsrefstate->{upper,lower}index[i] and
+    // ->replacevalue cells, plus the innermost_caseval save/restore) all need
+    // either a cross-unit owner seam or execExpr-core's not-yet-landed
+    // ExecInitExprRec result-cell-target model. The `isAssignmentIndirectionExpr`
+    // gate (this family's own logic) is ported above and consulted here in the
+    // assignment path. Faithful structure; deps not yet modeled.
+    //
+    // C (assignment-indirection gate, faithfully ported, consulted below):
+    //    if (isAssignmentIndirectionExpr(sbsref->refassgnexpr)) { ... EEOP_SBSREF_OLD ... }
+    let _needs_old = is_assignment_indirection_expr(sbsref.refassgnexpr.as_deref());
+
+    panic!(
+        "execExpr-func-subscript: ExecInitSubscriptingRef not fully ported — needs the \
+         getSubscriptingRoutines owner seam (backend-utils-adt subscripting) and the \
+         execExpr-core ExecInitExprRec result-cell-target model for the container/subscript/\
+         assign descent"
+    );
 }
