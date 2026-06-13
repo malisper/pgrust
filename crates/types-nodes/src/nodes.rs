@@ -68,6 +68,21 @@ pub use CmdType::{
     CMD_UTILITY,
 };
 
+/// `OnConflictAction` (nodes/nodes.h) — what to do at ON CONFLICT. Values
+/// verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum OnConflictAction {
+    /// No "ON CONFLICT" clause.
+    ONCONFLICT_NONE = 0,
+    /// ON CONFLICT ... DO NOTHING.
+    ONCONFLICT_NOTHING = 1,
+    /// ON CONFLICT ... DO UPDATE.
+    ONCONFLICT_UPDATE = 2,
+}
+
+pub use OnConflictAction::{ONCONFLICT_NONE, ONCONFLICT_NOTHING, ONCONFLICT_UPDATE};
+
 /// A plan-tree node (`Plan *` in C). The `NodeTag` is the enum discriminant.
 /// Carries the allocator lifetime of the context the plan tree lives in;
 /// copying allocates, so it goes through the fallible [`Node::clone_in`].

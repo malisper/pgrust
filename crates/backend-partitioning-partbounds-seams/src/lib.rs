@@ -67,3 +67,17 @@ seam_core::seam!(
         n_tuple_datums: i32,
     ) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `FunctionCall2Coll(&key->partsupfunc[0], key->partcollation[0],
+    /// last_datum, value)` for a LIST partition's cached-find double-check
+    /// (`get_partition_for_tuple` in execPartition.c): compare the last-found
+    /// LIST bound datum against the new key datum using the partition's first
+    /// support (comparison) function. The comparison function can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn partition_list_datum_cmp(
+        key: &PartitionKeyData<'_>,
+        last_datum: Datum,
+        value: Datum,
+    ) -> PgResult<i32>
+);

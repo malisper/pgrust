@@ -41,3 +41,49 @@ seam_core::seam!(
         maxfieldlen: i32,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `ExecPartitionCheck(resultRelInfo, slot, estate, emitError)`
+    /// (execMain.c): check the partition constraint of `result_rel_info`
+    /// (id into the EState `ResultRelInfo` pool) against the tuple in `slot`
+    /// (id into the EState slot pool). With `emit_error = true` a failing
+    /// constraint is `ereport(ERROR)` (carried on `Err`) and the bool is
+    /// always `true`; with `emit_error = false` it returns whether the
+    /// constraint passed. Evaluating the constraint expression can also
+    /// `ereport(ERROR)`.
+    pub fn exec_partition_check<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        emit_error: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecLookupResultRelByOid(node, resultoid, missing_ok, update_cache)`
+    /// (execMain.c): find the `ResultRelInfo` already known to the
+    /// `ModifyTableState` for the relation `resultoid`, returning its EState
+    /// pool id, or `None` (the C `NULL`) when not found and `missing_ok` is
+    /// true. With `missing_ok = false` a miss is the C `elog(ERROR, "incorrect
+    /// result relation OID %u")`, carried on `Err`.
+    pub fn exec_lookup_result_rel_by_oid<'mcx>(
+        node: &mut types_nodes::ModifyTableState<'mcx>,
+        resultoid: types_core::Oid,
+        missing_ok: bool,
+        update_cache: bool,
+    ) -> types_error::PgResult<Option<types_nodes::RriId>>
+);
+
+seam_core::seam!(
+    /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
+    /// mergeActions)` (execMain.c): verify the result relation (id into the
+    /// EState pool) is a valid target for the given command, raising the
+    /// appropriate `ereport(ERROR)` otherwise (carried on `Err`). The
+    /// `merge_actions` list is passed empty by the partition-routing caller.
+    pub fn check_valid_result_rel<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        operation: types_nodes::nodes::CmdType,
+        on_conflict_action: types_nodes::nodes::OnConflictAction,
+    ) -> types_error::PgResult<()>
+);

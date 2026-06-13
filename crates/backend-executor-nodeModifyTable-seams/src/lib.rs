@@ -19,3 +19,15 @@ seam_core::seam!(
         cmdtype: types_nodes::nodes::CmdType,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `((ModifyTable *) mtstate->ps.plan)->onConflictAction`
+    /// (nodeModifyTable.c view of the plan node): the ON CONFLICT action of
+    /// the `ModifyTableState`'s plan node, or `ONCONFLICT_NONE` when the plan
+    /// pointer is the C `NULL` (the `node ? ... : ONCONFLICT_NONE` guard in
+    /// `ExecFindPartition`). Infallible — a plain field read once the owner
+    /// can interpret its own plan node.
+    pub fn exec_get_on_conflict_action<'mcx>(
+        mtstate: &types_nodes::ModifyTableState<'mcx>,
+    ) -> types_nodes::nodes::OnConflictAction
+);

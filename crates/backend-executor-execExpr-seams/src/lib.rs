@@ -61,6 +61,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecPrepareExprList(exprList, estate)` (execExpr.c): compile a list of
+    /// expression trees into a parallel list of executable `ExprState`s,
+    /// allocated in the EState's per-query context. Fallible on OOM and on
+    /// unsupported expression shapes (`ereport(ERROR)`).
+    pub fn exec_prepare_expr_list<'mcx>(
+        expr_list: &[types_nodes::primnodes::Expr],
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<
+        mcx::PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>,
+    >
+);
+
+seam_core::seam!(
     /// `ExecQual(state, econtext)` (executor.h): evaluate a compiled boolean
     /// qual `ExprState` over the econtext (id into the EState pool), returning
     /// whether it passed (a `NULL` state is always-true, handled by the

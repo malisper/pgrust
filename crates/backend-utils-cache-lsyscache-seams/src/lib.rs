@@ -9,6 +9,15 @@ use types_core::Oid;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output function OID and whether it is varlena,
+    /// returned as `(typoutput, typisvarlena)`. A non-output type is the C
+    /// `ereport(ERROR, ...cannot display a value of type...)`; cache lookup
+    /// failure is `elog(ERROR)`. Both carried on `Err`.
+    pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
     /// name, copied out of the syscache into `mcx` (C: `pstrdup` in the
     /// current context). With `missing_ok = false` a missing opfamily raises

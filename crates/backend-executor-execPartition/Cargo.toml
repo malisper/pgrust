@@ -17,6 +17,7 @@ types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
+types-acl = { path = "../types-acl" }
 
 # Seam crates for the unported owners this unit calls (bodies dispatch through
 # these; they panic until the owner lands).
@@ -28,8 +29,10 @@ backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" 
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModifyTable-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-access-common-tupconvert-seams = { path = "../backend-access-common-tupconvert-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
@@ -38,3 +41,8 @@ backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-dep
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

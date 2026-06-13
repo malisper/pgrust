@@ -22,6 +22,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_class_aclcheck(table_oid, roleid, mode)` (aclchk.c): check
+    /// privilege bits on a relation. Can `ereport(ERROR)` on cache lookup
+    /// failure, carried on `Err`.
+    pub fn pg_class_aclcheck(table_oid: Oid, roleid: Oid, mode: AclMode) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
+    /// `pg_attribute_aclcheck(table_oid, attnum, roleid, mode)` (aclchk.c):
+    /// check privilege bits on a single relation column. Can `ereport(ERROR)`
+    /// on cache lookup failure, carried on `Err`.
+    pub fn pg_attribute_aclcheck(
+        table_oid: Oid,
+        attnum: types_core::AttrNumber,
+        roleid: Oid,
+        mode: AclMode,
+    ) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
     /// `object_ownercheck(classid, objectid, roleid)` (aclchk.c): is `roleid`
     /// owner of (or member of the owning role of) the object? Can
     /// `ereport(ERROR)` on cache lookup failure, carried on `Err`.
