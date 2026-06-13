@@ -22,3 +22,4 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
