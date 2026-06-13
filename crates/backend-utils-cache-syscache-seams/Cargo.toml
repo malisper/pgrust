@@ -21,3 +21,4 @@ types-tuple = { path = "../types-tuple" }
 types-partition = { path = "../types-partition" }
 types-fmgr = { path = "../types-fmgr" }
 types-cluster = { path = "../types-cluster" }
+types-format-type = { path = "../types-format-type" }

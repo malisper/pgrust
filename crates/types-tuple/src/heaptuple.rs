@@ -43,10 +43,24 @@ pub const INT2ARRAYOID: Oid = 1005;
 pub const TEXTARRAYOID: Oid = 1009;
 pub const OIDARRAYOID: Oid = 1028;
 pub const BITOID: Oid = 1560;
+/// `VARBITOID` — `varbit` (bit varying) type OID (`pg_type.dat`).
+pub const VARBITOID: Oid = 1562;
 pub const NUMERICOID: Oid = 1700;
 pub const CSTRINGOID: Oid = 2275;
 pub const VARCHAROID: Oid = 1043;
+/// `BPCHAROID` — `bpchar` (blank-padded char) type OID (`pg_type.dat`).
+pub const BPCHAROID: Oid = 1042;
 pub const DATEOID: Oid = 1082;
+/// `TIMEOID` — `time without time zone` type OID (`pg_type.dat`).
+pub const TIMEOID: Oid = 1083;
+/// `TIMETZOID` — `time with time zone` type OID (`pg_type.dat`).
+pub const TIMETZOID: Oid = 1266;
+/// `TIMESTAMPOID` — `timestamp without time zone` type OID (`pg_type.dat`).
+pub const TIMESTAMPOID: Oid = 1114;
+/// `TIMESTAMPTZOID` — `timestamp with time zone` type OID (`pg_type.dat`).
+pub const TIMESTAMPTZOID: Oid = 1184;
+/// `INTERVALOID` — `interval` type OID (`pg_type.dat`).
+pub const INTERVALOID: Oid = 1186;
 pub const TIDOID: Oid = 27;
 pub const XIDOID: Oid = 28;
 pub const CIDOID: Oid = 29;
