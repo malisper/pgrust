@@ -103,3 +103,10 @@ pub(crate) const REPLICA_IDENTITY_FULL: i8 = b'f' as i8;
 pub(crate) fn relation_get_relid(rel: &RelationData) -> Oid {
     rel.rd_id
 }
+
+/// `elog(WARNING, msg)` — emit a non-fatal warning report and continue. The
+/// build family's fetch routines warn (not error) on missing/null catalog rows
+/// just as the C does; `ThrowErrorData` logs a WARNING and returns `Ok`.
+pub(crate) fn elog_warning(message: String) -> backend_utils_error::PgResult<()> {
+    backend_utils_error::elog(types_error::WARNING, message)
+}

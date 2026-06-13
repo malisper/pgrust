@@ -448,6 +448,7 @@ pub fn AllocateRelationDesc(relp: FormPgClass) -> PgResult<Box<RelationData>> {
         tdtypeid: InvalidOid,
         tdtypmod: -1,
         attrs: Vec::new(),
+        constr: None,
     };
     // Copy the pg_class form into rd_rel (C memcpy of CLASS_TUPLE_SIZE).
     relation.rd_rel = relp;
@@ -574,6 +575,7 @@ pub fn formrdesc(
         tdtypeid: relationReltype,
         tdtypmod: -1,
         attrs: owned_attrs,
+        constr: None,
     };
     // C sets a TupleConstr{has_not_null} when any column is NOT NULL; the owned
     // entry tracks NOT NULL on each attr row, so the per-row attnotnull above is
@@ -608,33 +610,231 @@ pub fn formrdesc(
         .into_error())
 }
 
-/// `AttrDefaultFetch(relation, ndef)` (relcache.c): load column default
-/// expressions from `pg_attrdef`. **Own logic** is the accounting; the
-/// `pg_attrdef` scan + `nodeToString`/`stringToNode` of the default expr tree
-/// is the seamed catalog/nodes primitive.
-pub fn AttrDefaultFetch(relation: &mut RelationData, ndef: i32) -> PgResult<()> {
-    let _ = (relation, ndef);
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: AttrDefaultFetch pg_attrdef read \
-             (systable scan via genam + adbin node-tree deserialization) \
-             is a cross-unit primitive; owner not yet landed",
-        )
-        .into_error())
+/// One deformed `pg_attrdef` row for [`AttrDefaultFetch`]: the `adnum` plus the
+/// `adbin` default-expression node-tree text (`None` is the C `isnull`). The
+/// `TextDatumGetCString` detoast of `adbin` happens behind the scan seam (it is
+/// a cross-unit deform); the per-attribute accounting is own logic.
+pub(crate) struct ScannedAttrDefault {
+    pub adnum: types_core::primitive::AttrNumber,
+    pub adbin: Option<String>,
 }
 
-/// `CheckNNConstraintFetch(relation)` (relcache.c): load not-null constraint
-/// info from `pg_constraint`. **Own logic** is the accounting; the
-/// `pg_constraint` scan is the seamed catalog primitive.
+/// `AttrDefaultFetch(relation, ndef)` (relcache.c): load column default
+/// expressions from `pg_attrdef`. **Own logic** is the accounting/sort/install;
+/// the `pg_attrdef` systable scan + `TextDatumGetCString` of the `adbin` node
+/// tree is the seamed catalog primitive (`scan_pg_attrdef_seam`).
+pub fn AttrDefaultFetch(relation: &mut RelationData, ndef: i32) -> PgResult<()> {
+    use crate::core_entry_store::entry::OwnedAttrDefault;
+
+    // Allocate array with room for as many entries as expected (the C
+    // MemoryContextAllocZero of `ndef` slots; here a Vec we fill up to `found`).
+    let mut attrdef: Vec<OwnedAttrDefault> = Vec::with_capacity(ndef.max(0) as usize);
+
+    let relname = relation.rd_rel.relname.clone();
+    // Search pg_attrdef for relevant entries (adrelid = RelationGetRelid). The
+    // scan + GETSTRUCT deform + adbin detoast is the cross-unit catalog
+    // primitive; it yields the deformed rows. The accounting below is own logic.
+    let rows = scan_pg_attrdef_seam(relation.rd_id)?;
+
+    let mut found: i32 = 0;
+    for row in &rows {
+        // protect limited size of array
+        if found >= ndef {
+            crate::elog_warning(format!(
+                "unexpected pg_attrdef record found for attribute {} of relation \"{}\"",
+                row.adnum, relname
+            ))?;
+            break;
+        }
+
+        match &row.adbin {
+            None => {
+                crate::elog_warning(format!(
+                    "null adbin for attribute {} of relation \"{}\"",
+                    row.adnum, relname
+                ))?;
+            }
+            Some(s) => {
+                attrdef.push(OwnedAttrDefault {
+                    adnum: row.adnum,
+                    adbin: s.clone(),
+                });
+                found += 1;
+            }
+        }
+    }
+
+    if found != ndef {
+        crate::elog_warning(format!(
+            "{} pg_attrdef record(s) missing for relation \"{}\"",
+            ndef - found,
+            relname
+        ))?;
+    }
+
+    // Sort the AttrDefault entries by adnum (for equalTupleDescs convenience).
+    if found > 1 {
+        attrdef.sort_by(|a, b| a.adnum.cmp(&b.adnum));
+    }
+
+    // Install array only after it's fully valid: rd_att->constr->defval/num_defval.
+    let constr = relation
+        .rd_att
+        .constr
+        .get_or_insert_with(Default::default);
+    constr.defval = attrdef;
+    // num_defval is the Vec length (`found`); the owned mirror tracks it via len.
+    Ok(())
+}
+
+/// One deformed `pg_constraint` row for [`CheckNNConstraintFetch`]. Carries the
+/// `contype` plus the per-kind fields the routine consumes: for a NOT NULL
+/// constraint, `convalidated` + the `extractNotNullColumn` attnum; for a CHECK
+/// constraint, the enforced/valid/noinherit flags, the name, and the `conbin`
+/// node-tree text (`None` is the C `isnull`). The GETSTRUCT deform,
+/// `extractNotNullColumn`, and `TextDatumGetCString` of `conbin` happen behind
+/// the scan seam (cross-unit); the accounting is own logic.
+pub(crate) struct ScannedConstraint {
+    /// `conform->contype` (`CONSTRAINT_NOTNULL`/`CONSTRAINT_CHECK`/other).
+    pub contype: i8,
+    /// NOT NULL only: `!conform->convalidated`.
+    pub notnull_invalid: bool,
+    /// NOT NULL only: `extractNotNullColumn(htup)`.
+    pub notnull_attnum: types_core::primitive::AttrNumber,
+    /// CHECK only: `conform->conenforced`.
+    pub ccenforced: bool,
+    /// CHECK only: `conform->convalidated`.
+    pub ccvalid: bool,
+    /// CHECK only: `conform->connoinherit`.
+    pub ccnoinherit: bool,
+    /// CHECK only: `NameStr(conform->conname)`.
+    pub ccname: String,
+    /// CHECK only: `conbin` cstring, or `None` for the C `isnull`.
+    pub ccbin: Option<String>,
+}
+
+/// `CONSTRAINT_CHECK` (`catalog/pg_constraint.h`).
+const CONSTRAINT_CHECK: i8 = b'c' as i8;
+/// `CONSTRAINT_NOTNULL` (`catalog/pg_constraint.h`).
+const CONSTRAINT_NOTNULL: i8 = b'n' as i8;
+
+/// `CheckNNConstraintFetch(relation)` (relcache.c): load check constraints and
+/// update not-null validity of invalid constraints, from `pg_constraint`.
+/// **Own logic** is the accounting/sort/install + the not-null attnullability
+/// fixup; the `pg_constraint` systable scan + `extractNotNullColumn` +
+/// `TextDatumGetCString` of `conbin` is the seamed catalog primitive
+/// (`scan_pg_constraint_nncheck_seam`).
 pub fn CheckNNConstraintFetch(relation: &mut RelationData) -> PgResult<()> {
-    let _ = relation;
-    Err(ereport(ERROR)
-        .errmsg_internal(
-            "relcache-build: CheckNNConstraintFetch pg_constraint read \
-             (systable scan via genam) is a cross-unit primitive; owner not yet \
-             landed",
-        )
-        .into_error())
+    use crate::core_entry_store::entry::OwnedConstrCheck;
+    use types_tuple::heaptuple::ATTNULLABLE_UNKNOWN;
+
+    let ncheck = relation.rd_rel.relchecks as i32;
+    let relname = relation.rd_rel.relname.clone();
+
+    // Allocate array with room for as many entries as expected, if needed.
+    let mut check: Vec<OwnedConstrCheck> = Vec::with_capacity(ncheck.max(0) as usize);
+
+    // Search pg_constraint for relevant entries (conrelid = RelationGetRelid).
+    // The scan + GETSTRUCT deform + extractNotNullColumn + conbin detoast is the
+    // cross-unit catalog primitive; accounting below is own logic.
+    let rows = scan_pg_constraint_nncheck_seam(relation.rd_id)?;
+
+    let mut found: i32 = 0;
+    for row in &rows {
+        // If this is a not-null constraint, only look at it if it's invalid,
+        // and if so mark the TupleDesc entry as known invalid. Otherwise move
+        // on. Remaining UNKNOWN columns are marked known-valid later.
+        if row.contype == CONSTRAINT_NOTNULL {
+            if row.notnull_invalid {
+                let attnum = row.notnull_attnum;
+                let idx = (attnum - 1) as usize;
+                debug_assert!(
+                    relation.rd_att.attrs[idx].attnullability == ATTNULLABLE_UNKNOWN
+                );
+                relation.rd_att.attrs[idx].attnullability =
+                    types_tuple::heaptuple::ATTNULLABLE_INVALID;
+            }
+            continue;
+        }
+
+        // For what follows, consider check constraints only.
+        if row.contype != CONSTRAINT_CHECK {
+            continue;
+        }
+
+        // protect limited size of array
+        if found >= ncheck {
+            crate::elog_warning(format!(
+                "unexpected pg_constraint record found for relation \"{relname}\""
+            ))?;
+            break;
+        }
+
+        // Grab and test conbin is actually set.
+        match &row.ccbin {
+            None => {
+                crate::elog_warning(format!("null conbin for relation \"{relname}\""))?;
+            }
+            Some(s) => {
+                check.push(OwnedConstrCheck {
+                    ccname: row.ccname.clone(),
+                    ccbin: s.clone(),
+                    ccenforced: row.ccenforced,
+                    ccvalid: row.ccvalid,
+                    ccnoinherit: row.ccnoinherit,
+                });
+                found += 1;
+            }
+        }
+    }
+
+    if found != ncheck {
+        crate::elog_warning(format!(
+            "{} pg_constraint record(s) missing for relation \"{relname}\"",
+            ncheck - found
+        ))?;
+    }
+
+    // Sort the records by name (deterministic CHECK order + faster
+    // equalTupleDescs). C uses strcmp; Rust String Ord is the same byte order.
+    if found > 1 {
+        check.sort_by(|a, b| a.ccname.cmp(&b.ccname));
+    }
+
+    // Install array only after it's fully valid: rd_att->constr->check/num_check.
+    let constr = relation
+        .rd_att
+        .constr
+        .get_or_insert_with(Default::default);
+    constr.check = check;
+    Ok(())
+}
+
+/// `systable_beginscan(pg_attrdef, adrelid = relid)` + per-row GETSTRUCT deform
+/// of `Form_pg_attrdef` and `TextDatumGetCString(adbin)`. The `table_open` of
+/// pg_attrdef, the genam scan, and the `adbin` text detoast are genuine
+/// cross-unit primitives (genam owner + heap deform). Seam-and-panic until the
+/// owner lands; the [`AttrDefaultFetch`] accounting around it is own logic.
+fn scan_pg_attrdef_seam(_relid: Oid) -> PgResult<Vec<ScannedAttrDefault>> {
+    todo!(
+        "relcache-build: pg_attrdef scan + adbin TextDatumGetCString for \
+         AttrDefaultFetch (genam owner + heap deform seam)"
+    )
+}
+
+/// `systable_beginscan(pg_constraint, conrelid = relid)` + per-row GETSTRUCT
+/// deform of `Form_pg_constraint`, `extractNotNullColumn(htup)` for NOT NULL
+/// rows, and `TextDatumGetCString(conbin)` for CHECK rows. The `table_open` of
+/// pg_constraint, the genam scan, the not-null-column extraction, and the
+/// `conbin` text detoast are genuine cross-unit primitives. Seam-and-panic
+/// until the owner lands; the [`CheckNNConstraintFetch`] accounting around it
+/// is own logic.
+fn scan_pg_constraint_nncheck_seam(_relid: Oid) -> PgResult<Vec<ScannedConstraint>> {
+    todo!(
+        "relcache-build: pg_constraint scan + extractNotNullColumn + conbin \
+         TextDatumGetCString for CheckNNConstraintFetch (genam owner + heap \
+         deform seam)"
+    )
 }
 
 /// `RelationInitLockInfo(relation)` (relcache.c): fill `rd_lockInfo.lockRelId`
