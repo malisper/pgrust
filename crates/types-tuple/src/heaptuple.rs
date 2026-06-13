@@ -51,6 +51,14 @@ pub const CIDOID: Oid = 29;
 /// `refcursor` — reference to a cursor (portal name); uses `text`'s I/O routines
 /// (`catalog/pg_type.dat`, oid 1790).
 pub const REFCURSOROID: Oid = 1790;
+/// `internal` pseudo-type (`pg_type_d.h`, oid 2281).
+pub const INTERNALOID: Oid = 2281;
+/// `anyarray` pseudo-type (`pg_type_d.h`, oid 2277).
+pub const ANYARRAYOID: Oid = 2277;
+/// `any` pseudo-type (`pg_type_d.h`, oid 2276).
+pub const ANYOID: Oid = 2276;
+/// `anycompatiblearray` pseudo-type (`pg_type_d.h`, oid 5078).
+pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
 
 /// Default array element delimiter (`','`, `catalog/pg_type.h`).
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;
@@ -295,6 +303,69 @@ impl MinimalTupleData<'_> {
             t_infomask: self.t_infomask,
             t_hoff: self.t_hoff,
             t_bits: slice_in(mcx, &self.t_bits)?,
+        })
+    }
+
+    /// Serialize the full minimal tuple to bytes for a temp-file spill (the C
+    /// hash-join batch file records `tuple` of `tuple->t_len` bytes). The byte
+    /// stream is the carried header fields followed by a length-prefixed
+    /// `t_bits`; the leading 4 bytes are `t_len` so a reader can length its
+    /// read exactly as the C `BufFileReadExact(file, ..., t_len - 4)` does.
+    pub fn to_minimal_bytes(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(&self.t_len.to_ne_bytes());
+        for b in self.mt_padding.iter() {
+            out.push(*b as u8);
+        }
+        out.extend_from_slice(&self.t_infomask2.to_ne_bytes());
+        out.extend_from_slice(&self.t_infomask.to_ne_bytes());
+        out.push(self.t_hoff);
+        out.extend_from_slice(&(self.t_bits.len() as u32).to_ne_bytes());
+        out.extend_from_slice(&self.t_bits);
+        out
+    }
+
+    /// Reconstruct from the spilled record's `t_len` word plus the body bytes
+    /// (everything after the leading `t_len` word — `body.len() == t_len - 4`
+    /// in the C layout). Allocates the rebuilt tuple in `mcx`.
+    pub fn from_minimal_parts<'b>(
+        mcx: Mcx<'b>,
+        t_len: uint32,
+        body: &[u8],
+    ) -> PgResult<MinimalTupleData<'b>> {
+        // body layout: mt_padding[6], t_infomask2(2), t_infomask(2), t_hoff(1),
+        // t_bits_len(4), t_bits[...].
+        let mut p = 0usize;
+        let read = |p: &mut usize, n: usize| -> &[u8] {
+            let s = &body[*p..*p + n];
+            *p += n;
+            s
+        };
+        let mut mt_padding = [0i8; 6];
+        for (i, b) in read(&mut p, 6).iter().enumerate() {
+            mt_padding[i] = *b as i8;
+        }
+        let t_infomask2 = {
+            let s = read(&mut p, 2);
+            uint16::from_ne_bytes([s[0], s[1]])
+        };
+        let t_infomask = {
+            let s = read(&mut p, 2);
+            uint16::from_ne_bytes([s[0], s[1]])
+        };
+        let t_hoff = read(&mut p, 1)[0];
+        let bits_len = {
+            let s = read(&mut p, 4);
+            u32::from_ne_bytes([s[0], s[1], s[2], s[3]]) as usize
+        };
+        let bits = read(&mut p, bits_len);
+        Ok(MinimalTupleData {
+            t_len,
+            mt_padding,
+            t_infomask2,
+            t_infomask,
+            t_hoff,
+            t_bits: slice_in(mcx, bits)?,
         })
     }
 }

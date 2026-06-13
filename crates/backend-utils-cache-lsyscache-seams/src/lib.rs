@@ -146,3 +146,17 @@ seam_core::seam!(
         procnum: i16,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `get_op_hash_functions(opno, &lhs_procno, &rhs_procno)` (lsyscache.c):
+    /// resolve the LHS and RHS hash support functions of a hashable equality
+    /// operator. Returns `Some((lhs, rhs))` when found (the C `true`), `None`
+    /// when not (the C `false`). `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn get_op_hash_functions(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `op_strict(opno)` (lsyscache.c): whether the operator's underlying
+    /// function is strict. `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn op_strict(opno: Oid) -> PgResult<bool>
+);
