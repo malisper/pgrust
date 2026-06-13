@@ -17,6 +17,10 @@ types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-array = { path = "../types-array" }
 
+# ereport(ERROR) builder for the SQL-facing argument/limit checks.
+backend-utils-error = { path = "../backend-utils-error" }
+types-typcache = { path = "../types-typcache" }
+
 # Inward seams this crate OWNS and installs from init_seams().
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 
