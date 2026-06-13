@@ -242,3 +242,10 @@ seam_core::seam!(
     /// `ereport`.
     pub fn is_backend_pid(pid: i32) -> bool
 );
+
+seam_core::seam!(
+    /// `GetOldestSafeDecodingTransactionId(catalogOnly)` (procarray.c): the
+    /// oldest xid it is safe to start decoding from. `catalogOnly` restricts
+    /// the horizon to catalog tables. Called with `ProcArrayLock` held.
+    pub fn get_oldest_safe_decoding_transaction_id(catalog_only: bool) -> TransactionId
+);

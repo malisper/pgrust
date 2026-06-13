@@ -245,6 +245,10 @@ seam_core::seam!(
     pub fn slot_two_phase() -> bool
 );
 seam_core::seam!(
+    /// `MyReplicationSlot->data.failover`.
+    pub fn slot_failover() -> bool
+);
+seam_core::seam!(
     /// `MyReplicationSlot->data.two_phase_at`.
     pub fn slot_two_phase_at() -> XLogRecPtr
 );
@@ -327,6 +331,26 @@ seam_core::seam!(
     pub fn slot_set_candidate_restart_valid(lsn: XLogRecPtr)
 );
 
+// MyReplicationSlot field accessors/mutators additionally needed by the
+// slotsync consumer (slot.c owns `MyReplicationSlot`).
+seam_core::seam!(
+    /// `MyReplicationSlot->data.persistency`.
+    pub fn slot_persistency() -> ReplicationSlotPersistency
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.invalidated = cause` (under the per-slot
+    /// spinlock, held by the caller).
+    pub fn slot_set_invalidated(cause: ReplicationSlotInvalidationCause)
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.database = dbid` (under the per-slot spinlock).
+    pub fn slot_set_database(dbid: Oid)
+);
+seam_core::seam!(
+    /// `MyReplicationSlot->data.failover = value` (under the per-slot spinlock).
+    pub fn slot_set_failover(value: bool)
+);
+
 seam_core::seam!(
     /// `LWLockAcquire(ReplicationSlotControlLock, LW_EXCLUSIVE)`.
     pub fn replication_slot_control_lock_acquire_exclusive()
@@ -402,6 +426,7 @@ seam_core::seam!(pub fn slot_is_logical(slot: ReplicationSlotHandle) -> bool);
 seam_core::seam!(pub fn slot_data_synced(slot: ReplicationSlotHandle) -> bool);
 seam_core::seam!(pub fn slot_data_name(slot: ReplicationSlotHandle) -> String);
 seam_core::seam!(pub fn slot_data_database(slot: ReplicationSlotHandle) -> Oid);
+seam_core::seam!(pub fn slot_active_pid(slot: ReplicationSlotHandle) -> i32);
 seam_core::seam!(
     pub fn slot_data_invalidated(slot: ReplicationSlotHandle) -> ReplicationSlotInvalidationCause
 );

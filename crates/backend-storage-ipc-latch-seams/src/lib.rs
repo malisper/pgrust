@@ -122,3 +122,10 @@ seam_core::seam!(
     /// procno is passed explicitly. Infallible in C.
     pub fn set_latch_by_proc_number(pgprocno: types_core::ProcNumber)
 );
+
+seam_core::seam!(
+    /// `kill(pid, SIGUSR1)` (slotsync.c `ShutDownSlotSync`): signal the
+    /// slot-sync worker so it notices the stop request. `Err` carries a failed
+    /// `kill(2)`.
+    pub fn kill_sigusr1(pid: i32) -> types_error::PgResult<()>
+);

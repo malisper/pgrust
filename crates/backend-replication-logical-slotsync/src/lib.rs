@@ -24,6 +24,7 @@
 use std::cell::Cell;
 
 use types_core::primitive::{Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use types_core::catalog::DATABASE_RELATION_ID as DatabaseRelationId;
 use types_error::error::{DEBUG1, ERROR, LOG};
 use types_error::pg_error::{PgError, PgResult};
 use types_error::{
@@ -33,13 +34,13 @@ use types_error::{
 use types_core::xact::{
     FirstNormalTransactionId, InvalidTransactionId, InvalidXLogRecPtr,
 };
-use types_wal::WAL_LEVEL_LOGICAL;
+use types_wal::xlog_consts::WalLevel;
 
-use types_replication::{
-    ReplicationSlotHandle, ReplicationSlotInvalidationCause,
-    WrConnHandle, DatabaseRelationId, RS_INVAL_NONE, RS_TEMPORARY,
-    WALRCV_OK_TUPLES,
+use types_replication_slot::{
+    ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
+use types_replication_slot::ReplicationSlotInvalidationCause::RS_INVAL_NONE;
+use types_walreceiver::{WalRcvExecStatus, WalReceiverConn};
 use types_storage::lock::AccessShareLock;
 use types_storage::storage::{
     LWLockMode, LW_EXCLUSIVE, LW_SHARED, PROC_ARRAY_LOCK, REPLICATION_SLOT_ALLOCATION_LOCK,
@@ -55,6 +56,7 @@ use backend_storage_lmgr_s_lock::Spinlock;
 
 // Owner seam crate aliases.
 use backend_replication_slot_seams as slot;
+use backend_replication_libpqwalreceiver_seams as libpqwalrcv;
 use backend_replication_walreceiver_seams as walrcv;
 use backend_replication_walsender_seams as walsnd;
 use backend_replication_snapbuild_seams as snapbuild;
@@ -69,6 +71,7 @@ use backend_storage_lmgr_lmgr_seams as lmgr;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_commands_dbcommands_seams as dbcommands;
 use backend_utils_init_miscinit_seams as miscinit;
+use backend_utils_init_small_seams as init;
 use backend_utils_misc_guc_seams as guc;
 use backend_utils_adt_timestamp_seams as timestamp;
 use backend_tcop_postgres_seams as postgres;
@@ -317,11 +320,11 @@ fn update_local_synced_slot(
     mut found_consistent_snapshot: Option<&mut bool>,
     mut remote_slot_precedes: Option<&mut bool>,
 ) -> PgResult<bool> {
-    let s: ReplicationSlotHandle = slot::my_replication_slot::call();
+    // `slot = MyReplicationSlot` (slotsync.c:171) — implicit accessors.
     let mut updated_xmin_or_lsn = false;
     let mut updated_config = false;
 
-    debug_assert!(slot::slot_data_invalidated::call(s) == RS_INVAL_NONE);
+    debug_assert!(slot::slot_invalidated::call() == RS_INVAL_NONE);
 
     if let Some(fc) = found_consistent_snapshot.as_deref_mut() {
         *fc = false;
@@ -330,14 +333,14 @@ fn update_local_synced_slot(
         *rp = false;
     }
 
-    let slot_restart_lsn = slot::slot_data_restart_lsn::call(s);
-    let slot_catalog_xmin = slot::slot_data_catalog_xmin::call(s);
+    let slot_restart_lsn = slot::slot_restart_lsn::call();
+    let slot_catalog_xmin = slot::slot_catalog_xmin::call();
 
     // Don't overwrite if we already have a newer catalog_xmin and restart_lsn.
     if remote_slot.restart_lsn < slot_restart_lsn
         || TransactionIdPrecedes(remote_slot.catalog_xmin, slot_catalog_xmin)
     {
-        let level = if slot::slot_data_persistency::call(s) == RS_TEMPORARY {
+        let level = if slot::slot_persistency::call() == ReplicationSlotPersistency::RS_TEMPORARY {
             LOG.0
         } else {
             DEBUG1.0
@@ -364,29 +367,34 @@ fn update_local_synced_slot(
         return Ok(false);
     }
 
-    let slot_confirmed_flush = slot::slot_data_confirmed_flush::call(s);
+    let slot_confirmed_flush = slot::slot_confirmed_flush::call();
 
     if remote_slot.confirmed_lsn > slot_confirmed_flush
         || remote_slot.restart_lsn > slot_restart_lsn
         || TransactionIdFollows(remote_slot.catalog_xmin, slot_catalog_xmin)
     {
         if snapbuild::snap_build_snapshot_exists::call(remote_slot.restart_lsn) {
-            slot::slot_spin_acquire::call(s)?;
-            slot::set_slot_data_restart_lsn::call(s, remote_slot.restart_lsn);
-            slot::set_slot_data_confirmed_flush::call(s, remote_slot.confirmed_lsn);
-            slot::set_slot_data_catalog_xmin::call(s, remote_slot.catalog_xmin);
-            slot::slot_spin_release::call(s)?;
+            slot::slot_mutex_acquire::call();
+            slot::slot_set_restart_lsn::call(remote_slot.restart_lsn);
+            slot::slot_set_confirmed_flush::call(remote_slot.confirmed_lsn);
+            slot::slot_set_catalog_xmin::call(remote_slot.catalog_xmin);
+            slot::slot_mutex_release::call();
 
             if let Some(fc) = found_consistent_snapshot.as_deref_mut() {
                 *fc = true;
             }
         } else {
+            // C: `LogicalSlotAdvanceAndCheckSnapState(moveto, found_consistent
+            // _snapshot)`; the owner hoists the ambient `wal_segment_size` and
+            // `MyDatabaseId` globals into explicit arguments.
             logical::logical_slot_advance_and_check_snap_state::call(
                 remote_slot.confirmed_lsn,
                 found_consistent_snapshot.as_deref_mut(),
+                xlog::wal_segment_size::call(),
+                init::my_database_id::call(),
             )?;
 
-            if slot::slot_data_confirmed_flush::call(s) != remote_slot.confirmed_lsn {
+            if slot::slot_confirmed_flush::call() != remote_slot.confirmed_lsn {
                 return Err(PgError::error(format!(
                     "synchronized confirmed_flush for slot \"{}\" differs from remote slot",
                     remote_slot.name
@@ -394,7 +402,7 @@ fn update_local_synced_slot(
                 .with_detail(format!(
                     "Remote slot has LSN {} but local slot has LSN {}.",
                     lsn_str(remote_slot.confirmed_lsn),
-                    lsn_str(slot::slot_data_confirmed_flush::call(s))
+                    lsn_str(slot::slot_confirmed_flush::call())
                 )));
             }
         }
@@ -402,38 +410,36 @@ fn update_local_synced_slot(
         updated_xmin_or_lsn = true;
     }
 
-    if remote_dbid != slot::slot_data_database::call(s)
-        || remote_slot.two_phase != slot::slot_data_two_phase::call(s)
-        || remote_slot.failover != slot::slot_data_failover::call(s)
-        || remote_slot.plugin != slot::slot_data_plugin::call(s)
-        || remote_slot.two_phase_at != slot::slot_data_two_phase_at::call(s)
+    if remote_dbid != slot::slot_database::call()
+        || remote_slot.two_phase != slot::slot_two_phase::call()
+        || remote_slot.failover != slot::slot_failover::call()
+        || remote_slot.plugin != slot::slot_plugin::call()
+        || remote_slot.two_phase_at != slot::slot_two_phase_at::call()
     {
         let plugin_name = remote_slot.plugin.clone();
 
-        slot::slot_spin_acquire::call(s)?;
-        slot::set_slot_data_plugin::call(s, &plugin_name);
-        slot::set_slot_data_database::call(s, remote_dbid);
-        slot::set_slot_data_two_phase::call(s, remote_slot.two_phase);
-        slot::set_slot_data_two_phase_at::call(s, remote_slot.two_phase_at);
-        slot::set_slot_data_failover::call(s, remote_slot.failover);
-        slot::slot_spin_release::call(s)?;
+        slot::slot_mutex_acquire::call();
+        slot::slot_set_plugin::call(plugin_name);
+        slot::slot_set_database::call(remote_dbid);
+        slot::slot_set_two_phase::call(remote_slot.two_phase);
+        slot::slot_set_two_phase_at::call(remote_slot.two_phase_at);
+        slot::slot_set_failover::call(remote_slot.failover);
+        slot::slot_mutex_release::call();
 
         updated_config = true;
 
-        debug_assert!(
-            slot::slot_data_two_phase_at::call(s) <= slot::slot_data_confirmed_flush::call(s)
-        );
+        debug_assert!(slot::slot_two_phase_at::call() <= slot::slot_confirmed_flush::call());
     }
 
     if updated_config || updated_xmin_or_lsn {
-        slot::replication_slot_mark_dirty::call()?;
+        slot::replication_slot_mark_dirty::call();
         slot::replication_slot_save::call()?;
     }
 
     if updated_xmin_or_lsn {
-        slot::slot_spin_acquire::call(s)?;
-        slot::set_slot_effective_catalog_xmin::call(s, remote_slot.catalog_xmin);
-        slot::slot_spin_release::call(s)?;
+        slot::slot_mutex_acquire::call();
+        slot::slot_set_effective_catalog_xmin::call(remote_slot.catalog_xmin);
+        slot::slot_mutex_release::call();
 
         slot::replication_slots_compute_required_xmin::call(false)?;
         slot::replication_slots_compute_required_lsn::call()?;
@@ -485,10 +491,10 @@ fn local_sync_slot_required(
         if remote_slot.name == local_name {
             remote_exists = true;
 
-            slot::slot_spin_acquire::call(local_slot)?;
+            slot::slot_spin_acquire::call(local_slot);
             locally_invalidated = (remote_slot.invalidated == RS_INVAL_NONE)
                 && (slot::slot_data_invalidated::call(local_slot) != RS_INVAL_NONE);
-            slot::slot_spin_release::call(local_slot)?;
+            slot::slot_spin_release::call(local_slot);
 
             break;
         }
@@ -507,12 +513,13 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
     for local_slot in local_slots {
         if !local_sync_slot_required(local_slot, remote_slot_list)? {
             let dbid = slot::slot_data_database::call(local_slot);
-            lmgr::lock_shared_object::call(DatabaseRelationId, dbid, 0, AccessShareLock)?;
+            let lock_guard =
+                lmgr::lock_shared_object::call(DatabaseRelationId, dbid, 0, AccessShareLock)?;
 
-            slot::slot_spin_acquire::call(local_slot)?;
+            slot::slot_spin_acquire::call(local_slot);
             let synced_slot =
                 slot::slot_in_use::call(local_slot) && slot::slot_data_synced::call(local_slot);
-            slot::slot_spin_release::call(local_slot)?;
+            slot::slot_spin_release::call(local_slot);
 
             if synced_slot {
                 let name = slot::slot_data_name::call(local_slot);
@@ -520,8 +527,9 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
                 slot::replication_slot_drop_acquired::call()?;
             }
 
-            let dbid = slot::slot_data_database::call(local_slot);
-            lmgr::unlock_shared_object::call(DatabaseRelationId, dbid, 0, AccessShareLock)?;
+            // C: `UnlockSharedObject(DatabaseRelationId, local_slot->data
+            // .database, 0, AccessShareLock)` — release via the guard.
+            lock_guard.release()?;
 
             emit_log(
                 LOG.0,
@@ -544,10 +552,9 @@ fn drop_local_obsolete_slots(remote_slot_list: &[RemoteSlot]) -> PgResult<()> {
 // ===========================================================================
 
 fn reserve_wal_for_local_slot(restart_lsn: XLogRecPtr) -> PgResult<()> {
-    let s: ReplicationSlotHandle = slot::my_replication_slot::call();
-
-    debug_assert!(!s.is_none());
-    debug_assert!(!XLogRecPtrIsValid(slot::slot_data_restart_lsn::call(s)));
+    // `slot = MyReplicationSlot` (slotsync.c:495) — implicit accessors.
+    debug_assert!(slot::my_replication_slot_is_set::call());
+    debug_assert!(!XLogRecPtrIsValid(slot::slot_restart_lsn::call()));
 
     lwlock_acquire(REPLICATION_SLOT_ALLOCATION_LOCK, LW_EXCLUSIVE)?;
 
@@ -558,15 +565,15 @@ fn reserve_wal_for_local_slot(restart_lsn: XLogRecPtr) -> PgResult<()> {
         min_safe_lsn = slot_min_lsn;
     }
 
-    slot::slot_spin_acquire::call(s)?;
-    slot::set_slot_data_restart_lsn::call(s, MaxLsn(restart_lsn, min_safe_lsn));
-    slot::slot_spin_release::call(s)?;
+    slot::slot_mutex_acquire::call();
+    slot::slot_set_restart_lsn::call(MaxLsn(restart_lsn, min_safe_lsn));
+    slot::slot_mutex_release::call();
 
     slot::replication_slots_compute_required_lsn::call()?;
 
-    let segno = XLByteToSeg(slot::slot_data_restart_lsn::call(s), xlog::wal_segment_size::call());
+    let segno = XLByteToSeg(slot::slot_restart_lsn::call(), xlog::wal_segment_size::call());
     if xlog::xlog_get_last_removed_segno::call() >= segno {
-        let name = slot::slot_data_name::call(s);
+        let name = slot::slot_name::call();
         return Err(PgError::error(format!(
             "WAL required by replication slot {name} has been removed concurrently"
         )));
@@ -585,7 +592,7 @@ fn update_and_persist_local_synced_slot(
     remote_slot: &RemoteSlot,
     remote_dbid: Oid,
 ) -> PgResult<bool> {
-    let s: ReplicationSlotHandle = slot::my_replication_slot::call();
+    // `slot = MyReplicationSlot` (slotsync.c:564) — implicit accessors.
     let mut found_consistent_snapshot = false;
     let mut remote_slot_precedes = false;
 
@@ -609,7 +616,7 @@ fn update_and_persist_local_synced_slot(
             ),
             Some(&format!(
                 "Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN {}.",
-                lsn_str(slot::slot_data_restart_lsn::call(s))
+                lsn_str(slot::slot_restart_lsn::call())
             )),
             None,
         );
@@ -657,11 +664,11 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
         return Ok(false);
     }
 
-    let s = slot::search_named_replication_slot::call(&remote_slot.name, true);
+    let s = slot::search_named_replication_slot::call(&remote_slot.name, true)?;
     if !s.is_none() {
-        slot::slot_spin_acquire::call(s)?;
+        slot::slot_spin_acquire::call(s);
         let synced = slot::slot_data_synced::call(s);
-        slot::slot_spin_release::call(s)?;
+        slot::slot_spin_release::call(s);
 
         if !synced {
             return Err(PgError::error(format!(
@@ -673,37 +680,41 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
 
         slot::replication_slot_acquire::call(&remote_slot.name, true, false)?;
 
-        debug_assert!(s == slot::my_replication_slot::call());
+        // `Assert(slot == MyReplicationSlot)` — `ReplicationSlotAcquire` set
+        // MyReplicationSlot to this slot, so from here `slot` *is*
+        // MyReplicationSlot and all field access goes through the implicit
+        // accessors.
+        debug_assert!(slot::my_replication_slot_is_set::call());
 
-        if slot::slot_data_invalidated::call(s) == RS_INVAL_NONE
+        if slot::slot_invalidated::call() == RS_INVAL_NONE
             && remote_slot.invalidated != RS_INVAL_NONE
         {
-            slot::slot_spin_acquire::call(s)?;
-            slot::set_slot_data_invalidated::call(s, remote_slot.invalidated);
-            slot::slot_spin_release::call(s)?;
+            slot::slot_mutex_acquire::call();
+            slot::slot_set_invalidated::call(remote_slot.invalidated);
+            slot::slot_mutex_release::call();
 
-            slot::replication_slot_mark_dirty::call()?;
+            slot::replication_slot_mark_dirty::call();
             slot::replication_slot_save::call()?;
 
             slot_updated = true;
         }
 
-        if slot::slot_data_invalidated::call(s) != RS_INVAL_NONE {
+        if slot::slot_invalidated::call() != RS_INVAL_NONE {
             slot::replication_slot_release::call()?;
             return Ok(slot_updated);
         }
 
-        if slot::slot_data_persistency::call(s) == RS_TEMPORARY {
+        if slot::slot_persistency::call() == ReplicationSlotPersistency::RS_TEMPORARY {
             slot_updated = update_and_persist_local_synced_slot(remote_slot, remote_dbid)?;
         } else {
-            if remote_slot.confirmed_lsn < slot::slot_data_confirmed_flush::call(s) {
+            if remote_slot.confirmed_lsn < slot::slot_confirmed_flush::call() {
                 return Err(PgError::error(format!(
                     "cannot synchronize local slot \"{}\"",
                     remote_slot.name
                 ))
                 .with_detail(format!(
                     "Local slot's start streaming location LSN({}) is ahead of remote slot's LSN({}).",
-                    lsn_str(slot::slot_data_confirmed_flush::call(s)),
+                    lsn_str(slot::slot_confirmed_flush::call()),
                     lsn_str(remote_slot.confirmed_lsn)
                 )));
             }
@@ -718,29 +729,30 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
         slot::replication_slot_create::call(
             &remote_slot.name,
             true,
-            RS_TEMPORARY,
+            ReplicationSlotPersistency::RS_TEMPORARY,
             remote_slot.two_phase,
             remote_slot.failover,
             true,
+            init::my_database_id::call(),
         )?;
 
-        let s = slot::my_replication_slot::call();
+        // `slot = MyReplicationSlot` (slotsync.c) — implicit accessors.
         let plugin_name = remote_slot.plugin.clone();
 
-        slot::slot_spin_acquire::call(s)?;
-        slot::set_slot_data_database::call(s, remote_dbid);
-        slot::set_slot_data_plugin::call(s, &plugin_name);
-        slot::slot_spin_release::call(s)?;
+        slot::slot_mutex_acquire::call();
+        slot::slot_set_database::call(remote_dbid);
+        slot::slot_set_plugin::call(plugin_name);
+        slot::slot_mutex_release::call();
 
         reserve_wal_for_local_slot(remote_slot.restart_lsn)?;
 
         lwlock_acquire(REPLICATION_SLOT_CONTROL_LOCK, LW_EXCLUSIVE)?;
         lwlock_acquire(PROC_ARRAY_LOCK, LW_EXCLUSIVE)?;
         let xmin_horizon = procarray::get_oldest_safe_decoding_transaction_id::call(true);
-        slot::slot_spin_acquire::call(s)?;
-        slot::set_slot_effective_catalog_xmin::call(s, xmin_horizon);
-        slot::set_slot_data_catalog_xmin::call(s, xmin_horizon);
-        slot::slot_spin_release::call(s)?;
+        slot::slot_mutex_acquire::call();
+        slot::slot_set_effective_catalog_xmin::call(xmin_horizon);
+        slot::slot_set_catalog_xmin::call(xmin_horizon);
+        slot::slot_mutex_release::call();
         slot::replication_slots_compute_required_xmin::call(true)?;
         lwlock_release(PROC_ARRAY_LOCK)?;
         lwlock_release(REPLICATION_SLOT_CONTROL_LOCK)?;
@@ -759,8 +771,8 @@ fn synchronize_one_slot(remote_slot: &RemoteSlot, remote_dbid: Oid) -> PgResult<
 // synchronize_slots
 // ===========================================================================
 
-fn synchronize_slots(wrconn: WrConnHandle) -> PgResult<bool> {
-    let slot_row: [Oid; SLOTSYNC_COLUMN_COUNT as usize] = [
+fn synchronize_slots(wrconn: WalReceiverConn) -> PgResult<bool> {
+    let slot_row: Vec<Oid> = vec![
         TEXTOID, TEXTOID, LSNOID, LSNOID, XIDOID, BOOLOID, LSNOID, BOOLOID, TEXTOID, TEXTOID,
     ];
 
@@ -774,66 +786,71 @@ fn synchronize_slots(wrconn: WrConnHandle) -> PgResult<bool> {
         started_tx = true;
     }
 
-    let res = walrcv::walrcv_exec::call(wrconn, query, SLOTSYNC_COLUMN_COUNT, &slot_row)?;
-    if walrcv::res_status::call(res) != WALRCV_OK_TUPLES {
-        let err = walrcv::res_err::call(res).unwrap_or_default();
+    let res = libpqwalrcv::walrcv_exec::call(
+        wrconn,
+        query.to_string(),
+        SLOTSYNC_COLUMN_COUNT,
+        slot_row,
+    )?;
+    if libpqwalrcv::res_status::call(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
+        let err = libpqwalrcv::res_err::call(res).unwrap_or_default();
         return Err(PgError::error(format!(
             "could not fetch failover logical slots info from the primary server: {err}"
         )));
     }
 
-    let tupslot = walrcv::make_result_tupslot::call(res)?;
-    while walrcv::result_gettupleslot::call(res, tupslot)? {
+    let tupslot = libpqwalrcv::make_result_tupslot::call(res)?;
+    while libpqwalrcv::result_gettupleslot::call(res, tupslot)? {
         let mut remote_slot = RemoteSlot::new();
         let mut col: i32 = 0;
 
         col += 1;
-        let (name, isnull) = walrcv::getattr_text::call(tupslot, col)?;
+        let (name, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
         remote_slot.name = name.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (plugin, isnull) = walrcv::getattr_text::call(tupslot, col)?;
+        let (plugin, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
         remote_slot.plugin = plugin.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (lsn, isnull) = walrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
         remote_slot.confirmed_lsn = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (lsn, isnull) = walrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
         remote_slot.restart_lsn = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (xid, isnull) = walrcv::getattr_xid::call(tupslot, col)?;
+        let (xid, isnull) = libpqwalrcv::getattr_xid::call(tupslot, col)?;
         remote_slot.catalog_xmin = if isnull { InvalidTransactionId } else { xid };
 
         col += 1;
-        let (two_phase, isnull) = walrcv::getattr_bool::call(tupslot, col)?;
+        let (two_phase, isnull) = libpqwalrcv::getattr_bool::call(tupslot, col)?;
         remote_slot.two_phase = two_phase;
         debug_assert!(!isnull);
 
         col += 1;
-        let (lsn, isnull) = walrcv::getattr_lsn::call(tupslot, col)?;
+        let (lsn, isnull) = libpqwalrcv::getattr_lsn::call(tupslot, col)?;
         remote_slot.two_phase_at = if isnull { InvalidXLogRecPtr } else { lsn };
 
         col += 1;
-        let (failover, isnull) = walrcv::getattr_bool::call(tupslot, col)?;
+        let (failover, isnull) = libpqwalrcv::getattr_bool::call(tupslot, col)?;
         remote_slot.failover = failover;
         debug_assert!(!isnull);
 
         col += 1;
-        let (database, isnull) = walrcv::getattr_text::call(tupslot, col)?;
+        let (database, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
         remote_slot.database = database.unwrap_or_default();
         debug_assert!(!isnull);
 
         col += 1;
-        let (reason, isnull) = walrcv::getattr_text::call(tupslot, col)?;
+        let (reason, isnull) = libpqwalrcv::getattr_text::call(tupslot, col)?;
         remote_slot.invalidated = if isnull {
             RS_INVAL_NONE
         } else {
-            slot::get_slot_invalidation_cause::call(&reason.unwrap_or_default())?
+            slot::get_slot_invalidation_cause::call(&reason.unwrap_or_default())
         };
 
         debug_assert!(col == SLOTSYNC_COLUMN_COUNT);
@@ -851,7 +868,7 @@ fn synchronize_slots(wrconn: WrConnHandle) -> PgResult<bool> {
             remote_slot_list.push(remote_slot);
         }
 
-        walrcv::exec_clear_tuple::call(tupslot)?;
+        libpqwalrcv::exec_clear_tuple::call(tupslot)?;
     }
 
     drop_local_obsolete_slots(&remote_slot_list)?;
@@ -859,16 +876,17 @@ fn synchronize_slots(wrconn: WrConnHandle) -> PgResult<bool> {
     for remote_slot in &remote_slot_list {
         let remote_dbid = dbcommands::get_database_oid::call(&remote_slot.database, false)?;
 
-        lmgr::lock_shared_object::call(DatabaseRelationId, remote_dbid, 0, AccessShareLock)?;
+        let lock_guard =
+            lmgr::lock_shared_object::call(DatabaseRelationId, remote_dbid, 0, AccessShareLock)?;
 
         some_slot_updated |= synchronize_one_slot(remote_slot, remote_dbid)?;
 
-        lmgr::unlock_shared_object::call(DatabaseRelationId, remote_dbid, 0, AccessShareLock)?;
+        lock_guard.release()?;
     }
 
     drop(remote_slot_list);
 
-    walrcv::walrcv_clear_result::call(res)?;
+    libpqwalrcv::walrcv_clear_result::call(res)?;
 
     if started_tx {
         xact::commit_transaction_command::call()?;
@@ -881,11 +899,11 @@ fn synchronize_slots(wrconn: WrConnHandle) -> PgResult<bool> {
 // validate_remote_info
 // ===========================================================================
 
-fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
-    let slot_row: [Oid; PRIMARY_INFO_OUTPUT_COL_COUNT as usize] = [BOOLOID, BOOLOID];
+fn validate_remote_info(wrconn: WalReceiverConn) -> PgResult<()> {
+    let slot_row: Vec<Oid> = vec![BOOLOID, BOOLOID];
     let mut started_tx = false;
 
-    let primary_slot_name = xlogrecovery::primary_slot_name::call().unwrap_or_default();
+    let primary_slot_name = read_primary_slot_name()?;
     let cmd = format!(
         "SELECT pg_is_in_recovery(), count(*) = 1 FROM pg_catalog.pg_replication_slots WHERE slot_type='physical' AND slot_name={}",
         quote::quote_literal_cstr::call(&primary_slot_name)
@@ -896,24 +914,29 @@ fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
         started_tx = true;
     }
 
-    let res = walrcv::walrcv_exec::call(wrconn, &cmd, PRIMARY_INFO_OUTPUT_COL_COUNT, &slot_row)?;
+    let res = libpqwalrcv::walrcv_exec::call(
+        wrconn,
+        cmd,
+        PRIMARY_INFO_OUTPUT_COL_COUNT,
+        slot_row,
+    )?;
 
-    if walrcv::res_status::call(res) != WALRCV_OK_TUPLES {
-        let err = walrcv::res_err::call(res).unwrap_or_default();
+    if libpqwalrcv::res_status::call(res) != WalRcvExecStatus::WALRCV_OK_TUPLES {
+        let err = libpqwalrcv::res_err::call(res).unwrap_or_default();
         return Err(PgError::error(format!(
             "could not fetch primary slot name \"{primary_slot_name}\" info from the primary server: {err}"
         ))
         .with_hint("Check if \"primary_slot_name\" is configured correctly."));
     }
 
-    let tupslot = walrcv::make_result_tupslot::call(res)?;
-    if !walrcv::result_gettupleslot::call(res, tupslot)? {
+    let tupslot = libpqwalrcv::make_result_tupslot::call(res)?;
+    if !libpqwalrcv::result_gettupleslot::call(res, tupslot)? {
         return Err(PgError::error(
             "failed to fetch tuple for the primary server slot specified by \"primary_slot_name\"",
         ));
     }
 
-    let (remote_in_recovery, isnull) = walrcv::getattr_bool::call(tupslot, 1)?;
+    let (remote_in_recovery, isnull) = libpqwalrcv::getattr_bool::call(tupslot, 1)?;
     debug_assert!(!isnull);
 
     if remote_in_recovery {
@@ -923,7 +946,7 @@ fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
         );
     }
 
-    let (primary_slot_valid, isnull) = walrcv::getattr_bool::call(tupslot, 2)?;
+    let (primary_slot_valid, isnull) = libpqwalrcv::getattr_bool::call(tupslot, 2)?;
     debug_assert!(!isnull);
 
     if !primary_slot_valid {
@@ -934,8 +957,8 @@ fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
-    walrcv::exec_clear_tuple::call(tupslot)?;
-    walrcv::walrcv_clear_result::call(res)?;
+    libpqwalrcv::exec_clear_tuple::call(tupslot)?;
+    libpqwalrcv::walrcv_clear_result::call(res)?;
 
     if started_tx {
         xact::commit_transaction_command::call()?;
@@ -949,8 +972,8 @@ fn validate_remote_info(wrconn: WrConnHandle) -> PgResult<()> {
 // ===========================================================================
 
 pub fn CheckAndGetDbnameFromConninfo() -> PgResult<String> {
-    let primary_conninfo = xlogrecovery::primary_conn_info::call().unwrap_or_default();
-    let dbname = walrcv::walrcv_get_dbname_from_conninfo::call(&primary_conninfo)?;
+    let primary_conninfo = read_primary_conn_info()?;
+    let dbname = libpqwalrcv::walrcv_get_dbname_from_conninfo::call(primary_conninfo);
     match dbname {
         None => Err(PgError::error(format!(
             "replication slot synchronization requires \"{}\" to be specified in \"{}\"",
@@ -966,7 +989,7 @@ pub fn CheckAndGetDbnameFromConninfo() -> PgResult<String> {
 // ===========================================================================
 
 pub fn ValidateSlotSyncParams(elevel: i32) -> PgResult<bool> {
-    if xlog::wal_level::call() < WAL_LEVEL_LOGICAL {
+    if xlog::wal_level::call() < WalLevel::Logical {
         report_at(
             elevel,
             "replication slot synchronization requires \"wal_level\" >= \"logical\"",
@@ -975,12 +998,8 @@ pub fn ValidateSlotSyncParams(elevel: i32) -> PgResult<bool> {
         return Ok(false);
     }
 
-    let primary_slot_name = xlogrecovery::primary_slot_name::call();
-    if primary_slot_name
-        .as_deref()
-        .map(str::is_empty)
-        .unwrap_or(true)
-    {
+    let primary_slot_name = read_primary_slot_name()?;
+    if primary_slot_name.is_empty() {
         report_at(
             elevel,
             &format!(
@@ -1004,12 +1023,8 @@ pub fn ValidateSlotSyncParams(elevel: i32) -> PgResult<bool> {
         return Ok(false);
     }
 
-    let primary_conninfo = xlogrecovery::primary_conn_info::call();
-    if primary_conninfo
-        .as_deref()
-        .map(str::is_empty)
-        .unwrap_or(true)
-    {
+    let primary_conninfo = read_primary_conn_info()?;
+    if primary_conninfo.is_empty() {
         report_at(
             elevel,
             &format!(
@@ -1029,8 +1044,8 @@ pub fn ValidateSlotSyncParams(elevel: i32) -> PgResult<bool> {
 // ===========================================================================
 
 fn slotsync_reread_config() -> PgResult<()> {
-    let old_primary_conninfo = xlogrecovery::primary_conn_info::call().unwrap_or_default();
-    let old_primary_slotname = xlogrecovery::primary_slot_name::call().unwrap_or_default();
+    let old_primary_conninfo = read_primary_conn_info()?;
+    let old_primary_slotname = read_primary_slot_name()?;
     let old_sync_replication_slots = sync_replication_slots_guc();
     let old_hot_standby_feedback = walrcv::hot_standby_feedback::call();
 
@@ -1039,8 +1054,8 @@ fn slotsync_reread_config() -> PgResult<()> {
     backend_postmaster_interrupt::SetConfigReloadPending(false);
     guc::process_config_file_sighup::call()?;
 
-    let new_primary_conninfo = xlogrecovery::primary_conn_info::call().unwrap_or_default();
-    let new_primary_slotname = xlogrecovery::primary_slot_name::call().unwrap_or_default();
+    let new_primary_conninfo = read_primary_conn_info()?;
+    let new_primary_slotname = read_primary_slot_name()?;
     let new_sync_replication_slots = sync_replication_slots_guc();
     let new_hot_standby_feedback = walrcv::hot_standby_feedback::call();
 
@@ -1086,7 +1101,7 @@ fn slotsync_reread_config() -> PgResult<()> {
 // ProcessSlotSyncInterrupts
 // ===========================================================================
 
-fn ProcessSlotSyncInterrupts(_wrconn: WrConnHandle) -> PgResult<()> {
+fn ProcessSlotSyncInterrupts(_wrconn: WalReceiverConn) -> PgResult<()> {
     postgres::check_for_interrupts::call()?;
 
     ctx_spin_acquire();
@@ -1116,13 +1131,14 @@ fn ProcessSlotSyncInterrupts(_wrconn: WrConnHandle) -> PgResult<()> {
 
 /// `slotsync_worker_disconnect(code, arg)` (slotsync.c). `arg` is the wrconn.
 pub fn slotsync_worker_disconnect(_code: i32, arg: Datum) -> PgResult<()> {
-    let wrconn = WrConnHandle(arg.as_u64());
-    walrcv::walrcv_disconnect::call(wrconn)
+    let wrconn = WalReceiverConn(arg.as_usize());
+    libpqwalrcv::walrcv_disconnect::call(wrconn);
+    Ok(())
 }
 
 /// `slotsync_worker_onexit(code, arg)` (slotsync.c).
 pub fn slotsync_worker_onexit(_code: i32, _arg: Datum) -> PgResult<()> {
-    if !slot::my_replication_slot::call().is_none() {
+    if slot::my_replication_slot_is_set::call() {
         slot::replication_slot_release::call()?;
     }
 
@@ -1157,9 +1173,9 @@ fn wait_for_slot_activity(some_slot_updated: bool) -> PgResult<()> {
         WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
         sleep_ms(),
         WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN,
-    );
+    )?;
 
-    if (rc as u32) & WL_LATCH_SET != 0 {
+    if rc & WL_LATCH_SET != 0 {
         latch::reset_latch_my_latch::call();
     }
 
@@ -1219,9 +1235,21 @@ fn reset_syncing_flag() -> PgResult<()> {
 // ReplSlotSyncWorkerMain
 // ===========================================================================
 
-pub fn ReplSlotSyncWorkerMain(startup_data_len: usize) -> PgResult<()> {
-    debug_assert!(startup_data_len == 0);
+/// `void ReplSlotSyncWorkerMain(const void *startup_data, size_t
+/// startup_data_len)` (slotsync.c): the child entry point. Never returns — the
+/// worker loops forever (`for(;;)`) and only exits via `proc_exit` or an
+/// `ereport(ERROR+)` that longjmps out; there is no Rust caller to unwind to.
+pub fn ReplSlotSyncWorkerMain(startup_data: &types_startup::StartupData) -> ! {
+    // `Assert(startup_data_len == 0)` — the worker takes no startup payload.
+    debug_assert!(matches!(startup_data, types_startup::StartupData::None));
 
+    match repl_slot_sync_worker_main_inner() {
+        Ok(()) => unreachable!("ReplSlotSyncWorkerMain loops forever or proc_exits"),
+        Err(e) => panic!("slotsync worker exiting on error: {e:?}"),
+    }
+}
+
+fn repl_slot_sync_worker_main_inner() -> PgResult<()> {
     miscinit::set_my_backend_type_slotsync::call()?;
     miscinit::init_ps_display::call()?;
 
@@ -1240,13 +1268,13 @@ pub fn ReplSlotSyncWorkerMain(startup_data_len: usize) -> PgResult<()> {
     ipc::before_shmem_exit::call(slotsync_worker_onexit, Datum::from_i64(0))?;
 
     miscinit::initialize_timeouts::call()?;
-    walrcv::load_libpqwalreceiver::call()?;
+    libpqwalrcv::load_libpqwalreceiver::call()?;
     miscinit::unblock_signals::call()?;
     guc::set_config_option_search_path_empty::call()?;
 
     let dbname = CheckAndGetDbnameFromConninfo()?;
     miscinit::init_postgres::call(&dbname)?;
-    miscinit::set_processing_mode_normal::call()?;
+    miscinit::set_processing_mode_normal::call();
 
     let cluster = guc::cluster_name::call();
     let app_name = if !cluster.is_empty() {
@@ -1255,19 +1283,26 @@ pub fn ReplSlotSyncWorkerMain(startup_data_len: usize) -> PgResult<()> {
         "slotsync worker".to_string()
     };
 
-    let primary_conninfo = xlogrecovery::primary_conn_info::call().unwrap_or_default();
-    let (wrconn, err) =
-        walrcv::walrcv_connect::call(&primary_conninfo, false, false, false, &app_name)?;
+    // C: `walrcv_connect(PrimaryConnInfo, false, false, false, app_name.data,
+    // &err)` — a non-replication ("regular") connection so `walrcv_exec` runs.
+    let primary_conninfo = read_primary_conn_info()?;
+    let wrconn = match libpqwalrcv::walrcv_connect::call(
+        primary_conninfo,
+        false,
+        false,
+        false,
+        app_name.clone(),
+    ) {
+        Ok(conn) => conn,
+        Err(err) => {
+            return Err(PgError::error(format!(
+                "synchronization worker \"{app_name}\" could not connect to the primary server: {err}"
+            ))
+            .with_sqlstate(ERRCODE_CONNECTION_FAILURE));
+        }
+    };
 
-    if wrconn.is_none() {
-        return Err(PgError::error(format!(
-            "synchronization worker \"{app_name}\" could not connect to the primary server: {}",
-            err.unwrap_or_default()
-        ))
-        .with_sqlstate(ERRCODE_CONNECTION_FAILURE));
-    }
-
-    ipc::before_shmem_exit::call(slotsync_worker_disconnect, Datum::from_u64(wrconn.0))?;
+    ipc::before_shmem_exit::call(slotsync_worker_disconnect, Datum::from_usize(wrconn.0))?;
 
     validate_remote_info(wrconn)?;
 
@@ -1306,7 +1341,7 @@ fn update_synced_slots_inactive_since() -> PgResult<()> {
                 now = timestamp::get_current_timestamp::call();
             }
 
-            slot::replication_slot_set_inactive_since::call(s, now, true)?;
+            slot::replication_slot_set_inactive_since::call(s, now, true);
         }
     }
 
@@ -1343,9 +1378,9 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
             10,
             WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN,
-        );
+        )?;
 
-        if (rc as u32) & WL_LATCH_SET != 0 {
+        if rc & WL_LATCH_SET != 0 {
             latch::reset_latch_my_latch::call();
             postgres::check_for_interrupts::call()?;
         }
@@ -1448,8 +1483,8 @@ pub fn SlotSyncShmemInit() -> PgResult<()> {
 // ===========================================================================
 
 /// `slotsync_failure_callback(code, arg)` (slotsync.c). `arg` is the wrconn.
-pub fn slotsync_failure_callback(_code: i32, wrconn: WrConnHandle) -> PgResult<()> {
-    if !slot::my_replication_slot::call().is_none() {
+pub fn slotsync_failure_callback(_code: i32, wrconn: WalReceiverConn) -> PgResult<()> {
+    if slot::my_replication_slot_is_set::call() {
         slot::replication_slot_release::call()?;
     }
 
@@ -1459,7 +1494,7 @@ pub fn slotsync_failure_callback(_code: i32, wrconn: WrConnHandle) -> PgResult<(
         reset_syncing_flag()?;
     }
 
-    walrcv::walrcv_disconnect::call(wrconn)?;
+    libpqwalrcv::walrcv_disconnect::call(wrconn);
 
     Ok(())
 }
@@ -1468,7 +1503,7 @@ pub fn slotsync_failure_callback(_code: i32, wrconn: WrConnHandle) -> PgResult<(
 // SyncReplicationSlots
 // ===========================================================================
 
-pub fn SyncReplicationSlots(wrconn: WrConnHandle) -> PgResult<()> {
+pub fn SyncReplicationSlots(wrconn: WalReceiverConn) -> PgResult<()> {
     let body = (|| -> PgResult<()> {
         check_and_set_sync_info(InvalidPid)?;
         validate_remote_info(wrconn)?;
@@ -1499,6 +1534,24 @@ pub fn SyncReplicationSlots(wrconn: WrConnHandle) -> PgResult<()> {
 /// runs with it on; the SIGHUP reread compares old/new.
 fn sync_replication_slots_guc() -> bool {
     SYNC_REPLICATION_SLOTS.with(|c| c.get())
+}
+
+/// Read the `PrimaryConnInfo` GUC string into an owned `String`. The owner
+/// seam copies it into the supplied context (C `pstrdup`s into the current
+/// memory context); we copy it back out into an owned value before the
+/// transient context drops, matching slotsync's compare/extract usage.
+fn read_primary_conn_info() -> PgResult<String> {
+    let ctx = mcx::MemoryContext::new("slotsync primary_conninfo");
+    let s = xlogrecovery::primary_conninfo::call(ctx.mcx())?;
+    Ok(s.as_str().to_string())
+}
+
+/// Read the `PrimarySlotName` GUC string into an owned `String` (see
+/// [`read_primary_conn_info`]).
+fn read_primary_slot_name() -> PgResult<String> {
+    let ctx = mcx::MemoryContext::new("slotsync primary_slot_name");
+    let s = xlogrecovery::primary_slot_name::call(ctx.mcx())?;
+    Ok(s.as_str().to_string())
 }
 
 thread_local! {

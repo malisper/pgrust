@@ -231,3 +231,67 @@ seam_core::seam!(
     /// B_WAL_SUMMARIZER`. Pure backend-local read.
     pub fn am_wal_summarizer_process() -> bool
 );
+
+// ---------------------------------------------------------------------------
+// Worker-bootstrap group used by the slot-sync worker entry point
+// (`ReplSlotSyncWorkerMain`, slotsync.c). These mirror the auxiliary/background
+// worker startup sequence; their true owners (proc.c, ps_status.c, postinit.c,
+// interrupt.c, globals.c) are not yet ported, so a call panics loudly until
+// installed.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `MyBackendType = B_SLOTSYNC_WORKER` (miscadmin.h / globals.c).
+    pub fn set_my_backend_type_slotsync() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AmLogicalSlotSyncWorkerProcess()` (miscadmin.h): is this process the
+    /// dedicated slot-sync worker (`B_SLOTSYNC_WORKER`)?
+    pub fn am_logical_slot_sync_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `MyProcPid` (globals.c): this backend's process id.
+    pub fn my_proc_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `init_ps_display("")` (ps_status.c): set up the process-title display.
+    pub fn init_ps_display() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c): set up the PGPROC entry for this process.
+    pub fn init_process() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BaseInit()` (postinit.c): early per-backend subsystem initialization.
+    pub fn base_init() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The slot-sync worker's signal-handler setup block (slotsync.c
+    /// `ReplSlotSyncWorkerMain`): `pqsignal(...)`, `procsignal_sigusr1_handler`,
+    /// etc. installed before unblocking signals.
+    pub fn setup_signal_handlers() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeTimeouts()` (timeout.c): register the standard timeout
+    /// handlers for this process.
+    pub fn initialize_timeouts() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BackgroundWorkerUnblockSignals()` / `sigprocmask(SIG_SETMASK, &UnBlockSig,
+    /// NULL)` (slotsync.c): unblock signals once handlers are installed.
+    pub fn unblock_signals() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitPostgres(dbname, InvalidOid, ..., NULL)` (postinit.c): bind this
+    /// backend to the given database so `walrcv_exec` catalog queries can run.
+    pub fn init_postgres(dbname: &str) -> PgResult<()>
+);

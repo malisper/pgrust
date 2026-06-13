@@ -29,6 +29,16 @@ pub const WAIT_EVENT_ARCHIVER_MAIN: u32 = PG_WAIT_ACTIVITY + 0;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN` — "Waiting in main loop of slot sync
+/// worker." 12th entry (0-based 11) of the Activity section of
+/// `wait_event_names.txt`, so `PG_WAIT_ACTIVITY + 11`.
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 11;
+
+/// `WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN` — "Waiting for slot sync worker to
+/// shut down." 13th entry (0-based 12) of the Activity section, so
+/// `PG_WAIT_ACTIVITY + 12`.
+pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
+
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).

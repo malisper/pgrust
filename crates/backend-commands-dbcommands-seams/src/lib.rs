@@ -24,3 +24,11 @@ seam_core::seam!(
     /// copy.
     pub fn get_database_name<'mcx>(mcx: Mcx<'mcx>, dbid: Oid) -> PgResult<Option<PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `get_database_oid(dbname, missing_ok)` (dbcommands.c): look up the OID
+    /// of the database named `dbname`. With `missing_ok` false, `ereport(ERROR)`
+    /// if it does not exist (carried on `Err`); with it true, returns
+    /// `InvalidOid`.
+    pub fn get_database_oid(dbname: &str, missing_ok: bool) -> PgResult<Oid>
+);

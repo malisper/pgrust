@@ -292,3 +292,10 @@ seam_core::seam!(
         tli: TimeLineID,
     ) -> WalReadOutcome
 );
+
+seam_core::seam!(
+    /// `XLogGetReplicationSlotMinimumLSN()` (xlog.c): the oldest LSN required
+    /// by any replication slot, or `InvalidXLogRecPtr` if none. Read under the
+    /// `info_lck` spinlock by the owner.
+    pub fn xlog_get_replication_slot_minimum_lsn() -> XLogRecPtr
+);

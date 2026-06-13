@@ -4007,6 +4007,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery-seams",
  "backend-commands-dbcommands-seams",
  "backend-postmaster-interrupt",
+ "backend-replication-libpqwalreceiver-seams",
  "backend-replication-logical-logical-seams",
  "backend-replication-logical-slotsync-seams",
  "backend-replication-slot-seams",
@@ -4025,14 +4026,19 @@ dependencies = [
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error-seams",
  "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "mcx",
  "types-core",
  "types-datum",
  "types-error",
  "types-pgstat",
  "types-replication",
+ "types-replication-slot",
+ "types-startup",
  "types-storage",
  "types-wal",
+ "types-walreceiver",
 ]
 
 [[package]]
@@ -6829,6 +6835,7 @@ dependencies = [
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-inval",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
@@ -6842,7 +6849,6 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
- "backend-utils-time-snapmgr",
  "interfaces-libpq-legacy-pqsignal",
 ]
 

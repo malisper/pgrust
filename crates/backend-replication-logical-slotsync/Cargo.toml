@@ -16,6 +16,10 @@ types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 types-datum = { path = "../types-datum" }
 types-replication = { path = "../types-replication" }
+types-replication-slot = { path = "../types-replication-slot" }
+types-walreceiver = { path = "../types-walreceiver" }
+types-startup = { path = "../types-startup" }
+mcx = { path = "../mcx" }
 
 # own inward seams
 backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
@@ -27,6 +31,7 @@ backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 
 # outward owner seams
 backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-replication-libpqwalreceiver-seams = { path = "../backend-replication-libpqwalreceiver-seams" }
 backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-replication-snapbuild-seams = { path = "../backend-replication-snapbuild-seams" }
@@ -41,6 +46,7 @@ backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" 
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
