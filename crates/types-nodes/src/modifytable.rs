@@ -189,6 +189,15 @@ pub struct PartitionTupleRouting {
 pub struct ModifyTableState<'mcx> {
     /// `PlanState ps` — its first field is the NodeTag.
     pub ps: PlanStateData<'mcx>,
+    /// `(ModifyTable *) ps.plan` — the typed alias of this node's `ModifyTable`
+    /// plan node. The trimmed `PlanStateData.plan` (a `&Node`) cannot carry the
+    /// `ModifyTable` variant (it is not in the `Node` enum), so the typed plan
+    /// node is aliased here directly (inherited opacity: a real `&'mcx`
+    /// reference into the shared, read-only plan tree). `None` only before init
+    /// wires it. Consumers that the C reaches via `(ModifyTable *)
+    /// mtstate->ps.plan` (the partition-routing init legs, ExecInsert's ON
+    /// CONFLICT view) read it here.
+    pub plan_node: Option<&'mcx ModifyTable<'mcx>>,
     /// `CmdType operation` — INSERT, UPDATE, DELETE, or MERGE.
     pub operation: CmdType,
     /// `((ModifyTable *) ps.plan)->onConflictAction` — cached at node init
@@ -238,10 +247,16 @@ pub struct ModifyTableState<'mcx> {
     pub mt_merge_deleted: f64,
     /// `List *mt_updateColnosLists`.
     pub mt_updateColnosLists: Option<PgVec<'mcx, PgVec<'mcx, i32>>>,
-    /// `List *mt_mergeActionLists`.
-    pub mt_mergeActionLists: Option<PgVec<'mcx, PgVec<'mcx, MergeAction<'mcx>>>>,
-    /// `List *mt_mergeJoinConditions`.
-    pub mt_mergeJoinConditions: Option<PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>>,
+    /// `List *mt_mergeActionLists` — the per-kept-target-table MERGE action
+    /// lists. The C aliases the planner-owned `node->mergeActionLists` sublists
+    /// (`lappend` of the shared list cells); the owned model stores `&'mcx`
+    /// borrows of the plan node's per-target `MergeAction` lists (the plan tree
+    /// outlives the state tree), subset to the unpruned result relations.
+    pub mt_mergeActionLists: Option<PgVec<'mcx, &'mcx PgVec<'mcx, MergeAction<'mcx>>>>,
+    /// `List *mt_mergeJoinConditions` — per-kept-target-table MERGE join
+    /// conditions, borrowed from the plan node (`None` element = the C `NULL`).
+    pub mt_mergeJoinConditions:
+        Option<PgVec<'mcx, Option<&'mcx PgBox<'mcx, Node<'mcx>>>>>,
 }
 
 /// `HTAB *mt_resultOidHash` payload (the OID→resultRelInfo-index map for

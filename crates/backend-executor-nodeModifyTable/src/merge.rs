@@ -5,10 +5,16 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
+use types_nodes::nodes::CmdType;
 use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
 
-use crate::ModifyTableContext;
+use crate::{insert_exec, ModifyTableContext};
+
+extern crate alloc;
+
+/// `MERGE_INSERT` (execnodes.h) — MERGE subcommand mask bit.
+const MERGE_INSERT: i32 = 0x01;
 
 /// `ExecMerge(context, resultRelInfo, tupleid, oldtuple, canSetTag)` — execute
 /// the MERGE actions for one source row: dispatch to the matched or
@@ -75,7 +81,7 @@ pub fn ExecMergeNotMatched<'mcx>(
     result_rel_info: RriId,
     can_set_tag: bool,
 ) -> PgResult<Option<SlotId>> {
-    let _ = (mcx, can_set_tag, result_rel_info);
+    use types_nodes::modifytable::MERGE_WHEN_NOT_MATCHED_BY_TARGET;
 
     // ExprContext *econtext = mtstate->ps.ps_ExprContext;
     let econtext = mtstate
@@ -83,11 +89,22 @@ pub fn ExecMergeNotMatched<'mcx>(
         .ps_ExprContext
         .expect("MERGE node has an expression context");
 
+    let mut rslot: Option<SlotId> = None;
+
     // For INSERT actions, the root relation's merge action is OK since the
     // INSERT's targetlist and the WHEN conditions can only refer to the source
     // relation and hence it does not matter which result relation we work with.
     //
-    // actionStates = resultRelInfo->ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET];
+    //   actionStates = resultRelInfo->ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET];
+    //
+    // Count the not-matched-by-target actions (the action states live on the
+    // pooled ResultRelInfo; we index them so the per-action ExecInsert can
+    // re-borrow estate between iterations).
+    let n_actions = estate.result_rel(result_rel_info).ri_MergeActions
+        [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
+        .as_ref()
+        .map(|l| l.len())
+        .unwrap_or(0);
 
     // Make source tuple available to ExecQual and ExecProject. We don't need the
     // target tuple, since the WHEN quals and targetlist can't refer to the
@@ -102,19 +119,98 @@ pub fn ExecMergeNotMatched<'mcx>(
     ecxt.ecxt_innertuple = plan_slot;
     ecxt.ecxt_outertuple = None;
 
-    // foreach action in actionStates { ... }
-    //
-    // The WHEN NOT MATCHED [BY TARGET] action list lives in
-    // ResultRelInfo.ri_MergeActions, a field owned by execMain that has not yet
-    // been published into the shared types-nodes ResultRelInfo vocabulary, so
-    // the per-action loop (ExecQual on mas_whenqual, ExecProject on mas_proj,
-    // ExecInsert through rootResultRelInfo) cannot be reached.
-    let _ = mtstate.mt_merge_inserted;
-    panic!(
-        "ExecMergeNotMatched: ResultRelInfo.ri_MergeActions (the WHEN NOT \
-         MATCHED [BY TARGET] action list) is owned by execMain and not yet \
-         present in the shared types-nodes ResultRelInfo vocabulary"
-    );
+    // foreach(l, actionStates) { ... }
+    let root_result_rel_info = mtstate
+        .rootResultRelInfo
+        .expect("MERGE node has a root result relation");
+    for idx in 0..n_actions {
+        // MergeActionState *action = lfirst(l);
+        // CmdType commandType = action->mas_action->commandType;
+        //
+        // ExprState pi_state / ProjectionInfo are small trimmed structs; clone
+        // the action's whenqual + projection out of the pool so the estate
+        // borrow is free for ExecQual / ExecProject / ExecInsert.
+        let (command_type, whenqual, proj) = {
+            let action = &estate.result_rel(result_rel_info).ri_MergeActions
+                [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
+                .as_ref()
+                .expect("not-matched-by-target action list present")[idx];
+            let command_type = action
+                .mas_action
+                .as_ref()
+                .expect("MergeActionState has a MergeAction")
+                .commandType;
+            let whenqual = action.mas_whenqual.as_ref().map(|w| (**w).clone());
+            let proj = action.mas_proj.as_ref().map(|p| (**p).clone());
+            (command_type, whenqual, proj)
+        };
+
+        // Test condition, if any.  In the absence of any condition, we perform
+        // the action unconditionally (ExecQual returns true with no conditions).
+        //   if (!ExecQual(action->mas_whenqual, econtext)) continue;
+        let passed = match whenqual.as_ref() {
+            Some(state) => {
+                backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)?
+            }
+            None => true,
+        };
+        if !passed {
+            continue;
+        }
+
+        // Perform stated action.
+        match command_type {
+            CmdType::CMD_INSERT => {
+                // Project the tuple.  In case of a partitioned table, the
+                // projection was already built to use the root's descriptor, so
+                // we don't need to map the tuple here.
+                //   newslot = ExecProject(action->mas_proj);
+                let proj = proj.expect("CMD_INSERT MERGE action has a projection");
+                let newslot =
+                    backend_executor_execExpr_seams::exec_project_info::call(&proj, estate)?;
+
+                // mtstate->mt_merge_action = action;
+                //
+                // (The current-action pointer is consumed by transition-capture
+                // and the rootRelInfo INSERT path; setting it requires aliasing a
+                // pooled MergeActionState, which the owned model expresses by
+                // re-reading it by id where needed. The INSERT below proceeds
+                // against rootResultRelInfo as in C.)
+
+                // rslot = ExecInsert(context, mtstate->rootResultRelInfo,
+                //                    newslot, canSetTag, NULL, NULL);
+                rslot = insert_exec::ExecInsert(
+                    mcx,
+                    context,
+                    mtstate,
+                    estate,
+                    root_result_rel_info,
+                    newslot,
+                    can_set_tag,
+                    None,
+                    None,
+                )?;
+
+                // mtstate->mt_merge_inserted += 1;
+                mtstate.mt_merge_inserted += 1.0;
+            }
+            CmdType::CMD_NOTHING => {
+                // Do nothing.
+            }
+            _ => {
+                // default: elog(ERROR, "unknown action in MERGE WHEN NOT MATCHED clause");
+                return Err(types_error::PgError::error(
+                    "unknown action in MERGE WHEN NOT MATCHED clause",
+                ));
+            }
+        }
+
+        // We've activated one of the WHEN clauses, so we don't search further.
+        // This is required behaviour, not an optimization.
+        break;
+    }
+
+    Ok(rslot)
 }
 
 /// `ExecInitMerge(mtstate, estate)` — build the per-action `MergeActionState`
@@ -122,18 +218,26 @@ pub fn ExecMergeNotMatched<'mcx>(
 /// merge action list.
 pub fn ExecInitMerge<'mcx>(
     mcx: Mcx<'mcx>,
+    node: &'mcx types_nodes::ModifyTable<'mcx>,
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = mcx;
+    let _ = node;
 
     // List *mergeActionLists = mtstate->mt_mergeActionLists;
-    //
     // if (mergeActionLists == NIL) return;
-    let n_action_lists = match &mtstate.mt_mergeActionLists {
-        None => return Ok(()),
-        Some(lists) => lists.len(),
-    };
+    //
+    // Snapshot the per-rel `&'mcx` action-list borrows so the loop can re-borrow
+    // mtstate mutably between iterations (the referents live in the plan tree).
+    let action_lists: alloc::vec::Vec<&'mcx mcx::PgVec<'mcx, types_nodes::modifytable::MergeAction<'mcx>>> =
+        match mtstate.mt_mergeActionLists.as_ref() {
+            None => return Ok(()),
+            Some(lists) => lists.iter().copied().collect(),
+        };
+
+    let root_rel_info = mtstate
+        .rootResultRelInfo
+        .expect("MERGE node has a root result relation");
 
     // mtstate->mt_merge_subcommands = 0;
     mtstate.mt_merge_subcommands = 0;
@@ -144,39 +248,90 @@ pub fn ExecInitMerge<'mcx>(
     if mtstate.ps.ps_ExprContext.is_none() {
         backend_executor_execUtils_seams::exec_assign_expr_context::call(estate, &mut mtstate.ps)?;
     }
+    let econtext = mtstate
+        .ps
+        .ps_ExprContext
+        .expect("MERGE node has an expression context");
 
     // Create a MergeActionState for each action on the mergeActionList and add
     // it to either a list of matched actions or not-matched actions.
     //
-    // The per-rel loop builds, for every result relation:
-    //   - the MERGE fetch slots (ExecInitMergeTupleSlots, gated on
-    //     ResultRelInfo.ri_projectNewInfoValid);
-    //   - the join-condition ExprState (ResultRelInfo.ri_MergeJoinCondition);
-    //   - a MergeActionState per action, appended into
-    //     ResultRelInfo.ri_MergeActions[action->matchKind], carrying the
-    //     compiled WHEN qual (ExecInitQual) and the action projection
-    //     (ExecBuildProjectionInfo for INSERT / ExecBuildUpdateProjection for
-    //     UPDATE);
-    // and finally the root relation's WITH CHECK OPTION / RETURNING setup when
-    // the MERGE targets an inherited (non-partitioned) table with INSERT
-    // actions.
+    //   i = 0; foreach(lc, mergeActionLists) { ... }
+    for (i, merge_action_list) in action_lists.iter().enumerate() {
+        // joinCondition = (Node *) list_nth(mergeJoinConditions, i);
+        let join_condition: Option<&'mcx types_nodes::nodes::Node<'mcx>> = mtstate
+            .mt_mergeJoinConditions
+            .as_ref()
+            .and_then(|jc| jc.get(i).copied().flatten())
+            .map(|b| &**b);
+
+        // resultRelInfo = mtstate->resultRelInfo + i;  i++;
+        let result_rel_info = mtstate.resultRelInfo[i];
+
+        // initialize slots for MERGE fetches from this rel
+        //   if (unlikely(!resultRelInfo->ri_projectNewInfoValid))
+        //       ExecInitMergeTupleSlots(mtstate, resultRelInfo);
+        if !estate.result_rel(result_rel_info).ri_projectNewInfoValid {
+            ExecInitMergeTupleSlots(mcx, mtstate, estate, result_rel_info)?;
+        }
+
+        // initialize state for join condition checking
+        //   resultRelInfo->ri_MergeJoinCondition =
+        //       ExecInitQual((List *) joinCondition, &mtstate->ps);
+        backend_executor_execExpr_seams::exec_init_merge_join_condition::call(
+            mtstate,
+            estate,
+            result_rel_info,
+            join_condition,
+        )?;
+
+        // foreach(l, mergeActionList) { build each action's MergeActionState,
+        // its WHEN qual, the INSERT/UPDATE projection, and accumulate the
+        // mt_merge_subcommands bit. } — the per-action projection builders over
+        // explicit target lists/slots/descs and the MergeActionState node
+        // construction are execExpr-owned; the owner appends each state into
+        // resultRelInfo->ri_MergeActions[action->matchKind].
+        backend_executor_execExpr_seams::exec_init_merge_actions_for_rel::call(
+            mcx,
+            mtstate,
+            estate,
+            result_rel_info,
+            root_rel_info,
+            (*merge_action_list).as_slice(),
+            econtext,
+        )?;
+    }
+
+    // If the MERGE targets an inherited table, any INSERT actions will use
+    // rootRelInfo, which is not in the resultRelInfo array; initialize its WITH
+    // CHECK OPTION constraints and RETURNING projection (as ExecInitModifyTable
+    // did for the resultRelInfo entries).
     //
-    // All of those ResultRelInfo fields (ri_MergeActions, ri_MergeJoinCondition,
-    // ri_newTupleSlot/ri_oldTupleSlot/ri_projectNewInfoValid,
-    // ri_WithCheckOptions/ri_WithCheckOptionExprs, ri_returningList/
-    // ri_projectReturning) are owned by execMain and have not yet been published
-    // into the shared types-nodes ResultRelInfo vocabulary, and the per-action
-    // projection builders (ExecBuildProjectionInfo / ExecBuildUpdateProjection
-    // over an explicit target list and slot/desc) are not yet declared on the
-    // execExpr seam crate, so the per-rel loop body cannot be reached.
-    let _ = (n_action_lists, &mtstate.mt_mergeJoinConditions, mtstate.rootResultRelInfo);
-    panic!(
-        "ExecInitMerge: ResultRelInfo.ri_MergeActions/ri_MergeJoinCondition/\
-         ri_newTupleSlot/ri_WithCheckOptions/ri_returningList are owned by \
-         execMain and the per-action ExecBuildProjectionInfo/\
-         ExecBuildUpdateProjection seams are not yet declared on execExpr; \
-         neither is present in the shared vocabulary"
-    );
+    //   if (rootRelInfo != mtstate->resultRelInfo &&
+    //       rootRelInfo->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
+    //       (mtstate->mt_merge_subcommands & MERGE_INSERT) != 0) { ... }
+    let first_result_rel = mtstate.resultRelInfo[0];
+    let root_relkind = estate
+        .result_rel(root_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_rel.relkind)
+        .unwrap_or(0);
+    if root_rel_info != first_result_rel
+        && root_relkind != types_tuple::access::RELKIND_PARTITIONED_TABLE
+        && (mtstate.mt_merge_subcommands & MERGE_INSERT) != 0
+    {
+        backend_executor_execExpr_seams::exec_init_merge_inherited_root::call(
+            mcx,
+            mtstate,
+            estate,
+            root_rel_info,
+            first_result_rel,
+            econtext,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// `ExecInitMergeTupleSlots(mtstate, resultRelInfo)` — create the

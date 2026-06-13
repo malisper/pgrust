@@ -74,6 +74,7 @@ pub mod insert_exec;
 pub mod lifecycle;
 pub mod merge;
 pub mod merge_matched;
+pub mod partition_init;
 pub mod update;
 
 use types_tableam::tableam::{LockTupleMode, TM_FailureData, TU_UpdateIndexes};
@@ -118,5 +119,27 @@ pub struct UpdateContext {
 pub fn init_seams() {
     backend_executor_nodeModifyTable_seams::exec_init_generated::set(
         lifecycle::ExecInitGenerated,
+    );
+
+    // The per-leaf-partition `ResultRelInfo` init blocks of
+    // `ExecInitPartitionInfo` (execPartition.c) that read the `ModifyTable` plan
+    // node and write ModifyTable-meaning `ResultRelInfo` fields — owned here.
+    backend_executor_nodeModifyTable_seams::exec_get_on_conflict_action::set(
+        partition_init::ExecGetOnConflictAction,
+    );
+    backend_executor_nodeModifyTable_seams::exec_open_partition_indices::set(
+        partition_init::ExecOpenPartitionIndices,
+    );
+    backend_executor_nodeModifyTable_seams::exec_init_partition_with_check_options::set(
+        partition_init::ExecInitPartitionWithCheckOptions,
+    );
+    backend_executor_nodeModifyTable_seams::exec_init_partition_returning::set(
+        partition_init::ExecInitPartitionReturning,
+    );
+    backend_executor_nodeModifyTable_seams::exec_init_partition_on_conflict::set(
+        partition_init::ExecInitPartitionOnConflict,
+    );
+    backend_executor_nodeModifyTable_seams::exec_init_partition_merge::set(
+        partition_init::ExecInitPartitionMerge,
     );
 }

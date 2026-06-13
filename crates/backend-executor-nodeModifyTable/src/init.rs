@@ -9,7 +9,6 @@ use types_nodes::modifytable::{
     MergeAction, OnConflictAction, ResultRelHash, ONCONFLICT_NONE,
 };
 use types_nodes::nodes::CmdType;
-use types_nodes::parsenodes::RTEKind;
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::{
     EPQState, EStateData, ModifyTable, ModifyTableState, PlanStateData, ResultRelInfo, RriId,
@@ -64,13 +63,16 @@ pub fn ExecInitModifyTable<'mcx>(
         vec_with_capacity_in(mcx, total_nrels)?;
     let mut update_colnos_lists: PgVec<'mcx, PgVec<'mcx, i32>> =
         vec_with_capacity_in(mcx, total_nrels)?;
-    // mergeActionLists / mergeJoinConditions: the owned model has no shared
-    // alias for the planner's MergeAction lists, so these stay empty (the
-    // per-target append errors as unported below); kept as the C `NIL` lists.
-    let merge_action_lists: PgVec<'mcx, PgVec<'mcx, MergeAction<'mcx>>> =
+    // mergeActionLists / mergeJoinConditions: the C `lappend`s aliases of the
+    // planner-owned per-target sublists; the owned model stores `&'mcx` borrows
+    // of the plan node's lists (the plan tree outlives the state tree), subset
+    // to the kept (unpruned) result relations.
+    let mut merge_action_lists: PgVec<'mcx, &'mcx PgVec<'mcx, MergeAction<'mcx>>> =
         vec_with_capacity_in(mcx, total_nrels)?;
-    let merge_join_conditions: PgVec<'mcx, Option<PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>> =
-        vec_with_capacity_in(mcx, total_nrels)?;
+    let mut merge_join_conditions: PgVec<
+        'mcx,
+        Option<&'mcx PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>,
+    > = vec_with_capacity_in(mcx, total_nrels)?;
 
     {
         // foreach(l, node->resultRelations) with the C's `i` index.
@@ -122,27 +124,20 @@ pub fn ExecInitModifyTable<'mcx>(
                         update_colnos_lists.push(copy);
                     }
                     if let Some(mal) = node.mergeActionLists.as_ref() {
-                        let _ = list_nth_ref(mal, i)?;
-                        // The MERGE action lists carry `MergeAction` nodes that
-                        // are not `Clone`; the C aliases the planner-owned list
-                        // (`lappend`), but the owned model has no shared alias
-                        // for the plan tree's MergeActions here. MERGE init
-                        // (ExecInitMerge) is the owner of this list's runtime
-                        // form and is reached separately below; carrying the
-                        // raw alias here needs the plan-tree sharing model that
-                        // lands with the parsenodes/plan owner.
-                        return Err(unported(
-                            "ExecInitModifyTable: per-target MERGE action list aliasing \
-                             (lappend of planner-owned MergeAction lists) needs the \
-                             shared plan-tree model not yet ported",
-                        ));
+                        // mergeActionList = list_nth(node->mergeActionLists, i);
+                        // mergeActionLists = lappend(mergeActionLists, mergeActionList);
+                        let merge_action_list: &'mcx PgVec<'mcx, MergeAction<'mcx>> =
+                            list_nth_ref(mal, i)?;
+                        merge_action_lists.try_reserve(1).map_err(|_| mcx.oom(8))?;
+                        merge_action_lists.push(merge_action_list);
                     }
                     if let Some(mjc) = node.mergeJoinConditions.as_ref() {
-                        let _ = list_nth_ref(mjc, i)?;
-                        return Err(unported(
-                            "ExecInitModifyTable: per-target MERGE join-condition aliasing \
-                             needs the shared plan-tree model not yet ported",
-                        ));
+                        // mergeJoinCondition = list_nth(node->mergeJoinConditions, i);
+                        // mergeJoinConditions = lappend(mergeJoinConditions, mergeJoinCondition);
+                        let cond: &'mcx Option<PgBox<'mcx, types_nodes::nodes::Node<'mcx>>> =
+                            list_nth_ref(mjc, i)?;
+                        merge_join_conditions.try_reserve(1).map_err(|_| mcx.oom(8))?;
+                        merge_join_conditions.push(cond.as_ref());
                     }
                 }
                 i += 1;
@@ -186,6 +181,7 @@ pub fn ExecInitModifyTable<'mcx>(
         mcx,
         ModifyTableState {
             ps,
+            plan_node: Some(node),
             operation,
             // cached from the plan node so per-tuple paths need not re-downcast
             onConflictAction: node.onConflictAction,
@@ -521,7 +517,7 @@ pub fn ExecInitModifyTable<'mcx>(
         // expects one.
         //   ExecInitResultTypeTL(&mtstate->ps);
         //   mtstate->ps.ps_ExprContext = NULL;
-        exec_init_result_type_tl(&mut mtstate.ps)?;
+        exec_init_result_type_tl(&mut mtstate.ps, estate)?;
         mtstate.ps.ps_ExprContext = None;
     }
 
@@ -563,54 +559,39 @@ pub fn ExecInitModifyTable<'mcx>(
         ));
     }
 
+    // For a MERGE command, initialize its state.
+    //   if (mtstate->operation == CMD_MERGE) ExecInitMerge(mtstate, estate);
+    if mtstate.operation == CmdType::CMD_MERGE {
+        merge::ExecInitMerge(mcx, node, &mut mtstate, estate)?;
+    }
+
     // If we have any secondary relations in an UPDATE or DELETE, they need to
     // be treated like non-locked relations in SELECT FOR UPDATE (and likewise
     // the source relations in a MERGE).  Locate the relevant ExecRowMarks.
     //   arowmarks = NIL;
-    //   foreach(l, node->rowMarks) { ... }
+    //   foreach(l, node->rowMarks) { ...build ExecAuxRowMark... }
+    //   EvalPlanQualSetPlan(&mtstate->mt_epqstate, subplan, arowmarks);
     //
-    // Each iteration calls ExecFindRowMark (execMain.c) + ExecBuildAuxRowMark
-    // (execMain.c) to build an ExecAuxRowMark, neither of which has a declared
-    // seam in this unit's dependency set; the EPQ aux-rowmark machinery lands
-    // with the execMain owner. A non-empty (non-parent, unpruned) rowMarks list
-    // therefore cannot be honored. The empty/parent-only case is a genuine
-    // no-op (arowmarks stays NIL).
-    if let Some(row_marks) = node.rowMarks.as_ref() {
-        for rc in row_marks.iter() {
-            let (is_parent, rti, rtekind) = plan_row_mark_fields(rc)?;
-            // ignore "parent" rowmarks; they are irrelevant at runtime
-            if is_parent {
-                continue;
-            }
-            // Also ignore rowmarks for child tables pruned in ExecDoInitialPruning.
-            if rtekind == RTEKind::RTE_RELATION
-                && !backend_nodes_core_seams::bms_is_member::call(
-                    rti as i32,
-                    estate.es_unpruned_relids.as_deref(),
-                )
-            {
-                continue;
-            }
-            return Err(unported(
-                "ExecInitModifyTable: ExecFindRowMark / ExecBuildAuxRowMark (EPQ \
-                 aux-rowmark setup) have no declared seam in this unit",
-            ));
-        }
-    }
-
-    // For a MERGE command, initialize its state.
-    //   if (mtstate->operation == CMD_MERGE) ExecInitMerge(mtstate, estate);
-    if mtstate.operation == CmdType::CMD_MERGE {
-        merge::ExecInitMerge(mcx, &mut mtstate, estate)?;
-    }
-
-    // EvalPlanQualSetPlan(&mtstate->mt_epqstate, subplan, arowmarks);
-    //
-    // arowmarks is necessarily NIL here (a non-empty rowMarks list errored
-    // above), so this records the subplan and an empty aux-rowmark list on the
-    // EPQ state. EvalPlanQualSetPlan is owned by execMain.c and has no declared
-    // seam in this unit; setting the plan/rowmarks is reached through that owner.
-    eval_plan_qual_set_plan(&mut mtstate.mt_epqstate, subplan, mcx)?;
+    // The rowMarks loop reads the `PlanRowMark` plan-node type and calls
+    // ExecFindRowMark / ExecBuildAuxRowMark — all owned by execMain's EPQ
+    // aux-rowmark machinery, with no field for `PlanRowMark` in the trimmed
+    // `Node` enum. The owner seam builds the aux-rowmark list (a no-op for an
+    // empty/parent-only/pruned rowMarks list) and records it together with the
+    // recheck plan on the canonical EPQState, mirroring the C
+    // `EvalPlanQualSetPlan(epqstate, subplan, arowmarks)`.
+    let empty_row_marks: &[PgBox<'mcx, types_nodes::nodes::Node<'mcx>>] = &[];
+    let row_marks: &[PgBox<'mcx, types_nodes::nodes::Node<'mcx>>] = node
+        .rowMarks
+        .as_ref()
+        .map(|v| v.as_slice())
+        .unwrap_or(empty_row_marks);
+    backend_executor_execMain_seams::eval_plan_qual_set_plan_with_row_marks::call(
+        mcx,
+        &mut mtstate.mt_epqstate,
+        estate,
+        row_marks,
+        subplan,
+    )?;
 
     // If there are a lot of result relations, use a hash table to speed the
     // lookups; otherwise a simple linear search is faster (threshold 64).
@@ -743,41 +724,28 @@ fn unported(what: &str) -> PgError {
 }
 
 // ===========================================================================
-// Unported-owner shims. Each is a callee owned by a neighbor unit (execUtils,
-// execMain, nodeFuncs, dynahash) for which no seam is declared in this unit's
-// dependency set, and whose inputs/outputs touch fields not yet carried on the
-// trimmed node model. Per mirror-PG-and-panic these panic loudly when reached.
+// Owner-seam shims. Each is a callee owned by a neighbor unit (execMain,
+// execJunk) reached through that owner's `-seams` crate. They return
+// `PgResult` so an `ereport(ERROR)` in the owner surfaces as `Err` (per the
+// seam-signature failure-mode rule) rather than aborting node init.
 // ===========================================================================
 
-/// `ExecInitResultRelation(estate, resultRelInfo, rti)` (execUtils.c): open the
-/// rti'th range-table relation (via `ExecGetRangeTableRelation`) and fill the
-/// `ResultRelInfo` for it (`InitResultRelInfo`), recording it in
-/// `es_result_relations[rti-1]` and prepending it to
-/// `es_opened_result_relations`.
-///
-/// execUtils.c is not in this unit's dependency set (no `ExecInitResultRelation`
-/// seam is declared), and the open reads `es_relations`/`es_range_table` and the
-/// relcache through that owner; reached through the execUtils owner when it
-/// lands.
+/// `ExecInitResultRelation(estate, resultRelInfo, rti)` (execMain.c): open the
+/// rti'th range-table relation and fill the pooled `ResultRelInfo`. Routed
+/// through the execMain owner seam.
 fn exec_init_result_relation<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     rti: Index,
 ) -> PgResult<()> {
-    let _ = (estate, result_rel_info, rti);
-    panic!(
-        "ExecInitResultRelation (execUtils.c): no seam declared in this unit — \
-         relation open + InitResultRelInfo are owned by execUtils"
-    );
+    backend_executor_execMain_seams::exec_init_result_relation::call(estate, result_rel_info, rti)
 }
 
 /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
 /// mergeActions)` (execMain.c): verify the relation is a valid target for the
-/// operation (relkind/triggers/view-rules checks), `ereport(ERROR)` otherwise.
-///
-/// execMain.c declares no `CheckValidResultRel` seam in this unit's dependency
-/// set, and the checks read the relation's relkind/trigger/rule state through
-/// the relcache; reached through the execMain owner when it lands.
+/// operation. Routed through the execMain owner seam (its `check_valid_result_rel`
+/// takes the `(estate, rri, operation, on_conflict_action)` tuple; the
+/// `mergeActions` argument is consumed by the owner's own plan-node view).
 fn check_valid_result_rel<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
@@ -785,20 +753,18 @@ fn check_valid_result_rel<'mcx>(
     on_conflict_action: OnConflictAction,
     merge_actions: Option<&[MergeAction<'mcx>]>,
 ) -> PgResult<()> {
-    let _ = (estate, result_rel_info, operation, on_conflict_action, merge_actions);
-    panic!(
-        "CheckValidResultRel (execMain.c): no seam declared in this unit — \
-         valid-target validation is owned by execMain"
-    );
+    let _ = merge_actions;
+    backend_executor_execMain_seams::check_valid_result_rel::call(
+        estate,
+        result_rel_info,
+        operation,
+        on_conflict_action,
+    )
 }
 
 /// `EvalPlanQualInit(epqstate, parentestate, subplan, auxrowmarks, epqParam,
-/// resultRelations)` (execMain.c): initialize an `EPQState` with dummy subplan
-/// data, recording `epqParam` and `resultRelations`.
-///
-/// execMain.c declares no `EvalPlanQualInit` seam in this unit's dependency
-/// set; the EPQ machinery is owned by execMain. Reached through that owner when
-/// it lands.
+/// resultRelations)` (execMain.c): initialize the canonical `EPQState`. Routed
+/// through the execMain owner seam.
 fn eval_plan_qual_init<'mcx>(
     epqstate: &mut EPQState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -806,58 +772,36 @@ fn eval_plan_qual_init<'mcx>(
     result_relations: &PgVec<'mcx, Index>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let _ = (epqstate, estate, epq_param, result_relations, mcx);
-    panic!(
-        "EvalPlanQualInit (execMain.c): no seam declared in this unit — \
-         EvalPlanQual state init is owned by execMain"
-    );
-}
-
-/// `EvalPlanQualSetPlan(epqstate, subplan, auxrowmarks)` (execMain.c): record
-/// the recheck plan tree and the aux-rowmark list on the EPQ state.
-///
-/// execMain.c declares no `EvalPlanQualSetPlan` seam in this unit's dependency
-/// set. Reached through the execMain owner when it lands.
-fn eval_plan_qual_set_plan<'mcx>(
-    epqstate: &mut EPQState<'mcx>,
-    subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
-    mcx: Mcx<'mcx>,
-) -> PgResult<()> {
-    let _ = (epqstate, subplan, mcx);
-    panic!(
-        "EvalPlanQualSetPlan (execMain.c): no seam declared in this unit — \
-         owned by execMain"
-    );
+    backend_executor_execMain_seams::eval_plan_qual_init::call(
+        mcx,
+        epqstate,
+        estate,
+        epq_param,
+        result_relations.as_slice(),
+    )
 }
 
 /// `ExecFindJunkAttributeInTlist(targetlist, attrName)` (execJunk.c): find the
 /// resno of the junk `TargetEntry` whose `resname` is `attr_name`, or
-/// `InvalidAttrNumber` (0) if none.
-///
-/// execJunk.c is not in this unit's dependency set (no seam declared), and the
-/// `TargetEntry.resname`/`resjunk` lookup it performs is owned by that unit.
+/// `InvalidAttrNumber` (0) if none. Routed through the execUtils/execJunk owner
+/// seam (a pure, infallible lookup).
 fn exec_find_junk_attribute_in_tlist(target_list: &[TargetEntry<'_>], attr_name: &str) -> i16 {
-    let _ = (target_list, attr_name);
-    panic!(
-        "ExecFindJunkAttributeInTlist (execJunk.c): no seam declared in this unit — \
-         junk-attribute lookup is owned by execJunk"
-    );
+    backend_executor_execUtils_seams::exec_find_junk_attribute_in_tlist::call(
+        target_list,
+        attr_name,
+    )
 }
 
 /// `resultRelInfo->ri_RowIdAttNo = attno` — store the row-identity junk
-/// attribute number. `ri_RowIdAttNo` is not carried on the trimmed
-/// ResultRelInfo (the UPDATE/DELETE/MERGE row-identity machinery lands with
-/// that field), so the store is not expressible.
+/// attribute number on the pooled `ResultRelInfo`. (This unit's own field
+/// store now that `ri_RowIdAttNo` is carried on the shared `ResultRelInfo`.)
 fn set_ri_row_id_attno<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     attno: i16,
 ) -> PgResult<()> {
-    let _ = (estate, result_rel_info, attno);
-    panic!(
-        "ResultRelInfo.ri_RowIdAttNo store: the row-identity junk-attr field is \
-         not carried on the trimmed ResultRelInfo"
-    );
+    estate.result_rel_mut(result_rel_info).ri_RowIdAttNo = attno;
+    Ok(())
 }
 
 /// `resultRelInfo->ri_RelationDesc->rd_rel->relkind` — the target relation's
@@ -885,32 +829,14 @@ fn relation_get_relid<'mcx>(
     Ok(rel.rd_id)
 }
 
-/// `ExecInitResultTypeTL(planstate)` (execTuples.c): set the node's result
-/// tuple descriptor from the plan's targetlist, without creating a result slot.
-///
-/// execTuples.c declares no `ExecInitResultTypeTL` seam in this unit's
-/// dependency set (only the slot-creating `ExecInitResultTupleSlotTL`); the
-/// type-only setup is owned by that unit. Reached through it when it lands.
-fn exec_init_result_type_tl<'mcx>(planstate: &mut PlanStateData<'mcx>) -> PgResult<()> {
-    let _ = planstate;
-    panic!(
-        "ExecInitResultTypeTL (execTuples.c): no seam declared in this unit — \
-         owned by execTuples"
-    );
-}
-
-/// Read the `isParent` / `rti` / RTE-kind fields the rowmarks loop consumes off
-/// a `PlanRowMark` node. The `PlanRowMark` node is not represented in the
-/// trimmed `Node` enum (only `Material`/`MergeJoin`), so its fields cannot be
-/// read; `PlanRowMark` lands with the plannodes owner.
-fn plan_row_mark_fields(
-    rc: &PgBox<'_, types_nodes::nodes::Node<'_>>,
-) -> PgResult<(bool, Index, RTEKind)> {
-    let _ = rc;
-    panic!(
-        "PlanRowMark field access: PlanRowMark is not represented in the trimmed \
-         Node enum — owned by the plannodes vocabulary"
-    );
+/// `ExecInitResultTypeTL(planstate)` (execTuples.c / execUtils.c): set the
+/// node's result tuple descriptor from the plan's targetlist, without creating
+/// a result slot. Routed through the execUtils owner seam.
+fn exec_init_result_type_tl<'mcx>(
+    planstate: &mut PlanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    backend_executor_execUtils_seams::exec_init_result_type_tl::call(planstate, estate)
 }
 
 extern crate alloc;

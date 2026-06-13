@@ -31,6 +31,8 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

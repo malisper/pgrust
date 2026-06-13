@@ -424,3 +424,42 @@ seam_core::seam!(
         out_slot: types_nodes::SlotId,
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
+
+seam_core::seam!(
+    /// The per-attribute stored-generated-column compute loop of
+    /// `ExecComputeStoredGenerated` (nodeModifyTable.c) that touches the slot
+    /// payload: in the per-tuple memory context, `slot_getallattrs(slot)`, then
+    /// for every column with a non-NULL generated `ExprState`
+    /// (`ri_GeneratedExprsI`/`ri_GeneratedExprsU` per `cmdtype`) set
+    /// `econtext->ecxt_scantuple = slot`, `ExecEvalExpr` it, `datumCopy` a
+    /// non-null pass-by-reference result, and for the remaining columns
+    /// `datumCopy` the existing slot value; finally `ExecClearTuple` /
+    /// `memcpy` the values+nulls back / `ExecStoreVirtualTuple` /
+    /// `ExecMaterializeSlot`. The slot's `tts_values`/`tts_isnull` payload and
+    /// the expression interpreter are owned by execTuples/execExpr; the
+    /// generated `ExprState`s are read off the `ResultRelInfo` (pool id).
+    /// Fallible on `ereport(ERROR)` from a generation expression and on OOM.
+    pub fn exec_store_generated_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        econtext: types_nodes::EcxtId,
+        cmdtype: types_nodes::nodes::CmdType,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c) with
+    /// an explicitly-supplied `attrMap` (rather than one read off a
+    /// `ResultRelInfo` field). Used by callers that obtained the map directly
+    /// (e.g. `ExecGetRootToChildMap`'s returned `AttrMap`): remap `in_slot`'s
+    /// attributes through `attr_map` into `out_slot` and return `out_slot`.
+    /// Fallible on `palloc` (OOM).
+    pub fn execute_attr_map_slot_explicit<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        attr_map: &types_tuple::attmap::AttrMap<'mcx>,
+        in_slot: types_nodes::SlotId,
+        out_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);

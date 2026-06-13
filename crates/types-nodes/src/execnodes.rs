@@ -370,6 +370,34 @@ pub struct ResultRelInfo<'mcx> {
     /// `TupleTableSlot *ri_newTupleSlot` — new-tuple slot (UPDATE/INSERT
     /// projection output).
     pub ri_newTupleSlot: Option<SlotId>,
+    /// `AttrNumber ri_RowIdAttNo` — attribute number of the row-identity junk
+    /// column ("ctid" for heap, "wholerow" for foreign/other relkinds) found in
+    /// the subplan targetlist for UPDATE/DELETE/MERGE. `0` (`InvalidAttrNumber`)
+    /// when not applicable.
+    pub ri_RowIdAttNo: AttrNumber,
+    /// `List *ri_returningList` — the RETURNING target list for this relation
+    /// (stored alongside `ri_projectReturning`). `None` is the C `NIL`.
+    pub ri_returningList: Option<PgVec<'mcx, crate::primnodes::TargetEntry<'mcx>>>,
+    /// `List *ri_WithCheckOptions` — the WITH CHECK OPTION constraints (RLS /
+    /// updatable views) for this relation. `None` is the C `NIL`. (The
+    /// presence flag `ri_has_with_check_options` mirrors `!= NIL`.)
+    pub ri_WithCheckOptions: Option<PgVec<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `List *ri_WithCheckOptionExprs` — the compiled `ExprState`s for the
+    /// WITH CHECK OPTION constraints, parallel to `ri_WithCheckOptions`.
+    pub ri_WithCheckOptionExprs: Option<PgVec<'mcx, PgBox<'mcx, ExprState>>>,
+    /// `struct OnConflictSetState *ri_onConflict` — exec state for ON CONFLICT
+    /// DO UPDATE. `None` is the C `NULL`.
+    pub ri_onConflict: Option<PgBox<'mcx, crate::modifytable::OnConflictSetState>>,
+    /// `List *ri_MergeActions[NUM_MERGE_MATCH_KINDS]` — per-`MergeMatchKind`
+    /// lists of `MergeActionState`s (built by `ExecInitMerge` /
+    /// `ExecInitPartitionInfo`). Each element `None` is the C `NIL` for that
+    /// match kind.
+    pub ri_MergeActions:
+        [Option<PgVec<'mcx, PgBox<'mcx, crate::modifytable::MergeActionState<'mcx>>>>;
+            crate::modifytable::NUM_MERGE_MATCH_KINDS],
+    /// `ExprState *ri_MergeJoinCondition` — compiled MERGE join-condition qual
+    /// for this relation. `None` is the C `NULL`.
+    pub ri_MergeJoinCondition: Option<PgBox<'mcx, ExprState>>,
 }
 
 /// `ExecProcNodeMtd` — the per-node execution callback stored in

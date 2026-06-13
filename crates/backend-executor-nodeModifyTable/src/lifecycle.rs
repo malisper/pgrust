@@ -434,11 +434,58 @@ pub fn ExecComputeStoredGenerated<'mcx>(
     slot: SlotId,
     cmdtype: CmdType,
 ) -> PgResult<()> {
-    let _ = (mcx, estate, result_rel_info, slot, cmdtype);
-    Err(unported(
-        "ExecComputeStoredGenerated: ExecEvalExpr (execExpr.c) / ExecStoreVirtualTuple / \
-         ExecMaterializeSlot and ri_GeneratedExprs* not modeled",
-    ))
+    // Relation rel = resultRelInfo->ri_RelationDesc;
+    // TupleDesc tupdesc = RelationGetDescr(rel); int natts = tupdesc->natts;
+    //
+    // We should not be called unless this is true:
+    //   Assert(tupdesc->constr && tupdesc->constr->has_generated_stored);
+    debug_assert!(estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .and_then(|r| r.rd_att.constr.as_ref())
+        .map(|c| c.has_generated_stored)
+        .unwrap_or(false));
+
+    // ExprContext *econtext = GetPerTupleExprContext(estate);
+    let econtext = backend_executor_execUtils_seams::get_per_tuple_expr_context::call(estate)?;
+
+    // Initialize the expressions if we didn't already, and check whether we can
+    // exit early because nothing needs to be computed.
+    if cmdtype == CmdType::CMD_UPDATE {
+        // if (ri_GeneratedExprsU == NULL) ExecInitGenerated(...);
+        if estate.result_rel(result_rel_info).ri_GeneratedExprsU.is_none() {
+            ExecInitGenerated(estate, result_rel_info, cmdtype)?;
+        }
+        // if (ri_NumGeneratedNeededU == 0) return;
+        if estate.result_rel(result_rel_info).ri_NumGeneratedNeededU == 0 {
+            return Ok(());
+        }
+    } else {
+        // if (ri_GeneratedExprsI == NULL) ExecInitGenerated(...);
+        if estate.result_rel(result_rel_info).ri_GeneratedExprsI.is_none() {
+            ExecInitGenerated(estate, result_rel_info, cmdtype)?;
+        }
+        // Early exit is impossible given the prior Assert.
+        //   Assert(ri_NumGeneratedNeededI > 0);
+        debug_assert!(estate.result_rel(result_rel_info).ri_NumGeneratedNeededI > 0);
+    }
+
+    // The per-attribute compute loop touches the slot's tts_values/tts_isnull
+    // payload (slot_getallattrs, datumCopy, ExecClearTuple/memcpy/
+    // ExecStoreVirtualTuple/ExecMaterializeSlot) and runs ExecEvalExpr over the
+    // generated ExprStates in the per-tuple memory context — all slot-payload /
+    // expression-interpreter work owned by execTuples/execExpr. It reads the
+    // generated ExprStates off the ResultRelInfo (ri_GeneratedExprs*) selected
+    // by cmdtype.
+    backend_executor_execTuples_seams::exec_store_generated_columns::call(
+        mcx,
+        estate,
+        result_rel_info,
+        slot,
+        econtext,
+        cmdtype,
+    )
 }
 
 /// `ExecSetupTransitionCaptureState(mtstate, estate)` — set up the
@@ -528,17 +575,35 @@ pub fn ExecPrepareTupleRouting<'mcx>(
     //   if (map != NULL) { new_slot = partrel->ri_PartitionTupleSlot;
     //       slot = execute_attr_map_slot(map->attrMap, slot, new_slot); }
     //
-    // ExecGetRootToChildMap is owned by execPartition.c with no seam declared
-    // here, and ri_PartitionTupleSlot is not carried on the trimmed
-    // ResultRelInfo. When the rowtypes already match the map is NULL and no
-    // conversion is needed; that NULL/non-NULL decision and the conversion both
-    // live in the unported owner, so any tuple that reaches this point routes
-    // through the unported callee.
-    let _ = part_rel_info;
-    Err(unported(
-        "ExecPrepareTupleRouting: ExecGetRootToChildMap (execPartition.c) and \
-         ri_PartitionTupleSlot not modeled (root\u{2192}child tuple conversion)",
-    ))
+    // ExecGetRootToChildMap lazily builds (and caches) the root→child conversion
+    // map; when the rowtypes already match it returns the C `NULL` map and no
+    // conversion is needed (the fast path — keep `slot` unchanged). That NULL/
+    // non-NULL decision is this function's own control flow. The map build is
+    // owned by execUtils/execPartition and the attribute-remapping store is
+    // owned by tupconvert (execute_attr_map_slot), reached through their seams.
+    let map = backend_executor_execUtils_seams::exec_get_root_to_child_map::call(
+        mcx, estate, partrel,
+    )?;
+    let slot = match map {
+        // map == NULL: rowtypes match, no conversion needed.
+        None => slot,
+        // map != NULL: new_slot = partrel->ri_PartitionTupleSlot;
+        //              slot = execute_attr_map_slot(map->attrMap, slot, new_slot);
+        Some(attr_map) => {
+            let new_slot = estate
+                .result_rel(partrel)
+                .ri_PartitionTupleSlot
+                .expect("ExecPrepareTupleRouting: partition with a conversion map has a tuple slot");
+            backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+                estate, &attr_map, slot, new_slot,
+            )?
+        }
+    };
+
+    // *partRelInfo = partrel;
+    *part_rel_info = Some(partrel);
+    // return slot;
+    Ok(slot)
 }
 
 /// `ExecLookupResultRelByOid(node, resultoid, missing_ok, update_cache)` — map

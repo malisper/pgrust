@@ -111,13 +111,11 @@ pub fn ExecModifyTable<'mcx>(
     //
     //   if (estate->es_epq_active != NULL)
     //       elog(ERROR, "ModifyTable should not be called during EvalPlanQual");
-    //
-    // `EState.es_epq_active` is owned by execMain.c's EvalPlanQual machinery and
-    // is not yet modeled on the trimmed `EStateData`; the active-EPQ flag lands
-    // with the execMain port. Until then this guard cannot be evaluated, but the
-    // executor never drives a ModifyTable node under EvalPlanQual in the paths we
-    // run, so leaving the check unevaluated is safe (it is a defensive runtime
-    // assertion, not load-bearing control flow).
+    if estate.es_epq_active.is_some() {
+        return Err(PgError::error(
+            "ModifyTable should not be called during EvalPlanQual",
+        ));
+    }
 
     // If we've already completed processing, don't try to do more.  We need
     // this test because ExecPostprocessPlan might call us an extra time.

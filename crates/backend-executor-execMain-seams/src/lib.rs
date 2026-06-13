@@ -399,3 +399,72 @@ seam_core::seam!(
         rti: types_core::primitive::Index,
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
+
+seam_core::seam!(
+    /// `ExecInitResultRelation(estate, resultRelInfo, rti)` (execMain.c): open
+    /// the `rti`'th range-table relation (via `ExecGetRangeTableRelation`) and
+    /// fill the pooled `ResultRelInfo` for it (`InitResultRelInfo`), recording it
+    /// in `es_result_relations[rti-1]` and prepending it to
+    /// `es_opened_result_relations`. The `ResultRelInfo` is addressed by its
+    /// EState-pool id. Reads `es_relations`/`es_range_table` and the relcache;
+    /// fallible on `ereport(ERROR)` and OOM.
+    pub fn exec_init_result_relation<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualInit(epqstate, parentestate, subplan, auxrowmarks, epqParam,
+    /// resultRelations)` (execMain.c): initialize the canonical `EPQState` with
+    /// dummy subplan data, recording `epqParam` and the `resultRelations` integer
+    /// list. The owned model passes the canonical `EPQState` by mutable
+    /// reference. Allocates EPQ bookkeeping in the per-query context; fallible
+    /// on OOM.
+    pub fn eval_plan_qual_init<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epq_param: i32,
+        result_relations: &[types_core::primitive::Index],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualSetPlan(epqstate, subplan, auxrowmarks)` (execMain.c): record
+    /// the recheck plan tree and the aux-rowmark list on the canonical
+    /// `EPQState`. The owned model passes the (shared, read-only) subplan node by
+    /// borrow and the canonical `EPQState` by mutable reference; the aux-rowmark
+    /// list is currently always NIL at the nodeModifyTable call site. Fallible on
+    /// OOM.
+    pub fn eval_plan_qual_set_plan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The `arowmarks` build loop of `ExecInitModifyTable` (execMain.c):
+    /// `foreach(l, node->rowMarks) { PlanRowMark *rc = ...; if (rc->isParent)
+    /// continue; rte = exec_rt_fetch(rc->rti, estate); if (rte->rtekind ==
+    /// RTE_RELATION && !bms_is_member(rc->rti, es_unpruned_relids)) continue;
+    /// erm = ExecFindRowMark(estate, rc->rti, false); aerm =
+    /// ExecBuildAuxRowMark(erm, subplan->targetlist); arowmarks =
+    /// lappend(arowmarks, aerm); }`. The `PlanRowMark` plan-node type, the
+    /// `ExecFindRowMark`/`ExecBuildAuxRowMark` constructors, and the
+    /// `ExecAuxRowMark` list are all execMain's; the owner reads the rowMarks
+    /// off the plan node and records the resulting aux-rowmark list directly on
+    /// the canonical `EPQState` (the C passes `arowmarks` into
+    /// `EvalPlanQualSetPlan`). A no-op when the plan carries no (non-parent,
+    /// unpruned) rowMarks. Reads the range table; fallible on `ereport(ERROR)`
+    /// and OOM.
+    pub fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        row_marks: &[mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>],
+        subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
