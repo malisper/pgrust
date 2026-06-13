@@ -4282,6 +4282,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeWorktablescan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeWorktablescan-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeWorktablescan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
