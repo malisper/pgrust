@@ -630,3 +630,87 @@ seam_core::seam!(
         seed: u64,
     ) -> PgResult<u64>
 );
+
+// ---------------------------------------------------------------------------
+// Generic raw-`Datum` fmgr dispatch driven by `tcop/fastpath.c`
+// (backend-tcop-fastpath, the server side of `PQfn`). Unlike the
+// record/rowtypes consumers above (which classify values as `TupleValue`),
+// the fastpath path marshals raw argument `Datum` words straight through
+// `FunctionCallInvoke`, so these seams keep the values as opaque `Datum`s.
+// C's `FmgrInfo` cannot cross a seam, so each call dispatches by OID and the
+// owner re-resolves (matching `oid_input_function_call` above).
+
+seam_core::seam!(
+    /// `OidInputFunctionCall(typinput, str, typioparam, typmod)` (fmgr.c) for
+    /// the fastpath text-format argument path. `str_` is `None` for a NULL
+    /// argument (C's `pstring == NULL`, where `argsize == -1`); the call still
+    /// happens to support domains, exactly as C does. Returns the raw result
+    /// `Datum`. `Err` carries invalid-input-syntax, cache-lookup failure, and
+    /// OOM.
+    pub fn fastpath_input_function_call(
+        typinput: Oid,
+        str_: Option<&str>,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `OidReceiveFunctionCall(typreceive, buf, typioparam, typmod)` (fmgr.c)
+    /// for the fastpath binary-format argument path. `buf` is the argument's
+    /// raw payload bytes, or `None` for a NULL argument (C's `bufptr == NULL`,
+    /// where `argsize == -1`). Returns the raw result `Datum` together with the
+    /// number of bytes the receive function consumed from `buf`, so the caller
+    /// can reproduce C's `buf->cursor != buf->len` "incorrect binary data
+    /// format" check. `Err` carries the receive function's `ereport(ERROR)`s.
+    pub fn fastpath_receive_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typreceive: Oid,
+        buf: Option<&[u8]>,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<(Datum, usize)>
+);
+
+seam_core::seam!(
+    /// `OidOutputFunctionCall(typoutput, retval)` (fmgr.c) for the fastpath
+    /// text-format result path: one-shot lookup + call of a type's text output
+    /// function on the raw result `Datum`. The C `char *` result crosses as its
+    /// NUL-excluded bytes allocated in `mcx`. `Err` carries the lookup failure,
+    /// the strict-null `elog`, and whatever the output function raises.
+    pub fn fastpath_output_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typoutput: Oid,
+        retval: Datum,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `OidSendFunctionCall(typsend, retval)` (fmgr.c) for the fastpath
+    /// binary-format result path: one-shot lookup + call of a type's binary
+    /// send function on the raw result `Datum`. The C `bytea *` result crosses
+    /// as its payload bytes with the varlena header already stripped
+    /// (`VARDATA`, `VARSIZE - VARHDRSZ` bytes), allocated in `mcx`. `Err`
+    /// carries the lookup failure, the strict-null `elog`, and whatever the
+    /// send function raises.
+    pub fn fastpath_send_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typsend: Oid,
+        retval: Datum,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` (fmgr.h) for the fastpath call path: invoke
+    /// the function identified by `fn_oid` (its resolved `FmgrInfo` cannot
+    /// cross, so the owner re-resolves by OID) on the raw `args` under
+    /// `collation` (fastpath passes `InvalidOid`). Returns the raw result
+    /// `Datum` and the callee's `fcinfo->isnull` flag. fastpath has already
+    /// applied the strict-null short-circuit, so this is only called when the
+    /// function is to run. `Err` carries whatever the called function raises.
+    pub fn fastpath_function_call_invoke(
+        fn_oid: Oid,
+        collation: Oid,
+        args: &[types_datum::NullableDatum],
+    ) -> PgResult<(Datum, bool)>
+);
