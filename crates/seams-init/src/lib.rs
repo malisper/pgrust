@@ -57,6 +57,7 @@ pub fn init_all() {
     backend_utils_cache_spccache::init_seams();
     backend_utils_cache_syscache::init_seams();
     backend_utils_cache_ts_cache::init_seams();
+    backend_utils_cache_typcache::init_seams();
     backend_utils_error::init_seams();
     backend_utils_init_small::init_seams();
     backend_utils_mb_wstrcmp::init_seams();

@@ -61,6 +61,7 @@ backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilen
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
+backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }

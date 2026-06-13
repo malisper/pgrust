@@ -118,6 +118,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-session-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-syncscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -136,6 +146,16 @@ dependencies = [
  "types-error",
  "types-scan",
  "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-common-tupdesc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -1172,6 +1192,8 @@ name = "backend-catalog-pg-enum-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2813,6 +2835,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-domains-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -2952,6 +2984,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-cache",
  "types-core",
  "types-error",
 ]
@@ -2967,6 +3000,7 @@ dependencies = [
  "types-nodes",
  "types-rel",
  "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3065,6 +3099,28 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-guc",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-typcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-session-seams",
+ "backend-access-common-tupdesc-seams",
+ "backend-catalog-pg-enum-seams",
+ "backend-utils-adt-domains-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
  "types-tuple",
 ]
 
@@ -3580,6 +3636,7 @@ dependencies = [
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
+ "backend-utils-cache-typcache",
  "backend-utils-error",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",

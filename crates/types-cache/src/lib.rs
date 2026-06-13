@@ -7,10 +7,13 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
 pub mod deflist;
 pub mod inval;
 pub mod skey;
 pub mod syscache;
+pub mod typcache;
 
 pub use deflist::*;
 pub use inval::*;

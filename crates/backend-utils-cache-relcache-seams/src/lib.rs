@@ -45,3 +45,17 @@ seam_core::seam!(
         rel: &types_rel::RelationData<'_>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `load_typcache_tupdesc`'s relcache access: open the composite type's
+    /// relation under `AccessShareLock`, assert `rd_rel->reltype == type_id`,
+    /// copy the relation's `TupleDesc` (`RelationGetDescr`) into `mcx`, and
+    /// close the relation. The C shares the relcache's reference-counted
+    /// descriptor and bumps `tdrefcount`; the safe port returns an owned copy
+    /// the cache keeps. `Err` carries the open `ereport(ERROR)` and OOM.
+    pub fn relation_get_composite_tupdesc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typrelid: types_core::Oid,
+        type_id: types_core::Oid,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
