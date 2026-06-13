@@ -6187,6 +6187,7 @@ dependencies = [
  "types-acl",
  "types-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
