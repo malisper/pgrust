@@ -2969,6 +2969,7 @@ fn seam_slot_data_invalidated(handle: ReplicationSlotHandle) -> ReplicationSlotI
 pub fn init_seams() {
     use backend_replication_slot_seams as s;
     s::replication_slots_shmem_init::set(ReplicationSlotsShmemInit);
+    s::replication_slots_shmem_size::set(|| Ok(ReplicationSlotsShmemSize()));
     s::replication_slot_initialize::set(ReplicationSlotInitialize);
     s::replication_slot_create::set(ReplicationSlotCreate);
     s::replication_slot_acquire::set(ReplicationSlotAcquire);
