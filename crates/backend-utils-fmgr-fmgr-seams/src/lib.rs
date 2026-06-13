@@ -39,6 +39,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InputFunctionCallSafe(&finfo, str, typioparam, typmod, escontext,
+    /// &result)` (fmgr.c) for a hard-error caller (escontext == NULL, where it
+    /// is equivalent to `InputFunctionCall`): look up `function_id`'s text
+    /// input function and run it on `str` (`None` is C's `NULL` cstring, which
+    /// non-strict input functions accept). The C `FmgrInfo` cannot cross, so
+    /// the owner re-resolves by OID. `Err` carries the lookup failure and
+    /// whatever the input function raises.
+    pub fn input_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        str: Option<&str>,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `ReceiveFunctionCall(&finfo, buf, typioparam, typmod)` (fmgr.c): look
+    /// up `function_id`'s binary receive function and run it on `buf` (the
+    /// `StringInfo` payload). The C `FmgrInfo` cannot cross, so the owner
+    /// re-resolves by OID. `Err` carries the lookup failure and whatever the
+    /// receive function raises.
+    pub fn receive_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        buf: &[u8],
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `OidSendFunctionCall(functionId, val)` (fmgr.c): one-shot lookup +
     /// call of a type's binary send function. The C argument `Datum` crosses
     /// as the owned per-attribute value model

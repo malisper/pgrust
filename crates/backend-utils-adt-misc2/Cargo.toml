@@ -24,7 +24,8 @@ mcx = { path = "../mcx" }
 # rowtype-tupdesc lookup seam.
 # Composite (RECORD) I/O / compare / hash (rowtypes family) substrate crosses
 # to its real owner via that owner's seam crate (typcache, fmgr, format_type,
-# datum, pqformat message helpers).
+# datum, pqformat message helpers). The `domains` family reaches the typcache
+# domain-constraint engine and the base type's fmgr I/O via those same seams.
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
