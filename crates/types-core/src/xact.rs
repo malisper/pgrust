@@ -209,6 +209,58 @@ impl FullTransactionId {
 /// `InvalidFullTransactionId` (`access/transam.h`).
 pub const InvalidFullTransactionId: FullTransactionId = FullTransactionId { value: 0 };
 
+/// `FirstNormalFullTransactionId` (`access/transam.h`) — the smallest normal
+/// `FullTransactionId` (epoch 0, xid = `FirstNormalTransactionId`).
+pub const FirstNormalFullTransactionId: FullTransactionId =
+    FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId);
+
+/// `TransamVariablesData` (`access/transam.h`) — the cluster-wide variable
+/// cache for transaction/OID assignment, resident in shared memory in C
+/// (carved by `VarsupShmemInit` via `ShmemInitStruct("TransamVariables", ...)`).
+/// Field order, types, and lock-group comments mirror the C struct exactly.
+/// Each field group is protected by the noted LWLock; the lock-protected
+/// access discipline lives in the varsup crate.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransamVariablesData {
+    // These fields are protected by OidGenLock.
+    /// next OID to assign
+    pub nextOid: crate::primitive::Oid,
+    /// OIDs available before must do XLOG work
+    pub oidCount: u32,
+
+    // These fields are protected by XidGenLock.
+    /// next XID to assign
+    pub nextXid: FullTransactionId,
+    /// cluster-wide minimum datfrozenxid
+    pub oldestXid: TransactionId,
+    /// start forcing autovacuums here
+    pub xidVacLimit: TransactionId,
+    /// start complaining here
+    pub xidWarnLimit: TransactionId,
+    /// refuse to advance nextXid beyond here
+    pub xidStopLimit: TransactionId,
+    /// where the world ends
+    pub xidWrapLimit: TransactionId,
+    /// database with minimum datfrozenxid
+    pub oldestXidDB: crate::primitive::Oid,
+
+    // These fields are protected by CommitTsLock.
+    pub oldestCommitTsXid: TransactionId,
+    pub newestCommitTsXid: TransactionId,
+
+    // These fields are protected by ProcArrayLock.
+    /// newest full XID that has committed or aborted
+    pub latestCompletedXid: FullTransactionId,
+
+    /// Number of top-level transactions with xids that completed in some form
+    /// since the start of the server. Always above 1.
+    pub xactCompletionCount: u64,
+
+    // This field is protected by XactTruncationLock.
+    /// oldest it's safe to look up in clog
+    pub oldestClogXid: TransactionId,
+}
+
 /// `VirtualTransactionId` (`storage/lock.h`) — `{ ProcNumber procNumber;
 /// LocalTransactionId localTransactionId; }`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
