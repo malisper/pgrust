@@ -39,6 +39,7 @@ use backend_utils_init_miscinit_seams as miscinit_seams;
 use backend_utils_init_small_seams as globals_seams;
 use backend_utils_misc_more2_seams as timeout_seams;
 use backend_utils_mmgr_portalmem_seams as portal_seams;
+use backend_utils_time_snapmgr_pc_seams as snapmgr_pc_seams;
 
 use types_core::VirtualTransactionId;
 use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
@@ -220,7 +221,10 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
     }
 
     // Check that we haven't aborted halfway through RecordTransactionCommit.
-    if transam_seams::transaction_id_did_commit::call(xid)? {
+    // C reads the TransactionXmin global inside TransactionIdDidCommit; here it
+    // is threaded explicitly, so source it from snapmgr.
+    let transaction_xmin = snapmgr_pc_seams::transaction_xmin::call()?;
+    if transam_seams::transaction_id_did_commit::call(xid, transaction_xmin)? {
         return Err(PgError::new(
             types_error::PANIC,
             format!("cannot abort transaction {xid}, it was already committed"),

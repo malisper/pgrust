@@ -8,13 +8,27 @@ use types_error::PgResult;
 seam_core::seam!(
     /// `TransactionIdDidCommit(xid)` — clog lookup; can `ereport(ERROR)` on
     /// clog I/O failure.
-    pub fn transaction_id_did_commit(xid: TransactionId) -> PgResult<bool>
+    ///
+    /// `transaction_xmin` is C's `TransactionXmin` global (snapmgr.c), threaded
+    /// explicitly here: the body reads it when chasing a sub-committed xid's
+    /// parent through pg_subtrans. Consumers pass their snapshot xmin.
+    pub fn transaction_id_did_commit(
+        xid: TransactionId,
+        transaction_xmin: TransactionId,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `TransactionIdDidAbort(xid)` — clog lookup; can `ereport(ERROR)` on
     /// clog I/O failure.
-    pub fn transaction_id_did_abort(xid: TransactionId) -> PgResult<bool>
+    ///
+    /// `transaction_xmin` is C's `TransactionXmin` global (snapmgr.c), threaded
+    /// explicitly here: the body reads it when chasing a sub-committed xid's
+    /// parent through pg_subtrans. Consumers pass their snapshot xmin.
+    pub fn transaction_id_did_abort(
+        xid: TransactionId,
+        transaction_xmin: TransactionId,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

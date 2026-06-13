@@ -48,6 +48,7 @@ use backend_storage_lmgr_lock_seams as lock;
 use backend_storage_lmgr_proc_seams as proc;
 use backend_utils_init_small_seams as globals;
 use backend_utils_misc_ps_status_seams as ps_status;
+use backend_utils_time_snapmgr_pc_seams as snapmgr_pc;
 
 // ---------------------------------------------------------------------------
 // standbydefs.h — XLOG message types and record shapes for RM_STANDBY_ID.
@@ -881,9 +882,13 @@ pub fn StandbyAcquireAccessExclusiveLock(
     relOid: Oid,
 ) -> PgResult<()> {
     // Already processed?
+    //
+    // C reads the TransactionXmin global inside TransactionIdDidCommit/Abort;
+    // here it is threaded explicitly, so source it from snapmgr.
+    let transaction_xmin = snapmgr_pc::transaction_xmin::call()?;
     if !TransactionIdIsValid(xid)
-        || transam::transaction_id_did_commit::call(xid)?
-        || transam::transaction_id_did_abort::call(xid)?
+        || transam::transaction_id_did_commit::call(xid, transaction_xmin)?
+        || transam::transaction_id_did_abort::call(xid, transaction_xmin)?
     {
         return Ok(());
     }
