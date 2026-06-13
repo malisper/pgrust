@@ -218,3 +218,16 @@ seam_core::seam!(
     /// applying a function's `proconfig` SET items. Reads the catalog cache.
     pub fn superuser() -> bool
 );
+
+seam_core::seam!(
+    /// `MyBackendType = B_WAL_SUMMARIZER` — set this backend's type to the WAL
+    /// summarizer (globals.c stores `MyBackendType`; the WAL summarizer sets
+    /// it before `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_wal_summarizer()
+);
+
+seam_core::seam!(
+    /// `AmWalSummarizerProcess()` (miscadmin.h): `MyBackendType ==
+    /// B_WAL_SUMMARIZER`. Pure backend-local read.
+    pub fn am_wal_summarizer_process() -> bool
+);
