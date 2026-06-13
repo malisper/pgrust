@@ -13,6 +13,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bms_add_member(a, x)` (bitmapset.c): add `x` to the set, recycling
+    /// the input (the C reallocs/extends `a` in place and returns it; a
+    /// `None` input is the C NULL set). Growth allocates in `mcx`, so the
+    /// call is fallible on OOM; the C `elog(ERROR)` on a negative `x` is the
+    /// owner's to raise, also carried on `Err`.
+    pub fn bms_add_member<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        x: i32,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
+);
+
+seam_core::seam!(
     /// `bms_intersect(a, b)` (bitmapset.c): form a new set with the
     /// intersection of the inputs (allocates the copy in `mcx`; `None` in or
     /// empty result is the C NULL).

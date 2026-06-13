@@ -20,6 +20,10 @@ pub const FirstNormalTransactionId: TransactionId = 3;
 /// `InvalidXLogRecPtr` (`access/xlogdefs.h`).
 pub const InvalidXLogRecPtr: XLogRecPtr = 0;
 
+/// `GIDSIZE` (`access/xact.h`): maximum size of a global transaction id
+/// (including the trailing NUL).
+pub const GIDSIZE: usize = 200;
+
 pub const TRANSACTION_STATUS_IN_PROGRESS: XidStatus = 0x00;
 pub const TRANSACTION_STATUS_COMMITTED: XidStatus = 0x01;
 pub const TRANSACTION_STATUS_ABORTED: XidStatus = 0x02;

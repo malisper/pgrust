@@ -9,6 +9,26 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `slot_getallattrs(slot)` (tuptable.h, via execTuples.c's
+    /// `slot_getsomeattrs`) plus the subsequent `slot->tts_values[i]` /
+    /// `slot->tts_isnull[i]` reads: fully deconstruct the slot and return its
+    /// per-attribute `(value, isnull)` arrays, copied into `mcx` (in C the
+    /// arrays live in the slot itself). Deforming can detoast/allocate, so
+    /// the call is fallible.
+    ///
+    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
+    /// (no descriptor/values payload), so this contract cannot yet be
+    /// implemented as promised. It must be re-signed when the slot payload
+    /// model lands (same caveat as `exec_copy_slot`).
+    pub fn slot_getallattrs<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<
+        mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::DeformedColumn<'mcx>>,
+    >
+);
+
+seam_core::seam!(
     /// `ExecInitResultTupleSlotTL(planstate, tts_ops)` (execTuples.c):
     /// initialize the node's result tuple type (from the plan's targetlist)
     /// and create its result slot in the `EState` slot pool, storing the id in

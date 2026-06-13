@@ -36,6 +36,9 @@ use types_tuple::heaptuple::TupleDescData;
 pub struct FormData_pg_class<'mcx> {
     /// `NameData relname` — name of the relation.
     pub relname: PgString<'mcx>,
+    /// `Oid relnamespace` — OID of the namespace containing this relation
+    /// (`RelationGetNamespace`).
+    pub relnamespace: Oid,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
@@ -52,6 +55,9 @@ pub struct FormData_pg_class<'mcx> {
     pub relkind: u8,
     /// `bool relispopulated` — matview currently holds query results.
     pub relispopulated: bool,
+    /// `char relreplident` — replica identity setting, see
+    /// `REPLICA_IDENTITY_*` (types-tuple `access`).
+    pub relreplident: u8,
     /// `bool relispartition` — is the relation a partition?
     pub relispartition: bool,
 }

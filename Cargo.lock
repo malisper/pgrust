@@ -1585,6 +1585,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-proto"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-nodes-core-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-stringinfo",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-replication-logical-slotsync-seams"
 version = "0.0.0"
 dependencies = [
@@ -2217,7 +2243,10 @@ dependencies = [
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
+ "types-nodes",
  "types-rel",
  "types-tableam",
 ]
@@ -2368,11 +2397,13 @@ dependencies = [
 name = "backend-utils-fmgr-fmgr-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-cache",
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2722,6 +2753,7 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-replication-logical-proto",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-standby",

@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod reorderbuffer;
 pub mod rmgr;
 pub mod rmgrdesc;
 pub mod wal;

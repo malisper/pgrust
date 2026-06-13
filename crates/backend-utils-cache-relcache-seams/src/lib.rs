@@ -16,3 +16,17 @@ seam_core::seam!(
         rel: &types_rel::RelationData<'_>,
     ) -> Option<types_tableam::TableAmRoutine>
 );
+
+seam_core::seam!(
+    /// `RelationGetIdentityKeyBitmap(relation)` (relcache.c): the bitmap of
+    /// replica-identity-index key columns, offset by
+    /// `FirstLowInvalidHeapAttributeNumber`, or `None` when the relation has
+    /// no replica identity index (the C NULL). The set is allocated in `mcx`
+    /// (C: built under a short-lived context and `bms_copy`d into the
+    /// caller's). Opens the identity index, so it can `ereport(ERROR)`,
+    /// carried on `Err` (which also includes OOM from the copy).
+    pub fn relation_get_identity_key_bitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::RelationData<'_>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);

@@ -36,3 +36,32 @@ seam_core::seam!(
         options: &[DefElemString<'_>],
     ) -> PgResult<Datum>
 );
+
+seam_core::seam!(
+    /// `OidSendFunctionCall(functionId, val)` (fmgr.c): one-shot lookup +
+    /// call of a type's binary send function. The C argument `Datum` crosses
+    /// as the owned per-attribute value model
+    /// ([`types_tuple::backend_access_common_heaptuple::TupleValue`]); the C
+    /// `bytea *` result crosses as its payload bytes with the varlena header
+    /// already stripped (`VARDATA`, `VARSIZE - VARHDRSZ` bytes), allocated in
+    /// `mcx`. `Err` carries the lookup failure, the strict-null `elog`, and
+    /// whatever the send function raises.
+    pub fn oid_send_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `OidOutputFunctionCall(functionId, val)` (fmgr.c): one-shot lookup +
+    /// call of a type's text output function. The C `char *` result crosses
+    /// as its NUL-excluded bytes allocated in `mcx`. `Err` carries the lookup
+    /// failure, the strict-null `elog`, and whatever the output function
+    /// raises.
+    pub fn oid_output_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
