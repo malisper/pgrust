@@ -28,6 +28,7 @@ pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
+pub mod nodegroup;
 pub mod nodehash;
 pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
@@ -106,6 +107,7 @@ pub use nodeagg::{
     AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use nodegroup::{Group, GroupStateData, T_Group, T_GroupState};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
 pub use nodesetop::{
     SetOp, SetOpCmd, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SetOpStrategy,

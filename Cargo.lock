@@ -3690,6 +3690,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeGroup"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeHash"
 version = "0.0.0"
 dependencies = [
@@ -9858,6 +9876,7 @@ dependencies = [
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
