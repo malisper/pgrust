@@ -170,6 +170,21 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct DsmSegmentId(u64);
 
+impl DsmSegmentId {
+    /// The raw identity word. Consumers that name a segment across a seam
+    /// (e.g. the parallel-query DSA boundary) carry this token.
+    #[inline]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct an id from a token previously obtained via [`Self::as_u64`].
+    #[inline]
+    pub fn from_u64(v: u64) -> Self {
+        DsmSegmentId(v)
+    }
+}
+
 /// RAII guard standing in for the C `seg->resowner` bookkeeping: dropping it
 /// detaches the segment (`ResOwnerReleaseDSM`). [`dsm_pin_mapping`] consumes
 /// the guard, making the mapping session-lifetime (the C `resowner = NULL`);

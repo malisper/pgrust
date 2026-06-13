@@ -3293,6 +3293,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mmgr-dsa"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "backend-utils-mmgr-freepage-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-dsa",
+ "types-error",
+ "types-execparallel",
+ "types-freepage",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-mmgr-dsa-seams"
 version = "0.0.0"
 dependencies = [
@@ -3587,6 +3606,7 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
@@ -3677,6 +3697,13 @@ dependencies = [
 [[package]]
 name = "types-dest"
 version = "0.0.0"
+
+[[package]]
+name = "types-dsa"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-error"

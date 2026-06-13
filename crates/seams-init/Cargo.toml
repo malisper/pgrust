@@ -41,6 +41,7 @@ backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
+backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
