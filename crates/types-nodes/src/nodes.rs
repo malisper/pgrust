@@ -76,6 +76,8 @@ pub use CmdType::{
 pub enum Node<'mcx> {
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
+    /// `T_MergeAppend`.
+    MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
 }
@@ -85,6 +87,7 @@ impl<'mcx> Node<'mcx> {
     pub fn tag(&self) -> NodeTag {
         match self {
             Node::Material(_) => T_Material,
+            Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
         }
     }
@@ -93,6 +96,7 @@ impl<'mcx> Node<'mcx> {
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
+            Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
         }
     }
@@ -107,6 +111,7 @@ impl<'mcx> Node<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
+            Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
         }
     }
