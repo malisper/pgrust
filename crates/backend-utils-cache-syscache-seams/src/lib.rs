@@ -1210,6 +1210,75 @@ seam_core::seam!(
     pub fn pg_class_extra(relid: Oid) -> PgResult<Option<PgClassExtra>>
 );
 
+/// The complete fixed-width `Form_pg_class` columns
+/// (`CLASS_TUPLE_SIZE` worth) — the `memcpy(rd_rel, GETSTRUCT(htup), ...)`
+/// payload relcache's `RelationCacheInitializePhase3` copies back into a
+/// faked-up nailed entry. Field-for-field with `pg_class.h`'s
+/// `FormData_pg_class`.
+#[derive(Debug)]
+pub struct PgClassFullForm<'mcx> {
+    /// `NameData relname` (mcx-allocated copy of the catcache entry's name).
+    pub relname: PgString<'mcx>,
+    pub relnamespace: Oid,
+    pub reltype: Oid,
+    pub reloftype: Oid,
+    pub relowner: Oid,
+    pub relam: Oid,
+    pub relfilenode: Oid,
+    pub reltablespace: Oid,
+    pub relpages: i32,
+    pub reltuples: f32,
+    pub relallvisible: i32,
+    pub reltoastrelid: Oid,
+    pub relhasindex: bool,
+    pub relisshared: bool,
+    pub relpersistence: i8,
+    pub relkind: i8,
+    pub relnatts: i16,
+    pub relchecks: i16,
+    pub relhasrules: bool,
+    pub relhastriggers: bool,
+    pub relhassubclass: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
+    pub relispopulated: bool,
+    pub relreplident: i8,
+    pub relispartition: bool,
+    pub relrewrite: Oid,
+    pub relfrozenxid: u32,
+    pub relminmxid: u32,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` + `GETSTRUCT` of the
+    /// full `Form_pg_class` tuple (`relcache.c` Phase3 nailed-entry refill:
+    /// `memcpy(relation->rd_rel, relp, CLASS_TUPLE_SIZE)`). `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`) so the caller raises its own
+    /// `cache lookup failed for relation %u` `ereport(FATAL)`; the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn search_pg_class_full_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<PgClassFullForm<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RelationSupportsSysCache(relid)` (syscache.c): whether any system cache
+    /// is keyed on the given catalog relation OID
+    /// (`RelationHasSysCache`/`RelationSupportsSysCache`). Pure lookup over the
+    /// static cache-info table, so infallible.
+    pub fn relation_supports_syscache(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `InitCatalogCachePhase2()` (syscache.c): complete second-phase init of
+    /// all system caches (`InitCatCachePhase2(SysCache[cacheId], true)` for
+    /// every `cacheId`), loading each cache's index relcache entry. Done while
+    /// building the relcache init file. Can `ereport(ERROR)` (relcache open),
+    /// carried on `Err`.
+    pub fn init_catalog_cache_phase2() -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass))` projected to
     /// `(opcfamily, opcintype, opcmethod)` (`get_opclass_opfamily_and_input_type`

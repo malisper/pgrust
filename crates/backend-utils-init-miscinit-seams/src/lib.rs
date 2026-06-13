@@ -8,6 +8,9 @@
 
 #![allow(non_snake_case)]
 
+extern crate alloc;
+use alloc::string::String;
+
 use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
@@ -110,6 +113,14 @@ seam_core::seam!(
     /// [`set_database_path`] in the recovery hack of
     /// `ProcessCommittedInvalidationMessages`).
     pub fn clear_database_path()
+);
+
+seam_core::seam!(
+    /// Read the `DatabasePath` global (globals.c, owned via miscinit). Returns
+    /// `None` when it is still NULL (no database selected yet — the C
+    /// `DatabasePath != NULL` test relcache's init-file paths gate on),
+    /// otherwise the owned path string.
+    pub fn get_database_path() -> Option<String>
 );
 
 seam_core::seam!(

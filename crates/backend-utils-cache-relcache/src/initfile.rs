@@ -146,7 +146,7 @@ pub fn RelationCacheInitialize() -> PgResult<()> {
 /// `formrdesc`). **Own logic**; catalog/relmap access is seamed.
 pub fn RelationCacheInitializePhase2() -> PgResult<()> {
     // C: RelationMapInitializePhase2();
-    xunit::RelationMapInitializePhase2();
+    xunit::RelationMapInitializePhase2()?;
 
     // C: if (IsBootstrapProcessingMode()) return;
     if xunit::IsBootstrapProcessingMode() {
@@ -206,7 +206,7 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
     let mut need_new_cache_file = !with_state(|st| st.critical_shared_relcaches_built);
 
     // C: RelationMapInitializePhase3();
-    xunit::RelationMapInitializePhase3();
+    xunit::RelationMapInitializePhase3()?;
 
     // C: if (IsBootstrapProcessingMode() || !load_relcache_init_file(false))
     //        build the nailed local catalogs with formrdesc.
@@ -282,7 +282,7 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
     // C: if (needNewCacheFile) { InitCatalogCachePhase2();
     //        write_relcache_init_file(true); write_relcache_init_file(false); }
     if need_new_cache_file {
-        xunit::InitCatalogCachePhase2();
+        xunit::InitCatalogCachePhase2()?;
         write_relcache_init_file(true)?;
         write_relcache_init_file(false)?;
     }
@@ -422,9 +422,10 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
 
 /// `RelationBuildLocalRelation(...)` (relcache.c): build a relcache entry for a
 /// brand-new relation without catalog access. **Own logic.** The passed
-/// `TupleDesc` copy and `accessmtd`/`relfilenumber` arguments of the C signature
-/// are handled by the build/index families and the relation-map seam; this
-/// family's signature carries the scalar identity the entry stores directly.
+/// `TupleDesc` copy and `accessmtd` arguments of the C signature are handled by
+/// the build/index families; this family's signature carries the scalar identity
+/// the entry stores directly plus the `relfilenumber` the C uses to set
+/// `relfilenode` (unmapped relations) or seed the relation map (mapped).
 #[allow(unsafe_code)]
 pub fn RelationBuildLocalRelation(
     relname: &str,
@@ -435,6 +436,7 @@ pub fn RelationBuildLocalRelation(
     mapped_relation: bool,
     relpersistence: i8,
     relkind: i8,
+    relfilenumber: types_core::RelFileNumber,
 ) -> PgResult<*mut RelationData> {
     // C: nailit for the seven bootstrap-nailed catalogs.
     let nailit = matches!(
@@ -534,11 +536,11 @@ pub fn RelationBuildLocalRelation(
     if mapped_relation {
         relform.relfilenode = InvalidOid;
         // C: RelationMapUpdateMap(relid, relfilenumber, shared_relation, true);
-        // — relmapper owner seam (no relfilenumber arg in this signature; the
-        // caller path through the build family supplies it).
-        xunit::RelationMapUpdateMapLocal(relid, shared_relation);
+        // — relmapper owner seam.
+        xunit::RelationMapUpdateMapLocal(relid, relfilenumber, shared_relation)?;
     } else {
-        relform.relfilenode = InvalidOid;
+        // C: rel->rd_rel->relfilenode = relfilenumber;
+        relform.relfilenode = relfilenumber as Oid;
     }
 
     rel.rd_rel = relform;
@@ -1365,120 +1367,327 @@ const ProcedureRelationId: Oid = 1255;
 const TypeRelationId: Oid = 1247;
 
 /* ==========================================================================
- * `xunit` — GENUINE cross-unit primitive seam-and-panic shims.
+ * `xunit` — GENUINE cross-unit primitive shims (thin marshal + delegate).
  *
- * These mirror the C calls into units that are not yet dependencies of this
- * crate (relmapper, syscache, lock manager, xact, smgr/storage, the fd layer,
- * the RelCacheInitLock LWLock, the catalog-namespace/shared-rel predicates,
- * `InitCatalogCachePhase2`). Each panics until its owner lands — the documented
- * "Mirror PG and panic" boundary. They are NOT own-logic stubs: the relcache
- * orchestration that calls them is fully implemented above.
+ * Each mirrors a C call into a unit that is not a structural part of this
+ * family. Where the owner is already ported these delegate to its real
+ * `<owner>-seams::fn::call(...)` (relmapper map init/update, miscinit
+ * bootstrap/MyProcPid/DatabasePath, catalog IsSharedRelation, namespace
+ * IsCatalogNamespace, syscache RelationSupportsSysCache/SearchSysCache1(RELOID)/
+ * InitCatalogCachePhase2, xact GetCurrentSubTransactionId, the proc-number
+ * pair, lmgr LockRelationOid, the RelCacheInitLock LWLock, the fd file API, and
+ * AcceptInvalidationMessages) — panicking with "seam not installed" only until
+ * that owner's `init_seams()` runs. The remaining few (`catalog_schema_attrs`,
+ * `RelationBuildTriggers`, `RelationBuildRowSecurity`,
+ * `RelationGetIndexAttOptions`, `set_new_relfilenumber_storage`) cross as this
+ * crate's OWN entry types into units that are not yet ported, so they stay
+ * seam-and-panic ("Mirror PG and panic"). None are own-logic stubs: the
+ * relcache orchestration that calls them is fully implemented above.
  * ======================================================================== */
 mod xunit {
     use super::*;
 
+    use types_storage::lock::AccessShareLock;
+    use types_storage::storage::{LWLockMode, REL_CACHE_INIT_LOCK};
+
+    /// `ENOENT` (POSIX): the `errno` value the C `unlink` path treats as
+    /// "already gone" (a non-error). The fd `unlink_file` seam reports failures
+    /// as `-errno`, so ENOENT surfaces as `-2`.
+    const ENOENT: i32 = 2;
+
+    // ---- relmapper (relation map for mapped relations) ----
+
     pub(super) fn RelationMapInitialize() {
-        todo!("relcache-initfile xunit: RelationMapInitialize (relmapper owner seam)")
+        // C: RelationMapInitialize();
+        backend_utils_cache_relmapper_seams::relation_map_initialize::call();
     }
-    /// The hardcoded `Schema_pg_<name>[]` `FormData_pg_attribute` rows the C
-    /// `formrdesc` is handed for a nailed catalog. This is genbki-generated
-    /// catalog-header bootstrap data (`pg_attribute.h` / `schemapg.h`), owned by
-    /// the catalog-data layer; it crosses into relcache as a pure value array.
-    /// Panics until that owner lands — "Mirror PG and panic".
-    pub(super) fn catalog_schema_attrs(_relid: Oid) -> Vec<OwnedAttr> {
-        todo!("relcache-initfile xunit: Schema_pg_* bootstrap attr rows (catalog-data owner seam)")
+    pub(super) fn RelationMapInitializePhase2() -> PgResult<()> {
+        // C: RelationMapInitializePhase2();
+        backend_utils_cache_relmapper_seams::relation_map_initialize_phase2::call()
     }
-    pub(super) fn RelationMapInitializePhase2() {
-        todo!("relcache-initfile xunit: RelationMapInitializePhase2 (relmapper owner seam)")
+    pub(super) fn RelationMapInitializePhase3() -> PgResult<()> {
+        // C: RelationMapInitializePhase3();
+        backend_utils_cache_relmapper_seams::relation_map_initialize_phase3::call()
     }
-    pub(super) fn RelationMapInitializePhase3() {
-        todo!("relcache-initfile xunit: RelationMapInitializePhase3 (relmapper owner seam)")
+    pub(super) fn RelationMapUpdateMapLocal(
+        relid: Oid,
+        relfilenumber: types_core::RelFileNumber,
+        shared: bool,
+    ) -> PgResult<()> {
+        // C: RelationMapUpdateMap(relid, relfilenumber, shared_relation, true)
+        // — the immediate (transaction-private active-map) update
+        // RelationBuildLocalRelation issues for a mapped relation.
+        backend_utils_cache_relmapper_seams::relation_map_update_map::call(
+            relid,
+            relfilenumber,
+            shared,
+            true,
+        )
     }
-    pub(super) fn RelationMapUpdateMapLocal(_relid: Oid, _shared: bool) {
-        todo!("relcache-initfile xunit: RelationMapUpdateMap (relmapper owner seam)")
-    }
+
+    // ---- bootstrap / miscinit (proc-global reads) ----
+
     pub(super) fn IsBootstrapProcessingMode() -> bool {
-        todo!("relcache-initfile xunit: IsBootstrapProcessingMode (bootstrap owner seam)")
+        // C: IsBootstrapProcessingMode() — Mode == BootstrapProcessing.
+        backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call()
     }
-    pub(super) fn IsSharedRelation(_relid: Oid) -> bool {
-        todo!("relcache-initfile xunit: IsSharedRelation (catalog owner seam)")
+    pub(super) fn my_proc_pid() -> i32 {
+        // C: MyProcPid.
+        backend_utils_init_miscinit_seams::my_proc_pid::call()
     }
-    pub(super) fn IsCatalogNamespace(_nsp: Oid) -> bool {
-        todo!("relcache-initfile xunit: IsCatalogNamespace (catalog owner seam)")
+    pub(super) fn database_path() -> String {
+        // C: DatabasePath — guaranteed non-NULL on the paths that call this
+        // (a database has been selected). The presence test goes through
+        // `try_database_path`.
+        backend_utils_init_miscinit_seams::get_database_path::call()
+            .expect("DatabasePath is NULL but a database path was required")
     }
-    pub(super) fn RelationSupportsSysCache(_relid: Oid) -> bool {
-        todo!("relcache-initfile xunit: RelationSupportsSysCache (syscache owner seam)")
+    pub(super) fn try_database_path() -> Option<String> {
+        // C: (DatabasePath != NULL) ? DatabasePath : NULL.
+        backend_utils_init_miscinit_seams::get_database_path::call()
     }
+
+    // ---- catalog / namespace predicates ----
+
+    pub(super) fn IsSharedRelation(relid: Oid) -> bool {
+        // C: IsSharedRelation(relid).
+        backend_catalog_catalog_seams::is_shared_relation::call(relid)
+    }
+    pub(super) fn IsCatalogNamespace(nsp: Oid) -> bool {
+        // C: IsCatalogNamespace(relnamespace) — catalog.c.
+        backend_catalog_catalog_seams::is_catalog_namespace::call(nsp)
+    }
+
+    // ---- syscache ----
+
+    pub(super) fn RelationSupportsSysCache(relid: Oid) -> bool {
+        // C: RelationSupportsSysCache(relationId).
+        backend_utils_cache_syscache_seams::relation_supports_syscache::call(relid)
+    }
+    pub(super) fn SearchSysCacheRelOid(relid: Oid) -> PgResult<FormPgClass> {
+        // C: htup = SearchSysCache1(RELOID, relid); if (!HeapTupleIsValid(htup))
+        //    ereport(FATAL, "cache lookup failed for relation %u");
+        //    relp = (Form_pg_class) GETSTRUCT(htup);
+        // The owner returns the full Form_pg_class projection by value; marshal
+        // it into the entry-owned FormPgClass (the C memcpy into rd_rel).
+        let scratch = mcx::MemoryContext::new("pg_class form");
+        let form = backend_utils_cache_syscache_seams::search_pg_class_full_form::call(
+            scratch.mcx(),
+            relid,
+        )?;
+        match form {
+            Some(f) => Ok(FormPgClass {
+                relname: f.relname.to_string(),
+                relnamespace: f.relnamespace,
+                reltype: f.reltype,
+                reloftype: f.reloftype,
+                relowner: f.relowner,
+                relam: f.relam,
+                relfilenode: f.relfilenode,
+                reltablespace: f.reltablespace,
+                relpages: f.relpages,
+                reltuples: f.reltuples,
+                relallvisible: f.relallvisible,
+                reltoastrelid: f.reltoastrelid,
+                relhasindex: f.relhasindex,
+                relisshared: f.relisshared,
+                relpersistence: f.relpersistence,
+                relkind: f.relkind,
+                relnatts: f.relnatts,
+                relchecks: f.relchecks,
+                relhasrules: f.relhasrules,
+                relhastriggers: f.relhastriggers,
+                relhassubclass: f.relhassubclass,
+                relrowsecurity: f.relrowsecurity,
+                relforcerowsecurity: f.relforcerowsecurity,
+                relispopulated: f.relispopulated,
+                relreplident: f.relreplident,
+                relispartition: f.relispartition,
+                relrewrite: f.relrewrite,
+                relfrozenxid: f.relfrozenxid,
+                relminmxid: f.relminmxid,
+            }),
+            None => Err(ereport(types_error::FATAL)
+                .errcode(types_error::error::ERRCODE_UNDEFINED_OBJECT)
+                .errmsg_internal(format!("cache lookup failed for relation {relid}"))
+                .into_error()),
+        }
+    }
+
+    // ---- xact ----
+
     pub(super) fn GetCurrentSubTransactionId() -> types_core::xact::SubTransactionId {
-        todo!("relcache-initfile xunit: GetCurrentSubTransactionId (xact owner seam)")
+        // C: GetCurrentSubTransactionId().
+        backend_access_transam_xact_seams::get_current_sub_transaction_id::call()
     }
+
+    // ---- proc number (temp relation backend) ----
+
     pub(super) fn current_temp_proc_number() -> ProcNumber {
         // C: (ParallelLeaderProcNumber == INVALID_PROC_NUMBER) ? MyProcNumber :
         //    ParallelLeaderProcNumber.
-        todo!("relcache-initfile xunit: temp rel proc number (proc owner seam)")
+        let leader = backend_access_transam_parallel_rt_seams::parallel_leader_proc_number::call();
+        if leader == INVALID_PROC_NUMBER {
+            backend_utils_init_small_seams::my_proc_number::call()
+        } else {
+            leader
+        }
     }
-    pub(super) fn SearchSysCacheRelOid(_relid: Oid) -> PgResult<FormPgClass> {
-        todo!("relcache-initfile xunit: SearchSysCache1(RELOID) (syscache owner seam)")
+
+    // ---- catcache (second-phase syscache init) ----
+
+    pub(super) fn InitCatalogCachePhase2() -> PgResult<()> {
+        // C: InitCatalogCachePhase2() — loops InitCatCachePhase2 over every
+        // SysCache id; the syscache owner holds the cache-info table.
+        backend_utils_cache_syscache_seams::init_catalog_cache_phase2::call()
     }
-    pub(super) fn RelationBuildTriggers(_rel: *mut RelationData) -> PgResult<()> {
-        todo!("relcache-initfile xunit: RelationBuildTriggers (trigger owner seam)")
+
+    // ---- lock manager ----
+
+    pub(super) fn LockRelationOid(oid: Oid) -> PgResult<()> {
+        // C: LockRelationOid(oid, AccessShareLock); — held until transaction
+        // end (the C default), released by the matching UnlockRelationOid call
+        // in load_critical_index, so the guard is kept rather than dropped.
+        let guard =
+            backend_storage_lmgr_lmgr_seams::lock_relation_oid::call(oid, AccessShareLock)?;
+        guard.keep();
+        Ok(())
     }
-    pub(super) fn RelationBuildRowSecurity(_rel: *mut RelationData) -> PgResult<()> {
-        todo!("relcache-initfile xunit: RelationBuildRowSecurity (rowsecurity owner seam)")
+    pub(super) fn UnlockRelationOid(oid: Oid) -> PgResult<()> {
+        // C: UnlockRelationOid(oid, AccessShareLock).
+        backend_storage_lmgr_lmgr_seams::unlock_relation_oid::call(oid, AccessShareLock)
     }
-    pub(super) fn RelationGetIndexAttOptions(_ird: *mut RelationData) -> PgResult<()> {
-        todo!("relcache-initfile xunit: RelationGetIndexAttOptions (index/opclass owner seam)")
+
+    // ---- RelCacheInitLock LWLock (init-file rename/unlink dance) ----
+
+    pub(super) fn lwlock_acquire_relcache_init() {
+        // C: LWLockAcquire(RelCacheInitLock, LW_EXCLUSIVE); — held across the
+        // rename/unlink dance and released by lwlock_release_relcache_init, so
+        // the guard is leaked (kept) rather than dropped at end of scope.
+        let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+            REL_CACHE_INIT_LOCK,
+            LWLockMode::LW_EXCLUSIVE,
+        )
+        .expect("LWLockAcquire(RelCacheInitLock) failed");
+        core::mem::forget(guard);
     }
-    pub(super) fn LockRelationOid(_oid: Oid) -> PgResult<()> {
-        todo!("relcache-initfile xunit: LockRelationOid (lock manager owner seam)")
+    pub(super) fn lwlock_release_relcache_init() {
+        // C: LWLockRelease(RelCacheInitLock).
+        backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(REL_CACHE_INIT_LOCK)
+            .expect("LWLockRelease(RelCacheInitLock) failed");
     }
-    pub(super) fn UnlockRelationOid(_oid: Oid) -> PgResult<()> {
-        todo!("relcache-initfile xunit: UnlockRelationOid (lock manager owner seam)")
+
+    // ---- shared-cache invalidation ----
+
+    pub(super) fn accept_invalidation_messages() {
+        // C: AcceptInvalidationMessages().
+        backend_utils_cache_inval_seams::accept_invalidation_messages::call()
+            .expect("AcceptInvalidationMessages failed");
     }
-    pub(super) fn InitCatalogCachePhase2() {
-        todo!("relcache-initfile xunit: InitCatalogCachePhase2 (catcache owner seam)")
+
+    // ---- file API (AllocateFile / AllocateDir, fd.c) ----
+
+    pub(super) fn read_file(path: &str) -> PgResult<Option<Vec<u8>>> {
+        // C: AllocateFile(initfilename, PG_BINARY_R); fread() the whole file.
+        // `Ok(None)` is the C miss (file absent), which sends the caller down
+        // the rebuild path.
+        backend_storage_file_fd_seams::allocate_file_read::call(path)
     }
-    pub(super) fn set_new_relfilenumber_storage(_relid: Oid, _persistence: i8) -> PgResult<()> {
-        todo!("relcache-initfile xunit: GetNewRelFileNumber + storage swap + pg_class/relmap \
-               update (catalog/smgr/relmapper/inval owner seams)")
+    pub(super) fn write_file(path: &str, bytes: &[u8]) -> PgResult<()> {
+        // C: AllocateFile(tempfilename, PG_BINARY_W); fwrite() then FreeFile().
+        backend_storage_file_fd_seams::allocate_file_write::call(path, bytes)
     }
-    pub(super) fn my_proc_pid() -> i32 {
-        todo!("relcache-initfile xunit: MyProcPid (proc owner seam)")
+    pub(super) fn rename_file(from: &str, to: &str) -> Result<(), ()> {
+        // C: rename(tempfilename, finalfilename) < 0 — the init-file final
+        // rename (a plain rename, not durable_rename). 0 on success.
+        if backend_storage_file_fd_seams::rename_file::call(from, to) == 0 {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
-    pub(super) fn database_path() -> String {
-        todo!("relcache-initfile xunit: DatabasePath (init owner seam)")
-    }
-    pub(super) fn try_database_path() -> Option<String> {
-        todo!("relcache-initfile xunit: DatabasePath presence (init owner seam)")
-    }
-    pub(super) fn read_file(_path: &str) -> PgResult<Option<Vec<u8>>> {
-        todo!("relcache-initfile xunit: AllocateFile(PG_BINARY_R) read (fd owner seam)")
-    }
-    pub(super) fn write_file(_path: &str, _bytes: &[u8]) -> PgResult<()> {
-        todo!("relcache-initfile xunit: AllocateFile(PG_BINARY_W) write (fd owner seam)")
-    }
-    pub(super) fn rename_file(_from: &str, _to: &str) -> Result<(), ()> {
-        todo!("relcache-initfile xunit: durable_rename (fd owner seam)")
-    }
-    pub(super) fn unlink_file(_path: &str, _missing_ok: bool) {
-        todo!("relcache-initfile xunit: unlink (fd owner seam)")
+    pub(super) fn unlink_file(path: &str, _missing_ok: bool) {
+        // C: unlink(tempfilename) — best-effort cleanup, errors ignored.
+        let _ = backend_storage_file_fd_seams::unlink_file::call(path);
     }
     /// Returns `Err(true)` for ENOENT (the file was already absent), `Err(false)`
     /// for any other failure, `Ok(())` on success — mirroring the C
     /// `unlink` + `errno == ENOENT` check.
-    pub(super) fn unlink_file_result(_path: &str) -> Result<(), bool> {
-        todo!("relcache-initfile xunit: unlink + errno (fd owner seam)")
+    pub(super) fn unlink_file_result(path: &str) -> Result<(), bool> {
+        // C: if (unlink(initfilename) < 0) { if (errno == ENOENT) ok; else err }
+        let rc = backend_storage_file_fd_seams::unlink_file::call(path);
+        if rc == 0 {
+            Ok(())
+        } else {
+            // fd's unlink_file returns -errno on failure.
+            Err(rc == -ENOENT)
+        }
     }
-    pub(super) fn read_dir_numeric(_dir: &str) -> PgResult<Vec<String>> {
-        todo!("relcache-initfile xunit: AllocateDir/ReadDirExtended numeric entries (fd owner seam)")
+    pub(super) fn read_dir_numeric(dir: &str) -> PgResult<Vec<String>> {
+        // C: AllocateDir(dir); while (ReadDirExtended(dir, .., LOG)) keep only
+        // entries whose name is all digits (strspn == strlen). The numeric
+        // filter is relcache own logic; the dir walk is the fd owner seam (LOG
+        // severity, so infallible).
+        let names = backend_storage_file_fd_seams::read_dir_names_logged::call(dir);
+        Ok(names
+            .into_iter()
+            .filter(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
+            .collect())
     }
-    pub(super) fn lwlock_acquire_relcache_init() {
-        todo!("relcache-initfile xunit: LWLockAcquire(RelCacheInitLock) (lwlock owner seam)")
+
+    /* ----------------------------------------------------------------------
+     * GENUINELY-unported owners — seam-and-panic ("Mirror PG and panic").
+     *
+     * These mirror C calls into units that are not yet ported AND whose
+     * arguments/results cross as relcache's OWN entry types (`*mut
+     * RelationData`, the owned `FormPgClass`/`OwnedAttr` payloads) — which
+     * cannot cross a cross-crate seam boundary. They panic on an unported
+     * callee, which is the sanctioned boundary (audit-crate: "panicking on an
+     * unported callee is fine"). The relcache orchestration that calls them is
+     * fully implemented above; only the callee body is absent.
+     * -------------------------------------------------------------------- */
+
+    /// The hardcoded `Schema_pg_<name>[]` `FormData_pg_attribute` rows the C
+    /// `formrdesc` is handed for a nailed catalog. This is genbki-generated
+    /// catalog-header bootstrap data (`pg_attribute.h` / `schemapg.h`), owned by
+    /// the catalog-data layer; it crosses into relcache as a pure value array.
+    /// Panics until that owner lands — "Mirror PG and panic". (No owner crate
+    /// exists yet, and the result is the entry-owned `OwnedAttr` array, so this
+    /// stays a panic rather than a cross-crate seam.)
+    pub(super) fn catalog_schema_attrs(relid: Oid) -> Vec<OwnedAttr> {
+        panic!(
+            "relcache-initfile: Schema_pg_* bootstrap attr rows for relid {relid} \
+             (genbki catalog-data owner not yet ported)"
+        )
     }
-    pub(super) fn lwlock_release_relcache_init() {
-        todo!("relcache-initfile xunit: LWLockRelease(RelCacheInitLock) (lwlock owner seam)")
+    /// `RelationBuildTriggers(rel)` (trigger.c): scan `pg_trigger`, build
+    /// `rel->trigdesc`. Mutates the relcache entry in place; the trigger unit is
+    /// not yet ported. Panics until it lands.
+    pub(super) fn RelationBuildTriggers(_rel: *mut RelationData) -> PgResult<()> {
+        panic!("relcache-initfile: RelationBuildTriggers (backend-commands-trigger not yet ported)")
     }
-    pub(super) fn accept_invalidation_messages() {
-        todo!("relcache-initfile xunit: AcceptInvalidationMessages (inval owner seam)")
+    /// `RelationBuildRowSecurity(rel)` (policy.c): scan `pg_policy`, build
+    /// `rel->rd_rsdesc`. Mutates the relcache entry in place; the policy unit is
+    /// not yet ported. Panics until it lands.
+    pub(super) fn RelationBuildRowSecurity(_rel: *mut RelationData) -> PgResult<()> {
+        panic!("relcache-initfile: RelationBuildRowSecurity (backend-commands-policy not yet ported)")
+    }
+    /// `RelationGetIndexAttOptions(relation, copy)` (relcache.c via opclass):
+    /// fetch per-column `pg_attribute.attoptions`/opclass options into
+    /// `rd_opcoptions`. Mutates the relcache entry; the opclass index-options
+    /// primitives (`index_opclass_options`/`get_attoptions`) are not yet ported.
+    /// Panics until they land.
+    pub(super) fn RelationGetIndexAttOptions(_ird: *mut RelationData) -> PgResult<()> {
+        panic!("relcache-initfile: RelationGetIndexAttOptions (opclass index-options owner not yet ported)")
+    }
+    /// `RelationSetNewRelfilenumber`'s storage leg: `GetNewRelFileNumber` +
+    /// `RelationCreateStorage`/storage swap + `pg_class` update + relmap update.
+    /// A composite of smgr/storage/relmapper/inval owners (smgr not yet ported).
+    /// Panics until they land.
+    pub(super) fn set_new_relfilenumber_storage(_relid: Oid, _persistence: i8) -> PgResult<()> {
+        panic!(
+            "relcache-initfile: GetNewRelFileNumber + storage swap + pg_class/relmap update \
+             (smgr/storage composite owner not yet ported)"
+        )
     }
 }

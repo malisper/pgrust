@@ -60,3 +60,16 @@ backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+
+# initfile xunit cross-unit primitives (relcache bring-up + init-file IO):
+# bootstrap/DatabasePath/MyProcPid (miscinit), IsCatalogNamespace (namespace),
+# the RelCacheInitLock LWLock (lwlock), LockRelationOid (lmgr),
+# InitCatalogCachePhase2 (syscache, already a dep), AcceptInvalidationMessages
+# (inval), the AllocateFile/AllocateDir file API (fd), and the temp-rel proc
+# number (parallel-rt). Each panics until its owner installs the seam.
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }

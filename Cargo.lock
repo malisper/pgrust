@@ -238,23 +238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-access-common-tidstore"
-version = "0.0.0"
-dependencies = [
- "backend-access-heap-vacuumlazy-seams",
- "backend-lib-radixtree-seams",
- "backend-storage-page",
- "seam-core",
- "types-core",
- "types-dsa",
- "types-error",
- "types-nodes",
- "types-storage",
- "types-tuple",
- "types-vacuum",
-]
-
-[[package]]
 name = "backend-access-common-toast-compression-seams"
 version = "0.0.0"
 dependencies = [
@@ -1692,7 +1675,6 @@ name = "backend-access-transam-xlogutils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
  "types-error",
  "types-storage",
  "types-wal",
@@ -2319,30 +2301,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-commands-amcmds"
-version = "0.0.0"
-dependencies = [
- "backend-access-table-table",
- "backend-catalog-indexing-seams",
- "backend-catalog-objectaccess-seams",
- "backend-catalog-pg-depend-seams",
- "backend-commands-amcmds-seams",
- "backend-parser-parse-func-seams",
- "backend-utils-adt-format-type-seams",
- "backend-utils-cache-lsyscache-seams",
- "backend-utils-cache-syscache-seams",
- "backend-utils-error",
- "backend-utils-init-miscinit-seams",
- "mcx",
- "seam-core",
- "types-catalog",
- "types-core",
- "types-error",
- "types-nodes",
- "types-storage",
-]
-
-[[package]]
 name = "backend-commands-amcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -2573,21 +2531,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-opclass",
-]
-
-[[package]]
-name = "backend-commands-explain-dr"
-version = "0.0.0"
-dependencies = [
- "backend-libpq-pqformat",
- "mcx",
- "types-core",
- "types-datum",
- "types-dest",
- "types-error",
- "types-explain",
- "types-stringinfo",
- "types-tuple",
 ]
 
 [[package]]
@@ -3177,9 +3120,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
- "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-varlena-seams",
- "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-stack-depth-seams",
  "backend-utils-sort-tuplesort-seams",
@@ -4309,41 +4250,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-foreign-fdwapi-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-foreign-foreign"
-version = "0.0.0"
-dependencies = [
- "backend-access-common-reloptions",
- "backend-foreign-fdwapi-seams",
- "backend-foreign-foreign-seams",
- "backend-utils-adt-varlena",
- "backend-utils-cache-relcache-seams",
- "backend-utils-cache-syscache-seams",
- "backend-utils-fmgr-fmgr-seams",
- "backend-utils-fmgr-funcapi-seams",
- "backend-utils-init-miscinit-seams",
- "backend-utils-misc-guc-tables-seams",
- "mcx",
- "types-cache",
- "types-core",
- "types-datum",
- "types-error",
- "types-foreigncmds",
- "types-nodes",
- "types-pathnodes",
- "types-rel",
-]
-
-[[package]]
 name = "backend-foreign-foreign-seams"
 version = "0.0.0"
 dependencies = [
@@ -4401,18 +4307,6 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-nodes",
-]
-
-[[package]]
-name = "backend-lib-radixtree-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-dsa",
- "types-error",
- "types-nodes",
- "types-vacuum",
 ]
 
 [[package]]
@@ -5844,27 +5738,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-replication-walreceiverfuncs"
-version = "0.0.0"
-dependencies = [
- "backend-access-transam-xlog-seams",
- "backend-access-transam-xlogrecovery-seams",
- "backend-replication-walreceiver-seams",
- "backend-replication-walreceiverfuncs-seams",
- "backend-storage-ipc-latch-seams",
- "backend-storage-ipc-pmsignal",
- "backend-storage-lmgr-condition-variable",
- "backend-utils-adt-timestamp-seams",
- "libc",
- "seams-init",
- "types-condvar",
- "types-core",
- "types-error",
- "types-pgstat",
- "types-walreceiver",
-]
-
-[[package]]
 name = "backend-replication-walreceiverfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -5979,7 +5852,6 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
- "types-fsm",
  "types-rel",
  "types-storage",
 ]
@@ -6084,26 +5956,6 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
-]
-
-[[package]]
-name = "backend-storage-freespace"
-version = "0.0.0"
-dependencies = [
- "backend-access-transam-xlog-seams",
- "backend-access-transam-xloginsert-seams",
- "backend-access-transam-xlogutils-seams",
- "backend-storage-buffer-bufmgr-seams",
- "backend-storage-freespace-seams",
- "backend-storage-smgr-seams",
- "backend-utils-cache-relcache-seams",
- "backend-utils-error",
- "backend-utils-init-miscinit-seams",
- "types-core",
- "types-error",
- "types-fsm",
- "types-rel",
- "types-storage",
 ]
 
 [[package]]
@@ -8295,17 +8147,22 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
  "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
- "backend-storage-smgr-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-relmapper-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-hash-dynahash",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
@@ -9781,7 +9638,6 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
- "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-hashvalidate",
@@ -9816,7 +9672,6 @@ dependencies = [
  "backend-catalog-pg-depend",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-shdepend",
- "backend-commands-amcmds",
  "backend-commands-cluster",
  "backend-commands-copyto",
  "backend-commands-define",
@@ -9849,7 +9704,6 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
- "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
@@ -9875,11 +9729,9 @@ dependencies = [
  "backend-replication-logical-slotsync",
  "backend-replication-slot",
  "backend-replication-walreceiver",
- "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
- "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
@@ -10226,14 +10078,6 @@ name = "types-freepage"
 version = "0.0.0"
 dependencies = [
  "types-core",
-]
-
-[[package]]
-name = "types-fsm"
-version = "0.0.0"
-dependencies = [
- "types-core",
- "types-storage",
 ]
 
 [[package]]

@@ -1132,6 +1132,11 @@ pub fn init_seams() {
     // Pure-wiring install: the relcache SI-flush path (RelationCacheInvalidate)
     // now `::call`s this; owner body (RelationMapInvalidate) matches the decl.
     seams::relation_map_invalidate::set(RelationMapInvalidate);
+    // Backend bring-up + local-relation map update (relcache initfile consumer).
+    seams::relation_map_initialize::set(RelationMapInitialize);
+    seams::relation_map_initialize_phase2::set(RelationMapInitializePhase2);
+    seams::relation_map_initialize_phase3::set(RelationMapInitializePhase3);
+    seams::relation_map_update_map::set(RelationMapUpdateMap);
 }
 
 #[cfg(test)]
