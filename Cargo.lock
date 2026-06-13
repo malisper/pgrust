@@ -774,6 +774,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-xactdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xactdesc-seams",
+ "backend-rmgrdesc-next",
+ "backend-utils-adt-timestamp-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-xactdesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7856,6 +7871,7 @@ dependencies = [
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-rmgrdesc-small",
+ "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-twophase",
