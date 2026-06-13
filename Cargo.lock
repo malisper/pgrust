@@ -3249,6 +3249,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-functions-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-executor-instrument"
 version = "0.0.0"
 dependencies = [
@@ -8189,6 +8201,7 @@ name = "backend-utils-fmgr-core"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
+ "backend-executor-functions-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-dfmgr-seams",
