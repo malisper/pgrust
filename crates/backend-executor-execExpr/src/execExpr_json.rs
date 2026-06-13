@@ -1,19 +1,42 @@
 //! `execExpr-json` family — SQL/JSON expression init.
 //!
 //! Owns `ExecInitJsonExpr` and `ExecInitJsonCoercion` (the `EEOP_JSONEXPR_PATH`
-//! / `EEOP_JSONEXPR_COERCION` / `EEOP_JSON_CONSTRUCTOR` / `EEOP_IS_JSON` step
-//! emission). These are reached from the core `ExecInitExprRec` switch (a
-//! `JsonExpr` / `JsonConstructorExpr` / `JsonIsPredicate` arm dispatches here),
-//! not yet through a dedicated cross-unit seam — the JSON support types
-//! (`JsonExpr` / `JsonReturning` parse nodes, `JsonExprState` /
-//! `JsonPathVariable` / `ErrorSaveContext` runtime state) live in unported
-//! units, and the bodies drive the core family's still-unported static emission
-//! helpers `ExecInitExprRec` / `ExprEvalPushStep`. Per "Mirror PG and panic",
-//! each entry below carries the full C step-emission sequence as a structural
-//! comment and a loud seam-and-panic body until those owners land (it is neither
-//! a silent stub nor an invented opaque stand-in). No seam is installed from
-//! this family yet; it exists so the JSON emission code has its home when the
-//! spine starts emitting steps.
+//! / `EEOP_JSONEXPR_COERCION` / `EEOP_JSONEXPR_COERCION_FINISH` step emission).
+//! These are reached from the core `ExecInitExprRec` switch (the `T_JsonExpr`
+//! arm dispatches here), not through a dedicated cross-unit seam.
+//!
+//! Porting status — the parse-node side is now present (the keystone Expr-enum
+//! expansion carries faithful `JsonExpr` / `JsonReturning` / `JsonBehavior`
+//! primnodes), but TWO genuine cross-unit dependencies are still unported and
+//! block a faithful body:
+//!
+//!  1. The runtime-state structs `JsonExprState` / `JsonPathVariable` /
+//!     `ErrorSaveContext` (execExpr.h SQL/JSON state group) do not exist in the
+//!     repo. `ExecInitJsonExpr`'s whole job is `jsestate =
+//!     palloc0(sizeof(JsonExprState))` followed by populating
+//!     `jsestate->{formatted_expr,pathspec,args,escontext,jump_*}` and stashing
+//!     the pointer in `EEOP_JSONEXPR_PATH`'s `d.jsonexpr.jsestate`. The keystone
+//!     deliberately parks that member as `ExprEvalStepData::JsonExpr { jsestate:
+//!     usize }` (opaque address) because the owning state unit has not landed —
+//!     fabricating the struct here would *introduce* opacity / own the wrong
+//!     unit's type, which the porting rules forbid.
+//!  2. The core family's `ExecInitExprRec` recursion into *distinct* result
+//!     cells (`&jsestate->formatted_expr.value`, `&jsestate->pathspec.value`,
+//!     `&var->value`, the ON ERROR / ON EMPTY behavior expressions). The core
+//!     spine's `exec_init_expr_rec` is private to `execExpr_core`, is not
+//!     exported, and explicitly panics for any node whose compilation needs a
+//!     distinct (non-`state->resvalue`) output cell — the result-cell arena that
+//!     would back those distinct cells is not landed for this case.
+//!
+//! Per "Mirror PG and panic", each entry below carries the full C step-emission
+//! sequence as a structural comment and a loud seam-and-panic body until those
+//! two owners land (it is neither a silent stub nor an invented opaque
+//! stand-in). The genuine downstream cross-unit callees (`get_typtype`,
+//! `getTypeInputInfo` + `fmgr_info` for the IO-coercion path, `getBaseType` /
+//! `DomainHasConstraints` for the coercion-step flags) will route through their
+//! owner seams once the two blockers above are resolved. No seam is installed
+//! from this family yet; it exists so the JSON emission code has its home when
+//! the spine starts emitting steps.
 
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
@@ -52,20 +75,25 @@ pub(crate) fn exec_init_json_expr<'mcx>(
     //     ExecInitExprRec(behavior->expr), optional ExecInitJsonCoercion + COERCION_FINISH,
     //     JUMP to end); patch jumps_to_end -> end; jsestate->jump_end = steps_len.
     //
-    // This body consumes the `JsonExpr` / `JsonReturning` parse nodes and the
-    // `JsonExprState` / `JsonPathVariable` / `ErrorSaveContext` runtime structs,
-    // none of which are ported yet (primnodes.h JSON nodes + the execExpr.h JSON
-    // state structs are owned by still-unported units), and it drives the core
-    // family's static emission helpers `ExecInitExprRec` / `ExprEvalPushStep`,
-    // which are likewise unported in this scaffold. The signature above does not
+    // The `JsonExpr` / `JsonReturning` / `JsonBehavior` parse nodes are now
+    // present (keystone Expr-enum expansion), but this body still requires two
+    // genuinely unported cross-unit dependencies: (1) the `JsonExprState` /
+    // `JsonPathVariable` / `ErrorSaveContext` runtime-state structs (execExpr.h
+    // SQL/JSON state group, owned by a still-unported unit; the keystone parks
+    // the back-pointer as `ExprEvalStepData::JsonExpr { jsestate: usize }`), and
+    // (2) the core family's `ExecInitExprRec` recursion into *distinct* result
+    // cells (`&jsestate->formatted_expr.value`, the PASSING `&var->value`, the ON
+    // ERROR / ON EMPTY behavior expressions) — `exec_init_expr_rec` is private to
+    // `execExpr_core` and panics for any distinct-cell output target because the
+    // result-cell arena is not landed for that case. The signature above does not
     // yet carry `jsexpr` / `resv` / `resnull` / `scratch` for the same reason.
-    // Per "Mirror PG and panic", this is a loud seam-and-panic until those owners
-    // land (the JSON node/state types and the core emission spine) — not a silent
-    // stub and not an invented opaque stand-in.
+    // Per "Mirror PG and panic", this is a loud seam-and-panic until those two
+    // owners land — not a silent stub and not an invented opaque stand-in.
     panic!(
-        "execExpr-json: ExecInitJsonExpr — JsonExpr/JsonReturning/JsonExprState \
-         node+state types (primnodes.h / execExpr.h JSON) and the core-family \
-         ExecInitExprRec/ExprEvalPushStep emission spine are not yet ported"
+        "execExpr-json: ExecInitJsonExpr — the JsonExprState/JsonPathVariable/\
+         ErrorSaveContext runtime-state types (execExpr.h SQL/JSON state group) \
+         and the core-family ExecInitExprRec distinct-result-cell emission spine \
+         are not yet ported"
     )
 }
 
@@ -95,15 +123,17 @@ pub(crate) fn exec_init_json_coercion<'mcx>(
     //       exists_coerce && DomainHasConstraints(returning->typid);
     //   ExprEvalPushStep(state, &scratch);
     //
-    // Consumes the unported `JsonReturning` node and `ErrorSaveContext`, calls the
-    // unported lsyscache helpers `getBaseType` / `DomainHasConstraints` through
-    // their owner seams, and drives the unported core-family `ExprEvalPushStep`.
-    // The signature does not yet carry `returning` / `escontext` / `omit_quotes`
-    // / `exists_coerce` / `resv` / `resnull` for the same reason. Loud
-    // seam-and-panic until those owners land.
+    // The step-build/push body is otherwise own-logic (`ExprEvalPushStep` is
+    // ported in `execExpr_core`), but it depends on the `ErrorSaveContext`
+    // `escontext` threaded in from the caller's still-unported `JsonExprState`,
+    // and on the `getBaseType` / `DomainHasConstraints` lsyscache helpers routed
+    // through their owner seams. Its only caller is `ExecInitJsonExpr`, which
+    // cannot produce `returning` / `escontext` / `resv` / `resnull` until the
+    // `JsonExprState` runtime-state group lands, so the signature does not yet
+    // carry them. Loud seam-and-panic until those owners land.
     panic!(
-        "execExpr-json: ExecInitJsonCoercion — JsonReturning/ErrorSaveContext types, \
-         the getBaseType/DomainHasConstraints lsyscache seams, and the core-family \
-         ExprEvalPushStep emission spine are not yet ported"
+        "execExpr-json: ExecInitJsonCoercion — the ErrorSaveContext escontext \
+         (threaded from the unported JsonExprState) and the getBaseType/\
+         DomainHasConstraints lsyscache owner seams are not yet ported"
     )
 }
