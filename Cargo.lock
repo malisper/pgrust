@@ -2700,6 +2700,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-ispell-regis"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-tsearch-ispell-regis-seams",
+ "backend-tsearch-spell-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-tsearch-ispell-regis-seams"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-tsearch-spell-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-tsearch-ts-locale-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-tsearch-ts-utils-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-utils-activity-pgstat-seams"
 version = "0.0.0"
 dependencies = [
@@ -2814,6 +2871,16 @@ dependencies = [
 
 [[package]]
 name = "backend-utils-adt-format-type-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-formatting-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
@@ -3571,6 +3638,7 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
+ "backend-tsearch-ispell-regis",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-numutils",
@@ -3856,6 +3924,13 @@ name = "types-timeout"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-tsearch"
+version = "0.0.0"
+dependencies = [
+ "mcx",
 ]
 
 [[package]]

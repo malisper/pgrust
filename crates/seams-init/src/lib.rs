@@ -46,6 +46,7 @@ pub fn init_all() {
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
+    backend_tsearch_ispell_regis::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_strftime::init_seams();
     backend_utils_activity_small::init_seams();
