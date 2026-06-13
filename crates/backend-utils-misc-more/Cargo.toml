@@ -40,6 +40,7 @@ common-controldata-utils-seams = { path = "../common-controldata-utils-seams" }
 
 # Datum/Mcx/types needed for name resolution + control-file projection.
 types-datum = { path = "../types-datum" }
+types-acl = { path = "../types-acl" }
 mcx = { path = "../mcx" }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
