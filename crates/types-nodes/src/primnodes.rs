@@ -283,6 +283,12 @@ pub struct Var {
     pub vartype: Oid,
     /// `int32 vartypmod` — pg_attribute typmod value.
     pub vartypmod: i32,
+    /// `Oid varcollid` — OID of collation, or InvalidOid if none.
+    ///
+    /// Read/assigned by `exprCollation`/`exprSetCollation` (nodeFuncs.c).
+    /// Added field-for-field vs primnodes.h (the keystone Expr expansion left
+    /// the leaf trimmed); `Default` keeps `Var { .. }` construction additive.
+    pub varcollid: Oid,
     /// `Index varlevelsup` — subplan levels up; 0 = current query level.
     pub varlevelsup: Index,
 }
@@ -292,6 +298,16 @@ pub struct Var {
 pub struct Const {
     /// `Oid consttype` — pg_type OID of the constant's type.
     pub consttype: Oid,
+    /// `int32 consttypmod` — typmod value, or -1.
+    ///
+    /// Read/assigned by `exprTypmod`/`applyRelabelType` (nodeFuncs.c). Added
+    /// field-for-field vs primnodes.h; `Default` keeps construction additive.
+    pub consttypmod: i32,
+    /// `Oid constcollid` — collation, or InvalidOid if none.
+    ///
+    /// Read/assigned by `exprCollation`/`exprSetCollation`/`applyRelabelType`
+    /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
+    pub constcollid: Oid,
     /// `Datum constvalue` — the constant's value (undefined if `constisnull`).
     pub constvalue: Datum,
     /// `bool constisnull` — whether the constant is null.
@@ -322,12 +338,22 @@ pub struct OpExpr {
 /// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
 /// trimmed to the fields ports consume (the TID-scan node reads only `args`,
 /// via `linitial`/`lsecond`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScalarArrayOpExpr {
     /// `Oid opno` — PG_OPERATOR OID of the operator.
     pub opno: Oid,
+    /// `Oid opfuncid` — PG_PROC OID of comparison function.
+    ///
+    /// Set by `set_sa_opfuncid`/`fix_opfuncids` (nodeFuncs.c). Added
+    /// field-for-field vs primnodes.h; `Default` keeps construction additive.
+    pub opfuncid: Oid,
     /// `bool useOr` — true for ANY, false for ALL.
     pub useOr: bool,
+    /// `Oid inputcollid` — OID of collation that operator should use.
+    ///
+    /// Read/assigned by `exprInputCollation`/`exprSetInputCollation`
+    /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
+    pub inputcollid: Oid,
     /// `List *args` — the scalar and array operands.
     pub args: Vec<Expr>,
 }

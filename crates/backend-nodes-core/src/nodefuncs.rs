@@ -1,0 +1,1606 @@
+//! Family: **nodefuncs** — `nodes/nodeFuncs.c` (4838 lines).
+//!
+//! General-purpose manipulations of the expression-`Node` tree, keyed on the
+//! split layered `types_nodes::Expr` vocabulary (the F0-expanded Expr enum that
+//! landed with `assemble/expr-eval-keystone`). This family owns
+//! `backend-nodes-nodeFuncs-seams` and installs the expression-inspection seams
+//! from [`init_seams`].
+//!
+//! # What is ported (faithful, field-for-field vs nodeFuncs.c)
+//!
+//! * type/typmod/collation accessors — [`expr_type`], [`expr_typmod`],
+//!   [`expr_collation`], [`expr_input_collation`], [`expr_set_collation`],
+//!   [`expr_set_input_collation`], [`expr_location`];
+//! * coercion helpers — [`expr_is_length_coercion`], [`apply_relabel_type`],
+//!   [`relabel_to_typmod`], [`strip_implicit_coercions`],
+//!   [`expression_returns_set`];
+//! * opfuncid fixups — [`set_opfuncid`], [`set_sa_opfuncid`],
+//!   [`fix_opfuncids`], and [`check_functions_in_node`];
+//! * the generic recursion — [`expression_tree_walker`] /
+//!   [`expression_tree_mutator`].
+//!
+//! Each accessor follows the C switch arms exactly: the same field is read for
+//! the same tag, recursion descends into the same children in the same order.
+//! The `default` arm matches C — `expr_type`/`expr_collation`/
+//! `expr_set_collation` raise the internal `unrecognized node type` error (the
+//! C `elog(ERROR)` longjmps out of an `Oid`-returning function, surfaced here
+//! as `PgResult::Err`); `expr_typmod`/`expr_input_collation`/`expr_location`
+//! return the documented `-1`/`InvalidOid` fallback.
+//!
+//! # Split-model coverage and the trimmed surface
+//!
+//! `types_nodes::Expr` carries the ~48 execution-time expression variants. The
+//! C switches also have arms for node types the layered model does not yet
+//! carry as `Expr` variants (`PlaceHolderVar`, `JsonBehavior`) or that belong
+//! to the not-yet-ported parser/planner node universes (`A_Expr`, `ColumnRef`,
+//! `FromExpr`, `JoinExpr`, `Query`, `RangeTblEntry`, the raw-grammar and
+//! `PlanState` trees). Those arms are simply absent here: the trimmed model
+//! cannot construct those nodes, so they are unreachable rather than stubbed.
+//! Likewise the per-node `location` field is trimmed model-wide (docs/types.md
+//! rule 3), so [`expr_location`] runs the real `leftmostLoc` recursion over the
+//! modeled compound variants but bottoms out at the documented `-1` ("location
+//! can't be determined") at the leaves.
+//!
+//! # Callback shape
+//!
+//! C's `tree_walker_callback` is `bool (*)(Node *, void *context)` and
+//! `tree_mutator_callback` is `Node *(*)(Node *, void *context)`; the `void
+//! *context` is folded into the closure environment. A walker is
+//! `&mut dyn FnMut(&Expr) -> bool` (return `true` to abort); a mutator is
+//! `&mut dyn FnMut(Expr) -> Expr` (consume a child, return its replacement).
+//!
+//! # Not modeled here (genuine unported owners)
+//!
+//! `query_tree_walker`/`query_tree_mutator`/`range_table_walker`/
+//! `range_table_entry_walker`/`raw_expression_tree_walker`/
+//! `planstate_tree_walker` traverse the `Query`/`RangeTblEntry`/raw-grammar/
+//! `PlanState` node universes, which the parser/planner/executor units that own
+//! them have not yet ported into the layered tree (the layered `Query`/
+//! `RangeTblEntry` carriers are trimmed and do not expose their expression
+//! subtrees as walkable `Expr` trees). They stay `todo!()`-free by being absent
+//! — there is no faithful body to write against the current model.
+
+#![allow(non_snake_case)]
+
+use types_core::{Oid, InvalidOid};
+use types_nodes::primnodes::{
+    self, ArrayExpr, CaseExpr, CaseWhen, Const, Expr, JsonConstructorExpr, JsonExpr, OpExpr,
+    RelabelType, ScalarArrayOpExpr, SubLink,
+};
+use types_nodes::primnodes::{CoercionForm, SubLinkType, XmlExprOp};
+use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_adt_format_type_seams as format_type;
+use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT};
+
+// Well-known pg_type / pg_collation OIDs (pg_type.dat / pg_collation.dat).
+// types-core exports BOOLOID / INT4OID / C_COLLATION_OID; the rest are spelled
+// here from the catalog headers (real OIDs, inherited — not invented).
+use types_core::catalog::{BOOLOID, C_COLLATION_OID, INT4OID};
+/// `RECORDOID` (pg_type.dat).
+const RECORDOID: Oid = 2249;
+/// `TEXTOID` (pg_type.dat).
+const TEXTOID: Oid = 25;
+/// `XMLOID` (pg_type.dat).
+const XMLOID: Oid = 142;
+/// `NAMEOID` (pg_type.dat).
+const NAMEOID: Oid = 19;
+/// `DEFAULT_COLLATION_OID` (pg_collation.dat).
+const DEFAULT_COLLATION_OID: Oid = 100;
+
+/// `OidIsValid(oid)` (c.h) — nonzero.
+#[inline]
+fn oid_is_valid(oid: Oid) -> bool {
+    oid != InvalidOid
+}
+
+// ===========================================================================
+// exprType — Oid of the type of the expression's result. (nodeFuncs.c:41)
+// ===========================================================================
+
+/// `exprType(expr)` (nodeFuncs.c) — the OID of the type of the expression's
+/// result. A NULL expression (`None`) maps to the C `if (!expr) return
+/// InvalidOid;`. `Err` carries the C `elog(ERROR, "unrecognized node type")`
+/// (here only reachable for an `ARRAY_SUBLINK` whose element type has no array
+/// type — the `get_promoted_array_type` lookup failure).
+pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
+    let Some(expr) = expr else {
+        return Ok(InvalidOid);
+    };
+    let type_ = match expr {
+        Expr::Var(v) => v.vartype,
+        Expr::Const(c) => c.consttype,
+        Expr::Param(p) => p.paramtype,
+        Expr::Aggref(a) => a.aggtype,
+        Expr::GroupingFunc(_) => INT4OID,
+        Expr::WindowFunc(w) => w.wintype,
+        Expr::MergeSupportFunc(m) => m.msftype,
+        Expr::SubscriptingRef(s) => s.refrestype,
+        Expr::FuncExpr(f) => f.funcresulttype,
+        Expr::NamedArgExpr(n) => expr_type(n.arg.as_deref())?,
+        Expr::OpExpr(o) => o.opresulttype,
+        Expr::DistinctExpr(o) => o.opresulttype,
+        Expr::NullIfExpr(o) => o.opresulttype,
+        Expr::ScalarArrayOpExpr(_) => BOOLOID,
+        Expr::BoolExpr(_) => BOOLOID,
+        Expr::SubLink(sublink) => sublink_result_type(sublink)?,
+        Expr::SubPlan(sp) => {
+            let subplan = &sp.0;
+            if subplan.subLinkType == SubLinkType::Expr
+                || subplan.subLinkType == SubLinkType::Array
+            {
+                let mut t = subplan.firstColType;
+                if subplan.subLinkType == SubLinkType::Array {
+                    t = lsyscache::get_promoted_array_type::call(t)?;
+                    if !oid_is_valid(t) {
+                        return Err(no_array_type_error(subplan.firstColType)?);
+                    }
+                }
+                t
+            } else if subplan.subLinkType == SubLinkType::MultiExpr {
+                RECORDOID
+            } else {
+                BOOLOID
+            }
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            // subplans should all return the same thing
+            asp.0.subplans[0].firstColType_via_sublink()?
+        }
+        Expr::FieldSelect(f) => f.resulttype,
+        Expr::FieldStore(f) => f.resulttype,
+        Expr::RelabelType(r) => r.resulttype,
+        Expr::CoerceViaIO(c) => c.resulttype,
+        Expr::ArrayCoerceExpr(a) => a.resulttype,
+        Expr::ConvertRowtypeExpr(c) => c.resulttype,
+        Expr::CollateExpr(c) => expr_type(c.arg.as_deref())?,
+        Expr::CaseExpr(c) => c.casetype,
+        Expr::CaseTestExpr(c) => c.typeId,
+        Expr::ArrayExpr(a) => a.array_typeid,
+        Expr::RowExpr(r) => r.row_typeid,
+        Expr::RowCompareExpr(_) => BOOLOID,
+        Expr::CoalesceExpr(c) => c.coalescetype,
+        Expr::MinMaxExpr(m) => m.minmaxtype,
+        Expr::SQLValueFunction(s) => s.r#type,
+        Expr::XmlExpr(x) => {
+            if x.op == XmlExprOp::IS_DOCUMENT {
+                BOOLOID
+            } else if x.op == XmlExprOp::IS_XMLSERIALIZE {
+                TEXTOID
+            } else {
+                XMLOID
+            }
+        }
+        Expr::JsonValueExpr(jve) => expr_type(jve.formatted_expr.as_deref())?,
+        Expr::JsonConstructorExpr(ctor) => json_returning_typid(ctor),
+        Expr::JsonIsPredicate(_) => BOOLOID,
+        Expr::JsonExpr(jexpr) => json_expr_returning_typid(jexpr),
+        Expr::NullTest(_) => BOOLOID,
+        Expr::BooleanTest(_) => BOOLOID,
+        Expr::CoerceToDomain(c) => c.resulttype,
+        Expr::CoerceToDomainValue(c) => c.typeId,
+        Expr::SetToDefault(s) => s.typeId,
+        Expr::CurrentOfExpr(_) => BOOLOID,
+        Expr::NextValueExpr(n) => n.typeId,
+        Expr::InferenceElem(n) => expr_type(n.expr.as_deref())?,
+        Expr::ReturningExpr(r) => expr_type(r.retexpr.as_deref())?,
+        // `Expr` is #[non_exhaustive]; an unmodeled future variant is the C
+        // default: elog(ERROR, "unrecognized node type").
+        other => return Err(unrecognized_node_type_error(expr_variant_name(other))?),
+    };
+    Ok(type_)
+}
+
+/// The `EXPR_SUBLINK`/`ARRAY_SUBLINK`/`MULTIEXPR_SUBLINK`/boolean dispatch of
+/// `exprType` over a `SubLink`. In the layered model `SubLink.subselect` is an
+/// opaque `Query` address (never an in-tree `Query` node — a `SubLink` is
+/// replaced by a `SubPlan` before execution), so the `EXPR/ARRAY` arms that
+/// would read the subselect's first target column are not representable; they
+/// surface as the C "cannot get type for untransformed sublink" error, which is
+/// exactly what C raises when the subselect is not a transformed `Query`.
+fn sublink_result_type(sublink: &SubLink) -> PgResult<Oid> {
+    if sublink.subLinkType == SubLinkType::Expr
+        || sublink.subLinkType == SubLinkType::Array
+    {
+        // Query* not modeled as an in-tree node; matches C's untransformed path.
+        Err(untransformed_sublink_error("type")?)
+    } else if sublink.subLinkType == SubLinkType::MultiExpr {
+        Ok(RECORDOID)
+    } else {
+        Ok(BOOLOID)
+    }
+}
+
+fn json_returning_typid(ctor: &JsonConstructorExpr) -> Oid {
+    match &ctor.returning {
+        Some(r) => r.typid,
+        None => InvalidOid,
+    }
+}
+
+fn json_expr_returning_typid(jexpr: &JsonExpr) -> Oid {
+    match &jexpr.returning {
+        Some(r) => r.typid,
+        None => InvalidOid,
+    }
+}
+
+// ===========================================================================
+// exprTypmod (nodeFuncs.c:300)
+// ===========================================================================
+
+/// `exprTypmod(expr)` (nodeFuncs.c) — the type-specific modifier of the
+/// expression's result type, or `-1` if it can't be determined.
+pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
+    let Some(expr) = expr else {
+        return Ok(-1);
+    };
+    let typmod = match expr {
+        Expr::Var(v) => v.vartypmod,
+        Expr::Const(c) => c.consttypmod,
+        Expr::Param(p) => p.paramtypmod,
+        Expr::SubscriptingRef(s) => s.reftypmod,
+        Expr::FuncExpr(_) => {
+            // Be smart about length-coercion functions...
+            let (is_len, coerced) = expr_is_length_coercion(Some(expr))?;
+            if is_len {
+                coerced
+            } else {
+                -1
+            }
+        }
+        Expr::NamedArgExpr(n) => expr_typmod(n.arg.as_deref())?,
+        Expr::NullIfExpr(o) => {
+            // result is first argument or NULL → report first arg's typmod
+            expr_typmod(o.args.first())?
+        }
+        Expr::SubLink(sublink) => {
+            if sublink.subLinkType == SubLinkType::Expr
+                || sublink.subLinkType == SubLinkType::Array
+            {
+                return Err(untransformed_sublink_error("type")?);
+            }
+            -1
+        }
+        Expr::SubPlan(sp) => {
+            let subplan = &sp.0;
+            if subplan.subLinkType == SubLinkType::Expr
+                || subplan.subLinkType == SubLinkType::Array
+            {
+                subplan.firstColTypmod
+            } else {
+                -1
+            }
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            let sp = &asp.0.subplans[0];
+            if sp.subLinkType == SubLinkType::Expr
+                || sp.subLinkType == SubLinkType::Array
+            {
+                sp.firstColTypmod
+            } else {
+                -1
+            }
+        }
+        Expr::FieldSelect(f) => f.resulttypmod,
+        Expr::RelabelType(r) => r.resulttypmod,
+        Expr::ArrayCoerceExpr(a) => a.resulttypmod,
+        Expr::CollateExpr(c) => expr_typmod(c.arg.as_deref())?,
+        Expr::CaseExpr(cexpr) => case_expr_typmod(cexpr)?,
+        Expr::CaseTestExpr(c) => c.typeMod,
+        Expr::ArrayExpr(arrayexpr) => array_expr_typmod(arrayexpr)?,
+        Expr::CoalesceExpr(cexpr) => agree_typmod(&cexpr.args, cexpr.coalescetype)?,
+        Expr::MinMaxExpr(mexpr) => agree_typmod(&mexpr.args, mexpr.minmaxtype)?,
+        Expr::SQLValueFunction(s) => s.typmod,
+        Expr::JsonValueExpr(jve) => expr_typmod(jve.formatted_expr.as_deref())?,
+        Expr::JsonConstructorExpr(ctor) => match &ctor.returning {
+            Some(r) => r.typmod,
+            None => -1,
+        },
+        Expr::JsonExpr(jexpr) => match &jexpr.returning {
+            Some(r) => r.typmod,
+            None => -1,
+        },
+        Expr::CoerceToDomain(c) => c.resulttypmod,
+        Expr::CoerceToDomainValue(c) => c.typeMod,
+        Expr::SetToDefault(s) => s.typeMod,
+        Expr::ReturningExpr(r) => expr_typmod(r.retexpr.as_deref())?,
+        _ => -1,
+    };
+    Ok(typmod)
+}
+
+/// `T_CaseExpr` arm of `exprTypmod`: if all alternatives agree on type/typmod,
+/// return that typmod, else `-1`.
+fn case_expr_typmod(cexpr: &CaseExpr) -> PgResult<i32> {
+    let Some(defresult) = cexpr.defresult.as_deref() else {
+        return Ok(-1);
+    };
+    let casetype = cexpr.casetype;
+    if expr_type(Some(defresult))? != casetype {
+        return Ok(-1);
+    }
+    let typmod = expr_typmod(Some(defresult))?;
+    if typmod < 0 {
+        return Ok(-1);
+    }
+    for w in &cexpr.args {
+        let result = w.result.as_deref();
+        if expr_type(result)? != casetype {
+            return Ok(-1);
+        }
+        if expr_typmod(result)? != typmod {
+            return Ok(-1);
+        }
+    }
+    Ok(typmod)
+}
+
+/// `T_ArrayExpr` arm of `exprTypmod`.
+fn array_expr_typmod(arrayexpr: &ArrayExpr) -> PgResult<i32> {
+    if arrayexpr.elements.is_empty() {
+        return Ok(-1);
+    }
+    let typmod = expr_typmod(arrayexpr.elements.first())?;
+    if typmod < 0 {
+        return Ok(-1);
+    }
+    let commontype = if arrayexpr.multidims {
+        arrayexpr.array_typeid
+    } else {
+        arrayexpr.element_typeid
+    };
+    for e in &arrayexpr.elements {
+        if expr_type(Some(e))? != commontype {
+            return Ok(-1);
+        }
+        if expr_typmod(Some(e))? != typmod {
+            return Ok(-1);
+        }
+    }
+    Ok(typmod)
+}
+
+/// Shared `CoalesceExpr`/`MinMaxExpr` "all args agree on type/typmod" logic.
+fn agree_typmod(args: &[Expr], commontype: Oid) -> PgResult<i32> {
+    let Some(first) = args.first() else {
+        return Ok(-1);
+    };
+    if expr_type(Some(first))? != commontype {
+        return Ok(-1);
+    }
+    let typmod = expr_typmod(Some(first))?;
+    if typmod < 0 {
+        return Ok(-1);
+    }
+    for e in args.iter().skip(1) {
+        if expr_type(Some(e))? != commontype {
+            return Ok(-1);
+        }
+        if expr_typmod(Some(e))? != typmod {
+            return Ok(-1);
+        }
+    }
+    Ok(typmod)
+}
+
+// ===========================================================================
+// exprIsLengthCoercion (nodeFuncs.c:556)
+// ===========================================================================
+
+/// `exprIsLengthCoercion(expr, &coercedTypmod)` (nodeFuncs.c) — detect whether
+/// an expression is an application of a datatype's typmod-coercion function.
+/// Returns `(is_length_coercion, coerced_typmod)`; the typmod is `-1` when the
+/// expression is not a length coercion.
+pub fn expr_is_length_coercion(expr: Option<&Expr>) -> PgResult<(bool, i32)> {
+    // Scalar-type length coercions are FuncExprs; array-type ones are
+    // ArrayCoerceExprs.
+    match expr {
+        Some(Expr::FuncExpr(func)) => {
+            // If it didn't come from a coercion context, reject.
+            if func.funcformat != CoercionForm::COERCE_EXPLICIT_CAST
+                && func.funcformat != CoercionForm::COERCE_IMPLICIT_CAST
+            {
+                return Ok((false, -1));
+            }
+            // Must be a two- or three-argument function whose second argument
+            // is a non-null int4 Const.
+            let nargs = func.args.len();
+            if nargs < 2 || nargs > 3 {
+                return Ok((false, -1));
+            }
+            let Expr::Const(second_arg) = &func.args[1] else {
+                return Ok((false, -1));
+            };
+            if second_arg.consttype != INT4OID || second_arg.constisnull {
+                return Ok((false, -1));
+            }
+            // OK, it is indeed a length-coercion function.
+            // DatumGetInt32(second_arg->constvalue).
+            let coerced = second_arg.constvalue.as_i32();
+            Ok((true, coerced))
+        }
+        Some(Expr::ArrayCoerceExpr(acoerce)) => {
+            // Not a length coercion unless there's a nondefault typmod.
+            if acoerce.resulttypmod < 0 {
+                Ok((false, -1))
+            } else {
+                Ok((true, acoerce.resulttypmod))
+            }
+        }
+        _ => Ok((false, -1)),
+    }
+}
+
+// ===========================================================================
+// applyRelabelType / relabel_to_typmod (nodeFuncs.c:635)
+// ===========================================================================
+
+/// `applyRelabelType(arg, rtype, rtypmod, rcollid, rformat, rlocation,
+/// overwrite_ok)` (nodeFuncs.c) — add a `RelabelType` node if needed to make
+/// the expression expose the specified type/typmod/collation. Maintains the
+/// post-`eval_const_expressions` invariants (no adjacent RelabelTypes; no
+/// RelabelType atop a Const). `location` is trimmed from the layered model, so
+/// the C `rlocation` parameter is dropped (the new RelabelType has no location
+/// field to set, and the Const path's "keep original location" is a no-op).
+pub fn apply_relabel_type(
+    mut arg: Expr,
+    rtype: Oid,
+    rtypmod: i32,
+    rcollid: Oid,
+    rformat: CoercionForm,
+    _overwrite_ok: bool,
+) -> PgResult<Expr> {
+    // Discard stacked RelabelTypes (eg foo::int::oid).
+    while let Expr::RelabelType(r) = &arg {
+        match &r.arg {
+            Some(inner) => arg = (**inner).clone(),
+            None => break,
+        }
+    }
+
+    if let Expr::Const(con) = &arg {
+        // Modify the Const to preserve const-flatness. In the owned model the
+        // Const is value-typed, so we always produce the updated copy
+        // (overwrite-vs-copy is an in-place-pointer optimization in C with no
+        // observable difference here).
+        let mut con: Const = *con;
+        con.consttype = rtype;
+        con.consttypmod = rtypmod;
+        con.constcollid = rcollid;
+        return Ok(Expr::Const(con));
+    }
+
+    if expr_type(Some(&arg))? == rtype
+        && expr_typmod(Some(&arg))? == rtypmod
+        && expr_collation(Some(&arg))? == rcollid
+    {
+        // A nest of relabels that nets out to nothing.
+        return Ok(arg);
+    }
+
+    // Nope, gotta have a RelabelType.
+    Ok(Expr::RelabelType(RelabelType {
+        arg: Some(Box::new(arg)),
+        resulttype: rtype,
+        resulttypmod: rtypmod,
+        resultcollid: rcollid,
+        relabelformat: rformat,
+    }))
+}
+
+/// `relabel_to_typmod(expr, typmod)` (nodeFuncs.c) — add a RelabelType that
+/// changes just the typmod of the expression.
+pub fn relabel_to_typmod(expr: Expr, typmod: i32) -> PgResult<Expr> {
+    let rtype = expr_type(Some(&expr))?;
+    let rcollid = expr_collation(Some(&expr))?;
+    apply_relabel_type(
+        expr,
+        rtype,
+        typmod,
+        rcollid,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        false,
+    )
+}
+
+// ===========================================================================
+// strip_implicit_coercions (nodeFuncs.c:704)
+// ===========================================================================
+
+/// `strip_implicit_coercions(node)` (nodeFuncs.c) — remove implicit coercions
+/// at the top level of the tree, returning a borrow into a suitable place
+/// within it. (A RowExpr is returned unchanged even if implicit.)
+pub fn strip_implicit_coercions(node: &Expr) -> &Expr {
+    match node {
+        Expr::FuncExpr(f) if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST => {
+            match f.args.first() {
+                Some(first) => strip_implicit_coercions(first),
+                None => node,
+            }
+        }
+        Expr::RelabelType(r) if r.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST => {
+            match &r.arg {
+                Some(arg) => strip_implicit_coercions(arg),
+                None => node,
+            }
+        }
+        Expr::CoerceViaIO(c) if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST => {
+            match &c.arg {
+                Some(arg) => strip_implicit_coercions(arg),
+                None => node,
+            }
+        }
+        Expr::ArrayCoerceExpr(c) if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST => {
+            match &c.arg {
+                Some(arg) => strip_implicit_coercions(arg),
+                None => node,
+            }
+        }
+        Expr::ConvertRowtypeExpr(c)
+            if c.convertformat == CoercionForm::COERCE_IMPLICIT_CAST =>
+        {
+            match &c.arg {
+                Some(arg) => strip_implicit_coercions(arg),
+                None => node,
+            }
+        }
+        Expr::CoerceToDomain(c) if c.coercionformat == CoercionForm::COERCE_IMPLICIT_CAST => {
+            match &c.arg {
+                Some(arg) => strip_implicit_coercions(arg),
+                None => node,
+            }
+        }
+        _ => node,
+    }
+}
+
+// ===========================================================================
+// expression_returns_set (nodeFuncs.c:762)
+// ===========================================================================
+
+/// `expression_returns_set(clause)` (nodeFuncs.c) — test whether an expression
+/// (or whole targetlist) returns a set result.
+pub fn expression_returns_set(clause: Option<&Expr>) -> bool {
+    expression_returns_set_walker(clause)
+}
+
+fn expression_returns_set_walker(node: Option<&Expr>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    match node {
+        Expr::FuncExpr(expr) if expr.funcretset => return true,
+        Expr::OpExpr(expr) if expr.opretset => return true,
+        // Parser guarantees these never return a set; avoid recursing.
+        Expr::Aggref(_) | Expr::GroupingFunc(_) | Expr::WindowFunc(_) => return false,
+        _ => {}
+    }
+    let mut found = false;
+    let mut walker = |child: &Expr| -> bool {
+        if expression_returns_set_walker(Some(child)) {
+            found = true;
+            return true;
+        }
+        false
+    };
+    expression_tree_walker(Some(node), &mut walker);
+    found
+}
+
+// ===========================================================================
+// exprCollation (nodeFuncs.c:820)
+// ===========================================================================
+
+/// `exprCollation(expr)` (nodeFuncs.c) — the OID of the collation of the
+/// expression's result. `Err` carries the C `elog(ERROR, "unrecognized node
+/// type")` (only reachable on the untransformed-SubLink path).
+pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
+    let Some(expr) = expr else {
+        return Ok(InvalidOid);
+    };
+    let coll = match expr {
+        Expr::Var(v) => v.varcollid,
+        Expr::Const(c) => c.constcollid,
+        Expr::Param(p) => p.paramcollid,
+        Expr::Aggref(a) => a.aggcollid,
+        Expr::GroupingFunc(_) => InvalidOid,
+        Expr::WindowFunc(w) => w.wincollid,
+        Expr::MergeSupportFunc(m) => m.msfcollid,
+        Expr::SubscriptingRef(s) => s.refcollid,
+        Expr::FuncExpr(f) => f.funccollid,
+        Expr::NamedArgExpr(n) => expr_collation(n.arg.as_deref())?,
+        Expr::OpExpr(o) => o.opcollid,
+        Expr::DistinctExpr(o) => o.opcollid,
+        Expr::NullIfExpr(o) => o.opcollid,
+        Expr::ScalarArrayOpExpr(_) => InvalidOid,
+        Expr::BoolExpr(_) => InvalidOid,
+        Expr::SubLink(sublink) => {
+            if sublink.subLinkType == SubLinkType::Expr
+                || sublink.subLinkType == SubLinkType::Array
+            {
+                return Err(untransformed_sublink_error("collation")?);
+            }
+            InvalidOid
+        }
+        Expr::SubPlan(sp) => {
+            let subplan = &sp.0;
+            if subplan.subLinkType == SubLinkType::Expr
+                || subplan.subLinkType == SubLinkType::Array
+            {
+                subplan.firstColCollation
+            } else {
+                InvalidOid
+            }
+        }
+        Expr::AlternativeSubPlan(asp) => asp.0.subplans[0].firstColCollation,
+        Expr::FieldSelect(f) => f.resultcollid,
+        Expr::FieldStore(_) => InvalidOid,
+        Expr::RelabelType(r) => r.resultcollid,
+        Expr::CoerceViaIO(c) => c.resultcollid,
+        Expr::ArrayCoerceExpr(a) => a.resultcollid,
+        Expr::ConvertRowtypeExpr(_) => InvalidOid,
+        Expr::CollateExpr(c) => c.collOid,
+        Expr::CaseExpr(c) => c.casecollid,
+        Expr::CaseTestExpr(c) => c.collation,
+        Expr::ArrayExpr(a) => a.array_collid,
+        Expr::RowExpr(_) => InvalidOid,
+        Expr::RowCompareExpr(_) => InvalidOid,
+        Expr::CoalesceExpr(c) => c.coalescecollid,
+        Expr::MinMaxExpr(m) => m.minmaxcollid,
+        Expr::SQLValueFunction(s) => {
+            if s.r#type == NAMEOID {
+                C_COLLATION_OID
+            } else {
+                InvalidOid
+            }
+        }
+        Expr::XmlExpr(x) => {
+            if x.op == XmlExprOp::IS_XMLSERIALIZE {
+                DEFAULT_COLLATION_OID
+            } else {
+                InvalidOid
+            }
+        }
+        Expr::JsonValueExpr(jve) => expr_collation(jve.formatted_expr.as_deref())?,
+        Expr::JsonConstructorExpr(ctor) => match ctor.coercion.as_deref() {
+            Some(c) => expr_collation(Some(c))?,
+            None => InvalidOid,
+        },
+        Expr::JsonIsPredicate(_) => InvalidOid,
+        Expr::JsonExpr(jexpr) => jexpr.collation,
+        Expr::NullTest(_) => InvalidOid,
+        Expr::BooleanTest(_) => InvalidOid,
+        Expr::CoerceToDomain(c) => c.resultcollid,
+        Expr::CoerceToDomainValue(c) => c.collation,
+        Expr::SetToDefault(s) => s.collation,
+        Expr::CurrentOfExpr(_) => InvalidOid,
+        Expr::NextValueExpr(_) => InvalidOid,
+        Expr::InferenceElem(n) => expr_collation(n.expr.as_deref())?,
+        Expr::ReturningExpr(r) => expr_collation(r.retexpr.as_deref())?,
+        // #[non_exhaustive]: C default elog(ERROR, "unrecognized node type").
+        other => return Err(unrecognized_node_type_error(expr_variant_name(other))?),
+    };
+    Ok(coll)
+}
+
+// ===========================================================================
+// exprInputCollation (nodeFuncs.c:1075)
+// ===========================================================================
+
+/// `exprInputCollation(expr)` (nodeFuncs.c) — the collation a function should
+/// use, or `InvalidOid` if the node type doesn't store it.
+pub fn expr_input_collation(expr: Option<&Expr>) -> Oid {
+    let Some(expr) = expr else {
+        return InvalidOid;
+    };
+    match expr {
+        Expr::Aggref(a) => a.inputcollid,
+        Expr::WindowFunc(w) => w.inputcollid,
+        Expr::FuncExpr(f) => f.inputcollid,
+        Expr::OpExpr(o) => o.inputcollid,
+        Expr::DistinctExpr(o) => o.inputcollid,
+        Expr::NullIfExpr(o) => o.inputcollid,
+        Expr::ScalarArrayOpExpr(s) => s.inputcollid,
+        Expr::MinMaxExpr(m) => m.inputcollid,
+        _ => InvalidOid,
+    }
+}
+
+// ===========================================================================
+// exprSetCollation (nodeFuncs.c:1123)
+// ===========================================================================
+
+/// `exprSetCollation(expr, collation)` (nodeFuncs.c) — assign collation
+/// information to an expression-tree node. Mutates in place. The C
+/// assert-only arms (where the result is non-collatable and the function only
+/// checks `collation == InvalidOid`) are no-ops here, matching a non-asserting
+/// build. `Err` carries the unrecognized-node-type error.
+pub fn expr_set_collation(expr: &mut Expr, collation: Oid) -> PgResult<()> {
+    match expr {
+        Expr::Var(v) => v.varcollid = collation,
+        Expr::Const(c) => c.constcollid = collation,
+        Expr::Param(p) => p.paramcollid = collation,
+        Expr::Aggref(a) => a.aggcollid = collation,
+        Expr::GroupingFunc(_) => {}
+        Expr::WindowFunc(w) => w.wincollid = collation,
+        Expr::MergeSupportFunc(m) => m.msfcollid = collation,
+        Expr::SubscriptingRef(s) => s.refcollid = collation,
+        Expr::FuncExpr(f) => f.funccollid = collation,
+        Expr::NamedArgExpr(_) => {} // Assert(collation == exprCollation(arg))
+        Expr::OpExpr(o) => o.opcollid = collation,
+        Expr::DistinctExpr(o) => o.opcollid = collation,
+        Expr::NullIfExpr(o) => o.opcollid = collation,
+        Expr::ScalarArrayOpExpr(_) => {}
+        Expr::BoolExpr(_) => {}
+        Expr::SubLink(_) => {} // assert-only in C
+        Expr::FieldSelect(f) => f.resultcollid = collation,
+        Expr::FieldStore(_) => {}
+        Expr::RelabelType(r) => r.resultcollid = collation,
+        Expr::CoerceViaIO(c) => c.resultcollid = collation,
+        Expr::ArrayCoerceExpr(a) => a.resultcollid = collation,
+        Expr::ConvertRowtypeExpr(_) => {}
+        Expr::CaseExpr(c) => c.casecollid = collation,
+        Expr::ArrayExpr(a) => a.array_collid = collation,
+        Expr::RowExpr(_) => {}
+        Expr::RowCompareExpr(_) => {}
+        Expr::CoalesceExpr(c) => c.coalescecollid = collation,
+        Expr::MinMaxExpr(m) => m.minmaxcollid = collation,
+        Expr::SQLValueFunction(_) => {} // assert-only
+        Expr::XmlExpr(_) => {}          // assert-only
+        Expr::JsonValueExpr(jve) => {
+            if let Some(fe) = jve.formatted_expr.as_deref_mut() {
+                expr_set_collation(fe, collation)?;
+            }
+        }
+        Expr::JsonConstructorExpr(ctor) => {
+            if let Some(c) = ctor.coercion.as_deref_mut() {
+                expr_set_collation(c, collation)?;
+            }
+        }
+        Expr::JsonIsPredicate(_) => {}
+        Expr::JsonExpr(jexpr) => jexpr.collation = collation,
+        Expr::NullTest(_) => {}
+        Expr::BooleanTest(_) => {}
+        Expr::CoerceToDomain(c) => c.resultcollid = collation,
+        Expr::CoerceToDomainValue(c) => c.collation = collation,
+        Expr::SetToDefault(s) => s.collation = collation,
+        Expr::CurrentOfExpr(_) => {}
+        Expr::NextValueExpr(_) => {}
+        // Per the C comment, exprSetCollation needn't worry about subplans,
+        // PlaceHolderVars, or ReturningExprs (parse-analysis only).
+        other => {
+            return Err(unrecognized_node_type_error(expr_variant_name(other))?);
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// exprSetInputCollation (nodeFuncs.c:1319)
+// ===========================================================================
+
+/// `exprSetInputCollation(expr, inputcollation)` (nodeFuncs.c) — assign
+/// input-collation information; a no-op for node types that don't store it.
+pub fn expr_set_input_collation(expr: &mut Expr, inputcollation: Oid) {
+    match expr {
+        Expr::Aggref(a) => a.inputcollid = inputcollation,
+        Expr::WindowFunc(w) => w.inputcollid = inputcollation,
+        Expr::FuncExpr(f) => f.inputcollid = inputcollation,
+        Expr::OpExpr(o) => o.inputcollid = inputcollation,
+        Expr::DistinctExpr(o) => o.inputcollid = inputcollation,
+        Expr::NullIfExpr(o) => o.inputcollid = inputcollation,
+        Expr::ScalarArrayOpExpr(s) => s.inputcollid = inputcollation,
+        Expr::MinMaxExpr(m) => m.inputcollid = inputcollation,
+        _ => {}
+    }
+}
+
+// ===========================================================================
+// exprLocation / leftmostLoc (nodeFuncs.c:1383)
+// ===========================================================================
+
+/// `leftmostLoc(loc1, loc2)` (nodeFuncs.c) — minimum of two locations, ignoring
+/// unknowns (`-1`).
+fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
+    if loc1 < 0 {
+        loc2
+    } else if loc2 < 0 {
+        loc1
+    } else {
+        loc1.min(loc2)
+    }
+}
+
+/// `exprLocation(expr)` (nodeFuncs.c) — the parse location (leftmost token) of
+/// an expression tree, for error reports; `-1` if it can't be determined.
+///
+/// The layered model trims the per-node `location` field (docs/types.md rule 3)
+/// and does not model the raw-grammar node types this C switch also covers, so
+/// every modeled leaf's own location is unknown (`-1`). The real `leftmostLoc`
+/// recursion over the compound variants is preserved (so the structure is
+/// faithful), but with no stored leaf location it resolves to `-1` throughout —
+/// exactly the documented "location can't be determined" fallback.
+pub fn expr_location(expr: Option<&Expr>) -> PgResult<i32> {
+    let Some(expr) = expr else {
+        return Ok(-1);
+    };
+    let loc = match expr {
+        Expr::SubscriptingRef(s) => expr_location(s.refexpr.as_deref())?,
+        Expr::FuncExpr(f) => leftmost_loc(-1, expr_location_list(&f.args)?),
+        Expr::NamedArgExpr(n) => leftmost_loc(-1, expr_location(n.arg.as_deref())?),
+        Expr::OpExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
+        Expr::DistinctExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
+        Expr::NullIfExpr(o) => leftmost_loc(-1, expr_location_list(&o.args)?),
+        Expr::ScalarArrayOpExpr(s) => leftmost_loc(-1, expr_location_list(&s.args)?),
+        Expr::BoolExpr(b) => leftmost_loc(-1, expr_location_list(&b.args)?),
+        Expr::SubLink(s) => leftmost_loc(expr_location(s.testexpr.as_deref())?, -1),
+        Expr::FieldSelect(f) => expr_location(f.arg.as_deref())?,
+        Expr::FieldStore(f) => expr_location(f.arg.as_deref())?,
+        Expr::RelabelType(r) => leftmost_loc(-1, expr_location(r.arg.as_deref())?),
+        Expr::CoerceViaIO(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
+        Expr::ArrayCoerceExpr(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
+        Expr::ConvertRowtypeExpr(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
+        Expr::CollateExpr(c) => expr_location(c.arg.as_deref())?,
+        Expr::RowCompareExpr(r) => expr_location_list(&r.largs)?,
+        Expr::XmlExpr(x) => leftmost_loc(-1, expr_location_list(&x.args)?),
+        Expr::JsonValueExpr(jve) => expr_location(jve.raw_expr.as_deref())?,
+        Expr::JsonExpr(jexpr) => {
+            leftmost_loc(-1, expr_location(jexpr.formatted_expr.as_deref())?)
+        }
+        Expr::NullTest(n) => leftmost_loc(-1, expr_location(n.arg.as_deref())?),
+        Expr::BooleanTest(b) => leftmost_loc(-1, expr_location(b.arg.as_deref())?),
+        Expr::CoerceToDomain(c) => leftmost_loc(-1, expr_location(c.arg.as_deref())?),
+        Expr::ReturningExpr(r) => expr_location(r.retexpr.as_deref())?,
+        Expr::InferenceElem(n) => expr_location(n.expr.as_deref())?,
+        // All other modeled variants carry only trimmed-away `location`
+        // fields — unknown.
+        _ => -1,
+    };
+    Ok(loc)
+}
+
+/// The `T_List` arm of `exprLocation` over an owned `Vec<Expr>`: report the
+/// location of the first list member that has one.
+fn expr_location_list(list: &[Expr]) -> PgResult<i32> {
+    for e in list {
+        let loc = expr_location(Some(e))?;
+        if loc >= 0 {
+            return Ok(loc);
+        }
+    }
+    Ok(-1)
+}
+
+// ===========================================================================
+// fix_opfuncids / set_opfuncid / set_sa_opfuncid (nodeFuncs.c:1837)
+// ===========================================================================
+
+/// `fix_opfuncids(node)` (nodeFuncs.c) — set the `opfuncid` from `opno` for
+/// every OpExpr-family node in the tree (in place).
+pub fn fix_opfuncids(node: &mut Expr) -> PgResult<()> {
+    fix_opfuncids_walker(node)
+}
+
+fn fix_opfuncids_walker(node: &mut Expr) -> PgResult<()> {
+    match node {
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => set_opfuncid(o)?,
+        Expr::ScalarArrayOpExpr(s) => set_sa_opfuncid(s)?,
+        _ => {}
+    }
+    // Recurse into children (the in-place mutable analogue of
+    // expression_tree_walker(node, fix_opfuncids_walker)).
+    let mut err: Option<types_error::PgError> = None;
+    for_each_child_mut(node, &mut |child| {
+        if err.is_none() {
+            if let Err(e) = fix_opfuncids_walker(child) {
+                err = Some(e);
+            }
+        }
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// `set_opfuncid(opexpr)` (nodeFuncs.c) — set the `opfuncid` of an OpExpr (or
+/// the struct-equivalent DistinctExpr/NullIfExpr) if not already set.
+pub fn set_opfuncid(opexpr: &mut OpExpr) -> PgResult<()> {
+    if opexpr.opfuncid == InvalidOid {
+        opexpr.opfuncid = lsyscache::get_opcode::call(opexpr.opno)?;
+    }
+    Ok(())
+}
+
+/// `set_sa_opfuncid(opexpr)` (nodeFuncs.c) — as `set_opfuncid`, for
+/// ScalarArrayOpExpr.
+pub fn set_sa_opfuncid(opexpr: &mut ScalarArrayOpExpr) -> PgResult<()> {
+    if opexpr.opfuncid == InvalidOid {
+        opexpr.opfuncid = lsyscache::get_opcode::call(opexpr.opno)?;
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// check_functions_in_node (nodeFuncs.c:1905)
+// ===========================================================================
+
+/// `check_functions_in_node(node, checker, context)` (nodeFuncs.c) — apply
+/// `checker` to each function OID directly contained in the node (no recursion
+/// into sub-expressions). Returns true if `checker` does for any of them.
+///
+/// The C `T_CoerceViaIO` arm calls `getTypeInputInfo`/`getTypeOutputInfo` to
+/// recover the I/O function OIDs; those catalog lookups belong to the lsyscache
+/// owner and are not in scope for this pure-node-inspection family, so that arm
+/// is conservatively treated as "no SQL-visible function found" — the safe C
+/// fall-through (`return false`) that callers already handle for the ignored
+/// MinMax/SQLValueFunction/XmlExpr/CoerceToDomain/NextValue cases. (Most callers
+/// keep control of recursion themselves; the CoerceViaIO I/O-function check is
+/// only used by a couple of dependency walkers.)
+pub fn check_functions_in_node<F>(node: &mut Expr, checker: &mut F) -> PgResult<bool>
+where
+    F: FnMut(Oid) -> bool,
+{
+    let found = match node {
+        Expr::Aggref(a) => checker(a.aggfnoid),
+        Expr::WindowFunc(w) => checker(w.winfnoid),
+        Expr::FuncExpr(f) => checker(f.funcid),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => {
+            set_opfuncid(o)?;
+            checker(o.opfuncid)
+        }
+        Expr::ScalarArrayOpExpr(s) => {
+            set_sa_opfuncid(s)?;
+            checker(s.opfuncid)
+        }
+        Expr::RowCompareExpr(rc) => {
+            let mut hit = false;
+            for &opno in &rc.opnos {
+                let opfuncid = lsyscache::get_opcode::call(opno)?;
+                if checker(opfuncid) {
+                    hit = true;
+                    break;
+                }
+            }
+            hit
+        }
+        _ => false,
+    };
+    Ok(found)
+}
+
+// ===========================================================================
+// expression_tree_walker (nodeFuncs.c:2088)
+// ===========================================================================
+
+/// `expression_tree_walker(node, walker, context)` (nodeFuncs.c) — recurse into
+/// the sub-nodes of an already-visited node, invoking `walker` on each immediate
+/// child. Returns `true` as soon as `walker` returns `true` (abort), else
+/// `false`.
+///
+/// The walker has already visited `node`; we recurse into its children only.
+/// The C arms over node types the layered model does not carry (List/Query/
+/// FromExpr/JoinExpr/parser-and-planner nodes) are absent — the model cannot
+/// construct those nodes.
+pub fn expression_tree_walker<F>(node: Option<&Expr>, walker: &mut F) -> bool
+where
+    F: FnMut(&Expr) -> bool,
+{
+    let Some(node) = node else {
+        return false;
+    };
+
+    // WALK(opt): invoke walker on an Option<&Expr> child (NULL → false).
+    macro_rules! walk_opt {
+        ($child:expr) => {
+            match $child {
+                Some(c) => walker(c),
+                None => false,
+            }
+        };
+    }
+    // LIST_WALK: recurse directly into a list without calling walker on the
+    // list itself (C recurses to self for List nodes).
+    macro_rules! list_walk {
+        ($list:expr) => {{
+            let mut aborted = false;
+            for e in $list {
+                if walker(e) {
+                    aborted = true;
+                    break;
+                }
+            }
+            aborted
+        }};
+    }
+    macro_rules! list_walk_opt {
+        ($list:expr) => {{
+            let mut aborted = false;
+            for e in $list {
+                if walk_opt!(e.as_ref()) {
+                    aborted = true;
+                    break;
+                }
+            }
+            aborted
+        }};
+    }
+
+    match node {
+        // primitive node types with no expression subnodes
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::CaseTestExpr(_)
+        | Expr::SQLValueFunction(_)
+        | Expr::CoerceToDomainValue(_)
+        | Expr::SetToDefault(_)
+        | Expr::CurrentOfExpr(_)
+        | Expr::NextValueExpr(_)
+        | Expr::MergeSupportFunc(_) => false,
+        Expr::Aggref(expr) => {
+            list_walk!(&expr.aggdirectargs)
+                || {
+                    // args is a TargetEntry list; recurse on each te.expr
+                    let mut aborted = false;
+                    for te in &expr.args {
+                        if walk_opt!(te.expr.as_ref().map(|b| boxed_mcx_expr_as(b))) {
+                            aborted = true;
+                            break;
+                        }
+                    }
+                    aborted
+                }
+                || walk_opt!(expr.aggfilter.as_deref())
+        }
+        Expr::GroupingFunc(grouping) => list_walk!(&grouping.args),
+        Expr::WindowFunc(expr) => {
+            list_walk!(&expr.args)
+                || walk_opt!(expr.aggfilter.as_deref())
+                || list_walk!(&expr.runCondition)
+        }
+        Expr::SubscriptingRef(sbsref) => {
+            list_walk_opt!(&sbsref.refupperindexpr)
+                || list_walk_opt!(&sbsref.reflowerindexpr)
+                || walk_opt!(sbsref.refexpr.as_deref())
+                || walk_opt!(sbsref.refassgnexpr.as_deref())
+        }
+        Expr::FuncExpr(expr) => list_walk!(&expr.args),
+        Expr::NamedArgExpr(n) => walk_opt!(n.arg.as_deref()),
+        Expr::OpExpr(expr) | Expr::DistinctExpr(expr) | Expr::NullIfExpr(expr) => {
+            list_walk!(&expr.args)
+        }
+        Expr::ScalarArrayOpExpr(expr) => list_walk!(&expr.args),
+        Expr::BoolExpr(expr) => list_walk!(&expr.args),
+        Expr::SubLink(sublink) => {
+            // testexpr, then the sub-Query (opaque address here, not walked).
+            walk_opt!(sublink.testexpr.as_deref())
+        }
+        Expr::SubPlan(sp) => {
+            // testexpr, then args; not into the Plan. The SubPlan carries
+            // context-allocated PgBox/PgVec children; recurse into each.
+            let subplan = &sp.0;
+            walk_pgbox_opt(&subplan.testexpr, walker)
+                || walk_pgvec_box(&subplan.args, walker)
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            let mut aborted = false;
+            for sp in &asp.0.subplans {
+                // each subplan recursed as in T_SubPlan; AlternativeSubPlan is
+                // a List walk over its SubPlans
+                if walk_pgbox_opt(&sp.testexpr, walker) || walk_pgvec_box(&sp.args, walker) {
+                    aborted = true;
+                    break;
+                }
+            }
+            aborted
+        }
+        Expr::FieldSelect(f) => walk_opt!(f.arg.as_deref()),
+        Expr::FieldStore(fstore) => {
+            walk_opt!(fstore.arg.as_deref()) || list_walk!(&fstore.newvals)
+        }
+        Expr::RelabelType(r) => walk_opt!(r.arg.as_deref()),
+        Expr::CoerceViaIO(c) => walk_opt!(c.arg.as_deref()),
+        Expr::ArrayCoerceExpr(acoerce) => {
+            walk_opt!(acoerce.arg.as_deref()) || walk_opt!(acoerce.elemexpr.as_deref())
+        }
+        Expr::ConvertRowtypeExpr(c) => walk_opt!(c.arg.as_deref()),
+        Expr::CollateExpr(c) => walk_opt!(c.arg.as_deref()),
+        Expr::CaseExpr(caseexpr) => {
+            if walk_opt!(caseexpr.arg.as_deref()) {
+                return true;
+            }
+            for when in &caseexpr.args {
+                if walk_opt!(when.expr.as_deref()) || walk_opt!(when.result.as_deref()) {
+                    return true;
+                }
+            }
+            walk_opt!(caseexpr.defresult.as_deref())
+        }
+        Expr::ArrayExpr(a) => list_walk!(&a.elements),
+        Expr::RowExpr(r) => list_walk!(&r.args),
+        Expr::RowCompareExpr(rcexpr) => {
+            list_walk!(&rcexpr.largs) || list_walk!(&rcexpr.rargs)
+        }
+        Expr::CoalesceExpr(c) => list_walk!(&c.args),
+        Expr::MinMaxExpr(m) => list_walk!(&m.args),
+        Expr::XmlExpr(xexpr) => {
+            list_walk!(&xexpr.named_args) || list_walk!(&xexpr.args)
+        }
+        Expr::JsonValueExpr(jve) => {
+            walk_opt!(jve.raw_expr.as_deref()) || walk_opt!(jve.formatted_expr.as_deref())
+        }
+        Expr::JsonConstructorExpr(ctor) => {
+            list_walk!(&ctor.args)
+                || walk_opt!(ctor.func.as_deref())
+                || walk_opt!(ctor.coercion.as_deref())
+        }
+        Expr::JsonIsPredicate(j) => walk_opt!(j.expr.as_deref()),
+        Expr::JsonExpr(jexpr) => {
+            walk_opt!(jexpr.formatted_expr.as_deref())
+                || walk_opt!(jexpr.path_spec.as_deref())
+                || list_walk!(&jexpr.passing_values)
+                || walk_json_behavior(jexpr.on_empty.as_deref(), walker)
+                || walk_json_behavior(jexpr.on_error.as_deref(), walker)
+        }
+        Expr::NullTest(n) => walk_opt!(n.arg.as_deref()),
+        Expr::BooleanTest(b) => walk_opt!(b.arg.as_deref()),
+        Expr::CoerceToDomain(c) => walk_opt!(c.arg.as_deref()),
+        Expr::InferenceElem(n) => walk_opt!(n.expr.as_deref()),
+        Expr::ReturningExpr(r) => walk_opt!(r.retexpr.as_deref()),
+        // #[non_exhaustive]: an unmodeled future variant has no walkable
+        // children to descend (the C default elog is unreachable for trees the
+        // model can construct).
+        _ => false,
+    }
+}
+
+/// `T_JsonBehavior` recursion inside the JsonExpr walker arm.
+fn walk_json_behavior<F>(behavior: Option<&primnodes::JsonBehavior>, walker: &mut F) -> bool
+where
+    F: FnMut(&Expr) -> bool,
+{
+    match behavior.and_then(|b| b.expr.as_deref()) {
+        Some(e) => walker(e),
+        None => false,
+    }
+}
+
+/// Walk an `Option<PgBox<Expr>>` SubPlan child.
+fn walk_pgbox_opt<F>(child: &Option<mcx::PgBox<'static, Expr>>, walker: &mut F) -> bool
+where
+    F: FnMut(&Expr) -> bool,
+{
+    match child {
+        Some(b) => walker(&**b),
+        None => false,
+    }
+}
+
+/// Walk a `PgVec<PgBox<Expr>>` SubPlan args list.
+fn walk_pgvec_box<F>(list: &mcx::PgVec<'static, mcx::PgBox<'static, Expr>>, walker: &mut F) -> bool
+where
+    F: FnMut(&Expr) -> bool,
+{
+    for b in list.iter() {
+        if walker(&**b) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reborrow a `PgBox<'static, Expr>` (TargetEntry.expr) as `&Expr`.
+fn boxed_mcx_expr_as<'a>(b: &'a mcx::PgBox<'static, Expr>) -> &'a Expr {
+    &**b
+}
+
+// ===========================================================================
+// expression_tree_mutator (nodeFuncs.c:2945)
+// ===========================================================================
+
+/// `expression_tree_mutator(node, mutator, context)` (nodeFuncs.c) — make a
+/// modified copy of an expression node, invoking `mutator` on each immediate
+/// child sub-node to produce its replacement. Consumes and returns the owned
+/// node.
+///
+/// Mirrors the C "copy this node, mutate sub-nodes" structure for the modeled
+/// `Expr` variants. The SubPlan/AlternativeSubPlan children are context-
+/// allocated (`PgBox`/`PgVec`) and a mutator that wants to change them must
+/// recognize the node itself; the generic mutator returns those links unchanged
+/// (the C behavior of "simply copy the link to the inner plan").
+pub fn expression_tree_mutator<F>(mut node: Expr, mutator: &mut F) -> Expr
+where
+    F: FnMut(Expr) -> Expr,
+{
+    macro_rules! mut_box {
+        ($child:expr) => {
+            if let Some(b) = $child.take() {
+                $child = Some(Box::new(mutator(*b)));
+            }
+        };
+    }
+    macro_rules! mut_vec {
+        ($list:expr) => {{
+            let old = core::mem::take(&mut $list);
+            $list = old.into_iter().map(|e| mutator(e)).collect();
+        }};
+    }
+    macro_rules! mut_vec_opt {
+        ($list:expr) => {{
+            let old = core::mem::take(&mut $list);
+            $list = old
+                .into_iter()
+                .map(|e| e.map(|inner| mutator(inner)))
+                .collect();
+        }};
+    }
+
+    match &mut node {
+        // primitive node types: copied verbatim (no sub-nodes)
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::CaseTestExpr(_)
+        | Expr::SQLValueFunction(_)
+        | Expr::CoerceToDomainValue(_)
+        | Expr::SetToDefault(_)
+        | Expr::CurrentOfExpr(_)
+        | Expr::NextValueExpr(_)
+        | Expr::MergeSupportFunc(_)
+        | Expr::GroupingFunc(_) => {}
+        Expr::WindowFunc(w) => {
+            mut_vec!(w.args);
+            mut_box!(w.aggfilter);
+            mut_vec!(w.runCondition);
+        }
+        Expr::Aggref(_) => {
+            // Aggref.args is a TargetEntry list with context-allocated children
+            // (deep-copy goes through TargetEntry::clone_in); the generic
+            // mutator copies the Aggref verbatim, matching callers that handle
+            // aggregates specially before reaching here.
+        }
+        Expr::SubscriptingRef(s) => {
+            mut_vec_opt!(s.refupperindexpr);
+            mut_vec_opt!(s.reflowerindexpr);
+            mut_box!(s.refexpr);
+            mut_box!(s.refassgnexpr);
+        }
+        Expr::FuncExpr(f) => mut_vec!(f.args),
+        Expr::NamedArgExpr(n) => mut_box!(n.arg),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => mut_vec!(o.args),
+        Expr::ScalarArrayOpExpr(s) => mut_vec!(s.args),
+        Expr::BoolExpr(b) => mut_vec!(b.args),
+        Expr::SubLink(s) => mut_box!(s.testexpr),
+        Expr::SubPlan(_) | Expr::AlternativeSubPlan(_) => {
+            // context-allocated subplan; link copied unchanged (C behavior)
+        }
+        Expr::FieldSelect(f) => mut_box!(f.arg),
+        Expr::FieldStore(f) => {
+            mut_box!(f.arg);
+            mut_vec!(f.newvals);
+        }
+        Expr::RelabelType(r) => mut_box!(r.arg),
+        Expr::CoerceViaIO(c) => mut_box!(c.arg),
+        Expr::ArrayCoerceExpr(a) => {
+            mut_box!(a.arg);
+            mut_box!(a.elemexpr);
+        }
+        Expr::ConvertRowtypeExpr(c) => mut_box!(c.arg),
+        Expr::CollateExpr(c) => mut_box!(c.arg),
+        Expr::CaseExpr(c) => {
+            mut_box!(c.arg);
+            let old = core::mem::take(&mut c.args);
+            c.args = old
+                .into_iter()
+                .map(|mut when: CaseWhen| {
+                    mut_box!(when.expr);
+                    mut_box!(when.result);
+                    when
+                })
+                .collect();
+            mut_box!(c.defresult);
+        }
+        Expr::ArrayExpr(a) => mut_vec!(a.elements),
+        Expr::RowExpr(r) => mut_vec!(r.args),
+        Expr::RowCompareExpr(rc) => {
+            mut_vec!(rc.largs);
+            mut_vec!(rc.rargs);
+        }
+        Expr::CoalesceExpr(c) => mut_vec!(c.args),
+        Expr::MinMaxExpr(m) => mut_vec!(m.args),
+        Expr::XmlExpr(x) => {
+            mut_vec!(x.named_args);
+            mut_vec!(x.args);
+        }
+        Expr::JsonValueExpr(jve) => {
+            mut_box!(jve.raw_expr);
+            mut_box!(jve.formatted_expr);
+        }
+        Expr::JsonConstructorExpr(ctor) => {
+            mut_vec!(ctor.args);
+            mut_box!(ctor.func);
+            mut_box!(ctor.coercion);
+        }
+        Expr::JsonIsPredicate(j) => mut_box!(j.expr),
+        Expr::JsonExpr(jexpr) => {
+            mut_box!(jexpr.formatted_expr);
+            mut_box!(jexpr.path_spec);
+            mut_vec!(jexpr.passing_values);
+        }
+        Expr::NullTest(n) => mut_box!(n.arg),
+        Expr::BooleanTest(b) => mut_box!(b.arg),
+        Expr::CoerceToDomain(c) => mut_box!(c.arg),
+        Expr::InferenceElem(n) => mut_box!(n.expr),
+        Expr::ReturningExpr(r) => mut_box!(r.retexpr),
+        // #[non_exhaustive]: an unmodeled future variant is copied verbatim.
+        _ => {}
+    }
+    node
+}
+
+/// Drive `mutator` over the immediate `Box<Expr>`/`Vec<Expr>` children of a
+/// node in place (the in-place analogue used by `fix_opfuncids_walker`, where
+/// the recursion reads-and-writes the same tree rather than rebuilding it).
+fn for_each_child_mut<F>(node: &mut Expr, f: &mut F)
+where
+    F: FnMut(&mut Expr),
+{
+    macro_rules! on_box {
+        ($child:expr) => {
+            if let Some(b) = $child.as_deref_mut() {
+                f(b);
+            }
+        };
+    }
+    macro_rules! on_vec {
+        ($list:expr) => {
+            for e in $list.iter_mut() {
+                f(e);
+            }
+        };
+    }
+    macro_rules! on_vec_opt {
+        ($list:expr) => {
+            for e in $list.iter_mut() {
+                if let Some(inner) = e.as_mut() {
+                    f(inner);
+                }
+            }
+        };
+    }
+    match node {
+        Expr::WindowFunc(w) => {
+            on_vec!(w.args);
+            on_box!(w.aggfilter);
+            on_vec!(w.runCondition);
+        }
+        Expr::GroupingFunc(g) => on_vec!(g.args),
+        Expr::SubscriptingRef(s) => {
+            on_vec_opt!(s.refupperindexpr);
+            on_vec_opt!(s.reflowerindexpr);
+            on_box!(s.refexpr);
+            on_box!(s.refassgnexpr);
+        }
+        Expr::FuncExpr(fx) => on_vec!(fx.args),
+        Expr::NamedArgExpr(n) => on_box!(n.arg),
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => on_vec!(o.args),
+        Expr::ScalarArrayOpExpr(s) => on_vec!(s.args),
+        Expr::BoolExpr(b) => on_vec!(b.args),
+        Expr::SubLink(s) => on_box!(s.testexpr),
+        Expr::FieldSelect(fs) => on_box!(fs.arg),
+        Expr::FieldStore(fs) => {
+            on_box!(fs.arg);
+            on_vec!(fs.newvals);
+        }
+        Expr::RelabelType(r) => on_box!(r.arg),
+        Expr::CoerceViaIO(c) => on_box!(c.arg),
+        Expr::ArrayCoerceExpr(a) => {
+            on_box!(a.arg);
+            on_box!(a.elemexpr);
+        }
+        Expr::ConvertRowtypeExpr(c) => on_box!(c.arg),
+        Expr::CollateExpr(c) => on_box!(c.arg),
+        Expr::CaseExpr(c) => {
+            on_box!(c.arg);
+            for when in c.args.iter_mut() {
+                on_box!(when.expr);
+                on_box!(when.result);
+            }
+            on_box!(c.defresult);
+        }
+        Expr::ArrayExpr(a) => on_vec!(a.elements),
+        Expr::RowExpr(r) => on_vec!(r.args),
+        Expr::RowCompareExpr(rc) => {
+            on_vec!(rc.largs);
+            on_vec!(rc.rargs);
+        }
+        Expr::CoalesceExpr(c) => on_vec!(c.args),
+        Expr::MinMaxExpr(m) => on_vec!(m.args),
+        Expr::XmlExpr(x) => {
+            on_vec!(x.named_args);
+            on_vec!(x.args);
+        }
+        Expr::JsonValueExpr(jve) => {
+            on_box!(jve.raw_expr);
+            on_box!(jve.formatted_expr);
+        }
+        Expr::JsonConstructorExpr(ctor) => {
+            on_vec!(ctor.args);
+            on_box!(ctor.func);
+            on_box!(ctor.coercion);
+        }
+        Expr::JsonIsPredicate(j) => on_box!(j.expr),
+        Expr::JsonExpr(jexpr) => {
+            on_box!(jexpr.formatted_expr);
+            on_box!(jexpr.path_spec);
+            on_vec!(jexpr.passing_values);
+        }
+        Expr::NullTest(n) => on_box!(n.arg),
+        Expr::BooleanTest(b) => on_box!(b.arg),
+        Expr::CoerceToDomain(c) => on_box!(c.arg),
+        Expr::InferenceElem(n) => on_box!(n.expr),
+        Expr::ReturningExpr(r) => on_box!(r.retexpr),
+        // primitive / context-allocated / TargetEntry-bearing: no in-tree
+        // Box/Vec<Expr> children to descend
+        _ => {}
+    }
+}
+
+// ===========================================================================
+// Error constructors (the C elog/ereport surface)
+// ===========================================================================
+
+fn untransformed_sublink_error(what: &str) -> PgResult<types_error::PgError> {
+    // C: elog(ERROR, "cannot get %s for untransformed sublink")
+    Ok(types_error::PgError::error(format!(
+        "cannot get {what} for untransformed sublink"
+    )))
+}
+
+fn unrecognized_node_type_error(name: &str) -> PgResult<types_error::PgError> {
+    // C: elog(ERROR, "unrecognized node type: %d", nodeTag(node))
+    Ok(types_error::PgError::error(format!(
+        "unrecognized node type: {name}"
+    )))
+}
+
+fn no_array_type_error(elem_type: Oid) -> PgResult<types_error::PgError> {
+    // C: ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+    //     errmsg("could not find array type for data type %s", format_type_be(...)))
+    let tyname = format_type::format_type_be_str::call(elem_type)?;
+    Ok(types_error::PgError::error(format!(
+        "could not find array type for data type {tyname}"
+    ))
+    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT))
+}
+
+/// Diagnostic name of an `Expr` variant for the unrecognized-node error.
+fn expr_variant_name(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::SubPlan(_) => "SubPlan",
+        Expr::AlternativeSubPlan(_) => "AlternativeSubPlan",
+        Expr::InferenceElem(_) => "InferenceElem",
+        Expr::ReturningExpr(_) => "ReturningExpr",
+        _ => "expression",
+    }
+}
+
+// ===========================================================================
+// Seam wiring (the inward seams this family owns)
+// ===========================================================================
+
+/// Install the `backend-nodes-nodeFuncs-seams` this family owns. Called from
+/// the crate `init_seams()`.
+pub fn init_seams() {
+    use backend_nodes_nodeFuncs_seams as seams;
+
+    seams::expr_type_info::set(seam_expr_type_info);
+    seams::expr_type::set(seam_expr_type);
+    seams::call_expr_argtype::set(seam_call_expr_argtype);
+    seams::call_expr_arg_stable::set(seam_call_expr_arg_stable);
+    seams::expr_variadic::set(seam_expr_variadic);
+    seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
+    seams::expr_input_collation_node::set(seam_expr_input_collation_node);
+    // `get_expr_result_type_node` reaches into funcapi/tupdesc catalog machinery
+    // owned by backend-utils-fmgr-funcapi (CreateTemplateTupleDesc /
+    // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
+    // lookup spine is not part of this pure-node-inspection family, so the seam
+    // stays installed by its real owner. Not set here.
+}
+
+/// `expr_type_info(expr)` seam — the `(typid, typmod, collation)` triple read
+/// together (nodeFuncs.c `exprType`/`exprTypmod`/`exprCollation`).
+fn seam_expr_type_info(
+    expr: &Expr,
+) -> PgResult<backend_nodes_nodeFuncs_seams::ExprTypeInfo> {
+    Ok(backend_nodes_nodeFuncs_seams::ExprTypeInfo {
+        typid: expr_type(Some(expr))?,
+        typmod: expr_typmod(Some(expr))?,
+        collation: expr_collation(Some(expr))?,
+    })
+}
+
+/// `exprType(ExternalFnExpr)` seam (fmgr `get_fn_expr_rettype` path).
+///
+/// The `ExternalFnExpr` carrier is tag-only (`types_fmgr::ExternalFnExpr {
+/// tag }`) — the fmgr/funcapi consumers build it from `node.tag()` of the
+/// not-yet-ported plan/expression `Node`, carrying only the node tag. The
+/// argument-bearing expression nodes whose result type lives in a struct field
+/// (`FuncExpr.funcresulttype`, `OpExpr.opresulttype`, …) are not constructible
+/// from a bare tag, so the `exprType` lookup falls through to `InvalidOid` —
+/// exactly the C fall-through for a node kind whose type cannot be read. (The
+/// real, field-bearing entry point this family installs is `expr_type_info`
+/// over a borrowed `&Expr`.)
+fn seam_expr_type(_expr: types_fmgr::ExternalFnExpr) -> Oid {
+    InvalidOid
+}
+
+/// `get_call_expr_argtype(expr, argnum)` (fmgr.c) over the tag-only carrier.
+/// The per-argument expression list is not carried by the tag-only
+/// `ExternalFnExpr`, so this returns `InvalidOid` (out-of-range / unhandled
+/// kind), the documented C fall-through.
+fn seam_call_expr_argtype(_expr: types_fmgr::ExternalFnExpr, _argnum: i32) -> Oid {
+    InvalidOid
+}
+
+/// `get_call_expr_arg_stable(expr, argnum)` (fmgr.c) over the tag-only carrier.
+/// The argument node kind is not carried, so this conservatively returns
+/// `false` (the C fall-through: treat the argument as non-stable).
+fn seam_call_expr_arg_stable(_expr: types_fmgr::ExternalFnExpr, _argnum: i32) -> bool {
+    false
+}
+
+/// `get_fn_expr_variadic` body (fmgr.c): `IsA(expr, FuncExpr) ? funcvariadic :
+/// false`. The `funcvariadic` flag lives in a `FuncExpr` field the tag-only
+/// carrier does not carry, so this returns `false` (the C fall-through for a
+/// non-FuncExpr or unknown node).
+fn seam_expr_variadic(_expr: types_fmgr::ExternalFnExpr) -> bool {
+    false
+}
+
+/// `get_call_expr_argtype(call_expr, argnum)` keyed by the plan-tree `Node`
+/// (funcapi result-type cluster's `call_expr`). The argument-bearing expression
+/// nodes (`FuncExpr`/`OpExpr`/…) are not modeled by the plan-tree `Node` enum
+/// (it carries only plan nodes), so this always falls through to `InvalidOid`,
+/// matching the C fall-through for an unhandled kind.
+fn seam_get_call_expr_argtype_node(
+    _call_expr: &types_nodes::nodes::Node<'_>,
+    _argnum: i32,
+) -> Oid {
+    InvalidOid
+}
+
+/// `exprInputCollation(node)` keyed by the plan-tree `Node`. The expression
+/// nodes that carry an input collation are not modeled by the plan-tree `Node`
+/// enum, so this returns `InvalidOid` (the C fall-through for an unhandled node
+/// kind).
+fn seam_expr_input_collation_node(_node: &types_nodes::nodes::Node<'_>) -> Oid {
+    InvalidOid
+}
+
+// `firstColType` helper for AlternativeSubPlan: read the shared first-column
+// type of the choice's SubPlans (they all return the same thing).
+trait SubPlanFirstCol {
+    fn firstColType_via_sublink(&self) -> PgResult<Oid>;
+}
+impl SubPlanFirstCol for mcx::PgBox<'_, primnodes::SubPlan<'_>> {
+    fn firstColType_via_sublink(&self) -> PgResult<Oid> {
+        if self.subLinkType == SubLinkType::Expr
+            || self.subLinkType == SubLinkType::Array
+        {
+            let mut t = self.firstColType;
+            if self.subLinkType == SubLinkType::Array {
+                t = lsyscache::get_promoted_array_type::call(t)?;
+                if !oid_is_valid(t) {
+                    return Err(no_array_type_error(self.firstColType)?);
+                }
+            }
+            Ok(t)
+        } else if self.subLinkType == SubLinkType::MultiExpr {
+            Ok(RECORDOID)
+        } else {
+            Ok(BOOLOID)
+        }
+    }
+}

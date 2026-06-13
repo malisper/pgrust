@@ -4285,6 +4285,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-transam-xact-seams",
+ "backend-nodes-core-seams",
+ "backend-nodes-core-tidbitmap-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-params-seams",
+ "backend-nodes-read-seams",
+ "backend-nodes-readfuncs-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "common-hashfn",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-fmgr",
+ "types-nodes",
+ "types-parsenodes",
+ "types-pathnodes",
+ "types-storage",
+ "types-tidbitmap",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-nodes-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -4292,6 +4326,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-tuple",
 ]
 
@@ -4377,6 +4412,16 @@ dependencies = [
 
 [[package]]
 name = "backend-nodes-read-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-nodes-readfuncs-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
@@ -9432,6 +9477,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-nodes-core",
  "backend-nodes-extensible",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
