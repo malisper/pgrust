@@ -21,26 +21,48 @@
 use types_datum::ExpandedObjectRef;
 use types_error::PgResult;
 
-/// `EOH_get_flat_size(eohptr)` (expandeddatum.c): the number of bytes the
-/// expanded object would occupy once flattened. C dispatches through
-/// `eohptr->eoh_methods->get_flat_size`.
+/// `EOH_get_flat_size(eohptr)` (expandeddatum.c):
+///
+/// ```c
+/// Size
+/// EOH_get_flat_size(ExpandedObjectHeader *eohptr)
+/// {
+///     return eohptr->eoh_methods->get_flat_size(eohptr);
+/// }
+/// ```
+///
+/// A one-line convenience wrapper that chases the object's method table and
+/// invokes its `get_flat_size`. The method itself belongs to the concrete
+/// expanded type (expanded record / expanded array), so in the owned model it
+/// is the [`eom_get_flat_size`](backend_utils_adt_expanded_methods_seams::eom_get_flat_size)
+/// seam — exactly mirroring the C indirection through `eoh_methods`.
 ///
 /// This is the implementation installed into
 /// `backend_utils_adt_misc2_seams::eoh_get_flat_size` so external flatteners
 /// (heaptuple) can size an expanded datum without depending on this crate.
-pub fn eoh_get_flat_size(_eoh: ExpandedObjectRef<'_>) -> PgResult<usize> {
-    // Dispatches to the concrete expanded type's get_flat_size method
-    // (expanded record / expanded array). Filled when the keystone's method
-    // table lands alongside the expandedrecord family.
-    todo!("EOH_get_flat_size: dispatch eoh_methods->get_flat_size")
+pub fn eoh_get_flat_size(eoh: ExpandedObjectRef<'_>) -> PgResult<usize> {
+    backend_utils_adt_expanded_methods_seams::eom_get_flat_size::call(eoh)
 }
 
 /// `EOH_flatten_into(eohptr, result, allocated_size)` (expandeddatum.c):
-/// flatten the expanded object into `dest`, which is exactly
-/// `eoh_get_flat_size` bytes long. C dispatches through
-/// `eohptr->eoh_methods->flatten_into`.
+///
+/// ```c
+/// void
+/// EOH_flatten_into(ExpandedObjectHeader *eohptr,
+///                  void *result, Size allocated_size)
+/// {
+///     eohptr->eoh_methods->flatten_into(eohptr, result, allocated_size);
+/// }
+/// ```
+///
+/// Flatten the expanded object into `dest`, which is exactly the preceding
+/// `eoh_get_flat_size` bytes long (C passes `allocated_size` for the method to
+/// cross-check; the slice length carries it here). Dispatches through the
+/// object's method table — the concrete expanded type's `flatten_into`, modeled
+/// as the [`eom_flatten_into`](backend_utils_adt_expanded_methods_seams::eom_flatten_into)
+/// seam.
 ///
 /// Installed into `backend_utils_adt_misc2_seams::eoh_flatten_into`.
-pub fn eoh_flatten_into(_eoh: ExpandedObjectRef<'_>, _dest: &mut [u8]) -> PgResult<()> {
-    todo!("EOH_flatten_into: dispatch eoh_methods->flatten_into")
+pub fn eoh_flatten_into(eoh: ExpandedObjectRef<'_>, dest: &mut [u8]) -> PgResult<()> {
+    backend_utils_adt_expanded_methods_seams::eom_flatten_into::call(eoh, dest)
 }

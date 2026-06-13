@@ -18,3 +18,8 @@ mcx = { path = "../mcx" }
 # backend-access-common-heaptuple). The keystone installs these from
 # init_seams().
 backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+
+# Outward seam crate for the per-type ExpandedObjectMethods table that the
+# keystone EOH_get_flat_size / EOH_flatten_into dispatch through. Owned by the
+# concrete expanded types (expanded record / expanded array), still unported.
+backend-utils-adt-expanded-methods-seams = { path = "../backend-utils-adt-expanded-methods-seams" }

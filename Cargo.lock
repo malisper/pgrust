@@ -2921,6 +2921,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-expanded-methods-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -2934,6 +2943,7 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-expanded-methods-seams",
  "backend-utils-adt-misc2-seams",
  "mcx",
  "types-datum",
