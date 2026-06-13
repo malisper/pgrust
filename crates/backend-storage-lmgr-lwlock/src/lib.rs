@@ -1584,6 +1584,11 @@ fn release_held(lock: *const LWLock) -> PgResult<()> {
 /// `PG_LWLOCK(18, TwoPhaseState)`).
 const TWOPHASE_STATE_LOCK_OFFSET: usize = 18;
 
+/// `RelationMappingLock` — offset 25 in `MainLWLockArray` (`lwlocklist.h`
+/// `PG_LWLOCK(8, RelationMapping)`; the `8` is the historical NAME id, the
+/// runtime array offset is 25, matching `BUILTIN_TRANCHE_NAMES[25]`).
+const RELATION_MAPPING_LOCK_OFFSET: usize = 25;
+
 /// `lwlock_acquire` seam shape: acquire, then hand back the guard wrapping
 /// the still-borrowed lock (Drop = release, the C `LWLockReleaseAll`
 /// error-recovery backstop).
@@ -1648,6 +1653,70 @@ fn twophase_state_held_exclusive_seam() -> bool {
     LWLockHeldByMeInMode(lock, LW_EXCLUSIVE)
 }
 
+/// `lock_relation_mapping` seam shape: acquire `RelationMappingLock` in the
+/// requested mode (`exclusive ? LW_EXCLUSIVE : LW_SHARED`). `MyProcNumber` is
+/// read from the globals seam (the C ambient per-backend global).
+fn lock_relation_mapping_seam(exclusive: bool) -> PgResult<()> {
+    let mode = if exclusive { LW_EXCLUSIVE } else { LW_SHARED };
+    let lock = main_lock(RELATION_MAPPING_LOCK_OFFSET);
+    LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `unlock_relation_mapping` seam shape: release `RelationMappingLock`.
+fn unlock_relation_mapping_seam() -> PgResult<()> {
+    let lock = main_lock(RELATION_MAPPING_LOCK_OFFSET);
+    LWLockRelease(lock)
+}
+
+/// `relation_mapping_lock_held_by_me_exclusive` seam shape:
+/// `LWLockHeldByMeInMode(RelationMappingLock, LW_EXCLUSIVE)`.
+fn relation_mapping_lock_held_by_me_exclusive_seam() -> bool {
+    let lock = main_lock(RELATION_MAPPING_LOCK_OFFSET);
+    LWLockHeldByMeInMode(lock, LW_EXCLUSIVE)
+}
+
+/// `lwlock_acquire_proc_array` seam shape: acquire the built-in `ProcArrayLock`
+/// in `mode`. `MyProcNumber` is read from the globals seam (the C ambient
+/// per-backend global).
+fn lwlock_acquire_proc_array_seam(mode: LWLockMode) -> PgResult<()> {
+    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `lwlock_release_proc_array` seam shape: release `ProcArrayLock`.
+fn lwlock_release_proc_array_seam() -> PgResult<()> {
+    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    LWLockRelease(lock)
+}
+
+/// `lwlock_held_by_me_main` seam shape:
+/// `LWLockHeldByMe(&MainLWLockArray[offset].lock)`.
+fn lwlock_held_by_me_main_seam(offset: usize) -> bool {
+    let lock = main_lock(offset);
+    LWLockHeldByMe(lock)
+}
+
+/// `lwlock_held_by_me_in_mode_main` seam shape:
+/// `LWLockHeldByMeInMode(&MainLWLockArray[offset].lock, mode)`.
+fn lwlock_held_by_me_in_mode_main_seam(offset: usize, mode: LWLockMode) -> bool {
+    let lock = main_lock(offset);
+    LWLockHeldByMeInMode(lock, mode)
+}
+
+/// `create_lwlocks` seam shape: the C `CreateLWLocks(void)`. The ported body
+/// threads an explicit `Mcx` and `IsUnderPostmaster` (the C ambient globals).
+/// `IsUnderPostmaster` comes from the globals seam; the `Mcx` is a throwaway
+/// context — `CreateLWLocks`'s real allocation is a plain `Vec`, and the
+/// `Mcx` is used only to construct the OOM error and child contexts in
+/// `LWLockRegisterTranche`, so a fresh context preserves behaviour (the same
+/// explicit-Mcx-threading pattern proc.c's `InitProcGlobal`/`InitProcess`
+/// inward seams use). The published `&'static LWLockTable` is discarded:
+/// consumers reach the table through `MAIN_LWLOCKS`/`main_lock`.
+fn create_lwlocks_seam() -> PgResult<()> {
+    let cx = mcx::MemoryContext::new("CreateLWLocks");
+    CreateLWLocks(cx.mcx(), globals::is_under_postmaster::call()).map(|_| ())
+}
+
 /// Install every seam declared in `backend-storage-lmgr-lwlock-seams`.
 pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_initialize::set(LWLockInitialize);
@@ -1661,6 +1730,23 @@ pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::twophase_state_held_exclusive::set(
         twophase_state_held_exclusive_seam,
     );
+    backend_storage_lmgr_lwlock_seams::lock_relation_mapping::set(lock_relation_mapping_seam);
+    backend_storage_lmgr_lwlock_seams::unlock_relation_mapping::set(unlock_relation_mapping_seam);
+    backend_storage_lmgr_lwlock_seams::relation_mapping_lock_held_by_me_exclusive::set(
+        relation_mapping_lock_held_by_me_exclusive_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_acquire_proc_array::set(
+        lwlock_acquire_proc_array_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_release_proc_array::set(
+        lwlock_release_proc_array_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_main::set(lwlock_held_by_me_main_seam);
+    backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_in_mode_main::set(
+        lwlock_held_by_me_in_mode_main_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_shmem_size::set(LWLockShmemSize);
+    backend_storage_lmgr_lwlock_seams::create_lwlocks::set(create_lwlocks_seam);
 }
 
 #[cfg(test)]
