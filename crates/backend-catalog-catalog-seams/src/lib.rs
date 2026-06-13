@@ -22,10 +22,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsCatalogRelation(relation)` (catalog/catalog.c): is this relation a
+    /// system catalog (`IsCatalogRelationOid(RelationGetRelid(relation))`)?
+    /// Pure OID-range check; infallible.
+    pub fn is_catalog_relation(relation: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `IsToastRelation(relation)` (catalog/catalog.c): is this relation in the
+    /// `pg_toast` namespace (`relation->rd_rel->relnamespace ==
+    /// PG_TOAST_NAMESPACE`)? Pure field read; infallible.
+    pub fn is_toast_relation(relation: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation a
     /// shared catalog (lives in the global tablespace, visible from every
     /// database)? Lookup against a fixed OID set — infallible.
     pub fn is_shared_relation(relation_id: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `RelationInvalidatesSnapshotsOnly(relid)` (catalog/catalog.c): for the
+    /// few catalogs whose tuples affect only saved snapshots (not catcache or
+    /// relcache), this returns true so inval.c queues a snapshot inval instead.
+    /// Pure OID compare; infallible.
+    pub fn relation_invalidates_snapshots_only(relation_id: Oid) -> bool
 );
 
 seam_core::seam!(

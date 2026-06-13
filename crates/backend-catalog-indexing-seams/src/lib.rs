@@ -9,7 +9,10 @@
 
 use types_catalog::catalog_dependency::FormData_pg_depend;
 use types_catalog::catalog_shdepend::FormData_pg_shdepend;
-use types_core::primitive::Oid;
+use types_catalog::opclasscmds_catalog::{
+    FormData_pg_amop, FormData_pg_amproc, FormData_pg_opclass, FormData_pg_opfamily,
+};
+use types_core::Oid;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_tuple::heaptuple::ItemPointerData;
@@ -127,4 +130,51 @@ seam_core::seam!(
         rel: &RelationData<'_>,
         forms: &[FormData_pg_shdepend],
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, OpfamilyOidIndexId, Anum_pg_opfamily_oid)` +
+    /// `heap_form_tuple` + `CatalogTupleInsert` for one pg_opfamily row
+    /// (opclasscmds.c `CreateOpFamily`): assign the row OID, form the tuple
+    /// against the descriptor, insert it (with index maintenance), and return
+    /// the assigned OID. `Err` carries the heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_opfamily(
+        rel: &RelationData<'_>,
+        form: &FormData_pg_opfamily,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, OpclassOidIndexId, Anum_pg_opclass_oid)` +
+    /// `heap_form_tuple` + `CatalogTupleInsert` for one pg_opclass row
+    /// (opclasscmds.c `DefineOpClass`): returns the assigned OID. `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_opclass(
+        rel: &RelationData<'_>,
+        form: &FormData_pg_opclass,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, AccessMethodOperatorOidIndexId,
+    /// Anum_pg_amop_oid)` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_amop row (opclasscmds.c `storeOperators`): returns the assigned OID
+    /// (the `entryoid` the caller records dependencies against). `Err` carries
+    /// the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_amop(
+        rel: &RelationData<'_>,
+        form: &FormData_pg_amop,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, AccessMethodProcedureOidIndexId,
+    /// Anum_pg_amproc_oid)` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_amproc row (opclasscmds.c `storeProcedures`): returns the assigned
+    /// OID. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_amproc(
+        rel: &RelationData<'_>,
+        form: &FormData_pg_amproc,
+    ) -> PgResult<Oid>
 );

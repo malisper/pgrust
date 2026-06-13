@@ -55,6 +55,8 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_rel: FormData_pg_class {
             relname: PgString::from_str_in("t", mcx).unwrap(),
             relnamespace: 0,
+            relowner: 0,
+            relrowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             relallvisible: 0,

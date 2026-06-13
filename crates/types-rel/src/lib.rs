@@ -39,6 +39,10 @@ pub struct FormData_pg_class<'mcx> {
     /// `Oid relnamespace` — OID of the namespace containing this relation
     /// (`RelationGetNamespace`).
     pub relnamespace: Oid,
+    /// `Oid relowner` — the relation's owning role OID.
+    pub relowner: Oid,
+    /// `bool relrowsecurity` — row-level security is enabled on the relation.
+    pub relrowsecurity: bool,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
@@ -50,8 +54,6 @@ pub struct FormData_pg_class<'mcx> {
     /// `Oid reltablespace` — the relation's tablespace, or `InvalidOid` for
     /// the database's default tablespace.
     pub reltablespace: Oid,
-    /// `Oid relowner` — the relation owner's role OID.
-    pub relowner: Oid,
     /// `RelFileNumber relfilenode` — the on-disk file OID, or
     /// `InvalidRelFileNumber` for a relation that uses the relfilenumber map.
     pub relfilenode: Oid,
