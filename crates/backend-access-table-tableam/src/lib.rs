@@ -304,6 +304,13 @@ pub fn table_index_fetch_begin<'mcx>(
     (am(rel).index_fetch_begin)(rel)
 }
 
+/// `table_index_fetch_reset(scan)` (tableam.h inline) — release any resources
+/// (e.g. buffer pins) held by the index fetch, without ending it.
+pub fn table_index_fetch_reset(scan: &mut IndexFetchTableData<'_>) -> PgResult<()> {
+    let routine = am(&scan.rel);
+    (routine.index_fetch_reset)(scan)
+}
+
 /// `table_index_fetch_end(scan)` (tableam.h inline).
 pub fn table_index_fetch_end(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()> {
     let routine = am(&scan.rel);

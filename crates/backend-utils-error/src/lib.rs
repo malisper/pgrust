@@ -118,6 +118,7 @@ pub fn init_seams() {
     use types_error::PGErrorVerbosity;
 
     backend_utils_error_seams::ereport::set(stack::ThrowErrorData);
+    backend_utils_error_seams::sqlstate_for_file_access::set(errno::sqlstate_for_file_access);
 
     vars::log_min_messages.install(GucVarAccessors {
         get: || config::log_min_messages().0,

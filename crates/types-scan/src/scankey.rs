@@ -14,6 +14,20 @@ pub const BTEqualStrategyNumber: StrategyNumber = 3;
 pub const BTGreaterEqualStrategyNumber: StrategyNumber = 4;
 pub const BTGreaterStrategyNumber: StrategyNumber = 5;
 
+// `sk_flags` bits (`access/skey.h`).
+/// `SK_ISNULL` — `sk_argument` is NULL.
+pub const SK_ISNULL: i32 = 0x0001;
+/// `SK_SEARCHNULL` — scankey represents "col IS NULL".
+pub const SK_SEARCHNULL: i32 = 0x0040;
+
+// nbtree-private `sk_flags` bits (`access/nbtree.h`).
+/// `SK_BT_SKIP` — skip array on a column without an input `=` condition.
+pub const SK_BT_SKIP: i32 = 0x00040000;
+/// `SK_BT_MINVAL` — invalid `sk_argument`, use low_compare.
+pub const SK_BT_MINVAL: i32 = 0x00080000;
+/// `SK_BT_MAXVAL` — invalid `sk_argument`, use high_compare.
+pub const SK_BT_MAXVAL: i32 = 0x00100000;
+
 /// `ScanKeyData` (`access/skey.h`) — one search condition for an index or heap
 /// scan. `sk_func` is trimmed to the procedure OID ([`FmgrInfo`]); the scan
 /// code performs the real fmgr lookup when it consumes the key.
