@@ -65,3 +65,20 @@ seam_core::seam!(
         val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form:
+    /// one-shot lookup + call of a type's text output function on a bare
+    /// `Datum` (the caller has the value as a `Datum`, not a typed
+    /// `TupleValue` — e.g. the partition-key values in
+    /// `ExecBuildSlotPartitionKeyDescription`). The output function decodes the
+    /// `Datum` per its own known type. The C `char *` result crosses as its
+    /// NUL-excluded bytes allocated in `mcx`. `Err` carries the lookup
+    /// failure, the strict-null `elog`, and whatever the output function
+    /// raises.
+    pub fn oid_output_function_call_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        val: Datum,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);

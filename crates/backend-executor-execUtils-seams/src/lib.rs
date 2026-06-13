@@ -41,6 +41,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetRootToChildMap(resultRelInfo, estate)` (execUtils.c): the map
+    /// needed to convert the root partitioned table's tuples to the rowtype of
+    /// the given child result relation (id into the EState pool), computed on
+    /// first use. `Ok(None)` (the C `NULL` map) means no conversion is needed.
+    /// The C returns a borrowed `TupleConversionMap *`; the owned model returns
+    /// a copy of the map's `attrMap` allocated in `mcx`, so the caller can
+    /// re-borrow the estate to apply it. Fallible on OOM / catalog reads.
+    pub fn exec_get_root_to_child_map<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `GetPerTupleExprContext(estate)` / `MakePerTupleExprContext(estate)`
+    /// (executor.h / execUtils.c): the EState's per-output-tuple expression
+    /// context (`es_per_tuple_exprcontext`), created on first use. Returns its
+    /// id into the EState `ExprContext` pool. Creating it allocates in the
+    /// per-query context, so the call is fallible on OOM.
+    pub fn get_per_tuple_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_nodes::EcxtId>
+);
+
+seam_core::seam!(
     /// `ExecAssignProjectionInfo(planstate, inputDesc)` (execUtils.c): build
     /// the node's `ps_ProjInfo` from its result slot and target list (using the
     /// node's `ps_ResultTupleSlot`/`ps_ExprContext`). The owned model lends the

@@ -186,6 +186,10 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_ReturningSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_AllNullSlot` — all-NULL slot for RETURNING.
     pub ri_AllNullSlot: Option<SlotId>,
+    /// `TupleTableSlot *ri_PartitionTupleSlot` — non-NULL if the relation is a
+    /// partition whose rowtype differs from the root partitioned table's; used
+    /// to convert tuples for the partition's own layout. `None` is the C NULL.
+    pub ri_PartitionTupleSlot: Option<SlotId>,
     /// `Bitmapset *ri_extraUpdatedCols` — generated columns updated.
     pub ri_extraUpdatedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `bool ri_extraUpdatedCols_valid`.
