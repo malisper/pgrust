@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod buf;
 pub mod latch;
 pub mod lock;
 pub mod relfilelocator;
@@ -18,6 +19,7 @@ pub mod storage;
 pub mod sync;
 pub mod waiteventset;
 
+pub use buf::*;
 pub use lock::*;
 pub use relfilelocator::*;
 pub use sinval::*;

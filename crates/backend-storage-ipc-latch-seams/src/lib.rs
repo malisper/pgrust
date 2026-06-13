@@ -14,6 +14,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SetLatch(&GetPGProcByNumber(procno)->procLatch)`: set the process latch
+    /// of the backend identified by `procno`. The latch crate resolves the
+    /// target PGPROC's latch when installing. Async-signal-safe and infallible
+    /// in C.
+    pub fn set_latch_for_procno(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
     /// `ResetLatch(latch)`: clear the given latch. C call sites that pass
     /// `MyLatch` translate to an explicit handle the caller holds.
     /// Infallible in C.
@@ -71,4 +79,24 @@ seam_core::seam!(
         timeout: i64,
         wait_event_info: u32,
     ) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `WaitLatchOrSocket(MyLatch, wakeEvents, sock, timeout, wait_event_info)`
+    /// — like `wait_latch_my_latch` but also wakes on socket readiness.
+    pub fn wait_latch_or_socket(
+        wake_events: i32,
+        sock: types_core::pgsocket,
+        timeout: i64,
+        wait_event_info: types_core::uint32
+    ) -> i32
+);
+
+seam_core::seam!(
+    /// `SetLatch(&proc->procLatch)` for the backend whose PID is `pid`: wake
+    /// another backend by its shared `PGPROC` latch. The launcher names the
+    /// target by PID (it reads `proc->pid` from the worker slot); the latch
+    /// unit maps the PID to that backend's shared latch. Async-signal-safe and
+    /// infallible in C.
+    pub fn set_latch_for_proc_pid(pid: i32)
 );
