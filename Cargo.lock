@@ -6807,6 +6807,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-jsonb-util"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
+ "types-numeric",
+]
+
+[[package]]
 name = "backend-utils-adt-jsonfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -9280,6 +9298,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-jsonb"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
+]
+
+[[package]]
 name = "types-locale"
 version = "0.0.0"
 dependencies = [
@@ -9348,6 +9373,13 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-numeric"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
 ]
 
 [[package]]
