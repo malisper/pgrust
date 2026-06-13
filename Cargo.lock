@@ -6240,6 +6240,7 @@ dependencies = [
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-array",
@@ -6248,6 +6249,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+ "types-typcache",
 ]
 
 [[package]]
