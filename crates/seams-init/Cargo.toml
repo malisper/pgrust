@@ -36,6 +36,7 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
+backend-postmaster-pgarch = { path = "../backend-postmaster-pgarch" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }

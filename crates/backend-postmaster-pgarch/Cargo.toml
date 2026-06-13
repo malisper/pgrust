@@ -1,0 +1,60 @@
+[package]
+name = "backend-postmaster-pgarch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_postmaster_pgarch"
+path = "src/lib.rs"
+
+[dependencies]
+# own seam crate (inward)
+backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" }
+
+# direct deps (acyclic leaf subsystems)
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# outward seam crates (cyclic / not-yet-ported owners)
+backend-archive-shell-archive-seams = { path = "../backend-archive-shell-archive-seams" }
+backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess-seams" }
+backend-storage-aio-core-seams = { path = "../backend-storage-aio-core-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-storage-file-seams = { path = "../backend-storage-file-seams" }
+backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
+backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+backend-utils-resowner-all-seams = { path = "../backend-utils-resowner-all-seams" }
+port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+libc = "0.2"
+
+# shared types
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
+types-pgarch = { path = "../types-pgarch" }
+types-pgstat = { path = "../types-pgstat" }
+types-signal = { path = "../types-signal" }
+types-startup = { path = "../types-startup" }
+types-storage = { path = "../types-storage" }
+types-wal = { path = "../types-wal" }
+
+[dev-dependencies]

@@ -3,6 +3,13 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 seam_core::seam!(
+    /// `set_ps_display(activity)` — set the ps "activity" portion of the
+    /// process title (clears any suffix). The implementation copies the
+    /// string. Infallible in C.
+    pub fn set_ps_display(activity: &str)
+);
+
+seam_core::seam!(
     /// `set_ps_display_suffix(suffix)` — append a fixed suffix (e.g.
     /// "waiting") to the ps activity display. The implementation copies the
     /// string.
