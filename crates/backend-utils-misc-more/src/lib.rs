@@ -44,6 +44,10 @@ pub fn init_seams() {
         ps_status::update_process_title,
     );
 
+    // utils/misc/superuser.c inward seams.
+    backend_utils_misc_superuser_seams::superuser::set(superuser::superuser);
+    backend_utils_misc_superuser_seams::superuser_arg::set(superuser::superuser_arg);
+
     // The `update_process_title` GUC variable storage is owned by ps_status.c.
     vars::update_process_title.install(GucVarAccessors {
         get: ps_status::update_process_title,
