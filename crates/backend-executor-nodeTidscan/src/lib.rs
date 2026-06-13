@@ -38,7 +38,7 @@ use backend_executor_execCurrent_seams as execCurrent;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execMain_seams as execMain;
 use backend_executor_execMain_seams::EpqScanFetch;
-use backend_executor_execScan_seams as execScan;
+use backend_executor_nodeTidscan_seams as execScan;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop_postgres;
@@ -111,6 +111,15 @@ pub struct TidScanState<'mcx> {
     /// `ItemPointerData *tss_TidList` — sorted, de-duplicated TID array.
     /// `None` is the C `NULL` (TID list not computed yet).
     pub tss_TidList: Option<PgVec<'mcx, ItemPointerData>>,
+    /// `((Scan *) node->ss.ps.plan)->scanrelid` — the range-table index of the
+    /// scanned base relation. In C this is read off the `Scan` plan node via
+    /// the `PlanState.plan` back-link; the trimmed [`ScanStateData`]/
+    /// `PlanStateData` does not retain that borrow, so `ExecInitTidScan`
+    /// captures the plan's `scanrelid` here for the EvalPlanQual path
+    /// (`ExecScanFetch`) to recover. A `TidScan` always scans a base relation,
+    /// so this is always a real positive RTE index (never the `0`
+    /// ForeignScan/CustomScan pushed-down-join sentinel).
+    pub scanrelid: Index,
 }
 
 impl<'mcx> TidScanState<'mcx> {
@@ -125,6 +134,7 @@ impl<'mcx> TidScanState<'mcx> {
             tss_NumTids: 0,
             tss_TidPtr: -1,
             tss_TidList: None,
+            scanrelid: 0,
         }
     }
 }
@@ -587,11 +597,11 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
     // Get a tuple from the access method. Loop until we obtain a tuple that
     // passes the qualification.
     loop {
-        let have_tuple = ExecScanFetch(node, estate)?;
+        let slot = ExecScanFetch(node, estate)?;
 
         // If the slot returned by the accessMtd contains NULL, there is nothing
         // more to scan; return an empty slot using the projection result slot.
-        if have_tuple.is_none() {
+        if slot.is_none() {
             if has_proj_info {
                 // return ExecClearTuple(projInfo->pi_state.resultslot);
                 if let Some(result_slot) = node.ss.ps.ps_ResultTupleSlot {
@@ -602,8 +612,11 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
             return Ok(None);
         }
 
-        // econtext->ecxt_scantuple = node->ss.ss_ScanTupleSlot;
-        set_econtext_scantuple(node, estate);
+        // econtext->ecxt_scantuple = slot;
+        // `slot` is whatever ExecScanFetch returned — the node's scan slot on
+        // the normal path, or the EPQ replacement slot
+        // (`relsubs_slot[scanrelid - 1]`) on the EvalPlanQual path.
+        set_econtext_scantuple(node, estate, slot);
 
         // Check that the current tuple satisfies the qual-clause.
         let passes = if !has_qual {
@@ -631,26 +644,28 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
     }
 }
 
-/// `econtext->ecxt_scantuple = node->ss.ss_ScanTupleSlot` — point the per-tuple
-/// expression context at the node's scan slot.
-fn set_econtext_scantuple<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) {
-    if let (Some(ecxt), Some(slot)) = (node.ss.ps.ps_ExprContext, node.ss.ss_ScanTupleSlot) {
+/// `econtext->ecxt_scantuple = slot` — point the per-tuple expression context
+/// at the slot `ExecScanFetch` just returned. On the normal path that is the
+/// node's `ss_ScanTupleSlot`; on the EvalPlanQual replacement path it is the
+/// EPQ-supplied `relsubs_slot[scanrelid - 1]`, a different slot, so we must use
+/// the returned slot rather than unconditionally re-deriving `ss_ScanTupleSlot`.
+fn set_econtext_scantuple<'mcx>(
+    node: &mut TidScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: Option<SlotId>,
+) {
+    if let (Some(ecxt), Some(slot)) = (node.ss.ps.ps_ExprContext, slot) {
         estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
     }
 }
 
-/// `((Scan *) node->ps.plan)->scanrelid`. The plan back-link is not modeled on
-/// the node (the owned `PlanStateData.plan` is a borrow set by the executor);
-/// the scanrelid is carried separately by `ExecInitTidScan` into the node via
-/// the EPQ-only path, so this reads it from the scan slot's owning relation
-/// position. In practice the EPQ branch is unreached until execMain lands.
+/// `((Scan *) node->ps.plan)->scanrelid`. The trimmed `PlanStateData` does not
+/// retain the `plan` back-link, so `ExecInitTidScan` captured the plan's
+/// `scanrelid` onto the node-state; return it here. For a `TidScan` this is
+/// always the positive base-relation RTE index, never the `0`
+/// ForeignScan/CustomScan pushed-down-join sentinel.
 fn node_scanrelid(node: &TidScanState) -> Index {
-    // The plan node is not retained on the owned state; the EPQ owner reads
-    // scanrelid off the plan tree itself. We return 0 (the C ForeignScan/
-    // CustomScan sentinel) here; the actual value is recovered inside the
-    // execMain EPQ seam from the plan node it holds.
-    let _ = node;
-    0
+    node.scanrelid
 }
 
 // ===========================================================================
@@ -705,6 +720,11 @@ pub fn ExecInitTidScan<'mcx>(
     // tidstate->ss.ps.plan = (Plan *) node;  (the executor wires the plan
     // back-link / ExecProcNode dispatch slot when it installs this node; the
     // owned `PlanStateData.plan` borrow is set by the executor's node factory.)
+    // Because the trimmed PlanStateData does not retain that back-link, capture
+    // the plan's `scanrelid` onto the node-state now so the EvalPlanQual path
+    // (`ExecScanFetch` -> `node_scanrelid`) can recover it. C reads it via
+    // `((Scan *) node->ps.plan)->scanrelid`.
+    tidstate.scanrelid = node.scan.scanrelid;
 
     // Miscellaneous initialization: create expression context for node.
     // ExecAssignExprContext(estate, &tidstate->ss.ps);

@@ -1,37 +1,63 @@
 //! Seam declarations for the `backend-executor-execScan` unit
-//! (`executor/execScan.c`).
+//! (`executor/execScan.c`), the generic scan driver.
 //!
-//! `ExecScan` itself (the non-inline forwarder) and `ExecScanExtended` /
-//! `ExecScanFetch` (the `execScan.h` `static inline` driver) are inlined into
-//! each scan node's translation unit, so a scan node reproduces that driver
-//! locally; only the genuinely external `execScan.c` entry points that a scan
-//! node calls — `ExecAssignScanProjectionInfo` and `ExecScanReScan` — are
-//! declared here.
+//! `ExecScan` wraps an access method (return the next candidate tuple) and a
+//! recheck method (EvalPlanQual recheck) with qual evaluation, projection, and
+//! EPQ handling — logic owned by execScan.c. The executor scan node passes its
+//! own in-crate access/recheck functions (concrete `fn` pointers, the C
+//! `(ExecScanAccessMtd) TableFuncNext` casts) and its node + estate; the driver
+//! re-enters those functions per candidate tuple. The result is the slot id of
+//! the produced (possibly projected) tuple, or `None` (the C `NULL`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! The signatures are specialized to [`TableFuncScanState`] because that is the
+//! caller; when execScan.c lands it installs a single generic implementation
+//! and the per-node entry points marshal to it.
 
 #![allow(non_snake_case)]
 
+use types_error::PgResult;
+use types_nodes::{EStateData, SlotId, TableFuncScanState};
+
+/// `ExecScanAccessMtd` — the access method `ExecScan` re-enters to get the
+/// next candidate tuple. Returns `true` when a tuple is in the node's scan
+/// slot, `false` at end-of-scan (the C `TupleTableSlot *` / `NULL`). The node
+/// and estate share the state tree's allocator lifetime.
+pub type TableFuncScanAccessMtd =
+    for<'mcx> fn(&mut TableFuncScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd` — the recheck method for EvalPlanQual.
+pub type TableFuncScanRecheckMtd =
+    for<'mcx> fn(&mut TableFuncScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
 seam_core::seam!(
-    /// `ExecAssignScanProjectionInfo(node)` (execScan.c): set up projection
-    /// info for a scan node, using its scan-tuple-slot descriptor and the
-    /// plan's `scanrelid`. Allocates the compiled projection; fallible on OOM
-    /// and on `ereport(ERROR)` for unsupported expression shapes.
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — fetch via `access`, qual-filter, project — for a
+    /// table-func-scan node. Returns the result slot id, or `None` at end of
+    /// scan. `Err` carries qual/projection `ereport(ERROR)`s and OOM.
+    pub fn exec_scan(
+        node: &mut TableFuncScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: TableFuncScanAccessMtd,
+        recheck: TableFuncScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecAssignScanProjectionInfo(scanstate)` (execScan.c): set up the
+    /// node's projection, comparing the scan tuple type to the result type and
+    /// building a `ProjectionInfo` (or leaving `ps_ProjInfo` NULL for the
+    /// physical-tlist no-op case). Fallible on OOM / build errors.
     pub fn exec_assign_scan_projection_info<'mcx>(
         scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-        scanrelid: types_core::primitive::Index,
     ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `ExecScanReScan(node)` (execScan.c): reset a scan node's common state
-    /// for a rescan — rescan the projection result slot and reset the EPQ
-    /// tuple/done bookkeeping for this node's rel(s). Fallible on
-    /// `ereport(ERROR)`.
-    pub fn exec_scan_rescan<'mcx>(
-        scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
+    /// (rescan EPQ, clear the result slot) at the start of a rescan.
+    pub fn exec_scan_rescan(
+        node: &mut TableFuncScanState<'_>,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<()>
 );
