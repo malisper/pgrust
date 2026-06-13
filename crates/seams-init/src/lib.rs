@@ -75,6 +75,7 @@ pub fn init_all() {
     backend_executor_nodeMergejoin::init_seams();
     backend_executor_nodeModifyTable::init_seams();
     backend_executor_nodeResult::init_seams();
+    backend_executor_nodeSamplescan::init_seams();
     backend_executor_nodeSeqscan::init_seams();
     backend_executor_nodeSetOp::init_seams();
     backend_executor_nodeSort::init_seams();
