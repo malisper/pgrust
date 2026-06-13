@@ -1821,6 +1821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-class"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-class-seams",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-class-seams"
 version = "0.0.0"
 dependencies = [
@@ -8524,6 +8533,7 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
+ "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
