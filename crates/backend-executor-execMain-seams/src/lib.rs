@@ -12,9 +12,12 @@ seam_core::seam!(
     /// dynamic `paramFetch` hook when present), and for an OID-valid, non-NULL
     /// param classify its type — decoding the `refcursor` text Datum via
     /// `TextDatumGetCString` (palloc'd in `mcx`) when `ptype == REFCURSOROID`.
-    /// `Ok(None)` is `!OidIsValid(prm->ptype) || prm->isnull` (the C falls
-    /// through to "no value found for parameter"). The numParams/param_id
-    /// bounds are checked in-crate by the caller before this is invoked. Owner:
+    /// `Ok(None)` is the C fall-through to "no value found for parameter" —
+    /// i.e. no param list (`paramInfo == NULL`), `param_id` past `numParams`,
+    /// or the resolved param is OID-invalid/NULL
+    /// (`!OidIsValid(prm->ptype) || prm->isnull`). The caller has already
+    /// checked `param_id > 0`; this seam owns the `paramInfo != NULL &&
+    /// param_id <= numParams` bound against the live `ParamListInfo`. Owner:
     /// `backend-executor-execMain` (the live `ExprContext`/`ParamListInfo`
     /// navigation + the `paramFetch` hook dispatch).
     pub fn fetch_cursor_param<'mcx>(
