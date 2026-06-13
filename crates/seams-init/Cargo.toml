@@ -27,6 +27,7 @@ backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-generic-xlog = { path = "../backend-access-transam-generic-xlog" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-access-transam-timeline = { path = "../backend-access-transam-timeline" }
+backend-access-transam-subtrans = { path = "../backend-access-transam-subtrans" }
 backend-access-transam-transam = { path = "../backend-access-transam-transam" }
 backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }

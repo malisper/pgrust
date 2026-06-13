@@ -1190,6 +1190,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-subtrans"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-slru",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-pc-seams",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-transam-subtrans-seams"
 version = "0.0.0"
 dependencies = [
@@ -9352,6 +9372,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-access-transam-generic-xlog",
  "backend-access-transam-parallel",
+ "backend-access-transam-subtrans",
  "backend-access-transam-timeline",
  "backend-access-transam-transam",
  "backend-access-transam-twophase",
