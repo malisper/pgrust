@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod buf;
 pub mod bufpage;
+pub mod file;
 pub mod fileset;
 pub mod ilist;
 pub mod inval;
@@ -23,6 +24,7 @@ pub mod storage;
 pub mod sync;
 pub mod waiteventset;
 
+pub use file::*;
 pub use inval::*;
 pub use lock::*;
 pub use relfilelocator::*;

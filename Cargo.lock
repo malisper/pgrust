@@ -5184,6 +5184,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-fd"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-fd-seams"
 version = "0.0.0"
 dependencies = [
@@ -8077,6 +8090,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-storage-file-fd",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
