@@ -19,6 +19,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read `InRecovery` (xlogutils.c global, declared in `access/xlogutils.h`)
+    /// — true while this process is replaying WAL records.
+    pub fn in_recovery() -> bool
+);
+
+seam_core::seam!(
+    /// Write `InRecovery` (xlog.c / xlogrecovery.c drive it during recovery).
+    pub fn set_in_recovery(value: bool)
+);
+
+seam_core::seam!(
+    /// Read `ignore_invalid_pages` (xlogutils.c GUC, declared in
+    /// `access/xlogutils.h`) — when set, invalid-page references downgrade
+    /// from PANIC to WARNING.
+    pub fn ignore_invalid_pages() -> bool
+);
+
+seam_core::seam!(
+    /// Write `ignore_invalid_pages` (set by the GUC machinery).
+    pub fn set_ignore_invalid_pages(value: bool)
+);
+
+seam_core::seam!(
     /// `XLogReadBufferForRedo(record, block_id, &buf)` (xlogutils.c) — read and
     /// lock the buffer for the given block reference during redo, deciding via
     /// LSN whether replay is needed. Returns the [`XLogRedoAction`] and the
