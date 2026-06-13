@@ -475,6 +475,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-hio"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-hio-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-heap-hio-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
