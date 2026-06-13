@@ -51,7 +51,8 @@ use types_nodes::nodes::{CmdType, Node};
 use types_nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DeallocateStmt, DestReceiverHandle,
     EStateHandle, ExecuteStmt, ExplainState, IntoClause, ParamListInfoHandle, ParseState,
-    PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, ResourceOwnerHandle,
+    PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, RawStmt,
+    ResourceOwnerHandle,
 };
 
 use backend_access_common_tupdesc_seams as tupdesc_seam;
@@ -63,7 +64,7 @@ use backend_nodes_params_seams as params_seam;
 use backend_parser_analyze_seams as analyze_seam;
 use backend_parser_parse_expr_seams as parseexpr_seam;
 use backend_parser_parse_type_seams as parsetype_seam;
-use backend_tcop_pquery_seams as pquery_seam;
+use backend_tcop_pquery_pre_seams as pquery_seam;
 use backend_tcop_utility_seams as utility_seam;
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seam;
 use backend_utils_adt_format_type_seams as formattype_seam;
@@ -71,9 +72,9 @@ use backend_utils_adt_varlena_seams as varlena_seam;
 use backend_utils_cache_plancache_seams as plancache_seam;
 use backend_utils_fmgr_funcapi_seams as funcapi_seam;
 use backend_utils_mmgr_mcxt_seams as mcxt_seam;
-use backend_utils_mmgr_portalmem_seams as portal_seam;
+use backend_utils_mmgr_portalmem_pre_seams as portal_seam;
 use backend_utils_resowner_resowner_seams as resowner_seam;
-use backend_utils_time_snapmgr_seams as snapmgr_seam;
+use backend_utils_time_snapmgr_pre_seams as snapmgr_seam;
 
 /// `#define NAMEDATALEN 64` (`c.h`) — the dynahash key width.
 const NAMEDATALEN: usize = 64;
@@ -903,18 +904,22 @@ fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<ty
 // Internal helpers
 // ===========================================================================
 
-/// `makeNode(RawStmt)` (prepare.c:81) — build the `RawStmt` wrapper node in
-/// `mcx`, cloning the contained query (C aliases `stmt->query` into both the
-/// RawStmt and `CreateCommandTag`).
+/// `makeNode(RawStmt)` (prepare.c:81-84) — build the `RawStmt` wrapper in
+/// `mcx`, cloning the contained query into it (`rawstmt->stmt = stmt->query`;
+/// C aliases the same `stmt->query` pointer into both the RawStmt and
+/// `CreateCommandTag`) and recording the `stmt_location` / `stmt_len`
+/// source-text span. The wrapper is threaded into both `CreateCachedPlan`
+/// (which stores the raw tree, span included) and
+/// `pg_analyze_and_rewrite_varparams`.
 fn make_raw_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Node<'mcx>,
-    _stmt_location: i32,
-    _stmt_len: i32,
-) -> PgResult<Node<'mcx>> {
-    // The owned `Node` enum does not yet carry a `RawStmt` variant (the parse
-    // tree's node universe lands with the parser ports); the RawStmt wrapper is
-    // the clone of the contained query threaded to the plancache/analyzer
-    // seams, which copyObject it internally exactly as C does with rawstmt.
-    query.clone_in(mcx)
+    stmt_location: i32,
+    stmt_len: i32,
+) -> PgResult<RawStmt<'mcx>> {
+    Ok(RawStmt {
+        stmt: mcx::alloc_in(mcx, query.clone_in(mcx)?)?,
+        stmt_location,
+        stmt_len,
+    })
 }

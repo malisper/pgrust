@@ -25,10 +25,10 @@ backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" 
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
 backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
-backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
-backend-tcop-pquery-seams = { path = "../backend-tcop-pquery-seams" }
+backend-utils-mmgr-portalmem-pre-seams = { path = "../backend-utils-mmgr-portalmem-pre-seams" }
+backend-tcop-pquery-pre-seams = { path = "../backend-tcop-pquery-pre-seams" }
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
-backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-time-snapmgr-pre-seams = { path = "../backend-utils-time-snapmgr-pre-seams" }
 backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
 backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
 backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }

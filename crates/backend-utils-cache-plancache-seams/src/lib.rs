@@ -13,7 +13,7 @@ use types_error::PgResult;
 use types_nodes::nodes::Node;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::parsestmt::{
-    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, ParamListInfoHandle,
+    CachedPlanHandle, CachedPlanSourceHandle, CommandTag, ParamListInfoHandle, RawStmt,
     ResourceOwnerHandle,
 };
 use types_nodes::queryenvironment::QueryEnvironment;
@@ -22,10 +22,12 @@ use types_tuple::heaptuple::TupleDescData;
 seam_core::seam!(
     /// `CreateCachedPlan(raw_parse_tree, query_string, commandTag)`
     /// (plancache.c) — allocate a `CachedPlanSource` and copy the raw parse
-    /// tree into it. Allocates / can `ereport(ERROR)`.
+    /// tree into it. `raw_stmt` is the `RawStmt` wrapper carrying the contained
+    /// query plus its `stmt_location`/`stmt_len` source span. Allocates / can
+    /// `ereport(ERROR)`.
     pub fn create_cached_plan<'mcx>(
         mcx: Mcx<'mcx>,
-        raw_stmt: &Node<'mcx>,
+        raw_stmt: &RawStmt<'mcx>,
         query_string: &str,
         command_tag: CommandTag,
     ) -> PgResult<CachedPlanSourceHandle>

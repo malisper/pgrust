@@ -937,7 +937,7 @@ pub(crate) fn AtSubStart_ResourceOwner() {
 fn AtCCI_LocalCache() -> PgResult<()> {
     // Make any pending relation map changes visible BEFORE processing local
     // sinval messages, so the map changes reach the relcache on inval.
-    relmapper_seams::at_cci_relation_map::call();
+    relmapper_seams::at_cci_relation_map::call()?;
     // Make catalog changes visible to me for the next command.
     inval_seams::command_end_invalidation_messages::call()
 }
@@ -1483,18 +1483,61 @@ pub fn IsSubTransaction() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+//  Seam-adapter helpers (thin named functions required by seam::set())
+// ---------------------------------------------------------------------------
+
+/// `MyXactFlags |= XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK` — seam adapter for
+/// `set_my_xact_flags_acquired_access_exclusive_lock`.
+fn seam_set_my_xact_flags_acquired_access_exclusive_lock() {
+    xs(|s| {
+        s.MyXactFlags |= types_core::xact::XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK;
+    });
+}
+
+/// `MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPNAMESPACE` — seam adapter for
+/// `set_xact_accessed_temp_namespace`.
+fn seam_set_xact_accessed_temp_namespace() {
+    xs(|s| {
+        s.MyXactFlags |= types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
+    });
+}
+
+/// Read `XactLastRecEnd` — the end LSN of the last WAL record written by this
+/// backend. Owned by xlog.c; this crate forwards via the xlog seam (the xact
+/// crate drives that global through `set_xact_last_rec_end`).
+fn seam_xact_last_rec_end() -> types_core::XLogRecPtr {
+    xlog_seams::xact_last_rec_end::call()
+}
+
+// ---------------------------------------------------------------------------
 //  Seam installation
 // ---------------------------------------------------------------------------
 
 /// Install this crate's implementations into `backend-access-transam-xact-seams`.
 pub fn init_seams() {
-    backend_access_transam_xact_seams::command_counter_increment::set(CommandCounterIncrement);
-    backend_access_transam_xact_seams::transaction_id_is_current_transaction_id::set(
-        TransactionIdIsCurrentTransactionId,
+    use backend_access_transam_xact_seams as seams;
+    seams::command_counter_increment::set(CommandCounterIncrement);
+    seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
+    seams::transaction_id_is_current_transaction_id::set(TransactionIdIsCurrentTransactionId);
+    seams::is_transaction_state::set(IsTransactionState);
+    seams::get_current_command_id::set(GetCurrentCommandId);
+    seams::check_xid_alive::set(CheckXidAlive);
+    seams::bsysscan::set(bsysscan);
+    seams::get_current_transaction_id::set(GetCurrentTransactionId);
+    seams::set_my_xact_flags_acquired_access_exclusive_lock::set(
+        seam_set_my_xact_flags_acquired_access_exclusive_lock,
     );
-    backend_access_transam_xact_seams::get_current_statement_start_timestamp::set(
-        GetCurrentStatementStartTimestamp,
-    );
+    seams::get_current_sub_transaction_id::set(GetCurrentSubTransactionId);
+    seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
+    seams::start_transaction_command::set(StartTransactionCommand);
+    seams::commit_transaction_command::set(CommitTransactionCommand);
+    seams::abort_out_of_any_transaction::set(AbortOutOfAnyTransaction);
+    seams::xact_last_rec_end::set(seam_xact_last_rec_end);
+    seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
+    seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
+    seams::set_check_xid_alive::set(SetCheckXidAlive);
+    seams::set_bsysscan::set(SetBsysscan);
+    seams::get_current_statement_start_timestamp::set(GetCurrentStatementStartTimestamp);
 }
 
 #[cfg(test)]

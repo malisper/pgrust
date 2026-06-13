@@ -1,33 +1,35 @@
-//! Seam declarations for the `backend-tcop-pquery` unit (`tcop/pquery.c`).
+//! Seam declarations for the `backend-tcop-pquery` unit (`tcop/pquery.c`):
+//! the portal-execution operations portalcmds (cursor commands) calls.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use types_nodes::parsestmt::{
-    DestReceiverHandle, ParamListInfoHandle, PortalHandle, QueryCompletionHandle,
-};
-use types_scan::snapshot::SnapshotHandle;
+use types_nodes::portalcmds::ParamListInfo;
+use types_portal::{DestReceiver, FetchDirection, Portal};
+use types_snapshot::SnapshotData;
 
 seam_core::seam!(
-    /// `PortalStart(portal, params, eflags, snapshot)` (pquery.c). `snapshot`
-    /// is `GetActiveSnapshot()` (the C NULL for none is `None`). Can
-    /// `ereport(ERROR)`.
+    /// `PortalStart(portal, params, eflags, snapshot)` (pquery.c) — set up a
+    /// portal for execution (chooses the portal strategy, runs the executor's
+    /// `ExecutorStart`). `snapshot` is `GetActiveSnapshot()` (may be the C
+    /// NULL). Can `ereport(ERROR)`.
     pub fn portal_start(
-        portal: &PortalHandle,
-        params: ParamListInfoHandle,
+        portal: &Portal,
+        params: ParamListInfo,
         eflags: i32,
-        snapshot: Option<SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<SnapshotData>>,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    /// `PortalRun(portal, count, isTopLevel=false, dest, altdest=dest, qc)`
-    /// (pquery.c). Runs the query; can `ereport(ERROR)`.
-    pub fn portal_run(
-        portal: &PortalHandle,
+    /// `PortalRunFetch(portal, fdirection, count, dest)` (pquery.c) — run a
+    /// `FETCH`/`MOVE` against the portal, returning the number of rows
+    /// processed. Runs the executor; can `ereport(ERROR)`.
+    pub fn portal_run_fetch(
+        portal: &Portal,
+        fdirection: FetchDirection,
         count: i64,
-        dest: DestReceiverHandle,
-        qc: QueryCompletionHandle,
-    ) -> PgResult<()>
+        dest: DestReceiver,
+    ) -> PgResult<u64>
 );

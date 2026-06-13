@@ -14,3 +14,4 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
+types-portal = { path = "../types-portal" }

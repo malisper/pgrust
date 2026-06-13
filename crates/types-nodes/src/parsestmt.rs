@@ -140,6 +140,27 @@ pub struct ParseState<'mcx> {
     pub p_queryEnv: Option<PgBox<'mcx, crate::queryenvironment::QueryEnvironment<'mcx>>>,
 }
 
+/// `RawStmt` (`nodes/parsenodes.h`) — the wrapper a raw parse tree is placed
+/// in before parse analysis, recording the statement's source-text span.
+///
+/// ```c
+/// typedef struct RawStmt {
+///     NodeTag type;
+///     Node *stmt;        /* raw parse tree */
+///     ParseLoc stmt_location;  /* start location, or -1 if unknown */
+///     ParseLoc stmt_len;       /* length in bytes; 0 means "rest of string" */
+/// } RawStmt;
+/// ```
+#[derive(Debug)]
+pub struct RawStmt<'mcx> {
+    /// `Node *stmt` — the contained raw parse tree.
+    pub stmt: PgBox<'mcx, Node<'mcx>>,
+    /// `ParseLoc stmt_location` — start location, or -1 if unknown.
+    pub stmt_location: i32,
+    /// `ParseLoc stmt_len` — length in bytes; 0 means "rest of string".
+    pub stmt_len: i32,
+}
+
 /// `PrepareStmt` (`nodes/parsenodes.h`) — the parsed `PREPARE` statement.
 #[derive(Debug)]
 pub struct PrepareStmt<'mcx> {
