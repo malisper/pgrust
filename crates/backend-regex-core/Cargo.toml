@@ -14,4 +14,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-regex = { path = "../types-regex" }
+types-locale = { path = "../types-locale" }
 backend-regex-core-seams = { path = "../backend-regex-core-seams" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
