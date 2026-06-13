@@ -10,7 +10,19 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-lib-bloomfilter-seams = { path = "../backend-lib-bloomfilter-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 mcx = { path = "../mcx" }
 types-acl = { path = "../types-acl" }
+types-cache = { path = "../types-cache" }
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-syscache = { path = "../types-syscache" }

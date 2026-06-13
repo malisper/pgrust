@@ -27,6 +27,13 @@ pub const ACL_NO_RIGHTS: AclMode = 0;
 /// `ACL_ID_PUBLIC` (`utils/acl.h`) — placeholder grantee id for a PUBLIC item.
 pub const ACL_ID_PUBLIC: Oid = 0;
 
+/// `ACL_GRANT_OPTION_FOR(privs)` (`utils/acl.h`) — shift privilege bits into
+/// the grant-option half of an `AclMode`:
+/// `(((AclMode) (privs) & 0xFFFFFFFF) << 32)`.
+pub const fn ACL_GRANT_OPTION_FOR(privs: AclMode) -> AclMode {
+    (privs & 0xFFFF_FFFF) << 32
+}
+
 /// `ACLITEM_ALL_PRIV_BITS` (`utils/acl.h`) — `(AclMode) 0xFFFFFFFF`.
 pub const ACLITEM_ALL_PRIV_BITS: AclMode = 0xFFFF_FFFF;
 /// `ACLITEM_ALL_GOPTION_BITS` (`utils/acl.h`) — `(AclMode) 0xFFFFFFFF << 32`.

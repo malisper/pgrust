@@ -523,3 +523,34 @@ seam_core::seam!(
         collation: Oid,
     ) -> PgResult<Option<(PgVec<'mcx, u8>, PgVec<'mcx, u8>)>>
 );
+
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(DATABASEOID, ObjectIdGetDatum(dbid))`
+    /// (`utils/adt/acl.c` `initialize_acl`): the syscache hash value of the
+    /// `pg_database` row keyed by `dbid`, cached to filter `DATABASEOID`
+    /// invalidations for other databases. `Err` carries lookup failure.
+    pub fn database_syscache_hash_value(dbid: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(DATABASEOID, ObjectIdGetDatum(dbid))` +
+    /// `GETSTRUCT(Form_pg_database)->datdba` + `ReleaseSysCache`
+    /// (`roles_is_member_of`, acl.c): the owning role of database `dbid`.
+    /// `Ok(None)` on a cache miss so the caller raises the exact
+    /// `elog(ERROR, "cache lookup failed for database %u")`.
+    pub fn database_datdba(dbid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheList1(AUTHMEMMEMROLE, ObjectIdGetDatum(memberid))`
+    /// (`roles_is_member_of`, acl.c): the `pg_auth_members` rows where
+    /// `member == memberid`, each projected to the
+    /// `roleid`/`admin_option`/`inherit_option`/`set_option` fields the caller
+    /// reads off `GETSTRUCT(Form_pg_auth_members)`. The catlist is copied into
+    /// `mcx` and `ReleaseSysCacheList` is subsumed by returning the rows by
+    /// value (the rows are plain scalars, so an owned `Vec` carries them with
+    /// no lifetime). `Err` carries OOM from the copy.
+    pub fn auth_members_of_member(
+        memberid: Oid,
+    ) -> PgResult<Vec<types_cache::AuthMembersRow>>
+);
