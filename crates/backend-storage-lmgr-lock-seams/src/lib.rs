@@ -573,3 +573,15 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn lock_manager_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// The `holdMask` of every `PROCLOCK` on
+    /// `GetPGProcByNumber(holder)->myProcLocks[partition]` (lock.c). proc.c's
+    /// lock-group held-mask walk (`lock_group_held_locks`) reaches each member's
+    /// `myProcLocks` partition, which is a lock.c-owned shmem PROCLOCK list;
+    /// this returns the per-PROCLOCK masks for the named holder + partition.
+    pub fn proc_locks_hold_masks(
+        holder: types_core::ProcNumber,
+        partition: usize,
+    ) -> alloc::vec::Vec<types_storage::lock::LOCKMASK>
+);

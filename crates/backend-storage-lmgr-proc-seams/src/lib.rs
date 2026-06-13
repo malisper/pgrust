@@ -533,3 +533,21 @@ seam_core::seam!(
     /// `newval`, returning the previous value.
     pub fn clog_group_first_exchange(newval: u32) -> u32
 );
+
+seam_core::seam!(
+    /// `GetNewTransactionId` top-xid publication (varsup.c): store a freshly
+    /// allocated top-level `xid` into `MyProc->xid` and
+    /// `ProcGlobal->xids[MyProc->pgxactoff]` while `XidGenLock` is held (its
+    /// release acts as the write barrier). proc.c owns the PGPROC/ProcGlobal
+    /// layout and the `Assert(subxidStatus.count == 0)` invariants.
+    pub fn store_top_xid_in_proc(xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `GetNewTransactionId` subxid publication (varsup.c): push a freshly
+    /// allocated subtransaction `xid` into `MyProc->subxids.xids[]` and bump
+    /// `subxidStatus.count` (with the `pg_write_barrier()`), or set the
+    /// `overflowed` flag when `PGPROC_MAX_CACHED_SUBXIDS` is exceeded. proc.c
+    /// owns the PGPROC/ProcGlobal subxid-cache layout.
+    pub fn store_subxid_in_proc(xid: TransactionId)
+);

@@ -48,6 +48,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TransamVariables->oldestCommitTsXid` (`access/transam.h`) — the oldest
+    /// XID for which a commit timestamp can be consulted. Read under
+    /// `CommitTsLock` by commit_ts.c.
+    pub fn get_oldest_commit_ts_xid() -> TransactionId
+);
+
+seam_core::seam!(
+    /// `TransamVariables->newestCommitTsXid` (`access/transam.h`) — the newest
+    /// XID for which a commit timestamp endpoint is tracked. Read under
+    /// `CommitTsLock` by commit_ts.c.
+    pub fn get_newest_commit_ts_xid() -> TransactionId
+);
+
+seam_core::seam!(
+    /// `TransamVariables->oldestCommitTsXid = xid` — store the oldest
+    /// consultable commit-ts XID (commit_ts.c, under `CommitTsLock`).
+    pub fn set_oldest_commit_ts_xid(xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `TransamVariables->newestCommitTsXid = xid` — store the newest tracked
+    /// commit-ts XID endpoint (commit_ts.c, under `CommitTsLock`).
+    pub fn set_newest_commit_ts_xid(xid: TransactionId)
+);
+
+seam_core::seam!(
     /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
