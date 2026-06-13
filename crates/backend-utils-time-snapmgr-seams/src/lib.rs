@@ -10,6 +10,13 @@ use types_core::CommandId;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `HistoricSnapshotActive()` (snapmgr.c): true when a historic MVCC
+    /// snapshot (logical decoding) is installed. Pure read of the file-static
+    /// `HistoricSnapshot != NULL`. Cannot `ereport`.
+    pub fn historic_snapshot_active() -> bool
+);
+
+seam_core::seam!(
     /// `GetCatalogSnapshot(relid)` (snapmgr.c): an MVCC snapshot capable of
     /// reading the catalog (refreshed if invalidations arrived). Can
     /// `ereport(ERROR)` (snapshot import/allocation paths), carried on

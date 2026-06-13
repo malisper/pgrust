@@ -8,6 +8,18 @@ use mcx::{Mcx, PgString, PgVec};
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `int varstr_cmp(const char *arg1, int len1, const char *arg2, int len2,
+    /// Oid collid)` (varlena.c) — collation-aware 3-way comparison of two
+    /// strings. `arg1`/`arg2` are the string payload bytes in the database
+    /// encoding. Reached from `jsonb_util.c`'s `compareJsonbScalarValue`
+    /// `jbvString` arm with `collid = DEFAULT_COLLATION_OID` (B-tree operator
+    /// support only, off the `jsonb_in`/`jsonb_out` I/O path). The C-collation
+    /// fast path is a byte compare; non-C collations delegate to the locale
+    /// providers. `Err` carries the locale-comparison `ereport(ERROR)`.
+    pub fn varstr_cmp(arg1: &[u8], arg2: &[u8], collid: types_core::Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `textToQualifiedNameList(textval)` (varlena.c): split a (possibly
     /// qualified) name `text` on `.` into its identifier parts, downcasing
     /// and dequoting per `SplitIdentifierString`. `textval` is the `text`
