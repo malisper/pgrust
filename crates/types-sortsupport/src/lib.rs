@@ -27,6 +27,18 @@ pub const BTSORTSUPPORT_PROC: i16 = 2;
 /// value `IndexAmTranslateStrategy` returns for a btree equality strategy.
 pub const COMPARE_EQ: i32 = 3;
 
+/// `int COMPARE_GT` (access/cmptype.h) — the greater-than comparison type; an
+/// ordering operator with this comparison type sorts descending.
+pub const COMPARE_GT: i32 = 5;
+
+/// `int GIST_SORTSUPPORT_PROC` (access/gist.h) — opclass support-function
+/// number of the optional GiST sort-support function.
+pub const GIST_SORTSUPPORT_PROC: i16 = 11;
+
+/// `Oid GIST_AM_OID` (catalog/pg_am.dat) — the OID of the `gist` access
+/// method.
+pub const GIST_AM_OID: Oid = 783;
+
 /// The resolved `comparator` function pointer in the owned model: a `Copy`
 /// token the sortsupport/fmgr owner hands back from
 /// `PrepareSortSupportComparisonShim` / `OidFunctionCall1(BTSORTSUPPORT_PROC)`

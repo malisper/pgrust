@@ -1,0 +1,20 @@
+//! Seam declarations for `common/hashfn.c` — the hash functions dshash's
+//! built-in `dshash_memhash`/`dshash_strhash` key-helper sets forward to.
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly. The keys are read-only byte images, so they cross
+//! the seam as `&[u8]` (the C `const void *key` over the first `keysize` bytes).
+
+use types_core::{uint32, Size};
+
+seam_core::seam!(
+    /// `uint32 tag_hash(const void *key, Size keysize)` (`common/hashfn.h`) —
+    /// hash any fixed-size byte tag.
+    pub fn tag_hash(key: &[u8], keysize: Size) -> uint32
+);
+
+seam_core::seam!(
+    /// `uint32 string_hash(const void *key, Size keysize)` (`common/hashfn.h`) —
+    /// hash a NUL-terminated string occupying up to `keysize` bytes.
+    pub fn string_hash(key: &[u8], keysize: Size) -> uint32
+);

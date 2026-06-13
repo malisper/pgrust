@@ -24,3 +24,11 @@ seam_core::seam!(
         spc_oid: types_core::Oid,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `PrepareTempTablespaces(void)` (tablespace.c) — set up the per-session
+    /// list of temp tablespaces so `OpenTemporaryFile` can spread temp files
+    /// across them. Idempotent; `BufFileCreateTemp` calls it defensively.
+    /// Catalog access can `ereport(ERROR)`, carried on `Err`.
+    pub fn prepare_temp_tablespaces() -> types_error::PgResult<()>
+);

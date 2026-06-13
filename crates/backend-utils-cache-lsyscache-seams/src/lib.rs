@@ -143,6 +143,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_namespace_name_or_temp(nspid)` (lsyscache.c): `"pg_temp"` if
+    /// `isTempNamespace(nspid)`, else `get_namespace_name(nspid)`, copied into
+    /// `mcx` (C: `pstrdup`). A missing namespace is `Ok(None)`. `Err` is OOM.
+    pub fn get_namespace_name_or_temp<'mcx>(
+        mcx: Mcx<'mcx>,
+        nspid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `get_rel_relkind(relid)` (lsyscache.c): the relation's `relkind`, or 0
     /// when there is no such pg_class row (the C `'\0'` return). `Err`
     /// carries the syscache machinery's `ereport(ERROR)`s.
@@ -223,6 +233,18 @@ seam_core::seam!(
         opfamily: Oid,
         missing_ok: bool,
     ) -> PgResult<Option<(i32, Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `get_ordering_op_properties(opno, &opfamily, &opcintype, &cmptype)`
+    /// (lsyscache.c): given an ordering operator (a btree "<" or ">"
+    /// operator), return its containing opfamily, the opclass input type, and
+    /// the comparison type. `Some((opfamily, opcintype, cmptype))` is the C
+    /// `true`; `None` is the C `false` (the operator is not a valid ordering
+    /// operator). `Err` carries the syscache machinery's `ereport(ERROR)`s.
+    pub fn get_ordering_op_properties(
+        opno: Oid,
+    ) -> PgResult<Option<(Oid, Oid, i32)>>
 );
 
 seam_core::seam!(

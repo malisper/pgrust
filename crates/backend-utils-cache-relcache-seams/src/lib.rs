@@ -9,6 +9,26 @@
 
 
 seam_core::seam!(
+    /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
+    /// relcache entry for `relationId`, taking the `rd_refcnt += 1` pin, and
+    /// hand back the consumed slice of the entry copied into `mcx`. `Ok(None)`
+    /// is the C NULL (no `pg_class` row); the owner releases its pin on the
+    /// not-found path. Can `ereport(ERROR)` (catalog read failure, OOM),
+    /// carried on `Err`.
+    pub fn relation_id_get_relation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_rel::RelationData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RelationClose(relation)` (relcache.c): drop the relcache reference
+    /// (`rd_refcnt -= 1`) for the entry identified by `relation_id`. C can
+    /// `elog(WARNING)` on a refcount inconsistency, carried on `Err`.
+    pub fn relation_close(relation_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `relation->rd_tableam` — the relation's table-access-method vtable
     /// (`None` for relations without one: views, foreign tables,
     /// partitioned tables/indexes). The owner resolves the vtable from its
@@ -354,4 +374,33 @@ seam_core::seam!(
     /// `FreeFakeRelcacheEntry(fakerel)` (xlogutils.c) — `pfree` the fake entry.
     /// Takes ownership; the owner drops the allocation and its `SMgrRelation`.
     pub fn free_fake_relcache_entry(fakerel: types_rel::RelationData<'_>)
+);
+
+/* ---- index relcache field reads used by sortsupport.c
+ * (`PrepareSortSupportFrom{Index,GistIndex}Rel`). The opclass arrays
+ * (`rd_opfamily`/`rd_opcintype`) and the index AM vtable's `amcanorder` flag
+ * are relcache-owned per-index state; the relcache owner installs these from
+ * its `init_seams()` when it lands. */
+
+seam_core::seam!(
+    /// `indexRel->rd_opfamily[attno - 1]` — the operator-family OID of the
+    /// index column `attno` (1-based, as in C). `Err` only on a relcache miss.
+    pub fn rd_opfamily(
+        index: &types_rel::Relation<'_>,
+        attno: types_core::primitive::AttrNumber,
+    ) -> types_error::PgResult<types_core::Oid>
+);
+seam_core::seam!(
+    /// `indexRel->rd_opcintype[attno - 1]` — the opclass input-type OID of the
+    /// index column `attno` (1-based, as in C). `Err` only on a relcache miss.
+    pub fn rd_opcintype(
+        index: &types_rel::Relation<'_>,
+        attno: types_core::primitive::AttrNumber,
+    ) -> types_error::PgResult<types_core::Oid>
+);
+seam_core::seam!(
+    /// `indexRel->rd_indam->amcanorder` — whether the index AM produces ordered
+    /// output (i.e. supports btree-style ordering). `Err` only on a relcache
+    /// miss (the C dereferences `rd_indam` unconditionally).
+    pub fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
