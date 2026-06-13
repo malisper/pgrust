@@ -46,12 +46,15 @@ pub mod value_core;
 ///
 /// The KEYSTONE bitmapset family is fully ported, so its seams in
 /// `backend-nodes-core-seams` are installed here. The remaining `bms_*` seam
-/// surface is all backed by [`bitmapset`].
+/// surface is all backed by [`bitmapset`]. The **makefuncs** family is filled,
+/// so its three canonical seams in `backend-nodes-makefuncs-seams`
+/// (`make_const_node`, `make_and_boolexpr`, `make_type_name_from_name_list`)
+/// are installed here too.
 ///
 /// `tbm_add_tuple` (in the same seams crate) and every seam in
-/// `backend-nodes-core-tidbitmap-seams` / `-makefuncs-seams` / `-params-seams`
-/// / `-read-seams` / `-nodeFuncs-seams` stay UNINSTALLED (they panic on call)
-/// until their families are filled — `mirror-pg-and-panic`.
+/// `backend-nodes-core-tidbitmap-seams` / `-params-seams` / `-read-seams` /
+/// `-nodeFuncs-seams` stay UNINSTALLED (they panic on call) until their
+/// families are filled — `mirror-pg-and-panic`.
 pub fn init_seams() {
     use backend_nodes_core_seams as seams;
 
@@ -73,4 +76,12 @@ pub fn init_seams() {
     seams::bms_del_members::set(bitmapset::bms_del_members);
     seams::bms_equal::set(bitmapset::bms_equal);
     seams::bms_free::set(bitmapset::bms_free);
+
+    // makefuncs family — the three canonical constructor seams.
+    use backend_nodes_makefuncs_seams as makefuncs_seams;
+    makefuncs_seams::make_const_node::set(makefuncs::make_const_node_seam);
+    makefuncs_seams::make_and_boolexpr::set(makefuncs::make_and_boolexpr_seam);
+    makefuncs_seams::make_type_name_from_name_list::set(
+        makefuncs::make_type_name_from_name_list_seam,
+    );
 }

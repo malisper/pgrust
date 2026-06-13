@@ -4223,7 +4223,9 @@ dependencies = [
 name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-nodes-core-seams",
+ "backend-nodes-makefuncs-seams",
  "common-hashfn",
  "mcx",
  "seam-core",
@@ -4231,6 +4233,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
  "types-tuple",
 ]
 
