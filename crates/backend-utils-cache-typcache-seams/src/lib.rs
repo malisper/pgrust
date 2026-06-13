@@ -19,6 +19,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange view:
+    /// the same cache build as [`lookup_type_cache`] but returning the trimmed
+    /// `types_cache::typcache::TypeCacheEntry` the range/multirange ADTs read
+    /// (carrying the `rngtype` / `rngelemtype` sub-entries and the range
+    /// `cmp`/`subdiff` support `FmgrInfo`s). The owning typcache unit installs
+    /// this when it lands; until then a call panics loudly. `Err` carries
+    /// `ereport(ERROR, ERRCODE_UNDEFINED_OBJECT, "type ... does not exist")`
+    /// and the catalog-lookup surface.
+    pub fn lookup_type_cache_range(
+        type_id: types_core::primitive::Oid,
+        flags: i32,
+    ) -> types_error::PgResult<types_cache::typcache::TypeCacheEntry>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe
