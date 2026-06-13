@@ -23,24 +23,31 @@ use types_core::primitive::Oid;
 pub struct TypeCacheEntry {
     /// `type_id` -- the type's own OID.
     pub type_id: Oid,
-    /// `typlen` -- the type's `pg_type.typlen` (length, or -1/-2 for varlena/cstring).
+    /// `typlen` -- the type's `pg_type.typlen` (`-1` varlena, `-2` cstring).
     pub typlen: i16,
-    /// `typbyval` -- the type's `pg_type.typbyval` (passed by value).
+    /// `typbyval` -- the type's `pg_type.typbyval`.
     pub typbyval: bool,
-    /// `typalign` -- the type's `pg_type.typalign` (alignment requirement char).
+    /// `typalign` -- the type's `pg_type.typalign` (`'c'`/`'s'`/`'i'`/`'d'`).
     pub typalign: i8,
+    /// `typstorage` -- the type's `pg_type.typstorage` (`'p'`/`'e'`/`'m'`/`'x'`).
+    pub typstorage: i8,
     /// `rng_collation` -- collation for the range's comparison/subdiff calls.
     pub rng_collation: Oid,
     /// `rng_cmp_proc_finfo` -- the subtype's `cmp` support function.
     pub rng_cmp_proc_finfo: FmgrInfo,
+    /// `rng_canonical_finfo` -- the range type's optional canonicalization
+    /// function (`fn_oid == InvalidOid` when absent, i.e. a continuous subtype).
+    pub rng_canonical_finfo: FmgrInfo,
     /// `rng_subdiff_finfo` -- the subtype's optional `subdiff` support function
     /// (`fn_oid == InvalidOid` when absent).
     pub rng_subdiff_finfo: FmgrInfo,
-    /// `hash_proc_finfo` -- the type's hash support function
-    /// (`fn_oid == InvalidOid` when not yet resolved / unavailable).
+    /// `hash_proc_finfo` -- the type's hash support function (used by
+    /// `hash_range` on the range element type's entry; `fn_oid == InvalidOid`
+    /// when absent).
     pub hash_proc_finfo: FmgrInfo,
     /// `hash_extended_proc_finfo` -- the type's extended (64-bit, seeded) hash
-    /// support function (`fn_oid == InvalidOid` when not yet resolved).
+    /// support function (used by `hash_range_extended`; `fn_oid == InvalidOid`
+    /// when absent).
     pub hash_extended_proc_finfo: FmgrInfo,
     /// `rngelemtype` -- the range element type's cache entry (range types only).
     pub rngelemtype: Option<Box<TypeCacheEntry>>,

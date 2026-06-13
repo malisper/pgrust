@@ -71,3 +71,17 @@ seam_core::seam!(
     /// `max_worker_processes` (bgworker.c GUC).
     pub fn max_worker_processes() -> i32
 );
+
+seam_core::seam!(
+    /// `BackgroundWorkerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn background_worker_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `BackgroundWorkerShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn background_worker_shmem_init() -> types_error::PgResult<()>
+);

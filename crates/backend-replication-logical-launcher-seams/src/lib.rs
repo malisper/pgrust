@@ -104,3 +104,17 @@ seam_core::seam!(
     /// last-start-time entry so its apply worker can restart immediately.
     pub fn ApplyLauncherForgetWorkerStartTime(subid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ApplyLauncherShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn apply_launcher_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `ApplyLauncherShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn apply_launcher_shmem_init() -> types_error::PgResult<()>
+);

@@ -17,8 +17,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `hash_bytes_uint32_extended(k, seed)` (`common/hashfn.c`): hash a
-    /// 32-bit value to a 64-bit value with a seed (the mixer behind
+    /// `hash_bytes_uint32_extended(k, seed)` (`common/hashfn.c`): hash a 32-bit
+    /// value to a 64-bit value with a seed (the mixer behind
     /// `hash_uint32_extended`).
     pub fn hash_bytes_uint32_extended(k: u32, seed: u64) -> u64
 );

@@ -61,3 +61,17 @@ seam_core::seam!(
     /// `prepare_redo_add`).
     pub fn prepare_redo_remove(xid: TransactionId, give_warning: bool) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TwoPhaseShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn two_phase_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `TwoPhaseShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn two_phase_shmem_init() -> types_error::PgResult<()>
+);

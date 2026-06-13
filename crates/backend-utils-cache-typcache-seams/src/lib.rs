@@ -48,6 +48,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
+    /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
+    /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`
+    /// element-type fallback re-lookup, rangetypes.c:1419 / :1482): resolve the
+    /// element type's (extended, when `extended`) hash support function and
+    /// return its OID. `Err` carries the C `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION, "could not identify a hash function for type
+    /// %s")` raised when no hash function exists.
+    pub fn lookup_range_elem_hash_proc(
+        elem_type_id: types_core::primitive::Oid,
+        extended: bool,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe

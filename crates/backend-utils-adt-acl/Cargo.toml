@@ -1,0 +1,44 @@
+[package]
+name = "backend-utils-adt-acl"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_acl"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-lib-bloomfilter-seams = { path = "../backend-lib-bloomfilter-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+mcx = { path = "../mcx" }
+types-acl = { path = "../types-acl" }
+types-cache = { path = "../types-cache" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-syscache = { path = "../types-syscache" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-catalog-pg-largeobject-seams = { path = "../backend-catalog-pg-largeobject-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-commands-proclang-seams = { path = "../backend-commands-proclang-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

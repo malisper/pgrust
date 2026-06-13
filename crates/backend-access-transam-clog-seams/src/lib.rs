@@ -46,3 +46,17 @@ seam_core::seam!(
     /// returning the `0`/`<0` code, resolved path, and saved `errno`.
     pub fn clogsyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
 );
+
+seam_core::seam!(
+    /// `CLOGShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn clog_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CLOGShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn clog_shmem_init() -> types_error::PgResult<()>
+);
