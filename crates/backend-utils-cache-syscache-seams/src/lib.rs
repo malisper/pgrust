@@ -610,7 +610,6 @@ seam_core::seam!(
 );
 
 /* ------------------------------------------------------------------------
-<<<<<<< HEAD
  *  pg_operator / pg_amop / pg_proc reads driven by lsyscache.c's
  *  operator-and-opfamily helpers (backend-utils-cache-lsyscache's
  *  `opfamily_operator` family). All are `SearchSysCache*(OPEROID / AMOPOPID /
@@ -841,4 +840,46 @@ seam_core::seam!(
     /// `elog(ERROR, "cache lookup failed for index %u")`; the installer owns
     /// the `ReleaseSysCache`.
     pub fn index_isclustered(index_oid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid))` +
+    /// `GETSTRUCT(Form_pg_type)` (`utils/cache/lsyscache.c` reads). Returns the
+    /// fixed-length `pg_type` columns by value (every field through
+    /// `typcollation`), or `Ok(None)` on a cache miss (`!HeapTupleIsValid`) so
+    /// the caller raises its own `cache lookup failed for type %u`
+    /// `elog(ERROR)`. The struct is `Copy`, so no `mcx` is needed; the
+    /// installer owns the `ReleaseSysCache`.
+    pub fn pg_type_form(
+        typid: Oid,
+    ) -> PgResult<Option<types_tuple::pg_type::FormData_pg_type>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RANGETYPE, ObjectIdGetDatum(rngtypid))` +
+    /// `GETSTRUCT(Form_pg_range)`, projected to the `Form_pg_range` fields
+    /// `load_rangetype_info` reads (`rngsubtype` / `rngcollation` / `rngsubopc`
+    /// / `rngcanonical` / `rngsubdiff`). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
+    pub fn pg_range_form(
+        rngtypid: Oid,
+    ) -> PgResult<Option<types_cache::typcache::PgRangeRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RANGEMULTIRANGE, ObjectIdGetDatum(mltrngtypid))`
+    /// projected to `Form_pg_range.rngtypid` (the multirange's element range
+    /// type). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn pg_range_rngtypid_of_multirange(
+        mltrngtypid: Oid,
+    ) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(type_id))`
+    /// (`utils/cache/syscache.c`) — the catcache hash value of the
+    /// `pg_type` row, as stored in `TypeCacheEntry.type_id_hash`. `Err`
+    /// carries the catcache machinery's `ereport(ERROR)`s.
+    pub fn get_syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
 );

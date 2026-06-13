@@ -7127,6 +7127,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-selfuncs",
+ "types-tuple",
 ]
 
 [[package]]
