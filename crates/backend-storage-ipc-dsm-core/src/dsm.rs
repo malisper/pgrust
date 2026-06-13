@@ -633,7 +633,7 @@ pub fn dsm_shmem_init() -> PgResult<()> {
         // Initialize it and give it all the rest of the space.
         free_page_manager_initialize::call(fpm, begin);
         let pages = (size / FPM_PAGE_SIZE) - first_page;
-        free_page_manager_put::call(fpm, first_page, pages);
+        free_page_manager_put::call(fpm, first_page, pages)?;
     }
     Ok(())
 }
@@ -766,7 +766,7 @@ pub fn dsm_create(size: Size, flags: i32, mcx: Mcx<'static>) -> PgResult<Option<
     let maxitems = unsafe { (*control).maxitems };
     if nitems >= maxitems {
         if using_main_dsm_region {
-            free_page_manager_put::call(dsm_main_space_fpm, first_page, npages);
+            free_page_manager_put::call(dsm_main_space_fpm, first_page, npages)?;
         }
         control_lock.release()?;
         if !using_main_dsm_region {
@@ -1075,7 +1075,7 @@ pub fn dsm_detach(seg: DsmSegmentId) -> PgResult<()> {
                             main_space_fpm(),
                             (*item).first_page,
                             (*item).npages,
-                        );
+                        )?;
                     }
                     // Assert(item.handle == seg->handle && item.refcnt == 1).
                     (*item).refcnt = 0;
@@ -1233,7 +1233,7 @@ pub fn dsm_unpin_segment(handle: dsm_handle) -> PgResult<()> {
                         main_space_fpm(),
                         (*item).first_page,
                         (*item).npages,
-                    );
+                    )?;
                 }
                 // Assert(item.handle == handle && item.refcnt == 1).
                 (*item).refcnt = 0;
