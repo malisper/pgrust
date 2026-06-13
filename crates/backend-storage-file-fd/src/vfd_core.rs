@@ -522,6 +522,14 @@ pub(crate) fn FileIsValid(fd: &FdState, file: File) -> bool {
         && fd.vfd_cache[file as usize].file_name.is_some()
 }
 
+/// `ResourceOwnerForgetFile(ResourceOwner owner, File file)` (fd.c) — drop the
+/// VFD's registration with its `ResourceOwner` (the resowner-> RAII `File`
+/// ownership glue this family owns). Called by `FileClose` when
+/// `Vfd::has_resowner`.
+pub(crate) fn ResourceOwnerForgetFile(_file: File) {
+    todo!("fd.c ResourceOwnerForgetFile: unregister File from its ResourceOwner")
+}
+
 // ---------------------------------------------------------------------------
 // FD limit probing + initialization (fd.c:937-1100, 2802-2906 region).
 // ---------------------------------------------------------------------------

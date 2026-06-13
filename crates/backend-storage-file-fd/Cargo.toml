@@ -17,9 +17,11 @@ types-storage = { path = "../types-storage" }
 mcx = { path = "../mcx" }
 libc = "0.2"
 backend-utils-error = { path = "../backend-utils-error" }
-# Seam crates for UNPORTED neighbor calls this family makes.
-backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 # Seam crates this unit OWNS (installs every decl from its own init_seams()).
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+# Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
+backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }

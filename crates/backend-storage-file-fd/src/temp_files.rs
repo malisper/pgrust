@@ -77,6 +77,14 @@ pub fn RegisterTemporaryFile(_file: File) {
     todo!("fd.c RegisterTemporaryFile: set FD_CLOSE_AT_EOXACT, have_xact_temporary_files")
 }
 
+/// `ReportTemporaryFileUsage(const char *path, off_t size)` (fd.c) — report a
+/// just-removed temp file's size to pgstat and, when `log_temp_files >= 0` and
+/// the file is large enough, emit a LOG line. Part of the temp-file accounting
+/// this family owns; called by `FileClose` and the temp-file delete paths.
+pub(crate) fn ReportTemporaryFileUsage(_path: &str, _size: i64) {
+    todo!("fd.c ReportTemporaryFileUsage: pgstat_report_tempfile + log_temp_files LOG")
+}
+
 // ---------------------------------------------------------------------------
 // Temp-tablespace list (fd.c:2900-3000 region).
 // ---------------------------------------------------------------------------
