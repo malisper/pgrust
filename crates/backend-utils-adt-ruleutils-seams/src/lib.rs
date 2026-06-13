@@ -26,3 +26,5 @@ seam_core::seam!(
     /// owned image copies either way). `Err` carries OOM.
     pub fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>>
 );
+
+// (quote_identifier is already declared above; postinit reuses it.)

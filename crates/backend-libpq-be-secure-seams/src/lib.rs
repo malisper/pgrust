@@ -41,3 +41,18 @@ seam_core::seam!(
     /// Infallible in C.
     pub fn secure_close(port: &mut types_net::Port)
 );
+
+// --- backend-utils-init-postinit consumer (be-secure.c TLS/GSS reads) ---
+
+seam_core::seam!(
+    /// The `#ifdef USE_SSL` / `#ifdef ENABLE_GSS` fragment of
+    /// `PerformAuthentication`'s authorized-connection log line: " SSL enabled
+    /// (protocol=%s, cipher=%s, bits=%d)" and/or the GSS "(authenticated=...,
+    /// encrypted=..., delegated_credentials=..., principal=...)" suffix,
+    /// assembled by the be-secure owner (which holds the TLS version/cipher/bits
+    /// and GSS principal accessors over the ambient `MyProcPort`). `None` when
+    /// neither transport is in use. Copied into `mcx`.
+    pub fn transport_security_logfrag<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);

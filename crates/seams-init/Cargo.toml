@@ -62,6 +62,7 @@ backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }

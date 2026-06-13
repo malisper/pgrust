@@ -8,3 +8,16 @@ seam_core::seam!(
     /// postmaster-only file descriptors.
     pub fn close_postmaster_ports(am_syslogger: bool)
 );
+
+// --- backend-utils-init-postinit consumers (postmaster.c) ---
+
+seam_core::seam!(
+    /// `ClientAuthInProgress` (postmaster.c global): read the flag.
+    pub fn client_auth_in_progress() -> bool
+);
+
+seam_core::seam!(
+    /// `ClientAuthInProgress = value` (postmaster.c global): set the flag that
+    /// limits log-message visibility during authentication.
+    pub fn set_client_auth_in_progress(value: bool)
+);

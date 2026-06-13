@@ -49,3 +49,11 @@ seam_core::seam!(
     /// `AtSubCleanup_Portals(mySubid)`.
     pub fn at_subcleanup_portals(my_subid: SubTransactionId) -> PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumer (portalmem.c) ---
+
+seam_core::seam!(
+    /// `EnablePortalManager()` (portalmem.c): set up the portal hashtable and
+    /// memory context. `Err` carries its OOM surface.
+    pub fn enable_portal_manager() -> types_error::PgResult<()>
+);

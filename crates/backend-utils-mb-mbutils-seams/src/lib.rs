@@ -108,3 +108,17 @@ seam_core::seam!(
     /// collations work with the encoding. Pure table lookup.
     pub fn is_encoding_supported_by_icu(encoding: i32) -> bool
 );
+
+// --- backend-utils-init-postinit consumers (mbutils.c) ---
+
+seam_core::seam!(
+    /// `SetDatabaseEncoding(encoding)` (mbutils.c): set the server (database)
+    /// encoding. `Err` carries its `ereport` surface.
+    pub fn set_database_encoding(encoding: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeClientEncoding()` (mbutils.c): finalize the client_encoding
+    /// conversion setup. `Err` carries its `ereport` surface.
+    pub fn initialize_client_encoding() -> types_error::PgResult<()>
+);

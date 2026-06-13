@@ -33,3 +33,39 @@ seam_core::seam!(
     /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
     pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
 );
+
+// --- backend-utils-init-postinit consumers (backend_status.c) ---
+
+seam_core::seam!(
+    /// `pgstat_beinit()` (backend_status.c): initialize backend status
+    /// reporting (pick the MyBEEntry slot). `Err` carries its `ereport` surface.
+    pub fn pgstat_beinit() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_initial()` (backend_status.c): begin filling the
+    /// PgBackendStatus entry (the pre-auth portion).
+    pub fn pgstat_bestart_initial() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_security()` (backend_status.c): record SSL/GSS details.
+    pub fn pgstat_bestart_security() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_bestart_final()` (backend_status.c): finish the PgBackendStatus
+    /// entry (database/role/activity).
+    pub fn pgstat_bestart_final() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `conn_timing.auth_start = tstamp` (backend_status.c): record the
+    /// authentication start timestamp for logging.
+    pub fn set_conn_timing_auth_start(tstamp: types_core::TimestampTz)
+);
+
+seam_core::seam!(
+    /// `conn_timing.auth_end = tstamp` (backend_status.c).
+    pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
+);

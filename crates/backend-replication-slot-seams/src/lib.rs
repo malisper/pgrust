@@ -17,3 +17,11 @@ seam_core::seam!(
         snapshot_conflict_horizon: TransactionId,
     ) -> PgResult<bool>
 );
+
+// --- backend-utils-init-postinit consumer (slot.c) ---
+
+seam_core::seam!(
+    /// `ReplicationSlotInitialize()` (slot.c): register this backend's
+    /// replication-slot cleanup exit hook. `Err` carries its `ereport` surface.
+    pub fn replication_slot_initialize() -> types_error::PgResult<()>
+);

@@ -28,3 +28,36 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+// --- backend-utils-init-postinit consumers (fd.c) ---
+
+seam_core::seam!(
+    /// `InitFileAccess()` (fd.c): initialize the virtual file descriptor cache.
+    /// `Err` carries its `ereport` surface.
+    pub fn init_file_access() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitTemporaryFileAccess()` (fd.c): set up temporary-file accounting
+    /// (after pgstat). `Err` carries its `ereport` surface.
+    pub fn init_temporary_file_access() -> types_error::PgResult<()>
+);
+
+/// Result of `access(path, F_OK)` (postinit.c database-directory check).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessResult {
+    /// `access() == 0` — the path exists.
+    Ok,
+    /// `errno == ENOENT` — the path does not exist.
+    NoEnt,
+    /// Any other `errno` (carried as the raw value).
+    Other(i32),
+}
+
+seam_core::seam!(
+    /// `access(path, F_OK)` (unistd, used by InitPostgres): probe whether the
+    /// database directory exists. Returns the classified outcome (the C `== -1`
+    /// + `errno` branch). `Err` is reserved for the seam's own failure surface
+    /// (none expected; OS errno is returned in [`AccessResult::Other`]).
+    pub fn access_f_ok(path: &str) -> types_error::PgResult<AccessResult>
+);

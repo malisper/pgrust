@@ -10,3 +10,21 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_wal_snd_init_stopping()
 );
+
+// --- backend-utils-init-postinit consumers (walsender.c) ---
+
+seam_core::seam!(
+    /// `am_walsender` (walsender.c global): is this a WAL sender process?
+    pub fn am_walsender() -> bool
+);
+
+seam_core::seam!(
+    /// `am_db_walsender` (walsender.c global): is this a database-connected
+    /// (logical) WAL sender?
+    pub fn am_db_walsender() -> bool
+);
+
+seam_core::seam!(
+    /// `max_wal_senders` (walsender.c GUC).
+    pub fn max_wal_senders() -> i32
+);

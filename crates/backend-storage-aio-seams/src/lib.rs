@@ -12,3 +12,11 @@ seam_core::seam!(
     /// `pgaio_error_cleanup()` — release AIO state on the abort path.
     pub fn pgaio_error_cleanup()
 );
+
+// --- backend-utils-init-postinit consumer (aio_init.c) ---
+
+seam_core::seam!(
+    /// `pgaio_init_backend()` (aio_init.c): initialize this backend's AIO
+    /// subsystem. `Err` carries its `ereport` surface.
+    pub fn pgaio_init_backend() -> types_error::PgResult<()>
+);

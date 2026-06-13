@@ -130,3 +130,17 @@ seam_core::seam!(
     /// `replorigin_session_advance`. Pure read of backend-local state.
     pub fn xact_last_rec_end() -> types_core::XLogRecPtr
 );
+
+// --- backend-utils-init-postinit consumers (xact.c) ---
+
+seam_core::seam!(
+    /// `SetCurrentStatementStartTimestamp()` (xact.c): set the statement-start
+    /// timestamp (required for timeouts to work).
+    pub fn set_current_statement_start_timestamp()
+);
+
+seam_core::seam!(
+    /// `XactIsoLevel = XACT_READ_COMMITTED` (xact.c global): lower the
+    /// just-started transaction's isolation level to read committed.
+    pub fn set_xact_iso_level_read_committed()
+);

@@ -142,3 +142,12 @@ seam_core::seam!(
     /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
     pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumer (procarray.c) ---
+
+seam_core::seam!(
+    /// `CountDBConnections(databaseid)` (procarray.c): the number of backends
+    /// currently connected to `databaseid`. `Err` carries its `ereport`
+    /// surface.
+    pub fn count_db_connections(databaseid: types_core::Oid) -> types_error::PgResult<i32>
+);

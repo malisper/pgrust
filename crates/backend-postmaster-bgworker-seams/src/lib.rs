@@ -18,3 +18,15 @@ seam_core::seam!(
         handle: types_bgworker::BackgroundWorkerHandle,
     ) -> (types_bgworker::BgwHandleStatus, i32)
 );
+
+// --- backend-utils-init-postinit consumers (bgworker.c) ---
+
+seam_core::seam!(
+    /// `AmBackgroundWorkerProcess()` (miscadmin.h): is this a background worker?
+    pub fn am_background_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `max_worker_processes` (bgworker.c GUC).
+    pub fn max_worker_processes() -> i32
+);

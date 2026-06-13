@@ -90,3 +90,11 @@ seam_core::seam!(
     /// forbids PREPARE.
     pub fn xact_has_exported_snapshots() -> bool
 );
+
+// --- backend-utils-init-postinit consumer (snapmgr.c) ---
+
+seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the cached catalog
+    /// snapshot so the next catalog read takes a fresh one.
+    pub fn invalidate_catalog_snapshot()
+);

@@ -50,3 +50,12 @@ seam_core::seam!(
         block_num: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::PrefetchBufferResult>
 );
+
+// --- backend-utils-init-postinit consumer (bufmgr.c) ---
+
+seam_core::seam!(
+    /// `InitBufferManagerAccess()` (bufmgr.c): initialize this backend's local
+    /// buffer-manager structures and register its cleanup callback. `Err`
+    /// carries its `ereport` surface.
+    pub fn init_buffer_manager_access() -> types_error::PgResult<()>
+);

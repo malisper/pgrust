@@ -10,3 +10,11 @@ seam_core::seam!(
     /// `MyBackendType`). Infallible in C (assert-only).
     pub fn init_ps_display(fixed_part: Option<&str>)
 );
+
+// --- backend-utils-init-postinit consumer (ps_status.c) ---
+
+seam_core::seam!(
+    /// `set_ps_display(activity)` (ps_status.c): set the process-title activity
+    /// string.
+    pub fn set_ps_display(activity: &str)
+);

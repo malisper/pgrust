@@ -9,4 +9,6 @@ name = "backend_utils_misc_guc_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
 seam-core = { path = "../seam-core" }

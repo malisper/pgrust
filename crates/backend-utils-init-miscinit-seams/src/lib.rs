@@ -108,3 +108,70 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+// --- backend-utils-init-postinit consumers (miscinit.c) ---
+
+seam_core::seam!(
+    /// `GetSessionUserId()` (miscinit.c): the session user's role OID.
+    pub fn get_session_user_id() -> types_core::Oid
+);
+
+seam_core::seam!(
+    /// `InitializeSessionUserIdStandalone()` (miscinit.c): set the session user
+    /// to the bootstrap superuser (standalone/aux processes). `Err` carries its
+    /// `ereport` surface.
+    pub fn initialize_session_user_id_standalone() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSessionUserId(rolename, roleid, bypass_login_check)`
+    /// (miscinit.c): set the session user from name or OID, checking
+    /// rolcanlogin/rolconnlimit. `Err` carries its `ereport(FATAL)` surface.
+    pub fn initialize_session_user_id(
+        rolename: Option<&str>,
+        roleid: types_core::Oid,
+        bypass_login_check: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeSystemUser(authn_id, auth_method)` (miscinit.c): set the
+    /// `system_user` SQL value from the authenticated identity and method.
+    /// `Err` carries its `ereport` surface.
+    pub fn initialize_system_user(
+        authn_id: &str,
+        auth_method: &str,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `has_rolreplication(roleid)` (miscinit.c): does the role have the
+    /// REPLICATION attribute? `Err` carries its catcache `ereport` surface.
+    pub fn has_rolreplication(roleid: types_core::Oid) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ValidatePgVersion(path)` (miscinit.c): verify the database
+    /// directory's PG_VERSION matches the server. `Err` carries its
+    /// `ereport(FATAL)` surface.
+    pub fn validate_pg_version(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SetDatabasePath(path)` (miscinit.c): record the database directory
+    /// path globally. `Err` carries its OOM surface.
+    pub fn set_database_path(path: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `process_session_preload_libraries()` (miscinit.c): load the libraries
+    /// named by `session_preload_libraries`/`local_preload_libraries`. `Err`
+    /// carries the loader's `ereport` surface.
+    pub fn process_session_preload_libraries() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pg_usleep(microsec)` (port; PostAuthDelay application): sleep the given
+    /// number of microseconds.
+    pub fn pg_usleep(microsec: i64)
+);

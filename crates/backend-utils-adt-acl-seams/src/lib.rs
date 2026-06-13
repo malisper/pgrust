@@ -14,3 +14,21 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn member_can_set_role(member: Oid, role: Oid) -> PgResult<bool>
 );
+
+// --- backend-utils-init-postinit consumers (acl.c) ---
+
+seam_core::seam!(
+    /// `has_privs_of_role(member, role)` (acl.c): does `member` have the
+    /// privileges of `role` (directly or transitively, INHERIT)? `Err` carries
+    /// its catcache `ereport` surface.
+    pub fn has_privs_of_role(
+        member: types_core::Oid,
+        role: types_core::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `initialize_acl()` (acl.c): set up the ACL framework (role membership
+    /// cache). `Err` carries its `ereport` surface.
+    pub fn initialize_acl() -> types_error::PgResult<()>
+);

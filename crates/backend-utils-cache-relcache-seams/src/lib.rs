@@ -45,3 +45,24 @@ seam_core::seam!(
         rel: &types_rel::RelationData<'_>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+// --- backend-utils-init-postinit consumers (relcache.c) ---
+
+seam_core::seam!(
+    /// `RelationCacheInitialize()` (relcache.c): set up the relcache hashtable
+    /// (no catalog access). `Err` carries its OOM surface.
+    pub fn relation_cache_initialize() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitializePhase2()` (relcache.c): load relcache entries
+    /// for the shared system catalogs. `Err` carries its `ereport` surface.
+    pub fn relation_cache_initialize_phase2() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationCacheInitializePhase3()` (relcache.c): load the nailed-in
+    /// system-catalog relcache entries (real catalog access). `Err` carries its
+    /// `ereport` surface.
+    pub fn relation_cache_initialize_phase3() -> types_error::PgResult<()>
+);

@@ -169,3 +169,17 @@ seam_core::seam!(
     /// before advertising it in the proc array.
     pub fn virtual_xact_lock_table_insert(vxid: VirtualTransactionId) -> PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumer (lmgr.c) ---
+
+seam_core::seam!(
+    /// `LockSharedObject(classid, objid, objsubid, lockmode)` (lmgr.c): take a
+    /// lock on a shared-catalog object (the database lock during InitPostgres).
+    /// `Err` carries its `ereport` surface.
+    pub fn lock_shared_object(
+        classid: types_core::Oid,
+        objid: types_core::Oid,
+        objsubid: u16,
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> types_error::PgResult<()>
+);

@@ -7,3 +7,11 @@ seam_core::seam!(
     /// point invoked by `postmaster_child_launch`; never returns.
     pub fn repl_slot_sync_worker_main(startup_data: &types_startup::StartupData) -> !
 );
+
+// --- backend-utils-init-postinit consumer (slotsync.c) ---
+
+seam_core::seam!(
+    /// `AmLogicalSlotSyncWorkerProcess()` (slotsync.c / miscadmin.h): is this
+    /// the logical-slot-sync worker?
+    pub fn am_logical_slot_sync_worker_process() -> bool
+);

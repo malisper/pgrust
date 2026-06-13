@@ -220,3 +220,23 @@ seam_core::seam!(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
 );
+
+// --- backend-utils-init-postinit consumers (lock.c) ---
+
+seam_core::seam!(
+    /// `InitLockManagerAccess()` (lock.c): initialize the backend-local lock
+    /// manager structures (LOCALLOCK hashtable). `Err` carries its OOM surface.
+    pub fn init_lock_manager_access() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(USER_LOCKMETHOD, true)` (lock.c): release all
+    /// user (advisory) locks held by this backend. `Err` carries its `ereport`
+    /// surface.
+    pub fn lock_release_all_user() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `max_locks_per_xact` (lock.c GUC `max_locks_per_transaction`).
+    pub fn max_locks_per_xact() -> i32
+);

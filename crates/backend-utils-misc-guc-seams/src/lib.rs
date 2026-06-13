@@ -21,3 +21,17 @@ seam_core::seam!(
     /// GUC value (with optional unit suffix). `None` is the C `false` return.
     pub fn parse_real(value: String) -> Option<f64>
 );
+
+// --- backend-utils-init-postinit consumer (guc.c) ---
+
+seam_core::seam!(
+    /// `SetConfigOption(name, value, context, source)` (guc.c): set a GUC.
+    /// `value = None` mirrors the C NULL (reset to default). `Err` carries the
+    /// GUC assign-hook `ereport(ERROR)` surface.
+    pub fn set_config_option(
+        name: &str,
+        value: Option<&str>,
+        context: types_guc::GucContext,
+        source: types_guc::GucSource,
+    ) -> types_error::PgResult<()>
+);

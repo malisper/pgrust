@@ -48,3 +48,11 @@ seam_core::seam!(
         forknum: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<bool>
 );
+
+// --- backend-utils-init-postinit consumer (smgr.c) ---
+
+seam_core::seam!(
+    /// `smgrinit()` (smgr.c): initialize the storage-manager switch and
+    /// register its shutdown hook. `Err` carries its `ereport` surface.
+    pub fn smgrinit() -> types_error::PgResult<()>
+);
