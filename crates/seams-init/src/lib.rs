@@ -57,6 +57,7 @@ pub fn init_all() {
     backend_executor_nodeHash::init_seams();
     backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeIndexonlyscan::init_seams();
+    backend_executor_nodeLimit::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMemoize::init_seams();
     backend_executor_nodeMergejoin::init_seams();
