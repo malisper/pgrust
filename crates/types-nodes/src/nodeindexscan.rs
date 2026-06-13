@@ -24,6 +24,11 @@ pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `Cost startup_cost` — cost expended before fetching any tuples. `Cost`
+    /// is `double` in C.
+    pub startup_cost: f64,
+    /// `Cost total_cost` — total cost (assuming all tuples fetched).
+    pub total_cost: f64,
     /// `List *targetlist` — target list to be computed at this node
     /// (`None` = the C `NIL`).
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
@@ -67,6 +72,8 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            startup_cost: self.startup_cost,
+            total_cost: self.total_cost,
             targetlist,
             qual,
             parallel_aware: self.parallel_aware,
@@ -90,6 +97,34 @@ impl Plan<'_> {
     }
 }
 
+/// `Scan` (nodes/plannodes.h) — the base every scan plan node embeds first:
+///
+/// ```c
+/// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
+/// ```
+/// `Scan` (nodes/plannodes.h) — the abstract base for all scan plan nodes:
+/// the embedded `Plan` followed by the range-table index of the scanned
+/// relation. Trimmed to the fields ports consume.
+#[derive(Debug, Default)]
+pub struct Scan<'mcx> {
+    /// `Plan plan` — the abstract plan-node base.
+    pub plan: Plan<'mcx>,
+    /// `Index scanrelid` — relid is index into the range table.
+    pub scanrelid: types_core::primitive::Index,
+}
+
+impl Scan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    /// Deep copy of the scan base into `mcx`. Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
+        Ok(Scan {
+            plan: self.plan.clone_in(mcx)?,
+            scanrelid: self.scanrelid,
+        })
+    }
+}
+
 /// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlannedStmt<'mcx> {
@@ -99,4 +134,56 @@ pub struct PlannedStmt<'mcx> {
     /// `List *relationOids` — OIDs of relations the plan depends on, used by
     /// COPY-(query)-TO's RLS double-check (`None` = the C `NIL`).
     pub relationOids: Option<PgVec<'mcx, types_core::Oid>>,
+    /// `struct Plan *planTree` — tree of `Plan` nodes (`None` = the C `NULL`).
+    pub planTree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `List *rowMarks` — a list of `PlanRowMark` nodes (`None` = the C `NIL`).
+    /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
+    /// planner port.
+    pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+}
+
+impl PlannedStmt<'_> {
+    /// `copyObject(plannedstmt)` shape — deep copy into `mcx`. Fallible:
+    /// copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PlannedStmt<'b>> {
+        let resultRelations = match &self.resultRelations {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let rowMarks = match &self.rowMarks {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(x.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let relationOids = match &self.relationOids {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(PlannedStmt {
+            resultRelations,
+            relationOids,
+            planTree: match &self.planTree {
+                Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                None => None,
+            },
+            rowMarks,
+        })
+    }
 }

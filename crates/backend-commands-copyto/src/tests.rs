@@ -33,7 +33,7 @@ fn routine_selection() {
             file_encoding: -1,
             binary: bin,
             csv_mode: csv,
-            header_line: CopyHeaderChoice::False,
+            header_line: CopyHeaderChoice::COPY_HEADER_FALSE,
             null_print: PgString::from_str_in("\\N", mcx).unwrap(),
             null_print_client: PgString::from_str_in("\\N", mcx).unwrap(),
             delim: b'\t',

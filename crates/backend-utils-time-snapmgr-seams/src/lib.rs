@@ -107,7 +107,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PopActiveSnapshot()` (copyto.c:1013): pop the snapshot pushed by
-    /// [`push_copied_active_snapshot`].
-    pub fn pop_active_snapshot()
+    /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
+    /// `None` (the C may return NULL when no snapshot is active). Snapshots
+    /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
+    /// pointer the snapshot stack and callers alias).
+    pub fn get_active_snapshot() -> PgResult<Option<std::rc::Rc<types_snapshot::SnapshotData>>>
+);
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(snap)` (snapmgr.c) — make `snap` the active
+    /// snapshot (copies it onto the active-snapshot stack). Allocates; can
+    /// `ereport(ERROR)`.
+    pub fn push_active_snapshot(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
+    /// Used by COPY-(query)-TO teardown (copyto.c:1013) to pop the snapshot
+    /// pushed by [`push_copied_active_snapshot`].
+    pub fn pop_active_snapshot() -> PgResult<()>
 );

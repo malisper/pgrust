@@ -7,9 +7,12 @@
 //! The scan descriptor (`TableScanDesc`) is owned by the AM; it crosses as an
 //! opaque [`ScanToken`].
 
+use std::rc::Rc;
+
 use types_error::PgResult;
 use types_nodes::TupleTableSlot;
 use types_rel::Relation;
+use types_snapshot::SnapshotData;
 
 /// An open `TableScanDesc` (the AM-owned scan state). C's pointer is opaque to
 /// the COPY driver, which only threads it back into `getnextslot`/`endscan`.
@@ -17,11 +20,16 @@ use types_rel::Relation;
 pub struct ScanToken(pub u64);
 
 seam_core::seam!(
-    /// `table_beginscan(relation, GetActiveSnapshot(), 0, NULL)`
-    /// (copyto.c:1076): start a forward sequential scan of `relation` under the
-    /// active snapshot. Returns the AM-owned scan token. `Err` carries the
-    /// AM's `ereport(ERROR)`.
-    pub fn table_beginscan(relation: &Relation<'_>) -> PgResult<ScanToken>
+    /// `table_beginscan(relation, snapshot, 0, NULL)` (copyto.c:1076): start a
+    /// forward sequential scan of `relation` under `snapshot`. The COPY driver
+    /// passes `GetActiveSnapshot()` explicitly (the C call's second argument);
+    /// the snapshot crosses as a shared `Rc<SnapshotData>` rather than being
+    /// read ambiently inside the AM. Returns the AM-owned scan token. `Err`
+    /// carries the AM's `ereport(ERROR)`.
+    pub fn table_beginscan(
+        relation: &Relation<'_>,
+        snapshot: Rc<SnapshotData>,
+    ) -> PgResult<ScanToken>
 );
 
 seam_core::seam!(

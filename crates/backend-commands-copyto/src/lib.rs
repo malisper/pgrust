@@ -246,7 +246,7 @@ fn copy_to_text_like_start(cstate: &mut CopyToStateData<'_>, tup_desc: &TupleDes
     }
 
     // if a header has been requested send the line
-    if cstate.opts.header_line != CopyHeaderChoice::False {
+    if cstate.opts.header_line != CopyHeaderChoice::COPY_HEADER_FALSE {
         let mut hdr_delim = false;
         let delimc = cstate.opts.delim;
         let csv_mode = cstate.opts.csv_mode;
@@ -482,14 +482,47 @@ fn append_bytes(buf: &mut StringInfo<'_>, bytes: &[u8]) -> PgResult<()> {
 fn copy_send_end_of_row(cstate: &mut CopyToStateData<'_>) -> PgResult<()> {
     match cstate.copy_dest {
         CopyDest::File => {
-            // fwrite(...) + ferror() + EPIPE handling — fd/OS-owned.
-            let filename = cstate.filename.as_ref().map(|f| f.as_str());
-            fd_s::copy_write_file::call(
+            // The bare write/ferror is fd/OS-owned; the EPIPE / is_program
+            // decision and the message selection are copyto's own control flow
+            // (copyto.c:451-483).
+            if let Some(write_errno) = fd_s::copy_write_file::call(
                 cstate.copy_file.expect("COPY_FILE dest with no open file"),
                 cstate.fe_msgbuf.as_bytes(),
-                cstate.is_program,
-                filename,
-            )?;
+            )? {
+                if cstate.is_program {
+                    let mut errnum = write_errno;
+                    if errnum == backend_utils_error::errno::EPIPE {
+                        // The pipe will be closed automatically on error at the
+                        // end of transaction, but we might get a better error
+                        // message from the subprocess' exit code than just
+                        // "Broken Pipe".
+                        close_pipe_to_program(cstate)?;
+                        // If ClosePipeToProgram() didn't throw an error, the
+                        // program terminated normally, but closed the pipe
+                        // first. Restore errno, and throw an error.
+                        errnum = backend_utils_error::errno::EPIPE;
+                    }
+                    return Err(PgError::error(
+                        backend_utils_error::errno::replace_percent_m(
+                            "could not write to COPY program: %m",
+                            errnum,
+                        ),
+                    )
+                    .with_sqlstate(backend_utils_error::errno::sqlstate_for_file_access(errnum))
+                    .with_saved_errno(errnum));
+                } else {
+                    return Err(PgError::error(
+                        backend_utils_error::errno::replace_percent_m(
+                            "could not write to COPY file: %m",
+                            write_errno,
+                        ),
+                    )
+                    .with_sqlstate(backend_utils_error::errno::sqlstate_for_file_access(
+                        write_errno,
+                    ))
+                    .with_saved_errno(write_errno));
+                }
+            }
         }
         CopyDest::Frontend => {
             // Dump the accumulated row as one CopyData message
@@ -906,7 +939,7 @@ pub fn EndCopyTo(mut cstate: CopyToStateData<'_>) -> PgResult<()> {
     if let Some(query_desc) = cstate.query_desc.take() {
         // Close down the query and free resources.
         execmain_s::end_copy_query::call(query_desc.exec_token)?;
-        backend_utils_time_snapmgr_seams::pop_active_snapshot::call();
+        backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
     }
 
     // Clean up storage.
@@ -960,8 +993,12 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
     let processed: u64;
     if let Some(rel) = cstate.rel.as_ref() {
         // The table scan (copyto.c:1071-1100).
+        // table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL): the active
+        // snapshot is passed explicitly across the seam.
         let rel_alias = rel.alias();
-        let scandesc = tableam_s::table_beginscan::call(&rel_alias)?;
+        let snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?
+            .expect("COPY TO scan with no active snapshot");
+        let scandesc = tableam_s::table_beginscan::call(&rel_alias, snapshot)?;
         let mut slot = backend_access_table_tableam::table_slot_create(cstate.mcx, &rel_alias)?;
 
         let mut local_processed: u64 = 0;
@@ -988,12 +1025,18 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
         processed = local_processed;
     } else {
         // run the plan --- the dest receiver will send tuples
+        // ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0);
         let exec_token = cstate.query_desc.as_ref().unwrap().exec_token;
         let receiver = cstate.receiver.expect("COPY query TO with no receiver");
         receiver_bind(receiver, cstate);
         let run = execmain_s::executor_run_copy::call(exec_token);
         receiver_unbind(receiver);
-        processed = run?;
+        run?;
+
+        // processed = ((DR_copy *) cstate->queryDesc->dest)->processed;
+        // The receiver incremented `cstate.receiver_processed` per tuple inside
+        // `copy_dest_receive`, exactly mirroring the C DR_copy counter.
+        processed = cstate.receiver_processed;
     }
 
     // routine->CopyToEnd(cstate);

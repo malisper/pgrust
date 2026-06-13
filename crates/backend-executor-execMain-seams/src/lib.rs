@@ -63,10 +63,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecutorRun(queryDesc, ForwardScanDirection, 0)` (copyto.c:1104) for the
     /// COPY-(query)-TO path: run the plan to completion; the COPY-OUT receiver
-    /// emits each tuple. Returns the dest receiver's processed-tuple count
-    /// (`((DR_copy *) queryDesc->dest)->processed`). `Err` carries execution
-    /// `ereport(ERROR)`s.
-    pub fn executor_run_copy(exec_token: u64) -> types_error::PgResult<u64>
+    /// emits each tuple into copyto's `cstate` (incrementing
+    /// `cstate.receiver_processed`, the C `((DR_copy *) dest)->processed`). The
+    /// processed count is read by copyto from its own `cstate` after the run, so
+    /// it is *not* returned here. `Err` carries execution `ereport(ERROR)`s.
+    pub fn executor_run_copy(exec_token: u64) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -74,4 +75,49 @@ seam_core::seam!(
     /// `ExecutorEnd` + `FreeQueryDesc` for the started query. `Err` carries any
     /// teardown `ereport(ERROR)`.
     pub fn end_copy_query(exec_token: u64) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecutorRun(queryDesc, direction, count)` (execMain.c) — run the
+    /// executor, sending tuples to `queryDesc->dest`. Runs the plan; can
+    /// `ereport(ERROR)`. (`once` defaulted to false here, as in
+    /// `PersistHoldablePortal`'s call.)
+    pub fn executor_run(
+        query_desc: &mut types_portal::QueryDesc,
+        direction: types_scan::sdir::ScanDirection,
+        count: u64,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecutorFinish(queryDesc)` (execMain.c) — run the executor's
+    /// after-query cleanup (AFTER triggers etc.). Can `ereport(ERROR)`.
+    pub fn executor_finish(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecutorEnd(queryDesc)` (execMain.c) — shut down the executor and free
+    /// its per-query state. Can `ereport(ERROR)`.
+    pub fn executor_end(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecutorRewind(queryDesc)` (execMain.c) — rewind the executor to the
+    /// start of the query so it can be re-run. Can `ereport(ERROR)`.
+    pub fn executor_rewind(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `FreeQueryDesc(queryDesc)` (pquery.c, reached through the executor
+    /// surface) — free a finished `QueryDesc` (consumes it).
+    pub fn free_query_desc(query_desc: types_portal::QueryDesc) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecSupportsBackwardScan(plan)` (execAmi.c) — does the plan tree
+    /// support backward scanning? Pure structural inspection (no ereport in
+    /// practice, but the index-AM probe path can error), so fallible.
+    pub fn exec_supports_backward_scan(
+        plan: &types_nodes::nodeindexscan::PlannedStmt<'_>,
+    ) -> types_error::PgResult<bool>
 );
