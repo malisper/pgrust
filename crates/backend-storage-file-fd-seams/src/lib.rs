@@ -28,3 +28,36 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+seam_core::seam!(
+    /// Read the full contents of the file at `path` (`AllocateFile(path, "r")`
+    /// + read loop, allocated in `mcx`). Returns `None` when the file is absent
+    /// (`errno == ENOENT`); raises `FATAL` on any other open failure and
+    /// `ERROR` on a read failure, exactly as the timeline.c callers expect.
+    pub fn read_file_or_absent<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        path: &str,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// Probe whether the file at `path` exists (`AllocateFile(path, "r")` then
+    /// `FreeFile`). `true` if it could be opened, `false` if `errno == ENOENT`,
+    /// `FATAL` on any other open failure.
+    pub fn file_exists(path: &str) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// Atomically emplace a finished file: write `content` to a temp file under
+    /// `XLOGDIR`, `pg_fsync` it, then `durable_rename` it to `final_path`
+    /// (`OpenTransientFile`/`write`/`pg_fsync`/`CloseTransientFile`/
+    /// `durable_rename`). `replace_existing == false` asserts the destination
+    /// did not already exist (`writeTimeLineHistory`); `true` replaces any
+    /// existing file (`writeTimeLineHistoryFile`). Raises `ERROR` on I/O
+    /// failure.
+    pub fn durable_write_file(
+        final_path: &str,
+        content: &[u8],
+        replace_existing: bool,
+    ) -> types_error::PgResult<()>
+);
