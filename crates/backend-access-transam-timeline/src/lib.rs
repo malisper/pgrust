@@ -40,7 +40,9 @@ use backend_utils_error::errno::current_errno;
 use backend_utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR, FATAL};
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{TimeLineHistoryEntry, TimeLineID, XLogRecPtr, InvalidXLogRecPtr, XLOGDIR};
+use types_core::{TimeLineID, XLogRecPtr, InvalidXLogRecPtr};
+use types_wal::TimeLineHistoryEntry;
+use types_wal::xlog_consts::XLOGDIR;
 use types_pgstat::wait_event::{
     WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE,
     WAIT_EVENT_TIMELINE_HISTORY_READ, WAIT_EVENT_TIMELINE_HISTORY_SYNC,
@@ -669,20 +671,28 @@ pub fn tliSwitchPoint(
 /// (`backend-access-transam-timeline-seams`).
 pub fn init_seams() {
     use backend_access_transam_timeline_seams as seams;
-    seams::read_time_line_history::set(readTimeLineHistory);
-    seams::exists_time_line_history::set(|mcx, probe_tli, arr| {
+    // `read_timeline_history(mcx, target_tli)` is the live cyclic-consumer
+    // surface (xlogutils `XLogReadDetermineTimeline`, walsummarizer): these
+    // run during normal operation / streaming, where `ArchiveRecoveryRequested`
+    // is its default `false` (it is only set true during archive-recovery
+    // startup in xlogrecovery.c). So the 2-arg seam is the pg_wal-path reader;
+    // it threads `archive_recovery_requested = false` into the full impl.
+    seams::read_timeline_history::set(|mcx, target_tli| {
+        readTimeLineHistory(mcx, target_tli, false)
+    });
+    seams::exists_timeline_history::set(|mcx, probe_tli, arr| {
         existsTimeLineHistory(probe_tli, arr, mcx)
     });
-    seams::find_newest_time_line::set(|mcx, start_tli, arr| {
+    seams::find_newest_timeline::set(|mcx, start_tli, arr| {
         findNewestTimeLine(start_tli, arr, mcx)
     });
-    seams::write_time_line_history::set(
+    seams::write_timeline_history::set(
         |mcx, new_tli, parent_tli, sp, reason, arr, xaa| {
             writeTimeLineHistory(new_tli, parent_tli, sp, reason, arr, xaa, mcx)
         },
     );
-    seams::write_time_line_history_file::set(writeTimeLineHistoryFile);
-    seams::restore_time_line_history_files::set(|mcx, begin, end, arr| {
+    seams::write_timeline_history_file::set(writeTimeLineHistoryFile);
+    seams::restore_timeline_history_files::set(|mcx, begin, end, arr| {
         restoreTimeLineHistoryFiles(begin, end, arr, mcx)
     });
     seams::tli_in_history::set(tliInHistory);

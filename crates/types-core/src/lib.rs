@@ -13,7 +13,6 @@ pub mod geo;
 pub mod init;
 pub mod instrument;
 pub mod primitive;
-pub mod timeline;
 pub mod xact;
 
 pub use catalog::*;
@@ -22,5 +21,4 @@ pub use geo::*;
 pub use init::*;
 pub use instrument::*;
 pub use primitive::*;
-pub use timeline::*;
 pub use xact::*;

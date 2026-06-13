@@ -13,6 +13,7 @@ mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-wal = { path = "../types-wal" }
 
 backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
 backend-access-transam-xlogarchive-seams = { path = "../backend-access-transam-xlogarchive-seams" }
