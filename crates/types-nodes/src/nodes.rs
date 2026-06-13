@@ -44,6 +44,7 @@ pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
+pub const T_SetOp: NodeTag = NodeTag(371);
 pub const T_Limit: NodeTag = NodeTag(373);
 
 // Executor-state node tags (nodes/nodetags.h), copied as ports consume them
@@ -127,6 +128,8 @@ pub enum Node<'mcx> {
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Result`.
     Result(crate::noderesult::Result<'mcx>),
+    /// `T_SetOp`.
+    SetOp(crate::nodesetop::SetOp<'mcx>),
     /// `T_Memoize`.
     Memoize(crate::nodememoize::Memoize<'mcx>),
     /// `T_IndexOnlyScan`.
@@ -160,6 +163,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Result(_) => T_Result,
+            Node::SetOp(_) => T_SetOp,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
@@ -182,6 +186,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Result(r) => &r.plan,
+            Node::SetOp(s) => &s.plan,
             Node::Memoize(m) => &m.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
@@ -210,6 +215,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
+            Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),

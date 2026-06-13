@@ -69,6 +69,7 @@ backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
 backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
 backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
+backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
