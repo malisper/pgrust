@@ -49,11 +49,11 @@ use crate::regguts::{
     PLAIN, RAINBOW,
 };
 
-use self::nfacolor::{colorchain, rainbow, uncolorchain};
+use self::nfacolor::{colorchain, uncolorchain};
 
 pub mod nfacolor;
 
-pub use self::nfacolor::{colorcomplement, okcolors};
+pub use self::nfacolor::{colorcomplement, okcolors, rainbow};
 
 // =============================================================================
 // combine() result codes  (regcomp.c)
@@ -1342,18 +1342,84 @@ fn cleartraverse(nfa: &mut Nfa, s: StateId, depth: u32) -> RegResult<()> {
 /// NFA), because states are heap pointers and `duptraverse` scribbles `s->tmp`
 /// on the source states. The arena split forces the two NFAs to be distinct
 /// arguments; the single-NFA [`dupnfa`] is the `src == dst` special case.
+///
+/// The destination NFA (the child built by `newnfa(v, v->cm, v->nfa)`) always
+/// has a parent — it shares the colormap — so every arc created in `dst` runs
+/// with `has_parent = true` (C: `COLORED(a) && nfa->parent == NULL` is false,
+/// so the colorchain bookkeeping is skipped). Mirrors C `dupnfa`: scribble
+/// `tmp` on the *source* states (pointing at their `dst` duplicates), run the
+/// recursive duptraverse, then clear unconditionally (the first error wins).
 #[allow(clippy::too_many_arguments)]
 pub fn dupnfa_cross<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _dst: &mut Nfa,
-    _src: &mut Nfa,
-    _cm: &mut ColorMap,
-    _start: StateId,
-    _stop: StateId,
-    _from: StateId,
-    _to: StateId,
+    mcx: Mcx<'mcx>,
+    dst: &mut Nfa,
+    src: &mut Nfa,
+    cm: &mut ColorMap,
+    start: StateId,
+    stop: StateId,
+    from: StateId,
+    to: StateId,
 ) -> RegResult<()> {
-    todo!("regc_nfa.c:dupnfa (cross-NFA)")
+    if start == stop {
+        // newarc(nfa, EMPTY, 0, from, to) — into the destination NFA.
+        newarc(mcx, dst, cm, true, EMPTY, 0, from, to)?;
+        return Ok(());
+    }
+
+    // stop->tmp = to; (source state `stop` records its destination duplicate `to`)
+    src.st_mut(stop).tmp = Some(to);
+    let res = duptraverse_cross(mcx, dst, src, cm, start, Some(from), 0);
+    // done, except for clearing out the tmp pointers
+    src.st_mut(stop).tmp = None;
+    // C runs cleartraverse unconditionally after duptraverse; the duptraverse
+    // error takes precedence (set first), a cleartraverse error surfaces only
+    // when duptraverse succeeded. cleartraverse walks the SOURCE states.
+    let clear_res = cleartraverse(src, start, 0);
+    res?;
+    clear_res?;
+    Ok(())
+}
+
+/// Cross-NFA `duptraverse`: recursive heart of [`dupnfa_cross`]. Reads arcs from
+/// the SOURCE NFA, scribbles `tmp` on source states, and creates duplicate
+/// states/arcs in the DESTINATION NFA. `stmp` is `s`'s duplicate (a `dst`
+/// state id), or `None` (allocate a fresh `dst` state).
+fn duptraverse_cross<'mcx>(
+    mcx: Mcx<'mcx>,
+    dst: &mut Nfa,
+    src: &mut Nfa,
+    cm: &mut ColorMap,
+    s: StateId,
+    stmp: Option<StateId>,
+    depth: u32,
+) -> RegResult<()> {
+    if depth >= MAX_RECURSION_DEPTH {
+        return Err(err_etoobig());
+    }
+
+    if src.st(s).tmp.is_some() {
+        return Ok(()); // already done
+    }
+
+    let dup = match stmp {
+        Some(t) => t,
+        None => newstate(mcx, dst)?,
+    };
+    src.st_mut(s).tmp = Some(dup);
+
+    let mut cur = src.st(s).outs;
+    while let Some(a) = cur {
+        let to = src.ar(a).to.ok_or(err_assert())?;
+        duptraverse_cross(mcx, dst, src, cm, to, None, depth + 1)?;
+        let todup = src.st(to).tmp.expect("duptraverse_cross: dup not set");
+        let sdup = src.st(s).tmp.expect("duptraverse_cross: s dup not set");
+        // cparc(nfa, a, s->tmp, a->to->tmp): copy the source arc's (type, co)
+        // onto the new from/to pair in the destination NFA.
+        let (t, co) = (src.ar(a).type_, src.ar(a).co);
+        newarc(mcx, dst, cm, true, t, co, sdup, todup)?;
+        cur = src.ar(a).outchain;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

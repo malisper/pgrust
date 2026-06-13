@@ -545,7 +545,7 @@ pub fn subcolorcvec<'mcx>(
             while from <= lim {
                 let sco = subcolor(mcx, cm, from)?;
                 if sco != lastsubcolor {
-                    crate::regex_nfa::newarc(mcx, nfa, PLAIN, sco, lp, rp)?;
+                    crate::regex_nfa::newarc(mcx, nfa, cm, false, PLAIN, sco, lp, rp)?;
                     lastsubcolor = sco;
                 }
                 from += 1;
@@ -578,7 +578,7 @@ pub fn subcolorcvec<'mcx>(
                     let sco = subcolorhi(mcx, cm, hi_idx)?;
                     // add the arc if needed
                     if sco != lastsubcolor {
-                        crate::regex_nfa::newarc(mcx, nfa, PLAIN, sco, lp, rp)?;
+                        crate::regex_nfa::newarc(mcx, nfa, cm, false, PLAIN, sco, lp, rp)?;
                         lastsubcolor = sco;
                     }
                 }
@@ -608,7 +608,7 @@ pub fn subcoloronechr<'mcx>(
     if ch <= MAX_SIMPLE_CHR {
         let sco = subcolor(mcx, cm, ch)?;
         if sco != *lastsubcolor {
-            crate::regex_nfa::newarc(mcx, nfa, PLAIN, sco, lp, rp)?;
+            crate::regex_nfa::newarc(mcx, nfa, cm, false, PLAIN, sco, lp, rp)?;
             *lastsubcolor = sco;
         }
         return Ok(());
@@ -853,7 +853,7 @@ pub fn subcoloronerow<'mcx>(
         let sco = subcolorhi(mcx, cm, base + i)?;
         // make the arc if needed
         if sco != *lastsubcolor {
-            crate::regex_nfa::newarc(mcx, nfa, PLAIN, sco, lp, rp)?;
+            crate::regex_nfa::newarc(mcx, nfa, cm, false, PLAIN, sco, lp, rp)?;
             *lastsubcolor = sco;
         }
     }

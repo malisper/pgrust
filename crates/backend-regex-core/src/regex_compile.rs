@@ -1240,7 +1240,10 @@ impl<'mcx> Vars<'mcx> {
         if e_is_err {
             return lastresort;
         }
-        let c = elem.unwrap();
+        // C uses the resolved chr; the REG_ULOCALE note is intentionally not
+        // threaded here (chrnamed saves/restores v->err around element and only
+        // cares about the resolved code point).
+        let c = elem.unwrap().code;
 
         // cv = range(v, c, c, 0);
         match range(self.mcx, c, c, 0) {
@@ -1555,13 +1558,13 @@ pub fn charclasscomplement(
     v.cv = Some(cv);
 
     // clean up any subcolors in the arc set
-    okcolors(v.mcx, &mut v.nfa, &mut v.cm)?; // NOERR()
+    okcolors(v.mcx, &mut v.nfa, &mut v.cm, false)?; // NOERR()
 
     // now build output arcs for the complement of the char class
-    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, PLAIN, cstate, lp, rp)?; // NOERR()
+    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, cstate, lp, rp)?; // NOERR()
 
     // clean up dummy state
-    dropstate(&mut v.nfa, cstate);
+    dropstate(&mut v.nfa, &mut v.cm, false, cstate)?;
     Ok(())
 }
 
@@ -1579,10 +1582,10 @@ pub fn nonword(v: &mut Vars, dir: i32, lp: StateId, rp: StateId) -> RegResult<()
     };
 
     debug_assert!(dir == AHEAD || dir == BEHIND);
-    newarc(v.mcx, &mut v.nfa, anchor, 1, lp, rp)?;
-    newarc(v.mcx, &mut v.nfa, anchor, 0, lp, rp)?;
+    newarc(v.mcx, &mut v.nfa, &mut v.cm, false, anchor, 1, lp, rp)?;
+    newarc(v.mcx, &mut v.nfa, &mut v.cm, false, anchor, 0, lp, rp)?;
     let wordchrs = v.wordchrs.expect("nonword: wordchrs not set up");
-    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, dir, wordchrs, lp, rp)?;
+    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, false, dir, wordchrs, lp, rp)?;
     // (no need for special attention to \n)
     Ok(())
 }
@@ -1592,7 +1595,7 @@ pub fn nonword(v: &mut Vars, dir: i32, lp: StateId, rp: StateId) -> RegResult<()
 pub fn word(v: &mut Vars, dir: i32, lp: StateId, rp: StateId) -> RegResult<()> {
     debug_assert!(dir == AHEAD || dir == BEHIND);
     let wordchrs = v.wordchrs.expect("word: wordchrs not set up");
-    cloneouts(v.mcx, &mut v.nfa, wordchrs, lp, rp, dir)
+    cloneouts(v.mcx, &mut v.nfa, &mut v.cm, false, wordchrs, lp, rp, dir)
     // (no need for special attention to \n)
 }
 
@@ -1614,7 +1617,7 @@ pub fn wordchrs(v: &mut Vars) -> RegResult<()> {
     v.cv = Some(cv);
 
     // close new open subcolors to ensure the cache entry is self-contained
-    okcolors(v.mcx, &mut v.nfa, &mut v.cm)?; // NOERR()
+    okcolors(v.mcx, &mut v.nfa, &mut v.cm, false)?; // NOERR()
 
     // success! save the cache pointer
     v.wordchrs = Some(cstate);
@@ -1720,7 +1723,11 @@ pub fn brackpart(
             if v.ISERR() {
                 return Ok(());
             }
-            startc = latch!(element(&v.pattern[startp..endp]));
+            let er = latch!(element(&v.pattern[startp..endp]));
+            if er.note_ulocale {
+                v.NOTE(REG_ULOCALE);
+            }
+            startc = er.code;
         }
         t if t == ECLASS => {
             let startp = v.cursor;
@@ -1729,8 +1736,12 @@ pub fn brackpart(
             if v.ISERR() {
                 return Ok(());
             }
-            startc = latch!(element(&v.pattern[startp..endp]));
-            let cv = latch!(eclass(v.mcx, startc, v.cflags & REG_ICASE));
+            let er = latch!(element(&v.pattern[startp..endp]));
+            if er.note_ulocale {
+                v.NOTE(REG_ULOCALE);
+            }
+            startc = er.code;
+            let cv = latch!(eclass(v.mcx, v.cflags, startc, v.cflags & REG_ICASE));
             let r = subcolorcvec(v.mcx, &mut v.nfa, &mut v.cm, &cv, lp, rp);
             v.cv = Some(cv);
             return r;
@@ -1780,7 +1791,11 @@ pub fn brackpart(
                 if v.ISERR() {
                     return Ok(());
                 }
-                endc = latch!(element(&v.pattern[startp..endp]));
+                let er = latch!(element(&v.pattern[startp..endp]));
+                if er.note_ulocale {
+                    v.NOTE(REG_ULOCALE);
+                }
+                endc = er.code;
             }
             _ => {
                 v.seterr(REG_ERANGE);
@@ -1814,7 +1829,7 @@ pub fn bracket(v: &mut Vars, lp: StateId, rp: StateId) -> RegResult<()> {
     debug_assert!(v.SEE(b']' as i32) || v.ISERR());
 
     // close up open subcolors from the positive bracket elements
-    okcolors(v.mcx, &mut v.nfa, &mut v.cm)?; // NOERR()
+    okcolors(v.mcx, &mut v.nfa, &mut v.cm, false)?; // NOERR()
 
     // now handle any complemented elements
     let mut any_cclassc = false;
@@ -1847,7 +1862,7 @@ pub fn cbracket(v: &mut Vars, lp: StateId, rp: StateId) -> RegResult<()> {
     // in NLSTOP mode, ensure newline is not part of the result set
     if (v.cflags & REG_NLSTOP) != 0 {
         let nlcolor = v.nlcolor;
-        newarc(v.mcx, &mut v.nfa, PLAIN, nlcolor, left, right)?;
+        newarc(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, nlcolor, left, right)?;
     }
     if v.ISERR() {
         return Ok(()); // NOERR()
@@ -1856,8 +1871,8 @@ pub fn cbracket(v: &mut Vars, lp: StateId, rp: StateId) -> RegResult<()> {
     debug_assert_eq!(v.nfa.state_arena[lp.0 as usize].nouts, 0); // all outarcs ours
 
     // Easy part of complementing.
-    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, PLAIN, left, lp, rp)?; // NOERR()
-    dropstate(&mut v.nfa, left);
+    colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, left, lp, rp)?; // NOERR()
+    dropstate(&mut v.nfa, &mut v.cm, false, left)?;
     debug_assert_eq!(v.nfa.state_arena[right.0 as usize].nins, 0);
     freestate(&mut v.nfa, right);
     Ok(())
@@ -1897,9 +1912,9 @@ pub fn optimizebracket(v: &mut Vars, lp: StateId, rp: StateId) -> RegResult<()> 
 
     // OK, drop existing arcs and replace with a rainbow.
     while let Some(a) = v.nfa.state_arena[lp.0 as usize].outs {
-        freearc(&mut v.nfa, a);
+        freearc(&mut v.nfa, &mut v.cm, false, a);
     }
-    newarc(v.mcx, &mut v.nfa, PLAIN, RAINBOW, lp, rp)
+    newarc(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, RAINBOW, lp, rp)
 }
 
 // =============================================================================
@@ -1923,27 +1938,27 @@ pub fn processlacon(
     match latype {
         LATYPE_AHEAD_POS => {
             if let Some(s1) = s1 {
-                return cloneouts(v.mcx, &mut v.nfa, s1, lp, rp, AHEAD);
+                return cloneouts(v.mcx, &mut v.nfa, &mut v.cm, false, s1, lp, rp, AHEAD);
             }
         }
         LATYPE_AHEAD_NEG => {
             if let Some(s1) = s1 {
-                colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, AHEAD, s1, lp, rp)?;
-                newarc(v.mcx, &mut v.nfa, b'$' as i32, 1, lp, rp)?;
-                newarc(v.mcx, &mut v.nfa, b'$' as i32, 0, lp, rp)?;
+                colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, false, AHEAD, s1, lp, rp)?;
+                newarc(v.mcx, &mut v.nfa, &mut v.cm, false, b'$' as i32, 1, lp, rp)?;
+                newarc(v.mcx, &mut v.nfa, &mut v.cm, false, b'$' as i32, 0, lp, rp)?;
                 return Ok(());
             }
         }
         LATYPE_BEHIND_POS => {
             if let Some(s1) = s1 {
-                return cloneouts(v.mcx, &mut v.nfa, s1, lp, rp, BEHIND);
+                return cloneouts(v.mcx, &mut v.nfa, &mut v.cm, false, s1, lp, rp, BEHIND);
             }
         }
         LATYPE_BEHIND_NEG => {
             if let Some(s1) = s1 {
-                colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, BEHIND, s1, lp, rp)?;
-                newarc(v.mcx, &mut v.nfa, b'^' as i32, 1, lp, rp)?;
-                newarc(v.mcx, &mut v.nfa, b'^' as i32, 0, lp, rp)?;
+                colorcomplement(v.mcx, &mut v.nfa, &mut v.cm, false, BEHIND, s1, lp, rp)?;
+                newarc(v.mcx, &mut v.nfa, &mut v.cm, false, b'^' as i32, 1, lp, rp)?;
+                newarc(v.mcx, &mut v.nfa, &mut v.cm, false, b'^' as i32, 0, lp, rp)?;
                 return Ok(());
             }
         }
@@ -1954,7 +1969,7 @@ pub fn processlacon(
 
     // General case: we need a LACON subre and arc.
     let n = newlacon(v, begin, end, latype as u8)?;
-    newarc(v.mcx, &mut v.nfa, LACON, n as color, lp, rp)
+    newarc(v.mcx, &mut v.nfa, &mut v.cm, false, LACON, n as color, lp, rp)
 }
 
 /// newlacon - allocate a lookaround-constraint subRE (returns the lacon number).
@@ -2018,14 +2033,14 @@ pub fn repeat(v: &mut Vars, lp: StateId, rp: StateId, m: i32, n: i32) -> RegResu
 
     macro_rules! emptyarc {
         ($x:expr, $y:expr) => {
-            newarc(v.mcx, &mut v.nfa, EMPTY, 0, $x, $y)?
+            newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, $x, $y)?
         };
     }
 
     let pair = PAIR(rm, rn);
     if pair == PAIR(0, 0) {
         // empty string
-        delsub(&mut v.nfa, lp, rp);
+        delsub(&mut v.nfa, &mut v.cm, false, lp, rp)?;
         emptyarc!(lp, rp);
     } else if pair == PAIR(0, 1) {
         // do as x|
@@ -2037,8 +2052,8 @@ pub fn repeat(v: &mut Vars, lp: StateId, rp: StateId, m: i32, n: i32) -> RegResu
     } else if pair == PAIR(0, REPEAT_INF) {
         // loop x around
         let s = newstate(v.mcx, &mut v.nfa)?; // NOERR()
-        moveouts(v.mcx, &mut v.nfa, lp, s)?;
-        moveins(v.mcx, &mut v.nfa, rp, s)?;
+        moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s)?;
+        moveins(v.mcx, &mut v.nfa, &mut v.cm, false, rp, s)?;
         emptyarc!(lp, s);
         emptyarc!(s, rp);
     } else if pair == PAIR(1, 1) {
@@ -2046,30 +2061,30 @@ pub fn repeat(v: &mut Vars, lp: StateId, rp: StateId, m: i32, n: i32) -> RegResu
     } else if pair == PAIR(1, REPEAT_SOME) {
         // do as x{0,n-1}x = (x{1,n-1}|)x
         let s = newstate(v.mcx, &mut v.nfa)?; // NOERR()
-        moveouts(v.mcx, &mut v.nfa, lp, s)?;
-        dupnfa(v.mcx, &mut v.nfa, s, rp, lp, s)?; // NOERR()
+        moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s)?;
+        dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, s, rp, lp, s)?; // NOERR()
         repeat(v, lp, s, 1, n - 1)?; // NOERR()
         emptyarc!(lp, s);
     } else if pair == PAIR(1, REPEAT_INF) {
         // add loopback arc
         let s = newstate(v.mcx, &mut v.nfa)?;
         let s2 = newstate(v.mcx, &mut v.nfa)?; // NOERR()
-        moveouts(v.mcx, &mut v.nfa, lp, s)?;
-        moveins(v.mcx, &mut v.nfa, rp, s2)?;
+        moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s)?;
+        moveins(v.mcx, &mut v.nfa, &mut v.cm, false, rp, s2)?;
         emptyarc!(lp, s);
         emptyarc!(s2, rp);
         emptyarc!(s2, s);
     } else if pair == PAIR(REPEAT_SOME, REPEAT_SOME) {
         // do as x{m-1,n-1}x
         let s = newstate(v.mcx, &mut v.nfa)?; // NOERR()
-        moveouts(v.mcx, &mut v.nfa, lp, s)?;
-        dupnfa(v.mcx, &mut v.nfa, s, rp, lp, s)?; // NOERR()
+        moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s)?;
+        dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, s, rp, lp, s)?; // NOERR()
         repeat(v, lp, s, m - 1, n - 1)?;
     } else if pair == PAIR(REPEAT_SOME, REPEAT_INF) {
         // do as x{m-1,}x
         let s = newstate(v.mcx, &mut v.nfa)?; // NOERR()
-        moveouts(v.mcx, &mut v.nfa, lp, s)?;
-        dupnfa(v.mcx, &mut v.nfa, s, rp, lp, s)?; // NOERR()
+        moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s)?;
+        dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, s, rp, lp, s)?; // NOERR()
         repeat(v, lp, s, m - 1, n)?;
     } else {
         v.seterr(REG_ASSERT);
@@ -2116,10 +2131,10 @@ pub fn parse(
             return None; // NOERRN
         }
         // EMPTYARC(init, left); EMPTYARC(right, final);
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, init, left).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, init, left).is_err() {
             return None;
         }
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, right, final_).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, right, final_).is_err() {
             return None;
         }
         if v.NISERR() {
@@ -2195,7 +2210,7 @@ pub fn parsebranch(
                 Ok(s) => s,
                 Err(_) => return None, // NOERRN
             };
-            if moveins(v.mcx, &mut v.nfa, right, lp).is_err() {
+            if moveins(v.mcx, &mut v.nfa, &mut v.cm, false, right, lp).is_err() {
                 return None;
             }
         }
@@ -2211,7 +2226,7 @@ pub fn parsebranch(
             v.NOTE(REG_UUNSPEC);
         }
         debug_assert_eq!(lp, left);
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, left, right).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, left, right).is_err() {
             return None;
         }
     }
@@ -2225,7 +2240,7 @@ fn onechr_and_next(v: &mut Vars, lp: StateId, rp: StateId) -> Option<()> {
     if onechr(v, v.nextvalue, lp, rp).is_err() {
         return None;
     }
-    if okcolors(v.mcx, &mut v.nfa, &mut v.cm).is_err() {
+    if okcolors(v.mcx, &mut v.nfa, &mut v.cm, false).is_err() {
         return None;
     }
     if v.NISERR() {
@@ -2258,7 +2273,7 @@ pub fn parseqatom(
     // ARCV(t, val) == newarc(v->nfa, t, val, lp, rp)
     macro_rules! arcv {
         ($t:expr, $val:expr) => {
-            if newarc(v.mcx, &mut v.nfa, $t, $val, lp, rp).is_err() {
+            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, $t, $val, lp, rp).is_err() {
                 return None;
             }
         };
@@ -2453,7 +2468,7 @@ pub fn parseqatom(
             if charclass(v, cls, lp, rp).is_err() {
                 return None;
             }
-            if okcolors(v.mcx, &mut v.nfa, &mut v.cm).is_err() {
+            if okcolors(v.mcx, &mut v.nfa, &mut v.cm, false).is_err() {
                 return None;
             }
             v.next();
@@ -2472,7 +2487,7 @@ pub fn parseqatom(
             } else {
                 COLORLESS
             };
-            if rainbow(v.mcx, &mut v.nfa, &mut v.cm, PLAIN, but, lp, rp).is_err() {
+            if rainbow(v.mcx, &mut v.nfa, &mut v.cm, false, PLAIN, but, lp, rp).is_err() {
                 return None;
             }
             v.next();
@@ -2505,10 +2520,10 @@ pub fn parseqatom(
                 Err(_) => return None, // NOERRN
             };
             // We may not need these arcs, but keep things connected for now
-            if newarc(v.mcx, &mut v.nfa, EMPTY, 0, lp, s).is_err() {
+            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s).is_err() {
                 return None;
             }
-            if newarc(v.mcx, &mut v.nfa, EMPTY, 0, s2, rp).is_err() {
+            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp).is_err() {
                 return None;
             }
             if v.NISERR() {
@@ -2558,7 +2573,7 @@ pub fn parseqatom(
             v.tm(target).flags |= BRUSE;
             atom = Some(a);
             // EMPTYARC(lp, rp) -- temporarily, so there's something
-            if newarc(v.mcx, &mut v.nfa, EMPTY, 0, lp, rp).is_err() {
+            if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp).is_err() {
                 return None;
             }
             v.next();
@@ -2626,17 +2641,23 @@ pub fn parseqatom(
             if (v.t(at).flags & CAP) != 0 {
                 let abegin = v.t(at).begin.unwrap();
                 let aend = v.t(at).end.unwrap();
-                delsub(&mut v.nfa, lp, abegin);
-                delsub(&mut v.nfa, aend, rp);
+                if delsub(&mut v.nfa, &mut v.cm, false, lp, abegin).is_err() {
+                    return None;
+                }
+                if delsub(&mut v.nfa, &mut v.cm, false, aend, rp).is_err() {
+                    return None;
+                }
             } else {
                 // Otherwise, clean up any subre infrastructure we made
                 freesubre(v, atom);
-                delsub(&mut v.nfa, lp, rp);
+                if delsub(&mut v.nfa, &mut v.cm, false, lp, rp).is_err() {
+                    return None;
+                }
             }
-        } else {
-            delsub(&mut v.nfa, lp, rp);
+        } else if delsub(&mut v.nfa, &mut v.cm, false, lp, rp).is_err() {
+            return None;
         }
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, lp, rp).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, rp).is_err() {
             return None;
         }
         return Some(top);
@@ -2677,10 +2698,10 @@ pub fn parseqatom(
             Ok(x) => x,
             Err(_) => return None, // NOERRN
         };
-        if moveouts(v.mcx, &mut v.nfa, lp, s).is_err() {
+        if moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, lp, s).is_err() {
             return None;
         }
-        if moveins(v.mcx, &mut v.nfa, rp, s2).is_err() {
+        if moveins(v.mcx, &mut v.nfa, &mut v.cm, false, rp, s2).is_err() {
             return None;
         }
         v.tm(atom_id).begin = Some(s);
@@ -2689,8 +2710,12 @@ pub fn parseqatom(
         // disconnect atom from lp/rp (removes the EMPTY arcs made above)
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        delsub(&mut v.nfa, lp, abegin);
-        delsub(&mut v.nfa, aend, rp);
+        if delsub(&mut v.nfa, &mut v.cm, false, lp, abegin).is_err() {
+            return None;
+        }
+        if delsub(&mut v.nfa, &mut v.cm, false, aend, rp).is_err() {
+            return None;
+        }
     }
 
     // general-purpose state skeleton: make s here; s2 below if needed
@@ -2698,7 +2723,7 @@ pub fn parseqatom(
         Ok(x) => x,
         Err(_) => return None, // NOERRN
     };
-    if newarc(v.mcx, &mut v.nfa, EMPTY, 0, lp, s).is_err() {
+    if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, lp, s).is_err() {
         return None; // NOERRN
     }
 
@@ -2724,13 +2749,15 @@ pub fn parseqatom(
         ); // just the EMPTY
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        delsub(&mut v.nfa, abegin, aend);
+        if delsub(&mut v.nfa, &mut v.cm, false, abegin, aend).is_err() {
+            return None;
+        }
         debug_assert!(v.subs[subno as usize].is_some());
 
         let sub = v.subs[subno as usize].unwrap();
         let sub_begin = v.t(sub).begin.unwrap();
         let sub_end = v.t(sub).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, sub_begin, sub_end, abegin, aend).is_err() {
+        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, sub_begin, sub_end, abegin, aend).is_err() {
             return None;
         }
         if v.NISERR() {
@@ -2738,7 +2765,9 @@ pub fn parseqatom(
         }
 
         // The backref node's NFA should not enforce any constraints
-        removeconstraints(&mut v.nfa, abegin, aend);
+        if removeconstraints(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend).is_err() {
+            return None;
+        }
         if v.NISERR() {
             return None; // NOERRN
         }
@@ -2748,7 +2777,7 @@ pub fn parseqatom(
     if atomtype == BACKREF {
         // special case: backrefs have internal quantifiers
         let abegin = v.t(atom_id).begin.unwrap();
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, s, abegin).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
             return None;
         }
         // just stuff everything into atom
@@ -2769,7 +2798,7 @@ pub fn parseqatom(
     {
         // no/vacuous quantifier: done
         let abegin = v.t(atom_id).begin.unwrap();
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, s, abegin).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
             return None;
         }
         s2 = v.t(atom_id).end.unwrap();
@@ -2777,7 +2806,7 @@ pub fn parseqatom(
         // no captures nor backrefs in the atom: make a plain DFA node
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, s, abegin).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s, abegin).is_err() {
             return None;
         }
         if repeat(v, abegin, aend, m, n).is_err() {
@@ -2795,7 +2824,7 @@ pub fn parseqatom(
         // turn x{m,n} into x{m-1,n-1}x, capturing parens in only the second x.
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, abegin, aend, s, abegin).is_err() {
+        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, abegin).is_err() {
             return None;
         }
         debug_assert!(m >= 1 && m != DUPINF && n >= 1);
@@ -2819,7 +2848,7 @@ pub fn parseqatom(
             Err(_) => return None, // NOERRN
         };
         let aend = v.t(atom_id).end.unwrap();
-        if moveouts(v.mcx, &mut v.nfa, aend, s2).is_err() {
+        if moveouts(v.mcx, &mut v.nfa, &mut v.cm, false, aend, s2).is_err() {
             return None;
         }
         if v.NISERR() {
@@ -2827,7 +2856,7 @@ pub fn parseqatom(
         }
         let abegin = v.t(atom_id).begin.unwrap();
         let aend = v.t(atom_id).end.unwrap();
-        if dupnfa(v.mcx, &mut v.nfa, abegin, aend, s, s2).is_err() {
+        if dupnfa(v.mcx, &mut v.nfa, &mut v.cm, false, abegin, aend, s, s2).is_err() {
             return None;
         }
         if repeat(v, s, s2, m, n).is_err() {
@@ -2890,7 +2919,7 @@ pub fn parseqatom(
         }
     } else {
         // Nothing left in the branch; don't need the second concat node 't'.
-        if newarc(v.mcx, &mut v.nfa, EMPTY, 0, s2, rp).is_err() {
+        if newarc(v.mcx, &mut v.nfa, &mut v.cm, false, EMPTY, 0, s2, rp).is_err() {
             return None;
         }
         let tchild = v.t(t_node).child;
@@ -2992,7 +3021,12 @@ pub fn cleanst(_v: &mut Vars) {}
 /// C: `static void makesearch(struct vars *v, struct nfa *nfa)`. The colormap
 /// and NFA are passed explicitly so this applies to either the main NFA or a
 /// transient child NFA (lookbehind lacon).
-pub fn makesearch<'mcx>(mcx: Mcx<'mcx>, nfa: &mut Nfa, cm: &mut ColorMap) -> RegResult<()> {
+pub fn makesearch<'mcx>(
+    mcx: Mcx<'mcx>,
+    nfa: &mut Nfa,
+    cm: &mut ColorMap,
+    has_parent: bool,
+) -> RegResult<()> {
     let pre = nfa.pre;
 
     // no loops are needed if it's anchored
@@ -3009,13 +3043,13 @@ pub fn makesearch<'mcx>(mcx: Mcx<'mcx>, nfa: &mut Nfa, cm: &mut ColorMap) -> Reg
     }
     if !anchored {
         // add implicit .* in front
-        rainbow(mcx, nfa, cm, PLAIN, COLORLESS, pre, pre)?;
+        rainbow(mcx, nfa, cm, has_parent, PLAIN, COLORLESS, pre, pre)?;
 
         // and ^* and \A* too -- not always necessary, but harmless
         let bos0 = nfa.bos[0];
         let bos1 = nfa.bos[1];
-        newarc(mcx, nfa, PLAIN, bos0, pre, pre)?;
-        newarc(mcx, nfa, PLAIN, bos1, pre, pre)?;
+        newarc(mcx, nfa, cm, has_parent, PLAIN, bos0, pre, pre)?;
+        newarc(mcx, nfa, cm, has_parent, PLAIN, bos1, pre, pre)?;
 
         // The pattern is still MATCHALL if it was, but max match is now infinity.
         if (nfa.flags & MATCHALL) != 0 {
@@ -3052,14 +3086,14 @@ pub fn makesearch<'mcx>(mcx: Mcx<'mcx>, nfa: &mut Nfa, cm: &mut ColorMap) -> Reg
     let mut s_opt = slist;
     while let Some(st) = s_opt {
         let s2 = newstate(mcx, nfa)?; // NOERR
-        copyouts(mcx, nfa, st, s2)?; // NOERR
+        copyouts(mcx, nfa, cm, has_parent, st, s2)?; // NOERR
         let mut a_opt = nfa.state_arena[st.0 as usize].ins;
         while let Some(a) = a_opt {
             let b = nfa.arc_arena[a.0 as usize].inchain;
             let from = nfa.arc_arena[a.0 as usize].from.unwrap();
             if from != pre {
-                cparc(mcx, nfa, a, from, s2)?;
-                freearc(nfa, a);
+                cparc(mcx, nfa, cm, has_parent, a, from, s2)?;
+                freearc(nfa, cm, has_parent, a);
             }
             a_opt = b;
         }
@@ -3092,29 +3126,24 @@ pub fn nfanode(
     let mut ret: i64 = 0;
 
     // nfa = newnfa(v, v->cm, v->nfa) -- a child NFA sharing the colormap.
-    let mut nfa = newnfa(v.mcx, true)?; // NOERRZ
+    let mut nfa = newnfa(v.mcx, &mut v.cm, true)?; // NOERRZ
     let init = nfa.init;
     let final_ = nfa.final_;
     dupnfa_cross(v.mcx, &mut nfa, &mut v.nfa, &mut v.cm, begin, end, init, final_)?;
     nfa.flags = v.nfa.flags;
-    // The child NFA shares the parent's colormap, so it must reuse the parent's
-    // BOS/EOS pseudocolors rather than allocate fresh ones. In C this is done
-    // inside `specialcolors()` via the `nfa->parent` link; the scaffold NFA has
-    // no parent pointer, so the inheritance is performed here (the parent's
-    // bos/eos are already assigned by the top-level `specialcolors`), and the
-    // child's `specialcolors()` is a no-op because they are no longer COLORLESS.
-    nfa.bos = v.nfa.bos;
-    nfa.eos = v.nfa.eos;
 
     let mut cnfa = Cnfa::new_empty();
     if v.NOERR() {
-        specialcolors(v.mcx, &mut nfa, &mut v.cm)?;
+        // The child NFA shares the parent's colormap, so it inherits the
+        // parent's BOS/EOS pseudocolors rather than allocating fresh ones
+        // (C: specialcolors() follows nfa->parent).
+        specialcolors(v.mcx, &mut nfa, &mut v.cm, Some((v.nfa.bos, v.nfa.eos)))?;
     }
     if v.NOERR() {
-        ret = optimize(v.mcx, &mut nfa, &mut v.cm)?;
+        ret = optimize(v.mcx, &mut nfa, &mut v.cm, true)?;
     }
     if converttosearch && v.NOERR() {
-        makesearch(v.mcx, &mut nfa, &mut v.cm)?;
+        makesearch(v.mcx, &mut nfa, &mut v.cm, true)?;
     }
     if v.NOERR() {
         compact(v.mcx, &nfa, &v.cm, &mut cnfa)?;
@@ -3204,16 +3233,16 @@ pub fn pg_regcomp<'mcx>(
         return Err(RegError(REG_INVARG));
     }
 
-    // Initialize locale-dependent support (C: pg_set_regex_collation(collation)).
+    // Initialize locale-dependent support (C: pg_set_regex_collation(mcx, collation)).
     // A collation-setup failure is mapped to REG_INVARG at this boundary.
-    if pg_set_regex_collation(collation).is_err() {
+    if pg_set_regex_collation(mcx, collation).is_err() {
         return Err(RegError(REG_INVARG));
     }
 
     // Build the colormap + NFA (C: initcm(v, &cm); v->nfa = newnfa(v, &cm, NULL)).
     let mut cm = empty_colormap();
     crate::regex_foundation::initcm(mcx, &mut cm)?;
-    let nfa = newnfa(mcx, false)?;
+    let nfa = newnfa(mcx, &mut cm, false)?;
 
     // initial setup of vars: v->subs = v->sub10; nsubs = 10; all NULL.
     let mut subs: Vec<Option<NodeId>> = Vec::new();
@@ -3275,7 +3304,7 @@ pub fn pg_regcomp<'mcx>(
     if (v.cflags & REG_NLSTOP) != 0 || (v.cflags & REG_NLANCH) != 0 {
         // assign newline a unique color
         v.nlcolor = subcolor(v.mcx, &mut v.cm, newline())?;
-        okcolors(v.mcx, &mut v.nfa, &mut v.cm)?;
+        okcolors(v.mcx, &mut v.nfa, &mut v.cm, false)?;
     }
     cnoerr!();
 
@@ -3288,7 +3317,7 @@ pub fn pg_regcomp<'mcx>(
     let tree = v.tree.unwrap();
 
     // finish setup of nfa and its subre tree
-    specialcolors(v.mcx, &mut v.nfa, &mut v.cm)?;
+    specialcolors(v.mcx, &mut v.nfa, &mut v.cm, None)?;
     cnoerr!();
 
     if (v.cflags & REG_NOSUB) != 0 {
@@ -3318,9 +3347,9 @@ pub fn pg_regcomp<'mcx>(
     }
 
     // build compacted NFAs for tree, lacons, fast search; sacrifice main NFA.
-    optimize(v.mcx, &mut v.nfa, &mut v.cm)?;
+    optimize(v.mcx, &mut v.nfa, &mut v.cm, false)?;
     cnoerr!();
-    makesearch(v.mcx, &mut v.nfa, &mut v.cm)?;
+    makesearch(v.mcx, &mut v.nfa, &mut v.cm, false)?;
     cnoerr!();
     let mut search = Cnfa::new_empty();
     compact(v.mcx, &v.nfa, &v.cm, &mut search)?;

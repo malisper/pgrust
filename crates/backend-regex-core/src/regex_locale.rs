@@ -453,7 +453,7 @@ pub fn pg_ctype_get_cache<'mcx>(
         PgLocaleStrategy::Icu => MAX_SIMPLE_CHR,
     };
 
-    let mut cv = getcvec(mcx, 0, 0)?;
+    let mut cv = getcvec(mcx, None, 0, 0)?;
     cv.cclasscode = effective_cclasscode;
 
     // And scan 'em ... accumulating consecutive matches into ranges/singletons,
@@ -694,7 +694,7 @@ pub fn range<'mcx>(mcx: Mcx<'mcx>, a: chr, b: chr, cases: i32) -> RegResult<Cvec
 
     if cases == 0 {
         // easy version
-        let mut cv = getcvec(mcx, 0, 1)?;
+        let mut cv = getcvec(mcx, None, 0, 1)?;
         addrange(&mut cv, a, b);
         return Ok(cv);
     }
@@ -714,7 +714,7 @@ pub fn range<'mcx>(mcx: Mcx<'mcx>, a: chr, b: chr, cases: i32) -> RegResult<Cvec
         nchrs_i as i32
     };
 
-    let mut cv = getcvec(mcx, nchrs, 1)?;
+    let mut cv = getcvec(mcx, None, nchrs, 1)?;
     addrange(&mut cv, a, b);
 
     // The C loop ranges c from a..=b; the chrspace check (cv->nchrs >=
@@ -755,7 +755,7 @@ pub fn range<'mcx>(mcx: Mcx<'mcx>, a: chr, b: chr, cases: i32) -> RegResult<Cvec
 pub fn eclass<'mcx>(mcx: Mcx<'mcx>, cflags: i32, c: chr, cases: i32) -> RegResult<Cvec> {
     // crude fake equivalence class for testing
     if (cflags & REG_FAKE) != 0 && c == chr_lit('x') {
-        let mut cv = getcvec(mcx, 4, 0)?;
+        let mut cv = getcvec(mcx, None, 4, 0)?;
         addchr(&mut cv, chr_lit('x'));
         addchr(&mut cv, chr_lit('y'));
         if cases != 0 {
@@ -769,7 +769,7 @@ pub fn eclass<'mcx>(mcx: Mcx<'mcx>, cflags: i32, c: chr, cases: i32) -> RegResul
     if cases != 0 {
         return allcases(mcx, c);
     }
-    let mut cv = getcvec(mcx, 1, 0)?;
+    let mut cv = getcvec(mcx, None, 1, 0)?;
     addchr(&mut cv, c);
     Ok(cv)
 }
@@ -834,20 +834,20 @@ pub fn cclasscvec<'mcx>(mcx: Mcx<'mcx>, cclasscode: i32, cases: i32) -> RegResul
         CC_WORD => pg_ctype_get_cache(mcx, pg_wc_isword, cclasscode)?,
         CC_ASCII => {
             // hard-wired meaning
-            let mut cv = getcvec(mcx, 0, 1)?;
+            let mut cv = getcvec(mcx, None, 0, 1)?;
             addrange(&mut cv, 0, 0x7f);
             cv
         }
         CC_BLANK => {
             // hard-wired meaning
-            let mut cv = getcvec(mcx, 2, 0)?;
+            let mut cv = getcvec(mcx, None, 2, 0)?;
             addchr(&mut cv, chr_lit('\t'));
             addchr(&mut cv, chr_lit(' '));
             cv
         }
         CC_CNTRL => {
             // hard-wired meaning
-            let mut cv = getcvec(mcx, 0, 2)?;
+            let mut cv = getcvec(mcx, None, 0, 2)?;
             addrange(&mut cv, 0x0, 0x1f);
             addrange(&mut cv, 0x7f, 0x9f);
             cv
@@ -858,7 +858,7 @@ pub fn cclasscvec<'mcx>(mcx: Mcx<'mcx>, cclasscode: i32, cases: i32) -> RegResul
             // It's not clear how to define this in non-western locales, and even
             // less clear that there's any particular use in trying. So just
             // hard-wire the meaning.
-            let mut cv = getcvec(mcx, 0, 3)?;
+            let mut cv = getcvec(mcx, None, 0, 3)?;
             addrange(&mut cv, chr_lit('0'), chr_lit('9'));
             addrange(&mut cv, chr_lit('a'), chr_lit('f'));
             addrange(&mut cv, chr_lit('A'), chr_lit('F'));
@@ -938,7 +938,7 @@ pub fn allcases<'mcx>(mcx: Mcx<'mcx>, c: chr) -> RegResult<Cvec> {
     let lc = pg_wc_tolower(c);
     let uc = pg_wc_toupper(c);
 
-    let mut cv = getcvec(mcx, 2, 0)?;
+    let mut cv = getcvec(mcx, None, 2, 0)?;
     addchr(&mut cv, lc);
     if lc != uc {
         addchr(&mut cv, uc);
