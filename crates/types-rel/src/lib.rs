@@ -77,6 +77,9 @@ pub struct FormData_pg_class<'mcx> {
 /// consume (the `rd_index` payload of an index's relcache entry).
 #[derive(Clone, Copy, Debug)]
 pub struct FormData_pg_index {
+    /// `int16 indnkeyatts` — number of key columns in the index
+    /// (`IndexRelationGetNumberOfKeyAttributes`).
+    pub indnkeyatts: i16,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
 }
