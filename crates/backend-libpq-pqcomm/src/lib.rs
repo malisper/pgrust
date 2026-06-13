@@ -2026,6 +2026,32 @@ pub fn pq_check_connection() -> PgResult<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// Seam adapters.
+// ---------------------------------------------------------------------------
+
+/// Adapter for the `pq_getbytes` seam. The seam reads exactly `len` bytes into
+/// a fresh buffer allocated in `mcx` and returns `Ok(Some(buf))` on success,
+/// `Ok(None)` for the C `EOF` (-1) return (peer closed / incomplete), `Err`
+/// for the buffer-alloc OOM and the blocking-wait interrupt-processing
+/// `ereport(ERROR)`. The owner's [`pq_getbytes`] fills a caller `&mut [u8]`
+/// and returns `Ok(0)`/`Ok(EOF)`; this wrapper bridges the two shapes.
+fn pq_getbytes_seam(mcx: Mcx<'_>, len: usize) -> PgResult<Option<PgVec<'_, u8>>> {
+    let mut buf: PgVec<u8> = PgVec::new_in(mcx);
+    buf.try_reserve_exact(len).map_err(|_| mcx.oom(len))?;
+    buf.resize(len, 0);
+    if pq_getbytes(&mut buf)? == EOF {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+/// Adapter for the `pq_buffer_remaining_data` seam (`-> i64`). The owner's
+/// [`pq_buffer_remaining_data`] returns `isize`.
+fn pq_buffer_remaining_data_seam() -> i64 {
+    pq_buffer_remaining_data() as i64
+}
+
+// ---------------------------------------------------------------------------
 // Seam installation.
 // ---------------------------------------------------------------------------
 
@@ -2037,6 +2063,9 @@ pub fn init_seams() {
     backend_libpq_pqcomm_seams::pq_putmessage::set(pq_putmessage);
     backend_libpq_pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     backend_libpq_pqcomm_seams::pq_flush::set(pq_flush);
+    backend_libpq_pqcomm_seams::pq_endmsgread::set(pq_endmsgread);
+    backend_libpq_pqcomm_seams::pq_getbytes::set(pq_getbytes_seam);
+    backend_libpq_pqcomm_seams::pq_buffer_remaining_data::set(pq_buffer_remaining_data_seam);
 
     vars::Unix_socket_permissions.install(GucVarAccessors {
         get: config::unix_socket_permissions,

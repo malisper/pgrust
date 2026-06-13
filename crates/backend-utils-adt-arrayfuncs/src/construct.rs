@@ -257,6 +257,32 @@ pub fn deconstruct_array<'mcx>(
     Ok(out)
 }
 
+/// Seam adapter for `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype,
+/// elmlen, elmbyval, elmalign, ...)` (arrayfuncs.c). The seam takes the raw
+/// array `Datum` and the element's `(typlen, typbyval, typalign)` exactly as
+/// `pg_type` records them (`int16` len, `char` align); this wrapper detoasts
+/// the array varlena (`DatumGetArrayTypeP`) and widens the storage attrs to the
+/// in-process [`deconstruct_array`]'s `(i32, u8)` shape, mirroring PG.
+pub fn deconstruct_array_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, (Datum, bool)>> {
+    // DatumGetArrayTypeP(arraydatum) — detoast the array varlena.
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    deconstruct_array(
+        mcx,
+        &arr,
+        elmtype,
+        elmlen as i32,
+        elmbyval,
+        elmalign as u8,
+    )
+}
+
 /// `deconstruct_array_builtin(array, elmtype, &elemsp, &nullsp, &nelemsp)`
 /// (arrayfuncs.c:3697): the convenience wrapper over [`deconstruct_array`] for
 /// the handful of built-in element types whose `(typlen, typbyval, typalign)`
