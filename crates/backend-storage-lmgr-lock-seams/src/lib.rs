@@ -2,6 +2,8 @@
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
     /// transaction's locks at recovery startup (slot `TWOPHASE_RM_LOCK_ID` of
@@ -219,4 +221,193 @@ seam_core::seam!(
     pub fn post_prepare_locks(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
+);
+
+// --- low-level lock.c slots used by proc.c's wait-queue machinery ----------
+//
+// proc.c (JoinWaitQueue / ProcSleep / ProcWakeup / ProcLockWakeup /
+// CheckDeadLock / LockErrorCleanup / GetLockHoldersAndWaiters) reaches into the
+// shmem LOCK / PROCLOCK hash tables and the per-mode conflict table, all owned
+// by lock.c.  A LOCK is identified by its LOCKTAG, a PROCLOCK holder by the
+// owning backend's ProcNumber; the queue / list iteration is lock.c-owned data
+// so the owner provides it as snapshots / decisions.
+
+seam_core::seam!(
+    /// `lockMethodTable->conflictTab[mode]` — the conflict bitmask for a lock
+    /// mode under a given lock method.
+    pub fn conflict_tab(
+        lockmethodid: u8,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `LockCheckConflicts(lockMethodTable, lockmode, lock, proclock)` — does
+    /// the requested mode conflict with already-granted locks (excluding the
+    /// requester's own holdings)?
+    pub fn lock_check_conflicts(
+        lockmethodid: u8,
+        lockmode: types_storage::lock::LOCKMODE,
+        lock: types_storage::lock::LOCKTAG,
+        proclock_holder: types_core::ProcNumber,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GrantLock(lock, proclock, lockmode)` — record an immediate grant of
+    /// `lockmode` to the holder's PROCLOCK on `lock`.
+    pub fn grant_lock(
+        lock: types_storage::lock::LOCKTAG,
+        proclock_holder: types_core::ProcNumber,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `RemoveFromWaitQueue(proc, hashcode)` — pull a proc off the lock's wait
+    /// queue and clean up its accounting; sets the proc's waitStatus to
+    /// `PROC_WAIT_STATUS_ERROR`.
+    pub fn remove_from_wait_queue(
+        procno: types_core::ProcNumber,
+        hashcode: u32,
+    )
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` — the human-readable lock mode
+    /// name.
+    pub fn get_lockmode_name(
+        lockmethodid: u8,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(lockmethodid, allLocks)` — release all of this backend's
+    /// locks for the given method.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockTagHashCode(locktag)` — the hash value of a LOCKTAG.
+    pub fn lock_tag_hash_code(
+        locktag: types_storage::lock::LOCKTAG,
+    ) -> u32
+);
+
+seam_core::seam!(
+    /// `AbortStrongLockAcquire()` — revert a strong-lock-count acquisition for
+    /// a lock being acquired (called from LockErrorCleanup).
+    pub fn abort_strong_lock_acquire()
+);
+
+seam_core::seam!(
+    /// `GetAwaitedLock()` — the hashcode of the LOCALLOCK this backend is
+    /// currently waiting on, or `-1` (`lockAwaited == NULL`).
+    pub fn get_awaited_lock_hashcode() -> i64
+);
+
+seam_core::seam!(
+    /// `GrantAwaitedLock()` — record in the local lock table that the awaited
+    /// lock was granted.
+    pub fn grant_awaited_lock()
+);
+
+seam_core::seam!(
+    /// `ResetAwaitedLock()` — clear the `lockAwaited` pointer.
+    pub fn reset_awaited_lock()
+);
+
+seam_core::seam!(
+    /// `lock->procLocks` group-locking scan: OR together the holdMask of every
+    /// PROCLOCK on `lock` whose groupLeader is `leader` (JoinWaitQueue's
+    /// `myHeldLocks` augmentation).
+    pub fn lock_group_held_locks(
+        lock: types_storage::lock::LOCKTAG,
+        leader: types_core::ProcNumber,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `proclock->holdMask` for the PROCLOCK held by `holder` on `lock`.
+    pub fn proclock_hold_mask(
+        lock: types_storage::lock::LOCKTAG,
+        holder: types_core::ProcNumber,
+    ) -> types_storage::lock::LOCKMASK
+);
+
+seam_core::seam!(
+    /// `dclist_is_empty(&lock->waitProcs)`.
+    pub fn lock_wait_queue_is_empty(lock: types_storage::lock::LOCKTAG) -> bool
+);
+
+seam_core::seam!(
+    /// `dclist_insert_before(&lock->waitProcs, &insert_before->links,
+    /// &MyProc->links)`.
+    pub fn lock_wait_queue_insert_before(
+        lock: types_storage::lock::LOCKTAG,
+        insert_before: types_core::ProcNumber,
+        myproc: types_core::ProcNumber,
+    )
+);
+
+seam_core::seam!(
+    /// `dclist_push_tail(&lock->waitProcs, &MyProc->links)`.
+    pub fn lock_wait_queue_push_tail(
+        lock: types_storage::lock::LOCKTAG,
+        myproc: types_core::ProcNumber,
+    )
+);
+
+seam_core::seam!(
+    /// `lock->waitMask |= LOCKBIT_ON(lockmode)`.
+    pub fn lock_set_wait_mask_bit(
+        lock: types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `dclist_delete_from_thoroughly(&proc->waitLock->waitProcs,
+    /// &proc->links)` — remove a granted/aborted waiter from its lock's queue.
+    pub fn lock_wait_queue_delete(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// A front-to-back snapshot of the ProcNumbers in `lock->waitProcs`, for
+    /// `ProcLockWakeup`'s `dclist_foreach_modify`.
+    pub fn lock_wait_queue_waiters_snapshot(
+        lock: types_storage::lock::LOCKTAG,
+    ) -> alloc::vec::Vec<types_core::ProcNumber>
+);
+
+/// PID lists + holder count built from `lock->procLocks` by
+/// [`get_lock_holders_and_waiters`].
+#[derive(Clone, Debug, Default)]
+pub struct LockHoldersAndWaiters {
+    /// Comma-separated PIDs of processes holding the lock.
+    pub holders: alloc::string::String,
+    /// Comma-separated PIDs of processes waiting for the lock.
+    pub waiters: alloc::string::String,
+    /// Number of lock holders.
+    pub holders_num: i32,
+}
+
+seam_core::seam!(
+    /// `GetLockHoldersAndWaiters` inner walk over `lock->procLocks`: returns the
+    /// holder / waiter PID strings and the holder count.
+    pub fn get_lock_holders_and_waiters(
+        lock: types_storage::lock::LOCKTAG,
+    ) -> LockHoldersAndWaiters
+);
+
+seam_core::seam!(
+    /// `DescribeLockTag(buf, tag)` — the human-readable description of a
+    /// LOCKTAG (e.g. `relation 1234 of database 5`), as a string.
+    pub fn describe_lock_tag(
+        tag: types_storage::lock::LOCKTAG,
+    ) -> alloc::string::String
 );

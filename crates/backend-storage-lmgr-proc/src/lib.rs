@@ -34,6 +34,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod globals;
 pub mod proc_lifecycle;
 pub mod proc_misc;
 pub mod proc_shmem;

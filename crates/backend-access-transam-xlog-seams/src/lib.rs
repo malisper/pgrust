@@ -136,3 +136,9 @@ seam_core::seam!(
     /// read; infallible.
     pub fn GetActiveWalLevelOnStandby() -> types_logical::WalLevel
 );
+
+seam_core::seam!(
+    /// `log_recovery_conflict_waits` (the GUC, owned by xlog.c) — whether the
+    /// startup process should log long recovery-conflict waits.
+    pub fn log_recovery_conflict_waits() -> bool
+);

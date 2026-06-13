@@ -61,6 +61,24 @@ pub const LOCKACQUIRE_ALREADY_HELD: LockAcquireResult = 2;
 /// `LOCKACQUIRE_ALREADY_CLEAR` — incremented count for a lock already clear.
 pub const LOCKACQUIRE_ALREADY_CLEAR: LockAcquireResult = 3;
 
+/// `DeadLockState` (`storage/lock.h`) — the deadlock states identified by
+/// `DeadLockCheck()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum DeadLockState {
+    /// `DS_NOT_YET_CHECKED` — no deadlock check has run yet.
+    NotYetChecked = 0,
+    /// `DS_NO_DEADLOCK` — no deadlock detected.
+    NoDeadLock = 1,
+    /// `DS_SOFT_DEADLOCK` — deadlock avoided by queue rearrangement.
+    SoftDeadLock = 2,
+    /// `DS_HARD_DEADLOCK` — deadlock, no way out but ERROR.
+    HardDeadLock = 3,
+    /// `DS_BLOCKED_BY_AUTOVACUUM` — no deadlock; queue blocked by autovacuum
+    /// worker.
+    BlockedByAutoVacuum = 4,
+}
+
 /// `MAX_LOCKMODES` (`storage/lock.h`) — cannot exceed the # of bits in
 /// `LOCKMASK`.
 pub const MAX_LOCKMODES: usize = 10;

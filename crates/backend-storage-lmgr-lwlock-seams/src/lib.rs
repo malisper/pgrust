@@ -173,3 +173,16 @@ seam_core::seam!(
     /// predicate guarding the redo/scan entry points. Pure read.
     pub fn twophase_state_held_exclusive() -> bool
 );
+
+seam_core::seam!(
+    /// `LWLockAcquire(ProcArrayLock, mode)` — acquire the built-in ProcArrayLock
+    /// (its `MainLWLockArray` offset is owned by lwlock; the named slot avoids
+    /// transcribing the individual-lock offset here). `Err` carries the C
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_proc_array(mode: LWLockMode) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(ProcArrayLock)`.
+    pub fn lwlock_release_proc_array() -> PgResult<()>
+);

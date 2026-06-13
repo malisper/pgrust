@@ -40,3 +40,21 @@ seam_core::seam!(
     /// optionally preserving its already-fired indicator.
     pub fn disable_timeout(id: TimeoutId, keep_indicator: bool)
 );
+
+seam_core::seam!(
+    /// `enable_timeout_after(id, delay_ms)` (timeout.c) — arm a single timeout
+    /// to fire `delay_ms` milliseconds from now.
+    pub fn enable_timeout_after(id: TimeoutId, delay_ms: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `disable_timeouts(timeouts, count)` (timeout.c) — cancel several
+    /// timeouts at once.
+    pub fn disable_timeouts(timeouts: &[types_timeout::DisableTimeoutParams]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_timeout_start_time(id)` (timeout.c) — the timestamp at which the
+    /// given timeout was last armed.
+    pub fn get_timeout_start_time(id: TimeoutId) -> TimestampTz
+);
