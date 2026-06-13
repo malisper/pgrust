@@ -132,6 +132,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h) — service any pending interrupt
+    /// (query cancel, termination, recovery conflict). `Err` carries the
+    /// `ProcessInterrupts` `ereport(ERROR/FATAL)`.
+    pub fn check_for_interrupts() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `HOLD_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount++`.
     pub fn hold_interrupts()
 );

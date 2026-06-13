@@ -80,6 +80,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogHintBitIsNeeded()` (xlog.h) — `(XLogIsNeeded() &&
+    /// (data_checksums || wal_log_hints))`: whether hint-bit-style page
+    /// changes must be WAL-logged. Pure read of `wal_level` / checksum / GUC
+    /// state.
+    pub fn xlog_hint_bit_is_needed() -> bool
+);
+
+seam_core::seam!(
     /// `StartupXLOG()` (xlog.c) — perform crash/archive recovery and bring
     /// the system to a consistent, writable state. Many of its paths
     /// `ereport(ERROR)` (besides the FATAL/PANIC ones), so the error

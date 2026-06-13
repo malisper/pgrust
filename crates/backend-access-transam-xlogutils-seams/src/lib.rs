@@ -53,3 +53,16 @@ seam_core::seam!(
         block_id: u8,
     ) -> types_error::PgResult<(XLogRedoAction, Buffer)>
 );
+
+seam_core::seam!(
+    /// `XLogReadBufferExtended(rlocator, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
+    /// InvalidBuffer)` (xlogutils.c) — read (extending/creating the FSM fork if
+    /// the page is past EOF, per the redo extension rules) and pin a block of
+    /// the relation's FSM fork during WAL replay, returning the pinned buffer.
+    /// Used by `XLogRecordPageWithFreeSpace`. `Err` carries the smgr/read
+    /// `ereport(ERROR)`s.
+    pub fn xlog_read_buffer_extended_fsm(
+        rlocator: types_storage::RelFileLocator,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<Buffer>
+);

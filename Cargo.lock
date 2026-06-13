@@ -1544,6 +1544,7 @@ name = "backend-access-transam-xlogutils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-storage",
  "types-wal",
@@ -5659,6 +5660,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-fsm",
  "types-rel",
  "types-storage",
 ]
@@ -5763,6 +5765,26 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-freespace"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "types-core",
+ "types-error",
+ "types-fsm",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -9490,6 +9512,7 @@ dependencies = [
  "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
+ "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
@@ -9834,6 +9857,14 @@ name = "types-freepage"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-fsm"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]
