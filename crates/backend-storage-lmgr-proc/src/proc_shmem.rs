@@ -320,7 +320,7 @@ pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
 /// array. (Owner accessor for [`crate::proc_misc::ProcSendSignal`]'s range
 /// check; `ProcGlobal` storage belongs to this module.)
 pub(crate) fn all_proc_count() -> u32 {
-    todo!("proc.c: ProcGlobal->allProcCount")
+    with_proc_global(|pg| pg.allProcCount)
 }
 
 /// `&ProcGlobal->allProcs[procNumber].procLatch` as a `LatchHandle` — the
