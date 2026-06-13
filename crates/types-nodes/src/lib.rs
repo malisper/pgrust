@@ -25,6 +25,7 @@ pub mod jointype;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
+pub mod nodesetop;
 pub mod nodes;
 pub mod parsenodes;
 pub mod pathnodes;
@@ -45,6 +46,12 @@ pub use jointype::{
     JOIN_RIGHT_ANTI, JOIN_SEMI,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use nodesetop::{
+    SetOp, SetOpCmd, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SetOpStrategy,
+    TupleHashEntry, TupleHashEntryData, TupleHashIterator, TupleHashTable, SETOPCMD_EXCEPT,
+    SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL, SETOP_HASHED, SETOP_SORTED,
+    T_SetOp, T_SetOpState,
+};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;

@@ -123,6 +123,9 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_create_scan_slot_from_outer_plan::set(
         ExecCreateScanSlotFromOuterPlan,
     );
+    backend_executor_execUtils_seams::exec_get_common_child_slot_ops::set(
+        ExecGetCommonChildSlotOps,
+    );
 }
 
 // ===========================================================================
