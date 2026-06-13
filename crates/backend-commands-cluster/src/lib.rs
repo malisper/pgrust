@@ -48,8 +48,34 @@ use types_error::{ErrorLocation, DEBUG2, ERROR, INFO, WARNING};
 use backend_access_transam_xact_seams as xact;
 use backend_catalog_dependency_seams as dependency;
 use backend_catalog_pg_depend_seams as pg_depend;
-use backend_commands_cluster_deps_seams as deps;
 use backend_storage_lmgr_lmgr_seams as lmgr;
+use backend_catalog_namespace_seams as namespace;
+use backend_parser_small1_seams as parse_node;
+use backend_access_table_table_seams as table;
+use backend_access_index_indexam_seams as indexam;
+use backend_utils_cache_relcache_seams as relcache;
+use backend_utils_cache_syscache_seams as syscache;
+use backend_catalog_indexing_seams as indexing;
+use backend_utils_cache_inval_seams as inval;
+use backend_catalog_catalog_seams as catalog;
+use backend_catalog_heap_seams as heap;
+use backend_catalog_toasting_seams as toasting;
+use backend_access_common_toastdesc_seams as toast_internals;
+use backend_catalog_index_seams as index;
+use backend_catalog_pg_inherits_seams as pg_inherits;
+use backend_commands_tablecmds_seams as tablecmds;
+use backend_commands_vacuum_seams as vacuum;
+use backend_optimizer_plan_planner_seams as planner;
+use backend_storage_lmgr_predicate_seams as predicate;
+use backend_access_heap_heapam_seams as heapam;
+use backend_access_tableam_seams as tableam;
+use backend_utils_cache_relmapper_seams as relmapper;
+use backend_catalog_objectaccess_seams as objectaccess;
+use backend_utils_adt_catalog_perm_seams as acl;
+use backend_utils_activity_small_seams as backend_progress;
+use backend_utils_time_snapmgr_seams as snapmgr;
+use backend_utils_misc_clean_seams as pg_rusage;
+use backend_utils_error_elog_seams as elog;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_init_miscinit_seams as miscinit;
@@ -183,7 +209,7 @@ pub fn cluster(
             return ereport(ERROR)
                 .errcode(types_error::ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("unrecognized {} option \"{}\"", "CLUSTER", opt.defname))
-                .errposition(deps::parser_errposition::call(pstate, opt.location)?)
+                .errposition(parse_node::parser_errposition::call(pstate, opt.location)?)
                 .finish(here("cluster"));
         }
     }
@@ -199,12 +225,12 @@ pub fn cluster(
          * AccessExclusiveLock right away to avoid lock-upgrade hazard in the
          * single-transaction case.
          */
-        let tableOid = deps::range_var_get_relid_maintains_table::call(
+        let tableOid = namespace::range_var_get_relid_maintains_table::call(
             mcx,
             relation,
             AccessExclusiveLock,
         )?;
-        let opened = deps::table_open::call(mcx, tableOid, NoLock)?;
+        let opened = table::table_open::call(mcx, tableOid, NoLock)?;
 
         /*
          * Reject clustering a remote temp table ... their local buffer
@@ -220,9 +246,9 @@ pub fn cluster(
         match &stmt.indexname {
             None => {
                 /* We need to find the index that has indisclustered set. */
-                for thisIndexOid in deps::relation_get_index_list::call(mcx, &opened)? {
+                for thisIndexOid in relcache::relation_get_index_list::call(mcx, &opened)? {
                     indexOid = thisIndexOid;
-                    if deps::get_index_isclustered::call(indexOid)? {
+                    if lsyscache::get_index_isclustered::call(indexOid)? {
                         break;
                     }
                     indexOid = InvalidOid;
@@ -242,7 +268,7 @@ pub fn cluster(
                 /* The index is expected to be in the same namespace as the relation. */
                 indexOid = lsyscache::get_relname_relid::call(
                     indexname,
-                    deps::rd_rel_relnamespace::call(&opened)?,
+                    relcache::rd_rel_relnamespace::call(&opened)?,
                 )?;
                 if !OidIsValid(indexOid) {
                     return ereport(ERROR)
@@ -272,7 +298,7 @@ pub fn cluster(
      * transaction.  This forces us to disallow running inside a user
      * transaction block.
      */
-    deps::prevent_in_transaction_block::call(isTopLevel, "CLUSTER")?;
+    xact::prevent_in_transaction_block::call(isTopLevel, "CLUSTER")?;
 
     /*
      * Also, we need a memory context to hold our list of relations. Here the
@@ -307,7 +333,7 @@ pub fn cluster(
 /// `RELATION_IS_OTHER_TEMP(rel)` (rel.h): a temp relation of another session.
 /// `rd_rel->relpersistence == RELPERSISTENCE_TEMP && !rel->rd_islocaltemp`.
 fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
-    Ok(rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !deps::rd_islocaltemp::call(rel)?)
+    Ok(rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !relcache::rd_islocaltemp::call(rel)?)
 }
 
 /// Marshal the local `DefElemArg` projection into the define owner's variant.
@@ -333,7 +359,7 @@ fn cluster_multiple_rels(
     params: &mut ClusterParams,
 ) -> PgResult<()> {
     /* Commit to get out of starting transaction */
-    deps::pop_active_snapshot::call()?;
+    snapmgr::pop_active_snapshot::call()?;
     xact::commit_transaction_command::call()?;
 
     /* Cluster the tables, each in a separate transaction */
@@ -342,15 +368,15 @@ fn cluster_multiple_rels(
         xact::start_transaction_command::call()?;
 
         /* functions in indexes may want a snapshot set */
-        deps::push_active_snapshot_transaction::call()?;
+        snapmgr::push_active_snapshot_transaction::call()?;
 
-        let rel = deps::table_open::call(mcx, rtc.tableOid, AccessExclusiveLock)?;
+        let rel = table::table_open::call(mcx, rtc.tableOid, AccessExclusiveLock)?;
 
         /* Process this table */
         cluster_rel(mcx, rel, rtc.indexOid, *params)?;
         /* cluster_rel closes the relation, but keeps lock */
 
-        deps::pop_active_snapshot::call()?;
+        snapmgr::pop_active_snapshot::call()?;
         xact::commit_transaction_command::call()?;
     }
 
@@ -382,14 +408,14 @@ pub fn cluster_rel(
     /* Check for user-requested abort. */
     tcop::check_for_interrupts::call()?;
 
-    deps::pgstat_progress_start_command::call(PROGRESS_COMMAND_CLUSTER, tableOid)?;
+    backend_progress::pgstat_progress_start_command::call(PROGRESS_COMMAND_CLUSTER, tableOid)?;
     if OidIsValid(indexOid) {
-        deps::pgstat_progress_update_param::call(
+        backend_progress::pgstat_progress_update_param::call(
             PROGRESS_CLUSTER_COMMAND,
             PROGRESS_CLUSTER_COMMAND_CLUSTER,
         )?;
     } else {
-        deps::pgstat_progress_update_param::call(
+        backend_progress::pgstat_progress_update_param::call(
             PROGRESS_CLUSTER_COMMAND,
             PROGRESS_CLUSTER_COMMAND_VACUUM_FULL,
         )?;
@@ -401,11 +427,11 @@ pub fn cluster_rel(
      */
     let (save_userid, save_sec_context) = miscinit::get_user_id_and_sec_context::call();
     miscinit::set_user_id_and_sec_context::call(
-        deps::rd_rel_relowner::call(&OldHeap)?,
+        relcache::rd_rel_relowner::call(&OldHeap)?,
         save_sec_context | SECURITY_RESTRICTED_OPERATION,
     );
     let save_nestlevel = guc::new_guc_nest_level::call();
-    deps::restrict_search_path::call()?;
+    namespace::restrict_search_path::call()?;
 
     // The C body uses `goto out`; the inner closure replicates it, then the
     // `out:` cleanup runs unconditionally afterward.
@@ -417,13 +443,13 @@ pub fn cluster_rel(
         Ok(()) => {
             guc::at_eoxact_guc::call(false, save_nestlevel)?;
             miscinit::set_user_id_and_sec_context::call(save_userid, save_sec_context);
-            deps::pgstat_progress_end_command::call()?;
+            backend_progress::pgstat_progress_end_command::call()?;
             Ok(())
         }
         Err(body_err) => {
             let _ = guc::at_eoxact_guc::call(false, save_nestlevel);
             miscinit::set_user_id_and_sec_context::call(save_userid, save_sec_context);
-            let _ = deps::pgstat_progress_end_command::call();
+            let _ = backend_progress::pgstat_progress_end_command::call();
             Err(body_err)
         }
     }
@@ -449,35 +475,35 @@ fn cluster_rel_body(
     if recheck {
         /* Check that the user still has privileges for the relation */
         if !cluster_is_permitted_for_relation(mcx, tableOid, save_userid)? {
-            deps::relation_close::call(tableOid, AccessExclusiveLock)?;
+            table::relation_close::call(tableOid, AccessExclusiveLock)?;
             return Ok(()); // goto out
         }
 
         /* Silently skip a temp table for a remote session. */
         if relation_is_other_temp(OldHeap)? {
-            deps::relation_close::call(tableOid, AccessExclusiveLock)?;
+            table::relation_close::call(tableOid, AccessExclusiveLock)?;
             return Ok(()); // goto out
         }
 
         if OidIsValid(indexOid) {
             /* Check that the index still exists */
-            if !deps::search_syscache_exists_reloid::call(indexOid)? {
-                deps::relation_close::call(tableOid, AccessExclusiveLock)?;
+            if !syscache::search_syscache_exists_reloid::call(indexOid)? {
+                table::relation_close::call(tableOid, AccessExclusiveLock)?;
                 return Ok(()); // goto out
             }
 
             /* Check that the index is still the one with indisclustered set, if needed. */
             if (params.options & CLUOPT_RECHECK_ISCLUSTERED) != 0
-                && !deps::get_index_isclustered::call(indexOid)?
+                && !lsyscache::get_index_isclustered::call(indexOid)?
             {
-                deps::relation_close::call(tableOid, AccessExclusiveLock)?;
+                table::relation_close::call(tableOid, AccessExclusiveLock)?;
                 return Ok(()); // goto out
             }
         }
     }
 
     /* We allow VACUUM FULL, but not CLUSTER, on shared catalogs. */
-    if OidIsValid(indexOid) && deps::rd_rel_relisshared::call(&OldHeap)? {
+    if OidIsValid(indexOid) && relcache::rd_rel_relisshared::call(&OldHeap)? {
         return ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("cannot cluster a shared catalog")
@@ -500,7 +526,7 @@ fn cluster_rel_body(
     }
 
     /* Check for active uses of the relation in the current transaction. */
-    deps::check_table_not_in_use::call(
+    tablecmds::check_table_not_in_use::call(
         OldHeap,
         if OidIsValid(indexOid) { "CLUSTER" } else { "VACUUM" },
     )?;
@@ -508,7 +534,7 @@ fn cluster_rel_body(
     /* Check heap and index are valid to cluster on */
     let index: Option<Relation<'_>> = if OidIsValid(indexOid) {
         check_index_is_clusterable(mcx, OldHeap, indexOid, AccessExclusiveLock)?;
-        Some(deps::index_open::call(mcx, indexOid, NoLock)?)
+        Some(indexam::index_open::call(mcx, indexOid, NoLock)?)
     } else {
         None
     };
@@ -521,7 +547,7 @@ fn cluster_rel_body(
         if let Some(idx) = index {
             idx.close(AccessExclusiveLock)?;
         }
-        deps::relation_close::call(tableOid, AccessExclusiveLock)?;
+        table::relation_close::call(tableOid, AccessExclusiveLock)?;
         return Ok(()); // goto out
     }
 
@@ -535,7 +561,7 @@ fn cluster_rel_body(
      * All predicate locks on the tuples or pages are about to be made invalid;
      * promote them to relation locks.
      */
-    deps::transfer_predicate_locks_to_heap_relation::call(tableOid)?;
+    predicate::transfer_predicate_locks_to_heap_relation::call(tableOid)?;
 
     /* rebuild_relation does all the dirty work (closes OldHeap and index). */
     rebuild_relation(mcx, OldHeap, index, verbose)
@@ -552,10 +578,10 @@ pub fn check_index_is_clusterable(
     indexOid: Oid,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    let OldIndex = deps::index_open::call(mcx, indexOid, lockmode)?;
+    let OldIndex = indexam::index_open::call(mcx, indexOid, lockmode)?;
 
     /* Check that index is in fact an index on the given relation */
-    let mismatch = match deps::rd_index_indrelid::call(&OldIndex)? {
+    let mismatch = match relcache::rd_index_indrelid::call(&OldIndex)? {
         None => true, // rd_index == NULL
         Some(rel) => rel != OldHeap.rd_id,
     };
@@ -571,7 +597,7 @@ pub fn check_index_is_clusterable(
     }
 
     /* Index AM must allow clustering */
-    if !deps::rd_indam_amclusterable::call(&OldIndex)? {
+    if !relcache::rd_indam_amclusterable::call(&OldIndex)? {
         return ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
@@ -582,7 +608,7 @@ pub fn check_index_is_clusterable(
     }
 
     /* Disallow clustering on incomplete (partial) indexes. */
-    if deps::rd_index_has_indpred::call(&OldIndex)? {
+    if relcache::rd_index_has_indpred::call(&OldIndex)? {
         return ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
@@ -593,7 +619,7 @@ pub fn check_index_is_clusterable(
     }
 
     /* Disallow if index is left over from a failed CREATE INDEX CONCURRENTLY. */
-    if !deps::rd_index_indisvalid::call(&OldIndex)? {
+    if !relcache::rd_index_indisvalid::call(&OldIndex)? {
         return ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
@@ -629,18 +655,18 @@ pub fn mark_index_clustered(
     }
 
     /* If the index is already marked clustered, no need to do anything. */
-    if OidIsValid(indexOid) && deps::get_index_isclustered::call(indexOid)? {
+    if OidIsValid(indexOid) && lsyscache::get_index_isclustered::call(indexOid)? {
         return Ok(());
     }
 
     /* Check each index of the relation and set/clear the bit as needed. */
-    let pg_index = deps::table_open::call(mcx, IndexRelationId, RowExclusiveLock)?;
+    let pg_index = table::table_open::call(mcx, IndexRelationId, RowExclusiveLock)?;
 
-    for thisIndexOid in deps::relation_get_index_list::call(mcx, rel)? {
+    for thisIndexOid in relcache::relation_get_index_list::call(mcx, rel)? {
         // SearchSysCacheCopy1(INDEXRELID, thisIndexOid): the writable pg_index
         // tuple's (t_self, {indisclustered, indisvalid}).
         let Some((tid, mut form)) =
-            deps::search_syscache_copy_pg_index::call(mcx, thisIndexOid)?
+            syscache::search_syscache_copy_pg_index::call(mcx, thisIndexOid)?
         else {
             return elog_error(format!("cache lookup failed for index {}", thisIndexOid));
         };
@@ -648,17 +674,17 @@ pub fn mark_index_clustered(
         /* Unset the bit if set.  We know it's wrong because we checked earlier. */
         if form.indisclustered {
             form.indisclustered = false;
-            deps::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
+            indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
         } else if thisIndexOid == indexOid {
             /* this was checked earlier, but let's be real sure */
             if !form.indisvalid {
                 return elog_error(format!("cannot cluster on invalid index {}", indexOid));
             }
             form.indisclustered = true;
-            deps::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
+            indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, tid, &form)?;
         }
 
-        deps::invoke_object_post_alter_hook_arg::call(
+        objectaccess::invoke_object_post_alter_hook_arg::call(
             IndexRelationId,
             thisIndexOid,
             0,
@@ -685,8 +711,8 @@ fn rebuild_relation(
     verbose: bool,
 ) -> PgResult<()> {
     let tableOid = OldHeap.rd_id;
-    let accessMethod = deps::rd_rel_relam::call(&OldHeap)?;
-    let tableSpace = deps::rd_rel_reltablespace::call(&OldHeap)?;
+    let accessMethod = relcache::rd_rel_relam::call(&OldHeap)?;
+    let tableSpace = relcache::rd_rel_reltablespace::call(&OldHeap)?;
 
     debug_assert!(
         lmgr::check_relation_locked_by_me::call(tableOid, AccessExclusiveLock, false)
@@ -707,22 +733,22 @@ fn rebuild_relation(
 
     /* Remember info about rel before closing OldHeap */
     let relpersistence = OldHeap.rd_rel.relpersistence;
-    let is_system_catalog = deps::is_system_relation::call(OldHeap)?;
+    let is_system_catalog = catalog::is_system_relation::call(OldHeap)?;
 
     /* Create the transient table that will receive the re-ordered data. */
     let OIDNewHeap = make_new_heap(mcx, tableOid, tableSpace, accessMethod, relpersistence, NoLock)?;
-    debug_assert!(deps::check_relation_oid_locked_by_me::call(
+    debug_assert!(lmgr::check_relation_oid_locked_by_me::call(
         OIDNewHeap,
         AccessExclusiveLock,
         false
     ));
-    let NewHeap = deps::table_open::call(mcx, OIDNewHeap, NoLock)?;
+    let NewHeap = table::table_open::call(mcx, OIDNewHeap, NoLock)?;
 
     /* Copy the heap data into the new table in the desired order */
     let copied = copy_table_data(mcx, &NewHeap, OldHeap, index.as_ref(), verbose)?;
 
     /* Close relcache entries, but keep lock until transaction commit */
-    deps::relation_close::call(tableOid, NoLock)?;
+    table::relation_close::call(tableOid, NoLock)?;
     if let Some(idx) = index {
         idx.close(NoLock)?;
     }
@@ -762,34 +788,34 @@ pub fn make_new_heap(
     relpersistence: u8,
     lockmode: LOCKMODE,
 ) -> PgResult<Oid> {
-    let OldHeap = deps::table_open::call(mcx, OIDOldHeap, lockmode)?;
+    let OldHeap = table::table_open::call(mcx, OIDOldHeap, lockmode)?;
 
     /*
      * Use reloptions of the old heap for the new heap. fetch_class_reloptions
      * does SearchSysCache1 / SysCacheGetAttr / ReleaseSysCache, erroring
      * "cache lookup failed for relation %u" on a missing tuple.
      */
-    let reloptions = deps::fetch_class_reloptions::call(mcx, OIDOldHeap)?;
+    let reloptions = syscache::fetch_class_reloptions::call(mcx, OIDOldHeap)?;
 
     let namespaceid = if relpersistence == RELPERSISTENCE_TEMP {
-        deps::lookup_creation_namespace::call("pg_temp")?
+        namespace::lookup_creation_namespace::call("pg_temp")?
     } else {
-        deps::rd_rel_relnamespace::call(&OldHeap)?
+        relcache::rd_rel_relnamespace::call(&OldHeap)?
     };
 
     /* Create the new heap with a temporary name in the same namespace. */
     let NewHeapName = format_namedata(&format!("pg_temp_{}", OIDOldHeap));
 
-    let OIDNewHeap = deps::heap_create_with_catalog_transient::call(
+    let OIDNewHeap = heap::heap_create_with_catalog_transient::call(
         mcx,
         &NewHeapName,
         namespaceid,
         NewTableSpace,
-        deps::rd_rel_relowner::call(&OldHeap)?,
+        relcache::rd_rel_relowner::call(&OldHeap)?,
         NewAccessMethod,
         &OldHeap,
         relpersistence,
-        deps::relation_is_mapped::call(&OldHeap)?,
+        relcache::relation_is_mapped::call(&OldHeap)?,
         reloptions.clone(),
         OIDOldHeap,
     )?;
@@ -802,8 +828,8 @@ pub fn make_new_heap(
     let toastid = OldHeap.rd_rel.reltoastrelid;
     if OidIsValid(toastid) {
         /* keep the existing toast table's reloptions, if any */
-        let toast_reloptions = deps::fetch_class_reloptions::call(mcx, toastid)?;
-        deps::new_heap_create_toast_table::call(mcx, OIDNewHeap, toast_reloptions, lockmode, toastid)?;
+        let toast_reloptions = syscache::fetch_class_reloptions::call(mcx, toastid)?;
+        toasting::new_heap_create_toast_table::call(mcx, OIDNewHeap, toast_reloptions, lockmode, toastid)?;
     }
 
     OldHeap.close(NoLock)?;
@@ -831,10 +857,10 @@ fn copy_table_data(
 ) -> PgResult<CopyTableDataResult> {
     let elevel = if verbose { INFO } else { DEBUG2 };
 
-    let ru0 = deps::pg_rusage_init::call();
+    let ru0 = pg_rusage::pg_rusage_init::call();
 
     /* Store a copy of the namespace name for logging purposes */
-    let nspname = lsyscache::get_namespace_name::call(mcx, deps::rd_rel_relnamespace::call(&OldHeap)?)?
+    let nspname = lsyscache::get_namespace_name::call(mcx, relcache::rd_rel_relnamespace::call(&OldHeap)?)?
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
@@ -863,18 +889,18 @@ fn copy_table_data(
          * use the old toast table's OID (rd_toastoid), so toast_save_datum
          * preserves the toast value OIDs.
          */
-        deps::set_rd_toastoid::call(NewHeap, OldHeap.rd_rel.reltoastrelid)?;
+        relcache::set_rd_toastoid::call(NewHeap, OldHeap.rd_rel.reltoastrelid)?;
         true
     } else {
         false
     };
 
     /* Compute xids used to freeze and weed out dead tuples and multixacts. */
-    let mut cutoffs = deps::vacuum_get_cutoffs::call(OldHeap)?;
+    let mut cutoffs = vacuum::vacuum_get_cutoffs::call(OldHeap)?;
 
     /* FreezeXid mustn't go backwards, so take the max. */
     {
-        let relfrozenxid = deps::rd_rel_relfrozenxid::call(&OldHeap)?;
+        let relfrozenxid = relcache::rd_rel_relfrozenxid::call(&OldHeap)?;
         if TransactionIdIsValid(relfrozenxid)
             && TransactionIdPrecedes(cutoffs.FreezeLimit, relfrozenxid)
         {
@@ -884,7 +910,7 @@ fn copy_table_data(
 
     /* MultiXactCutoff, similarly, shouldn't go backwards. */
     {
-        let relminmxid = deps::rd_rel_relminmxid::call(&OldHeap)?;
+        let relminmxid = relcache::rd_rel_relminmxid::call(&OldHeap)?;
         if MultiXactIdIsValid(relminmxid)
             && MultiXactIdPrecedes(cutoffs.MultiXactCutoff, relminmxid)
         {
@@ -894,8 +920,8 @@ fn copy_table_data(
 
     /* Decide whether to use an indexscan or seqscan-and-optional-sort. */
     let use_sort = match OldIndex {
-        Some(idx) if deps::rd_rel_relam::call(&idx)? == BTREE_AM_OID => {
-            deps::plan_cluster_use_sort::call(OldHeap.rd_id, idx.rd_id)?
+        Some(idx) if relcache::rd_rel_relam::call(&idx)? == BTREE_AM_OID => {
+            planner::plan_cluster_use_sort::call(OldHeap.rd_id, idx.rd_id)?
         }
         _ => false,
     };
@@ -903,7 +929,7 @@ fn copy_table_data(
     /* Log what we're doing */
     if OldIndex.is_some() && !use_sort {
         let idx = OldIndex.unwrap();
-        deps::ereport_msg::call(
+        elog::ereport_msg::call(
             elevel,
             format!(
                 "clustering \"{}.{}\" using index scan on \"{}\"",
@@ -914,7 +940,7 @@ fn copy_table_data(
             None,
         )?;
     } else if use_sort {
-        deps::ereport_msg::call(
+        elog::ereport_msg::call(
             elevel,
             format!(
                 "clustering \"{}.{}\" using sequential scan and sort",
@@ -924,7 +950,7 @@ fn copy_table_data(
             None,
         )?;
     } else {
-        deps::ereport_msg::call(
+        elog::ereport_msg::call(
             elevel,
             format!("vacuuming \"{}.{}\"", nspname, OldHeap.name()),
             None,
@@ -932,7 +958,7 @@ fn copy_table_data(
     }
 
     /* Hand off the actual copying to AM specific function. */
-    let copied = deps::table_relation_copy_for_cluster::call(
+    let copied = tableam::table_relation_copy_for_cluster::call(
         OldHeap,
         NewHeap,
         OldIndex,
@@ -948,12 +974,12 @@ fn copy_table_data(
     let cutoff_multi = cutoffs.MultiXactCutoff;
 
     /* Reset rd_toastoid just to be tidy. */
-    deps::set_rd_toastoid::call(NewHeap, InvalidOid)?;
+    relcache::set_rd_toastoid::call(NewHeap, InvalidOid)?;
 
-    let num_pages = deps::relation_get_number_of_blocks::call(NewHeap)?;
+    let num_pages = relcache::relation_get_number_of_blocks::call(NewHeap)?;
 
     /* Log what we did */
-    deps::ereport_msg::call(
+    elog::ereport_msg::call(
         elevel,
         format!(
             "\"{}.{}\": found {:.0} removable, {:.0} nonremovable row versions in {} pages",
@@ -961,19 +987,19 @@ fn copy_table_data(
             OldHeap.name(),
             copied.tups_vacuumed,
             copied.num_tuples,
-            deps::relation_get_number_of_blocks::call(OldHeap)?
+            relcache::relation_get_number_of_blocks::call(OldHeap)?
         ),
         Some(format!(
             "{:.0} dead row versions cannot be removed yet.\n{}.",
             copied.tups_recently_dead,
-            deps::pg_rusage_show::call(mcx, ru0)?
+            pg_rusage::pg_rusage_show::call(mcx, ru0)?
         )),
     )?;
 
     /* Update pg_class to reflect the correct values of pages and tuples. */
-    let relRelation = deps::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
+    let relRelation = table::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
 
-    let Some((tid, mut reltup)) = deps::search_syscache_copy_pg_class::call(mcx, NewHeap.rd_id)?
+    let Some((tid, mut reltup)) = syscache::search_syscache_copy_pg_class::call(mcx, NewHeap.rd_id)?
     else {
         return elog_error(format!("cache lookup failed for relation {}", NewHeap.rd_id));
     };
@@ -983,9 +1009,9 @@ fn copy_table_data(
 
     /* Don't update the stats for pg_class. See swap_relation_files. */
     if OldHeap.rd_id != RelationRelationId {
-        deps::catalog_tuple_update_pg_class::call(mcx, &relRelation, tid, &reltup)?;
+        indexing::catalog_tuple_update_pg_class::call(mcx, &relRelation, tid, &reltup)?;
     } else {
-        deps::cache_invalidate_relcache_by_pg_class::call(tid, &reltup)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(tid, &reltup)?;
     }
 
     /* Clean up (heap_freetuple = drop). */
@@ -1036,12 +1062,12 @@ fn swap_relation_files(
     mapped_tables: &mut MappedTables,
 ) -> PgResult<()> {
     /* We need writable copies of both pg_class tuples. */
-    let relRelation = deps::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
+    let relRelation = table::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
 
-    let Some((tid1, mut relform1)) = deps::search_syscache_copy_pg_class::call(mcx, r1)? else {
+    let Some((tid1, mut relform1)) = syscache::search_syscache_copy_pg_class::call(mcx, r1)? else {
         return elog_error(format!("cache lookup failed for relation {}", r1));
     };
-    let Some((tid2, mut relform2)) = deps::search_syscache_copy_pg_class::call(mcx, r2)? else {
+    let Some((tid2, mut relform2)) = syscache::search_syscache_copy_pg_class::call(mcx, r2)? else {
         return elog_error(format!("cache lookup failed for relation {}", r2));
     };
 
@@ -1100,14 +1126,14 @@ fn swap_relation_files(
         }
 
         /* Fetch the mappings --- shouldn't fail, but be paranoid */
-        relfilenumber1 = deps::relation_map_oid_to_filenumber::call(r1, relform1.relisshared)?;
+        relfilenumber1 = relmapper::relation_map_oid_to_filenumber::call(r1, relform1.relisshared)?;
         if !RelFileNumberIsValid(relfilenumber1) {
             return elog_error(format!(
                 "could not find relation mapping for relation \"{}\", OID {}",
                 relform1.relname, r1
             ));
         }
-        relfilenumber2 = deps::relation_map_oid_to_filenumber::call(r2, relform2.relisshared)?;
+        relfilenumber2 = relmapper::relation_map_oid_to_filenumber::call(r2, relform2.relisshared)?;
         if !RelFileNumberIsValid(relfilenumber2) {
             return elog_error(format!(
                 "could not find relation mapping for relation \"{}\", OID {}",
@@ -1116,15 +1142,15 @@ fn swap_relation_files(
         }
 
         /* Send replacement mappings to relmapper. */
-        deps::relation_map_update_map::call(r1, relfilenumber2, relform1.relisshared, false)?;
-        deps::relation_map_update_map::call(r2, relfilenumber1, relform2.relisshared, false)?;
+        relmapper::relation_map_update_map::call(r1, relfilenumber2, relform1.relisshared, false)?;
+        relmapper::relation_map_update_map::call(r2, relfilenumber1, relform2.relisshared, false)?;
 
         /* Pass OIDs of mapped r2 tables back to caller */
         mapped_tables.push(r2);
     }
 
     /* Recognize that rel1's relfilenumber (swapped from rel2) is new in this subtransaction. */
-    deps::swap_relfilelocator_subids::call(r1, r2)?;
+    relcache::swap_relfilelocator_subids::call(r1, r2)?;
 
     /* set rel1's frozen Xid and minimum MultiXid */
     if relform1.relkind != RELKIND_INDEX {
@@ -1143,14 +1169,14 @@ fn swap_relation_files(
 
     /* Update the tuples in pg_class --- unless the target is pg_class itself. */
     if !target_is_pg_class {
-        let indstate = deps::catalog_open_indexes::call(mcx, &relRelation)?;
-        deps::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid1, &relform1, &indstate)?;
-        deps::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid2, &relform2, &indstate)?;
-        deps::catalog_close_indexes::call(indstate)?;
+        let indstate = indexing::catalog_open_indexes::call(mcx, &relRelation)?;
+        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid1, &relform1, &indstate)?;
+        indexing::catalog_tuple_update_with_info_pg_class::call(mcx, &relRelation, tid2, &relform2, &indstate)?;
+        indexing::catalog_close_indexes::call(indstate)?;
     } else {
         /* no update ... but we do still need relcache inval */
-        deps::cache_invalidate_relcache_by_pg_class::call(tid1, &relform1)?;
-        deps::cache_invalidate_relcache_by_pg_class::call(tid2, &relform2)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(tid1, &relform1)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(tid2, &relform2)?;
     }
 
     /* Update the dependency of the relations to point to their new table AM, if changed. */
@@ -1166,7 +1192,7 @@ fn swap_relation_files(
         {
             return elog_error(format!(
                 "could not change access method dependency for relation \"{}.{}\"",
-                lsyscache::get_namespace_name::call(mcx, deps::get_rel_namespace::call(r1)?)?
+                lsyscache::get_namespace_name::call(mcx, lsyscache::get_rel_namespace::call(r1)?)?
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_default(),
                 lsyscache::get_rel_name::call(mcx, r1)?
@@ -1185,7 +1211,7 @@ fn swap_relation_files(
         {
             return elog_error(format!(
                 "could not change access method dependency for relation \"{}.{}\"",
-                lsyscache::get_namespace_name::call(mcx, deps::get_rel_namespace::call(r2)?)?
+                lsyscache::get_namespace_name::call(mcx, lsyscache::get_rel_namespace::call(r2)?)?
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_default(),
                 lsyscache::get_rel_name::call(mcx, r2)?
@@ -1196,8 +1222,8 @@ fn swap_relation_files(
     }
 
     /* Post alter hook for modified relations. */
-    deps::invoke_object_post_alter_hook_arg::call(RelationRelationId, r1, 0, InvalidOid, is_internal)?;
-    deps::invoke_object_post_alter_hook_arg::call(RelationRelationId, r2, 0, InvalidOid, true)?;
+    objectaccess::invoke_object_post_alter_hook_arg::call(RelationRelationId, r1, 0, InvalidOid, is_internal)?;
+    objectaccess::invoke_object_post_alter_hook_arg::call(RelationRelationId, r2, 0, InvalidOid, true)?;
 
     /* If we have toast tables associated with the relations being swapped, deal with them. */
     if OidIsValid(relform1.reltoastrelid) || OidIsValid(relform2.reltoastrelid) {
@@ -1226,7 +1252,7 @@ fn swap_relation_files(
              * We swapped the ownership links, so change dependency data to match.
              * We disallow this case for system catalogs.
              */
-            if deps::is_system_class::call(r1, &relform1)? {
+            if catalog::is_system_class::call(r1, &relform1)? {
                 return elog_error::<()>(
                     "cannot swap toast files by links for system catalogs".to_string(),
                 );
@@ -1295,8 +1321,8 @@ fn swap_relation_files(
         && relform1.relkind == RELKIND_TOASTVALUE
         && relform2.relkind == RELKIND_TOASTVALUE
     {
-        let toastIndex1 = deps::toast_get_valid_index::call(r1, AccessExclusiveLock)?;
-        let toastIndex2 = deps::toast_get_valid_index::call(r2, AccessExclusiveLock)?;
+        let toastIndex1 = toast_internals::toast_get_valid_index::call(r1, AccessExclusiveLock)?;
+        let toastIndex2 = toast_internals::toast_get_valid_index::call(r2, AccessExclusiveLock)?;
 
         swap_relation_files(
             mcx,
@@ -1337,7 +1363,7 @@ pub fn finish_heap_swap(
     let _reindex_params = ReindexParams::default();
 
     /* Report that we are now swapping relation files */
-    deps::pgstat_progress_update_param::call(
+    backend_progress::pgstat_progress_update_param::call(
         PROGRESS_CLUSTER_PHASE,
         PROGRESS_CLUSTER_PHASE_SWAP_REL_FILES,
     )?;
@@ -1360,7 +1386,7 @@ pub fn finish_heap_swap(
 
     /* If a system catalog, queue a sinval to flush all catcaches at CCI. */
     if is_system_catalog {
-        deps::cache_invalidate_catalog::call(OIDOldHeap)?;
+        inval::cache_invalidate_catalog::call(OIDOldHeap)?;
     }
 
     /* Rebuild each index on the relation (but not the toast table). */
@@ -1377,15 +1403,15 @@ pub fn finish_heap_swap(
     }
 
     /* Report that we are now reindexing relations */
-    deps::pgstat_progress_update_param::call(
+    backend_progress::pgstat_progress_update_param::call(
         PROGRESS_CLUSTER_PHASE,
         PROGRESS_CLUSTER_PHASE_REBUILD_INDEX,
     )?;
 
-    deps::reindex_relation::call(mcx, OIDOldHeap, reindex_flags, _reindex_params)?;
+    index::reindex_relation::call(mcx, OIDOldHeap, reindex_flags, _reindex_params)?;
 
     /* Report that we are now doing clean up */
-    deps::pgstat_progress_update_param::call(
+    backend_progress::pgstat_progress_update_param::call(
         PROGRESS_CLUSTER_PHASE,
         PROGRESS_CLUSTER_PHASE_FINAL_CLEANUP,
     )?;
@@ -1395,15 +1421,15 @@ pub fn finish_heap_swap(
      * update pg_class's own entry; do it now using the new relation's indices.
      */
     if OIDOldHeap == RelationRelationId {
-        let relRelation = deps::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
+        let relRelation = table::table_open::call(mcx, RelationRelationId, RowExclusiveLock)?;
 
-        let Some((tid, mut relform)) = deps::search_syscache_copy_pg_class::call(mcx, OIDOldHeap)?
+        let Some((tid, mut relform)) = syscache::search_syscache_copy_pg_class::call(mcx, OIDOldHeap)?
         else {
             return elog_error(format!("cache lookup failed for relation {}", OIDOldHeap));
         };
         relform.relfrozenxid = frozenXid;
         relform.relminmxid = cutoffMulti;
-        deps::catalog_tuple_update_pg_class::call(mcx, &relRelation, tid, &relform)?;
+        indexing::catalog_tuple_update_pg_class::call(mcx, &relRelation, tid, &relform)?;
 
         relRelation.close(RowExclusiveLock)?;
     }
@@ -1424,7 +1450,7 @@ pub fn finish_heap_swap(
     /* Remove any relation mapping entries we set up for the transient table. */
     let mut i = 0usize;
     while i < mapped_tables.slots.len() && OidIsValid(mapped_tables.slots[i]) {
-        deps::relation_map_remove_mapping::call(mapped_tables.slots[i])?;
+        relmapper::relation_map_remove_mapping::call(mapped_tables.slots[i])?;
         i += 1;
     }
 
@@ -1433,34 +1459,34 @@ pub fn finish_heap_swap(
      * corresponds to the transient table) to prevent user confusion.
      */
     if !swap_toast_by_content {
-        let newrel = deps::table_open::call(mcx, OIDOldHeap, NoLock)?;
+        let newrel = table::table_open::call(mcx, OIDOldHeap, NoLock)?;
         let reltoastrelid = newrel.rd_rel.reltoastrelid;
         if OidIsValid(reltoastrelid) {
             /* Get the associated valid index to be renamed */
-            let toastidx = deps::toast_get_valid_index::call(reltoastrelid, NoLock)?;
+            let toastidx = toast_internals::toast_get_valid_index::call(reltoastrelid, NoLock)?;
 
             /* rename the toast table ... */
             let new_toast_name = format_namedata(&format!("pg_toast_{}", OIDOldHeap));
-            deps::rename_relation_internal::call(mcx, reltoastrelid, &new_toast_name, true, false)?;
+            tablecmds::rename_relation_internal::call(mcx, reltoastrelid, &new_toast_name, true, false)?;
 
             /* ... and its valid index too. */
             let new_toast_index_name = format_namedata(&format!("pg_toast_{}_index", OIDOldHeap));
-            deps::rename_relation_internal::call(mcx, toastidx, &new_toast_index_name, true, true)?;
+            tablecmds::rename_relation_internal::call(mcx, toastidx, &new_toast_index_name, true, true)?;
 
             /*
              * Reset the relrewrite for the toast. The CCI is required here as
              * we are about to update the tuple updated by RenameRelationInternal.
              */
             xact::command_counter_increment::call()?;
-            deps::reset_rel_rewrite::call(reltoastrelid)?;
+            tablecmds::reset_rel_rewrite::call(reltoastrelid)?;
         }
         newrel.close(NoLock)?;
     }
 
     /* if it's not a catalog table, clear any missing attribute settings */
     if !is_system_catalog {
-        let newrel = deps::table_open::call(mcx, OIDOldHeap, NoLock)?;
-        deps::relation_clear_missing::call(&newrel)?;
+        let newrel = table::table_open::call(mcx, OIDOldHeap, NoLock)?;
+        heap::relation_clear_missing::call(&newrel)?;
         newrel.close(NoLock)?;
     }
 
@@ -1478,7 +1504,7 @@ fn types_nodes_drop_restrict() -> types_nodes::parsenodes::DropBehavior {
 
 /// `get_tables_to_cluster(MemoryContext cluster_context)`. The `rtcs` list is
 /// allocated in `mcx` (the C `cluster_context`). The pg_index `indisclustered`
-/// scan crosses as the batched [`deps::scan_indisclustered`] seam (open +
+/// scan crosses as the batched [`heapam::scan_indisclustered`] seam (open +
 /// beginscan_catalog + heap_getnext loop + endscan + close), exactly the
 /// genam `systable_scan` precedent; the per-row aclcheck + push stays here.
 fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RelToCluster>> {
@@ -1488,7 +1514,7 @@ fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RelToClus
      * Get all indexes that have indisclustered set and that the current user
      * has the appropriate privileges for.
      */
-    let rows = deps::scan_indisclustered::call(mcx)?;
+    let rows = heapam::scan_indisclustered::call(mcx)?;
     for (indrelid, indexrelid) in rows {
         if !cluster_is_permitted_for_relation(mcx, indrelid, miscinit::get_user_id::call())? {
             continue;
@@ -1510,10 +1536,10 @@ fn get_tables_to_cluster_partitioned<'mcx>(
     let mut rtcs: PgVec<RelToCluster> = PgVec::new_in(mcx);
 
     /* Do not lock the children until they're processed */
-    let inhoids = deps::find_all_inheritors::call(mcx, indexOid, NoLock)?;
+    let inhoids = pg_inherits::find_all_inheritors::call(mcx, indexOid, NoLock)?;
 
     for indexrelid in inhoids {
-        let relid = deps::index_get_relation::call(indexrelid, false)?;
+        let relid = index::index_get_relation::call(indexrelid, false)?;
 
         /* consider only leaf indexes */
         if lsyscache::get_rel_relkind::call(indexrelid)? != RELKIND_INDEX {
@@ -1539,7 +1565,7 @@ fn get_tables_to_cluster_partitioned<'mcx>(
 // ===========================================================================
 
 fn cluster_is_permitted_for_relation(mcx: Mcx<'_>, relid: Oid, userid: Oid) -> PgResult<bool> {
-    if deps::pg_class_aclcheck_maintain_ok::call(relid, userid)? {
+    if acl::pg_class_aclcheck_maintain_ok::call(relid, userid)? {
         return Ok(true);
     }
 

@@ -168,3 +168,8 @@ seam_core::seam!(
     /// Set the `bsysscan` global (xact.c) — `ResetLogicalStreamingState`.
     pub fn set_bsysscan(value: bool)
 );
+
+seam_core::seam!(
+    /// `PreventInTransactionBlock(isTopLevel, stmtType)` (xact.c).
+    pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: &str) -> PgResult<()>
+);

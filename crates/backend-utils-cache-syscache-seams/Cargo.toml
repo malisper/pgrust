@@ -17,3 +17,5 @@ types-hash = { path = "../types-hash" }
 types-namespace = { path = "../types-namespace" }
 types-partition = { path = "../types-partition" }
 types-fmgr = { path = "../types-fmgr" }
+types-tuple = { path = "../types-tuple" }
+types-cluster = { path = "../types-cluster" }

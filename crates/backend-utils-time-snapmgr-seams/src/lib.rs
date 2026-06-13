@@ -112,3 +112,9 @@ seam_core::seam!(
     /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
     pub fn pop_active_snapshot() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(GetTransactionSnapshot())` (snapmgr.c): take and
+    /// push the transaction snapshot.
+    pub fn push_active_snapshot_transaction() -> PgResult<()>
+);

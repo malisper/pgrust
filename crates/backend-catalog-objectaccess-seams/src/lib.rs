@@ -24,3 +24,15 @@ seam_core::seam!(
     /// installed (drives namespace.c's finalPath recompute). Pure read.
     pub fn object_access_hook_present() -> bool
 );
+
+seam_core::seam!(
+    /// `InvokeObjectPostAlterHookArg(classId, objectId, subId, auxObjId,
+    /// is_internal)` (objectaccess.h): fire the post-alter object-access hook.
+    pub fn invoke_object_post_alter_hook_arg(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        aux_obj_id: Oid,
+        is_internal: bool,
+    ) -> PgResult<()>
+);

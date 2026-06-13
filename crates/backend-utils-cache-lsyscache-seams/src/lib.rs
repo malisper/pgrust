@@ -280,3 +280,12 @@ seam_core::seam!(
     /// carries the catcache failure surface.
     pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
 );
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
+);

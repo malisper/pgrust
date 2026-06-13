@@ -375,3 +375,36 @@ seam_core::seam!(
         language_id: Oid,
     ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
 );
+
+/* ---- CLUSTER pg_class / pg_index writable copies (backend-commands-cluster) */
+
+seam_core::seam!(
+    /// `SearchSysCacheExists1(RELOID, indexOid)` (syscache.c).
+    pub fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` (syscache.c): the
+    /// writable pg_class row and its `t_self`; `None` on a cache miss.
+    pub fn search_syscache_copy_pg_class<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgClassForm)>>
+);
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(INDEXRELID, indexOid)` + `GETSTRUCT` (syscache.c):
+    /// the writable pg_index row and its `t_self`; `None` on a cache miss.
+    pub fn search_syscache_copy_pg_index<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_oid: Oid,
+    ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>>
+);
+seam_core::seam!(
+    /// `SearchSysCache1 + SysCacheGetAttr(Anum_pg_class_reloptions) +
+    /// ReleaseSysCache` (the make_new_heap reloptions fetch): the pg_class
+    /// reloptions token (NULL when unset). `Err` "cache lookup failed for
+    /// relation %u" when the tuple is missing.
+    pub fn fetch_class_reloptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<types_cluster::RelOptionsToken>
+);

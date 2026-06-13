@@ -263,8 +263,3 @@ pub struct RelOptionsToken {
 /// catalog-indexing owner keys it; this consumer only forwards the token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CatalogIndexStateToken(pub u64);
-
-/// Opaque `PGRUsage` handle (`utils/pg_rusage.h`) — the timer snapshot
-/// `pg_rusage_init` starts and `pg_rusage_show` renders. The owner keys it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PgRusageToken(pub u64);
