@@ -3668,6 +3668,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeResult"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeSeqscan"
 version = "0.0.0"
 dependencies = [
@@ -9088,6 +9105,7 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
+ "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
