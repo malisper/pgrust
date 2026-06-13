@@ -1950,6 +1950,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-opclass-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-pg-shdepend"
 version = "0.0.0"
 dependencies = [
@@ -7115,7 +7124,9 @@ dependencies = [
 name = "backend-utils-cache-lsyscache"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-pg-opclass-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
  "mcx",
  "seam-core",
  "types-array",
