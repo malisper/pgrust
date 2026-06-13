@@ -1237,3 +1237,15 @@ seam_core::seam!(
         opfamily: Oid,
     ) -> PgResult<Option<(i16, Oid)>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(relid),
+    /// Int16GetDatum(attnum), BoolGetDatum(false))` +
+    /// `((Form_pg_statistic) GETSTRUCT(tp))->stawidth` (`get_attavgwidth`): the
+    /// non-inherited average stored width of the column. `Ok(None)` on a cache
+    /// miss (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
+    pub fn pg_statistic_stawidth(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Option<i32>>
+);

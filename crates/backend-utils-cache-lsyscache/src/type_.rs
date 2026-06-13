@@ -14,16 +14,42 @@
 //! typcache-driven `RANGETYPE` / `TYPEOID` row probes and the arrayfuncs.c
 //! element-I/O projection.
 
+use backend_utils_adt_format_type_seams as format_type;
 use backend_utils_cache_lsyscache_seams::{IOFuncSelector, TypLenByValAlign, TypeIoData};
 use backend_utils_cache_syscache_seams as syscache;
+use backend_utils_fmgr_fmgr_seams as fmgr;
 use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
 use types_cache::typcache::{PgRangeRow, PgTypeRow};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_datum::Datum;
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_UNDEFINED_OBJECT,
+};
 use types_tuple::pg_type::FormData_pg_type;
 
-/// `TYPTYPE_DOMAIN` (`catalog/pg_type.h`): `typtype == 'd'`.
+/// `TYPTYPE_*` (`catalog/pg_type.h`).
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
+const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
+const TYPTYPE_ENUM: i8 = b'e' as i8;
+const TYPTYPE_RANGE: i8 = b'r' as i8;
+const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
+
+/// `TYPSTORAGE_PLAIN` (`catalog/pg_type.h`): `typstorage == 'p'`.
+const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
+
+/// `RECORDOID` / `BPCHAROID` (`catalog/pg_type.dat`).
+const RECORDOID: Oid = 2249;
+const BPCHAROID: Oid = 1042;
+/// `F_ARRAY_SUBSCRIPT_HANDLER` (`fmgroids.h`) — the `array_subscript_handler`
+/// builtin OID; the `IsTrueArrayType` test.
+const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+
+/// `IsTrueArrayType(typeForm)` (`catalog/pg_type.h`): a "true" array type has a
+/// valid `typelem` and the `array_subscript_handler` as its `typsubscript`.
+fn is_true_array_type(typtup: &FormData_pg_type) -> bool {
+    OidIsValid(typtup.typelem) && typtup.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
+}
 
 /// `elog(ERROR, "cache lookup failed for type %u", typid)`.
 fn cache_lookup_failed_for_type<T>(typid: Oid) -> PgResult<T> {
@@ -296,8 +322,9 @@ pub fn get_base_element_type(type_id: Oid) -> PgResult<Oid> {
         };
 
         if typ_tup.typtype != TYPTYPE_DOMAIN {
-            // Not a domain, so stop descending; return element type if any
-            let result = if typ_tup.typlen == -1 {
+            // Not a domain, so stop descending; return element type if any.
+            // This test must match get_element_type (IsTrueArrayType).
+            let result = if is_true_array_type(&typ_tup) {
                 typ_tup.typelem
             } else {
                 InvalidOid
@@ -330,7 +357,10 @@ pub fn get_base_element_type(type_id: Oid) -> PgResult<Oid> {
 pub fn get_element_type(array_type: Oid) -> PgResult<Option<Oid>> {
     match syscache::pg_type_form::call(array_type)? {
         Some(typtup) => {
-            let result = if typtup.typlen == -1 {
+            // NB: only "true" arrays (array_subscript_handler) succeed, exactly
+            // as C's IsTrueArrayType, independent of typelem/typsubscript on
+            // other types.
+            let result = if is_true_array_type(&typtup) {
                 typtup.typelem
             } else {
                 InvalidOid
@@ -459,4 +489,273 @@ fn oid_to_option(oid: Oid) -> Option<Oid> {
     } else {
         None
     }
+}
+
+// ===========================================================================
+// Remaining pg_type scalar reads (PG 18.3).
+// ===========================================================================
+
+/// `get_typisdefined(typid)` (lsyscache.c): `typisdefined`, or `false` if
+/// absent.
+pub fn get_typisdefined(typid: Oid) -> PgResult<bool> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typisdefined),
+        None => Ok(false),
+    }
+}
+
+/// `get_typlen(typid)` (lsyscache.c): `typlen`, or `0` if absent.
+pub fn get_typlen(typid: Oid) -> PgResult<i16> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typlen),
+        None => Ok(0),
+    }
+}
+
+/// `get_typbyval(typid)` (lsyscache.c): `typbyval`, or `false` if absent.
+pub fn get_typbyval(typid: Oid) -> PgResult<bool> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typbyval),
+        None => Ok(false),
+    }
+}
+
+/// `get_typlenbyval(typid, &typlen, &typbyval)` (lsyscache.c): `(typlen,
+/// typbyval)`; a missing type is `elog(ERROR, "cache lookup failed for type
+/// %u")`.
+pub fn get_typlenbyval(typid: Oid) -> PgResult<(i16, bool)> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok((typtup.typlen, typtup.typbyval)),
+        None => cache_lookup_failed_for_type(typid),
+    }
+}
+
+/// `get_typstorage(typid)` (lsyscache.c): `typstorage`, or `TYPSTORAGE_PLAIN`
+/// (`'p'`) if absent.
+pub fn get_typstorage(typid: Oid) -> PgResult<u8> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typstorage as u8),
+        None => Ok(TYPSTORAGE_PLAIN as u8),
+    }
+}
+
+/// `get_typtype(typid)` (lsyscache.c): `typtype`, or `'\0'` if absent.
+pub fn get_typtype(typid: Oid) -> PgResult<u8> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typtype as u8),
+        None => Ok(b'\0'),
+    }
+}
+
+/// `type_is_rowtype(typid)` (lsyscache.c): RECORD, or a (possibly domain-over)
+/// named composite type.
+pub fn type_is_rowtype(typid: Oid) -> PgResult<bool> {
+    if typid == RECORDOID {
+        return Ok(true); // easy case
+    }
+    let typtype = get_typtype(typid)? as i8;
+    match typtype {
+        TYPTYPE_COMPOSITE => Ok(true),
+        TYPTYPE_DOMAIN => {
+            if (get_typtype(get_base_type(typid)?)? as i8) == TYPTYPE_COMPOSITE {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
+/// `type_is_enum(typid)` (lsyscache.c).
+pub fn type_is_enum(typid: Oid) -> PgResult<bool> {
+    Ok((get_typtype(typid)? as i8) == TYPTYPE_ENUM)
+}
+
+/// `type_is_range(typid)` (lsyscache.c).
+pub fn type_is_range(typid: Oid) -> PgResult<bool> {
+    Ok((get_typtype(typid)? as i8) == TYPTYPE_RANGE)
+}
+
+/// `type_is_multirange(typid)` (lsyscache.c).
+pub fn type_is_multirange(typid: Oid) -> PgResult<bool> {
+    Ok((get_typtype(typid)? as i8) == TYPTYPE_MULTIRANGE)
+}
+
+/// `get_type_category_preferred(typid, &typcategory, &typispreferred)`
+/// (lsyscache.c): `(typcategory, typispreferred)`; a missing type is
+/// `elog(ERROR)`.
+pub fn get_type_category_preferred(typid: Oid) -> PgResult<(u8, bool)> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok((typtup.typcategory as u8, typtup.typispreferred)),
+        None => cache_lookup_failed_for_type(typid),
+    }
+}
+
+/// `get_typ_typrelid(typid)` (lsyscache.c): `typrelid`, or `InvalidOid` if
+/// absent or not a complex type.
+pub fn get_typ_typrelid(typid: Oid) -> PgResult<Oid> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typrelid),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_promoted_array_type(typid)` (lsyscache.c): the "true" array type of a
+/// scalar, or the type itself if already a true array, else `InvalidOid`.
+///
+/// ```c
+/// Oid array_type = get_array_type(typid);
+/// if (OidIsValid(array_type)) return array_type;
+/// if (OidIsValid(get_element_type(typid))) return typid;
+/// return InvalidOid;
+/// ```
+pub fn get_promoted_array_type(typid: Oid) -> PgResult<Oid> {
+    let array_type = get_array_type(typid)?; // Option<Oid> (None == InvalidOid)
+    if let Some(at) = array_type {
+        return Ok(at);
+    }
+    if get_element_type(typid)?.is_some() {
+        return Ok(typid);
+    }
+    Ok(InvalidOid)
+}
+
+/// `getTypeBinaryInputInfo(type, &typReceive, &typIOParam)` (lsyscache.c).
+///
+/// ```c
+/// if (!pt->typisdefined) ereport(ERROR, ERRCODE_UNDEFINED_OBJECT, "type %s is only a shell");
+/// if (!OidIsValid(pt->typreceive)) ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION, "no binary input function available for type %s");
+/// *typReceive = pt->typreceive;
+/// *typIOParam = getTypeIOParam(typeTuple);
+/// ```
+pub fn get_type_binary_input_info(typ: Oid) -> PgResult<(Oid, Oid)> {
+    let pt = match syscache::pg_type_form::call(typ)? {
+        Some(t) => t,
+        None => return cache_lookup_failed_for_type(typ),
+    };
+
+    if !pt.typisdefined {
+        return Err(PgError::error(format!(
+            "type {} is only a shell",
+            format_type::format_type_be_str::call(typ)?
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+    }
+    if !OidIsValid(pt.typreceive) {
+        return Err(PgError::error(format!(
+            "no binary input function available for type {}",
+            format_type::format_type_be_str::call(typ)?
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+    }
+
+    Ok((pt.typreceive, get_type_io_param(&pt)))
+}
+
+/// `get_typmodin(typid)` (lsyscache.c): `typmodin`, or `InvalidOid`.
+pub fn get_typmodin(typid: Oid) -> PgResult<Oid> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typmodin),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_typmodout(typid)` (lsyscache.c): `typmodout`, or `InvalidOid`. (PG
+/// marks this `#ifdef NOT_USED`; ported for C-source completeness.)
+pub fn get_typmodout(typid: Oid) -> PgResult<Oid> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typmodout),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_typcollation(typid)` (lsyscache.c): `typcollation`, or `InvalidOid`.
+pub fn get_typcollation(typid: Oid) -> PgResult<Oid> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typtup) => Ok(typtup.typcollation),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `type_is_collatable(typid)` (lsyscache.c): `OidIsValid(get_typcollation)`.
+pub fn type_is_collatable(typid: Oid) -> PgResult<bool> {
+    Ok(OidIsValid(get_typcollation(typid)?))
+}
+
+/// `get_typsubscript(typid, &typelem)` (lsyscache.c): `(typsubscript,
+/// typelem)`; `(InvalidOid, InvalidOid)` if absent.
+pub fn get_typsubscript(typid: Oid) -> PgResult<(Oid, Oid)> {
+    match syscache::pg_type_form::call(typid)? {
+        Some(typform) => Ok((typform.typsubscript, typform.typelem)),
+        None => Ok((InvalidOid, InvalidOid)),
+    }
+}
+
+/// `getSubscriptingRoutines(typid, &typelem)` (lsyscache.c).
+///
+/// ```c
+/// RegProcedure typsubscript = get_typsubscript(typid, typelemp);
+/// if (!OidIsValid(typsubscript)) return NULL;
+/// return (const struct SubscriptRoutines *) DatumGetPointer(OidFunctionCall0(typsubscript));
+/// ```
+///
+/// The `OidFunctionCall0` routes through the fmgr owner's seam; its returned
+/// `Datum` is the `const SubscriptRoutines *` pointer word, kept opaque (the
+/// struct lives in `nodes/subscripting.h`, outside this unit, and no ported
+/// caller consumes it yet). `None` is the C NULL (not subscriptable).
+pub fn get_subscripting_routines(typid: Oid) -> PgResult<Option<(Datum, Oid)>> {
+    let (typsubscript, typelem) = get_typsubscript(typid)?;
+    if !OidIsValid(typsubscript) {
+        return Ok(None);
+    }
+    let routines = fmgr::oid_function_call0::call(typsubscript)?;
+    Ok(Some((routines, typelem)))
+}
+
+/// `get_typavgwidth(typid, typmod)` (lsyscache.c): the planner's estimated
+/// average value width for the type.
+///
+/// ```c
+/// int typlen = get_typlen(typid);
+/// if (typlen > 0) return typlen;
+/// maxwidth = type_maximum_size(typid, typmod);
+/// if (maxwidth > 0) {
+///     if (typid == BPCHAROID) return maxwidth;
+///     if (maxwidth <= 32) return maxwidth;
+///     if (maxwidth < 1000) return 32 + (maxwidth - 32) / 2;
+///     return 32 + (1000 - 32) / 2;
+/// }
+/// return 32;
+/// ```
+///
+/// The `get_attavgwidth_hook` planner hook is never installed in this port, so
+/// (as in C with a NULL hook) only the catalog path runs.
+pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32> {
+    let typlen = get_typlen(typid)? as i32;
+
+    // Easy if it's a fixed-width type
+    if typlen > 0 {
+        return Ok(typlen);
+    }
+
+    // type_maximum_size knows the encoding of typmod for some datatypes.
+    let maxwidth = format_type::type_maximum_size::call(typid, typmod)?;
+    if maxwidth > 0 {
+        // For BPCHAR, the max width is also the only width.
+        if typid == BPCHAROID {
+            return Ok(maxwidth);
+        }
+        if maxwidth <= 32 {
+            return Ok(maxwidth); // assume full width
+        }
+        if maxwidth < 1000 {
+            return Ok(32 + (maxwidth - 32) / 2); // assume 50%
+        }
+        // Beyond 1000, use a fixed estimate.
+        return Ok(32 + (1000 - 32) / 2);
+    }
+
+    // Oops, we have no idea ... wild guess time.
+    Ok(32)
 }

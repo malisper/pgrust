@@ -19,8 +19,13 @@
 use backend_catalog_namespace_seams as namespace_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
+use types_core::{InvalidOid, Oid};
+use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
+
+/// `OidIsValid(oid)` (`c.h`).
+fn oid_is_valid(oid: Oid) -> bool {
+    oid != InvalidOid
+}
 
 /// `get_namespace_name(nspid)` (lsyscache.c).
 ///
@@ -80,4 +85,121 @@ pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, am_oid: Oid) -> PgResult<Option<PgStrin
     // into `mcx` and the ReleaseSysCache; a cache miss returns `Ok(None)` (the
     // C NULL initializer left untouched).
     syscache_seams::search_am_name::call(mcx, am_oid)
+}
+
+// ---- PG_RANGE caches ------------------------------------------------------
+
+/// `get_range_subtype(rangeOid)` (lsyscache.c): the range's subtype, or
+/// `InvalidOid` if not a range type.
+pub fn get_range_subtype(range_oid: Oid) -> PgResult<Oid> {
+    match syscache_seams::pg_range_fields::call(range_oid)? {
+        Some(rng) => Ok(rng.rngsubtype),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_range_collation(rangeOid)` (lsyscache.c): the range's collation, or
+/// `InvalidOid`.
+pub fn get_range_collation(range_oid: Oid) -> PgResult<Oid> {
+    match syscache_seams::pg_range_fields::call(range_oid)? {
+        Some(rng) => Ok(rng.rngcollation),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_range_multirange(rangeOid)` (lsyscache.c): the range's multirange type
+/// (`rngmultitypid`), or `InvalidOid`.
+pub fn get_range_multirange(range_oid: Oid) -> PgResult<Oid> {
+    match syscache_seams::pg_range_fields::call(range_oid)? {
+        Some(rng) => Ok(rng.rngmultitypid),
+        None => Ok(InvalidOid),
+    }
+}
+
+// ---- publication / subscription -------------------------------------------
+
+/// `get_publication_oid(pubname, missing_ok)` (lsyscache.c).
+///
+/// ```c
+/// oid = GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid, CStringGetDatum(pubname));
+/// if (!OidIsValid(oid) && !missing_ok)
+///     ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+///             errmsg("publication \"%s\" does not exist", pubname));
+/// return oid;
+/// ```
+pub fn get_publication_oid(pubname: &str, missing_ok: bool) -> PgResult<Oid> {
+    let oid = syscache_seams::get_publication_oid_syscache::call(pubname)?;
+    if !oid_is_valid(oid) && !missing_ok {
+        return Err(PgError::error(format!(
+            "publication \"{pubname}\" does not exist"
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+    }
+    Ok(oid)
+}
+
+/// `get_publication_name(pubid, missing_ok)` (lsyscache.c): the publication's
+/// name copied into `mcx`; with `missing_ok = false` a miss is `elog(ERROR,
+/// "cache lookup failed for publication %u")`, else `Ok(None)`.
+pub fn get_publication_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    pubid: Oid,
+    missing_ok: bool,
+) -> PgResult<Option<PgString<'mcx>>> {
+    match syscache_seams::get_publication_name_syscache::call(mcx, pubid)? {
+        Some(name) => Ok(Some(name)),
+        None => {
+            if !missing_ok {
+                return Err(PgError::error(format!(
+                    "cache lookup failed for publication {pubid}"
+                )));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// `get_subscription_oid(subname, missing_ok)` (lsyscache.c).
+///
+/// ```c
+/// oid = GetSysCacheOid2(SUBSCRIPTIONNAME, Anum_pg_subscription_oid,
+///                       MyDatabaseId, CStringGetDatum(subname));
+/// if (!OidIsValid(oid) && !missing_ok)
+///     ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+///             errmsg("subscription \"%s\" does not exist", subname));
+/// return oid;
+/// ```
+///
+/// The `MyDatabaseId` key is the syscache owner's per-backend global, supplied
+/// inside the seam installer.
+pub fn get_subscription_oid(subname: &str, missing_ok: bool) -> PgResult<Oid> {
+    let oid = syscache_seams::get_subscription_oid_syscache::call(subname)?;
+    if !oid_is_valid(oid) && !missing_ok {
+        return Err(PgError::error(format!(
+            "subscription \"{subname}\" does not exist"
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+    }
+    Ok(oid)
+}
+
+/// `get_subscription_name(subid, missing_ok)` (lsyscache.c): the subscription's
+/// name copied into `mcx`; with `missing_ok = false` a miss is `elog(ERROR,
+/// "cache lookup failed for subscription %u")`, else `Ok(None)`.
+pub fn get_subscription_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    subid: Oid,
+    missing_ok: bool,
+) -> PgResult<Option<PgString<'mcx>>> {
+    match syscache_seams::get_subscription_name_syscache::call(mcx, subid)? {
+        Some(name) => Ok(Some(name)),
+        None => {
+            if !missing_ok {
+                return Err(PgError::error(format!(
+                    "cache lookup failed for subscription {subid}"
+                )));
+            }
+            Ok(None)
+        }
+    }
 }

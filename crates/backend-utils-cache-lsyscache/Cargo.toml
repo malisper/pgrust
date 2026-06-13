@@ -25,6 +25,8 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 # Owner seam crates this unit's lookups route through until those owners land.
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-catalog-pg-opclass-seams = { path = "../backend-catalog-pg-opclass-seams" }
 backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

@@ -12,7 +12,8 @@
 
 use backend_utils_cache_syscache_seams as syscache_seam;
 use mcx::{Mcx, PgString};
-use types_core::{AttrNumber, InvalidAttrNumber, Oid};
+use types_core::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid};
+use types_datum::Datum;
 use types_error::{PgError, PgResult};
 
 /// `elog(ERROR, ...)` — an internal error with the default
@@ -87,5 +88,62 @@ pub fn get_attnum(relid: Oid, attname: &str) -> PgResult<AttrNumber> {
     match syscache_seam::search_attname_attnum::call(relid, attname)? {
         Some((attnum, attisdropped)) if !attisdropped => Ok(attnum),
         _ => Ok(InvalidAttrNumber),
+    }
+}
+
+/// `get_attgenerated(relid, attnum)` (lsyscache.c): the `attgenerated` char of
+/// the column; a missing attribute is the C `elog(ERROR, "cache lookup failed
+/// for attribute %d of relation %u")`.
+pub fn get_attgenerated(relid: Oid, attnum: AttrNumber) -> PgResult<u8> {
+    match syscache_seam::pg_attribute_form::call(relid, attnum)? {
+        Some(att_tup) => Ok(att_tup.attgenerated as u8),
+        None => Err(elog_error(format!(
+            "cache lookup failed for attribute {attnum} of relation {relid}"
+        ))),
+    }
+}
+
+/// `get_atttype(relid, attnum)` (lsyscache.c): the attribute's type OID, or
+/// `InvalidOid` if absent.
+pub fn get_atttype(relid: Oid, attnum: AttrNumber) -> PgResult<Oid> {
+    match syscache_seam::pg_attribute_form::call(relid, attnum)? {
+        Some(att_tup) => Ok(att_tup.atttypid),
+        None => Ok(InvalidOid),
+    }
+}
+
+/// `get_atttypetypmodcoll(relid, attnum, &typid, &typmod, &collid)`
+/// (lsyscache.c): `(atttypid, atttypmod, attcollation)` in one cache lookup; a
+/// missing attribute is `elog(ERROR)`.
+pub fn get_atttypetypmodcoll(relid: Oid, attnum: AttrNumber) -> PgResult<(Oid, i32, Oid)> {
+    match syscache_seam::pg_attribute_form::call(relid, attnum)? {
+        Some(att_tup) => Ok((att_tup.atttypid, att_tup.atttypmod, att_tup.attcollation)),
+        None => Err(elog_error(format!(
+            "cache lookup failed for attribute {attnum} of relation {relid}"
+        ))),
+    }
+}
+
+/// `get_attoptions(relid, attnum)` (lsyscache.c): the attribute's `attoptions`
+/// `text[]` Datum (`datumCopy`'d into `mcx`), or `Ok(None)` for SQL null (the C
+/// `(Datum) 0`). A missing attribute is `elog(ERROR)`.
+///
+/// ```c
+/// tuple = SearchSysCache2(ATTNUM, relid, attnum);
+/// if (!HeapTupleIsValid(tuple)) elog(ERROR, "cache lookup failed for attribute %d of relation %u", attnum, relid);
+/// attopts = SysCacheGetAttr(ATTNAME, tuple, Anum_pg_attribute_attoptions, &isnull);
+/// result = isnull ? (Datum) 0 : datumCopy(attopts, false, -1);
+/// ReleaseSysCache(tuple);
+/// ```
+///
+/// The seam folds the `SearchSysCache2` + `SysCacheGetAttr` + `datumCopy`; its
+/// outer `Option` is the cache miss (here turned into the C `elog`), its inner
+/// `Option<Datum>` is the `isnull` test.
+pub fn get_attoptions<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: i16) -> PgResult<Option<Datum>> {
+    match syscache_seam::pg_attribute_attoptions::call(mcx, relid, attnum)? {
+        Some(maybe_datum) => Ok(maybe_datum),
+        None => Err(elog_error(format!(
+            "cache lookup failed for attribute {attnum} of relation {relid}"
+        ))),
     }
 }

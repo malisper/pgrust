@@ -7152,6 +7152,8 @@ dependencies = [
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "seam-core",
  "types-array",

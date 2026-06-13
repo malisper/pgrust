@@ -202,3 +202,49 @@ pub fn get_attstatsslot_mcv<'mcx>(
 
     Ok(result)
 }
+
+/// `get_attavgwidth(relid, attnum)` (lsyscache.c): the average stored width of
+/// a column from `pg_statistic`, or `0` if no data.
+///
+/// ```c
+/// if (get_attavgwidth_hook) {
+///     stawidth = (*get_attavgwidth_hook)(relid, attnum);
+///     if (stawidth > 0) return stawidth;
+/// }
+/// tp = SearchSysCache3(STATRELATTINH, relid, attnum, BoolGetDatum(false));
+/// if (HeapTupleIsValid(tp)) {
+///     stawidth = ((Form_pg_statistic) GETSTRUCT(tp))->stawidth;
+///     ReleaseSysCache(tp);
+///     if (stawidth > 0) return stawidth;
+/// }
+/// return 0;
+/// ```
+///
+/// The `get_attavgwidth_hook` planner hook is never installed in this port, so
+/// (as in C with a NULL hook) only the catalog path runs.
+pub fn get_attavgwidth(relid: Oid, attnum: AttrNumber) -> PgResult<i32> {
+    if let Some(stawidth) = syscache_seams::pg_statistic_stawidth::call(relid, attnum)? {
+        if stawidth > 0 {
+            return Ok(stawidth);
+        }
+    }
+    Ok(0)
+}
+
+/// `free_attstatsslot(sslot)` (lsyscache.c): release a slot obtained from
+/// [`get_attstatsslot`].
+///
+/// ```c
+/// void free_attstatsslot(AttStatsSlot *sslot) {
+///     if (sslot->values_arr) pfree(sslot->values_arr);
+///     if (sslot->numbers_arr) pfree(sslot->numbers_arr);
+/// }
+/// ```
+///
+/// In the owned model the slot's `values` / `numbers` `PgVec`s are dropped
+/// (and their `mcx` storage reclaimed) when the slot is dropped; this entry
+/// point consumes the slot to make that release explicit, mirroring the C
+/// `pfree`s of `values_arr` / `numbers_arr`.
+pub fn free_attstatsslot(sslot: AttStatsSlot<'_>) {
+    drop(sslot);
+}

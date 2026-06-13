@@ -236,3 +236,34 @@ pub fn get_opfamily_name<'mcx>(
 pub fn get_default_opclass(type_id: Oid, am_id: Oid) -> PgResult<Oid> {
     pg_opclass_seams::get_default_opclass::call(type_id, am_id)
 }
+
+/// `get_opclass_opfamily_and_input_type(opclass, &opfamily, &opcintype)`
+/// (lsyscache.c).
+///
+/// ```c
+/// tp = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclass));
+/// if (!HeapTupleIsValid(tp)) return false;
+/// cla_tup = (Form_pg_opclass) GETSTRUCT(tp);
+/// *opfamily = cla_tup->opcfamily;
+/// *opcintype = cla_tup->opcintype;
+/// ReleaseSysCache(tp);
+/// return true;
+/// ```
+pub fn get_opclass_opfamily_and_input_type(opclass: Oid) -> PgResult<Option<(Oid, Oid)>> {
+    match syscache_seams::pg_opclass_form::call(opclass)? {
+        Some((opcfamily, opcintype, _opcmethod)) => Ok(Some((opcfamily, opcintype))),
+        None => Ok(None),
+    }
+}
+
+/// `get_opclass_method(opclass)` (lsyscache.c): the index AM OID
+/// (`opcmethod`); a missing opclass is the C `elog(ERROR, "cache lookup failed
+/// for opclass %u")`.
+pub fn get_opclass_method(opclass: Oid) -> PgResult<Oid> {
+    match syscache_seams::pg_opclass_form::call(opclass)? {
+        Some((_opcfamily, _opcintype, opcmethod)) => Ok(opcmethod),
+        None => Err(PgError::error(format!(
+            "cache lookup failed for opclass {opclass}"
+        ))),
+    }
+}
