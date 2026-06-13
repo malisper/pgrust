@@ -1129,6 +1129,9 @@ pub fn init_seams() {
     seams::at_prepare_relation_map::set(AtPrepare_RelationMap);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     seams::relation_map_finish_bootstrap::set(RelationMapFinishBootstrap);
+    // Pure-wiring install: the relcache SI-flush path (RelationCacheInvalidate)
+    // now `::call`s this; owner body (RelationMapInvalidate) matches the decl.
+    seams::relation_map_invalidate::set(RelationMapInvalidate);
 }
 
 #[cfg(test)]

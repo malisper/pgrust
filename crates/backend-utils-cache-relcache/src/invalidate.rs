@@ -43,37 +43,55 @@ const RELKIND_RELATION: i8 = b'r' as i8;
  * panic"). They are NOT own logic and are NOT stubbed silently.
  * ======================================================================== */
 mod xunit {
+    use backend_utils_error::PgResult;
+
     /// `RelationMapInvalidateAll()` (relmapper.c) — reload the relation map.
-    pub(super) fn relation_map_invalidate_all() {
-        todo!("relcache-invalidate xunit seam: RelationMapInvalidateAll (relmapper owner)")
+    /// C reloads both the shared and local maps (`RelationMapInvalidate(true)`
+    /// then `RelationMapInvalidate(false)`); the relmapper owner exposes the
+    /// per-map `relation_map_invalidate(shared)` seam, so compose the two.
+    /// Reading the on-disk map file can `ereport(ERROR)`, carried on `Err`.
+    pub(super) fn relation_map_invalidate_all() -> PgResult<()> {
+        backend_utils_cache_relmapper_seams::relation_map_invalidate::call(true)?;
+        backend_utils_cache_relmapper_seams::relation_map_invalidate::call(false)?;
+        Ok(())
     }
 
-    /// `smgrreleaseall()` (smgr.c) — close all open relation files.
+    /// `smgrreleaseall()` (smgr.c) — close all open relation files. Genuine
+    /// cross-unit owner (smgr is still unported, CATALOG status=todo); the seam
+    /// panics until smgr installs it.
     pub(super) fn smgrreleaseall() {
-        todo!("relcache-invalidate xunit seam: smgrreleaseall (smgr owner)")
+        backend_storage_smgr_seams::smgrreleaseall::call()
     }
 
-    /// `RelationCloseSmgr(relation)` (relcache.h inline) — close the relation's
-    /// smgr handle. The smgr layer is a genuine cross-unit owner; the entry
-    /// holds no `rd_smgr` field in the owned mirror, so this is the smgr-close
-    /// side effect routed to its owner.
-    pub(super) fn relation_close_smgr(_relation: *mut super::RelationData) {
-        todo!("relcache-invalidate xunit seam: RelationCloseSmgr (smgr owner)")
+    /// `RelationCloseSmgr(relation)` (rel.h inline) — close the relation's smgr
+    /// handle. The smgr layer is a genuine cross-unit owner; the entry holds no
+    /// `rd_smgr` field in the owned mirror, so this routes the relation's
+    /// `RelFileLocatorBackend` to its owner (panics until smgr lands).
+    #[allow(unsafe_code)]
+    pub(super) fn relation_close_smgr(relation: *mut super::RelationData) {
+        // SAFETY: live `Relation` pointer into a cache-owned (or in-build)
+        // descriptor.
+        let rd = unsafe { &*relation };
+        let rlocator = types_storage::RelFileLocatorBackend {
+            locator: rd.rd_locator,
+            backend: rd.rd_backend,
+        };
+        backend_storage_smgr_seams::relation_close_smgr::call(rlocator)
     }
 
     /// `IsTransactionState()` (xact.c) — true when in a live transaction.
     pub(super) fn is_transaction_state() -> bool {
-        todo!("relcache-invalidate xunit seam: IsTransactionState (xact owner)")
+        backend_access_transam_xact_seams::is_transaction_state::call()
     }
 
     /// `HistoricSnapshotActive()` (snapmgr.c) — true during logical decoding.
     pub(super) fn historic_snapshot_active() -> bool {
-        todo!("relcache-invalidate xunit seam: HistoricSnapshotActive (snapmgr owner)")
+        backend_utils_time_snapmgr_seams::historic_snapshot_active::call()
     }
 
     /// `GetCurrentSubTransactionId()` (xact.c).
     pub(super) fn get_current_sub_transaction_id() -> types_core::xact::SubTransactionId {
-        todo!("relcache-invalidate xunit seam: GetCurrentSubTransactionId (xact owner)")
+        backend_access_transam_xact_seams::get_current_sub_transaction_id::call()
     }
 }
 
@@ -530,7 +548,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
 #[allow(unsafe_code)]
 pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     // Reload relation mapping data before reconstructing the cache.
-    xunit::relation_map_invalidate_all();
+    xunit::relation_map_invalidate_all()?;
 
     // Phase 1: walk the cache, deleting deletable items and collecting the
     // rebuildable ones. We snapshot the descriptor pointers first (own
