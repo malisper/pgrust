@@ -1845,6 +1845,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-bgworker"
+version = "0.0.0"
+dependencies = [
+ "backend-postmaster-bgworker-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-error-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-ps-status-seams",
+ "port-pgsleep-seams",
+ "port-pqsignal-seams",
+ "types-bgworker",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-startup",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-postmaster-bgworker-seams"
 version = "0.0.0"
 dependencies = [
@@ -3120,6 +3150,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-bgworker",
  "types-cache",
  "types-core",
  "types-datum",
@@ -3145,6 +3176,15 @@ name = "backend-utils-init-miscinit-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-init-postinit-seams"
+version = "0.0.0"
+dependencies = [
  "seam-core",
  "types-core",
  "types-error",
@@ -3553,6 +3593,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
+ "backend-postmaster-bgworker",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
@@ -3631,6 +3672,10 @@ dependencies = [
 [[package]]
 name = "types-bgworker"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
 
 [[package]]
 name = "types-cache"
@@ -3814,6 +3859,7 @@ dependencies = [
 name = "types-startup"
 version = "0.0.0"
 dependencies = [
+ "types-bgworker",
  "types-core",
 ]
 

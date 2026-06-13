@@ -65,3 +65,20 @@ seam_core::seam!(
         val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// The `BackgroundWorkerMain` entry-point dispatch: resolve the worker's
+    /// `(bgw_library_name, bgw_function_name)` to a `bgworker_main_type` —
+    /// either an internal core entry (library "postgres":
+    /// `ParallelWorkerMain`/`ApplyLauncherMain`/`ApplyWorkerMain`/
+    /// `ParallelApplyWorkerMain`/`TablesyncWorkerMain`) or one loaded via
+    /// `load_external_function` — and call it with `worker.bgw_main_arg`. The
+    /// fn-pointers live in core / loadable libraries owned by other
+    /// subsystems, so the resolution and call are the loader's job. `Err`
+    /// carries the FATAL "internal function not found" and any error the
+    /// worker body raises.
+    pub fn call_bgworker_entrypoint(
+        worker: types_bgworker::BackgroundWorker,
+        main_arg: types_datum::Datum,
+    ) -> PgResult<()>
+);

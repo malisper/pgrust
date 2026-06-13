@@ -206,3 +206,10 @@ seam_core::seam!(
     /// prepare/commit WAL insert. Plain shared-memory field write.
     pub fn set_delay_chkpt_start(on: bool)
 );
+
+seam_core::seam!(
+    /// `InitProcess()` (proc.c) — create this backend's PGPROC entry in shared
+    /// memory. Must run before any LWLock use. `ereport(FATAL)` when no free
+    /// PGPROC slots remain, hence the `PgResult`.
+    pub fn init_process() -> PgResult<()>
+);

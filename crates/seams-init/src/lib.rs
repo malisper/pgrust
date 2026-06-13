@@ -30,6 +30,7 @@ pub fn init_all() {
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();
+    backend_postmaster_bgworker::init_seams();
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_startup::init_seams();
