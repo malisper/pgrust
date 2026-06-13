@@ -35,6 +35,8 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 
 # Seams: parallel / shared-memory machinery
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-ipc-barrier-seams = { path = "../backend-storage-ipc-barrier-seams" }
