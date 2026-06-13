@@ -2443,6 +2443,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-collationcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-commands-collationcmds-seams",
+ "backend-commands-define-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-mb-mbutils-seams",
+ "common-string",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-locale",
+ "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
+ "types-wchar",
+]
+
+[[package]]
+name = "backend-commands-collationcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-commands-copy-seams"
 version = "0.0.0"
 dependencies = [
