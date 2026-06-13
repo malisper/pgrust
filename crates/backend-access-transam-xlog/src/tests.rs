@@ -230,3 +230,50 @@ fn checkpoint_state_seeds_redo_from_control_file() {
     assert_eq!(st.RedoRecPtr, 0xDEAD_BEEF);
     assert_eq!(st.LocalXLogInsertAllowed, -1);
 }
+
+#[test]
+fn xlog_checkpoint_needed_matches_c() {
+    // RedoRecPtr at start of segment 10; CheckPointSegments = 5.
+    let redo = 10 * (SEG as u64);
+    // old_segno = 10; trigger when new_segno >= 10 + (5-1) = 14.
+    assert!(!XLogCheckpointNeeded(13, redo, 5, SEG));
+    assert!(XLogCheckpointNeeded(14, redo, 5, SEG));
+    assert!(XLogCheckpointNeeded(99, redo, 5, SEG));
+    // CheckPointSegments == 1 => trigger at old_segno itself.
+    assert!(XLogCheckpointNeeded(10, redo, 1, SEG));
+}
+
+#[test]
+fn xlog_choose_num_buffers_clamps() {
+    // NBuffers/32, clamped to [8, SEG/XLOG_BLCKSZ]=[8,2048].
+    assert_eq!(XLOGChooseNumBuffers(16, SEG), 8); // 0 -> 8
+    assert_eq!(XLOGChooseNumBuffers(1024, SEG), 32); // 32
+    assert_eq!(XLOGChooseNumBuffers(1_000_000, SEG), 2048); // capped at SEG/8192
+}
+
+#[test]
+fn check_wal_buffers_autotune_and_floor() {
+    // -1 with XLOGbuffers still -1 stays -1.
+    assert_eq!(check_wal_buffers(-1, -1, 1024, SEG), -1);
+    // -1 with XLOGbuffers already set substitutes auto-tune.
+    assert_eq!(check_wal_buffers(-1, 64, 1024, SEG), 32);
+    // manual below 4 clamps to 4.
+    assert_eq!(check_wal_buffers(1, 64, 1024, SEG), 4);
+    assert_eq!(check_wal_buffers(100, 64, 1024, SEG), 100);
+}
+
+#[test]
+fn get_sync_bit_maps_methods() {
+    const O_SYNC: i32 = 0x1000;
+    const O_DSYNC: i32 = 0x2000;
+    const DIRECT: i32 = 0x80000000u32 as i32;
+    // fsync disabled: only the o_direct flag.
+    assert_eq!(get_sync_bit(WalSyncMethod::OpenDsync, DIRECT, false, O_SYNC, O_DSYNC).unwrap(), DIRECT);
+    // fsync/fdatasync/writethrough: just o_direct_flag.
+    assert_eq!(get_sync_bit(WalSyncMethod::Fsync, 0, true, O_SYNC, O_DSYNC).unwrap(), 0);
+    assert_eq!(get_sync_bit(WalSyncMethod::Fdatasync, DIRECT, true, O_SYNC, O_DSYNC).unwrap(), DIRECT);
+    assert_eq!(get_sync_bit(WalSyncMethod::FsyncWritethrough, 0, true, O_SYNC, O_DSYNC).unwrap(), 0);
+    // open / open_dsync OR in the sync bit.
+    assert_eq!(get_sync_bit(WalSyncMethod::Open, 0, true, O_SYNC, O_DSYNC).unwrap(), O_SYNC);
+    assert_eq!(get_sync_bit(WalSyncMethod::OpenDsync, DIRECT, true, O_SYNC, O_DSYNC).unwrap(), O_DSYNC | DIRECT);
+}

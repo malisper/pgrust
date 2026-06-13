@@ -14,7 +14,7 @@
 //! passes them in. When xlogreader/xlogrecovery land, the per-arm externals
 //! become calls through their seam crates with the real record handle.
 
-use backend_utils_error::{PgError, PgResult};
+use backend_utils_error::PgResult;
 use types_core::TimeLineID;
 
 // XLOG resource-manager info opcodes (catalog/pg_control.h:68-82).
@@ -77,8 +77,10 @@ pub fn xlog_redo(info: u8, replay_tli: TimeLineID) -> PgResult<()> {
         // nothing to do here, just for informational purposes
         Ok(())
     } else {
-        // C has no final else; an unknown XLOG opcode is a corrupt record.
-        Err(PgError::error("xlog_redo: unrecognized XLOG record info"))
+        // C's switch has no `default` arm: an `info` that matches none of the
+        // XLOG opcodes simply falls through to the end of `xlog_redo` and the
+        // function returns (a no-op). Match that — do NOT raise an error.
+        Ok(())
     }
 }
 

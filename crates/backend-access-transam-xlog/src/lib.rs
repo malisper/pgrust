@@ -481,6 +481,100 @@ pub fn CalculateCheckpointSegments(
     checkpoint_segments
 }
 
+/// `assign_max_wal_size(newval, extra)` (xlog.c:2224) — the GUC assign hook:
+/// set `max_wal_size_mb` then recompute `CheckPointSegments`. The owning GUC
+/// state holds `max_wal_size_mb`/`CheckPointCompletionTarget`/`CheckPointSegments`;
+/// this returns the recomputed segment count to publish.
+pub fn assign_max_wal_size(newval: i32, wal_segsz_bytes: i32, checkpoint_completion_target: f64) -> i32 {
+    CalculateCheckpointSegments(newval, wal_segsz_bytes, checkpoint_completion_target)
+}
+
+/// `assign_checkpoint_completion_target(newval, extra)` (xlog.c:2231) — set
+/// `CheckPointCompletionTarget` then recompute `CheckPointSegments`.
+pub fn assign_checkpoint_completion_target(newval: f64, max_wal_size_mb: i32, wal_segsz_bytes: i32) -> i32 {
+    CalculateCheckpointSegments(max_wal_size_mb, wal_segsz_bytes, newval)
+}
+
+/// `XLogCheckpointNeeded(new_segno)` (xlog.c:2304) — whether enough xlog space
+/// has been consumed since the last checkpoint REDO that a new checkpoint is
+/// needed. `redo_rec_ptr`/`checkpoint_segments` are the (driver-owned)
+/// `RedoRecPtr` and `CheckPointSegments`; the arithmetic is grounded here.
+pub fn XLogCheckpointNeeded(
+    new_segno: XLogSegNo,
+    redo_rec_ptr: XLogRecPtr,
+    checkpoint_segments: i32,
+    wal_segsz_bytes: i32,
+) -> bool {
+    let old_segno = XLByteToSeg(redo_rec_ptr, wal_segsz_bytes);
+    new_segno >= old_segno.wrapping_add((checkpoint_segments - 1) as u64)
+}
+
+// ===========================================================================
+// WAL-buffer count auto-tune + the wal_buffers GUC check hook (xlog.c).
+// ===========================================================================
+
+/// `XLOGChooseNumBuffers()` (xlog.c:4681) — auto-tuned WAL buffer count:
+/// `NBuffers / 32`, clamped to `[8, wal_segment_size / XLOG_BLCKSZ]`.
+pub fn XLOGChooseNumBuffers(NBuffers: i32, wal_segsz_bytes: i32) -> i32 {
+    let mut xbuffers = NBuffers / 32;
+    if xbuffers > wal_segsz_bytes / XLOG_BLCKSZ as i32 {
+        xbuffers = wal_segsz_bytes / XLOG_BLCKSZ as i32;
+    }
+    if xbuffers < 8 {
+        xbuffers = 8;
+    }
+    xbuffers
+}
+
+/// `check_wal_buffers(*newval, ...)` (xlog.c:4697) — the GUC check hook. `-1`
+/// requests auto-tune (left as `-1` until `XLOGShmemSize` if `XLOGbuffers` is
+/// still `-1`, else substituted with [`XLOGChooseNumBuffers`]); manual values
+/// below 4 blocks are silently clamped to 4. Returns the (possibly rewritten)
+/// value; the hook never rejects.
+pub fn check_wal_buffers(newval: i32, XLOGbuffers: i32, NBuffers: i32, wal_segsz_bytes: i32) -> i32 {
+    let mut v = newval;
+    if v == -1 {
+        if XLOGbuffers == -1 {
+            return v;
+        }
+        v = XLOGChooseNumBuffers(NBuffers, wal_segsz_bytes);
+    }
+    if v < 4 {
+        v = 4;
+    }
+    v
+}
+
+// ===========================================================================
+// get_sync_bit — the WalSyncMethod -> open(2) sync-flag mapping (xlog.c:8678).
+// ===========================================================================
+
+/// `get_sync_bit(method)` (xlog.c:8678) — the open(2) flag bits for a
+/// `wal_sync_method`. The platform `O_SYNC`/`O_DSYNC` values and the
+/// already-computed `o_direct_flag` (which depends on `io_direct_flags` /
+/// `AmWalReceiverProcess`, a driver concern) are supplied by the caller; the
+/// branch logic — the `!enableFsync` short-circuit, the fsync/fdatasync/
+/// writethrough no-extra-bit arms, the open/open_dsync arms, and the
+/// unrecognized-method `elog(ERROR)` default — is grounded here.
+pub fn get_sync_bit(
+    method: WalSyncMethod,
+    o_direct_flag: i32,
+    enable_fsync: bool,
+    o_sync: i32,
+    o_dsync: i32,
+) -> PgResult<i32> {
+    if !enable_fsync {
+        return Ok(o_direct_flag);
+    }
+    match method {
+        WalSyncMethod::Fsync | WalSyncMethod::FsyncWritethrough | WalSyncMethod::Fdatasync => {
+            Ok(o_direct_flag)
+        }
+        WalSyncMethod::Open => Ok(o_sync | o_direct_flag),
+        WalSyncMethod::OpenDsync => Ok(o_dsync | o_direct_flag),
+    }
+}
+
 // ===========================================================================
 // The XLogCtl shmem-write / WAL-write / fsync DRIVER + cross-subsystem getters.
 //
