@@ -62,6 +62,14 @@ pub struct FormData_pg_class<'mcx> {
     pub relispartition: bool,
 }
 
+/// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
+/// consume (the `rd_index` payload of an index's relcache entry).
+#[derive(Clone, Copy, Debug)]
+pub struct FormData_pg_index {
+    /// `bool indimmediate` — is uniqueness enforced immediately?
+    pub indimmediate: bool,
+}
+
 /// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
 /// parser builds and `RelationData::rd_options` carries. Re-exported from
 /// `types-reloptions`, the designated home of the parsed option-struct
@@ -90,6 +98,9 @@ pub struct RelationData<'mcx> {
     pub rd_att: PgBox<'mcx, TupleDescData<'mcx>>,
     /// `bytea *rd_options` — parsed reloptions (trimmed), or `None`.
     pub rd_options: Option<StdRdOptions>,
+    /// `Form_pg_index rd_index` — the pg_index row (trimmed); `None` (the C
+    /// NULL) for non-index relations.
+    pub rd_index: Option<FormData_pg_index>,
 }
 
 impl<'mcx> RelationData<'mcx> {

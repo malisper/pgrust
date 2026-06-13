@@ -112,3 +112,14 @@ seam_core::seam!(
     /// cumulative-stats cleanup for a finished prepared transaction.
     pub fn at_eoxact_pgstat(is_commit: bool) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `pgstat_report_subscription_conflict(subid, type)`
+    /// (pgstat_subscription.c): bump the subscription's conflict counter for
+    /// the given conflict type. Preparing the pending stats entry can
+    /// allocate (`ereport(ERROR)` on OOM), carried on `Err`.
+    pub fn pgstat_report_subscription_conflict(
+        subid: types_core::Oid,
+        conflict_type: types_replication::conflict::ConflictType,
+    ) -> types_error::PgResult<()>
+);

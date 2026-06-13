@@ -145,3 +145,15 @@ seam_core::seam!(
         slot: types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `slot_getsysattr(slot, attnum, &isnull)` (tuptable.h/execTuples.c):
+    /// fetch a system attribute of the slot's current tuple as
+    /// `(datum, isnull)` (`slot->tts_ops->getsysattr` dispatch). A slot class
+    /// without system attributes (e.g. virtual) is the C `elog(ERROR)`,
+    /// carried on `Err`.
+    pub fn slot_getsysattr(
+        slot: &types_nodes::TupleTableSlot,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);

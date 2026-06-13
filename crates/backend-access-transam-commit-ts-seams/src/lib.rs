@@ -26,3 +26,19 @@ seam_core::seam!(
         node_id: RepOriginId,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TransactionIdGetCommitTsData(xid, &ts, &nodeid)` (commit_ts.c): the
+    /// commit timestamp and replication origin of `xid` as
+    /// `(found, ts, nodeid)`; a too-old or not-yet-committed xid is
+    /// `(false, 0, InvalidRepOriginId)`. An invalid or permanent xid, or
+    /// commit-ts tracking being inactive, is `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn transaction_id_get_commit_ts_data(
+        xid: types_core::TransactionId,
+    ) -> types_error::PgResult<(
+        bool,
+        types_core::TimestampTz,
+        types_core::primitive::RepOriginId,
+    )>
+);

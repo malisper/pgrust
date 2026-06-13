@@ -26,3 +26,14 @@ seam_core::seam!(
         msec: i32,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `timestamptz_to_str(t)` (timestamp.c): format a timestamp with ISO
+    /// date style and the session timezone. The C writes a static buffer and
+    /// never errors ("(timestamp out of range)" on conversion failure); the
+    /// owned copy lands in `mcx`, so OOM of the copy is the only `Err`.
+    pub fn timestamptz_to_str<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        t: TimestampTz,
+    ) -> types_error::PgResult<mcx::PgString<'mcx>>
+);

@@ -109,3 +109,18 @@ seam_core::seam!(
         body: &mut dyn FnMut(&types_scan::backend_access_index_genam::SysScanRow<'_>) -> PgResult<bool>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `BuildIndexValueDescription(indexRelation, values, isnull)` (genam.c):
+    /// build a "(key_names) = (key_values)" description of an index entry,
+    /// or `Ok(None)` when the current user lacks rights to see the key values
+    /// (the C NULL). `values`/`isnull` are `FormIndexDatum` outputs (the raw
+    /// index-AM input). The string is allocated in `mcx`; key out-functions
+    /// can `ereport(ERROR)`, carried on `Err`.
+    pub fn build_index_value_description<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: &types_rel::Relation<'_>,
+        values: &[types_datum::Datum],
+        isnull: &[bool],
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);

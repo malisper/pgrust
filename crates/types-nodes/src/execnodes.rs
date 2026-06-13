@@ -23,7 +23,7 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::Index;
+use types_core::primitive::{Index, Oid};
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
@@ -147,6 +147,13 @@ pub struct ParamExecData {
     pub isnull: bool,
 }
 
+/// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IndexInfo {
+    /// `bool ii_Unique` — is it a unique index?
+    pub ii_Unique: bool,
+}
+
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
 /// in the EState's [`EStateData::es_result_rel_pool`], addressed by [`RriId`].
 #[derive(Debug, Default)]
@@ -159,6 +166,18 @@ pub struct ResultRelInfo<'mcx> {
     /// here it is a [`types_rel::Relation::alias`] of that handle (shared
     /// data, no release authority).
     pub ri_RelationDesc: Option<types_rel::Relation<'mcx>>,
+    /// `int ri_NumIndices` — number of indices existing on result relation.
+    pub ri_NumIndices: i32,
+    /// `RelationPtr ri_IndexRelationDescs` — the open index relations
+    /// (aliases of the executor-owned opens; a `None` element is the C NULL
+    /// slot of a closed/unopened index). `None` is the C NULL array.
+    pub ri_IndexRelationDescs: Option<PgVec<'mcx, Option<types_rel::Relation<'mcx>>>>,
+    /// `IndexInfo **ri_IndexRelationInfo` — per-index info, parallel to
+    /// `ri_IndexRelationDescs`. `None` is the C NULL array.
+    pub ri_IndexRelationInfo: Option<PgVec<'mcx, IndexInfo>>,
+    /// `List *ri_onConflictArbiterIndexes` — index OIDs that arbitrate
+    /// ON CONFLICT / apply-conflict detection. `None` is the C NIL.
+    pub ri_onConflictArbiterIndexes: Option<PgVec<'mcx, Oid>>,
     /// `TupleTableSlot *ri_TrigOldSlot` — for trigger OLD tuples.
     pub ri_TrigOldSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_TrigNewSlot` — for trigger NEW tuples.
