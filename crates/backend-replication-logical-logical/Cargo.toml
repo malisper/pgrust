@@ -23,6 +23,8 @@ backend-replication-logical-snapbuild-seams = { path = "../backend-replication-l
 backend-replication-logical-reorderbuffer-seams = { path = "../backend-replication-logical-reorderbuffer-seams" }
 backend-replication-logical-decode-seams = { path = "../backend-replication-logical-decode-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
+types-replication-slot = { path = "../types-replication-slot" }
 backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

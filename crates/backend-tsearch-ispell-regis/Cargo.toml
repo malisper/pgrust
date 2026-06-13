@@ -1,0 +1,23 @@
+[package]
+name = "backend-tsearch-ispell-regis"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_tsearch_ispell_regis"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-tsearch = { path = "../types-tsearch" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-tsearch-ispell-regis-seams = { path = "../backend-tsearch-ispell-regis-seams" }
+backend-tsearch-ts-locale-seams = { path = "../backend-tsearch-ts-locale-seams" }
+backend-tsearch-spell-seams = { path = "../backend-tsearch-spell-seams" }
+backend-tsearch-ts-utils-seams = { path = "../backend-tsearch-ts-utils-seams" }
+backend-utils-adt-formatting-seams = { path = "../backend-utils-adt-formatting-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }

@@ -42,3 +42,11 @@ seam_core::seam!(
         types_core::primitive::RepOriginId,
     )>
 );
+
+seam_core::seam!(
+    /// `committssyncfiletag(const FileTag *ftag, char *path)` (commit_ts.c, the
+    /// `syncsw[SYNC_HANDLER_COMMIT_TS]` sync callback) — fsync the SLRU segment
+    /// the tag names, returning the `0`/`<0` code, resolved path, and saved
+    /// `errno`.
+    pub fn committssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+);

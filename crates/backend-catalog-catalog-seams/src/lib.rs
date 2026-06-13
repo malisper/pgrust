@@ -4,21 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-
-seam_core::seam!(
-    /// `GetDatabasePath(dbOid, spcOid)` (catalog/catalog.c): build the
-    /// filesystem path of the directory holding a database's relations,
-    /// allocated in `mcx` (C: `palloc` in the current context). `Err` carries
-    /// the allocation failure.
-    pub fn get_database_path<'mcx>(
-        mcx: Mcx<'mcx>,
-        db_oid: Oid,
-        spc_oid: Oid,
-    ) -> PgResult<PgString<'mcx>>
-);
 
 seam_core::seam!(
     /// `IsPinnedObject(classId, objectId)` (catalog/catalog.c): is the object
@@ -42,9 +29,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation one
-    /// of the shared catalogs (or their indexes/toast)? Pure OID compare;
-    /// infallible.
+    /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation a
+    /// shared catalog (lives in the global tablespace, visible from every
+    /// database)? Lookup against a fixed OID set — infallible.
     pub fn is_shared_relation(relation_id: Oid) -> bool
 );
 
@@ -54,4 +41,14 @@ seam_core::seam!(
     /// relcache), this returns true so inval.c queues a snapshot inval instead.
     /// Pure OID compare; infallible.
     pub fn relation_invalidates_snapshots_only(relation_id: Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `GetDatabasePath(dbOid, spcOid)` (catalog/catalog.c): build the
+    /// filesystem path to the directory holding `dbOid`'s relations in
+    /// tablespace `spcOid`. relmapper's `relmap_redo` calls it during WAL
+    /// replay, uses the path transiently, then `pfree`s it (the returned owned
+    /// `String` is dropped). Path construction allocates, so the result is
+    /// fallible (OOM).
+    pub fn get_database_path(db_oid: Oid, spc_oid: Oid) -> PgResult<String>
 );

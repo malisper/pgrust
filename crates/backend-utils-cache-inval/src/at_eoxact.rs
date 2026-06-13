@@ -5,7 +5,6 @@
 //! `inplaceGetInvalidationMessages`, `ProcessCommittedInvalidationMessages`,
 //! and `LogLogicalInvalidations`).
 
-use mcx::MemoryContext;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_storage::SharedInvalidationMessage;
@@ -453,11 +452,10 @@ pub fn ProcessCommittedInvalidationMessages(
         // to be used only once by normal backends.  Hence, a quick hack: set
         // DatabasePath directly then unset after use.
         if dbid != INVALID_OID {
-            // GetDatabasePath palloc's the path string; we hold it in a scratch
-            // context for the duration of the set/use/clear dance, then drop it
-            // (C: pfree(DatabasePath) below).
-            let scratch = MemoryContext::new("ProcessCommittedInval scratch");
-            let path = catalog_seams::get_database_path::call(scratch.mcx(), dbid, tsid)?;
+            // GetDatabasePath builds the path string; we hold it for the
+            // duration of the set/use/clear dance, then drop it (C:
+            // pfree(DatabasePath) below).
+            let path = catalog_seams::get_database_path::call(dbid, tsid)?;
             miscinit_seams::set_database_path::call(path.as_str());
         }
 

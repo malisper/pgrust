@@ -1580,6 +1580,10 @@ fn release_held(lock: *const LWLock) -> PgResult<()> {
 // Seam installation.
 // ---------------------------------------------------------------------------
 
+/// `TwoPhaseStateLock` — offset 18 in `MainLWLockArray` (`lwlocklist.h`
+/// `PG_LWLOCK(18, TwoPhaseState)`).
+const TWOPHASE_STATE_LOCK_OFFSET: usize = 18;
+
 /// `lwlock_acquire` seam shape: acquire, then hand back the guard wrapping
 /// the still-borrowed lock (Drop = release, the C `LWLockReleaseAll`
 /// error-recovery backstop).
@@ -1594,11 +1598,69 @@ fn lwlock_acquire_guard<'l>(
     ))
 }
 
+/// `lwlock_acquire_main` seam shape: acquire a built-in lock by offset,
+/// returning the seam's [`MainLWLockGuard`] (which releases by offset through
+/// the seam system). `MyProcNumber` is read from the globals seam, matching
+/// the C ambient global (no-ambient-seams rule: the seam API has no
+/// per-call proc-number parameter).
+fn lwlock_acquire_main_seam(
+    offset: usize,
+    mode: LWLockMode,
+) -> PgResult<backend_storage_lmgr_lwlock_seams::MainLWLockGuard> {
+    let lock = main_lock(offset);
+    let was_free = LWLockAcquire(lock, mode, globals::my_proc_number::call())?;
+    Ok(backend_storage_lmgr_lwlock_seams::MainLWLockGuard::new(
+        offset, was_free,
+    ))
+}
+
+/// `lwlock_release_main` seam shape: release a built-in lock by offset.
+fn lwlock_release_main_seam(offset: usize) -> PgResult<()> {
+    let lock = main_lock(offset);
+    LWLockRelease(lock)
+}
+
+/// `lwlock_release_all` seam shape: release every held LWLock (abort-cleanup
+/// path). Errors during cleanup are suppressed, matching C's
+/// `LWLockReleaseAll` which is called from the error-recovery path.
+fn lwlock_release_all_seam() {
+    let _ = LWLockReleaseAll();
+}
+
+/// `lock_twophase_state` seam shape: acquire `TwoPhaseStateLock` in the
+/// requested mode (`exclusive ? LW_EXCLUSIVE : LW_SHARED`).
+fn lock_twophase_state_seam(exclusive: bool) -> PgResult<()> {
+    let mode = if exclusive { LW_EXCLUSIVE } else { LW_SHARED };
+    let lock = main_lock(TWOPHASE_STATE_LOCK_OFFSET);
+    LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `unlock_twophase_state` seam shape: release `TwoPhaseStateLock`.
+fn unlock_twophase_state_seam() -> PgResult<()> {
+    let lock = main_lock(TWOPHASE_STATE_LOCK_OFFSET);
+    LWLockRelease(lock)
+}
+
+/// `twophase_state_held_exclusive` seam shape:
+/// `LWLockHeldByMeInMode(TwoPhaseStateLock, LW_EXCLUSIVE)`.
+fn twophase_state_held_exclusive_seam() -> bool {
+    let lock = main_lock(TWOPHASE_STATE_LOCK_OFFSET);
+    LWLockHeldByMeInMode(lock, LW_EXCLUSIVE)
+}
+
 /// Install every seam declared in `backend-storage-lmgr-lwlock-seams`.
 pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_initialize::set(LWLockInitialize);
     backend_storage_lmgr_lwlock_seams::lwlock_acquire::set(lwlock_acquire_guard);
     backend_storage_lmgr_lwlock_seams::lwlock_release::set(LWLockRelease);
+    backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::set(lwlock_acquire_main_seam);
+    backend_storage_lmgr_lwlock_seams::lwlock_release_main::set(lwlock_release_main_seam);
+    backend_storage_lmgr_lwlock_seams::lwlock_release_all::set(lwlock_release_all_seam);
+    backend_storage_lmgr_lwlock_seams::lock_twophase_state::set(lock_twophase_state_seam);
+    backend_storage_lmgr_lwlock_seams::unlock_twophase_state::set(unlock_twophase_state_seam);
+    backend_storage_lmgr_lwlock_seams::twophase_state_held_exclusive::set(
+        twophase_state_held_exclusive_seam,
+    );
 }
 
 #[cfg(test)]
