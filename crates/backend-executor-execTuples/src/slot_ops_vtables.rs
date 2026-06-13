@@ -118,7 +118,7 @@ pub fn tts_virtual_materialize<'mcx>(
     // owners' substrate. Mirror PG and panic until the slot payload model's
     // datum-flatten bridge lands (slot_payload_model + datum.c owners).
     let _ = slot;
-    todo!("execTuples.c tts_virtual_materialize: datum flatten into vslot->data needs unported utils/adt/datum.c (att_addlength_datum/datumGetSize) + expandeddatum.c (EOH_get_flat_size/EOH_flatten_into) over the slot's raw tts_values words")
+    panic!("execTuples.c tts_virtual_materialize: datum flatten into vslot->data needs unported utils/adt/datum.c (att_addlength_datum/datumGetSize) + expandeddatum.c (EOH_get_flat_size/EOH_flatten_into) over the slot's raw tts_values words")
 }
 
 /// `tts_virtual_copyslot` (execTuples.c): copy `src`'s attributes into `dst`,
@@ -154,7 +154,7 @@ pub fn tts_virtual_copyslot<'mcx>(
     // non-virtual sources to the owner once the slot payload model's
     // shared-deform path lands. For a virtual source nothing to deform.
     if !matches!(src, SlotData::Virtual(_)) {
-        todo!("execTuples.c tts_virtual_copyslot: slot_getallattrs(srcslot) on a non-virtual source needs the slot payload model's deform-through-shared-ref path")
+        panic!("execTuples.c tts_virtual_copyslot: slot_getallattrs(srcslot) on a non-virtual source needs the slot payload model's deform-through-shared-ref path")
     }
 
     // for (natt = 0; natt < srcdesc->natts; natt++) {
@@ -205,7 +205,7 @@ pub fn tts_virtual_copy_heap_tuple<'mcx>(
     // `slot_payload_model` family's tuple-carrier bridge. Mirror PG and panic
     // until it lands.
     let _ = slot;
-    todo!("execTuples.c tts_virtual_copy_heap_tuple: heap_form_tuple over the slot's raw tts_values + the FormedTuple->HeapTuple carrier bridge are owned by the slot payload model")
+    panic!("execTuples.c tts_virtual_copy_heap_tuple: heap_form_tuple over the slot's raw tts_values + the FormedTuple->HeapTuple carrier bridge are owned by the slot payload model")
 }
 
 /// `tts_virtual_copy_minimal_tuple` (execTuples.c):
@@ -223,7 +223,7 @@ pub fn tts_virtual_copy_minimal_tuple<'mcx>(
     // Same carrier gap as tts_virtual_copy_heap_tuple (FormedMinimalTuple ->
     // the slot's MinimalTuple header-only carrier + raw tts_values words).
     let _ = slot;
-    todo!("execTuples.c tts_virtual_copy_minimal_tuple: heap_form_minimal_tuple over raw tts_values + FormedMinimalTuple->MinimalTuple carrier bridge are owned by the slot payload model")
+    panic!("execTuples.c tts_virtual_copy_minimal_tuple: heap_form_minimal_tuple over raw tts_values + FormedMinimalTuple->MinimalTuple carrier bridge are owned by the slot payload model")
 }
 
 // --- HeapTupleTableSlot ops -----------------------------------------------
@@ -349,7 +349,7 @@ pub fn tts_heap_materialize<'mcx>(
     // (FormedTuple) produce the heaptuple crate's `FormedTuple`, which the
     // slot's header-only `HeapTuple` carrier cannot hold. Carrier bridge is
     // the sibling slot_payload_model family's. Mirror PG and panic.
-    todo!("execTuples.c tts_heap_materialize: heap_form_tuple/heap_copytuple produce FormedTuple; the slot's HeapTuple carrier (header-only) + raw tts_values are the slot payload model's bridge")
+    panic!("execTuples.c tts_heap_materialize: heap_form_tuple/heap_copytuple produce FormedTuple; the slot's HeapTuple carrier (header-only) + raw tts_values are the slot payload model's bridge")
 }
 
 /// `tts_heap_get_heap_tuple` (execTuples.c).
@@ -362,7 +362,7 @@ pub fn tts_heap_get_heap_tuple<'mcx>(
     //
     // Returning hslot->tuple depends on tts_heap_materialize being able to
     // store a FormedTuple in the slot's HeapTuple carrier (blocked above).
-    todo!("execTuples.c tts_heap_get_heap_tuple: depends on tts_heap_materialize's FormedTuple->HeapTuple carrier (slot payload model)")
+    panic!("execTuples.c tts_heap_get_heap_tuple: depends on tts_heap_materialize's FormedTuple->HeapTuple carrier (slot payload model)")
 }
 
 /// `tts_heap_copy_heap_tuple` (execTuples.c).
@@ -376,7 +376,7 @@ pub fn tts_heap_copy_heap_tuple<'mcx>(
     //
     // heap_copytuple(hslot->tuple) returns a FormedTuple the slot's HeapTuple
     // carrier cannot hold; also gated on tts_heap_materialize. Mirror+panic.
-    todo!("execTuples.c tts_heap_copy_heap_tuple: heap_copytuple yields FormedTuple; slot HeapTuple carrier + materialize are the slot payload model's bridge")
+    panic!("execTuples.c tts_heap_copy_heap_tuple: heap_copytuple yields FormedTuple; slot HeapTuple carrier + materialize are the slot payload model's bridge")
 }
 
 /// `tts_heap_copy_minimal_tuple` (execTuples.c).
@@ -391,7 +391,7 @@ pub fn tts_heap_copy_minimal_tuple<'mcx>(
     // minimal_tuple_from_heap_tuple needs a FormedTuple input (the slot's
     // HeapTuple carrier can't supply the data bytes) and returns a
     // FormedMinimalTuple the slot's MinimalTuple carrier can't hold.
-    todo!("execTuples.c tts_heap_copy_minimal_tuple: minimal_tuple_from_heap_tuple over FormedTuple; carrier bridge owned by the slot payload model")
+    panic!("execTuples.c tts_heap_copy_minimal_tuple: minimal_tuple_from_heap_tuple over FormedTuple; carrier bridge owned by the slot payload model")
 }
 
 /// `tts_heap_store_tuple` (execTuples.c).
@@ -442,7 +442,7 @@ pub fn tts_heap_copyslot<'mcx>(
     // cannot hold, and forming it in dstslot->tts_mcxt is the slot payload
     // model's per-slot context. Mirror PG and panic.
     let _ = (dst, src);
-    todo!("execTuples.c tts_heap_copyslot: ExecCopySlotHeapTuple (FormedTuple -> slot HeapTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
+    panic!("execTuples.c tts_heap_copyslot: ExecCopySlotHeapTuple (FormedTuple -> slot HeapTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
 }
 
 // --- MinimalTupleTableSlot ops --------------------------------------------
@@ -504,7 +504,7 @@ pub fn tts_minimal_getsomeattrs<'mcx>(
     // takes a `HeapTupleTableSlot`; the minimal slot's heap-tuple view
     // (minhdr/mintuple) is the slot payload model's workspace bridge. Route to
     // it once the minimal-slot heap-tuple view lands. Mirror PG and panic.
-    todo!("execTuples.c tts_minimal_getsomeattrs: slot_deform_heap_tuple over the minimal slot's minhdr heap-tuple view (slot payload model workspace)")
+    panic!("execTuples.c tts_minimal_getsomeattrs: slot_deform_heap_tuple over the minimal slot's minhdr heap-tuple view (slot payload model workspace)")
 }
 
 /// `tts_minimal_getsysattr` (execTuples.c): `ereport(ERROR,
@@ -562,7 +562,7 @@ pub fn tts_minimal_materialize<'mcx>(
     // FormedMinimalTuple the slot's MinimalTuple carrier can't hold, and the
     // minhdr.t_data fix-up is raw-pointer aliasing of the minimal tuple body
     // — both the slot payload model's. Mirror PG and panic.
-    todo!("execTuples.c tts_minimal_materialize: heap_form/copy_minimal_tuple -> FormedMinimalTuple + minhdr.t_data alias fix-up are the slot payload model's carrier bridge")
+    panic!("execTuples.c tts_minimal_materialize: heap_form/copy_minimal_tuple -> FormedMinimalTuple + minhdr.t_data alias fix-up are the slot payload model's carrier bridge")
 }
 
 /// `tts_minimal_get_minimal_tuple` (execTuples.c).
@@ -574,7 +574,7 @@ pub fn tts_minimal_get_minimal_tuple<'mcx>(
     //
     // Returning mslot->mintuple depends on tts_minimal_materialize being able
     // to store a FormedMinimalTuple in the slot's MinimalTuple carrier.
-    todo!("execTuples.c tts_minimal_get_minimal_tuple: depends on tts_minimal_materialize's FormedMinimalTuple->MinimalTuple carrier (slot payload model)")
+    panic!("execTuples.c tts_minimal_get_minimal_tuple: depends on tts_minimal_materialize's FormedMinimalTuple->MinimalTuple carrier (slot payload model)")
 }
 
 /// `tts_minimal_copy_minimal_tuple` (execTuples.c).
@@ -587,7 +587,7 @@ pub fn tts_minimal_copy_minimal_tuple<'mcx>(
     //
     // heap_copy_minimal_tuple yields a FormedMinimalTuple the slot's
     // MinimalTuple carrier can't hold; gated on tts_minimal_materialize.
-    todo!("execTuples.c tts_minimal_copy_minimal_tuple: heap_copy_minimal_tuple -> FormedMinimalTuple carrier bridge + materialize are the slot payload model's")
+    panic!("execTuples.c tts_minimal_copy_minimal_tuple: heap_copy_minimal_tuple -> FormedMinimalTuple carrier bridge + materialize are the slot payload model's")
 }
 
 /// `tts_minimal_copy_heap_tuple` (execTuples.c:659).
@@ -603,7 +603,7 @@ pub fn tts_minimal_copy_heap_tuple<'mcx>(
     // heap_tuple_from_minimal_tuple then yields a FormedTuple the slot's
     // HeapTuple carrier cannot hold either — both the slot payload model's
     // carrier bridge. Mirror PG and panic.
-    todo!("execTuples.c tts_minimal_copy_heap_tuple: heap_tuple_from_minimal_tuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
+    panic!("execTuples.c tts_minimal_copy_heap_tuple: heap_tuple_from_minimal_tuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
 }
 
 /// `tts_minimal_store_tuple` (execTuples.c).
@@ -659,7 +659,7 @@ pub fn tts_minimal_copyslot<'mcx>(
     // MinimalTuple carrier cannot hold, and forming it in dstslot->tts_mcxt is
     // the slot payload model's per-slot context. Mirror PG and panic.
     let _ = (dst, src);
-    todo!("execTuples.c tts_minimal_copyslot: ExecCopySlotMinimalTuple (FormedMinimalTuple -> slot MinimalTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
+    panic!("execTuples.c tts_minimal_copyslot: ExecCopySlotMinimalTuple (FormedMinimalTuple -> slot MinimalTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
 }
 
 // --- BufferHeapTupleTableSlot ops -----------------------------------------
@@ -794,7 +794,7 @@ pub fn tts_buffer_heap_materialize<'mcx>(
     // carrier can't hold (slot payload model bridge). The buffer-release
     // bookkeeping is owned logic but is downstream of the tuple copy, which is
     // blocked. Mirror PG and panic.
-    todo!("execTuples.c tts_buffer_heap_materialize: heap_form_tuple/heap_copytuple -> FormedTuple; the slot's HeapTuple carrier bridge is the slot payload model's")
+    panic!("execTuples.c tts_buffer_heap_materialize: heap_form_tuple/heap_copytuple -> FormedTuple; the slot's HeapTuple carrier bridge is the slot payload model's")
 }
 
 /// `tts_buffer_heap_copyslot` (execTuples.c).
@@ -817,7 +817,7 @@ pub fn tts_buffer_heap_copyslot<'mcx>(
     // carrier) or the in-buffer-tuple sharing through the tupdata workspace
     // alias — both the slot payload model's tuple-carrier bridge. Mirror+panic.
     let _ = (dst, src);
-    todo!("execTuples.c tts_buffer_heap_copyslot: ExecCopySlotHeapTuple / in-buffer tuple sharing through tupdata depend on the slot payload model's HeapTuple carrier bridge")
+    panic!("execTuples.c tts_buffer_heap_copyslot: ExecCopySlotHeapTuple / in-buffer tuple sharing through tupdata depend on the slot payload model's HeapTuple carrier bridge")
 }
 
 /// `tts_buffer_heap_get_heap_tuple` (execTuples.c).
@@ -827,7 +827,7 @@ pub fn tts_buffer_heap_get_heap_tuple<'mcx>(
     // Assert(!TTS_EMPTY(slot));
     // if (!bslot->base.tuple) tts_buffer_heap_materialize(slot);
     // return bslot->base.tuple;
-    todo!("execTuples.c tts_buffer_heap_get_heap_tuple: depends on tts_buffer_heap_materialize's FormedTuple->HeapTuple carrier (slot payload model)")
+    panic!("execTuples.c tts_buffer_heap_get_heap_tuple: depends on tts_buffer_heap_materialize's FormedTuple->HeapTuple carrier (slot payload model)")
 }
 
 /// `tts_buffer_heap_copy_heap_tuple` (execTuples.c).
@@ -838,7 +838,7 @@ pub fn tts_buffer_heap_copy_heap_tuple<'mcx>(
     // Assert(!TTS_EMPTY(slot));
     // if (!bslot->base.tuple) tts_buffer_heap_materialize(slot);
     // return heap_copytuple(bslot->base.tuple);
-    todo!("execTuples.c tts_buffer_heap_copy_heap_tuple: heap_copytuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
+    panic!("execTuples.c tts_buffer_heap_copy_heap_tuple: heap_copytuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
 }
 
 /// `tts_buffer_heap_copy_minimal_tuple` (execTuples.c).
@@ -849,7 +849,7 @@ pub fn tts_buffer_heap_copy_minimal_tuple<'mcx>(
     // Assert(!TTS_EMPTY(slot));
     // if (!bslot->base.tuple) tts_buffer_heap_materialize(slot);
     // return minimal_tuple_from_heap_tuple(bslot->base.tuple, extra);
-    todo!("execTuples.c tts_buffer_heap_copy_minimal_tuple: minimal_tuple_from_heap_tuple over FormedTuple + carrier bridge are the slot payload model's")
+    panic!("execTuples.c tts_buffer_heap_copy_minimal_tuple: minimal_tuple_from_heap_tuple over FormedTuple + carrier bridge are the slot payload model's")
 }
 
 // --- helpers --------------------------------------------------------------
