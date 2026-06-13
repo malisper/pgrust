@@ -3278,6 +3278,7 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execAsync-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
