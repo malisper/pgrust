@@ -1,6 +1,8 @@
 //! Tuple-routing structure build/teardown family:
 //! `ExecSetupPartitionTupleRouting`, `ExecInitPartitionDispatchInfo`,
-//! `ExecInitPartitionInfo`, `ExecInitRoutingInfo`, `ExecCleanupTupleRouting`.
+//! `ExecInitRoutingInfo`, `ExecCleanupTupleRouting`.
+//! `ExecInitPartitionInfo` (the largest C function here, ~479 lines) lives in
+//! its own `routing_init_info` sub-module.
 
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
@@ -53,65 +55,6 @@ pub fn ExecSetupPartitionTupleRouting<'mcx>(
     ExecInitPartitionDispatchInfo(mcx, estate, &mut proute, partoid, None, 0, None)?;
 
     Ok(proute)
-}
-
-/// `ExecInitPartitionInfo(mtstate, estate, proute, dispatch, rootResultRelInfo,
-/// partidx)` — lock the partition, build its `ResultRelInfo`, and store it in
-/// the next free slot of `proute->partitions`. Returns the new `ResultRelInfo`
-/// id. Fallible (table open, index open, expression compilation, OOM).
-pub(crate) fn ExecInitPartitionInfo<'mcx>(
-    mcx: Mcx<'mcx>,
-    mtstate: &mut ModifyTableState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    proute: &mut PartitionTupleRouting<'mcx>,
-    dispatch: PartitionDispatchId,
-    root_result_rel_info: RriId,
-    partidx: i32,
-) -> PgResult<RriId> {
-    // Oid partOid = dispatch->partdesc->oids[partidx];
-    let part_oid = {
-        let pd = &proute.partition_dispatch_info[dispatch];
-        let partdesc = pd
-            .partdesc
-            .as_ref()
-            .expect("PartitionDispatch.partdesc set");
-        partdesc.oids[partidx as usize]
-    };
-
-    // partrel = table_open(partOid, RowExclusiveLock);
-    let partrel =
-        backend_access_common_relation_seams::relation_open::call(mcx, part_oid, RowExclusiveLock)?;
-
-    // leaf_part_rri = makeNode(ResultRelInfo);
-    let mut leaf_part_rri = ResultRelInfo::default();
-
-    // InitResultRelInfo(leaf_part_rri, partrel, 0, rootResultRelInfo,
-    //                   estate->es_instrument);
-    let instrument = estate.es_instrument;
-    backend_executor_execMain_seams::init_result_rel_info::call(
-        mcx,
-        &mut leaf_part_rri,
-        partrel.alias(),
-        0,
-        Some(root_result_rel_info),
-        instrument,
-    )?;
-
-    // The following per-partition setup steps — verifying the result rel is a
-    // valid INSERT target (CheckValidResultRel), opening partition indices
-    // (ExecOpenIndices), building the WITH CHECK OPTION / RETURNING / ON
-    // CONFLICT / MERGE state, and storing the per-partition FdwRoutine/batch
-    // bookkeeping — all read or write `ResultRelInfo` fields that the trimmed
-    // executor type (and their owning -seams crates) do not yet carry.  Until
-    // those land, the C body past InitResultRelInfo cannot be expressed; a loud
-    // panic here beats silently dropping that logic.
-    let _ = (mtstate, partidx, &partrel, &mut leaf_part_rri);
-    panic!(
-        "ExecInitPartitionInfo: CheckValidResultRel / ExecOpenIndices / WCO / \
-         RETURNING / ON CONFLICT / MERGE setup not yet portable — trimmed \
-         ResultRelInfo and its owners (execMain index/WCO, execExpr update \
-         projection, nodeModifyTable merge) have not landed"
-    );
 }
 
 /// `ExecInitRoutingInfo(mtstate, estate, proute, dispatch, partRelInfo,

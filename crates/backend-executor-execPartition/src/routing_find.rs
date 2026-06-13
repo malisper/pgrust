@@ -169,7 +169,7 @@ pub fn ExecFindPartition<'mcx>(
                     rri = Some(found_rri);
                 } else {
                     // We need to create a new one.
-                    rri = Some(crate::routing_setup::ExecInitPartitionInfo(
+                    rri = Some(crate::routing_init_info::ExecInitPartitionInfo(
                         mcx,
                         mtstate,
                         estate,

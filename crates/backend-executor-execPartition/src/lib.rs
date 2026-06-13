@@ -26,6 +26,7 @@ use types_tuple::attmap::AttrMap;
 pub mod colnos;
 pub mod pruning;
 pub mod routing_find;
+pub mod routing_init_info;
 pub mod routing_setup;
 
 /// `PARTITION_MAX_KEYS` (`pg_config_manual.h`): max columns in a partition key.
