@@ -117,20 +117,33 @@ impl XLogRecord {
 
 /// One decoded block reference of a WAL record (`DecodedBkpBlock`,
 /// access/xlogreader.h). Trimmed to the fields current ports read; the
-/// xlogreader port owns the full shape and will widen it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct DecodedBkpBlock {
+/// xlogreader port owns the full shape and will widen it. The block-data
+/// borrow points into the reader's decode buffer (C `char *data`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DecodedBkpBlock<'a> {
     in_use: bool,
     has_image: bool,
+    apply_image: bool,
     bimg_len: uint16,
+    /// `Some` iff the block carries block data (`has_data`); the slice is the
+    /// `XLogRecGetBlockData` payload.
+    data: Option<&'a [u8]>,
 }
 
-impl DecodedBkpBlock {
-    pub const fn new(in_use: bool, has_image: bool, bimg_len: uint16) -> Self {
+impl<'a> DecodedBkpBlock<'a> {
+    pub const fn new(
+        in_use: bool,
+        has_image: bool,
+        apply_image: bool,
+        bimg_len: uint16,
+        data: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             in_use,
             has_image,
+            apply_image,
             bimg_len,
+            data,
         }
     }
 
@@ -147,26 +160,26 @@ impl DecodedBkpBlock {
 }
 
 /// A decoded WAL record (`DecodedXLogRecord`, access/xlogreader.h). Trimmed to
-/// the header, the main-data portion, and the block references
-/// `0..=max_block_id`. The main data and block array are context-allocated
-/// (C pallocs the decode buffer in the reader's context), so the record
-/// carries its allocator lifetime.
+/// the header, the main data (`XLogRecGetData`), and the block references
+/// `0..=max_block_id`. The block array is context-allocated (C pallocs the
+/// decode buffer in the reader's context), so the record carries its
+/// allocator lifetime; `main_data` and the per-block data borrow the decode
+/// buffer with the same lifetime.
 #[derive(Debug)]
 pub struct DecodedXLogRecord<'mcx> {
     header: XLogRecord,
-    main_data: PgVec<'mcx, u8>,
-    blocks: PgVec<'mcx, DecodedBkpBlock>,
+    /// `XLogRecGetData` — the record's main data.
+    main_data: &'mcx [u8],
+    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
-    /// `main_data` is the record's main data portion (`main_data` /
-    /// `main_data_len`); `blocks` must hold the block references
-    /// `0..=max_block_id` (in-use or not), mirroring the C array indexed by
-    /// block id.
+    /// `blocks` must hold the block references `0..=max_block_id` (in-use or
+    /// not), mirroring the C array indexed by block id.
     pub const fn new(
         header: XLogRecord,
-        main_data: PgVec<'mcx, u8>,
-        blocks: PgVec<'mcx, DecodedBkpBlock>,
+        main_data: &'mcx [u8],
+        blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
     ) -> Self {
         Self {
             header,
@@ -179,17 +192,49 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
         &self.header
     }
 
-    /// `XLogRecGetInfo` — the header's `xl_info`.
+    pub fn blocks(&self) -> &[DecodedBkpBlock<'mcx>] {
+        &self.blocks
+    }
+
+    /// `XLogRecGetInfo(record)` — the raw `xl_info` byte.
     pub const fn info(&self) -> uint8 {
         self.header.info()
     }
 
-    /// `XLogRecGetData` (with `XLogRecGetDataLen` == `.len()`).
-    pub fn main_data(&self) -> &[u8] {
-        &self.main_data
+    /// `XLogRecGetData(record)`.
+    pub const fn data(&self) -> &'mcx [u8] {
+        self.main_data
     }
 
-    pub fn blocks(&self) -> &[DecodedBkpBlock] {
-        &self.blocks
+    /// `XLogRecGetData` (with `XLogRecGetDataLen` == `.len()`) — alias of
+    /// [`Self::data`] kept for the rmgrdesc-small ports.
+    pub const fn main_data(&self) -> &'mcx [u8] {
+        self.main_data
+    }
+
+    fn block(&self, block_id: usize) -> Option<&DecodedBkpBlock<'mcx>> {
+        self.blocks.get(block_id).filter(|b| b.in_use)
+    }
+
+    /// `XLogRecHasBlockData(record, block_id)`.
+    pub fn has_block_data(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.data.is_some())
+    }
+
+    /// `XLogRecGetBlockData(record, block_id, NULL)` — `None` where C returns
+    /// a NULL pointer (block not in use, or no block data).
+    pub fn block_data(&self, block_id: usize) -> Option<&'mcx [u8]> {
+        self.block(block_id).and_then(|b| b.data)
+    }
+
+    /// `XLogRecHasBlockImage(record, block_id)`.
+    pub fn has_block_image(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.has_image)
+    }
+
+    /// `XLogRecBlockImageApply(record, block_id)`.
+    pub fn block_image_apply(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.apply_image)
     }
 }
+

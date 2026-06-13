@@ -234,13 +234,18 @@ mod tests {
         tot_len: u32,
         info: u8,
         rmid: RmgrId,
-        blocks: &[DecodedBkpBlock],
+        blocks: &[DecodedBkpBlock<'mcx>],
     ) -> DecodedXLogRecord<'mcx> {
         DecodedXLogRecord::new(
             XLogRecord::new(tot_len, 0, 0, info, rmid, 0),
-            mcx::PgVec::new_in(mcx),
+            &[],
             slice_in(mcx, blocks).unwrap(),
         )
+    }
+
+    /// A block reference with no block-data borrow, as the stats tests need.
+    fn block(in_use: bool, has_image: bool, bimg_len: u16) -> DecodedBkpBlock<'static> {
+        DecodedBkpBlock::new(in_use, has_image, false, bimg_len, None)
     }
 
     #[test]
@@ -252,10 +257,10 @@ mod tests {
             0,
             0,
             &[
-                DecodedBkpBlock::new(true, true, 300),  // counted
-                DecodedBkpBlock::new(true, false, 50),  // no image: skipped
-                DecodedBkpBlock::new(false, true, 70),  // not in use: skipped
-                DecodedBkpBlock::new(true, true, 100),  // counted
+                block(true, true, 300),  // counted
+                block(true, false, 50),  // no image: skipped
+                block(false, true, 70),  // not in use: skipped
+                block(true, true, 100),  // counted
             ],
         );
         assert_eq!(xlog_rec_get_len(&rec), (600, 400));
@@ -266,7 +271,7 @@ mod tests {
         let ctx = MemoryContext::new("test");
         let mut stats = XLogStats::default();
         // Non-XACT rmgr keeps the full four xl_info bits.
-        let rec = record(ctx.mcx(), 100, 0xf0, 10, &[DecodedBkpBlock::new(true, true, 40)]);
+        let rec = record(ctx.mcx(), 100, 0xf0, 10, &[block(true, true, 40)]);
         xlog_rec_store_stats(&mut stats, &rec);
 
         assert_eq!(stats.count(), 1);
@@ -293,14 +298,14 @@ mod tests {
     fn record_block_array_accounting_is_exact() {
         let ctx = MemoryContext::new("test");
         let blocks = [
-            DecodedBkpBlock::new(true, true, 300),
-            DecodedBkpBlock::new(true, false, 50),
+            block(true, true, 300),
+            block(true, false, 50),
         ];
         let rec = record(ctx.mcx(), 1000, 0, 0, &blocks);
         // The block array is the record's only context allocation.
         assert_eq!(
             ctx.used(),
-            rec.blocks().len() * core::mem::size_of::<DecodedBkpBlock>(),
+            rec.blocks().len() * core::mem::size_of::<DecodedBkpBlock<'_>>(),
             "context is charged exactly the decoded block array"
         );
         // Reading stats allocates nothing.
@@ -308,7 +313,7 @@ mod tests {
         xlog_rec_store_stats(&mut stats, &rec);
         assert_eq!(
             ctx.used(),
-            rec.blocks().len() * core::mem::size_of::<DecodedBkpBlock>()
+            rec.blocks().len() * core::mem::size_of::<DecodedBkpBlock<'_>>()
         );
     }
 
@@ -317,7 +322,7 @@ mod tests {
         let ctx = MemoryContext::new("test");
         {
             let recs = [
-                record(ctx.mcx(), 1000, 0, 0, &[DecodedBkpBlock::new(true, true, 300)]),
+                record(ctx.mcx(), 1000, 0, 0, &[block(true, true, 300)]),
                 record(ctx.mcx(), 100, 0xf0, RM_XACT_ID, &[]),
             ];
             assert!(ctx.used() > 0, "decoded records are charged to the context");

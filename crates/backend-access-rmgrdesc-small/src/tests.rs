@@ -14,7 +14,7 @@ fn render(
     let ctx = MemoryContext::new("rmgrdesc-test");
     let record = DecodedXLogRecord::new(
         XLogRecord::new(0, 0, 0, info, 0, 0),
-        slice_in(ctx.mcx(), data).unwrap(),
+        data,
         PgVec::new_in(ctx.mcx()),
     );
     let mut buf = PgString::new_in(ctx.mcx());

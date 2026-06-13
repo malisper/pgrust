@@ -1192,6 +1192,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rmgrdesc-next"
+version = "0.0.0"
+dependencies = [
+ "backend-rmgrdesc-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
+name = "backend-rmgrdesc-small-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -2343,6 +2367,15 @@ name = "types-wchar"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-xlog-records"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
