@@ -5210,6 +5210,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-guc",
  "types-storage",
  "types-wal",
 ]

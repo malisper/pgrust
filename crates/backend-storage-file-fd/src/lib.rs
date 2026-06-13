@@ -54,16 +54,29 @@ pub mod vfd_io;
 /// Install every seam this unit owns.
 ///
 /// The unit owns two seam crates (by C-source coverage of `fd.c`):
-/// `backend-storage-file-seams` and `backend-storage-file-fd-seams`. Every
-/// declaration in both is installed here, exactly once.
+/// `backend-storage-file-seams` and `backend-storage-file-fd-seams`. The
+/// fd.c-direct inward adapters are installed here, exactly once. NOTE: a number
+/// of inward decls in `backend-storage-file-fd-seams` that wrap consumer-side
+/// I/O loops (the `relmap_*`, `allocate_file_*`, `open_copy_to_file`/
+/// `copy_write_file` families, `access_f_ok`, `read_dir_names*`, `rename_file`/
+/// `unlink_file`) are not yet installed — those adapters still need to be
+/// authored as thin marshal+delegate wrappers. See `audits/backend-storage-file-fd.md`.
 pub fn init_seams() {
     use backend_storage_file_fd_seams as fd_seams;
     use backend_storage_file_seams as file_seams;
 
-    // backend-storage-file-fd-seams
+    // backend-storage-file-fd-seams — the fd.c-direct inward adapters this unit
+    // owns and backs with real fd.c logic.
     fd_seams::make_pg_directory::set(vfd_core::seam_make_pg_directory);
     fd_seams::at_eoxact_files::set(sync_cleanup::AtEOXact_Files);
     fd_seams::at_eosubxact_files::set(sync_cleanup::AtEOSubXact_Files);
+    fd_seams::init_file_access::set(vfd_core::seam_init_file_access);
+    fd_seams::init_temporary_file_access::set(vfd_core::InitTemporaryFileAccess);
+    fd_seams::set_max_safe_fds::set(vfd_core::set_max_safe_fds);
+    fd_seams::last_errno::set(vfd_core::seam_last_errno);
+    fd_seams::access_f_ok::set(vfd_core::seam_access_f_ok);
+    fd_seams::unlink_file::set(vfd_core::seam_unlink_file);
+    fd_seams::rename_file::set(vfd_core::seam_rename_file);
 
     // backend-storage-file-seams
     file_seams::with_allocated_dir::set(allocated_desc::with_allocated_dir);

@@ -263,6 +263,48 @@ pub fn io_direct_flags() -> i32 {
 pub fn set_io_direct_flags(value: i32) {
     with_g(|g| g.io_direct_flags = value);
 }
+
+/// `check_debug_io_direct(char **newval, void **extra, GucSource source)`
+/// (fd.c:4007) — GUC check-hook for `debug_io_direct`. Parses the comma list
+/// into the `IO_DIRECT_*` flag set; `Ok(flags)` becomes the `*extra` value the
+/// assign-hook stores, `Err(detail)` is the `GUC_check_errdetail` text.
+///
+/// `PG_O_DIRECT != 0` on every supported platform here, so the
+/// `#if PG_O_DIRECT == 0` reject-non-empty branch is not in the build config.
+/// The two `#if XLOG_BLCKSZ < PG_IO_ALIGN_SIZE` / `#if BLCKSZ < PG_IO_ALIGN_SIZE`
+/// guards are compile-time false in the default block-size config (both 8192 >=
+/// 4096), so they are likewise absent from the build and omitted here.
+pub fn check_debug_io_direct(newval: &str, _source: types_guc::GucSource) -> Result<i32, String> {
+    use types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
+
+    let mut flags = 0;
+    // SplitGUCList on ',' for these simple unquoted identifiers is a
+    // comma-split with surrounding-whitespace trimming.
+    for item in newval.split(',') {
+        let item = item.trim();
+        // C's SplitGUCList produces no element for an all-empty input.
+        if item.is_empty() {
+            continue;
+        }
+        if item.eq_ignore_ascii_case("data") {
+            flags |= IO_DIRECT_DATA;
+        } else if item.eq_ignore_ascii_case("wal") {
+            flags |= IO_DIRECT_WAL;
+        } else if item.eq_ignore_ascii_case("wal_init") {
+            flags |= IO_DIRECT_WAL_INIT;
+        } else {
+            return Err(format!("Invalid option \"{item}\"."));
+        }
+    }
+
+    Ok(flags)
+}
+
+/// `assign_debug_io_direct(const char *newval, void *extra)` (fd.c:4094) —
+/// GUC assign-hook: store the flag set computed by the check-hook.
+pub fn assign_debug_io_direct(flags: i32) {
+    set_io_direct_flags(flags);
+}
 pub fn num_external_fds() -> i32 {
     with_g(|g| g.num_external_fds)
 }
@@ -826,6 +868,60 @@ pub(crate) fn seam_make_pg_directory(directory_name: &str) -> i32 {
     let cpath = path_to_cstring(Path::new(directory_name));
     // SAFETY: cpath is NUL-terminated; mkdir(2) with the configured dir mode.
     unsafe { libc::mkdir(cpath.as_ptr(), pg_dir_create_mode() as libc::mode_t) }
+}
+
+/// Inward-seam adapter for `init_file_access` — `InitFileAccess()` is
+/// infallible; the seam carries the fallible `Init*` shape uniformly.
+pub fn seam_init_file_access() -> PgResult<()> {
+    InitFileAccess();
+    Ok(())
+}
+
+/// Inward-seam adapter for `last_errno` — read the current OS `errno`.
+pub fn seam_last_errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// Inward-seam adapter for `access_f_ok` — `access(path, F_OK)` (InitPostgres).
+pub fn seam_access_f_ok(
+    path: &str,
+) -> PgResult<backend_storage_file_fd_seams::AccessResult> {
+    use backend_storage_file_fd_seams::AccessResult;
+    let cpath = path_to_cstring(Path::new(path));
+    // SAFETY: cpath is NUL-terminated; access(2) probe for existence.
+    let rc = unsafe { libc::access(cpath.as_ptr(), libc::F_OK) };
+    if rc == 0 {
+        return Ok(AccessResult::Ok);
+    }
+    let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if e == libc::ENOENT {
+        Ok(AccessResult::NoEnt)
+    } else {
+        Ok(AccessResult::Other(e))
+    }
+}
+
+/// Inward-seam adapter for `unlink_file` — `unlink(2)`; `0` / `-errno`.
+pub fn seam_unlink_file(path: &str) -> i32 {
+    let cpath = path_to_cstring(Path::new(path));
+    // SAFETY: cpath is NUL-terminated.
+    if unsafe { libc::unlink(cpath.as_ptr()) } == 0 {
+        0
+    } else {
+        -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
+}
+
+/// Inward-seam adapter for `rename_file` — `rename(2)`; `0` / `-errno`.
+pub fn seam_rename_file(from: &str, to: &str) -> i32 {
+    let cfrom = path_to_cstring(Path::new(from));
+    let cto = path_to_cstring(Path::new(to));
+    // SAFETY: both paths are NUL-terminated.
+    if unsafe { libc::rename(cfrom.as_ptr(), cto.as_ptr()) } == 0 {
+        0
+    } else {
+        -std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------

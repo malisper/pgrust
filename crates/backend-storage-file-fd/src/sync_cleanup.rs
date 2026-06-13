@@ -15,7 +15,7 @@ use std::os::fd::FromRawFd;
 use std::path::Path;
 
 use types_core::SubTransactionId;
-use types_error::{ErrorLevel, PgError, PgResult, ERROR, LOG, WARNING};
+use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, ERROR, LOG, WARNING};
 use types_storage::{
     PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, PG_TEMP_FILE_PREFIX, TABLESPACE_VERSION_DIRECTORY,
 };
@@ -452,6 +452,8 @@ fn fsync_parent_path(fname: &Path, elevel: ErrorLevel) -> PgResult<()> {
 /// The per-entry action a [`walkdir`] applies.
 #[derive(Clone, Copy)]
 pub(crate) enum WalkAction {
+    /// `pre_sync_fname` (fd.c:3786).
+    PreSync,
     /// `datadir_fsync_fname` (fd.c:3824).
     DatadirFsync,
     /// `unlink_if_exists_fname` (fd.c:3837).
@@ -461,10 +463,62 @@ pub(crate) enum WalkAction {
 impl WalkAction {
     fn apply(self, fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {
         match self {
+            WalkAction::PreSync => pre_sync_fname(fname, isdir, elevel),
             WalkAction::DatadirFsync => datadir_fsync_fname(fname, isdir, elevel),
             WalkAction::UnlinkIfExists => unlink_if_exists_fname(fname, isdir, elevel),
         }
     }
+}
+
+/// `pre_sync_fname(const char *fname, bool isdir, int elevel)` (fd.c:3786,
+/// `#ifdef PG_FLUSH_DATA_WORKS`) — hint the kernel that `fname` is about to be
+/// fsync'd. Directories are skipped; the flush itself is a best-effort hint
+/// (`pg_flush_data` is a no-op in the safe port), but the open/close churn and
+/// its error logging at `elevel` are reproduced.
+fn pre_sync_fname(fname: &Path, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {
+    // fd.c:3793-3794 -- don't try to flush directories.
+    if isdir {
+        return Ok(());
+    }
+
+    // fd.c:3796 -- ereport_startup_progress hint (folded into the phase report).
+    let fname_str = fname.to_str().expect("pre_sync_fname: non-UTF-8 path");
+
+    // fd.c:3799 -- OpenTransientFile(fname, O_RDONLY | PG_BINARY).
+    let fd = match OpenTransientFile(fname_str, O_RDONLY | PG_BINARY) {
+        Ok(fd) => fd,
+        Err(error) => {
+            // fd.c:3801-3808 -- EACCES is silently ignored; otherwise log.
+            let e = error.saved_errno().unwrap_or(errno::EIO);
+            if e == errno::EACCES {
+                return Ok(());
+            }
+            return report_errno(
+                elevel,
+                format!("could not open file \"{fname_str}\""),
+                e,
+            );
+        }
+    };
+
+    // fd.c:3814 -- pg_flush_data(fd, 0, 0); errors ignored (hint only / no-op).
+    if let Ok(raw) = TransientFileRawFd(fd) {
+        // SAFETY: `raw` is owned by the transient-file slot; ManuallyDrop keeps
+        // the slot owning it (CloseTransientFile closes it below).
+        let borrowed = ManuallyDrop::new(unsafe { StdFile::from_raw_fd(raw) });
+        let _ = pg_flush_data(&borrowed, 0, 0);
+    }
+
+    // fd.c:3816-3821 -- CloseTransientFile; ereport at elevel on failure.
+    if let Err(error) = CloseTransientFile(fd) {
+        let e = error.saved_errno().unwrap_or(errno::EIO);
+        return report_errno(
+            elevel,
+            format!("could not close file \"{fname_str}\""),
+            e,
+        );
+    }
+    Ok(())
 }
 
 /// `walkdir(const char *path, void (*action)(...), bool process_symlinks,
@@ -595,9 +649,20 @@ pub fn SyncDataDirectory() -> PgResult<()> {
         return Ok(());
     }
 
-    // fd.c:3686-3712 -- the default (fsync) path. The pre-fsync writeback-hint
-    // pass (pg_flush_data via the PreSync walk) is a no-op in the safe port and
-    // is omitted; the fsync pass below carries the durability guarantee.
+    // fd.c:3674-3687 (#ifdef PG_FLUSH_DATA_WORKS) -- the pre-fsync pass hints
+    // the kernel that we're about to fsync; errors are logged only at DEBUG1.
+    // pg_flush_data is a no-op in the safe port, but the walk/open/close churn
+    // and its error logging are reproduced for fidelity.
+    begin_startup_progress_phase();
+
+    walkdir(Path::new("."), WalkAction::PreSync, false, DEBUG1)?;
+    if xlog_is_symlink {
+        walkdir(Path::new("pg_wal"), WalkAction::PreSync, false, DEBUG1)?;
+    }
+    walkdir(Path::new(PG_TBLSPC_DIR), WalkAction::PreSync, true, DEBUG1)?;
+
+    // fd.c:3689-3712 -- the fsync pass, in the same order; this carries the
+    // durability guarantee.
     begin_startup_progress_phase();
 
     walkdir(Path::new("."), WalkAction::DatadirFsync, false, LOG)?;

@@ -85,6 +85,18 @@ fn pg_preadv(fd: RawFd, iov: &mut [std::io::IoSliceMut<'_>], offset: i64) -> isi
     }
 }
 
+/// `pg_ftruncate(int fd, off_t length)` (fd.c:703) — `ftruncate(2)` with an
+/// `EINTR` retry loop. Returns the raw `ftruncate` result (0 / -1 with errno).
+fn pg_ftruncate(fd: RawFd, length: i64) -> i32 {
+    loop {
+        let ret = unsafe { libc::ftruncate(fd, length as libc::off_t) };
+        if ret == -1 && get_errno() == libc::EINTR {
+            continue;
+        }
+        return ret;
+    }
+}
+
 /// `pg_pwritev(fd, iov, iovcnt, offset)` (port) — positioned vectored write.
 fn pg_pwritev(fd: RawFd, iov: &[std::io::IoSlice<'_>], offset: i64) -> isize {
     unsafe {
@@ -721,7 +733,7 @@ pub fn FileTruncate(file: File, offset: i64, wait_event_info: u32) -> PgResult<i
     let raw_fd = vfd_raw_fd(file);
 
     waitevent::pgstat_report_wait_start::call(wait_event_info);
-    let return_code = unsafe { libc::ftruncate(raw_fd, offset as libc::off_t) };
+    let return_code = pg_ftruncate(raw_fd, offset);
     waitevent::pgstat_report_wait_end::call();
 
     if return_code == 0 {
