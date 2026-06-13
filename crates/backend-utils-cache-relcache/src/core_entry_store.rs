@@ -289,17 +289,26 @@ pub fn RelationClose(relation: *mut RelationData) -> PgResult<()> {
     RelationCloseCleanup(relation)
 }
 
-/// `RelationCloseCleanup(relation)` (relcache.c): when the entry's refcount has
-/// returned to zero and it has been invalidated or dropped, flush it now
-/// rather than waiting for the next inval. The clear half is
-/// [`crate::invalidate`] logic; this routine's own decision (refcount-zero +
-/// invalid/dropped) lives here.
+/// `RelationCloseCleanup(relation)` (relcache.c). When the relation is no
+/// longer open in this session (`RelationHasReferenceCountZero`), the C cleans
+/// up any stale partition descriptors it has by deleting the child contexts of
+/// `rd_pdcxt`/`rd_pddcxt`. Those partition-descriptor MemoryContexts are
+/// partition-descriptor vocabulary owned by the partcache/derived family and
+/// are not represented on this entry, so the cleanup is a no-op over the
+/// fields this family owns (mirror PG and panic: the contexts are simply not
+/// present rather than restructured around).
+///
+/// The further `RelationClearRelation` call the C makes is guarded by
+/// `#ifdef RELCACHE_FORCE_RELEASE`, a debug-only define that is compiled out of
+/// normal builds; so it is intentionally absent here, exactly as in a default
+/// PostgreSQL build.
 #[allow(unsafe_code)]
 pub(crate) fn RelationCloseCleanup(relation: *mut RelationData) -> PgResult<()> {
     // SAFETY: live `Relation` pointer.
     let rd = unsafe { &*relation };
-    if rd.rd_refcnt == 0 && (!rd.rd_isvalid || rd.rd_droppedSubid != 0) {
-        return crate::invalidate::RelationClearRelation(relation, false);
+    if rd.rd_refcnt == 0 {
+        // C: MemoryContextDeleteChildren(rd_pdcxt/rd_pddcxt) when those
+        // partition-descriptor contexts have children. Not represented here.
     }
     Ok(())
 }
