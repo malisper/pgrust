@@ -17,3 +17,6 @@ types-cache = { path = "../types-cache" }
 types-rangetypes = { path = "../types-rangetypes" }
 backend-utils-adt-multirangetypes-seams = { path = "../backend-utils-adt-multirangetypes-seams" }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
