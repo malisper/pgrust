@@ -54,26 +54,124 @@ pub(crate) fn exec_init_json_expr<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let _ = (state, econtext, estate);
-    // ExecInitJsonExpr(jsexpr, state, resv, resnull, scratch) (execExpr.c):
+    // ExecInitJsonExpr(jsexpr, state, resv, resnull, scratch) (execExpr.c) —
+    // line-for-line C step-emission sequence (c2rust execExpr.rs:10369-10675):
     //
     //   jsestate = palloc0(sizeof(JsonExprState));
     //   returning_domain = get_typtype(jsexpr->returning->typid) == TYPTYPE_DOMAIN;
-    //   Assert(jsexpr->on_error != NULL);
     //   jsestate->jsexpr = jsexpr;
-    //   ExecInitExprRec(jsexpr->formatted_expr, ...);  // -> jsestate->formatted_expr
-    //   <EEOP_JUMP_IF_NULL on formatted_expr.isnull, target patched below>
-    //   ExecInitExprRec(jsexpr->path_spec, ...);       // -> jsestate->pathspec
-    //   <EEOP_JUMP_IF_NULL on pathspec.isnull, target patched below>
-    //   forboth(passing_values, passing_names): build JsonPathVariable, ExecInitExprRec
-    //   <EEOP_JSONEXPR_PATH with jsestate>
-    //   patch jumps_return_null -> here; <EEOP_CONST NULL>
-    //   escontext = on_error->btype != JSON_BEHAVIOR_ERROR ? &jsestate->escontext : NULL;
-    //   if (use_json_coercion) ExecInitJsonCoercion(...);
-    //   else if (use_io_coercion) build the input-function FunctionCallInfo (3 args);
-    //   if (jump_eval_coercion >= 0 && escontext) <EEOP_JSONEXPR_COERCION_FINISH>;
-    //   ON ERROR / ON EMPTY behaviour expression steps (each: JUMP_IF_NOT_TRUE,
-    //     ExecInitExprRec(behavior->expr), optional ExecInitJsonCoercion + COERCION_FINISH,
-    //     JUMP to end); patch jumps_to_end -> end; jsestate->jump_end = steps_len.
+    //   // --- formatted_expr: query target, recursed into jsestate->formatted_expr ---
+    //   ExecInitExprRec(jsexpr->formatted_expr, state,
+    //                   &jsestate->formatted_expr.value, &jsestate->formatted_expr.isnull);
+    //   jumps_return_null = lappend_int(jumps_return_null, state->steps_len);
+    //   scratch.opcode = EEOP_JUMP_IF_NULL;
+    //   scratch.resnull = &jsestate->formatted_expr.isnull;
+    //   scratch.d.jump.jumpdone = -1;            ExprEvalPushStep(state, scratch);
+    //   // --- path_spec: jsonpath, recursed into jsestate->pathspec ---
+    //   ExecInitExprRec(jsexpr->path_spec, state,
+    //                   &jsestate->pathspec.value, &jsestate->pathspec.isnull);
+    //   jumps_return_null = lappend_int(jumps_return_null, state->steps_len);
+    //   scratch.opcode = EEOP_JUMP_IF_NULL;
+    //   scratch.resnull = &jsestate->pathspec.isnull;
+    //   scratch.d.jump.jumpdone = -1;            ExprEvalPushStep(state, scratch);
+    //   // --- PASSING args: forboth(passing_values, passing_names) ---
+    //   jsestate->args = NIL;
+    //   forboth(argexprlc, jsexpr->passing_values, argnamelc, jsexpr->passing_names) {
+    //       argexpr = lfirst(argexprlc); argname = lfirst(argnamelc);
+    //       var = palloc(sizeof(JsonPathVariable));
+    //       var->name = argname->sval; var->namelen = strlen(var->name);
+    //       var->typid = exprType(argexpr); var->typmod = exprTypmod(argexpr);
+    //       ExecInitExprRec(argexpr, state, &var->value, &var->isnull);
+    //       jsestate->args = lappend(jsestate->args, var);
+    //   }
+    //   // --- the JSONEXPR_PATH step itself ---
+    //   scratch.opcode = EEOP_JSONEXPR_PATH;
+    //   scratch.resvalue = resv; scratch.resnull = resnull;
+    //   scratch.d.jsonexpr.jsestate = jsestate;  ExprEvalPushStep(state, scratch);
+    //   // patch every jumps_return_null target -> here (steps_len)
+    //   foreach(lc, jumps_return_null)
+    //       state->steps[lfirst_int(lc)].d.jump.jumpdone = state->steps_len;
+    //   scratch.opcode = EEOP_CONST;             // return SQL NULL on a null input
+    //   scratch.resvalue = resv; scratch.resnull = resnull;
+    //   scratch.d.constval.value = (Datum) 0; scratch.d.constval.isnull = true;
+    //   ExprEvalPushStep(state, scratch);
+    //   // --- escontext: &jsestate->escontext unless ON ERROR is ERROR ---
+    //   escontext = (on_error->btype != JSON_BEHAVIOR_ERROR) ? &jsestate->escontext : NULL;
+    //   jsestate->escontext.type = T_ErrorSaveContext;
+    //   jsestate->jump_eval_coercion = -1;
+    //   if (jsexpr->use_json_coercion) {
+    //       jsestate->jump_eval_coercion = state->steps_len;
+    //       ExecInitJsonCoercion(state, jsexpr->returning, escontext,
+    //                            jsexpr->omit_quotes,
+    //                            jsexpr->op == JSON_EXISTS_OP, resv, resnull);
+    //   } else if (jsexpr->use_io_coercion) {
+    //       getTypeInputInfo(jsexpr->returning->typid, &typinput, &typioparam);
+    //       finfo  = palloc0(sizeof(FmgrInfo));
+    //       fcinfo = palloc0(SizeForFunctionCallInfo(3));
+    //       fmgr_info(typinput, finfo);
+    //       finfo->fn_expr = (Node *) jsexpr->returning;
+    //       fcinfo->flinfo = finfo; fcinfo->context = NULL; fcinfo->resultinfo = NULL;
+    //       fcinfo->fncollation = InvalidOid; fcinfo->isnull = false; fcinfo->nargs = 3;
+    //       fcinfo->args[1].value = ObjectIdGetDatum(typioparam); fcinfo->args[1].isnull = false;
+    //       fcinfo->args[2].value = Int32GetDatum(jsexpr->returning->typmod);
+    //       fcinfo->args[2].isnull = false;
+    //       fcinfo->context = (Node *) escontext;
+    //       jsestate->input_fcinfo = fcinfo;
+    //   }
+    //   if (jsestate->jump_eval_coercion >= 0 && escontext) {
+    //       scratch.opcode = EEOP_JSONEXPR_COERCION_FINISH;
+    //       scratch.d.jsonexpr.jsestate = jsestate;  ExprEvalPushStep(state, scratch);
+    //   }
+    //   // --- ON ERROR / ON EMPTY behaviour expressions ---
+    //   jsestate->jump_error = jsestate->jump_empty = -1;
+    //   if (on_error->btype != JSON_BEHAVIOR_ERROR &&
+    //       (!(IsA(on_error->expr, Const) && ((Const *) on_error->expr)->constisnull)
+    //        || returning_domain)) {
+    //       jsestate->jump_error = state->steps_len;
+    //       jumps_to_end = lappend_int(jumps_to_end, state->steps_len);
+    //       scratch.opcode = EEOP_JUMP_IF_NOT_TRUE;
+    //       scratch.resvalue = &jsestate->error.value; scratch.resnull = &jsestate->error.isnull;
+    //       scratch.d.jump.jumpdone = -1;        ExprEvalPushStep(state, scratch);
+    //       saved = state->escontext; state->escontext = escontext;
+    //       ExecInitExprRec(on_error->expr, state, resv, resnull);
+    //       state->escontext = saved;
+    //       if (on_error->coerce)
+    //           ExecInitJsonCoercion(state, jsexpr->returning, escontext,
+    //                                jsexpr->omit_quotes, false, resv, resnull);
+    //       if (on_error->coerce || IsA(on_error->expr, CoerceViaIO)
+    //                            || IsA(on_error->expr, CoerceToDomain)) {
+    //           scratch.opcode = EEOP_JSONEXPR_COERCION_FINISH;
+    //           scratch.resvalue = resv; scratch.resnull = resnull;
+    //           scratch.d.jsonexpr.jsestate = jsestate;  ExprEvalPushStep(state, scratch);
+    //       }
+    //       jumps_to_end = lappend_int(jumps_to_end, state->steps_len);
+    //       scratch.opcode = EEOP_JUMP; scratch.d.jump.jumpdone = -1;
+    //       ExprEvalPushStep(state, scratch);
+    //   }
+    //   if (on_empty != NULL && on_empty->btype != JSON_BEHAVIOR_ERROR &&
+    //       (!(IsA(on_empty->expr, Const) && ((Const *) on_empty->expr)->constisnull)
+    //        || returning_domain)) {
+    //       jsestate->jump_empty = state->steps_len;
+    //       jumps_to_end = lappend_int(jumps_to_end, state->steps_len);
+    //       scratch.opcode = EEOP_JUMP_IF_NOT_TRUE;
+    //       scratch.resvalue = &jsestate->empty.value; scratch.resnull = &jsestate->empty.isnull;
+    //       scratch.d.jump.jumpdone = -1;        ExprEvalPushStep(state, scratch);
+    //       saved = state->escontext; state->escontext = escontext;
+    //       ExecInitExprRec(on_empty->expr, state, resv, resnull);
+    //       state->escontext = saved;
+    //       if (on_empty->coerce)
+    //           ExecInitJsonCoercion(state, jsexpr->returning, escontext,
+    //                                jsexpr->omit_quotes, false, resv, resnull);
+    //       if (on_empty->coerce || IsA(on_empty->expr, CoerceViaIO)
+    //                            || IsA(on_empty->expr, CoerceToDomain)) {
+    //           scratch.opcode = EEOP_JSONEXPR_COERCION_FINISH;
+    //           scratch.resvalue = resv; scratch.resnull = resnull;
+    //           scratch.d.jsonexpr.jsestate = jsestate;  ExprEvalPushStep(state, scratch);
+    //       }
+    //   }
+    //   foreach(lc, jumps_to_end)              // patch all JUMP/JUMP_IF_NOT_TRUE -> end
+    //       state->steps[lfirst_int(lc)].d.jump.jumpdone = state->steps_len;
+    //   jsestate->jump_end = state->steps_len;
     //
     // The `JsonExpr` / `JsonReturning` / `JsonBehavior` parse nodes are now
     // present (keystone Expr-enum expansion), but this body still requires two
@@ -82,11 +180,14 @@ pub(crate) fn exec_init_json_expr<'mcx>(
     // SQL/JSON state group, owned by a still-unported unit; the keystone parks
     // the back-pointer as `ExprEvalStepData::JsonExpr { jsestate: usize }`), and
     // (2) the core family's `ExecInitExprRec` recursion into *distinct* result
-    // cells (`&jsestate->formatted_expr.value`, the PASSING `&var->value`, the ON
-    // ERROR / ON EMPTY behavior expressions) — `exec_init_expr_rec` is private to
-    // `execExpr_core` and panics for any distinct-cell output target because the
-    // result-cell arena is not landed for that case. The signature above does not
-    // yet carry `jsexpr` / `resv` / `resnull` / `scratch` for the same reason.
+    // cells (`&jsestate->formatted_expr.value`, `&jsestate->pathspec.value`, the
+    // PASSING `&var->value`, the ON ERROR / ON EMPTY behavior expressions) —
+    // `exec_init_expr_rec` and the `new_result_cell` arena allocator are private
+    // (`fn`, not `pub(crate)`) to `execExpr_core` with no cross-family entry
+    // point, so a sibling family cannot allocate a distinct output cell nor drive
+    // the recursion (the `execExpr_func_subscript` family records the identical
+    // blocker). The signature above does not yet carry `jsexpr` / `resv` /
+    // `resnull` / `scratch` for the same reason.
     // Per "Mirror PG and panic", this is a loud seam-and-panic until those two
     // owners land — not a silent stub and not an invented opaque stand-in.
     panic!(
