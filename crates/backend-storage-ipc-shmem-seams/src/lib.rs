@@ -1,8 +1,8 @@
 //! Seam declarations for the `backend-storage-ipc-shmem` unit
 //! (`storage/ipc/shmem.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! The owning crate `backend-storage-ipc-shmem` installs these from its
+//! `init_seams()`.
 
 use types_core::Size;
 use types_error::PgResult;
