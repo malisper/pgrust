@@ -367,13 +367,14 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
 }
 
 /// `ExecInitFunc(scratch, node, args, funcid, inputcollid, state)`
-/// (execExpr.c:2716) — set up the [`Func`] step for a function/operator call:
+/// (execExpr.c:2704) — set up the [`Func`] step for a function/operator call:
 /// ACL-check `funcid`, look up its `FmgrInfo`/`FunctionCallInfo`, recurse each
 /// non-Const argument into its `fcinfo->args[i]` cell, then pick the
 /// `EEOP_FUNCEXPR*` opcode by strictness × pg_stat_function-tracking.
 ///
 /// [`Func`]: types_nodes::execexpr::ExprEvalStepData::Func
 pub(crate) fn exec_init_func<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
     _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
     _node: &Expr,
     args: &[Expr],
@@ -381,32 +382,64 @@ pub(crate) fn exec_init_func<'mcx>(
     _inputcollid: types_core::Oid,
     _state: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
+    // C: int nargs = list_length(args);
     let nargs = args.len() as i32;
+
     // C: aclresult = object_aclcheck(ProcedureRelationId, funcid, GetUserId(),
     //                                ACL_EXECUTE);
-    //    if (aclresult != ACLCHECK_OK) aclcheck_error(...);
+    //    if (aclresult != ACLCHECK_OK)
+    //        aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(funcid));
     //    InvokeFunctionExecuteHook(funcid);
     //
-    // The catalog ACL check (backend-catalog-aclchk), the object-access hook,
-    // and fmgr_info (backend-utils-fmgr) are cross-unit callees that route
-    // through their owner seams. The keystone result-cell model that the
-    // per-argument `ExecInitExprRec(arg, state, &fcinfo->args[i].value, ...)`
-    // descent and the `scratch.d.func.{finfo,fcinfo_data,fn_addr}` wiring need
-    // (a step naming a distinct fcinfo arg cell) has not landed — see the
-    // module note. Faithful structure, in-unit dep not yet modeled.
+    // The catalog ACL check needs GetUserId() (backend-utils-init-miscinit;
+    // no usable wiring here — nodeAgg's identical object_aclcheck on the
+    // aggregate funcid panics on GetUserId() for the same reason), and the
+    // object-access hook is the objectaccess owner's. Both precede fmgr_info in
+    // C; the genuine structural blocker below (fmgr_info producing the FmgrInfo
+    // the step must carry) makes the ordering moot. Per "mirror PG and panic",
+    // route loudly at the first unported owner the C reaches.
+    //
+    // C: scratch->d.func.finfo = palloc0(sizeof(FmgrInfo));
+    //    scratch->d.func.fcinfo_data = palloc0(SizeForFunctionCallInfo(nargs));
+    //    fmgr_info(funcid, flinfo);  fmgr_info_set_expr((Node *) node, flinfo);
+    //    InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
+    //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;
+    //
+    // `fmgr_info` resolves funcid through the pg_proc syscache into a `FmgrInfo`
+    // that embeds the C function pointer (`fn_addr`); the fmgr-fmgr seam crate
+    // states a `FmgrInfo` cannot cross the seam (it carries the resolved native
+    // address), so no `FmgrInfo`-producing seam is exported. Without `flinfo`
+    // the step's `fn_addr`/`finfo`/`fcinfo_data` cannot be filled, the
+    // `fn_retset` set-returning check cannot be made, and — critically — the
+    // strict/fusage opcode selection below reads `flinfo->fn_strict` /
+    // `flinfo->fn_stats`, so it too is unreachable until the FmgrInfo lands.
+    //
+    // The per-argument descent (each non-Const arg → its own
+    // `fcinfo->args[i]` cell via the result-cell arena) and the strict/fusage
+    // opcode selection are this unit's own logic and fully expressible against
+    // the landed arena (`new_result_cell` / `exec_init_expr_rec`) +
+    // `Func.arg_cells`; they are written below the FmgrInfo gate but cannot run
+    // before the catalog/fmgr owners land. Faithful structure; genuine
+    // cross-unit blocker.
     if nargs > FUNC_MAX_ARGS {
         // C: ereport(ERROR, errcode(ERRCODE_TOO_MANY_ARGUMENTS),
-        //            errmsg_plural("cannot pass more than %d argument(s)...", ...));
-        panic!(
-            "execExpr-func-subscript: ExecInitFunc — too many function arguments \
-             ({nargs} > {FUNC_MAX_ARGS}) (faithful errpath; the ereport sink is threaded \
-             with the core compiler)"
-        );
+        //            errmsg_plural("cannot pass more than %d argument(s) to a function",
+        //                          ..., FUNC_MAX_ARGS, FUNC_MAX_ARGS));
+        return Err(types_error::PgError::error(format!(
+            "cannot pass more than {FUNC_MAX_ARGS} arguments to a function"
+        ))
+        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ARGUMENTS));
     }
+
     panic!(
-        "execExpr-func-subscript: ExecInitFunc not fully ported — needs the execExpr-core \
-         ExecInitExprRec per-argument result-cell target model (each argument compiles into \
-         its own fcinfo->args[i] cell) plus the object_aclcheck / fmgr_info owner seams"
+        "execExpr-func-subscript: ExecInitFunc — object_aclcheck(ProcedureRelationId, funcid, \
+         GetUserId(), ACL_EXECUTE) needs GetUserId() (backend-utils-init-miscinit) and the \
+         function-execute object-access hook; and fmgr_info(funcid) -> FmgrInfo + \
+         InitFunctionCallInfoData (backend-utils-fmgr) cannot cross the fmgr seam (a resolved \
+         FmgrInfo embeds the native fn_addr), so the step's finfo/fcinfo_data/fn_addr and the \
+         strict/fusage opcode (which reads flinfo->fn_strict/fn_stats) cannot be filled. The \
+         per-arg fcinfo result-cell descent and opcode selection are this unit's own logic and \
+         land once the fmgr_info FmgrInfo-producing seam is exported."
     );
 }
 
@@ -416,34 +449,84 @@ pub(crate) fn exec_init_func<'mcx>(
 /// `SubPlanState` (nodeSubplan) and register it on the parent, then emit the
 /// `EEOP_SUBPLAN` step.
 pub(crate) fn exec_init_sub_plan_expr<'mcx>(
-    _subplan: &types_nodes::primnodes::SubPlan<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    subplan: &types_nodes::primnodes::SubPlan<'mcx>,
     state: &mut ExprState<'mcx>,
-    _resv: Option<&mut Datum>,
-    _resnull: Option<&mut bool>,
+    resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
-    // C: if (state->parent == NULL)
+    use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+
+    // C: ExprEvalStep scratch = {0};
+    // C: if (!state->parent)
     //        elog(ERROR, "SubPlan found with no parent plan");
     if state.parent.is_none() {
-        panic!("execExpr-func-subscript: ExecInitSubPlanExpr — SubPlan found with no parent plan");
+        return Err(types_error::PgError::error(
+            "SubPlan found with no parent plan",
+        ));
     }
-    // C: forboth(l, subplan->parParam, pvar, subplan->args) {
+
+    // C: Assert(list_length(subplan->parParam) == list_length(subplan->args));
+    //    forboth(l, subplan->parParam, pvar, subplan->args) {
+    //        int paramid = lfirst_int(l);
+    //        Expr *arg = (Expr *) lfirst(pvar);
     //        ExecInitExprRec(arg, state, resv, resnull);
-    //        scratch.opcode = EEOP_PARAM_SET; scratch.d.param.paramid = paramid;
-    //        scratch.d.param.paramtype = exprType(arg); ExprEvalPushStep(...);
+    //        scratch.opcode = EEOP_PARAM_SET;
+    //        scratch.resvalue = resv; scratch.resnull = resnull;
+    //        scratch.d.param.paramid = paramid;
+    //        scratch.d.param.paramtype = exprType((Node *) arg);
+    //        ExprEvalPushStep(state, &scratch);
     //    }
-    //    sstate = ExecInitSubPlan(subplan, state->parent);
-    //    state->parent->subPlan = lappend(state->parent->subPlan, sstate);
-    //    scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
-    //    ExprEvalPushStep(...);
     //
-    // The per-arg descent needs execExpr-core's not-yet-landed ExecInitExprRec
-    // result-cell-target model (it recurses into the shared resv/resnull cell);
-    // `ExecInitSubPlan` is owned by nodeSubplan (cross-unit seam). Faithful
-    // structure; in-unit + cross-unit deps not yet modeled.
+    // We evaluate each argument expression into resv/resnull (the shared output
+    // cell) and immediately follow it with an EEOP_PARAM_SET, so reusing one
+    // cell across params is safe — exactly the C rationale. `paramtype` is
+    // filled for completeness (the interpreter does not use it); C calls
+    // exprType(arg), but the owned model has no exprType seam threaded here, so
+    // the EEOP_PARAM_SET step carries InvalidOid for paramtype, matching the C
+    // comment "paramtype's not actually used".
+    debug_assert_eq!(subplan.parParam.len(), subplan.args.len());
+    for (l, pvar) in subplan.parParam.iter().zip(subplan.args.iter()) {
+        let paramid = *l;
+        let arg: &Expr = pvar;
+
+        crate::execExpr_core::exec_init_expr_rec(mcx, arg, state, resv)?;
+
+        let scratch = types_nodes::execexpr::ExprEvalStep {
+            opcode: ExprEvalOp::EEOP_PARAM_SET,
+            resvalue: resv,
+            resnull: resv,
+            d: ExprEvalStepData::Param {
+                paramid,
+                // C: scratch.d.param.paramtype = exprType((Node *) arg);
+                // (declared "not actually used"). No exprType seam threaded
+                // here; carry InvalidOid.
+                paramtype: types_core::InvalidOid,
+            },
+        };
+        crate::execExpr_core::expr_eval_push_step(mcx, state, scratch)?;
+    }
+
+    // C: sstate = ExecInitSubPlan(subplan, state->parent);
+    //    state->parent->subPlan = lappend(state->parent->subPlan, sstate);
+    //    scratch.opcode = EEOP_SUBPLAN;
+    //    scratch.resvalue = resv; scratch.resnull = resnull;
+    //    scratch.d.subplan.sstate = sstate;
+    //    ExprEvalPushStep(state, &scratch);
+    //
+    // `ExecInitSubPlan` is owned by nodeSubplan (builds the SubPlanState, sets
+    // up the hash tables / projections / combining-expr); it is not exported as
+    // a callable seam here, and the parent PlanState's `subPlan` list append is
+    // the parent owner's. The PARAM_SET argument-evaluation steps above are this
+    // unit's own logic and are emitted; the EEOP_SUBPLAN step needs the
+    // nodeSubplan-built SubPlanState the step must carry. Faithful structure;
+    // genuine cross-unit blocker.
+    let _ = subplan;
     panic!(
-        "execExpr-func-subscript: ExecInitSubPlanExpr not fully ported — needs the execExpr-core \
-         ExecInitExprRec recursion entry (for the EEOP_PARAM_SET argument descent) and the \
-         nodeSubplan ExecInitSubPlan owner seam"
+        "execExpr-func-subscript: ExecInitSubPlanExpr — ExecInitSubPlan(subplan, state->parent) \
+         is owned by nodeSubplan (builds the SubPlanState the EEOP_SUBPLAN step carries) and is \
+         not exported as a callable seam; the state->parent->subPlan lappend is the parent \
+         PlanState owner's. The EEOP_PARAM_SET argument descent above is this unit's own logic \
+         and is emitted."
     );
 }
 
@@ -494,20 +577,65 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
         VarReturningType::VAR_RETURNING_DEFAULT => {}
     }
 
-    // C: if (parent) { ... SubqueryScanState/CteScanState junk-filter setup,
-    //        scratch->d.wholerow.junkFilter = ExecInitJunkFilter(...); }
+    // C: PlanState *parent = state->parent;
+    //    if (parent) {
+    //        PlanState *subplan = NULL;
+    //        switch (nodeTag(parent)) {
+    //            case T_SubqueryScanState:
+    //                subplan = ((SubqueryScanState *) parent)->subplan; break;
+    //            case T_CteScanState:
+    //                subplan = ((CteScanState *) parent)->cteplanstate; break;
+    //            default: break;
+    //        }
+    //        if (subplan) { ... detect resjunk cols; if so,
+    //            scratch->d.wholerow.junkFilter =
+    //                ExecInitJunkFilter(subplan->plan->targetlist,
+    //                                   ExecInitExtraTupleSlot(parent->state, NULL,
+    //                                                          &TTSOpsVirtual)); } }
     //
-    // The parent PlanState's SubqueryScan/CteScan subplan-targetlist
-    // introspection and ExecInitJunkFilter / ExecInitExtraTupleSlot are owned
-    // by execProcnode / execJunk / execTuples (cross-unit). With no parent the
-    // C skips the whole block; that is the only shape this family compiles
-    // standalone, so leave junkFilter NULL — exactly the C `!parent` path.
-    if state.parent.is_some() {
-        panic!(
-            "execExpr-func-subscript: ExecInitWholeRowVar — parent-bearing junk-filter setup \
-             not ported (needs the SubqueryScan/CteScan subplan-targetlist introspection and \
-             the ExecInitJunkFilter / ExecInitExtraTupleSlot owner seams)"
-        );
+    // Only a SubqueryScan or CteScan parent yields a non-NULL `subplan` and thus
+    // any junk-filter work; every other parent tag hits the `default:` arm and
+    // leaves `subplan` NULL (junkFilter stays NULL — already set above). Neither
+    // `SubqueryScanState` nor `CteScanState` has landed as a `PlanStateNode`
+    // variant yet (`PlanStateNode::subquery_subplan_state()` is the modeled
+    // accessor and returns `None` for every current variant), so the owned model
+    // can faithfully realize the `default:` arm for every parent that can reach
+    // here: `subplan` is `None`, and the junk-filter block is correctly skipped.
+    if let Some(parent) = state.parent.as_deref() {
+        use types_nodes::nodes::T_SubqueryScanState;
+
+        let subplan: Option<&types_nodes::planstate::PlanStateNode<'mcx>> = match parent.tag() {
+            // C: case T_SubqueryScanState: subplan = ...->subplan;
+            //    case T_CteScanState: subplan = ...->cteplanstate;
+            // Reached via the modeled SubqueryScan/CteScan child-plan accessor.
+            // `CteScanState` has no node tag landed yet; a CteScan parent cannot
+            // exist as a `PlanStateNode` variant, so only the SubqueryScan tag is
+            // matchable today (both share the `default: break` -> NULL outcome
+            // until their variants land).
+            t if t == T_SubqueryScanState => parent.subquery_subplan_state(),
+            // C: default: break; — subplan stays NULL.
+            _ => None,
+        };
+
+        if let Some(subplan) = subplan {
+            // C: foreach(tlist, subplan->plan->targetlist)
+            //        if (tle->resjunk) { junk_filter_needed = true; break; }
+            //    if (junk_filter_needed)
+            //        scratch->d.wholerow.junkFilter = ExecInitJunkFilter(...);
+            //
+            // The subplan-targetlist resjunk scan plus ExecInitJunkFilter /
+            // ExecInitExtraTupleSlot (execJunk / execTuples owners) build the
+            // JunkFilter the step parks; route loudly only when a real
+            // SubqueryScan/CteScan parent is threaded (impossible today — neither
+            // variant has landed, so this arm is unreachable for current parents).
+            let _ = subplan;
+            panic!(
+                "execExpr-func-subscript: ExecInitWholeRowVar — a SubqueryScan/CteScan parent \
+                 needs the subplan-targetlist resjunk scan + ExecInitJunkFilter / \
+                 ExecInitExtraTupleSlot (execJunk / execTuples owner seams) to build the \
+                 whole-row JunkFilter"
+            );
+        }
     }
 
     Ok(())
@@ -520,39 +648,60 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
 /// and each subscript expression, emit the SUBSCRIPTS/OLD/ASSIGN/FETCH steps,
 /// and backpatch the null-jump targets.
 pub(crate) fn exec_init_subscripting_ref<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
     _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
     sbsref: &types_nodes::primnodes::SubscriptingRef,
     _state: &mut ExprState<'mcx>,
-    _resv: Option<&mut Datum>,
-    _resnull: Option<&mut bool>,
+    _resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
     // C: bool isAssignment = (sbsref->refassgnexpr != NULL);
     //    int nupper = list_length(sbsref->refupperindexpr);
     //    int nlower = list_length(sbsref->reflowerindexpr);
-    //    sbsroutines = getSubscriptingRoutines(sbsref->refcontainertype, NULL);
-    //    if (!sbsroutines) ereport(ERROR, "cannot subscript type %s ...");
     let _is_assignment = sbsref.refassgnexpr.is_some();
     let _nupper = sbsref.refupperindexpr.len() as i32;
     let _nlower = sbsref.reflowerindexpr.len() as i32;
 
-    // The subscript-handler resolution (getSubscriptingRoutines ->
-    // backend-utils-adt subscripting), the SubscriptExecSteps method install
-    // (sbsroutines->exec_setup), and the per-subscript / container / assign
-    // descent (ExecInitExprRec into the sbsrefstate->{upper,lower}index[i] and
-    // ->replacevalue cells, plus the innermost_caseval save/restore) all need
-    // either a cross-unit owner seam or execExpr-core's not-yet-landed
-    // ExecInitExprRec result-cell-target model. The `isAssignmentIndirectionExpr`
-    // gate (this family's own logic) is ported above and consulted here in the
-    // assignment path. Faithful structure; deps not yet modeled.
+    // C: sbsroutines = getSubscriptingRoutines(sbsref->refcontainertype, NULL);
+    //    if (!sbsroutines)
+    //        ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
+    //                errmsg("cannot subscript type %s because it does not support
+    //                        subscripting", format_type_be(sbsref->refcontainertype)),
+    //                ...);
     //
-    // C (assignment-indirection gate, faithfully ported, consulted below):
-    //    if (isAssignmentIndirectionExpr(sbsref->refassgnexpr)) { ... EEOP_SBSREF_OLD ... }
-    let _needs_old = is_assignment_indirection_expr(sbsref.refassgnexpr.as_deref());
-
+    // `getSubscriptingRoutines` (backend-utils-adt subscripting: looks up the
+    // type's `SubscriptRoutines` via the typsubscript support function) is the
+    // FIRST cross-unit call and has no exported seam in this repo. Everything
+    // downstream is gated on its `SubscriptRoutines`:
+    //
+    //  * the `SubscriptingRefState` workspace can be laid out (own logic:
+    //    isassignment/numupper/numlower + the upper/lower index+provided+null
+    //    arrays modeled as `PgVec`s, the C `palloc0(MAXALIGN(...) + (nupper +
+    //    nlower)*(sizeof(Datum)+2*sizeof(bool)))` single-block carve),
+    //  * but `sbsroutines->exec_setup(sbsref, sbsrefstate, &methods)` fills the
+    //    `SubscriptExecSteps` (the `sbs_check_subscripts` / `sbs_fetch` /
+    //    `sbs_fetch_old` / `sbs_assign` subroutine pointers + `fetch_strict`)
+    //    that the EEOP_SBSREF_SUBSCRIPTS / _OLD / _ASSIGN / _FETCH steps must
+    //    carry and that the `!isAssignment && fetch_strict` JUMP_IF_NULL and the
+    //    assignment `sbs_assign`/`sbs_fetch_old` presence checks branch on.
+    //
+    // The container/subscript/assign argument descent below it
+    // (`ExecInitExprRec(sbsref->refexpr, ..., resv)`, each subscript into
+    // `&sbsrefstate->{upper,lower}index[i]` / `[i]null`, and — gated by
+    // `isAssignmentIndirectionExpr(sbsref->refassgnexpr)` (this family's own
+    // helper, ported above) — the EEOP_SBSREF_OLD step + the
+    // innermost_caseval/innermost_casenull save/restore around
+    // `ExecInitExprRec(sbsref->refassgnexpr, ..., &replacevalue/&replacenull)`)
+    // is this unit's own logic and is expressible against the landed result-cell
+    // arena + `Func`/`SbsRef` step vocab — but it cannot run before the
+    // `SubscriptRoutines` (and thus the step subroutine pointers) exist. Per
+    // "mirror PG and panic", route loudly at the first unported owner.
     panic!(
-        "execExpr-func-subscript: ExecInitSubscriptingRef not fully ported — needs the \
-         getSubscriptingRoutines owner seam (backend-utils-adt subscripting) and the \
-         execExpr-core ExecInitExprRec result-cell-target model for the container/subscript/\
-         assign descent"
+        "execExpr-func-subscript: ExecInitSubscriptingRef — getSubscriptingRoutines(\
+         refcontainertype) (backend-utils-adt subscripting) has no exported seam; its \
+         SubscriptRoutines->exec_setup fills the SubscriptExecSteps (sbs_check_subscripts/\
+         sbs_fetch/sbs_fetch_old/sbs_assign + fetch_strict) the EEOP_SBSREF_* steps carry and \
+         branch on. The SubscriptingRefState workspace layout, the container/subscript/assign \
+         argument descent, and the isAssignmentIndirectionExpr-gated SBSREF_OLD step are this \
+         unit's own logic and land once the getSubscriptingRoutines seam is exported."
     );
 }

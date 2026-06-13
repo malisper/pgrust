@@ -74,7 +74,7 @@ fn ensure_result_arena<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgR
 /// Allocate a fresh result cell in `state`'s arena and return its
 /// [`ResultCellId`] — the owned-model replacement for `palloc(sizeof(Datum))`
 /// of a dedicated `Datum *`/`bool *` output target.
-fn new_result_cell<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<ResultCellId> {
+pub(crate) fn new_result_cell<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<ResultCellId> {
     ensure_result_arena(mcx, state)?;
     let cells = state.result_cells.cells.as_mut().unwrap();
     let id = ResultCellId(cells.len() as u32);
@@ -326,45 +326,9 @@ fn exec_create_expr_setup_steps_list<'mcx>(
     exec_push_expr_setup_steps(mcx, state, &info)
 }
 
-// ===========================================================================
-// ExecInitFunc — emit a function-call step (FuncExpr / OpExpr / DistinctExpr /
-// NullIfExpr). execExpr's own logic; the catalog ACL check + fmgr_info lookup
-// are the only genuine cross-unit callees and route through owner seams.
-// ===========================================================================
-
-/// `ExecInitFunc(scratch, node, args, funcid, inputcollid, state)` (execExpr.c)
-/// — set up a function/operator call step.
-///
-/// The C body, in order: `object_aclcheck(ProcedureRelationId, funcid, ...)`
-/// (catalog ACL), `palloc0(sizeof(FmgrInfo))` + `fmgr_info(funcid, flinfo)` +
-/// `InitFunctionCallInfoData` (fmgr), then recurses each non-Const argument into
-/// `&fcinfo->args[argno]` (own logic — the [`ExprState`] arena now models those
-/// per-arg cells, see the `Func.arg_cells` keystone field) and finally selects
-/// the strict/fusage opcode from `flinfo->fn_strict`/`fn_stats`.
-///
-/// The argument recursion + opcode-selection are this unit's own logic and are
-/// ready, but `fmgr_info` (producing the `FmgrInfo`/`FunctionCallInfo` the step
-/// must carry) and the catalog ACL check are genuine cross-unit callees with no
-/// `FmgrInfo`-producing seam exported yet. Per "mirror PG and panic", the arm
-/// routes here loudly until the fmgr_info seam lands.
-fn exec_init_func<'mcx>(
-    mcx: Mcx<'mcx>,
-    scratch: &mut ExprEvalStep<'mcx>,
-    node: &Expr,
-    args: &[Expr],
-    funcid: types_core::Oid,
-    inputcollid: types_core::Oid,
-    state: &mut ExprState<'mcx>,
-) -> PgResult<()> {
-    let _ = (mcx, scratch, node, args, funcid, inputcollid, state);
-    panic!(
-        "execExpr-core: ExecInitFunc needs the catalog ACL check + fmgr_info lookup seam \
-         (backend-utils-fmgr owns fmgr_info -> FmgrInfo + InitFunctionCallInfoData); no \
-         FmgrInfo-producing seam is exported yet. The per-arg fcinfo result cells (Func.arg_cells), \
-         argument recursion, and strict/fusage opcode selection are modeled and ready once the \
-         seam lands."
-    );
-}
+// ExecInitFunc lives in execExpr_func_subscript (this crate's func/subscript
+// family); the dispatch arms below route FuncExpr/OpExpr/DistinctExpr/NullIfExpr
+// through `crate::execExpr_func_subscript::exec_init_func`.
 
 // ===========================================================================
 // ExecInitExprRec — the opcode-emission switch
@@ -373,7 +337,7 @@ fn exec_init_func<'mcx>(
 /// `ExecInitExprRec(node, state, resv, resnull)` (execExpr.c) — append the
 /// steps that evaluate `node`, leaving the result in the caller's output cell
 /// (`resv`, a [`ResultCellId`] into `state`'s arena).
-fn exec_init_expr_rec<'mcx>(
+pub(crate) fn exec_init_expr_rec<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Expr,
     state: &mut ExprState<'mcx>,
@@ -395,10 +359,17 @@ fn exec_init_expr_rec<'mcx>(
             };
 
             if variable.varattno == types_core::InvalidAttrNumber {
-                panic!(
-                    "execExpr-core: whole-row Var compilation not ported (owner: \
-                     execExpr_func_subscript::ExecInitWholeRowVar)"
-                );
+                // Whole-row Var: ExecInitWholeRowVar fills the EEOP_WHOLEROW
+                // scratch (owned by the func/subscript family), then we push it.
+                let mut scratch = scratch_for(resv);
+                crate::execExpr_func_subscript::exec_init_whole_row_var(
+                    mcx,
+                    &mut scratch,
+                    variable,
+                    state,
+                )?;
+                expr_eval_push_step(mcx, state, scratch)?;
+                return Ok(());
             } else if variable.varattno <= 0 {
                 // system column
                 set_var_payload(&mut scratch, variable.varattno as i32, variable.vartype);
@@ -535,7 +506,7 @@ fn exec_init_expr_rec<'mcx>(
         // ----- T_FuncExpr / T_OpExpr / T_DistinctExpr / T_NullIfExpr -----
         Expr::FuncExpr(func) => {
             let mut scratch = scratch_for(resv);
-            exec_init_func(
+            crate::execExpr_func_subscript::exec_init_func(
                 mcx,
                 &mut scratch,
                 node,
@@ -555,20 +526,20 @@ fn exec_init_expr_rec<'mcx>(
         // so the dispatch is shaped, then panic in ExecInitFunc.
         Expr::OpExpr(op) => {
             let mut scratch = scratch_for(resv);
-            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
         Expr::DistinctExpr(op) => {
             let mut scratch = scratch_for(resv);
-            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_DISTINCT;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
         Expr::NullIfExpr(op) => {
             let mut scratch = scratch_for(resv);
-            exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_NULLIF;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
@@ -929,10 +900,12 @@ fn exec_init_expr_rec<'mcx>(
             "execExpr-core: RowCompareExpr needs per-column fmgr_info comparison lookups (fmgr \
              owner seam)"
         ),
-        Expr::SubscriptingRef(_) => panic!(
-            "execExpr-core: SubscriptingRef compilation is owned by execExpr_func_subscript \
-             (ExecInitSubscriptingRef)"
-        ),
+        Expr::SubscriptingRef(sbsref) => {
+            let mut scratch = scratch_for(resv);
+            crate::execExpr_func_subscript::exec_init_subscripting_ref(
+                mcx, &mut scratch, sbsref, state, resv,
+            )
+        }
         Expr::CoerceViaIO(_) => panic!(
             "execExpr-core: CoerceViaIO needs getTypeOutputInfo/getTypeInputInfo + fmgr_info \
              (lsyscache/fmgr owner seams); owned by execExpr_func_subscript"
@@ -953,9 +926,23 @@ fn exec_init_expr_rec<'mcx>(
             "execExpr-core: domain coercion is owned by execExpr_domain_agg \
              (ExecInitCoerceToDomain) — needs the domain constraint list (typcache owner)"
         ),
-        Expr::SubPlan(_) | Expr::AlternativeSubPlan(_) => panic!(
-            "execExpr-core: SubPlan is owned by execExpr_func_subscript (ExecInitSubPlanExpr) — \
-             needs nodeSubplan's ExecInitSubPlan"
+        Expr::SubPlan(subplan) => {
+            // `Expr::SubPlan` carries a `Box<SubPlan<'static>>` (the lifetime-free
+            // Expr enum erases the arena lifetime); the SubPlan tree is allocated
+            // in the EState per-query context, so reinstate the compiler's `'mcx`
+            // to thread it (same lifetime-erasure precedent as the Opaque
+            // carriers in this crate).
+            let sub: &types_nodes::primnodes::SubPlan<'mcx> = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::primnodes::SubPlan<'static>,
+                    &types_nodes::primnodes::SubPlan<'mcx>,
+                >(&subplan.0)
+            };
+            crate::execExpr_func_subscript::exec_init_sub_plan_expr(mcx, sub, state, resv)
+        }
+        Expr::AlternativeSubPlan(_) => panic!(
+            "execExpr-core: AlternativeSubPlan must be replaced by a concrete SubPlan before \
+             execution (planner: select cheapest alternative)"
         ),
         Expr::WindowFunc(_) => panic!(
             "execExpr-core: WindowFunc setup is owned by nodeWindowAgg (WindowFuncExprState); the \
@@ -986,7 +973,7 @@ fn exec_init_expr_rec<'mcx>(
 }
 
 /// Helper: a zero-initialized scratch step targeting `resv`.
-fn scratch_for<'mcx>(resv: ResultCellId) -> ExprEvalStep<'mcx> {
+pub(crate) fn scratch_for<'mcx>(resv: ResultCellId) -> ExprEvalStep<'mcx> {
     ExprEvalStep {
         opcode: ExprEvalOp::EEOP_FUNCEXPR,
         resvalue: resv,
