@@ -18,3 +18,5 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-nodes-readfuncs-seams = { path = "../backend-nodes-readfuncs-seams" }

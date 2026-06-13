@@ -50,10 +50,16 @@ pub mod value_core;
 ///
 /// `tbm_add_tuple` (in the same seams crate) and every seam in
 /// `backend-nodes-core-tidbitmap-seams` / `-makefuncs-seams` / `-params-seams`
-/// / `-read-seams` / `-nodeFuncs-seams` stay UNINSTALLED (they panic on call)
-/// until their families are filled — `mirror-pg-and-panic`.
+/// / `-nodeFuncs-seams` stay UNINSTALLED (they panic on call) until their
+/// families are filled — `mirror-pg-and-panic`. The **read** family is now
+/// filled, so its `backend-nodes-read-seams::string_to_node` is installed here;
+/// `string_to_node` of a node tree still routes the body through the unported
+/// `backend-nodes-readfuncs-seams::parse_node_string`, which panics until the
+/// readfuncs unit lands.
 pub fn init_seams() {
     use backend_nodes_core_seams as seams;
+
+    backend_nodes_read_seams::string_to_node::set(read::string_to_node);
 
     seams::bms_is_member::set(bitmapset::bms_is_member);
     seams::bms_add_member::set(bitmapset::bms_add_member);
