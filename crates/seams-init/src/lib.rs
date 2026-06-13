@@ -62,6 +62,7 @@ pub fn init_all() {
     backend_utils_init_small::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
+    backend_utils_misc_more::init_seams();
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();

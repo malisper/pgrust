@@ -3282,6 +3282,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-more"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-more-seams",
+ "backend-utils-misc-ps-status-seams",
+ "common-controldata-utils-seams",
+ "libc",
+ "mcx",
+ "types-control",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
+ "types-syscache",
+]
+
+[[package]]
 name = "backend-utils-misc-more-seams"
 version = "0.0.0"
 dependencies = [
@@ -3453,6 +3482,15 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "common-controldata-utils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-control",
+ "types-error",
+]
 
 [[package]]
 name = "common-ip-seams"
@@ -3643,6 +3681,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",

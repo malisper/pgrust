@@ -27,6 +27,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+    /// `Form_pg_class.relrowsecurity`/`relforcerowsecurity` flags
+    /// (`utils/misc/rls.c`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+    /// the installer owns the `ReleaseSysCache`.
+    pub fn search_relation_rls_flags(relid: Oid) -> PgResult<Option<(bool, bool)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` projected to the
+    /// `Form_pg_authid.rolsuper` flag (`utils/misc/superuser.c`). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`), where `superuser_arg` treats the
+    /// role as a non-superuser; the installer owns the `ReleaseSysCache`.
+    pub fn search_authid_rolsuper(roleid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the
     /// `Form_pg_opclass` fields the hash validator reads, copied into `mcx`.
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).

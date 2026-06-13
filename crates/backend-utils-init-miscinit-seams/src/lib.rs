@@ -42,6 +42,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InNoForceRLSOperation()` (miscinit.c): `SecurityRestrictionContext &
+    /// SECURITY_NOFORCE_RLS`. A plain backend-local global read — infallible.
+    pub fn in_no_force_rls_operation() -> bool
+);
+
+seam_core::seam!(
     /// `GetUserIdAndSecContext(&userid, &sec_context)` (miscinit.c): the
     /// current user ID and security-context bitmask. Reads backend-local
     /// state; infallible.
@@ -80,6 +86,13 @@ seam_core::seam!(
     /// `GetUserId()` (miscinit.c): the current effective user id. Pure
     /// global read (asserts validity in C); cannot `ereport`.
     pub fn get_user_id() -> Oid
+);
+
+seam_core::seam!(
+    /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
+    /// process-type description string for `backendType` (a static table
+    /// lookup; the C returns a `const char *` into static text). Infallible.
+    pub fn get_backend_type_desc(backend_type: types_core::init::BackendType) -> &'static str
 );
 
 // ---- critical-section / interrupt brackets + superuser check (miscadmin.h) ----

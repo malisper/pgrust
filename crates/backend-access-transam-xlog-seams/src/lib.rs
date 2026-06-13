@@ -32,6 +32,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `wal_segment_size` (xlog.c global, bytes-per-WAL-segment). A plain
+    /// global read — infallible.
+    pub fn wal_segment_size() -> i32
+);
+
+seam_core::seam!(
     /// `InRecovery` (xlog.c global) — true in the startup process during
     /// crash/archive recovery.
     pub fn in_recovery() -> bool
