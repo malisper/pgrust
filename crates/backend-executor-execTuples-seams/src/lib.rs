@@ -238,6 +238,60 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
 
+/// One read of a slot/tuple attribute: its `Datum` plus is-null.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotAttr {
+    pub value: types_datum::Datum,
+    pub isnull: bool,
+}
+
+seam_core::seam!(
+    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h): fetch a user
+    /// attribute of the slot's current tuple as `(datum, isnull)`. The slot is
+    /// addressed by its pool id; reads it out of the EState slot pool.
+    /// Deforming can detoast/allocate, so fallible. (The `&mut TupleTableSlot`
+    /// form above is the same C op reached through a borrowed slot; this
+    /// pool-id form is the one the owned-EState executor nodes use.)
+    pub fn slot_getattr_by_id<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<SlotAttr>
+);
+
+seam_core::seam!(
+    /// `slot->tts_tupleDescriptor->natts` of the slot addressed by its pool id
+    /// (`slotAllNulls`/`slotNoNulls` over a scan slot; the EXPR/MULTIEXPR
+    /// per-column loops bound). Infallible.
+    pub fn slot_natts(estate: &types_nodes::EStateData<'_>, slot: types_nodes::SlotId) -> i32
+);
+
+seam_core::seam!(
+    /// `node->curTuple = ExecCopySlotHeapTuple(slot)` after
+    /// `if (node->curTuple) heap_freetuple(node->curTuple)` (nodeSubplan.c):
+    /// copy the slot's current tuple into the node's `curTuple` (freeing any
+    /// previous copy). The copy is allocated in the per-query context; fallible
+    /// on OOM.
+    pub fn replace_cur_tuple_from_slot<'mcx>(
+        node: &mut types_nodes::execexpr::SubPlanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_getattr(node->curTuple, attnum, tdesc, &isnull)` (htup_details.h)
+    /// where `tdesc` is the producing slot's descriptor (nodeSubplan.c): read
+    /// column `attnum` of the node's `curTuple`. The descriptor is the slot the
+    /// tuple was copied from, addressed by its pool id. Fallible (detoast).
+    pub fn cur_tuple_getattr<'mcx>(
+        node: &types_nodes::execexpr::SubPlanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        attnum: types_core::AttrNumber,
+    ) -> types_error::PgResult<SlotAttr>
+);
+
 seam_core::seam!(
     /// `ExecGetResultType(planstate)` (execUtils.c/executor.h): the node's
     /// result tuple descriptor (`planstate->ps_ResultTupleSlot`'s descriptor),
@@ -259,6 +313,42 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecTypeFromTL(targetList)` (execTuples.c): build a tuple descriptor
+    /// from a target list (the planner's `indextlist` for an index-only scan),
+    /// allocated in `mcx`. Fallible on OOM.
+    pub fn exec_type_from_tl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        target_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecAllocTableSlot(tupleTable, desc, tts_ops)` (execTuples.c): allocate
+    /// a slot in the EState slot pool with the given descriptor and slot class,
+    /// returning its pool id. The descriptor is the relation's
+    /// `RelationGetDescr` copy; the slot class is `table_slot_callbacks`'s
+    /// result. Fallible on OOM.
+    pub fn exec_alloc_table_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        desc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c):
+    /// store a heap tuple in the slot regardless of the slot's native format
+    /// (materializing it if the slot is not a heap-tuple slot). Targets the
+    /// slot by pool id. Fallible on OOM.
+    pub fn exec_force_store_heap_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
     /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
     /// taking ownership when `should_free`. Fallible on OOM.
@@ -267,6 +357,33 @@ seam_core::seam!(
         mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
         should_free: bool,
         estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecStoreVirtualTuple(slot)` (tuptable.h/execTuples.c): mark the slot
+    /// as holding a valid virtual tuple (its `tts_values`/`tts_isnull` arrays
+    /// have already been filled, e.g. by `index_deform_tuple`). Targets the
+    /// slot by pool id. Fallible only via the slot-ops `ereport(ERROR)` paths.
+    pub fn exec_store_virtual_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Slot-payload op for `StoreIndexTuple`'s name-cstring fix-up
+    /// (nodeIndexonlyscan.c): for each attribute number in `attnums` whose slot
+    /// value is non-null, copy the cstring datum into a NAMEDATALEN-byte
+    /// allocation in `per_tuple_ecxt` (the C `namestrcpy` zero-pad) and store
+    /// the resulting `Name` datum back. The decision of *which* attnums is the
+    /// node's owned logic; this seam performs only the slot-value read/write
+    /// the slot owns. Fallible on OOM.
+    pub fn pad_name_cstring_columns<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        per_tuple_ecxt: types_nodes::EcxtId,
+        attnums: &[types_core::AttrNumber],
     ) -> types_error::PgResult<()>
 );
 
@@ -281,4 +398,19 @@ seam_core::seam!(
         mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
         bool,
     )>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): the
+    /// slot's contents as a `MinimalTuple` (`slot->tts_ops->get_minimal_tuple`
+    /// or `copy_minimal_tuple`). The owned model always returns a copy into
+    /// `mcx`, so the C `shouldFree` / `heap_free_minimal_tuple` bookkeeping is
+    /// internal to the owner and does not cross the seam. The materialize /
+    /// copy path allocates, so the call is fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<
+        types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    >
 );

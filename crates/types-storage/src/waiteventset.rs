@@ -42,8 +42,7 @@ impl WaitEventSetHandle {
     }
 }
 
-/// `struct WaitEvent` (`storage/waiteventset.h`), trimmed (`user_data`
-/// dropped: no consumer stores per-event payloads yet).
+/// `struct WaitEvent` (`storage/waiteventset.h`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WaitEvent {
     /// Position in the event data structure.
@@ -52,4 +51,12 @@ pub struct WaitEvent {
     pub events: u32,
     /// Socket fd associated with the event, if any.
     pub fd: pgsocket,
+    /// `void *user_data` — the opaque per-event payload supplied at
+    /// `AddWaitEventToSet` time and handed back by `WaitEventSetWait`. The C
+    /// `void *` is an aliasing back-pointer to whatever the registrant owns;
+    /// the owned model carries a non-aliasing key instead (`None` = the C
+    /// `NULL`). nodeAppend's `ExecAsyncConfigureWait` registers the owning
+    /// `AsyncRequest`'s `request_index` here so the delivery loop can recover
+    /// the single matched request, mirroring C's `(AsyncRequest *) w->user_data`.
+    pub user_data: Option<i32>,
 }

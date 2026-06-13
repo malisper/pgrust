@@ -24,6 +24,8 @@ pub fn init_all() {
     backend_executor_execParallel::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
+    backend_executor_nodeHash::init_seams();
+    backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMergejoin::init_seams();
     backend_libpq_pqcomm::init_seams();
@@ -44,6 +46,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
+    backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
@@ -55,7 +58,6 @@ pub fn init_all() {
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_cache_attoptcache::init_seams();
-    backend_utils_cache_inval::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();
     backend_utils_cache_syscache::init_seams();

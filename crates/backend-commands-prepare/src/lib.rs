@@ -48,9 +48,11 @@ use types_error::{
 };
 
 use types_nodes::nodes::{CmdType, Node};
+use types_nodes::primnodes::Expr;
+use types_nodes::EStateData;
 use types_nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DeallocateStmt, DestReceiverHandle,
-    EStateHandle, ExecuteStmt, ExplainState, IntoClause, ParamListInfoHandle, ParseState,
+    ExecuteStmt, ExplainState, IntoClause, ParamListInfoHandle, ParseState,
     PortalHandle, PrepareStmt, PreparedStatement, QueryCompletionHandle, RawStmt,
     ResourceOwnerHandle,
 };
@@ -235,7 +237,7 @@ pub fn ExecuteQuery<'mcx>(
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
     let mut param_li: ParamListInfoHandle = ParamListInfoHandle::NULL;
-    let mut estate: EStateHandle = EStateHandle::NULL;
+    let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
     let eflags: i32;
     let count: i64;
 
@@ -256,9 +258,10 @@ pub fn ExecuteQuery<'mcx>(
     //     estate = CreateExecutorState(); estate->es_param_list_info = params;
     //     paramLI = EvaluateParams(pstate, entry, stmt->params, estate); }
     if plancache_seam::plansource_num_params::call(entry.plansource)? > 0 {
-        estate = execexpr_seam::create_executor_state::call()?;
-        execexpr_seam::estate_set_param_list_info::call(estate, params)?;
-        param_li = EvaluateParams(mcx, pstate, &entry, &stmt.params, estate)?;
+        let mut es = execexpr_seam::create_executor_state::call(mcx)?;
+        es.es_param_list_info = params;
+        param_li = EvaluateParams(mcx, pstate, &entry, &stmt.params, &mut es)?;
+        estate = Some(es);
     }
 
     // portal = CreateNewPortal(); portal->visible = false;
@@ -338,8 +341,8 @@ pub fn ExecuteQuery<'mcx>(
     portal_seam::portal_drop::call(&portal)?;
 
     // if (estate) FreeExecutorState(estate);
-    if estate != EStateHandle::NULL {
-        execexpr_seam::free_executor_state::call(estate)?;
+    if let Some(es) = estate {
+        execexpr_seam::free_executor_state::call(es)?;
     }
 
     // No need to pfree other memory, MemoryContext will be reset.
@@ -358,7 +361,7 @@ fn EvaluateParams<'mcx>(
     pstate: &ParseState<'mcx>,
     pstmt: &PreparedStatement,
     params: &[mcx::PgBox<'mcx, Node<'mcx>>],
-    estate: EStateHandle,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<ParamListInfoHandle> {
     // Oid *param_types = pstmt->plansource->param_types;
     // int num_params = pstmt->plansource->num_params;
@@ -385,29 +388,28 @@ fn EvaluateParams<'mcx>(
     }
 
     // params = copyObject(params); — the parser scribbles on its input, so it
-    // copies first. The owned node list is moved/cloned into a uniquely-owned
-    // working copy here.
-    let mut params_work: mcx::PgVec<'mcx, mcx::PgBox<'mcx, Node<'mcx>>> =
-        mcx::vec_with_capacity_in(mcx, params.len())?;
-    for n in params.iter() {
-        params_work.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
-    }
-
+    // copies first.
+    //
     // foreach(l, params) { expr = transformExpr(...); given = exprType(expr);
     //     expr = coerce_to_target_type(...); if (!expr) ereport(...);
     //     assign_expr_collations(...); lfirst(l) = expr; }
+    //
+    // In the owned model the per-parameter analysis seam takes the raw parser
+    // node and returns the finished `Expr`; we collect them into the working
+    // `Expr` list (`lfirst(l) = expr`) handed to `ExecPrepareExprList`.
     let p_sourcetext: &str = pstate
         .p_sourcetext
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("");
+    let mut params_work: mcx::PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, num_params as usize)?;
     let mut i: i32 = 0;
     while i < num_params {
         let expected_type_id = param_types[i as usize];
         let res = parseexpr_seam::analyze_one_exec_param::call(
             mcx,
             p_sourcetext,
-            params_work.as_mut_slice(),
+            &params[i as usize],
             i,
             expected_type_id,
         )?;
@@ -427,12 +429,17 @@ fn EvaluateParams<'mcx>(
             .with_cursor_position(cursor));
         }
 
+        // lfirst(l) = expr;
+        let expr = res
+            .expr
+            .expect("analyze_one_exec_param returns Some expr when coercion succeeds");
+        params_work.push((*expr).clone());
         i += 1;
     }
 
     // exprstates = ExecPrepareExprList(params, estate);
     let exprstates =
-        execexpr_seam::exec_prepare_expr_list::call(mcx, params_work.as_slice(), estate)?;
+        execexpr_seam::exec_prepare_expr_list::call(params_work.as_slice(), estate)?;
 
     // paramLI = makeParamList(num_params);
     let param_li = params_seam::make_param_list::call(num_params)?;
@@ -446,7 +453,7 @@ fn EvaluateParams<'mcx>(
     while i < num_params {
         execexpr_seam::eval_exec_param_into_list::call(
             param_li,
-            exprstates[i as usize],
+            &exprstates[i as usize],
             i,
             param_types[i as usize],
             estate,
@@ -672,7 +679,7 @@ pub fn ExplainExecuteQuery<'mcx>(
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
     let mut param_li: ParamListInfoHandle = ParamListInfoHandle::NULL;
-    let mut estate: EStateHandle = EStateHandle::NULL;
+    let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
 
     // if (es->memory) { create+switch planner ctx } if (es->buffers) snapshot
     // pgBufferUsage; INSTR_TIME_SET_CURRENT(planstart);
@@ -703,9 +710,10 @@ pub fn ExplainExecuteQuery<'mcx>(
     // EvaluateParams only consults p_sourcetext, and C copies pstate's into the
     // throwaway pstate_params, so we pass `pstate` straight through.
     if plancache_seam::plansource_num_params::call(entry.plansource)? != 0 {
-        estate = execexpr_seam::create_executor_state::call()?;
-        execexpr_seam::estate_set_param_list_info::call(estate, params)?;
-        param_li = EvaluateParams(mcx, pstate, &entry, &execstmt.params, estate)?;
+        let mut es_state = execexpr_seam::create_executor_state::call(mcx)?;
+        es_state.es_param_list_info = params;
+        param_li = EvaluateParams(mcx, pstate, &entry, &execstmt.params, &mut es_state)?;
+        estate = Some(es_state);
     }
 
     // cplan = GetCachedPlan(entry->plansource, paramLI, CurrentResourceOwner,
@@ -786,8 +794,8 @@ pub fn ExplainExecuteQuery<'mcx>(
     }
 
     // if (estate) FreeExecutorState(estate);
-    if estate != EStateHandle::NULL {
-        execexpr_seam::free_executor_state::call(estate)?;
+    if let Some(es_state) = estate {
+        execexpr_seam::free_executor_state::call(es_state)?;
     }
 
     // ReleaseCachedPlan(cplan, CurrentResourceOwner);

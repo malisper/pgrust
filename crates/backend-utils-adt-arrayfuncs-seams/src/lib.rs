@@ -11,10 +11,86 @@
 //! The owning unit (`backend-utils-adt-array-more`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::{Mcx, PgString, PgVec};
+use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::Oid;
+use types_datum::array_build::ArrayBuildStateAny;
 use types_datum::datum::Datum;
 use types_error::PgResult;
+use types_nodes::{EStateData, EcxtId};
+
+/// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.
+/// `None` is the C `NULL` (no accumulator yet / empty result).
+pub type ArrayBuildStateAnyHandle<'mcx> = Option<PgBox<'mcx, ArrayBuildStateAny>>;
+
+/// Which of an `ExprContext`'s two memory contexts a polymorphic-array build
+/// step allocates in. The C reaches the live memory context through the
+/// ambient `CurrentMemoryContext` / `econtext->ecxt_per_query_memory`; the
+/// owned model has no ambient current context, so the caller names the target
+/// relative to its `econtext` (`EcxtId`) and the arrayfuncs owner resolves the
+/// real `MemoryContext` (and its `'mcx`-lived handle) off the EState.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayBuildCtx {
+    /// `CurrentMemoryContext` at entry — for a SubPlan evaluated inside
+    /// expression evaluation that is `econtext->ecxt_per_tuple_memory` (the
+    /// short-lived per-tuple eval context that the caller resets between outer
+    /// tuples). Used by `ExecScanSubPlan`'s ARRAY_SUBLINK path.
+    PerTuple,
+    /// `econtext->ecxt_per_query_memory` (== the EState's `es_query_cxt`) — the
+    /// per-query context that survives until query end. Used by
+    /// `ExecSetParamPlan`'s ARRAY_SUBLINK path (the result is stashed in
+    /// `node->curArray` for cross-call reuse).
+    PerQuery,
+}
+
+seam_core::seam!(
+    /// `initArrayResultAny(input_type, CurrentMemoryContext, true)`
+    /// (arrayfuncs.c): create a fresh polymorphic array accumulator for
+    /// elements of `input_type`, allocated in the memory context the `econtext`
+    /// names with `ctx`. Fallible on OOM.
+    pub fn init_array_result_any<'mcx>(
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
+        input_type: Oid,
+    ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>>
+);
+
+seam_core::seam!(
+    /// `accumArrayResultAny(astate, dvalue, disnull, input_type, ctx)`
+    /// (arrayfuncs.c): accumulate one value into the accumulator (creating it
+    /// if `None`), in the memory context the `econtext` names with `ctx`.
+    /// Returns the (possibly newly created) accumulator. Fallible on OOM.
+    pub fn accum_array_result_any<'mcx>(
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
+        astate: ArrayBuildStateAnyHandle<'mcx>,
+        dvalue: Datum,
+        disnull: bool,
+        input_type: Oid,
+    ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>>
+);
+
+seam_core::seam!(
+    /// `makeArrayResultAny(astate, ctx, true)` (arrayfuncs.c): finalize the
+    /// accumulator into an array `Datum`, allocated in the memory context the
+    /// `econtext` names with `ctx`. A `None` accumulator yields an empty array
+    /// (not NULL). Fallible on OOM.
+    pub fn make_array_result_any<'mcx>(
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
+        astate: ArrayBuildStateAnyHandle<'mcx>,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `pfree(DatumGetPointer(node->curArray))` (utils/palloc.h): free a
+    /// previously built array `Datum` held in the node's `curArray`. A null
+    /// `Datum` is a no-op (the C guards with `!= PointerGetDatum(NULL)`).
+    /// Infallible.
+    pub fn pfree_array_datum(curarray: Datum)
+);
 
 seam_core::seam!(
     /// `construct_array_builtin(elems, nelems, elmtype)` (arrayfuncs.c): build
@@ -39,6 +115,21 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         array: &[u8],
     ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `DatumGetArrayTypeP(arraydatum)` then
+    /// `deconstruct_array_builtin(itemarray, TIDOID, &ipdatums, &ipnulls,
+    /// &ndatums)` (arrayfuncs.c): detoast the `tid[]` array `Datum` and split
+    /// it into its per-element `(ItemPointerData, isnull)` pairs, in order
+    /// (`ipdatums[i]` reinterpreted via `DatumGetPointer` as an
+    /// `ItemPointer`). The C result arrays are palloc'd in the current context
+    /// (and pfree'd by the caller); the owned model returns them in `mcx`.
+    /// Fallible on `ereport(ERROR)` (malformed array).
+    pub fn deconstruct_tid_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<PgVec<'mcx, (types_tuple::heaptuple::ItemPointerData, bool)>>
 );
 
 seam_core::seam!(

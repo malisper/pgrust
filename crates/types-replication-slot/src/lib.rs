@@ -18,6 +18,26 @@ use types_tuple::heaptuple::NameData;
 /// `PG_REPLSLOT_DIR` (slot.h) — directory to store replication slot data in.
 pub const PG_REPLSLOT_DIR: &str = "pg_replslot";
 
+/// `ReplicationSlot *` identified to the `slot.c` owner by its index into
+/// `ReplicationSlotCtl->replication_slots[]`. The live struct embeds real lock
+/// primitives and is owner-private; non-`MyReplicationSlot` slots (e.g. the
+/// `slotsync` array scan in `get_local_synced_slots`) are reached through the
+/// owner's by-handle seams, which map the index back to `&replication_slots[i]`.
+/// `NONE` is the `NULL` sentinel (no in-range index equals it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ReplicationSlotHandle(pub i32);
+
+impl ReplicationSlotHandle {
+    /// Sentinel for a `NULL` `ReplicationSlot *`.
+    pub const NONE: ReplicationSlotHandle = ReplicationSlotHandle(-1);
+
+    /// `slot == NULL`.
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self == ReplicationSlotHandle::NONE
+    }
+}
+
 /// `ReplicationSlotPersistency` (slot.h) — behaviour of replication slots upon
 /// release or crash.
 #[repr(C)]

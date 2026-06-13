@@ -80,3 +80,26 @@ seam_core::seam!(
     /// `makeStringInfo()` — allocate an empty output buffer (`ctx->out`).
     pub fn makeStringInfo() -> types_logical::StringInfoHandle
 );
+
+// ---------------------------------------------------------------------------
+// Archiver's private memory context (pgarch.c).
+//
+// `archive_context = AllocSetContextCreate(TopMemoryContext, "archiver",
+// ALLOCSET_DEFAULT_SIZES)`. The handle is created once in PgArchiverMain and
+// thereafter switched into / reset around each archive_file_cb call. Same
+// DESIGN_DEBT shape as the logical-decoding context above: the mmgr owner
+// resolves these opaque handles; the calling sequence (when to switch and when
+// to reset) is archiver-private logic that lives in backend-postmaster-pgarch.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `AllocSetContextCreate(TopMemoryContext, "archiver",
+    /// ALLOCSET_DEFAULT_SIZES)` (pgarch.c PgArchiverMain).
+    pub fn create_archiver_memcxt() -> types_logical::MemoryContextHandle
+);
+seam_core::seam!(
+    /// `MemoryContextReset(context)` — release the context's child contexts
+    /// and free all but the context's standard allocation, keeping the
+    /// context itself reusable.
+    pub fn MemoryContextReset(context: types_logical::MemoryContextHandle)
+);

@@ -129,8 +129,13 @@ seam_core::seam!(
 
 // ===========================================================================
 // SharedTuplestore (utils/sort/sharedtuplestore.c) — the parallel hash join's
-// per-batch shared tuplestores. `SharedTuplestoreAccessor` is the opaque
-// per-backend handle (types_nodes::nodehashjoin).
+// per-batch shared tuplestores. Two opacity models coexist for the same C
+// `SharedTuplestoreAccessor *`: nodeHashjoin threads it as the
+// `types_nodes::nodehashjoin::SharedTuplestoreAccessor` struct (the `&mut`
+// seams below), while nodeHash threads it as the
+// `types_execparallel::SharedTuplestoreAccessorHandle` token (the `*_handle`
+// seams below). The owning unit installs both from its `init_seams()` when it
+// lands; until then a call panics loudly.
 // ===========================================================================
 
 seam_core::seam!(
@@ -189,4 +194,97 @@ seam_core::seam!(
         ntuples: i64,
         forward: bool,
     ) -> types_error::PgResult<bool>
+);
+
+// ---------------------------------------------------------------------------
+//  Handle-threaded SharedTuplestore surface (nodeHash / parallel hash build).
+//  Same C functions as above; the `SharedTuplestoreAccessor *` is carried as
+//  the opaque `SharedTuplestoreAccessorHandle` token.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `sts_estimate(participants)` (sharedtuplestore.c): size of the shared
+    /// state object for the given participant count. A pure arithmetic
+    /// computation — infallible.
+    pub fn sts_estimate(participants: i32) -> types_core::Size
+);
+
+seam_core::seam!(
+    /// `sts_initialize(sts, participants, my_participant_number, meta_data_size,
+    /// flags, fileset, name)` (sharedtuplestore.c): initialize the shared
+    /// tuplestore object in place (in DSM) and return this backend's accessor.
+    pub fn sts_initialize(
+        sts: types_execparallel::SharedTuplestoreHandle,
+        participants: i32,
+        my_participant_number: i32,
+        meta_data_size: types_core::Size,
+        flags: i32,
+        fileset: types_execparallel::SharedFileSetHandle,
+        name: &str,
+    ) -> types_error::PgResult<types_execparallel::SharedTuplestoreAccessorHandle>
+);
+
+seam_core::seam!(
+    /// `sts_attach(sts, my_participant_number, fileset)` (sharedtuplestore.c):
+    /// attach to an already-initialized shared tuplestore.
+    pub fn sts_attach(
+        sts: types_execparallel::SharedTuplestoreHandle,
+        my_participant_number: i32,
+        fileset: types_execparallel::SharedFileSetHandle,
+    ) -> types_error::PgResult<types_execparallel::SharedTuplestoreAccessorHandle>
+);
+
+seam_core::seam!(
+    /// `sts_reinitialize(accessor)` (sharedtuplestore.c): prepare an
+    /// already-written shared tuplestore to be read again from the start.
+    pub fn sts_reinitialize(
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_begin_parallel_scan(accessor)` (sharedtuplestore.c): begin a
+    /// cooperative parallel scan of every participant's partition.
+    pub fn sts_begin_parallel_scan_handle(
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_end_parallel_scan(accessor)` (sharedtuplestore.c): end the
+    /// cooperative parallel scan, releasing read buffers. Infallible.
+    pub fn sts_end_parallel_scan_handle(
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+    )
+);
+
+seam_core::seam!(
+    /// `sts_puttuple(accessor, meta_data, tuple)` (sharedtuplestore.c): write a
+    /// tuple plus its fixed-size meta-data (the tuple's hash value, in parallel
+    /// hash) to this participant's partition.
+    pub fn sts_puttuple_handle(
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+        meta_data: &[u8],
+        tuple: &types_tuple::heaptuple::MinimalTupleData<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_end_write(accessor)` (sharedtuplestore.c): finish writing this
+    /// participant's partition, flushing its output buffer to the temp file.
+    pub fn sts_end_write_handle(
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_parallel_scan_next(accessor, meta_data)` (sharedtuplestore.c): fetch
+    /// the next tuple from the cooperative scan, copying its meta-data into
+    /// `meta_data`. Returns `None` at end of the whole store (C `NULL`). The
+    /// returned tuple is allocated in `mcx`.
+    pub fn sts_parallel_scan_next_handle<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        accessor: types_execparallel::SharedTuplestoreAccessorHandle,
+        meta_data: &mut [u8],
+    ) -> types_error::PgResult<Option<types_tuple::heaptuple::MinimalTupleData<'mcx>>>
 );

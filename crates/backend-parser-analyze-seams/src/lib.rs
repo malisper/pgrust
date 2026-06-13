@@ -1,7 +1,7 @@
-//! Seam declarations for the `backend-parser-analyze` unit
-//! (`parser/analyze.c`).
+//! (`parser/analyze.c` / `tcop/postgres.c`'s rewrite wrappers).
 //!
-//! Two consumer slices:
+//! Consumer slices:
+//!  * COPY-(query)-TO: the driver's `pg_analyze_and_rewrite_fixedparams` call.
 //!  * portalcmds: the `post_parse_analyze_hook` runner it invokes after
 //!    (re)jumbling the cursor query. The hook is a per-backend function pointer
 //!    extensions install (NULL by default); the owner runs it (a no-op when
@@ -13,9 +13,10 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::copy_query::{Query as CopyQuery, RawStmt as CopyRawStmt};
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::RawStmt;
 use types_nodes::portalcmds::{JumbleState, ParseState as PortalcmdsParseState, Query};
@@ -29,6 +30,20 @@ pub struct AnalyzedVarparams<'mcx> {
     /// The resolved parameter OID array (may differ from the input).
     pub arg_types: mcx::PgVec<'mcx, Oid>,
 }
+
+seam_core::seam!(
+    /// `pg_analyze_and_rewrite_fixedparams(parsetree, query_string, paramTypes,
+    /// numParams, queryEnv)` (tcop/postgres.c): parse-analyze and rewrite a raw
+    /// statement, returning the list of rewritten `Query`s (also acquiring the
+    /// source tables' locks). COPY passes no parameters and a NULL query
+    /// environment. The rewritten queries are allocated in `mcx`. `Err` carries
+    /// any analysis/rewrite `ereport(ERROR)`.
+    pub fn pg_analyze_and_rewrite_fixedparams<'mcx>(
+        mcx: Mcx<'mcx>,
+        parsetree: &CopyRawStmt<'mcx>,
+        query_string: &str,
+    ) -> PgResult<PgVec<'mcx, CopyQuery<'mcx>>>
+);
 
 seam_core::seam!(
     /// `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,

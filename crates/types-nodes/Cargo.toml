@@ -12,6 +12,7 @@ path = "src/lib.rs"
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }
 types-datum = { path = "../types-datum" }
 types-sortsupport = { path = "../types-sortsupport" }
 types-rel = { path = "../types-rel" }
@@ -19,3 +20,5 @@ types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 types-storage = { path = "../types-storage" }
 types-opclass = { path = "../types-opclass" }
+types-condvar = { path = "../types-condvar" }
+types-execparallel = { path = "../types-execparallel" }

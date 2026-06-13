@@ -149,3 +149,9 @@ seam_core::seam!(
         cplan: CachedPlanHandle,
     ) -> PgResult<mcx::PgVec<'mcx, PlannedStmt<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `InitPlanCache()` (plancache.c): set up the plan-cache invalidation
+    /// callbacks. `Err` carries its `ereport` surface.
+    pub fn init_plan_cache() -> PgResult<()>
+);

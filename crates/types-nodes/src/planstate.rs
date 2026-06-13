@@ -8,6 +8,8 @@ use mcx::PgBox;
 use crate::nodes::NodeTag;
 
 use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
+use crate::nodeindexonlyscan::T_IndexOnlyScanState;
+use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
@@ -15,6 +17,8 @@ use crate::nodemergejoin::T_MergeJoinState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
 use crate::nodenestloop::T_NestLoopState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
+use crate::nodehash::HashState;
+use crate::execstate_tags::T_HashState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -22,12 +26,16 @@ use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PlanStateNode<'mcx> {
+    /// `T_AppendState`.
+    Append(PgBox<'mcx, AppendStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeAppendState`.
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_IndexOnlyScanState`.
+    IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
     /// `T_SortState`.
@@ -38,20 +46,25 @@ pub enum PlanStateNode<'mcx> {
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
+    /// `T_HashState` — the inner Hash node of a hash join.
+    Hash(PgBox<'mcx, HashState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete state node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
+            PlanStateNode::Hash(_) => T_HashState,
         }
     }
 
@@ -59,28 +72,34 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `<Node>State` struct begins with.
     pub fn ps_head(&self) -> &PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
+            PlanStateNode::Hash(h) => &h.ps,
         }
     }
 
     /// `&mut ((PlanState *) node)->...`.
     pub fn ps_head_mut(&mut self) -> &mut PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
+            PlanStateNode::Hash(h) => &mut h.ps,
         }
     }
 

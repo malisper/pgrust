@@ -24,3 +24,21 @@ seam_core::seam!(
     /// copy.
     pub fn get_database_name<'mcx>(mcx: Mcx<'mcx>, dbid: Oid) -> PgResult<Option<PgString<'mcx>>>
 );
+
+// --- backend-utils-init-postinit consumer (dbcommands.c) ---
+
+seam_core::seam!(
+    /// `database_is_invalid_form(datform)` (dbcommands.c): is the pg_database
+    /// row in the "invalid" state (a failed/interrupted CREATE DATABASE)? The
+    /// C reads `datform->datconnlimit == DATCONNLIMIT_INVALID_DB`, so only
+    /// `datconnlimit` crosses.
+    pub fn database_is_invalid_form(datconnlimit: i32) -> bool
+);
+
+seam_core::seam!(
+    /// `get_database_oid(dbname, missing_ok)` (dbcommands.c): look up the OID
+    /// of the database named `dbname`. With `missing_ok` false, `ereport(ERROR)`
+    /// if it does not exist (carried on `Err`); with it true, returns
+    /// `InvalidOid`.
+    pub fn get_database_oid(dbname: &str, missing_ok: bool) -> PgResult<Oid>
+);

@@ -5,7 +5,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::Oid;
+use types_core::{AttrNumber, Oid};
+use types_datum::Datum;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
 
@@ -57,6 +58,34 @@ seam_core::seam!(
     /// pg_class row. `Err` carries the syscache machinery's
     /// `ereport(ERROR)`s.
     pub fn get_rel_relispartition(relid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(STATRELATTINH, relid, attnum, inherit)` +
+    /// `get_attstatsslot(&sslot, statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+    /// ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)` (the
+    /// `ExecHashBuildSkewHash` skew-MCV probe). Returns the MCV slot's
+    /// `(values, numbers)` arrays copied into `mcx` (the only `AttStatsSlot`
+    /// fields the skew build reads), or `Ok(None)` when there is no
+    /// `pg_statistic` row (`!HeapTupleIsValid`) or no MCV slot
+    /// (`get_attstatsslot` returns false). The owner does the matching
+    /// `free_attstatsslot` / `ReleaseSysCache`. `Err` carries the catcache /
+    /// detoast `ereport(ERROR)`s plus OOM from the copy.
+    pub fn get_attstatsslot_mcv<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inherit: bool,
+    ) -> PgResult<Option<(PgVec<'mcx, Datum>, PgVec<'mcx, f32>)>>
+);
+
+seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output function OID and whether it is varlena,
+    /// returned as `(typoutput, typisvarlena)`. A non-output type is the C
+    /// `ereport(ERROR, ...cannot display a value of type...)`; cache lookup
+    /// failure is `elog(ERROR)`. Both carried on `Err`.
+    pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)>
 );
 
 seam_core::seam!(
@@ -150,6 +179,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
     /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
     /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
     /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
@@ -206,6 +243,13 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -304,4 +348,13 @@ seam_core::seam!(
     /// syscache hash value stored as `TypeCacheEntry.type_id_hash`. `Err`
     /// carries the catcache failure surface.
     pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
 );

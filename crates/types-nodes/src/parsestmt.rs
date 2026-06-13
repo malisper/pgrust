@@ -75,26 +75,6 @@ impl ResourceOwnerHandle {
     pub const NULL: ResourceOwnerHandle = ResourceOwnerHandle(0);
 }
 
-/// Opaque handle to an `EState *` (`nodes/execnodes.h`). The PREPARE/EXECUTE/
-/// EXPLAIN drivers create a throwaway executor state only to evaluate parameter
-/// expressions; they never read its fields directly (only set
-/// `es_param_list_info` and pass it to the parser/executor seams), so it
-/// crosses as a handle owned by the unported execUtils unit. `NULL` == not
-/// created.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EStateHandle(pub u64);
-
-impl EStateHandle {
-    /// The `NULL` executor state.
-    pub const NULL: EStateHandle = EStateHandle(0);
-}
-
-/// Opaque handle to a compiled `ExprState *` (`nodes/execnodes.h`). Produced by
-/// `ExecPrepareExprList`; the driver threads it back into the per-parameter
-/// evaluation seam without inspecting it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExprStateHandle(pub u64);
-
 /// Opaque handle to a `DestReceiver *` (`tcop/dest.h`). Owned by the caller of
 /// the EXECUTE driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

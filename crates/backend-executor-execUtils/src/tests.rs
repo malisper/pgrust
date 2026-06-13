@@ -331,8 +331,10 @@ fn relation_is_target_relation() {
                     commandType: types_nodes::nodes::CmdType::default(),
                     utilityStmt: None,
                     resultRelations: Some(rels),
+                    relationOids: None,
                     planTree: None,
                     rowMarks: None,
+                    canSetTag: false,
                 },
             )
             .unwrap(),

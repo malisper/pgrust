@@ -120,10 +120,41 @@ fn instr_count_filtered2(node: &mut HashJoinState) {
 
 /// Install this crate's implementations into its seam slots.
 ///
-/// nodeHashjoin has no `<unit>-seams` crate: callers that will need its entry
-/// points (execProcnode's dispatch) can depend on this crate directly without a
-/// cycle, since this crate reaches outward only through per-owner seam crates.
-pub fn init_seams() {}
+/// nodeHashjoin owns one outward-facing seam, `ExecHashJoinSaveTuple`, which
+/// `nodeHash.c` calls from `ExecHashIncreaseNumBatches` /
+/// `ExecHashRemoveNextSkewBucket` to spill a tuple that has moved to a later
+/// batch. The rest of its entry points (execProcnode dispatch) are reached by
+/// depending on this crate directly.
+pub fn init_seams() {
+    backend_executor_nodeHashjoin_seams::ExecHashJoinSaveTuple::set(exec_hash_join_save_tuple_seam);
+}
+
+/// `ExecHashJoinSaveTuple(tuple, hashvalue, fileptr, hashtable)`
+/// (nodeHashjoin.c) — append a `MinimalTuple` + its hash value to a batch temp
+/// file at `*fileptr`, creating the `BufFile` in the hash table's `spillCxt`
+/// (threaded as `mcx`) on first write. The data recorded for each tuple is its
+/// hash value, then the tuple in MinimalTuple format.
+fn exec_hash_join_save_tuple_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    hashvalue: u32,
+    fileptr: &mut Option<PgBox<'mcx, BufFile>>,
+) -> PgResult<()> {
+    // if (file == NULL) { /* First write to this batch file, so open it. */
+    //     file = BufFileCreateTemp(hashtable->spillCxt, false); *fileptr = file; }
+    if fileptr.is_none() {
+        let file = buffile::buf_file_create_temp::call(mcx, false)?;
+        *fileptr = Some(file);
+    }
+    let file = fileptr.as_deref_mut().expect("file created above");
+
+    // BufFileWrite(file, &hashvalue, sizeof(uint32));
+    // BufFileWrite(file, tuple, tuple->t_len);
+    let bytes = tuple.to_minimal_bytes();
+    buffile::buf_file_write::call(file, &hashvalue.to_ne_bytes())?;
+    buffile::buf_file_write::call(file, &bytes)?;
+    Ok(())
+}
 
 // ===========================================================================
 // ExecHashJoinImpl — the hybrid hashjoin state machine.

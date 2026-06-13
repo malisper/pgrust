@@ -93,38 +93,11 @@ impl MergeAppend<'_> {
     }
 }
 
-/// `PartitionPruneState` (executor/execPartition.h), trimmed to the fields the
-/// MergeAppend node reads. The full structure (the per-partition prune-data
-/// array, the prune-context, the other-subplans set) lands with the owning
-/// `execPartition.c` unit; the MergeAppend node only consults `do_exec_prune`
-/// (decide whether it can fill `ms_valid_subplans` eagerly) and
-/// `execparamids` (decide whether changed params force re-selection).
-///
-/// ```c
-/// typedef struct PartitionPruneState
-/// {
-///     Bitmapset  *relids;
-///     bool        do_initial_prune;
-///     bool        do_exec_prune;
-///     int         num_partprunedata;
-///     Bitmapset  *execparamids;
-///     Bitmapset  *other_subplans;
-///     MemoryContext prune_context;
-///     PartitionPruningData *partprunedata[FLEXIBLE_ARRAY_MEMBER];
-/// } PartitionPruneState;
-/// ```
-#[derive(Debug, Default)]
-pub struct PartitionPruneState<'mcx> {
-    /// `bool do_initial_prune` — true if pruning should be performed during
-    /// executor startup (for this PlanState).
-    pub do_initial_prune: bool,
-    /// `bool do_exec_prune` — true if pruning should be performed during
-    /// executor run (for this PlanState).
-    pub do_exec_prune: bool,
-    /// `Bitmapset *execparamids` — All PARAM_EXEC parameter IDs which are part
-    /// of expressions which the pruning code may evaluate when pruning.
-    pub execparamids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
-}
+/// `PartitionPruneState` (executor/execPartition.h) — the MergeAppend node
+/// embeds the full run-time partition-pruning state defined in
+/// [`crate::partition::PartitionPruneState`]; re-exported here so the
+/// `MergeAppendState` field type stays unqualified.
+pub use crate::partition::PartitionPruneState;
 
 /// `binaryheap` (lib/binaryheap.h), specialized to the MergeAppend node's
 /// slot-index entries.

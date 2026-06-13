@@ -178,11 +178,11 @@ pub fn InitializeLatchWaitSet() -> PgResult<()> {
         debug_assert!(slot.is_none());
 
         let set = WaitEventSet::create(2)?;
-        let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, my_latch())?;
+        let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, my_latch(), None)?;
         debug_assert_eq!(latch_pos, LatchWaitSetLatchPos);
 
         if is_under_postmaster() {
-            let latch_pos = set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None)?;
+            let latch_pos = set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None)?;
             debug_assert_eq!(latch_pos, LatchWaitSetPostmasterDeathPos);
         }
 
@@ -337,7 +337,7 @@ pub fn WaitLatchOrSocket(
     }
 
     if wakeEvents & WL_LATCH_SET != 0 {
-        set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, latch)?;
+        set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, latch, None)?;
     }
 
     // Postmaster-managed callers must handle postmaster death somehow.
@@ -346,16 +346,16 @@ pub fn WaitLatchOrSocket(
     );
 
     if wakeEvents & WL_POSTMASTER_DEATH != 0 && is_under_postmaster() {
-        set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None)?;
+        set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None, None)?;
     }
 
     if wakeEvents & WL_EXIT_ON_PM_DEATH != 0 && is_under_postmaster() {
-        set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None)?;
+        set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None)?;
     }
 
     if wakeEvents & WL_SOCKET_MASK != 0 {
         let ev = wakeEvents & WL_SOCKET_MASK;
-        set.add_event(ev, sock, None)?;
+        set.add_event(ev, sock, None, None)?;
     }
 
     let mut event = [WaitEvent::default()];

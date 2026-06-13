@@ -17,6 +17,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `replorigin_session_origin_lsn = lsn` (origin.c session-state global):
+    /// record the remote LSN the current session's replication origin has
+    /// reached, so streaming can restart from the right place after a crash.
+    /// Plain backend-local write; infallible.
+    pub fn set_replorigin_session_origin_lsn(lsn: types_core::XLogRecPtr)
+);
+
+seam_core::seam!(
     /// Read `replorigin_session_origin`.
     pub fn replorigin_session_origin() -> RepOriginId
 );

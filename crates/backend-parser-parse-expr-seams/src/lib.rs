@@ -6,10 +6,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
+use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::Node;
+use types_nodes::primnodes::Expr;
 
 /// Result of [`analyze_one_exec_param`] — mirrors the per-parameter body of
 /// `EvaluateParams`: `transformExpr(EXPR_KIND_EXECUTE_PARAMETER)`,
@@ -17,8 +18,12 @@ use types_nodes::nodes::Node;
 /// COERCE_IMPLICIT_CAST)`, `assign_expr_collations`, `lfirst(l) = expr`.
 /// Returned so the driver reproduces the cannot-be-coerced ereport in-crate
 /// with C's exact branch order.
-#[derive(Clone, Copy, Debug)]
-pub struct AnalyzedExecParam {
+pub struct AnalyzedExecParam<'mcx> {
+    /// The analyzed/coerced/collated expression (`lfirst(l) = expr`), the real
+    /// [`Expr`] tree threaded on into `ExecPrepareExprList`. `None` when
+    /// `coerce_to_target_type(...)` returned NULL (the C NULL `expr`); the
+    /// driver raises the cannot-be-coerced ereport in that case.
+    pub expr: Option<PgBox<'mcx, Expr>>,
     /// `coerce_to_target_type(...)` returned NULL — the coercion failed.
     pub coercion_failed: bool,
     /// `exprType(expr)` of the given (pre-coercion) expression.
@@ -28,18 +33,23 @@ pub struct AnalyzedExecParam {
 }
 
 seam_core::seam!(
-    /// Transform-analyze-coerce-collate one EXECUTE parameter expression and
-    /// store the finished node back into its list cell
-    /// (`params[param_index] = expr`), mirroring the per-parameter body of
-    /// `EvaluateParams`. `expected_type_id` is `param_types[i]`; `source_text`
-    /// is the parse state's `p_sourcetext`. Allocates / can `ereport(ERROR)`.
+    /// Transform-analyze-coerce-collate one EXECUTE parameter expression,
+    /// mirroring the per-parameter body of `EvaluateParams`:
+    /// `expr = transformExpr(EXPR_KIND_EXECUTE_PARAMETER)`,
+    /// `coerce_to_target_type(...)`, `assign_expr_collations`, `lfirst(l) = expr`.
+    /// The finished real [`Expr`] is returned (the C stores it back into the
+    /// list cell; the owned driver collects it into the working `Expr` list it
+    /// then hands to `ExecPrepareExprList`). `raw_param` is the original
+    /// parser-output node for this cell; `expected_type_id` is `param_types[i]`;
+    /// `source_text` is the parse state's `p_sourcetext`. Allocates / can
+    /// `ereport(ERROR)`.
     pub fn analyze_one_exec_param<'mcx>(
         mcx: Mcx<'mcx>,
         source_text: &str,
-        params: &mut [mcx::PgBox<'mcx, Node<'mcx>>],
+        raw_param: &Node<'mcx>,
         param_index: i32,
         expected_type_id: Oid,
-    ) -> PgResult<AnalyzedExecParam>
+    ) -> PgResult<AnalyzedExecParam<'mcx>>
 );
 
 seam_core::seam!(
