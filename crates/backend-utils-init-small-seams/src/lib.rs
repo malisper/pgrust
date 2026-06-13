@@ -79,10 +79,6 @@ seam_core::seam!(
     pub fn resume_interrupts()
 );
 
-// `MyDatabaseId` / `MyDatabaseTableSpace` deliberately have no getter seams:
-// per the no-ambient-global-seams rule, consumers take the value as an
-// explicit parameter and read it off this unit's state when it lands.
-
 seam_core::seam!(
     /// Write `MyBackendType` (globals.c, declared in miscadmin.h): processes
     /// assign their own type at startup (e.g. `MyBackendType = B_LOGGER` in
@@ -128,4 +124,26 @@ seam_core::seam!(
     /// `MyClientSocket = palloc(...); memcpy(...)` (`globals.c` global): store
     /// this child's inherited client socket.
     pub fn set_my_client_socket(client_sock: types_net::ClientSocket)
+);
+
+seam_core::seam!(
+    /// `START_CRIT_SECTION()` — increment `CritSectionCount` (globals.c);
+    /// while non-zero any ERROR escalates to PANIC.
+    pub fn start_critical_section()
+);
+
+seam_core::seam!(
+    /// `END_CRIT_SECTION()` — decrement `CritSectionCount`.
+    pub fn end_critical_section()
+);
+
+seam_core::seam!(
+    /// Read `ExitOnAnyError` (globals.c).
+    pub fn exit_on_any_error() -> bool
+);
+
+seam_core::seam!(
+    /// Write `ExitOnAnyError` (BeginInternalSubTransaction forces FATAL exit
+    /// on error around its body).
+    pub fn set_exit_on_any_error(value: bool)
 );

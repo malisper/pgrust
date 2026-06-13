@@ -2,7 +2,7 @@
 //! (`access/transam/transam.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::TransactionId;
+use types_core::{TransactionId, XLogRecPtr};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -20,4 +20,32 @@ seam_core::seam!(
 seam_core::seam!(
     /// `TransactionIdPrecedes(id1, id2)` — modulo-2^31 circular comparison.
     pub fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> bool
+);
+
+seam_core::seam!(
+    /// `TransactionIdCommitTree(xid, nxids, xids)` — mark a commit tree
+    /// committed in pg_xact (synchronous form).
+    pub fn transaction_id_commit_tree(xid: TransactionId, children: &[TransactionId]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TransactionIdAsyncCommitTree(xid, nxids, xids, lsn)` — async form,
+    /// recording the LSN the XLOG must be flushed to first.
+    pub fn transaction_id_async_commit_tree(
+        xid: TransactionId,
+        children: &[TransactionId],
+        lsn: XLogRecPtr,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TransactionIdAbortTree(xid, nxids, xids)` — mark a tree aborted in
+    /// pg_xact.
+    pub fn transaction_id_abort_tree(xid: TransactionId, children: &[TransactionId]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TransactionIdLatest(mainxid, nxids, xids)` — newest XID among the
+    /// tree, by TransactionIdFollows order. Pure.
+    pub fn transaction_id_latest(main_xid: TransactionId, children: &[TransactionId]) -> TransactionId
 );

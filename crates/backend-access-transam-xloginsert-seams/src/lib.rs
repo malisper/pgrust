@@ -19,3 +19,27 @@ seam_core::seam!(
         fragments: &[&[u8]],
     ) -> PgResult<XLogRecPtr>
 );
+
+seam_core::seam!(
+    /// `XLogBeginInsert()` — start building a WAL record. `elog(ERROR)`s if
+    /// already in insert mode or during recovery.
+    pub fn xlog_begin_insert() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogRegisterData(data, len)` — append one chunk of record data (the
+    /// installed impl copies the bytes; C keeps the caller's pointer alive
+    /// until `XLogInsert`). `elog(ERROR)` on too many data chunks.
+    pub fn xlog_register_data(data: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogSetRecordFlags(flags)` — e.g. `XLOG_INCLUDE_ORIGIN`.
+    pub fn xlog_set_record_flags(flags: u8)
+);
+
+seam_core::seam!(
+    /// `XLogResetInsertion()` — forget a partially-constructed record (abort
+    /// path).
+    pub fn xlog_reset_insertion()
+);

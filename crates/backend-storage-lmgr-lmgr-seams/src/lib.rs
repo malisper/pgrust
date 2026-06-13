@@ -18,7 +18,7 @@
 //! * `Drop` — the abort path: an error unwinding past the guard releases the
 //!   lock, which is what C's transaction-abort resowner sweep would do.
 
-use types_core::Oid;
+use types_core::{Oid, TransactionId, VirtualTransactionId};
 use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
 
@@ -152,3 +152,20 @@ fn unlock(tag: LockTag) -> PgResult<()> {
         }
     }
 }
+
+seam_core::seam!(
+    /// `XactLockTableInsert(xid)` — take ExclusiveLock on the transaction
+    /// XID. Lock acquisition can `ereport(ERROR)` (out of shared memory).
+    pub fn xact_lock_table_insert(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XactLockTableDelete(xid)` — release the subtransaction XID lock.
+    pub fn xact_lock_table_delete(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLockTableInsert(vxid)` — lock our virtual transaction id
+    /// before advertising it in the proc array.
+    pub fn virtual_xact_lock_table_insert(vxid: VirtualTransactionId) -> PgResult<()>
+);

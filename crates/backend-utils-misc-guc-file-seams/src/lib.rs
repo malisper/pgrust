@@ -30,3 +30,15 @@ seam_core::seam!(
     /// Plain backend-local state write.
     pub fn guc_check_errdetail(detail: String)
 );
+
+seam_core::seam!(
+    /// `AtStart_GUC()` (guc.c) — sanity-reset GUC nesting at transaction
+    /// start.
+    pub fn at_start_guc()
+);
+
+seam_core::seam!(
+    /// Read the `log_transaction_sample_rate` GUC
+    /// (`double log_xact_sample_rate`, guc_tables.c).
+    pub fn log_xact_sample_rate() -> f64
+);

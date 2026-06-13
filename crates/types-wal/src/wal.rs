@@ -275,3 +275,11 @@ pub const RS_INVAL_WAL_REMOVED: ReplicationSlotInvalidationCause = 1 << 0;
 pub const RS_INVAL_HORIZON: ReplicationSlotInvalidationCause = 1 << 1;
 pub const RS_INVAL_WAL_LEVEL: ReplicationSlotInvalidationCause = 1 << 2;
 pub const RS_INVAL_IDLE_TIMEOUT: ReplicationSlotInvalidationCause = 1 << 3;
+
+/// `XLR_SPECIAL_REL_UPDATE` (`access/xlogrecord.h`) — flag bit in `xl_info`:
+/// the record modifies relation files outside the buffer manager's view.
+pub const XLR_SPECIAL_REL_UPDATE: uint8 = 0x01;
+
+/// `XLOG_INCLUDE_ORIGIN` (`access/xloginsert.h`) — record flag: include the
+/// replication origin in the record.
+pub const XLOG_INCLUDE_ORIGIN: uint8 = 0x01;

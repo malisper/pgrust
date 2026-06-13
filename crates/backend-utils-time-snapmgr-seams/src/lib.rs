@@ -6,6 +6,7 @@
 //! until then a call panics loudly. Snapshots cross as trimmed owned
 //! `SnapshotData` values.
 
+use types_core::CommandId;
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -59,4 +60,33 @@ seam_core::seam!(
     pub fn with_transaction_snapshot(
         f: &mut dyn FnMut() -> PgResult<()>,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SnapshotSetCommandId(curcid)` — propagate the new command id into the
+    /// static snapshots. Pure field updates; cannot `ereport`.
+    pub fn snapshot_set_command_id(curcid: CommandId)
+);
+
+seam_core::seam!(
+    /// `AtEOXact_Snapshot(isCommit, resetXmin)` — snapshot cleanup at
+    /// transaction end (WARNs about leaks at commit; can `ereport(ERROR)` on
+    /// exported-snapshot file cleanup).
+    pub fn at_eoxact_snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtSubCommit_Snapshot(level)`.
+    pub fn at_subcommit_snapshot(level: i32)
+);
+
+seam_core::seam!(
+    /// `AtSubAbort_Snapshot(level)`.
+    pub fn at_subabort_snapshot(level: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XactHasExportedSnapshots()` — true after `pg_export_snapshot`, which
+    /// forbids PREPARE.
+    pub fn xact_has_exported_snapshots() -> bool
 );

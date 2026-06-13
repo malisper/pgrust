@@ -206,3 +206,17 @@ seam_core::seam!(
     /// `VirtualXactLockTableCleanup()`.
     pub fn virtual_xact_lock_table_cleanup() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AtPrepare_Locks()` — collect lock data for the 2PC state file;
+    /// errors out for cases 2PC cannot handle (e.g. session locks).
+    pub fn at_prepare_locks() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PostPrepare_Locks(xid)` — transfer the prepared transaction's locks
+    /// to a dummy PGPROC.
+    pub fn post_prepare_locks(
+        xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);

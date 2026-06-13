@@ -7,11 +7,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use types_core::LocalTransactionId;
+use types_core::Oid;
 use types_core::ProcNumber;
-use types_storage::{proclist_node, LWLockMode, LWLockWaitState};
 use types_core::TimestampTz;
 use types_error::PgResult;
-use types_core::Oid;
+use types_storage::{proclist_node, LWLockMode, LWLockWaitState};
 
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->lwWaiting`.
@@ -88,4 +89,31 @@ seam_core::seam!(
     /// `MyProc->tempNamespaceId = nspid` (namespace.c writes the field; the
     /// PGPROC storage belongs to proc.c). Plain shared-memory field write.
     pub fn set_my_proc_temp_namespace_id(nspid: Oid)
+);
+
+seam_core::seam!(
+    /// Read `MyProc->vxid.lxid`.
+    pub fn my_proc_lxid() -> LocalTransactionId
+);
+
+seam_core::seam!(
+    /// Write `MyProc->vxid.lxid` (StartTransaction advertises the new local
+    /// xid in the proc array).
+    pub fn set_my_proc_lxid(lxid: LocalTransactionId)
+);
+
+seam_core::seam!(
+    /// Read the `transaction_timeout` GUC (`int TransactionTimeout`, proc.c).
+    pub fn transaction_timeout() -> i32
+);
+
+seam_core::seam!(
+    /// `LockErrorCleanup()` — clean up any open wait-for-lock state.
+    pub fn lock_error_cleanup()
+);
+
+seam_core::seam!(
+    /// Set/clear the `DELAY_CHKPT_START` bit in `MyProc->delayChkptFlags`
+    /// (the commit critical section's checkpoint interlock).
+    pub fn my_proc_set_delay_chkpt_start(on: bool)
 );

@@ -28,3 +28,8 @@ seam_core::seam!(
     /// Callers must only call this after [`my_be_entry_present`] returns true.
     pub fn with_my_beentry(f: &mut dyn FnMut(&mut PgBackendStatus))
 );
+
+seam_core::seam!(
+    /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
+    pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
+);

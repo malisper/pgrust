@@ -24,3 +24,14 @@ seam_core::seam!(
     /// buffer pin the Startup process is waiting for?
     pub fn holding_buffer_pin_that_delays_recovery() -> bool
 );
+
+seam_core::seam!(
+    /// `AtEOXact_Buffers(isCommit)` — sanity-check that all buffer pins were
+    /// released (Assert-only in production builds).
+    pub fn at_eoxact_buffers(is_commit: bool)
+);
+
+seam_core::seam!(
+    /// `UnlockBuffers()` — release buffer content locks on the abort path.
+    pub fn unlock_buffers()
+);

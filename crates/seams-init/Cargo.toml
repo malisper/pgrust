@@ -16,6 +16,7 @@ backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }

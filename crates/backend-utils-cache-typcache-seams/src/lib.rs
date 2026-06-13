@@ -17,3 +17,13 @@ seam_core::seam!(
         typmod: i32,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `AtEOXact_TypeCache()`.
+    pub fn at_eoxact_type_cache()
+);
+
+seam_core::seam!(
+    /// `AtEOSubXact_TypeCache()`.
+    pub fn at_eosubxact_type_cache()
+);

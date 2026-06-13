@@ -6,6 +6,10 @@
 
 #![allow(non_snake_case)]
 
+use mcx::{Mcx, PgString};
+use types_core::Oid;
+use types_error::PgResult;
+
 seam_core::seam!(
     /// `CreateSocketLockFile(socketfile, amPostmaster, socketDir)` — create
     /// the interlock file for a Unix socket path and arrange for it to be
@@ -36,10 +40,6 @@ seam_core::seam!(
     /// BootstrapProcessing`. A plain global read — infallible.
     pub fn is_bootstrap_processing_mode() -> bool
 );
-
-use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
 
 seam_core::seam!(
     /// `GetUserIdAndSecContext(&userid, &sec_context)` (miscinit.c): the
