@@ -131,6 +131,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-relation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-relation-seams"
 version = "0.0.0"
 dependencies = [
@@ -1640,6 +1661,16 @@ dependencies = [
  "types-nodes",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-catalog-objectaccess"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-objectaccess-seams",
+ "types-catalog",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -7824,6 +7855,14 @@ name = "pg-prng"
 version = "0.0.0"
 
 [[package]]
+name = "port-crc32c"
+version = "0.0.0"
+dependencies = [
+ "port-crc32c-seams",
+ "port-pg-crc32c-seams",
+]
+
+[[package]]
 name = "port-crc32c-seams"
 version = "0.0.0"
 dependencies = [
@@ -7989,7 +8028,6 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
- "backend-utils-adt-format-type",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
@@ -8005,11 +8043,9 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
- "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
- "port-pqsignal",
 ]
 
 [[package]]

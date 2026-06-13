@@ -9,6 +9,26 @@
 
 
 seam_core::seam!(
+    /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
+    /// relcache entry for `relationId`, taking the `rd_refcnt += 1` pin, and
+    /// hand back the consumed slice of the entry copied into `mcx`. `Ok(None)`
+    /// is the C NULL (no `pg_class` row); the owner releases its pin on the
+    /// not-found path. Can `ereport(ERROR)` (catalog read failure, OOM),
+    /// carried on `Err`.
+    pub fn relation_id_get_relation<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_rel::RelationData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RelationClose(relation)` (relcache.c): drop the relcache reference
+    /// (`rd_refcnt -= 1`) for the entry identified by `relation_id`. C can
+    /// `elog(WARNING)` on a refcount inconsistency, carried on `Err`.
+    pub fn relation_close(relation_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `relation->rd_tableam` — the relation's table-access-method vtable
     /// (`None` for relations without one: views, foreign tables,
     /// partitioned tables/indexes). The owner resolves the vtable from its

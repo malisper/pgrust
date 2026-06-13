@@ -19,6 +19,15 @@ use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
 };
 
 seam_core::seam!(
+    /// `pgstat_init_relation(rel)` (pgstat_relation.c): set the relcache
+    /// entry's `pgstat_enabled` / `pgstat_info` according to whether the
+    /// relation has storage (or is a partitioned table) and whether
+    /// `pgstat_track_counts` is on. Keyed by the relation OID; the owner reads
+    /// the relkind and mutates its per-relation pending-stats bookkeeping.
+    pub fn pgstat_init_relation(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `pgstat_count_index_tuples(rel, n)` (pgstat.h macro): add `n` to the
     /// relation's pending `t_tuples_returned` counter (only when
     /// `rel->pgstat_info` is set). The per-relation pending stats live in
