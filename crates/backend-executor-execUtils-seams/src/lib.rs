@@ -19,3 +19,32 @@ seam_core::seam!(
         tts_ops: types_nodes::TupleSlotKind,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecAssignExprContext(estate, &node->js.ps)` (execUtils.c): create the
+    /// node's per-node `ExprContext` and store its id in `ps_ExprContext`.
+    /// Allocates a new context in the EState pool (fallible on OOM).
+    pub fn exec_assign_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecAssignProjectionInfo(&node->js.ps, NULL)` (execUtils.c): build the
+    /// node's projection info from its result tuple type. Allocates; can
+    /// `ereport(ERROR)` on an unsupported target expression.
+    pub fn exec_assign_projection_info<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResetExprContext(node->js.ps.ps_ExprContext)` (executor.h): reset the
+    /// node's per-tuple memory context, freeing per-tuple expression storage.
+    pub fn reset_per_tuple_expr_context<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        ps: &types_nodes::execnodes::PlanStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

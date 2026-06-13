@@ -229,6 +229,8 @@ pub struct PlanStateData<'mcx> {
     pub ps_ResultTupleSlot: Option<SlotId>,
     /// `ProjectionInfo *ps_ProjInfo` — info for doing tuple projection.
     pub ps_ProjInfo: Option<PgBox<'mcx, ProjectionInfo>>,
+    /// `ExprState *qual` — boolean qual to check (`NULL` when there is none).
+    pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState>>,
     /// `bool scanopsset` / `const TupleTableSlotOps *scanops` /
     /// `bool scanopsfixed` — information about the type of the scan slot.
     pub scanopsset: bool,

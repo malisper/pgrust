@@ -18,6 +18,7 @@ pub fn init_all() {
     backend_executor_execAmi::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
+    backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();

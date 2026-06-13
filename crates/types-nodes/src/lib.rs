@@ -21,6 +21,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod nodeforeigncustom;
+pub mod nodehashjoin;
 pub mod nodeindexscan;
 pub mod nodes;
 pub mod parsenodes;
@@ -41,6 +42,11 @@ pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
+pub use nodehashjoin::{
+    HashJoin, HashJoinState, HashJoinTableData, Join, JoinStateData, JoinType, T_HashJoin,
+    T_HashJoinState, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI, JOIN_SEMI,
+};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};

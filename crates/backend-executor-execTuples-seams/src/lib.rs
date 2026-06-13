@@ -125,3 +125,57 @@ seam_core::seam!(
         slot: types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecGetResultType(planstate)` (execUtils.c, via execTuples ownership of
+    /// the result slot): the child node's result tuple descriptor, copied into
+    /// `mcx` for the consumer's owned use. Fallible on OOM.
+    pub fn exec_get_result_type<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        planstate: &types_nodes::PlanStateNode<'mcx>,
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `ExecGetResultSlotOps(planstate, &isfixed)` (execUtils.c): the slot-ops
+    /// class of the child node's result slot.
+    pub fn exec_get_result_slot_ops<'mcx>(
+        planstate: &types_nodes::PlanStateNode<'mcx>,
+    ) -> types_nodes::TupleSlotKind
+);
+
+seam_core::seam!(
+    /// `ExecInitNullTupleSlot(estate, tupType, tts_ops)` (execTuples.c): create
+    /// a slot containing a constant all-NULL tuple of `tup_type`, returning its
+    /// pool id. Fallible on OOM.
+    pub fn exec_init_null_tuple_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        tup_type: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecForceStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c):
+    /// store a `MinimalTuple` into the slot (forcing it through the slot's ops),
+    /// taking ownership when `should_free`. Fallible on OOM.
+    pub fn exec_force_store_minimal_tuple<'mcx>(
+        slot: types_nodes::SlotId,
+        mtup: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        should_free: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): materialize
+    /// the slot's contents as a `MinimalTuple` (copied into `mcx`), returning it
+    /// and whether the caller must free it. Fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<(
+        mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
+        bool,
+    )>
+);

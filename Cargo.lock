@@ -1161,6 +1161,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeHash-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeHashjoin"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeHash-seams",
+ "backend-storage-file-buffile-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeMaterial"
 version = "0.0.0"
 dependencies = [
@@ -1656,6 +1689,16 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-file-buffile-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -2539,6 +2582,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2713,6 +2757,7 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeHashjoin",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",

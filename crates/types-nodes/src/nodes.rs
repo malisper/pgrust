@@ -75,6 +75,8 @@ pub use CmdType::{
 pub enum Node<'mcx> {
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
+    /// `T_HashJoin`.
+    HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -82,6 +84,7 @@ impl<'mcx> Node<'mcx> {
     pub fn tag(&self) -> NodeTag {
         match self {
             Node::Material(_) => T_Material,
+            Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
         }
     }
 
@@ -89,6 +92,7 @@ impl<'mcx> Node<'mcx> {
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
+            Node::HashJoin(h) => &h.join.plan,
         }
     }
 
@@ -102,6 +106,7 @@ impl<'mcx> Node<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
+            Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
         }
     }
 }
