@@ -110,6 +110,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatabasePath` (globals.c): the path to the current database's data
+    /// directory, set up at backend startup. Returns an owned copy of the
+    /// backend-global string (the caller uses it transiently). `Err` carries
+    /// the OOM surface of copying the global.
+    pub fn database_path() -> types_error::PgResult<String>
+);
+
+seam_core::seam!(
     /// Read `IsPostmasterEnvironment` (`globals.c`).
     pub fn is_postmaster_environment() -> bool
 );

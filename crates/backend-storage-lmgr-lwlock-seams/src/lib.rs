@@ -118,6 +118,29 @@ seam_core::seam!(
     /// `LWLockAcquire(TwoPhaseStateLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
     pub fn lock_twophase_state(exclusive: bool) -> PgResult<()>
 );
+
+// ---- RelationMappingLock (the named LWLock interlocking pg_filenode.map) ----
+//
+// relmapper.c acquires `RelationMappingLock` in LW_SHARED (read) or
+// LW_EXCLUSIVE (write/checkpoint) and releases it mid-function at points C
+// chooses. The lock lives in `MainLWLockArray` owned by lwlock.c. As with
+// `TwoPhaseStateLock`, a guard form is preferred per AGENTS.md "Locks and held
+// resources"; until lwlock.c hands back a guard for the named locks, the
+// explicit acquire/release pair is recorded in DESIGN_DEBT.
+
+seam_core::seam!(
+    /// `LWLockAcquire(RelationMappingLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
+    pub fn lock_relation_mapping(exclusive: bool) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockRelease(RelationMappingLock)`.
+    pub fn unlock_relation_mapping() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(RelationMappingLock, LW_EXCLUSIVE)` — the
+    /// assertion predicate at the top of `write_relmap_file`. Pure read.
+    pub fn relation_mapping_lock_held_by_me_exclusive() -> bool
+);
 seam_core::seam!(
     /// `LWLockRelease(TwoPhaseStateLock)`.
     pub fn unlock_twophase_state() -> PgResult<()>

@@ -32,6 +32,9 @@ pub const RM_SMGR_ID: RmgrId = 2;
 /// `RM_DBASE_ID` — the Database resource manager (rmgrlist.h entry 4).
 pub const RM_DBASE_ID: RmgrId = 4;
 
+/// `RM_RELMAP_ID` — the RelMap resource manager (rmgrlist.h entry 7).
+pub const RM_RELMAP_ID: RmgrId = 7;
+
 /// `BKPBLOCK_WILL_INIT` (access/xlogrecord.h) — redo will re-init the page.
 pub const BKPBLOCK_WILL_INIT: uint8 = 0x40;
 

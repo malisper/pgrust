@@ -36,6 +36,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsInParallelMode()` (xact.c): true when the current transaction (or
+    /// subtransaction) has entered parallel mode
+    /// (`CurrentTransactionState->parallelModeLevel != 0`). Pure read of
+    /// backend-local transaction state; cannot `ereport`.
+    pub fn is_in_parallel_mode() -> bool
+);
+
+seam_core::seam!(
     /// `GetCurrentCommandId(used)` (xact.c): the current command id; with
     /// `used` true the caller intends to use it to mark inserted/updated/
     /// deleted tuples, which is forbidden in parallel mode — that check

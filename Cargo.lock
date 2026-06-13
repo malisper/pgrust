@@ -987,6 +987,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2277,6 +2278,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2985,6 +2987,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-relmapper"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-storage-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-error-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "port-crc32c-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-utils-cache-relmapper-seams"
 version = "0.0.0"
 dependencies = [
@@ -3172,6 +3201,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-net",
 ]
 
@@ -3577,6 +3607,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
+ "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",

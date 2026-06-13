@@ -21,3 +21,11 @@ seam_core::seam!(
     /// GUC value (with optional unit suffix). `None` is the C `false` return.
     pub fn parse_real(value: String) -> Option<f64>
 );
+
+seam_core::seam!(
+    /// `allowSystemTableMods` (guc_tables.c / guc.c): the GUC controlling
+    /// whether DDL may modify system catalogs. relmapper's
+    /// `perform_relmap_update` reads it to decide `add_okay` when merging map
+    /// updates. Pure backend-local GUC read.
+    pub fn allow_system_table_mods() -> bool
+);
