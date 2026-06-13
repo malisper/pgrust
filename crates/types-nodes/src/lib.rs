@@ -24,6 +24,7 @@ pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
+pub mod nodememoize;
 pub mod nodemergejoin;
 pub mod nodes;
 pub mod parsenodes;
@@ -49,6 +50,10 @@ pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
+pub use nodememoize::{
+    CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
+    MemoizeScanState, SharedMemoizeInfo, T_Memoize, T_MemoizeState,
+};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};

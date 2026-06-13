@@ -87,6 +87,8 @@ seam_core::seam!(pub fn make_parallel_worker_context(
 ) -> ParallelWorkerContextHandle);
 /// `ParallelWorkerNumber`.
 seam_core::seam!(pub fn parallel_worker_number() -> i32);
+/// `pwcxt->toc` — the worker's `shm_toc *`.
+seam_core::seam!(pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ShmTocHandle);
 
 // ===========================================================================
 // shm_toc estimate/allocate/insert/lookup (storage/ipc/shm_toc.c).

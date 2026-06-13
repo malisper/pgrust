@@ -1602,12 +1602,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeMemoize"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-nodeMemoize-seams",
+ "backend-nodes-core-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeMemoize-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-execparallel",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3548,6 +3568,7 @@ dependencies = [
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
+ "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
