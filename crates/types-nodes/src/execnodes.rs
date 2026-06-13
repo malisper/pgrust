@@ -355,12 +355,6 @@ pub struct EStateData<'mcx> {
     pub es_unpruned_relids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `PartitionDirectory es_partition_directory` (partdesc-owned).
     pub es_partition_directory: Opaque,
-    /// `struct dsa_area *es_query_dsa` — the DSA area for parallel execution,
-    /// installed by a Gather/GatherMerge node while running its subplan
-    /// locally so parallel-aware children find shared state, then cleared.
-    /// `None` is the C `NULL`. The area itself is owned by the
-    /// `ParallelExecutorInfo` (dsa-owned); this only aliases it.
-    pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
     /// Owned-model pool holding every `ResultRelInfo` belonging to this
     /// EState (C: caller-owned nodes aliased from the lists above), addressed
     /// by [`RriId`].
@@ -428,8 +422,6 @@ impl<'mcx> EStateData<'mcx> {
             // (set later by ExecInitRangeTable / partition pruning setup)
             es_unpruned_relids: None,
             es_partition_directory: Opaque(None),
-            // es_query_dsa = NULL;
-            es_query_dsa: None,
             es_result_rel_pool: PgVec::new_in(mcx),
         }
     }

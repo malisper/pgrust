@@ -57,13 +57,3 @@ seam_core::seam!(
     /// wakeup list before testing the wait condition. Infallible.
     pub fn condition_variable_prepare_to_sleep(cv: &ConditionVariable)
 );
-
-seam_core::seam!(
-    /// `ConditionVariableSleep(cv, wait_event_info)` — wait until signaled.
-    /// The sleep loop runs `CHECK_FOR_INTERRUPTS()`, so a
-    /// query-cancel/termination `ereport(ERROR/FATAL)` surfaces as `Err`.
-    pub fn condition_variable_sleep(
-        cv: &ConditionVariable,
-        wait_event_info: u32,
-    ) -> types_error::PgResult<()>
-);

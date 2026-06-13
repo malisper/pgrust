@@ -24,12 +24,6 @@ pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B000000;
 /// SYSLOGGER_MAIN, ...).
 pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 
-/// `WAIT_EVENT_EXECUTE_GATHER` — "Waiting for activity from a child process
-/// while executing a Gather plan node." 14th entry (0-based 13) of the IPC
-/// section of `wait_event_names.txt`, so `PG_WAIT_IPC | 13`
-/// (= 134217741, matching c2rust).
-pub const WAIT_EVENT_EXECUTE_GATHER: u32 = PG_WAIT_IPC | 13;
-
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).

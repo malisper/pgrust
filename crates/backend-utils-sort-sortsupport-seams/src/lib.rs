@@ -37,18 +37,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PrepareSortSupportFromOrderingOp(orderingOp, ssup)` (sortsupport.c):
-    /// fill in `ssup` (setting `ssup_reverse` and installing `ssup.comparator`)
-    /// for the given btree ordering operator. `elog(ERROR)` when `orderingOp`
-    /// is not a valid ordering operator (carried on `Err`). Allocates the
-    /// comparator state in `ssup.ssup_cxt`.
-    pub fn prepare_sort_support_from_ordering_op(
-        ordering_op: Oid,
-        ssup: &mut SortSupportData<'_>,
-    ) -> PgResult<()>
-);
-
-seam_core::seam!(
     /// `ssup->comparator(datum1, datum2, ssup)` (sortsupport.h): invoke the
     /// installed comparator (identified by the `SortComparatorId` carried in
     /// `ssup.comparator`) on two non-null datums, returning `<0`/`0`/`>0`. The

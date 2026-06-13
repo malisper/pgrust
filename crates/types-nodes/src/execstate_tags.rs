@@ -36,5 +36,3 @@ pub const T_AggState: NodeTag = NodeTag(429);
 pub const T_HashState: NodeTag = NodeTag(434);
 /// `T_AppendState`.
 pub const T_AppendState: NodeTag = NodeTag(397);
-/// `T_SetOpState`.
-pub const T_SetOpState: NodeTag = NodeTag(435);
