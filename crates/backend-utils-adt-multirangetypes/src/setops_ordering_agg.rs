@@ -9,7 +9,6 @@
 
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
-use types_cache::typcache::{TYPECACHE_HASH_EXTENDED_PROC_FINFO, TYPECACHE_HASH_PROC_FINFO};
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
@@ -318,6 +317,11 @@ pub fn multirange_cmp(
     mr1: MultirangeTypeP<'_>,
     mr2: MultirangeTypeP<'_>,
 ) -> PgResult<i32> {
+    // Different types should be prevented by ANYMULTIRANGE matching rules.
+    if multirange_type_oid(mr1) != multirange_type_oid(mr2) {
+        return Err(PgError::error("multirange types do not match"));
+    }
+
     let range_count_1 = multirange_range_count(mr1);
     let range_count_2 = multirange_range_count(mr2);
 
@@ -421,14 +425,14 @@ pub fn hash_multirange(rangetyp: &TypeCacheEntry, mr: MultirangeTypeP<'_>) -> Pg
     if rngelemtype.hash_proc_finfo.fn_oid != 0 {
         hash_fn_oid = rngelemtype.hash_proc_finfo.fn_oid;
     } else {
-        let scache = typcache_seams::lookup_type_cache_entry::call(
-            rngelemtype.type_id,
-            TYPECACHE_HASH_PROC_FINFO,
-        )?;
-        if scache.hash_proc_finfo.fn_oid == 0 {
+        // C: scache = lookup_type_cache(scache->type_id,
+        // TYPECACHE_HASH_PROC_FINFO); then read scache->hash_proc_finfo.fn_oid.
+        let scache_fn_oid =
+            typcache_seams::lookup_range_elem_hash_proc::call(rngelemtype.type_id, false)?;
+        if scache_fn_oid == 0 {
             return Err(could_not_identify_hash_fn(rngelemtype.type_id));
         }
-        hash_fn_oid = scache.hash_proc_finfo.fn_oid;
+        hash_fn_oid = scache_fn_oid;
     }
 
     let range_count = multirange_range_count(mr);
@@ -488,14 +492,15 @@ pub fn hash_multirange_extended(
     if rngelemtype.hash_extended_proc_finfo.fn_oid != 0 {
         hash_fn_oid = rngelemtype.hash_extended_proc_finfo.fn_oid;
     } else {
-        let scache = typcache_seams::lookup_type_cache_entry::call(
-            rngelemtype.type_id,
-            TYPECACHE_HASH_EXTENDED_PROC_FINFO,
-        )?;
-        if scache.hash_extended_proc_finfo.fn_oid == 0 {
+        // C: scache = lookup_type_cache(scache->type_id,
+        // TYPECACHE_HASH_EXTENDED_PROC_FINFO); then read
+        // scache->hash_extended_proc_finfo.fn_oid.
+        let scache_fn_oid =
+            typcache_seams::lookup_range_elem_hash_proc::call(rngelemtype.type_id, true)?;
+        if scache_fn_oid == 0 {
             return Err(could_not_identify_hash_fn(rngelemtype.type_id));
         }
-        hash_fn_oid = scache.hash_extended_proc_finfo.fn_oid;
+        hash_fn_oid = scache_fn_oid;
     }
 
     let seed_datum = Datum::from_u64(seed);

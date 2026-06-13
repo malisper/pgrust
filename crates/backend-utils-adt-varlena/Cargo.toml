@@ -1,0 +1,35 @@
+[package]
+name = "backend-utils-adt-varlena"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_varlena"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-locale = { path = "../types-locale" }
+types-sortsupport = { path = "../types-sortsupport" }
+types-regex = { path = "../types-regex" }
+types-stringinfo = { path = "../types-stringinfo" }
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-regexp-seams = { path = "../backend-utils-adt-regexp-seams" }
+backend-regex-core-seams = { path = "../backend-regex-core-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-adt-encode-seams = { path = "../backend-utils-adt-encode-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-lib-hyperloglog-seams = { path = "../backend-lib-hyperloglog-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }
+types-wchar = { path = "../types-wchar" }
+common-unicode-norm-bitfields = { path = "../common-unicode-norm-bitfields" }
+common-unicode-category-seams = { path = "../common-unicode-category-seams" }

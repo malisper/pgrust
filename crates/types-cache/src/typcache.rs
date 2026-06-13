@@ -42,12 +42,12 @@ pub struct TypeCacheEntry {
     /// (`fn_oid == InvalidOid` when absent).
     pub rng_subdiff_finfo: FmgrInfo,
     /// `hash_proc_finfo` -- the type's hash support function (used by
-    /// `hash_range` on the range element type's entry; `fn_oid == InvalidOid`
-    /// when absent).
+    /// `hash_range` on the range element type's entry, and by `hash_multirange`;
+    /// `fn_oid == InvalidOid` when absent).
     pub hash_proc_finfo: FmgrInfo,
     /// `hash_extended_proc_finfo` -- the type's extended (64-bit, seeded) hash
-    /// support function (used by `hash_range_extended`; `fn_oid == InvalidOid`
-    /// when absent).
+    /// support function (used by `hash_range_extended` / `hash_multirange_extended`;
+    /// `fn_oid == InvalidOid` when absent).
     pub hash_extended_proc_finfo: FmgrInfo,
     /// `rngelemtype` -- the range element type's cache entry (range types only).
     pub rngelemtype: Option<Box<TypeCacheEntry>>,
