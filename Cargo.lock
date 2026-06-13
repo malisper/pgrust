@@ -2149,6 +2149,7 @@ dependencies = [
  "backend-replication-logical-decode-seams",
  "backend-replication-logical-logical-seams",
  "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-logical-slotsync-seams",
  "backend-replication-logical-snapbuild-seams",
  "backend-replication-slot-seams",
  "backend-replication-walsender-seams",
@@ -2162,6 +2163,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-logical",
+ "types-replication-slot",
 ]
 
 [[package]]
@@ -2253,6 +2255,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-slot"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam",
+ "backend-access-transam-xlog-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-postmaster-interrupt",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-replslot-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-more-seams",
+ "libc",
+ "mcx",
+ "port-pg-crc32c-seams",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-logical",
+ "types-pgstat",
+ "types-replication-slot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-replication-slot-seams"
 version = "0.0.0"
 dependencies = [
@@ -2260,6 +2306,8 @@ dependencies = [
  "types-core",
  "types-error",
  "types-logical",
+ "types-replication-slot",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -2292,6 +2340,7 @@ name = "backend-replication-walsender-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-condvar",
  "types-core",
  "types-error",
 ]
@@ -2351,6 +2400,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2481,7 +2531,9 @@ name = "backend-storage-ipc-procsignal-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -2796,6 +2848,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-pgtime",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-replslot-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-logical",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3714,6 +3775,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-crc32c-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "port-pgsleep-seams"
 version = "0.0.0"
 dependencies = [
@@ -3800,6 +3868,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-replication-slot",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -4041,6 +4110,14 @@ version = "0.0.0"
 [[package]]
 name = "types-replication"
 version = "0.0.0"
+
+[[package]]
+name = "types-replication-slot"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-tuple",
+]
 
 [[package]]
 name = "types-scan"

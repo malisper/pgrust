@@ -3391,7 +3391,7 @@ fn preprocessNamespacePath(
     roleid: Oid,
 ) -> PgResult<(Vec<Oid>, bool)> {
     /* Parse string into list of identifiers */
-    let namelist = match varlena_seams::split_identifier_string::call(mcx, searchPath)? {
+    let namelist = match varlena_seams::split_identifier_string::call(mcx, searchPath, ',')? {
         Some(l) => l,
         None => {
             /* syntax error in name list */
@@ -3984,7 +3984,7 @@ pub fn check_search_path(mcx: Mcx<'_>, newval: &str) -> PgResult<bool> {
      * Ensure validity check succeeds before creating cache entry.
      */
     /* Parse string into list of identifiers */
-    if varlena_seams::split_identifier_string::call(mcx, searchPath)?.is_none() {
+    if varlena_seams::split_identifier_string::call(mcx, searchPath, ',')?.is_none() {
         /* syntax error in name list */
         guc_seams::guc_check_errdetail::call("List syntax is invalid.".to_string());
         return Ok(false);
