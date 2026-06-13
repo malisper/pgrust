@@ -18,4 +18,5 @@ types-storage = { path = "../types-storage" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-scan = { path = "../types-scan" }
+types-snapshot = { path = "../types-snapshot" }
 types-nbtree = { path = "../types-nbtree" }

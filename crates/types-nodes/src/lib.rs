@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bitmapset;
+pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;
@@ -22,6 +23,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
@@ -66,6 +68,10 @@ pub use nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
     IndexScanInstrumentation, ParallelIndexScanDesc, ParallelIndexScanDescData, Scan,
     SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+};
+pub use nodeappend::{
+    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
+    T_Append, T_AppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{

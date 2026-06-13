@@ -10,7 +10,29 @@ seam_core::seam!(
     pub fn predicate_lock_page<'mcx>(
         relation: types_rel::Relation<'mcx>,
         blkno: types_core::primitive::BlockNumber,
-        snapshot: Option<types_scan::snapshot::SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetSerializableTransactionSnapshot(snapshot)` (predicate.c) — get a
+    /// snapshot for a serializable transaction, registering it with the
+    /// predicate-locking machinery. C fills the caller's `SnapshotData`; here
+    /// the seam takes the freshly-fetched snapshot and returns the registered
+    /// (possibly adjusted) one. Allocates / can `ereport(ERROR)`.
+    pub fn get_serializable_transaction_snapshot(
+        snapshot: types_snapshot::SnapshotData,
+    ) -> types_error::PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `SetSerializableTransactionSnapshot(snapshot, sourcevxid, sourcepid)`
+    /// (predicate.c) — adopt an imported snapshot into the serializable
+    /// machinery (used by `SET TRANSACTION SNAPSHOT`).
+    pub fn set_serializable_transaction_snapshot(
+        snapshot: types_snapshot::SnapshotData,
+        sourcevxid: types_storage::VirtualTransactionId,
+        sourcepid: i32,
     ) -> types_error::PgResult<()>
 );
 
@@ -82,4 +104,10 @@ seam_core::seam!(
         xid: types_core::primitive::TransactionId,
         is_commit: bool,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `TransferPredicateLocksToHeapRelation(relation)` (predicate.c): promote
+    /// tuple/page predicate locks to a relation lock before the rewrite.
+    pub fn transfer_predicate_locks_to_heap_relation(relid: types_core::Oid) -> types_error::PgResult<()>
 );

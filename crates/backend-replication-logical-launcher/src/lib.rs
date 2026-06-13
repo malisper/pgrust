@@ -568,34 +568,43 @@ pub fn logicalrep_worker_launch(
 
     worker_lock_release()?;
 
-    // Register the new dynamic worker (memset(&bgw, 0, ...) == ::default()).
-    let mut bgw = BackgroundWorker {
-        bgw_flags: BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION,
-        bgw_start_time: BgWorkerStartTime::RecoveryFinished as i32,
-        bgw_library_name: String::from("postgres"),
-        ..Default::default()
-    };
+    // Register the new dynamic worker (memset(&bgw, 0, ...) == ::zeroed()).
+    let mut bgw = BackgroundWorker::zeroed();
+    bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    bgw.bgw_start_time = BgWorkerStartTime::RecoveryFinished;
+    types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
 
     match wtype {
         LogicalRepWorkerType::Apply => {
-            bgw.bgw_function_name = String::from("ApplyWorkerMain");
-            bgw.bgw_name = format!("logical replication apply worker for subscription {subid}");
-            bgw.bgw_type = String::from("logical replication apply worker");
+            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyWorkerMain");
+            types_bgworker::snprintf_cstr(
+                &mut bgw.bgw_name,
+                &format!("logical replication apply worker for subscription {subid}"),
+            );
+            types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication apply worker");
         }
         LogicalRepWorkerType::ParallelApply => {
-            bgw.bgw_function_name = String::from("ParallelApplyWorkerMain");
-            bgw.bgw_name =
-                format!("logical replication parallel apply worker for subscription {subid}");
-            bgw.bgw_type = String::from("logical replication parallel worker");
+            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ParallelApplyWorkerMain");
+            types_bgworker::snprintf_cstr(
+                &mut bgw.bgw_name,
+                &format!("logical replication parallel apply worker for subscription {subid}"),
+            );
+            types_bgworker::snprintf_cstr(
+                &mut bgw.bgw_type,
+                "logical replication parallel worker",
+            );
             // memcpy(bgw.bgw_extra, &subworker_dsm, sizeof(dsm_handle)).
-            bgw.bgw_extra_dsm = Some(subworker_dsm);
+            bgw.bgw_extra[..4].copy_from_slice(&subworker_dsm.to_ne_bytes());
         }
         LogicalRepWorkerType::Tablesync => {
-            bgw.bgw_function_name = String::from("TablesyncWorkerMain");
-            bgw.bgw_name = format!(
-                "logical replication tablesync worker for subscription {subid} sync {relid}"
+            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "TablesyncWorkerMain");
+            types_bgworker::snprintf_cstr(
+                &mut bgw.bgw_name,
+                &format!(
+                    "logical replication tablesync worker for subscription {subid} sync {relid}"
+                ),
             );
-            bgw.bgw_type = String::from("logical replication tablesync worker");
+            types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication tablesync worker");
         }
         LogicalRepWorkerType::Unknown => {
             // Should never happen.
@@ -605,7 +614,7 @@ pub fn logicalrep_worker_launch(
 
     bgw.bgw_restart_time = BGW_NEVER_RESTART;
     bgw.bgw_notify_pid = globals::my_proc_pid::call();
-    bgw.bgw_main_arg = slot; // Int32GetDatum(slot)
+    bgw.bgw_main_arg = Datum::from_i32(slot); // Int32GetDatum(slot)
 
     let bgw_handle = match bgworker::register_dynamic_background_worker::call(&bgw)? {
         Some(h) => h,
@@ -997,19 +1006,17 @@ pub fn ApplyLauncherRegister() -> PgResult<()> {
         return Ok(());
     }
 
-    // memset(&bgw, 0, sizeof(bgw)) — BackgroundWorker::default().
-    let bgw = BackgroundWorker {
-        bgw_flags: BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION,
-        bgw_start_time: BgWorkerStartTime::RecoveryFinished as i32,
-        bgw_library_name: String::from("postgres"),
-        bgw_function_name: String::from("ApplyLauncherMain"),
-        bgw_name: String::from("logical replication launcher"),
-        bgw_type: String::from("logical replication launcher"),
-        bgw_restart_time: 5,
-        bgw_notify_pid: 0,
-        bgw_main_arg: 0, // (Datum) 0
-        bgw_extra_dsm: None,
-    };
+    // memset(&bgw, 0, sizeof(bgw)) — BackgroundWorker::zeroed().
+    let mut bgw = BackgroundWorker::zeroed();
+    bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    bgw.bgw_start_time = BgWorkerStartTime::RecoveryFinished;
+    types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
+    types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyLauncherMain");
+    types_bgworker::snprintf_cstr(&mut bgw.bgw_name, "logical replication launcher");
+    types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication launcher");
+    bgw.bgw_restart_time = 5;
+    bgw.bgw_notify_pid = 0;
+    bgw.bgw_main_arg = Datum::null(); // (Datum) 0
 
     bgworker::register_background_worker::call(&bgw)
 }

@@ -11,7 +11,6 @@ use types_nodes::nodeindexonlyscan::{
 };
 use types_nodes::{IndexOnlyScanState, ParallelIndexScanDescData};
 use types_scan::sdir::ScanDirection;
-use types_scan::snapshot::SnapshotHandle;
 use types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
@@ -25,7 +24,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         heap_relation: types_rel::Relation<'mcx>,
         index_relation: types_rel::Relation<'mcx>,
-        snapshot: Option<SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
         instrument: IndexScanInstrumentation,
         nkeys: i32,
         norderbys: i32,
@@ -112,7 +111,7 @@ seam_core::seam!(
         index_relation: types_rel::Relation<'mcx>,
         nkeys: i32,
         norderbys: i32,
-        snapshot: Option<SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
         instrument: bool,
         parallel_aware: bool,
         nworkers: i32,
@@ -129,7 +128,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         heap_relation: types_rel::Relation<'mcx>,
         index_relation: types_rel::Relation<'mcx>,
-        snapshot: Option<SnapshotHandle>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
         instrument: bool,
         parallel_aware: bool,
         nworkers: i32,

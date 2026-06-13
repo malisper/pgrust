@@ -122,7 +122,7 @@ fn IndexOnlyNext<'mcx>(
             mcx,
             heap_rel,
             index_rel,
-            estate.es_snapshot,
+            estate.es_snapshot.clone(),
             node.ioss_Instrument,
             node.ioss_NumScanKeys,
             node.ioss_NumOrderByKeys,
@@ -276,7 +276,7 @@ fn IndexOnlyNext<'mcx>(
                 .as_ref()
                 .map(|r| r.alias())
                 .ok_or_else(|| elog("index-only scan descriptor has no heap relation"))?;
-            predicate::predicate_lock_page::call(heap_rel, blkno, estate.es_snapshot)?;
+            predicate::predicate_lock_page::call(heap_rel, blkno, estate.es_snapshot.clone())?;
         }
 
         return Ok(true);
@@ -720,7 +720,7 @@ pub fn ExecIndexOnlyScanEstimate<'mcx>(
         index,
         node.ioss_NumScanKeys,
         node.ioss_NumOrderByKeys,
-        estate.es_snapshot,
+        estate.es_snapshot.clone(),
         instrument,
         parallel_aware,
         nworkers,
@@ -767,7 +767,7 @@ pub fn ExecIndexOnlyScanInitializeDSM<'mcx>(
         mcx,
         heap_rel,
         index_rel,
-        estate.es_snapshot,
+        estate.es_snapshot.clone(),
         instrument,
         parallel_aware,
         nworkers,

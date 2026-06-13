@@ -376,9 +376,9 @@ pub fn pq_init(client_sock: &ClientSocket, my_latch: LatchHandle) -> PgResult<Po
     }
 
     let set = WaitEventSet::create(FeBeWaitSetNEvents as i32)?;
-    let socket_pos = set.add_event(WL_SOCKET_WRITEABLE, port.sock, None)?;
-    let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch))?;
-    set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None)?;
+    let socket_pos = set.add_event(WL_SOCKET_WRITEABLE, port.sock, None, None)?;
+    let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, Some(my_latch), None)?;
+    set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None, None)?;
     FE_BE_WAIT_SET.with(|c| *c.borrow_mut() = Some((set, my_latch)));
 
     // The event positions match the order we added them.

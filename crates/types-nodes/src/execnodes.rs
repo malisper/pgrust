@@ -23,7 +23,8 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
+use types_core::primitive::{AttrNumber, Index, Oid};
+use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
@@ -155,10 +156,58 @@ pub struct ParamExecData {
 }
 
 /// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// `ii_IndexAttrNumbers` is the C `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]`,
+/// fixed-size here.
+#[derive(Clone, Copy, Debug)]
 pub struct IndexInfo {
+    /// `int ii_NumIndexAttrs` — total number of columns in the index.
+    pub ii_NumIndexAttrs: i32,
+    /// `int ii_NumIndexKeyAttrs` — number of key columns in the index.
+    pub ii_NumIndexKeyAttrs: i32,
+    /// `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]` — heap-attribute
+    /// numbers of the index's columns (0 for an expression column).
+    pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
     /// `bool ii_Unique` — is it a unique index?
     pub ii_Unique: bool,
+    /// `bool ii_NullsNotDistinct` — does a unique index treat NULLs as not
+    /// distinct?
+    pub ii_NullsNotDistinct: bool,
+    /// `bool ii_ReadyForInserts` — is the index ready for inserts?
+    pub ii_ReadyForInserts: bool,
+    /// `bool ii_CheckedUnchanged` — HOT/summarizing-unchanged checked for the
+    /// current tuple?
+    pub ii_CheckedUnchanged: bool,
+    /// `bool ii_IndexUnchanged` — is the current tuple unchanged wrt this
+    /// index?
+    pub ii_IndexUnchanged: bool,
+    /// `bool ii_Concurrent` — built with CONCURRENTLY?
+    pub ii_Concurrent: bool,
+    /// `bool ii_BrokenHotChain` — was a broken HOT chain seen during build?
+    pub ii_BrokenHotChain: bool,
+    /// `int ii_ParallelWorkers` — number of parallel workers for the build.
+    pub ii_ParallelWorkers: i32,
+    /// `Oid ii_Am` — the index access method's OID.
+    pub ii_Am: Oid,
+}
+
+impl Default for IndexInfo {
+    fn default() -> Self {
+        IndexInfo {
+            ii_NumIndexAttrs: 0,
+            ii_NumIndexKeyAttrs: 0,
+            ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
+            ii_Unique: false,
+            ii_NullsNotDistinct: false,
+            ii_ReadyForInserts: false,
+            ii_CheckedUnchanged: false,
+            ii_IndexUnchanged: false,
+            ii_Concurrent: false,
+            ii_BrokenHotChain: false,
+            ii_ParallelWorkers: 0,
+            ii_Am: Oid::default(),
+        }
+    }
 }
 
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
@@ -417,11 +466,11 @@ impl Default for RowMarkType {
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
-    /// `Snapshot es_snapshot` — time qual to use. The active-snapshot token
-    /// owned by snapmgr (`SnapshotHandle`); `None` is the C `NULL`. Lands
-    /// with its first consumer (the index/heap scan ports), per docs/types.md
-    /// rule 3.
-    pub es_snapshot: Option<types_scan::snapshot::SnapshotHandle>,
+    /// `Snapshot es_snapshot` — time qual to use. The C `Snapshot` is a shared
+    /// pointer, modeled as the shared `Rc<SnapshotData>` the active-snapshot
+    /// stack/owner alias; `None` is the C `NULL`. Lands with its first consumer
+    /// (the index/heap scan ports), per docs/types.md rule 3.
+    pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
     /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
     /// recheck state this EState belongs to. The full `EPQState` is owned by
     /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle

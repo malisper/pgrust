@@ -108,3 +108,37 @@ seam_core::seam!(
     /// collations work with the encoding. Pure table lookup.
     pub fn is_encoding_supported_by_icu(encoding: i32) -> bool
 );
+
+seam_core::seam!(
+    /// `pg_server_to_any(s, len, encoding)` (mbutils.c): convert from the
+    /// server encoding to an arbitrary `encoding`. As with the client/server
+    /// dispatchers, `Ok(None)` means no conversion happened (the caller's
+    /// bytes stand); `Ok(Some(v))` carries the converted bytes (no trailing
+    /// NUL) allocated in `mcx`. `Err` carries the conversion failure /
+    /// out-of-memory `ereport(ERROR)`.
+    pub fn pg_server_to_any<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: &[u8],
+        encoding: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `pg_get_client_encoding()` (mbutils.c): the current client encoding id.
+    /// Pure global read.
+    pub fn pg_get_client_encoding() -> i32
+);
+
+seam_core::seam!(
+    /// `pg_encoding_mblen(encoding, mbstr)` (wchar.c): the byte length of the
+    /// first character of `mbstr` (the remaining bytes from the current scan
+    /// position) in the explicit `encoding`. Result is `>= 1`. Infallible.
+    pub fn pg_encoding_mblen(encoding: i32, mbstr: &[u8]) -> i32
+);
+
+seam_core::seam!(
+    /// `PG_ENCODING_IS_CLIENT_ONLY(encoding)` (`mb/pg_wchar.h`): whether the
+    /// encoding may appear only on the client side (so ASCII can be a
+    /// non-first byte of a multibyte char). Pure table predicate.
+    pub fn pg_encoding_is_client_only(encoding: i32) -> bool
+);

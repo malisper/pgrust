@@ -11,6 +11,14 @@ pub const NAMESPACE_RELATION_ID: Oid = 2615;
 pub const RELATION_RELATION_ID: Oid = 1259;
 /// `DatabaseRelationId` (`catalog/pg_database.h`) — pg_database's OID.
 pub const DATABASE_RELATION_ID: Oid = 1262;
+/// `AuthIdRelationId` (`catalog/pg_authid.h`) — pg_authid's OID.
+pub const AUTH_ID_RELATION_ID: Oid = 1260;
+/// `AuthIdOidIndexId` (`catalog/pg_authid.h`) — pg_authid_oid_index's OID.
+pub const AUTH_ID_OID_INDEX_ID: Oid = 2677;
+/// `AuthMemRelationId` (`catalog/pg_auth_members.h`) — pg_auth_members's OID.
+pub const AUTH_MEM_RELATION_ID: Oid = 1261;
+/// `AuthMemOidIndexId` (`catalog/pg_auth_members.h`) — pg_auth_members_oid_index's OID.
+pub const AUTH_MEM_OID_INDEX_ID: Oid = 6303;
 /// `AttributeRelationId` (`catalog/pg_attribute.h`) — pg_attribute's OID.
 pub const ATTRIBUTE_RELATION_ID: Oid = 1249;
 /// `IndexRelationId` (`catalog/pg_index.h`) — pg_index's OID.
@@ -26,6 +34,9 @@ pub const PG_CATALOG_NAMESPACE: Oid = 11;
 pub const PG_TOAST_NAMESPACE: Oid = 99;
 /// `BOOTSTRAP_SUPERUSERID` (`catalog/pg_authid_d.h`).
 pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
+/// `ROLE_PG_DATABASE_OWNER` (`catalog/pg_authid.dat`) — the `pg_database_owner`
+/// predefined role.
+pub const ROLE_PG_DATABASE_OWNER: Oid = 6171;
 
 /// `FirstNormalObjectId` (`access/transam.h`) — first OID assignable to
 /// user-created objects; OIDs below this belong to built-in system objects.
@@ -47,6 +58,11 @@ pub const INTERNALOID: Oid = 2281;
 
 /// `BTREE_AM_OID` (`catalog/pg_am_d.h`) — the OID of the btree access method.
 pub const BTREE_AM_OID: Oid = 403;
+
+/// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation. The
+/// `ScanKeyInit` shorthand always stamps this into `sk_collation` (correct
+/// for all collation-aware catalog columns, ignored for the rest).
+pub const C_COLLATION_OID: Oid = 950;
 
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
