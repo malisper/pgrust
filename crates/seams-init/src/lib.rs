@@ -94,6 +94,7 @@ pub fn init_all() {
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_latch::init_seams();
+    backend_storage_ipc_pmsignal::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_ipc_shm_mq::init_seams();
     backend_storage_ipc_shm_toc::init_seams();

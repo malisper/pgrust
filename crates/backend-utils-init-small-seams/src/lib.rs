@@ -31,6 +31,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PostmasterPid` (globals.c): the postmaster's process id, used as the
+    /// `kill(2)` target when a child signals the postmaster (`SIGUSR1`/`SIGHUP`).
+    pub fn postmaster_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `MyPMChildSlot` (globals.c): this child's index (1-based) into the
+    /// postmaster's `PMChildFlags[]` slot array; 0 outside a postmaster child.
+    pub fn my_pm_child_slot() -> i32
+);
+
+seam_core::seam!(
     /// `MaxBackends` (globals.c): the computed backend-slot count, fixed at
     /// postmaster startup.
     pub fn max_backends() -> i32

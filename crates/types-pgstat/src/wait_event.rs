@@ -44,6 +44,12 @@ pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
 /// `PG_WAIT_IPC | 0` (= 134217728, matching c2rust).
 pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
 
+/// `WAIT_EVENT_BACKEND_TERMINATION` — "Waiting for the termination of another
+/// backend." 4th entry (0-based 3) of the IPC section of
+/// `wait_event_names.txt` (APPEND_READY, ARCHIVE_CLEANUP_COMMAND,
+/// ARCHIVE_COMMAND, BACKEND_TERMINATION, ...), so `PG_WAIT_IPC + 3`.
+pub const WAIT_EVENT_BACKEND_TERMINATION: u32 = PG_WAIT_IPC + 3;
+
 /// `WAIT_EVENT_MESSAGE_QUEUE_INTERNAL` — "Waiting for another process to be
 /// attached to a shared message queue." 34th entry (0-based 33) of the IPC
 /// section, so `PG_WAIT_IPC | 33` (= 134217761, matching c2rust).

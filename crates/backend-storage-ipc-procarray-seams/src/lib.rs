@@ -294,3 +294,15 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn proc_array_shmem_init() -> types_error::PgResult<()>
 );
+
+// --- backend-storage-ipc-signalfuncs consumer (signalfuncs.c) ---
+
+seam_core::seam!(
+    /// `BackendPidGetProc(pid)` (procarray.c) followed by `GetNumberFromPGProc(proc)`
+    /// (`storage/proc.h`): look up the live backend whose PID is `pid`, returning
+    /// the `roleId` it advertises (`proc->roleId`, `InvalidOid` if none) and its
+    /// proc number. `None` mirrors `BackendPidGetProc` returning `NULL` — the pid
+    /// is not a live backend (it may be an auxiliary process, the postmaster, or
+    /// already gone). Shared-memory scan; cannot `ereport`.
+    pub fn backend_pid_get_proc_role(pid: i32) -> Option<(Oid, ProcNumber)>
+);
