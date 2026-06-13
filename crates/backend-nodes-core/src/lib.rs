@@ -73,4 +73,8 @@ pub fn init_seams() {
     seams::bms_del_members::set(bitmapset::bms_del_members);
     seams::bms_equal::set(bitmapset::bms_equal);
     seams::bms_free::set(bitmapset::bms_free);
+
+    // The nodefuncs family (`nodeFuncs.c`) owns `backend-nodes-nodeFuncs-seams`
+    // and installs its expression-inspection seams.
+    nodefuncs::init_seams();
 }

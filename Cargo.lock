@@ -4224,12 +4224,16 @@ name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
  "common-hashfn",
  "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-nodes",
  "types-tuple",
 ]
