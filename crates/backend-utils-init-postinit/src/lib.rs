@@ -549,7 +549,7 @@ pub fn InitializeMaxBackends() -> PgResult<()> {
 /// PGPROC.
 pub fn InitializeFastPathLocks() -> PgResult<()> {
     debug_assert_eq!(
-        backend_storage_lmgr_proc_seams::fast_path_lock_groups_per_backend::call(),
+        backend_utils_init_small_seams::fast_path_lock_groups_per_backend::call(),
         0,
         "FastPathLockGroupsPerBackend must be 0"
     );
@@ -564,7 +564,7 @@ pub fn InitializeFastPathLocks() -> PgResult<()> {
         ),
         1,
     );
-    backend_storage_lmgr_proc_seams::set_fast_path_lock_groups_per_backend::call(value);
+    backend_utils_init_small_seams::set_fast_path_lock_groups_per_backend::call(value);
 
     debug_assert_eq!(
         value,
@@ -641,7 +641,7 @@ pub fn InitPostgres(
         .finish(loc(723, "InitPostgres"));
 
     // Add my PGPROC struct to the ProcArray. Once done, I am visible to others.
-    backend_storage_lmgr_proc_seams::init_process_phase2::call()?;
+    backend_storage_lmgr_proc_seams::init_process_phase2::call(mcx)?;
 
     // Initialize status reporting.
     backend_utils_activity_status_seams::pgstat_beinit::call()?;
@@ -829,8 +829,11 @@ pub fn InitPostgres(
         && !am_superuser
         && (su_reserved + reserved_conns) > 0
     {
-        let (have, nfree) =
-            backend_storage_lmgr_proc_seams::have_n_free_procs::call(su_reserved + reserved_conns)?;
+        let mut nfree = 0;
+        let have = backend_storage_lmgr_proc_seams::have_n_free_procs::call(
+            su_reserved + reserved_conns,
+            &mut nfree,
+        );
         if !have {
             if nfree < su_reserved {
                 return ereport(FATAL)

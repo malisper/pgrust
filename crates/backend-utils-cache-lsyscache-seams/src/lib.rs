@@ -203,6 +203,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_namespace_name_or_temp(nspid)` (lsyscache.c): like
+    /// [`get_namespace_name`], but returns the literal `"pg_temp"` when
+    /// `nspid` is the calling backend's own temp namespace. A missing
+    /// namespace is `Ok(None)`.
     /// `get_namespace_name_or_temp(nspid)` (lsyscache.c): `"pg_temp"` if
     /// `isTempNamespace(nspid)`, else `get_namespace_name(nspid)`, copied into
     /// `mcx` (C: `pstrdup`). A missing namespace is `Ok(None)`. `Err` is OOM.

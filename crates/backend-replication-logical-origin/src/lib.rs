@@ -1330,6 +1330,9 @@ pub fn init_seams() {
     s::replorigin_by_oid::set(replorigin_by_oid_seam);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     s::replication_origin_shmem_init::set(ReplicationOriginShmemInit);
+    // Contract-reconciled install (assemble/seam-contract-reconciles): the seam
+    // is now the infallible `-> Size` shape, matching the C `Size` return.
+    s::replication_origin_shmem_size::set(ReplicationOriginShmemSize);
 }
 
 #[cfg(test)]

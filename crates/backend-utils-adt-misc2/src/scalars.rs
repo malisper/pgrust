@@ -1,0 +1,1063 @@
+//! Family `scalars` — `src/backend/utils/adt/tid.c` + `windowfuncs.c`.
+//!
+//! Two cohesive scalar/SRF-helper clusters grouped together: the `tid` type
+//! (ItemPointer) I/O and operators — `tidin` / `tidout` / `tidrecv` /
+//! `tidsend`, the comparison/equality family (`tideq` … `bttidcmp`,
+//! `tidlarger` / `tidsmaller`), `hashtid` / `hashtidextended`, and the
+//! `currtid_*` lookups — and the SQL window support functions in
+//! windowfuncs.c (rank / dense_rank / percent_rank / cume_dist / ntile /
+//! row_number, the lead/lag/first/last/nth_value `leadlag_common` family, and
+//! the matching `*_support` planner-support functions).
+//!
+//! TID ops are pure scalar transforms (no Mcx beyond text formatting); the
+//! window functions drive the executor's WindowObject through the adt-infra
+//! SRF/window boundary (seamed to its real owner). Values cross as `Datum`.
+//! Independent of the keystone.
+//!
+//! ## Faithfulness / seam boundaries
+//!
+//! Every piece of *this unit's own* logic — the `tid` input-syntax parser, the
+//! `ItemPointerCompare` ordering and the equality/larger/smaller/cmp wrappers
+//! built on it, and the full control flow of the window functions (rank
+//! advancement, ntile bucketing, lead/lag dispatch) — is ported field-for-field
+//! from `tid.c` / `windowfuncs.c`.
+//!
+//! Three boundaries reach owners that are **not yet ported** and are therefore
+//! reached through the named seam-and-panic helpers in [`unported`]
+//! (mirror-pg-and-panic — never a silent stub):
+//!
+//! * The `WindowObject` runtime (`windowapi.h`: `WinGetCurrentPosition`,
+//!   `WinSetMarkPosition`, `WinRowsArePeers`, `WinGetPartitionRowCount`,
+//!   `WinGetPartitionLocalMemory`, `WinGetFuncArgCurrent`,
+//!   `WinGetFuncArgInPartition`, `WinGetFuncArgInFrame`) — owned by the
+//!   executor's `nodeWindowAgg.c`, not yet a crate on main.
+//! * `get_fn_expr_arg_stable` (`utils/fmgr` flinfo introspection) — reached for
+//!   the lead/lag/nth_value const-offset optimization.
+//! * The `tid` type's pass-by-reference container plumbing: `palloc`'d
+//!   `ItemPointerData`, the cstring/`bytea` result construction, and the
+//!   `pq_getmsgint` / `pq_sendint*` wire codec (libpq/pqformat), plus the
+//!   `currtid_internal` table-AM / snapshot / acl path. The pure arithmetic
+//!   that *surrounds* these (syntax scan, range checks, comparison) is ported
+//!   in full; only the container/runtime crossing panics.
+
+use mcx::Mcx;
+use types_datum::Datum;
+use types_error::{PgError, PgResult};
+use types_error::{
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE,
+    ERRCODE_INVALID_ARGUMENT_FOR_NTILE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+};
+
+// ---------------------------------------------------------------------------
+// tid.c
+// ---------------------------------------------------------------------------
+
+// tid.c #defines
+const LDELIM: u8 = b'(';
+const RDELIM: u8 = b')';
+const DELIM: u8 = b',';
+const NTIDARGS: usize = 2;
+
+/// `BlockNumber` (`storage/block.h`): `typedef uint32 BlockNumber`.
+type BlockNumber = u32;
+/// `OffsetNumber` (`storage/off.h`): `typedef uint16 OffsetNumber`.
+type OffsetNumber = u16;
+
+/// `ItemPointerData` (`storage/itemptr.h`) — `BlockIdData` (two `uint16`) plus a
+/// `uint16` offset. Field-for-field with the C struct; the layered owner is
+/// `types_tuple::ItemPointerData` (not a dependency of this carrier crate, so
+/// the (block, offset) pair is modeled locally and crosses as a `Datum`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ItemPointer {
+    block_number: BlockNumber,
+    offset_number: OffsetNumber,
+}
+
+impl ItemPointer {
+    /// C `ItemPointerSet(pointer, blockNumber, offNum)`.
+    fn set(block_number: BlockNumber, offset_number: OffsetNumber) -> Self {
+        ItemPointer {
+            block_number,
+            offset_number,
+        }
+    }
+
+    /// C `ItemPointerGetBlockNumberNoCheck` (no validity assertion).
+    fn block_number_no_check(&self) -> BlockNumber {
+        self.block_number
+    }
+
+    /// C `ItemPointerGetOffsetNumberNoCheck`.
+    fn offset_number_no_check(&self) -> OffsetNumber {
+        self.offset_number
+    }
+}
+
+/// C `ItemPointerCompare` (`storage/itemptr.c`): order by block number, then by
+/// offset number; returns -1 / 0 / 1. Pure arithmetic, ported in full.
+fn item_pointer_compare(arg1: &ItemPointer, arg2: &ItemPointer) -> i32 {
+    // BlockIdGetBlockNumber comparison first.
+    let b1 = arg1.block_number_no_check();
+    let b2 = arg2.block_number_no_check();
+
+    if b1 < b2 {
+        -1
+    } else if b1 > b2 {
+        1
+    } else {
+        // same block, compare offsets
+        let o1 = arg1.offset_number_no_check();
+        let o2 = arg2.offset_number_no_check();
+        if o1 < o2 {
+            -1
+        } else if o1 > o2 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Build the `invalid input syntax for type tid` soft/hard error
+/// (`ERRCODE_INVALID_TEXT_REPRESENTATION`) exactly as tid.c's repeated
+/// `ereturn(... errmsg("invalid input syntax for type %s: \"%s\"", "tid", str))`.
+fn tid_invalid_syntax(str: &str) -> PgError {
+    PgError::error(alloc::format!(
+        "invalid input syntax for type tid: \"{str}\""
+    ))
+    .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+}
+
+/// `tidin(str)` — input routine (tid.c, "largely stolen from boxin()").
+///
+/// Parses `(blocknum,offnum)`; the surrounding scan + `strtoul` range checks are
+/// ported in full. NULL (`None`) cstring cannot reach a C cstring-in (the cstring
+/// is never SQL-NULL); we treat it as the empty string, which fails the syntax
+/// check exactly like a C empty input would.
+pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum> {
+    let str = string.unwrap_or("");
+    let bytes = str.as_bytes();
+
+    // for (i = 0, p = str; *p && i < NTIDARGS && *p != RDELIM; p++)
+    //     if (*p == DELIM || (*p == LDELIM && i == 0))
+    //         coord[i++] = p + 1;
+    // coord[k] records the byte offset *after* the matched delimiter.
+    let mut coord: [usize; NTIDARGS] = [0; NTIDARGS];
+    let mut i = 0usize;
+    let mut p = 0usize;
+    while p < bytes.len() && i < NTIDARGS && bytes[p] != RDELIM {
+        let c = bytes[p];
+        if c == DELIM || (c == LDELIM && i == 0) {
+            coord[i] = p + 1;
+            i += 1;
+        }
+        p += 1;
+    }
+
+    if i < NTIDARGS {
+        return Err(tid_invalid_syntax(str));
+    }
+
+    // errno = 0; cvt = strtoul(coord[0], &badp, 10);
+    // if (errno || *badp != DELIM) ereturn(...)
+    let (cvt0, badp0) = strtoul(bytes, coord[0]);
+    let cvt0 = match cvt0 {
+        Some(v) => v,
+        None => return Err(tid_invalid_syntax(str)),
+    };
+    if byte_at(bytes, badp0) != DELIM {
+        return Err(tid_invalid_syntax(str));
+    }
+    let block_number = cvt0 as BlockNumber;
+
+    // Cope with possibility that unsigned long is wider than BlockNumber
+    // (SIZEOF_LONG > 4): reject values out of BlockNumber range (matching oidin).
+    if cvt0 != block_number as u64 && cvt0 != (block_number as i32) as u64 {
+        return Err(tid_invalid_syntax(str));
+    }
+
+    // cvt = strtoul(coord[1], &badp, 10);
+    // if (errno || *badp != RDELIM || cvt > USHRT_MAX) ereturn(...)
+    let (cvt1, badp1) = strtoul(bytes, coord[1]);
+    let cvt1 = match cvt1 {
+        Some(v) => v,
+        None => return Err(tid_invalid_syntax(str)),
+    };
+    if byte_at(bytes, badp1) != RDELIM || cvt1 > u16::MAX as u64 {
+        return Err(tid_invalid_syntax(str));
+    }
+    let offset_number = cvt1 as OffsetNumber;
+
+    // result = palloc(sizeof(ItemPointerData)); ItemPointerSet(result, ...)
+    let result = ItemPointer::set(block_number, offset_number);
+
+    // PG_RETURN_ITEMPOINTER(result): a palloc'd ItemPointerData crosses by
+    // reference (unported container plumbing).
+    unported::return_itempointer(mcx, result)
+}
+
+/// `tidout(itemPtr)` — `snprintf(buf, "(%u,%u)", block, offset)` then `pstrdup`.
+pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
+    let item_ptr = unported::getarg_itempointer(item_ptr);
+    let block_number = item_ptr.block_number_no_check();
+    let offset_number = item_ptr.offset_number_no_check();
+    // "Perhaps someday we should output this as a record."
+    let buf = alloc::format!("({block_number},{offset_number})");
+    // PG_RETURN_CSTRING(pstrdup(buf)): the cstring result crosses by reference.
+    unported::return_cstring(mcx, buf)
+}
+
+/// `tidrecv(buf)` — `pq_getmsgint(blocknum)` + `pq_getmsgint(offnum)`.
+pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum> {
+    // blockNumber = pq_getmsgint(buf, sizeof(blockNumber)); // uint32
+    // offsetNumber = pq_getmsgint(buf, sizeof(offsetNumber)); // uint16
+    let mut cursor = unported::StringInfoCursor::new(buf);
+    let block_number = cursor.getmsgint32();
+    let offset_number = cursor.getmsgint16();
+    let result = ItemPointer::set(block_number, offset_number);
+    unported::return_itempointer(mcx, result)
+}
+
+/// `tidsend(itemPtr)` — `pq_sendint32(block)` + `pq_sendint16(offset)`.
+pub fn tidsend<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
+    let item_ptr = unported::getarg_itempointer(item_ptr);
+    let mut buf = unported::StringInfoBuilder::begintypsend();
+    buf.sendint32(item_ptr.block_number_no_check());
+    buf.sendint16(item_ptr.offset_number_no_check());
+    // PG_RETURN_BYTEA_P(pq_endtypsend(&buf))
+    unported::return_bytea(mcx, buf.endtypsend())
+}
+
+/// `tideq(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) == 0`.
+pub fn tideq(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) == 0)
+}
+
+/// `tidne(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) != 0`.
+pub fn tidne(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) != 0)
+}
+
+/// `tidlt(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) < 0`.
+pub fn tidlt(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) < 0)
+}
+
+/// `tidle(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) <= 0`.
+pub fn tidle(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) <= 0)
+}
+
+/// `tidgt(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) > 0`.
+pub fn tidgt(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) > 0)
+}
+
+/// `tidge(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) >= 0`.
+pub fn tidge(arg1: Datum, arg2: Datum) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2) >= 0)
+}
+
+/// `bttidcmp(arg1, arg2)` — three-way TID comparison shared by the operators.
+pub fn bttidcmp(arg1: Datum, arg2: Datum) -> PgResult<i32> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(item_pointer_compare(&a1, &a2))
+}
+
+/// `tidlarger(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) >= 0 ? arg1 : arg2`.
+pub fn tidlarger(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(if item_pointer_compare(&a1, &a2) >= 0 {
+        arg1
+    } else {
+        arg2
+    })
+}
+
+/// `tidsmaller(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) <= 0 ? arg1 : arg2`.
+pub fn tidsmaller(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
+    let a1 = unported::getarg_itempointer(arg1);
+    let a2 = unported::getarg_itempointer(arg2);
+    Ok(if item_pointer_compare(&a1, &a2) <= 0 {
+        arg1
+    } else {
+        arg2
+    })
+}
+
+/// `hashtid(key)` — `hash_any(key, sizeof(BlockIdData) + sizeof(OffsetNumber))`.
+///
+/// The C deliberately hashes only `sizeof(BlockIdData) + sizeof(OffsetNumber)`
+/// bytes (not `sizeof(ItemPointerData)`) to avoid struct trailing pad. The hash
+/// itself (`hash_any`) lives in `common/hashfn`, not yet a dependency of this
+/// carrier crate, so the byte image is built here and the hash crossing is the
+/// seam-and-panic boundary.
+pub fn hashtid(key: Datum) -> PgResult<u32> {
+    let key = unported::getarg_itempointer(key);
+    let image = itempointer_hash_image(&key);
+    Ok(unported::hash_any(&image))
+}
+
+/// `hashtidextended(key, seed)` —
+/// `hash_any_extended(key, sizeof(BlockIdData) + sizeof(OffsetNumber), seed)`.
+pub fn hashtidextended(key: Datum, seed: u64) -> PgResult<u64> {
+    let key = unported::getarg_itempointer(key);
+    let image = itempointer_hash_image(&key);
+    Ok(unported::hash_any_extended(&image, seed))
+}
+
+/// The exact `sizeof(BlockIdData) + sizeof(OffsetNumber)` little-significant
+/// byte image the C hashes: `BlockIdData{bi_hi, bi_lo}` (two `uint16`, native
+/// layout) followed by the `uint16` offset — 6 bytes total, no trailing pad.
+fn itempointer_hash_image(ptr: &ItemPointer) -> [u8; 6] {
+    // BlockIdData stores the block number as { bi_hi = high16, bi_lo = low16 }.
+    let bn = ptr.block_number_no_check();
+    let bi_hi = (bn >> 16) as u16;
+    let bi_lo = (bn & 0xffff) as u16;
+    let off = ptr.offset_number_no_check();
+    let mut image = [0u8; 6];
+    image[0..2].copy_from_slice(&bi_hi.to_ne_bytes());
+    image[2..4].copy_from_slice(&bi_lo.to_ne_bytes());
+    image[4..6].copy_from_slice(&off.to_ne_bytes());
+    image
+}
+
+/// `currtid_byrelname(relname, tid)` — open the named relation and return the
+/// latest tuple version pointing at `tid`.
+///
+/// The whole body (`makeRangeVarFromNameList(textToQualifiedNameList(...))`,
+/// `table_openrv`, `currtid_internal` — itself the acl check + snapshot +
+/// `table_beginscan_tid` / `table_tuple_get_latest_tid` path, including
+/// `currtid_for_view`) reaches the catalog/namespace + table-AM owners, none of
+/// which are ported. mirror-pg-and-panic at that named boundary.
+pub fn currtid_byrelname<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _relname: &str,
+    _tid: Datum,
+) -> PgResult<Datum> {
+    unported::currtid_internal_by_relname()
+}
+
+// ---------------------------------------------------------------------------
+// windowfuncs.c
+// ---------------------------------------------------------------------------
+//
+// The WindowObject runtime (windowapi.h) is owned by the executor's
+// nodeWindowAgg.c, not yet ported. The per-partition context structs
+// (rank_context / ntile_context) and the entire control flow of each window
+// function are ported field-for-field below; only the WinGet*/WinSet* accessors
+// cross to the unported owner (via `unported::win`).
+
+/// C `rank_context` — ranking process information stored in partition-local
+/// memory. `WinGetPartitionLocalMemory` zero-initializes on first use, so
+/// `rank == 0` means "first call".
+#[derive(Clone, Copy, Default)]
+struct RankContext {
+    /// current rank
+    rank: i64,
+}
+
+/// C `ntile_context` — ntile process information.
+#[derive(Clone, Copy, Default)]
+struct NtileContext {
+    /// current result
+    ntile: i32,
+    /// row number of current bucket
+    rows_per_bucket: i64,
+    /// how many rows should be in the bucket
+    boundary: i64,
+    /// (total rows) % (bucket num)
+    remainder: i64,
+}
+
+/// C `rank_up(winobj)` — utility routine for `*_rank` functions; returns whether
+/// the rank should increase, and advances the mark.
+fn rank_up(winobj: unported::WindowObject) -> bool {
+    let mut up = false; // should rank increase?
+    let curpos = unported::win::get_current_position(winobj);
+    let context = unported::win::get_partition_local_memory_rank(winobj);
+
+    if context.rank == 0 {
+        // first call: rank of first row is always 1
+        debug_assert!(curpos == 0);
+        context.rank = 1;
+    } else {
+        debug_assert!(curpos > 0);
+        // do current and prior tuples match by ORDER BY clause?
+        if !unported::win::rows_are_peers(winobj, curpos - 1, curpos) {
+            up = true;
+        }
+    }
+
+    // We can advance the mark, but only *after* access to prior row
+    unported::win::set_mark_position(winobj, curpos);
+
+    up
+}
+
+/// `window_row_number(fcinfo)` — just increment up from 1 until current
+/// partition finishes.
+pub fn window_row_number<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let curpos = unported::win::get_current_position(winobj);
+
+    unported::win::set_mark_position(winobj, curpos);
+    Ok(Datum::from_i64(curpos + 1))
+}
+
+/// `window_rank(fcinfo)` — rank changes when key columns change; the new rank
+/// number is the current row number.
+pub fn window_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let up = rank_up(winobj);
+    let context = unported::win::get_partition_local_memory_rank(winobj);
+    if up {
+        context.rank = unported::win::get_current_position(winobj) + 1;
+    }
+    Ok(Datum::from_i64(context.rank))
+}
+
+/// `window_dense_rank(fcinfo)` — rank increases by 1 when key columns change.
+pub fn window_dense_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let up = rank_up(winobj);
+    let context = unported::win::get_partition_local_memory_rank(winobj);
+    if up {
+        context.rank += 1;
+    }
+    Ok(Datum::from_i64(context.rank))
+}
+
+/// `window_percent_rank(fcinfo)` — `(RK - 1) / (NR - 1)`, per spec; returns 0 if
+/// there is only one row.
+pub fn window_percent_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let totalrows = unported::win::get_partition_row_count(winobj);
+
+    debug_assert!(totalrows > 0);
+
+    let up = rank_up(winobj);
+    let context = unported::win::get_partition_local_memory_rank(winobj);
+    if up {
+        context.rank = unported::win::get_current_position(winobj) + 1;
+    }
+
+    // return zero if there's only one row, per spec
+    if totalrows <= 1 {
+        return Ok(Datum::from_f64(0.0));
+    }
+
+    Ok(Datum::from_f64(
+        (context.rank - 1) as f64 / (totalrows - 1) as f64,
+    ))
+}
+
+/// `window_cume_dist(fcinfo)` — `NP / NR`, per spec, where NP is the number of
+/// rows preceding or peer to the current row.
+pub fn window_cume_dist<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let totalrows = unported::win::get_partition_row_count(winobj);
+
+    debug_assert!(totalrows > 0);
+
+    let up = rank_up(winobj);
+    let context = unported::win::get_partition_local_memory_rank(winobj);
+    if up || context.rank == 1 {
+        // The current row is not peer to prior row or is just the first, so
+        // count up the number of rows that are peer to the current.
+        context.rank = unported::win::get_current_position(winobj) + 1;
+
+        // start from current + 1
+        let mut row = context.rank;
+        while row < totalrows {
+            if !unported::win::rows_are_peers(winobj, row - 1, row) {
+                break;
+            }
+            context.rank += 1;
+            row += 1;
+        }
+    }
+
+    Ok(Datum::from_f64(context.rank as f64 / totalrows as f64))
+}
+
+/// `window_ntile(fcinfo)` — compute an exact numeric value with scale 0, ranging
+/// from 1 to n, per spec.
+pub fn window_ntile<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let context = unported::win::get_partition_local_memory_ntile(winobj);
+
+    if context.ntile == 0 {
+        // first call
+        let total = unported::win::get_partition_row_count(winobj);
+        let mut isnull = false;
+        let nbuckets =
+            unported::win::get_func_arg_current(winobj, 0, &mut isnull).as_i32();
+
+        // per spec: If NT is the null value, then the result is the null value.
+        if isnull {
+            return Ok(Datum::null()); // PG_RETURN_NULL()
+        }
+
+        // per spec: If NT is <= 0, then an exception condition is raised.
+        if nbuckets <= 0 {
+            return Err(PgError::error(
+                "argument of ntile must be greater than zero",
+            )
+            .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_NTILE));
+        }
+
+        context.ntile = 1;
+        context.rows_per_bucket = 0;
+        context.boundary = total / nbuckets as i64;
+        if context.boundary <= 0 {
+            context.boundary = 1;
+        } else {
+            // If the total number is not divisible, add 1 row to leading
+            // buckets.
+            context.remainder = total % nbuckets as i64;
+            if context.remainder != 0 {
+                context.boundary += 1;
+            }
+        }
+    }
+
+    context.rows_per_bucket += 1;
+    if context.boundary < context.rows_per_bucket {
+        // ntile up
+        if context.remainder != 0 && context.ntile as i64 == context.remainder {
+            context.remainder = 0;
+            context.boundary -= 1;
+        }
+        context.ntile += 1;
+        context.rows_per_bucket = 1;
+    }
+
+    Ok(Datum::from_i32(context.ntile))
+}
+
+/// C `WINDOW_SEEK_CURRENT` / `WINDOW_SEEK_HEAD` / `WINDOW_SEEK_TAIL`
+/// (`windowapi.h`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindowSeek {
+    /// `WINDOW_SEEK_CURRENT`
+    Current,
+    /// `WINDOW_SEEK_HEAD`
+    Head,
+    /// `WINDOW_SEEK_TAIL`
+    Tail,
+}
+
+/// `leadlag_common(...)` — shared engine for lead/lag with/without
+/// offset/default. For lead() `forward` is true; for lag() it is false.
+/// `with_offset` indicates a second offset argument; `with_default` a third
+/// default argument.
+pub fn leadlag_common<'mcx>(
+    _mcx: Mcx<'mcx>,
+    forward: bool,
+    with_offset: bool,
+    with_default: bool,
+) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let offset: i32;
+    let const_offset: bool;
+    let mut isnull = false;
+
+    if with_offset {
+        offset = unported::win::get_func_arg_current(winobj, 1, &mut isnull).as_i32();
+        if isnull {
+            return Ok(Datum::null()); // PG_RETURN_NULL()
+        }
+        const_offset = unported::get_fn_expr_arg_stable(1);
+    } else {
+        offset = 1;
+        const_offset = true;
+    }
+
+    let mut isout = false;
+    let mut result = unported::win::get_func_arg_in_partition(
+        winobj,
+        0,
+        if forward { offset } else { -offset },
+        WindowSeek::Current,
+        const_offset,
+        &mut isnull,
+        &mut isout,
+    );
+
+    if isout {
+        // target row is out of the partition; supply default value if provided.
+        // otherwise it'll stay NULL
+        if with_default {
+            result = unported::win::get_func_arg_current(winobj, 2, &mut isnull);
+        }
+    }
+
+    if isnull {
+        return Ok(Datum::null()); // PG_RETURN_NULL()
+    }
+
+    Ok(result) // PG_RETURN_DATUM(result)
+}
+
+/// `window_lag(fcinfo)` — value 1 row before the current row.
+pub fn window_lag<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, false, false, false)
+}
+
+/// `window_lag_with_offset(fcinfo)` — value OFFSET rows before the current row.
+pub fn window_lag_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, false, true, false)
+}
+
+/// `window_lag_with_offset_and_default(fcinfo)` — as above with a default value.
+pub fn window_lag_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, false, true, true)
+}
+
+/// `window_lead(fcinfo)` — value 1 row after the current row.
+pub fn window_lead<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, true, false, false)
+}
+
+/// `window_lead_with_offset(fcinfo)` — value OFFSET rows after the current row.
+pub fn window_lead_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, true, true, false)
+}
+
+/// `window_lead_with_offset_and_default(fcinfo)` — as above with a default value.
+pub fn window_lead_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    leadlag_common(mcx, true, true, true)
+}
+
+/// `window_first_value(fcinfo)` — value evaluated on the first row of the frame.
+pub fn window_first_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let mut isnull = false;
+    let result = unported::win::get_func_arg_in_frame(
+        winobj,
+        0,
+        0,
+        WindowSeek::Head,
+        true,
+        &mut isnull,
+        unported::win::NO_ISOUT,
+    );
+    if isnull {
+        return Ok(Datum::null());
+    }
+    Ok(result)
+}
+
+/// `window_last_value(fcinfo)` — value evaluated on the last row of the frame.
+pub fn window_last_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let mut isnull = false;
+    let result = unported::win::get_func_arg_in_frame(
+        winobj,
+        0,
+        0,
+        WindowSeek::Tail,
+        true,
+        &mut isnull,
+        unported::win::NO_ISOUT,
+    );
+    if isnull {
+        return Ok(Datum::null());
+    }
+    Ok(result)
+}
+
+/// `window_nth_value(fcinfo)` — value on the n-th row from the first row of the
+/// frame, per spec.
+pub fn window_nth_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+    let winobj = unported::win::window_object();
+    let mut isnull = false;
+
+    let nth = unported::win::get_func_arg_current(winobj, 1, &mut isnull).as_i32();
+    if isnull {
+        return Ok(Datum::null());
+    }
+    let const_offset = unported::get_fn_expr_arg_stable(1);
+
+    if nth <= 0 {
+        return Err(PgError::error(
+            "argument of nth_value must be greater than zero",
+        )
+        .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE));
+    }
+
+    let result = unported::win::get_func_arg_in_frame(
+        winobj,
+        0,
+        nth - 1,
+        WindowSeek::Head,
+        const_offset,
+        &mut isnull,
+        unported::win::NO_ISOUT,
+    );
+    if isnull {
+        return Ok(Datum::null());
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// *_support planner-support functions (windowfuncs.c)
+// ---------------------------------------------------------------------------
+//
+// Each prosupport function handles two request node kinds:
+// SupportRequestWFuncMonotonic (set req->monotonic) and
+// SupportRequestOptimizeWindowClause (set req->frameOptions). The request node
+// (a Node*) and the WFunc-monotonicity / frame-option enums are owned by
+// nodes/supportnodes.h + parsenodes.h, not ported. mirror-pg-and-panic at that
+// named boundary; the *decision* each support fn encodes (which monotonicity,
+// which frame options) is documented inline so the port is faithful once the
+// node owners land.
+
+/// `window_row_number_support(rawreq)` — row_number() is monotonically
+/// increasing; optimizes the frame to ROWS BETWEEN UNBOUNDED PRECEDING AND
+/// CURRENT ROW.
+pub fn window_row_number_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+/// `window_rank_support(rawreq)` — rank() is monotonically increasing; frame set
+/// to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
+pub fn window_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+/// `window_dense_rank_support(rawreq)` — dense_rank() is monotonically
+/// increasing; frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
+pub fn window_dense_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+/// `window_percent_rank_support(rawreq)` — percent_rank() is monotonically
+/// increasing; frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
+pub fn window_percent_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+/// `window_cume_dist_support(rawreq)` — cume_dist() is monotonically increasing;
+/// frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
+pub fn window_cume_dist_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+/// `window_ntile_support(rawreq)` — ntile() is monotonically increasing (the
+/// bucket count cannot change after the first call); frame set to ROWS BETWEEN
+/// UNBOUNDED PRECEDING AND CURRENT ROW.
+pub fn window_ntile_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+    unported::window_support(rawreq)
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (this unit's own logic).
+// ---------------------------------------------------------------------------
+
+/// Read `bytes[idx]`, or NUL if `idx` is at/after the end — mirrors C reading
+/// `*p` of a NUL-terminated string (so a `badp` parked on the terminator
+/// compares unequal to DELIM/RDELIM and yields the syntax error).
+fn byte_at(bytes: &[u8], idx: usize) -> u8 {
+    if idx < bytes.len() {
+        bytes[idx]
+    } else {
+        0
+    }
+}
+
+/// Faithful subset of C `strtoul(start, &badp, 10)` over a NUL-terminated
+/// string, for the `tidin` parser: skips leading whitespace and an optional
+/// sign (tid only ever feeds non-negative coordinates, but C's strtoul accepts
+/// the same grammar), consumes decimal digits, and reports the byte offset of
+/// the first unconsumed character (`badp`). Returns `None` on the C error
+/// conditions tid.c checks via `errno` (no digits consumed → returns 0 with
+/// `badp == start`, which the caller's delimiter check rejects; or overflow of
+/// `unsigned long`). Returns `Some(value)` otherwise.
+fn strtoul(bytes: &[u8], start: usize) -> (Option<u64>, usize) {
+    let mut i = start;
+    // skip leading whitespace (C isspace: space, \t, \n, \v, \f, \r)
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i += 1;
+    }
+    // optional sign
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        i += 1;
+    }
+
+    let digits_start = i;
+    let mut value: u64 = 0;
+    let mut overflow = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        let d = (bytes[i] - b'0') as u64;
+        match value.checked_mul(10).and_then(|v| v.checked_add(d)) {
+            Some(v) => value = v,
+            None => overflow = true,
+        }
+        i += 1;
+    }
+
+    if i == digits_start {
+        // No digits: C strtoul returns 0 and sets badp = start (sign skipped).
+        // errno is not set; the caller's `*badp != DELIM/RDELIM` check rejects.
+        return (Some(0), i);
+    }
+
+    if overflow {
+        // C: errno == ERANGE. tid.c checks `errno` and treats it as invalid.
+        return (None, i);
+    }
+
+    (Some(value), i)
+}
+
+// ---------------------------------------------------------------------------
+// Genuinely-unported-owner boundaries (mirror-pg-and-panic).
+// ---------------------------------------------------------------------------
+//
+// Each item here is a real owner that has NOT yet been ported onto main. None of
+// this unit's own logic is stubbed: these are the cross-unit crossings the C
+// reaches through other modules. They panic loudly with the owning C file named
+// so a later port can wire them (or so this family can be re-homed onto seam
+// slots once those owners land and expose seam crates).
+mod unported {
+    use super::{Datum, ItemPointer, Mcx, NtileContext, PgResult, WindowSeek};
+    use super::{ERRCODE_FEATURE_NOT_SUPPORTED, PgError};
+
+    /// Opaque `WindowObject` handle (`windowapi.h`) — owned by the executor's
+    /// `nodeWindowAgg.c`, not yet ported. Inherited-opacity: this is a real
+    /// pointer-shaped handle in C; here it is a never-constructed marker, so any
+    /// path that would dereference it panics through the accessors below.
+    #[derive(Clone, Copy)]
+    pub struct WindowObject(());
+
+    /// `PG_GETARG_ITEMPOINTER(n)` — the arg datum points at a `palloc`'d
+    /// `ItemPointerData`. Detoasting/pointer-deref of pass-by-reference args is
+    /// fmgr/varlena plumbing not modeled by the bare `Datum` word.
+    pub fn getarg_itempointer(_datum: Datum) -> ItemPointer {
+        panic!(
+            "unported owner: tid PG_GETARG_ITEMPOINTER (fmgr pass-by-reference \
+             arg deref of palloc'd ItemPointerData)"
+        )
+    }
+
+    /// `PG_RETURN_ITEMPOINTER(result)` — palloc the `ItemPointerData` and return
+    /// its pointer as a Datum (mmgr + fmgr).
+    pub fn return_itempointer<'mcx>(_mcx: Mcx<'mcx>, _ptr: ItemPointer) -> PgResult<Datum> {
+        panic!(
+            "unported owner: tid PG_RETURN_ITEMPOINTER (palloc + pass-by-reference \
+             Datum construction)"
+        )
+    }
+
+    /// `PG_RETURN_CSTRING(pstrdup(buf))` — palloc the result cstring.
+    pub fn return_cstring<'mcx>(_mcx: Mcx<'mcx>, _buf: alloc::string::String) -> PgResult<Datum> {
+        panic!("unported owner: tidout PG_RETURN_CSTRING (pstrdup + cstring Datum)")
+    }
+
+    /// `PG_RETURN_BYTEA_P(...)` — palloc the bytea result.
+    pub fn return_bytea<'mcx>(_mcx: Mcx<'mcx>, _bytes: alloc::vec::Vec<u8>) -> PgResult<Datum> {
+        panic!("unported owner: tidsend PG_RETURN_BYTEA_P (bytea Datum construction)")
+    }
+
+    /// `common/hashfn.c` `hash_any` — not yet a dependency owner.
+    pub fn hash_any(_image: &[u8]) -> u32 {
+        panic!("unported owner: hashtid hash_any (common/hashfn.c)")
+    }
+
+    /// `common/hashfn.c` `hash_any_extended`.
+    pub fn hash_any_extended(_image: &[u8], _seed: u64) -> u64 {
+        panic!("unported owner: hashtidextended hash_any_extended (common/hashfn.c)")
+    }
+
+    /// The whole `currtid_internal` / `currtid_for_view` path: `table_openrv`,
+    /// `pg_class_aclcheck`, `RegisterSnapshot(GetLatestSnapshot())`,
+    /// `table_beginscan_tid`, `table_tuple_get_latest_tid`, and the view rule
+    /// walk — catalog/namespace + table-AM + snapshot + acl owners, unported.
+    /// Returns a typed `feature not supported`-shaped error rather than building
+    /// a bogus result.
+    pub fn currtid_internal_by_relname() -> PgResult<Datum> {
+        let _ = ERRCODE_FEATURE_NOT_SUPPORTED;
+        let _ = PgError::error("");
+        panic!(
+            "unported owner: currtid_byrelname/currtid_internal (table-AM \
+             table_open/table_beginscan_tid + snapshot + pg_class_aclcheck + view \
+             rule rewrite)"
+        )
+    }
+
+    /// `utils/fmgr` `get_fn_expr_arg_stable(flinfo, n)` — whether the n-th
+    /// function argument is a stable (non-volatile) expression; flinfo
+    /// introspection lives in fmgr, reached here for the lead/lag/nth_value
+    /// const-offset fast path.
+    pub fn get_fn_expr_arg_stable(_argno: i32) -> bool {
+        panic!("unported owner: get_fn_expr_arg_stable (utils/fmgr flinfo introspection)")
+    }
+
+    /// Dispatch for the `*_support` prosupport functions: inspect the request
+    /// `Node*` (`SupportRequestWFuncMonotonic` / `SupportRequestOptimizeWindowClause`)
+    /// and fill its fields. The node kinds and `monotonic`/`frameOptions` enums
+    /// are owned by nodes/supportnodes.h + parsenodes.h, not ported.
+    pub fn window_support(_rawreq: Datum) -> PgResult<Datum> {
+        panic!(
+            "unported owner: window *_support prosupport (nodes/supportnodes.h \
+             SupportRequestWFuncMonotonic / SupportRequestOptimizeWindowClause)"
+        )
+    }
+
+    /// Minimal forward-reading cursor mirroring the pieces of `StringInfo` that
+    /// `tidrecv` consumes; the real `pq_getmsgint` (libpq/pqformat) owns
+    /// cursor/length-error handling, so the reads themselves panic into it.
+    pub struct StringInfoCursor<'a> {
+        _buf: &'a [u8],
+    }
+    impl<'a> StringInfoCursor<'a> {
+        pub fn new(buf: &'a [u8]) -> Self {
+            StringInfoCursor { _buf: buf }
+        }
+        /// `pq_getmsgint(buf, 4)`.
+        pub fn getmsgint32(&mut self) -> u32 {
+            panic!("unported owner: tidrecv pq_getmsgint (libpq/pqformat StringInfo)")
+        }
+        /// `pq_getmsgint(buf, 2)`.
+        pub fn getmsgint16(&mut self) -> u16 {
+            panic!("unported owner: tidrecv pq_getmsgint (libpq/pqformat StringInfo)")
+        }
+    }
+
+    /// Minimal builder mirroring the `pq_begintypsend`/`pq_sendint*`/
+    /// `pq_endtypsend` sequence `tidsend` uses; libpq/pqformat owns the actual
+    /// `StringInfoData`.
+    pub struct StringInfoBuilder;
+    impl StringInfoBuilder {
+        /// `pq_begintypsend(&buf)`.
+        pub fn begintypsend() -> Self {
+            panic!("unported owner: tidsend pq_begintypsend (libpq/pqformat StringInfo)")
+        }
+        /// `pq_sendint32(&buf, v)`.
+        pub fn sendint32(&mut self, _v: u32) {
+            panic!("unported owner: tidsend pq_sendint32 (libpq/pqformat)")
+        }
+        /// `pq_sendint16(&buf, v)`.
+        pub fn sendint16(&mut self, _v: u16) {
+            panic!("unported owner: tidsend pq_sendint16 (libpq/pqformat)")
+        }
+        /// `pq_endtypsend(&buf)`.
+        pub fn endtypsend(self) -> alloc::vec::Vec<u8> {
+            panic!("unported owner: tidsend pq_endtypsend (libpq/pqformat)")
+        }
+    }
+
+    /// The `WindowObject` accessor surface (`windowapi.h`), owned by the
+    /// executor's `nodeWindowAgg.c`. Every function the windowfuncs.c bodies
+    /// call lives here; the bodies' own arithmetic/control-flow is ported in the
+    /// parent module, these are only the runtime crossings.
+    pub mod win {
+        use super::super::RankContext;
+        use super::{Datum, NtileContext, WindowObject, WindowSeek};
+
+        /// Sentinel for the C `NULL` `isout` out-parameter that
+        /// first_value/last_value/nth_value pass to `WinGetFuncArgInFrame`.
+        pub const NO_ISOUT: Option<&mut bool> = None;
+
+        /// `PG_WINDOW_OBJECT()`.
+        pub fn window_object() -> WindowObject {
+            panic!("unported owner: PG_WINDOW_OBJECT (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinGetCurrentPosition(winobj)`.
+        pub fn get_current_position(_winobj: WindowObject) -> i64 {
+            panic!("unported owner: WinGetCurrentPosition (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinSetMarkPosition(winobj, pos)`.
+        pub fn set_mark_position(_winobj: WindowObject, _pos: i64) {
+            panic!("unported owner: WinSetMarkPosition (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinRowsArePeers(winobj, pos1, pos2)`.
+        pub fn rows_are_peers(_winobj: WindowObject, _pos1: i64, _pos2: i64) -> bool {
+            panic!("unported owner: WinRowsArePeers (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinGetPartitionRowCount(winobj)`.
+        pub fn get_partition_row_count(_winobj: WindowObject) -> i64 {
+            panic!("unported owner: WinGetPartitionRowCount (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinGetPartitionLocalMemory(winobj, sizeof(rank_context))` — the
+        /// runtime hands back zero-initialized partition-local storage that
+        /// persists across calls within a partition; modeled as a typed `&mut`.
+        pub fn get_partition_local_memory_rank(_winobj: WindowObject) -> &'static mut RankContext {
+            panic!(
+                "unported owner: WinGetPartitionLocalMemory (windowapi.h / \
+                 nodeWindowAgg.c) — rank_context"
+            )
+        }
+
+        /// `WinGetPartitionLocalMemory(winobj, sizeof(ntile_context))`.
+        pub fn get_partition_local_memory_ntile(
+            _winobj: WindowObject,
+        ) -> &'static mut NtileContext {
+            panic!(
+                "unported owner: WinGetPartitionLocalMemory (windowapi.h / \
+                 nodeWindowAgg.c) — ntile_context"
+            )
+        }
+
+        /// `WinGetFuncArgCurrent(winobj, argno, &isnull)`.
+        pub fn get_func_arg_current(
+            _winobj: WindowObject,
+            _argno: i32,
+            _isnull: &mut bool,
+        ) -> Datum {
+            panic!("unported owner: WinGetFuncArgCurrent (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinGetFuncArgInPartition(winobj, argno, relpos, seektype,
+        /// set_mark, &isnull, &isout)`.
+        #[allow(clippy::too_many_arguments)]
+        pub fn get_func_arg_in_partition(
+            _winobj: WindowObject,
+            _argno: i32,
+            _relpos: i32,
+            _seektype: WindowSeek,
+            _set_mark: bool,
+            _isnull: &mut bool,
+            _isout: &mut bool,
+        ) -> Datum {
+            panic!("unported owner: WinGetFuncArgInPartition (windowapi.h / nodeWindowAgg.c)")
+        }
+
+        /// `WinGetFuncArgInFrame(winobj, argno, relpos, seektype, set_mark,
+        /// &isnull, isout)`.
+        #[allow(clippy::too_many_arguments)]
+        pub fn get_func_arg_in_frame(
+            _winobj: WindowObject,
+            _argno: i32,
+            _relpos: i32,
+            _seektype: WindowSeek,
+            _set_mark: bool,
+            _isnull: &mut bool,
+            _isout: Option<&mut bool>,
+        ) -> Datum {
+            panic!("unported owner: WinGetFuncArgInFrame (windowapi.h / nodeWindowAgg.c)")
+        }
+    }
+}

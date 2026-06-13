@@ -42,6 +42,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Resolve a live-`BackgroundWorkerHandle *` identity threaded across the
+    /// parallel/executor seams as a [`types_execparallel::BackgroundWorkerHandle`]
+    /// id back to the owning unit's real [`types_bgworker::BackgroundWorkerHandle`]
+    /// (`{slot, generation}`). C never needs this conversion (the handle is a raw
+    /// pointer the leader holds directly); it exists only because the
+    /// cross-subsystem seams name the handle by an id (opacity-inherited: the id
+    /// is bgworker's name for the real handle it minted in
+    /// `register_dynamic_background_worker`). Infallible: a live id always names a
+    /// registered handle.
+    pub fn background_worker_handle_from_token(
+        token: types_execparallel::BackgroundWorkerHandle,
+    ) -> types_bgworker::BackgroundWorkerHandle
+);
+
+seam_core::seam!(
     /// `BackgroundWorkerInitializeConnection(const char *dbname,
     /// const char *username, uint32 flags)` (bgworker.c): establish this
     /// bgworker's connection to a database (the launcher passes NULL/NULL to
@@ -73,10 +88,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `BackgroundWorkerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
-    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
-    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn background_worker_shmem_size() -> types_error::PgResult<types_core::Size>
+    /// `BackgroundWorkerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
+    /// shared-memory bytes this subsystem needs. Infallible in C, so the seam
+    /// returns a bare `Size`.
+    pub fn background_worker_shmem_size() -> types_core::Size
 );
 
 seam_core::seam!(

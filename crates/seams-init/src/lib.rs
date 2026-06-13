@@ -123,6 +123,7 @@ pub fn init_all() {
     backend_utils_activity_small::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
+    backend_utils_adt_misc2::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
@@ -476,16 +477,8 @@ mod recurrence_guard {
         ("backend_access_transam_xlog", "xlog_shmem_init"),
         ("backend_access_transam_xlog", "xlog_shmem_size"),
         ("backend_access_transam_xlogprefetcher", "xlog_prefetch_shmem_size"),
-        ("backend_catalog_namespace", "make_range_var_from_name_list"),
         ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
-        // execExprInterp owns the dispatch loop; `exec_eval_expr_switch_context`
-        // is declared `&ExprState` in the seam (C `ExecEvalExprSwitchContext`
-        // macro) but the owned `ExecInterpExprStillValid` entry needs
-        // `&mut ExprState` for the still-valid check + ExecJust*/ExecInterpExpr
-        // per-eval scratch mutation. Shared-vs-mut reconcile is the
-        // seam-contract-reconcile lane's job (DESIGN_DEBT). `ExecReadyInterpretedExpr`
-        // (`exec_ready_interpreted_expr`) matches `&mut` and IS installed.
         ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
@@ -507,21 +500,12 @@ mod recurrence_guard {
         ("backend_executor_execUtils", "exec_init_result_type_tl"),
         ("backend_postmaster_autovacuum", "am_autovacuum_launcher_process"),
         ("backend_postmaster_autovacuum", "am_autovacuum_worker_process"),
-        ("backend_postmaster_autovacuum", "auto_vacuum_shmem_size"),
         ("backend_postmaster_bgworker", "am_background_worker_process"),
-        ("backend_postmaster_bgworker", "background_worker_shmem_size"),
         ("backend_postmaster_bgworker", "max_worker_processes"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
-        ("backend_postmaster_pgarch", "pg_arch_shmem_init"),
-        ("backend_postmaster_pgarch", "pg_arch_shmem_size"),
-        ("backend_postmaster_walsummarizer", "wal_summarizer_shmem_size"),
-        ("backend_replication_logical_launcher", "apply_launcher_shmem_size"),
-        ("backend_replication_logical_origin", "replication_origin_shmem_size"),
         ("backend_replication_logical_origin", "set_replorigin_session_origin_lsn"),
         ("backend_replication_logical_slotsync", "am_logical_slot_sync_worker_process"),
-        ("backend_replication_walreceiver", "wal_rcv_shmem_init"),
-        ("backend_replication_walreceiver", "wal_rcv_shmem_size"),
         ("backend_storage_ipc", "before_shmem_exit"),
         ("backend_storage_ipc", "check_on_shmem_exit_lists_are_empty"),
         ("backend_storage_ipc", "on_exit_reset"),
@@ -531,16 +515,11 @@ mod recurrence_guard {
         ("backend_storage_ipc_latch", "wait_latch_register_sync_request"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
         ("backend_storage_lmgr_proc", "am_regular_backend_process"),
-        ("backend_storage_lmgr_proc", "fast_path_lock_groups_per_backend"),
-        ("backend_storage_lmgr_proc", "have_n_free_procs"),
-        ("backend_storage_lmgr_proc", "init_process_phase2"),
         ("backend_storage_lmgr_proc", "my_proc_latch"),
-        ("backend_storage_lmgr_proc", "set_fast_path_lock_groups_per_backend"),
-        ("backend_storage_lmgr_proc", "set_my_proc_database_id"),
-        ("backend_storage_lmgr_proc", "set_my_proc_role_id"),
         ("backend_tcop_backend_startup", "my_cancel_key"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
+        ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "load_file"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),

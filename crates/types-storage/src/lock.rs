@@ -15,6 +15,16 @@ pub type LOCKMODE = i32;
 /// `LOCKMASK` (`storage/lock.h`) — a bitmask of lock modes (`typedef int`).
 pub type LOCKMASK = i32;
 
+/// `LOCKBIT_ON(lockmode)` (`storage/lock.h`).
+pub const fn LOCKBIT_ON(lockmode: LOCKMODE) -> LOCKMASK {
+    1 << lockmode
+}
+
+/// `LOCKBIT_OFF(lockmode)` (`storage/lock.h`).
+pub const fn LOCKBIT_OFF(lockmode: LOCKMODE) -> LOCKMASK {
+    !(1 << lockmode)
+}
+
 /// `LOCKMETHODID` (`storage/lock.h`) — index of a lock method (`typedef uint16`).
 pub type LOCKMETHODID = uint16;
 
@@ -95,6 +105,45 @@ pub struct LOCKTAG {
     /// see the `LOCKTAG_*` LockTagType constants
     pub locktag_type: uint8,
     pub locktag_lockmethodid: uint8,
+}
+
+impl LOCKTAG {
+    /// `SET_LOCKTAG_ADVISORY(locktag, id1, id2, id3, id4)` (`storage/lock.h`):
+    /// build the advisory-lock tag. `id1` is `MyDatabaseId`; for an int8 key,
+    /// `id2`/`id3` are the high/low halves and `id4 == 1`; for two int4 keys,
+    /// `id2`/`id3` are the keys and `id4 == 2`.
+    pub fn advisory(id1: uint32, id2: uint32, id3: uint32, id4: uint16) -> Self {
+        LOCKTAG {
+            locktag_field1: id1,
+            locktag_field2: id2,
+            locktag_field3: id3,
+            locktag_field4: id4,
+            locktag_type: LOCKTAG_ADVISORY,
+            locktag_lockmethodid: USER_LOCKMETHOD,
+        }
+    }
+}
+
+/// `LockInstanceData` (`storage/lock.h`) — one PROCLOCK's worth of state, as
+/// passed from lmgr internals to the lock-listing user functions (lockfuncs.c).
+#[derive(Clone, Copy, Debug)]
+pub struct LockInstanceData {
+    /// `LOCKTAG locktag` — tag for the locked object.
+    pub locktag: LOCKTAG,
+    /// `LOCKMASK holdMask` — locks held by this PGPROC.
+    pub holdMask: LOCKMASK,
+    /// `LOCKMODE waitLockMode` — lock awaited by this PGPROC, if any.
+    pub waitLockMode: LOCKMODE,
+    /// `VirtualTransactionId vxid` — virtual transaction ID of this PGPROC.
+    pub vxid: crate::storage::VirtualTransactionId,
+    /// `TimestampTz waitStart` — when this PGPROC started waiting for the lock.
+    pub waitStart: types_core::TimestampTz,
+    /// `int pid` — pid of this PGPROC.
+    pub pid: i32,
+    /// `int leaderPid` — pid of the group leader; `= pid` if no group.
+    pub leaderPid: i32,
+    /// `bool fastpath` — taken via fastpath?
+    pub fastpath: bool,
 }
 
 /// `enum LockAcquireResult` (`storage/lock.h`).

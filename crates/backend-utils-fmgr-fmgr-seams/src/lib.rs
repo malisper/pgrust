@@ -15,6 +15,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
+use types_tuple::backend_access_common_heaptuple::TupleValue;
 
 seam_core::seam!(
     /// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID
@@ -227,6 +228,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InputFunctionCallSafe(&finfo, str, typioparam, typmod, escontext,
+    /// &result)` (fmgr.c) for a hard-error caller (escontext == NULL, where it
+    /// is equivalent to `InputFunctionCall`): look up `function_id`'s text
+    /// input function and run it on `str` (`None` is C's `NULL` cstring, which
+    /// non-strict input functions accept). The C `FmgrInfo` cannot cross, so
+    /// the owner re-resolves by OID. `Err` carries the lookup failure and
+    /// whatever the input function raises.
+    pub fn input_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        str: Option<&str>,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `ReceiveFunctionCall(&finfo, buf, typioparam, typmod)` (fmgr.c): look
+    /// up `function_id`'s binary receive function and run it on `buf` (the
+    /// `StringInfo` payload). The C `FmgrInfo` cannot cross, so the owner
+    /// re-resolves by OID. `Err` carries the lookup failure and whatever the
+    /// receive function raises.
+    pub fn receive_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        buf: &[u8],
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `OutputFunctionCall(flinfo, val)` (fmgr.c): invoke a type's text output
     /// function through an already-resolved `FmgrInfo`. The owned `FmgrInfo`
     /// carries only the resolved function's OID (the lookup key), so the owner
@@ -269,6 +302,75 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// rowtypes.c `record_in` per-column conversion: `getTypeInputInfo(coltype,
+    /// &typiofunc, &typioparam)` + `fmgr_info_cxt` + `InputFunctionCallSafe(...,
+    /// column_data, typioparam, atttypmod, escontext, &result)`. `column_data`
+    /// is `None` for a SQL NULL field (C passes a NULL cstring). The soft-error
+    /// path is modelled by the `Option` result: `Ok(None)` means the input
+    /// function reported a soft error via the `escontext` (C's
+    /// `InputFunctionCallSafe` returned `false`), so the caller bails the same
+    /// way C does at its `goto fail`. `Ok(Some(v))` is the converted column
+    /// value (allocated in `mcx`). `Err` carries hard `ereport(ERROR)`s
+    /// (catalog lookups, OOM).
+    pub fn record_column_input<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        coltype: Oid,
+        column_data: Option<&str>,
+        atttypmod: i32,
+        escontext: Option<&mut types_error::SoftErrorContext>,
+    ) -> PgResult<Option<TupleValue<'mcx>>>
+);
+
+seam_core::seam!(
+    /// rowtypes.c `record_recv` per-column conversion:
+    /// `getTypeBinaryInputInfo(coltype, &typiofunc, &typioparam)` +
+    /// `fmgr_info_cxt` + `ReceiveFunctionCall(..., buf, typioparam, atttypmod)`.
+    /// `item` is the column's binary payload bytes, or `None` for a -1-length
+    /// NULL field (C passes a NULL `StringInfo`). The owner verifies the
+    /// receive function consumed the whole item buffer, raising
+    /// `errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)` ("improper binary
+    /// format in record column %d") with the 1-based `colno` otherwise. Result
+    /// is allocated in `mcx`. `Err` carries the catalog lookups and the receive
+    /// function's `ereport(ERROR)`s.
+    pub fn record_column_receive<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        coltype: Oid,
+        item: Option<&[u8]>,
+        atttypmod: i32,
+        colno: i32,
+    ) -> PgResult<TupleValue<'mcx>>
+);
+
+seam_core::seam!(
+    /// rowtypes.c `record_out` per-column conversion: `getTypeOutputInfo(coltype,
+    /// &typiofunc, &typisvarlena)` + `fmgr_info_cxt` +
+    /// `OutputFunctionCall(&proc, attr)`. The C `char *` result crosses as its
+    /// NUL-excluded bytes allocated in `mcx`. `val` is the non-null column
+    /// value. `Err` carries the catalog lookups and the output function's
+    /// `ereport(ERROR)`s.
+    pub fn record_column_output<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        coltype: Oid,
+        val: &TupleValue<'_>,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// rowtypes.c `record_send` per-column conversion:
+    /// `getTypeBinaryOutputInfo(coltype, &typiofunc, &typisvarlena)` +
+    /// `fmgr_info_cxt` + `SendFunctionCall(&proc, attr)`. The C `bytea *`
+    /// result crosses as its payload bytes with the varlena header already
+    /// stripped (`VARDATA`, `VARSIZE - VARHDRSZ` bytes), allocated in `mcx`.
+    /// `val` is the non-null column value. `Err` carries the catalog lookups
+    /// and the send function's `ereport(ERROR)`s.
+    pub fn record_column_send<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        coltype: Oid,
+        val: &TupleValue<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 

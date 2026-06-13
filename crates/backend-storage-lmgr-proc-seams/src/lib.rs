@@ -361,7 +361,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `InitProcessPhase2()` (proc.c): add MyProc to the ProcArray; after this
     /// the backend is visible to others. `Err` carries its `ereport` surface.
-    pub fn init_process_phase2() -> types_error::PgResult<()>
+    /// Takes `Mcx` to thread the owner's memory-context-scoped body.
+    pub fn init_process_phase2(mcx: mcx::Mcx<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -370,10 +371,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `HaveNFreeProcs(n, &nfree)` (proc.c): are at least `n` PGPROC slots
-    /// free? Returns `(have_n, nfree)` where `nfree` is the actual free count
-    /// (the C out-parameter).
-    pub fn have_n_free_procs(n: i32) -> types_error::PgResult<(bool, i32)>
+    /// `HaveNFreeProcs(int n, int *nfree)` (proc.c): are at least `n` PGPROC
+    /// slots free? Reports the count seen via the `nfree` out-parameter, exactly
+    /// as the C signature (the owner body counts the freelist under the
+    /// ProcStructLock). Infallible — no `ereport`.
+    pub fn have_n_free_procs(n: i32, nfree: &mut i32) -> bool
 );
 
 seam_core::seam!(
@@ -382,15 +384,11 @@ seam_core::seam!(
     pub fn am_regular_backend_process() -> bool
 );
 
-seam_core::seam!(
-    /// `FastPathLockGroupsPerBackend` (proc.c global): the current value.
-    pub fn fast_path_lock_groups_per_backend() -> i32
-);
-
-seam_core::seam!(
-    /// `FastPathLockGroupsPerBackend = value` (proc.c global).
-    pub fn set_fast_path_lock_groups_per_backend(value: i32)
-);
+// `FastPathLockGroupsPerBackend` is a `globals.c` variable (the
+// `backend-utils-init-small` unit), not a proc.c global; proc.c only reads it.
+// Both the getter and the `InitializeFastPathLocks` setter are homed in
+// `backend-utils-init-small-seams` (`fast_path_lock_groups_per_backend` /
+// `set_fast_path_lock_groups_per_backend`); no mis-homed decl lives here.
 
 seam_core::seam!(
     /// `MyProc->databaseId = dboid` (proc.c): mark this backend's PGPROC entry

@@ -1227,4 +1227,9 @@ fn now_seconds() -> i64 {
 /// Install this crate's implementations into its seam crate.
 pub fn init_seams() {
     backend_postmaster_pgarch_seams::pg_archiver_main::set(PgArchiverMain);
+    // Contract-reconciled installs (assemble/seam-contract-reconciles): both
+    // seams now match the C signatures — `PgArchShmemSize() -> Size` and
+    // `PgArchShmemInit() -> ()` (both infallible).
+    backend_postmaster_pgarch_seams::pg_arch_shmem_size::set(PgArchShmemSize);
+    backend_postmaster_pgarch_seams::pg_arch_shmem_init::set(PgArchShmemInit);
 }
