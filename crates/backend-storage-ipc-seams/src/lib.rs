@@ -33,3 +33,14 @@ seam_core::seam!(
         arg: types_datum::Datum,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `before_shmem_exit(function, arg)` (ipc.c): register a callback to run
+    /// early in shmem exit. C `ereport(FATAL)`s when the callback table is
+    /// full, carried on `Err`. The callback's `PgResult` mirrors a C callback
+    /// that can `ereport(ERROR)`.
+    pub fn before_shmem_exit(
+        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
+        arg: types_datum::Datum,
+    ) -> types_error::PgResult<()>
+);

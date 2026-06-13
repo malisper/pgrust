@@ -24,3 +24,9 @@ seam_core::seam!(
     /// `GetNextLocalTransactionId()` (sinvaladt.c).
     pub fn get_next_local_transaction_id() -> LocalTransactionId
 );
+
+seam_core::seam!(
+    /// `SharedInvalidMessageCounter` (sinval.c): the running count of shared
+    /// invalidation messages this backend has processed. Pure global read.
+    pub fn shared_invalid_message_counter() -> u64
+);

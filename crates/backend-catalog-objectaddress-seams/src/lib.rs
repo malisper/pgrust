@@ -7,6 +7,7 @@
 use mcx::{Mcx, PgString};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_error::PgResult;
+use types_nodes::parsenodes::ObjectType;
 
 seam_core::seam!(
     /// `getObjectDescription(object, missing_ok)` (objectaddress.c): a
@@ -19,4 +20,11 @@ seam_core::seam!(
         object: &ObjectAddress,
         missing_ok: bool,
     ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `get_relkind_objtype(relkind)` (objectaddress.c): map a `pg_class`
+    /// relkind to the `ObjectType` used in error messages. Total mapping
+    /// (unknown relkinds return `OBJECT_TABLE`); cannot `ereport`.
+    pub fn get_relkind_objtype(relkind: u8) -> ObjectType
 );

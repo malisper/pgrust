@@ -87,3 +87,11 @@ seam_core::seam!(
     /// slot, or 0 when the slot is not active (C NULL result).
     pub fn proc_number_get_proc_pid(proc_number: ProcNumber) -> i32
 );
+
+seam_core::seam!(
+    /// `ProcNumberGetProc(procNumber)` projected to the two PGPROC fields
+    /// `checkTempNamespaceStatus` reads: `Some((proc->databaseId,
+    /// proc->tempNamespaceId))`, or `None` when the slot is empty (backend
+    /// not alive). Shared-memory read; cannot `ereport`.
+    pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
+);

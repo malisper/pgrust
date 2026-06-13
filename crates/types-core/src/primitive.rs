@@ -89,6 +89,8 @@ pub const MAX_FORKNUM: ForkNumber = ForkNumber::INIT_FORKNUM;
 
 pub const INVALID_PROC_NUMBER: ProcNumber = -1;
 pub const MAX_CANCEL_KEY_LENGTH: usize = 32;
+/// `FUNC_MAX_ARGS` (`pg_config_manual.h`) — maximum function arguments.
+pub const FUNC_MAX_ARGS: usize = 100;
 pub const MAXPGPATH: usize = 1024;
 
 /// `pgsocket` (`port.h`) — a socket file descriptor (`int` on Unix).

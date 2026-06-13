@@ -1,0 +1,41 @@
+//! Seam declarations for the `backend-catalog-aclchk` unit
+//! (`catalog/aclchk.c`).
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+use types_acl::{AclMode, AclResult};
+use types_core::Oid;
+use types_error::PgResult;
+use types_nodes::parsenodes::ObjectType;
+
+seam_core::seam!(
+    /// `object_aclcheck(classid, objectid, roleid, mode)` (aclchk.c): check
+    /// privilege bits on a catalog object. Can `ereport(ERROR)` (e.g. cache
+    /// lookup failure for a dropped object), carried on `Err`.
+    pub fn object_aclcheck(
+        classid: Oid,
+        objectid: Oid,
+        roleid: Oid,
+        mode: AclMode,
+    ) -> PgResult<AclResult>
+);
+
+seam_core::seam!(
+    /// `object_ownercheck(classid, objectid, roleid)` (aclchk.c): is `roleid`
+    /// owner of (or member of the owning role of) the object? Can
+    /// `ereport(ERROR)` on cache lookup failure, carried on `Err`.
+    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `aclcheck_error(aclerr, objtype, objectname)` (aclchk.c): raise the
+    /// standard permission-denied / must-be-owner error. Always raises for a
+    /// non-OK `aclerr` (the only way callers reach it), carried on `Err`.
+    /// `objectname` mirrors the C `const char *` (nullable in principle).
+    pub fn aclcheck_error(
+        aclerr: AclResult,
+        objtype: ObjectType,
+        objectname: Option<String>,
+    ) -> PgResult<()>
+);

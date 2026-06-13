@@ -6,6 +6,8 @@
 //! until then a call panics loudly. Snapshots cross as trimmed owned
 //! `SnapshotData` values.
 
+use types_error::PgResult;
+
 seam_core::seam!(
     /// `GetCatalogSnapshot(relid)` (snapmgr.c): an MVCC snapshot capable of
     /// reading the catalog (refreshed if invalidations arrived). Can
@@ -46,4 +48,15 @@ seam_core::seam!(
     pub fn restore_snapshot(
         bytes: &[u8],
     ) -> types_error::PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// Run `f` with a transaction snapshot active — the C
+    /// `PushActiveSnapshot(GetTransactionSnapshot()); ...; PopActiveSnapshot()`
+    /// bracket of `RemoveTempRelationsCallback`, owned by snapmgr as one
+    /// scope. Snapshot acquisition allocates and can `ereport(ERROR)`, and
+    /// `f`'s error propagates; both carried on `Err`.
+    pub fn with_transaction_snapshot(
+        f: &mut dyn FnMut() -> PgResult<()>,
+    ) -> PgResult<()>
 );

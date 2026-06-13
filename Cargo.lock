@@ -765,11 +765,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-aclchk-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-catalog-catalog-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-catalog-dependency-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -785,7 +806,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-namespace"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-conversion-seams",
+ "backend-catalog-pg-namespace-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-namespace-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-catalog-objectaccess-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -801,6 +879,7 @@ dependencies = [
  "seam-core",
  "types-catalog",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -818,6 +897,15 @@ name = "backend-catalog-pg-class-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-conversion-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -862,6 +950,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-namespace-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-storage-seams"
 version = "0.0.0"
 dependencies = [
@@ -882,6 +979,7 @@ dependencies = [
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -1770,7 +1868,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2100,6 +2200,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-storage",
+ "types-syscache",
 ]
 
 [[package]]
@@ -2191,6 +2292,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-hash",
+ "types-namespace",
 ]
 
 [[package]]
@@ -2277,9 +2379,12 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
+ "types-namespace",
  "types-nodes",
 ]
 
@@ -2603,6 +2708,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xlogstats",
+ "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execUtils",
@@ -2653,6 +2759,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "types-acl"
+version = "0.0.0"
 
 [[package]]
 name = "types-amvalidate"
@@ -2717,6 +2827,14 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-amvalidate",
+ "types-core",
+]
+
+[[package]]
+name = "types-namespace"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "types-core",
 ]
 
@@ -2812,6 +2930,10 @@ version = "0.0.0"
 dependencies = [
  "mcx",
 ]
+
+[[package]]
+name = "types-syscache"
+version = "0.0.0"
 
 [[package]]
 name = "types-tableam"

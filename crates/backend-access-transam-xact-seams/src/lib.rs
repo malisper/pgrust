@@ -74,3 +74,33 @@ seam_core::seam!(
     /// backend-global).
     pub fn set_my_xact_flags_acquired_access_exclusive_lock()
 );
+
+seam_core::seam!(
+    /// `GetCurrentSubTransactionId()` (xact.c): the current subtransaction's
+    /// id. Pure read of backend-local transaction state.
+    pub fn get_current_sub_transaction_id() -> types_core::SubTransactionId
+);
+
+seam_core::seam!(
+    /// `MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPNAMESPACE` (xact.h flag on
+    /// xact.c's `MyXactFlags`). Plain global-flag write.
+    pub fn set_xact_accessed_temp_namespace()
+);
+
+seam_core::seam!(
+    /// `StartTransactionCommand()` (xact.c). Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn start_transaction_command() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CommitTransactionCommand()` (xact.c). Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn commit_transaction_command() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AbortOutOfAnyTransaction()` (xact.c): abort the current transaction
+    /// (at any nesting level) and return to default state.
+    pub fn abort_out_of_any_transaction() -> PgResult<()>
+);

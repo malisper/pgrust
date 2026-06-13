@@ -13,3 +13,6 @@ seam-core = { path = "../seam-core" }
 types-nodes = { path = "../types-nodes" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-namespace = { path = "../types-namespace" }

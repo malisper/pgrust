@@ -40,3 +40,9 @@ seam_core::seam!(
     /// propagates to the caller.
     pub fn startup_xlog() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RecoveryInProgress()` (xlog.c): true while hot-standby recovery is
+    /// running. Reads backend-local + shared state; cannot `ereport`.
+    pub fn recovery_in_progress() -> bool
+);

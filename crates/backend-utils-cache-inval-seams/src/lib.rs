@@ -9,6 +9,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_core::Oid;
 use types_storage::SharedInvalidationMessage;
+use types_syscache::SysCacheIdentifier;
 
 seam_core::seam!(
     /// `CacheRegisterSyscacheCallback(cacheid, func, arg)` (inval.c):

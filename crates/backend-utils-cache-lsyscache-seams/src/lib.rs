@@ -73,3 +73,10 @@ seam_core::seam!(
     /// syscache machinery's `ereport(ERROR)`s.
     pub fn get_attnum(relid: Oid, attname: &str) -> PgResult<types_core::AttrNumber>
 );
+
+seam_core::seam!(
+    /// `get_relname_relid(relname, relnamespace)` (lsyscache.c):
+    /// `GetSysCacheOid2(RELNAMENSP, ...)` — the relation's OID or
+    /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.
+    pub fn get_relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid>
+);

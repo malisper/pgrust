@@ -23,3 +23,10 @@ seam_core::seam!(
     /// propagating values. Restore paths allocate and can `ereport`.
     pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GUC_check_errdetail(fmt, ...)` (guc.h): record errdetail for the
+    /// in-progress GUC check-hook failure (`GUC_check_errdetail_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errdetail(detail: String)
+);

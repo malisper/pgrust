@@ -75,3 +75,9 @@ seam_core::seam!(
     /// handling, process group, postmaster-death watch, etc.).
     pub fn init_postmaster_child()
 );
+
+seam_core::seam!(
+    /// `GetUserId()` (miscinit.c): the current effective user id. Pure
+    /// global read (asserts validity in C); cannot `ereport`.
+    pub fn get_user_id() -> Oid
+);
