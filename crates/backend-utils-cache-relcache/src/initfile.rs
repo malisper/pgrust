@@ -475,6 +475,7 @@ pub fn RelationBuildLocalRelation(
         tdtypeid: types_tuple::heaptuple::RECORDOID,
         tdtypmod: -1,
         attrs: Vec::<OwnedAttr>::new(),
+        constr: None,
     };
 
     // C: rd_rel = palloc0(CLASS_TUPLE_SIZE); fill the pg_class form.

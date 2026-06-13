@@ -516,6 +516,7 @@ mod recurrence_guard {
         ("backend_storage_ipc", "on_shmem_exit"),
         ("backend_storage_ipc", "proc_exit"),
         ("backend_storage_ipc_latch", "wait_latch_register_sync_request"),
+        ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
         ("backend_storage_lmgr_proc", "am_regular_backend_process"),
         ("backend_storage_lmgr_proc", "fast_path_lock_groups_per_backend"),
         ("backend_storage_lmgr_proc", "have_n_free_procs"),

@@ -98,6 +98,54 @@ pub struct OwnedTupleDesc {
     pub tdtypmod: i32,
     /// The attribute rows, in owned form (filled by the build family).
     pub attrs: Vec<OwnedAttr>,
+    /// `TupleConstr *constr` — column defaults/check constraints/not-null
+    /// accounting; `None` is the C NULL (no constraints). Filled by
+    /// `AttrDefaultFetch`/`CheckNNConstraintFetch` (build family).
+    pub constr: Option<OwnedTupleConstr>,
+}
+
+/// `struct TupleConstr` (`access/tupdesc.h`) — the owned mirror of `rd_att->
+/// constr`. Carries the default-expression and check-constraint arrays plus the
+/// has_*/num_* accounting the build family fills.
+#[derive(Clone, Debug, Default)]
+pub struct OwnedTupleConstr {
+    /// `AttrDefault *defval` (+ `uint16 num_defval`) — per-column default
+    /// expressions, owned cstring node-tree text keyed by attnum, sorted by
+    /// adnum. Length is `num_defval`.
+    pub defval: Vec<OwnedAttrDefault>,
+    /// `ConstrCheck *check` (+ `uint16 num_check`) — check constraints, sorted
+    /// by name. Length is `num_check`.
+    pub check: Vec<OwnedConstrCheck>,
+    /// `bool has_not_null`.
+    pub has_not_null: bool,
+    /// `bool has_generated_stored`.
+    pub has_generated_stored: bool,
+    /// `bool has_generated_virtual`.
+    pub has_generated_virtual: bool,
+}
+
+/// `struct AttrDefault` (`access/tupdesc.h`) — one column default.
+#[derive(Clone, Debug, Default)]
+pub struct OwnedAttrDefault {
+    /// `AttrNumber adnum`.
+    pub adnum: AttrNumber,
+    /// `char *adbin` — the serialized default-expression node tree (cstring).
+    pub adbin: String,
+}
+
+/// `struct ConstrCheck` (`access/tupdesc.h`) — one check constraint.
+#[derive(Clone, Debug, Default)]
+pub struct OwnedConstrCheck {
+    /// `char *ccname`.
+    pub ccname: String,
+    /// `char *ccbin` — the serialized check-expression node tree (cstring).
+    pub ccbin: String,
+    /// `bool ccenforced`.
+    pub ccenforced: bool,
+    /// `bool ccvalid`.
+    pub ccvalid: bool,
+    /// `bool ccnoinherit`.
+    pub ccnoinherit: bool,
 }
 
 /// One `FormData_pg_attribute` row of [`OwnedTupleDesc`] (owned mirror).
@@ -113,6 +161,10 @@ pub struct OwnedAttr {
     pub attnotnull: bool,
     pub attisdropped: bool,
     pub attcollation: Oid,
+    /// `CompactAttribute.attnullability` (`access/tupdesc.h`): one of
+    /// `ATTNULLABLE_UNRESTRICTED`/`_UNKNOWN`/`_VALID`/`_INVALID`. The not-null
+    /// validity state `CheckNNConstraintFetch` maintains.
+    pub attnullability: i8,
 }
 
 /// `struct RelationData` (`utils/rel.h`) — the real, mutable relcache entry.
