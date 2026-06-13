@@ -481,9 +481,8 @@ impl Default for RowMarkType {
 
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
 /// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
-/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_param_list_info`,
-/// `es_queryEnv` — are trimmed outright and land with their first consumer,
-/// per docs/types.md rule 3).
+/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_queryEnv` — are trimmed
+/// outright and land with their first consumer, per docs/types.md rule 3).
 #[derive(Debug)]
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
