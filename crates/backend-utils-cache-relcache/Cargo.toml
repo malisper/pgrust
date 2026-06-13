@@ -1,0 +1,61 @@
+[package]
+name = "backend-utils-cache-relcache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_relcache"
+path = "src/lib.rs"
+
+[dependencies]
+# Inward seam crate this unit owns + installs.
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+# The RelationIdCache is a real dynahash table (merged C-faithful raw-pointer
+# dynahash) — the substrate, not a stand-in. Acyclic: dynahash depends only on
+# types/error/storage/core.
+backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
+
+# Memory contexts (CacheMemoryContext analog) + allocation.
+mcx = { path = "../mcx" }
+
+# Error / ereport surface.
+backend-utils-error = { path = "../backend-utils-error" }
+types-error = { path = "../types-error" }
+
+# Type vocabulary embedded in the owned RelationData entry / crossed at seams.
+types-core = { path = "../types-core" }
+# pg_class / pg_class_oid_index OIDs used by the RelationCacheInvalidate
+# two-phase rebuild ordering.
+types-catalog = { path = "../types-catalog" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
+types-tableam = { path = "../types-tableam" }
+types-nodes = { path = "../types-nodes" }
+types-partition = { path = "../types-partition" }
+types-reloptions = { path = "../types-reloptions" }
+types-hash = { path = "../types-hash" }
+types-cache = { path = "../types-cache" }
+types-wal = { path = "../types-wal" }
+
+# Tuple-descriptor construction (access/common/tupdesc.c) — a lower-level
+# utility relcache layers on (CreateTupleDesc / populate_compact_attribute when
+# materializing the cross-unit rd_att slice). Acyclic: tupdesc does not depend
+# on relcache.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+
+# Outward seams for the genuine cross-unit catalog primitives the index family
+# routes through their owners (panic until each owner installs them).
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
+backend-utils-cache-relmapper-seams = { path = "../backend-utils-cache-relmapper-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

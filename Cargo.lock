@@ -467,6 +467,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-opclass",
+ "types-tableam",
 ]
 
 [[package]]
@@ -7311,6 +7312,41 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-relcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-index-amapi-seams",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-storage-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-partition",
+ "types-rel",
+ "types-reloptions",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-wal",
 ]
 
 [[package]]
