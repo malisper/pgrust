@@ -62,7 +62,7 @@ pub use nodelimit::{
 };
 pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
-    PartitionPruneState, T_Append, T_AppendState,
+    T_Append, T_AppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{

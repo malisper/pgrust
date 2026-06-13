@@ -108,20 +108,11 @@ pub struct ParallelAppendState {
     pub pa_finished: Vec<bool>,
 }
 
-/// `PartitionPruneState` (execPartition.h), trimmed to the two fields the
-/// Append node reads (`do_exec_prune` at init, `execparamids` at rescan). The
-/// remaining fields (`econtext`, `other_subplans`, `prune_context`,
-/// `partprunedata`) arrive with the execPartition.c port that owns this struct.
-#[derive(Debug, Default)]
-pub struct PartitionPruneState<'mcx> {
-    /// `Bitmapset *execparamids` — the PARAM_EXEC params whose change forces a
-    /// re-selection of valid subplans.
-    pub execparamids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
-    /// `bool do_initial_prune` — prune during executor startup?
-    pub do_initial_prune: bool,
-    /// `bool do_exec_prune` — prune during executor run?
-    pub do_exec_prune: bool,
-}
+/// `PartitionPruneState` (execPartition.h), trimmed to the fields the Append
+/// node reads (`do_exec_prune` at init, `execparamids` at rescan). It is the
+/// same trimmed type the MergeAppend node consults, so it is defined once in
+/// [`crate::nodemergeappend`] and re-used here.
+pub use crate::nodemergeappend::PartitionPruneState;
 
 /// `AppendState` (execnodes.h):
 ///
