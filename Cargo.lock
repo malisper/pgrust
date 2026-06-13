@@ -3061,23 +3061,14 @@ dependencies = [
 name = "backend-utils-adt-ts-small"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-spi-seams",
  "backend-tcop-postgres-seams",
- "backend-utils-adt-ts-small-seams",
  "backend-utils-error",
  "mcx",
  "types-core",
  "types-error",
  "types-tsearch",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-utils-adt-ts-small-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
 ]
 
 [[package]]

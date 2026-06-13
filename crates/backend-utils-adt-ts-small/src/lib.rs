@@ -21,10 +21,11 @@
 //!
 //! Genuine externals: `check_stack_depth` / `CHECK_FOR_INTERRUPTS` (owned by
 //! `tcop/postgres.c`, via `backend-tcop-postgres-seams`); the
-//! `ts_rewrite(query, text)` SPI execution (via this unit's own seam crate,
-//! installed by the SPI owner). The fmgr `Datum` wrappers and `gettext _()`
-//! are project-wide deferrals; the cores take fully-detoasted `tsquery` datums
-//! as `&[u8]` and return `Vec<u8>`.
+//! `ts_rewrite(query, text)` SPI execution (via the SPI owner's seam crate
+//! `backend-executor-spi-seams::tsquery_rewrite_run`, which the SPI owner
+//! installs — SPI owns that execution capability). The fmgr `Datum` wrappers
+//! and `gettext _()` are project-wide deferrals; the cores take fully-detoasted
+//! `tsquery` datums as `&[u8]` and return `Vec<u8>`.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -37,10 +38,11 @@ pub mod cleanup;
 pub mod rewrite;
 pub mod util;
 
-/// Install this crate's seams. This crate provides no seams of its own — its
-/// inward seam crate (`backend-utils-adt-ts-small-seams`) is installed by the
-/// SPI owner when it lands — so `init_seams()` is a no-op, present for the
-/// uniform `seams-init` call shape.
+/// Install this crate's seams. This unit owns no seam crate of its own (it
+/// declares no functions that other crates call back into), so `init_seams()`
+/// is a no-op, present for the uniform `seams-init` call shape. The one outward
+/// seam it consumes — `ts_rewrite(query, text)` SPI execution — is declared in
+/// the SPI owner's `backend-executor-spi-seams` and installed by that owner.
 pub fn init_seams() {}
 
 #[cfg(test)]

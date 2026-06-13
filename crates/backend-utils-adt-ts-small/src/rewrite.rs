@@ -10,7 +10,7 @@ use types_tsearch::tsearch::{OP_AND, OP_NOT, OP_OR};
 use types_tuple::heaptuple::TSQUERYOID;
 
 use backend_tcop_postgres_seams as tcop;
-use backend_utils_adt_ts_small_seams as seam;
+use backend_executor_spi_seams as spi;
 
 use crate::util::{
     oom, qt2qtn, qtn2qt, tsq_size, QTNBinary, QTNClearFlags, QTNEq, QTNSort, QTNTernary, QTNode,
@@ -316,7 +316,7 @@ pub fn tsquery_rewrite_query(mcx: Mcx<'_>, query: &[u8], buf: &str) -> PgResult<
 
     // SPI_connect(); SPI_prepare(buf,...); SPI_cursor_open(...);
     // SPI_cursor_fetch loop; per-column SPI_getbinval; SPI cleanup.
-    let result = seam::tsquery_rewrite_run::call(String::from(buf))?;
+    let result = spi::tsquery_rewrite_run::call(String::from(buf))?;
 
     // if (SPI_tuptable == NULL || tupdesc->natts != 2 ||
     //     SPI_gettypeid(tupdesc, 1) != TSQUERYOID ||
