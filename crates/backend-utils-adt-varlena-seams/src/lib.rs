@@ -20,15 +20,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `SplitIdentifierString(rawstring, ',', &namelist)` (varlena.c) for the
-    /// comma separator: parse a comma-separated list of identifiers,
-    /// downcasing and dequoting per identifier rules. `Ok(None)` is the C
-    /// `false` return (syntax error); the returned strings are the
+    /// `bool SplitIdentifierString(char *rawstring, char separator,
+    /// List **namelist)` (varlena.c) — parse a `separator`-separated list of
+    /// identifiers, downcasing and dequoting per identifier rules. `Ok(None)`
+    /// is the C `false` return (syntax error); the returned strings are the
     /// truncated/downcased names, allocated in `mcx` (C: pstrdup + List in
     /// the current context). `Err` carries OOM from the copies.
     pub fn split_identifier_string<'mcx>(
         mcx: Mcx<'mcx>,
         raw: &str,
+        separator: char,
     ) -> PgResult<Option<PgVec<'mcx, PgString<'mcx>>>>
 );
 

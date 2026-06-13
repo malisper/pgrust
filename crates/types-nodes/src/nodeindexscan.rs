@@ -24,6 +24,11 @@ pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `Cost startup_cost` — cost expended before fetching any tuples. `Cost`
+    /// is `double` in C.
+    pub startup_cost: f64,
+    /// `Cost total_cost` — total cost (assuming all tuples fetched).
+    pub total_cost: f64,
     /// `List *targetlist` — target list to be computed at this node
     /// (`None` = the C `NIL`).
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
@@ -67,6 +72,8 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            startup_cost: self.startup_cost,
+            total_cost: self.total_cost,
             targetlist,
             qual,
             parallel_aware: self.parallel_aware,
@@ -86,6 +93,27 @@ impl Plan<'_> {
                 Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
+        })
+    }
+}
+
+/// `Scan` (nodes/plannodes.h) — the abstract base for all scan plan nodes:
+/// the embedded `Plan` followed by the range-table index of the scanned
+/// relation. Trimmed to the fields ports consume.
+#[derive(Debug, Default)]
+pub struct Scan<'mcx> {
+    /// `Plan plan` — the abstract plan-node base.
+    pub plan: Plan<'mcx>,
+    /// `Index scanrelid` — relid is index into the range table.
+    pub scanrelid: types_core::primitive::Index,
+}
+
+impl Scan<'_> {
+    /// Deep copy of the scan base into `mcx`. Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
+        Ok(Scan {
+            plan: self.plan.clone_in(mcx)?,
+            scanrelid: self.scanrelid,
         })
     }
 }

@@ -35,6 +35,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the SIGTERM handler: set
+    /// `ShutdownRequestPending`/`InterruptPending` and the latch.
+    /// Async-signal-safe and infallible; installed as the SIGTERM handler.
+    pub fn die(postgres_signal_arg: i32)
+);
+
+seam_core::seam!(
+    /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the standard SIGTERM handler that
+    /// sets `ProcDiePending`/`InterruptPending` and the latch so the next
+    /// `CHECK_FOR_INTERRUPTS` exits. Returns the handler so callers can install
+    /// it with `pqsignal(SIGTERM, ...)`; tcop owns the handler body, so this
+    /// resolves only once tcop lands.
+    pub fn die_signal_handler() -> fn(i32)
+);
+
+seam_core::seam!(
     /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
     /// (tcop/postgres.c) — plan a single already-rewritten query, returning a
     /// `PlannedStmt` allocated in `mcx`. Runs the planner; can
