@@ -1071,7 +1071,7 @@ pub fn check_log_connections(mcx: Mcx<'_>, newval: &str) -> PgResult<Result<u32,
     // rawstring = pstrdup(*newval);
     // if (!SplitIdentifierString(rawstring, ',', &elemlist)) { ... return false; }
     let elemlist =
-        match backend_utils_adt_varlena_seams::split_identifier_string::call(mcx, newval)? {
+        match backend_utils_adt_varlena_seams::split_identifier_string::call(mcx, newval, ',')? {
             Some(list) => list,
             None => {
                 // GUC_check_errdetail("Invalid list syntax in parameter \"%s\".", ...);
