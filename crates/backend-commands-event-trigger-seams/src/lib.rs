@@ -1,0 +1,50 @@
+//! Seam declarations for the `backend-commands-event-trigger` unit
+//! (`commands/event_trigger.c`), for the command-collection entry points
+//! opclasscmds.c calls.
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly. The collection routines append to the
+//! `currentEventTriggerState` command list (the unported owner's backend
+//! state); they no-op when no event-trigger collection is in progress.
+
+use types_catalog::catalog_dependency::ObjectAddress;
+use types_core::Oid;
+use types_error::PgResult;
+use types_opclass::{AlterOpFamilyStmt, CreateOpClassStmt, CreateOpFamilyStmt, OpFamilyMember};
+
+seam_core::seam!(
+    /// `EventTriggerCollectCreateOpClass(stmt, opclassoid, operators,
+    /// procedures)` (event_trigger.c): record a CREATE OPERATOR CLASS for
+    /// possibly-interested event triggers. `Err` carries any allocation
+    /// failure of the collected command.
+    pub fn event_trigger_collect_create_opclass(
+        stmt: &CreateOpClassStmt,
+        opclassoid: Oid,
+        operators: &[OpFamilyMember],
+        procedures: &[OpFamilyMember],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EventTriggerCollectAlterOpFam(stmt, opfamilyoid, operators,
+    /// procedures)` (event_trigger.c): record an ALTER OPERATOR FAMILY
+    /// ADD/DROP. `Err` carries any allocation failure of the collected
+    /// command.
+    pub fn event_trigger_collect_alter_opfam(
+        stmt: &AlterOpFamilyStmt,
+        opfamilyoid: Oid,
+        operators: &[OpFamilyMember],
+        procedures: &[OpFamilyMember],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EventTriggerCollectSimpleCommand(address, secondaryObject, stmt)`
+    /// (event_trigger.c): record a simple DDL command (here, CREATE OPERATOR
+    /// FAMILY). `Err` carries any allocation failure of the collected command.
+    pub fn event_trigger_collect_simple_command(
+        address: ObjectAddress,
+        secondary_object: ObjectAddress,
+        stmt: &CreateOpFamilyStmt,
+    ) -> PgResult<()>
+);

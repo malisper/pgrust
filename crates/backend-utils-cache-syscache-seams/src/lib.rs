@@ -90,6 +90,38 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists3(OPFAMILYAMNAMENSP, amoid, opfname, nsp)`.
+    pub fn opfamily_exists(amoid: Oid, opfname: &str, namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheExists3(CLAAMNAMENSP, amoid, opcname, nsp)`.
+    pub fn opclass_exists(amoid: Oid, opcname: &str, namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid4(AMOPSTRATEGY, Anum_pg_amop_oid, opfamilyoid, lefttype,
+    /// righttype, strategy)` — the `pg_amop` row's OID, or `InvalidOid`.
+    pub fn amop_oid(
+        opfamilyoid: Oid,
+        lefttype: Oid,
+        righttype: Oid,
+        strategy: i16,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid4(AMPROCNUM, Anum_pg_amproc_oid, opfamilyoid, lefttype,
+    /// righttype, procnum)` — the `pg_amproc` row's OID, or `InvalidOid`.
+    pub fn amproc_oid(
+        opfamilyoid: Oid,
+        lefttype: Oid,
+        righttype: Oid,
+        procnum: i16,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid2(CONNAMENSP, Anum_pg_conversion_oid, conname, nsp)`.
     pub fn get_conversion_oid_cached(conname: &str, namespace_id: Oid) -> PgResult<Oid>
 );
