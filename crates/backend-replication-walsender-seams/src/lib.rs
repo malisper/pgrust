@@ -16,12 +16,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `am_walsender` (walsender.c global) — true in a WAL-sender backend.
-    /// Pure read of backend-local state.
-    pub fn am_walsender() -> bool
-);
-
-seam_core::seam!(
     /// `am_db_walsender` (walsender.c global) — true in a database-connected
     /// (logical-replication) WAL sender. Pure read.
     pub fn am_db_walsender() -> bool
