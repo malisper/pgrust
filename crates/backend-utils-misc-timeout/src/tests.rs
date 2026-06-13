@@ -33,7 +33,7 @@ fn install_seams() {
         backend_storage_ipc_latch_seams::set_latch_my_latch::set(|| {});
         backend_utils_init_small_seams::hold_interrupts::set(|| {});
         backend_utils_init_small_seams::resume_interrupts::set(|| {});
-        port_pqsignal_seams::pqsignal::set(|_signo, _func| types_signal::SigDisposition::Default);
+        port_pqsignal_seams::pqsignal::set(|_signo, _func| {});
         // The mock clock can drive schedule_alarm to arm a real ~1us SIGALRM
         // timer; ignore the signal so a stray delivery can't kill the test
         // process (we drive handle_sig_alarm directly instead).
