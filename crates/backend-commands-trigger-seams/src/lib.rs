@@ -155,3 +155,105 @@ seam_core::seam!(
         newvalue: Datum,
     ) -> bool
 );
+
+// ---- ROW-trigger firing (commands/trigger.c), called by nodeModifyTable.c ----
+
+seam_core::seam!(
+    /// `ExecBRDeleteTriggers(estate, epqstate, relinfo, tupleid, fdw_trigtuple,
+    /// epqslot, tmresult, tmfd, is_merge_delete)` (trigger.c) — fire BEFORE ROW
+    /// DELETE triggers, returning `false` when one of them turns the delete
+    /// into a no-op. `relinfo` addresses the target in `estate`'s result-rel
+    /// pool. Trigger functions are user code and can `ereport(ERROR)`.
+    pub fn exec_br_delete_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::EPQState<'mcx>,
+        relinfo: types_nodes::RriId,
+        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        epqslot: Option<&mut Option<types_nodes::SlotId>>,
+        tmresult: Option<&mut types_tableam::tableam::TM_Result>,
+        tmfd: &mut types_tableam::tableam::TM_FailureData,
+        is_merge_delete: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecARDeleteTriggers(estate, relinfo, tupleid, fdw_trigtuple,
+    /// transition_capture, is_crosspart_update)` (trigger.c) — queue AFTER ROW
+    /// DELETE triggers and capture the OLD row for transition tables.
+    pub fn exec_ar_delete_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        transition_capture: Option<&types_nodes::TransitionCaptureState>,
+        is_crosspart_update: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// Whether the `ResultRelInfo`'s `ri_TrigDesc` has any non-cloned AFTER
+    /// ROW UPDATE trigger whose function is an `RI_TRIGGER_PK` foreign-key
+    /// trigger (nodeModifyTable.c's `ExecCrossPartitionUpdateForeignKey`
+    /// inner loop). The trigger descriptor is owned by the relcache/trigger
+    /// machinery; the owner walks `trigdesc->triggers[]`.
+    pub fn has_noncloned_pk_fkey_trigger<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecBRUpdateTriggers(estate, epqstate, relinfo, tupleid, fdw_trigtuple,
+    /// newslot, tmresult, tmfd, is_merge_update)` (trigger.c): fire BEFORE ROW
+    /// UPDATE triggers. Returns `false` when a trigger turns the update into a
+    /// no-op; otherwise `true` (and `newslot` may have been replaced by a
+    /// trigger). `tmresult`, when present, carries the trigger's `TM_Result`.
+    pub fn exec_br_update_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        newslot: types_nodes::SlotId,
+        tmresult: Option<&mut types_tableam::tableam::TM_Result>,
+        tmfd: &mut types_tableam::tableam::TM_FailureData,
+        is_merge_update: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecIRUpdateTriggers(estate, relinfo, trigtuple, newslot)` (trigger.c):
+    /// fire INSTEAD OF ROW UPDATE triggers on a view. Returns `false` when the
+    /// triggers ask for "do nothing"; otherwise `true`.
+    pub fn exec_ir_update_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        newslot: types_nodes::SlotId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecARUpdateTriggers(estate, relinfo, src_partinfo, dst_partinfo,
+    /// tupleid, fdw_trigtuple, newslot, recheckIndexes, transition_capture,
+    /// is_crosspart_update)` (trigger.c): queue AFTER ROW UPDATE trigger
+    /// events (and capture NEW/OLD tuples for transition tables). For a
+    /// cross-partition update, `src_partinfo`/`dst_partinfo` name the source
+    /// and destination partition rels; otherwise they equal `relinfo`. The
+    /// transition-capture state is owned by the caller's `ModifyTableState`;
+    /// `transition_capture` is lent in (the caller selects `mt_transition_capture`
+    /// or `mt_oc_transition_capture`; `None` is the C `NULL`).
+    pub fn exec_ar_update_triggers<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        src_partinfo: Option<types_nodes::RriId>,
+        dst_partinfo: Option<types_nodes::RriId>,
+        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        newslot: Option<types_nodes::SlotId>,
+        recheck_indexes: &[types_core::Oid],
+        transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+        is_crosspart_update: bool,
+    ) -> types_error::PgResult<()>
+);

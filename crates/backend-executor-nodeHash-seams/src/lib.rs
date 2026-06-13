@@ -315,3 +315,11 @@ seam_core::seam!(
     /// `hashtable->curbatch >= 0` — were we attached to a batch?
     pub fn parallel_has_curbatch<'mcx>(node: &HashJoinState<'mcx>) -> bool
 );
+
+seam_core::seam!(
+    /// `get_hash_memory_limit()` (nodeHash.c) — the per-hash-operation working
+    /// memory budget in bytes (`work_mem`/`hash_mem_multiplier`, clamped to
+    /// `SIZE_MAX`). Consumed by Memoize to bound its cache. Infallible in
+    /// practice; `PgResult` mirrors the C `ereport`-capable surface.
+    pub fn get_hash_memory_limit() -> PgResult<u64>
+);

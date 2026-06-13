@@ -202,12 +202,13 @@ fn options_for_store<'a, 'mcx>(options: &'a [DefElem<'mcx>]) -> Option<&'a [DefE
 /// `AlterForeignDataWrapperOwner_internal` — change a FDW's owner.  Allowed
 /// only for superusers; the new owner must also be a superuser.  `row` is the
 /// syscache-fetched `(fdwid, fdwname, fdwowner)`.
-fn AlterForeignDataWrapperOwner_internal(
+fn AlterForeignDataWrapperOwner_internal<'mcx>(
+    mcx: Mcx<'mcx>,
     row: &FdwOwnerRow<'_>,
     new_owner_id: Oid,
 ) -> PgResult<()> {
     /* Must be a superuser to change a FDW owner */
-    if !miscinit_seams::superuser::call() {
+    if !miscinit_seams::superuser::call(mcx)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
@@ -219,7 +220,7 @@ fn AlterForeignDataWrapperOwner_internal(
     }
 
     /* New owner must also be a superuser */
-    if !miscinit_seams::superuser_arg::call(new_owner_id) {
+    if !miscinit_seams::superuser_arg::call(new_owner_id)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
@@ -271,7 +272,7 @@ pub fn AlterForeignDataWrapperOwner<'mcx>(
 
     let fdw_id = row.fdwid;
 
-    AlterForeignDataWrapperOwner_internal(&row, new_owner_id)?;
+    AlterForeignDataWrapperOwner_internal(mcx, &row, new_owner_id)?;
 
     Ok(object_address_set(ForeignDataWrapperRelationId, fdw_id))
 }
@@ -291,7 +292,7 @@ pub fn AlterForeignDataWrapperOwner_oid<'mcx>(
             .finish(errloc(335, "AlterForeignDataWrapperOwner_oid"));
     };
 
-    AlterForeignDataWrapperOwner_internal(&row, new_owner_id)
+    AlterForeignDataWrapperOwner_internal(mcx, &row, new_owner_id)
 }
 
 /* ===========================================================================
@@ -307,7 +308,7 @@ fn AlterForeignServerOwner_internal<'mcx>(
 ) -> PgResult<()> {
     if row.srvowner != new_owner_id {
         /* Superusers can always do it */
-        if !miscinit_seams::superuser::call() {
+        if !miscinit_seams::superuser::call(mcx)? {
             let srv_id = row.serverid;
 
             /* Must be owner */
@@ -516,7 +517,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
     let fdwname = stmt.fdwname.as_str();
 
     /* Must be superuser */
-    if !miscinit_seams::superuser::call() {
+    if !miscinit_seams::superuser::call(mcx)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
@@ -605,7 +606,7 @@ pub fn AlterForeignDataWrapper<'mcx>(
     let fdwname = stmt.fdwname.as_str();
 
     /* Must be superuser */
-    if !miscinit_seams::superuser::call() {
+    if !miscinit_seams::superuser::call(mcx)? {
         return ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(

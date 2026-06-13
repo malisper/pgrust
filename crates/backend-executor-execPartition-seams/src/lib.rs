@@ -43,3 +43,43 @@ seam_core::seam!(
         initial_prune: bool,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `ExecSetupPartitionTupleRouting(estate, rel)` (execPartition.c): build
+    /// the `PartitionTupleRouting` for a partitioned target relation `rel`
+    /// (an open-relation alias). Allocates the routing structure in the
+    /// EState's per-query context; fallible on OOM and on catalog
+    /// `ereport(ERROR)`.
+    pub fn exec_setup_partition_tuple_routing<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        rel: types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::PartitionTupleRouting>>
+);
+
+seam_core::seam!(
+    /// `ExecFindPartition(mtstate, rootResultRelInfo, proute, slot, estate)`
+    /// (execPartition.c): find or initialize the leaf-partition
+    /// `ResultRelInfo` that `slot`'s tuple routes to, returning its id in the
+    /// EState result-rel pool. May initialize a new partition's
+    /// `ResultRelInfo` (allocating + firing relcache/trigger setup), so
+    /// fallible.
+    pub fn exec_find_partition<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        root_result_rel_info: types_nodes::RriId,
+        proute: &mut types_nodes::PartitionTupleRouting,
+        slot: types_nodes::SlotId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_nodes::RriId>
+);
+
+seam_core::seam!(
+    /// `ExecCleanupTupleRouting(mtstate, proute)` (execPartition.c): tear down
+    /// the tuple-routing state at executor shutdown (close partitions, free
+    /// per-partition resources). Closing relations can `ereport(ERROR)`.
+    pub fn exec_cleanup_tuple_routing<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        proute: &mut types_nodes::PartitionTupleRouting,
+    ) -> types_error::PgResult<()>
+);

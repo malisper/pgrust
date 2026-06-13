@@ -45,11 +45,13 @@ seam_core::seam!(
     /// (walsender / logicalfuncs) installs. Can `ereport(ERROR)`.
     pub fn call_prepare_write(write_location: XLogRecPtr, write_xid: TransactionId, last_write: bool) -> types_error::PgResult<()>
 );
+
 seam_core::seam!(
     /// `ctx->write(ctx, write_location, write_xid, last_write)`. Can
     /// `ereport(ERROR)`.
     pub fn call_write(write_location: XLogRecPtr, write_xid: TransactionId, last_write: bool) -> types_error::PgResult<()>
 );
+
 seam_core::seam!(
     /// `ctx->update_progress(ctx, write_location, write_xid, skipped_xact)`.
     /// Can `ereport(ERROR)`.
@@ -81,4 +83,17 @@ seam_core::seam!(
     /// `if (AllowCascadeReplication()) WalSndWakeup(true, false)` — wake
     /// cascading walsenders after the walreceiver flushes new WAL.
     pub fn walsnd_wakeup_if_cascading()
+);
+
+seam_core::seam!(
+    /// `max_wal_senders` (walsender.c GUC).
+    pub fn max_wal_senders() -> i32
+);
+
+seam_core::seam!(
+    /// `GetStandbyFlushRecPtr(NULL)` (walsender.c): on a standby, the most
+    /// recent WAL position known to be safely flushed/replayed (the max of the
+    /// receiver's flushed and the startup process's replayed LSN). Callers
+    /// that don't need the timeline pass `NULL`; this seam discards it.
+    pub fn get_standby_flush_rec_ptr() -> XLogRecPtr
 );

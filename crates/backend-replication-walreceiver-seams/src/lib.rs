@@ -29,3 +29,10 @@ seam_core::seam!(
     /// `(lsn, tli)`.
     pub fn get_wal_rcv_flush_rec_ptr() -> (types_core::XLogRecPtr, types_core::TimeLineID)
 );
+
+seam_core::seam!(
+    /// `hot_standby_feedback` (walreceiver.c GUC bool): whether the standby
+    /// sends its xmin/catalog_xmin back to the primary. Slot synchronization
+    /// requires it enabled. Backend-local GUC state.
+    pub fn hot_standby_feedback() -> bool
+);

@@ -527,6 +527,23 @@ pub fn table_tuple_update(
     )
 }
 
+/// `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, wait_policy, flags,
+/// tmfd)` (tableam.h inline).
+#[allow(clippy::too_many_arguments)]
+pub fn table_tuple_lock(
+    rel: &Relation<'_>,
+    tid: &ItemPointerData,
+    snapshot: &Snapshot,
+    slot: &mut TupleTableSlot,
+    cid: types_core::xact::CommandId,
+    mode: LockTupleMode,
+    wait_policy: types_tableam::tableam::LockWaitPolicy,
+    flags: u8,
+    tmfd: &mut TM_FailureData,
+) -> PgResult<TM_Result> {
+    (am(rel).tuple_lock)(rel, tid, snapshot, slot, cid, mode, wait_policy, flags, tmfd)
+}
+
 // ===========================================================================
 // Functions to make modifications a bit simpler (tableam.c)
 // ===========================================================================

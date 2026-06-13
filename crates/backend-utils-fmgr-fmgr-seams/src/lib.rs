@@ -14,6 +14,24 @@ use types_datum::Datum;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `FunctionCall1Coll(flinfo, collation, arg1)` (fmgr.c): invoke a
+    /// one-argument function whose `FmgrInfo` is already resolved (the C
+    /// caller keeps a resolved `FmgrInfo *`; the owned model dispatches by
+    /// `fn_oid` and re-resolves at call time, as elsewhere here). Used by
+    /// `ExecHashBuildSkewHash` to hash each MCV through
+    /// `hashstate->skew_hashfunction` under `hashstate->skew_collation`, and by
+    /// Memoize's `MemoizeHash_hash` to invoke a cache key's hash function
+    /// (`DatumGetUInt32` applied by the caller). The
+    /// C strict-null `elog(ERROR, "function %u returned NULL")` and whatever
+    /// the function raises are carried on `Err`.
+    pub fn function_call1_coll(
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `fmgr_info(functionId, &finfo)` (fmgr.c), lookup half only: resolve
     /// the function and fail exactly where C would (`elog(ERROR, "cache
     /// lookup failed for function %u")`, unsupported language, etc.). The

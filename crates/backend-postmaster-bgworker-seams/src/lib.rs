@@ -2,6 +2,7 @@
 //! (`src/backend/postmaster/bgworker.c`). The owning unit installs these from its
 //! `init_seams()`; until then a call panics loudly.
 
+
 seam_core::seam!(
     /// `BackgroundWorkerMain(startup_data, startup_data_len)` (`src/backend/postmaster/bgworker.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
@@ -57,4 +58,16 @@ seam_core::seam!(
     /// `BackgroundWorkerUnblockSignals()` (bgworker.c): unblock signals in a
     /// background worker after handlers are installed.
     pub fn background_worker_unblock_signals()
+);
+
+// --- backend-utils-init-postinit consumers (bgworker.c) ---
+
+seam_core::seam!(
+    /// `AmBackgroundWorkerProcess()` (miscadmin.h): is this a background worker?
+    pub fn am_background_worker_process() -> bool
+);
+
+seam_core::seam!(
+    /// `max_worker_processes` (bgworker.c GUC).
+    pub fn max_worker_processes() -> i32
 );

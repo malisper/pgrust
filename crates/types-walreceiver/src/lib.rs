@@ -26,6 +26,37 @@ use types_core::{ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WalReceiverConn(pub usize);
 
+/// `WalRcvExecResult *` (`replication/walreceiver.h`) — the result of a
+/// `walrcv_exec` query.  The concrete struct (status, sqlstate, err string,
+/// `Tuplestorestate *`, `TupleDesc`) is libpqwalreceiver-owned; here it is the
+/// opaque token the libpqwalreceiver result seams hand back and forth.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalRcvExecResult(pub usize);
+
+/// `TupleTableSlot *` made for iterating a `WalRcvExecResult`'s tuplestore
+/// (`MakeTupleTableSlot(...)` in slotsync.c).  Opaque, owner-resident token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalRcvResultTupslot(pub usize);
+
+/// `WalRcvExecStatus` (`replication/walreceiver.h`) — `walrcv_exec` result
+/// status.  Discriminants match the C enum exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum WalRcvExecStatus {
+    /// `WALRCV_ERROR` — There was error while executing the query.
+    WALRCV_ERROR = 0,
+    /// `WALRCV_OK_COMMAND` — Query executed utility or replication command.
+    WALRCV_OK_COMMAND = 1,
+    /// `WALRCV_OK_TUPLES` — Query returned tuples.
+    WALRCV_OK_TUPLES = 2,
+    /// `WALRCV_OK_COPY_IN` — Query started COPY FROM.
+    WALRCV_OK_COPY_IN = 3,
+    /// `WALRCV_OK_COPY_OUT` — Query started COPY TO.
+    WALRCV_OK_COPY_OUT = 4,
+    /// `WALRCV_OK_COPY_BOTH` — Query started COPY BOTH replication command.
+    WALRCV_OK_COPY_BOTH = 5,
+}
+
 /// `replication/walreceiver.h`: maximum size of a connection string.
 pub const MAXCONNINFO: usize = 1024;
 /// `pg_config_manual.h` / `c.h`: `NAMEDATALEN`.

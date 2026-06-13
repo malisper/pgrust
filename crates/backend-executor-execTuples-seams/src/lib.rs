@@ -399,3 +399,82 @@ seam_core::seam!(
         bool,
     )>
 );
+
+seam_core::seam!(
+    /// `ExecMaterializeSlot(slot)` (execTuples.c, via the slot ops): force the
+    /// slot to materialize its own copy of the tuple's data (so later changes
+    /// to the source storage cannot affect it). Fallible: materializing can
+    /// `palloc` (OOM).
+    pub fn exec_materialize_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c):
+    /// remap `in_slot`'s attributes through `attr_map` into `out_slot` and
+    /// return `out_slot`. The conversion map is the one ExecGetChildToRootMap
+    /// stored on the source `ResultRelInfo`'s `ri_ChildToRootMap`; the owner
+    /// reads it from there. Fallible on `palloc` (OOM).
+    pub fn execute_attr_map_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        in_slot: types_nodes::SlotId,
+        out_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// The per-attribute stored-generated-column compute loop of
+    /// `ExecComputeStoredGenerated` (nodeModifyTable.c) that touches the slot
+    /// payload: in the per-tuple memory context, `slot_getallattrs(slot)`, then
+    /// for every column with a non-NULL generated `ExprState`
+    /// (`ri_GeneratedExprsI`/`ri_GeneratedExprsU` per `cmdtype`) set
+    /// `econtext->ecxt_scantuple = slot`, `ExecEvalExpr` it, `datumCopy` a
+    /// non-null pass-by-reference result, and for the remaining columns
+    /// `datumCopy` the existing slot value; finally `ExecClearTuple` /
+    /// `memcpy` the values+nulls back / `ExecStoreVirtualTuple` /
+    /// `ExecMaterializeSlot`. The slot's `tts_values`/`tts_isnull` payload and
+    /// the expression interpreter are owned by execTuples/execExpr; the
+    /// generated `ExprState`s are read off the `ResultRelInfo` (pool id).
+    /// Fallible on `ereport(ERROR)` from a generation expression and on OOM.
+    pub fn exec_store_generated_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        econtext: types_nodes::EcxtId,
+        cmdtype: types_nodes::nodes::CmdType,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c) with
+    /// an explicitly-supplied `attrMap` (rather than one read off a
+    /// `ResultRelInfo` field). Used by callers that obtained the map directly
+    /// (e.g. `ExecGetRootToChildMap`'s returned `AttrMap`): remap `in_slot`'s
+    /// attributes through `attr_map` into `out_slot` and return `out_slot`.
+    /// Fallible on `palloc` (OOM).
+    pub fn execute_attr_map_slot_explicit<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        attr_map: &types_tuple::attmap::AttrMap<'mcx>,
+        in_slot: types_nodes::SlotId,
+        out_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c): the
+    /// slot's contents as a `MinimalTuple` (`slot->tts_ops->get_minimal_tuple`
+    /// or `copy_minimal_tuple`). The owned model always returns a copy into
+    /// `mcx`, so the C `shouldFree` / `heap_free_minimal_tuple` bookkeeping is
+    /// internal to the owner and does not cross the seam. The materialize /
+    /// copy path allocates, so the call is fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<
+        types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    >
+);
