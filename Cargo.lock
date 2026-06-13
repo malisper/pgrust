@@ -2379,6 +2379,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-explain-dr"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-dest",
+ "types-error",
+ "types-explain",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-explain-format"
 version = "0.0.0"
 dependencies = [
