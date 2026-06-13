@@ -348,14 +348,36 @@ fn IndexOnlyRecheck<'mcx>(
 
 /// `ExecIndexOnlyScan(pstate)` — scan the index, returning whether the next
 /// qualifying tuple is available (in the node's scan/result slot).
+///
+/// Takes the enclosing `PlanStateNode` (C: `PlanState *pstate`) so the
+/// runtime-key setup can go through the generic `ExecReScan` dispatcher
+/// (execAmi) exactly as the C does — that path also runs `InstrEndLoop`,
+/// `chgParam` propagation, and `ReScanExprContext` before the node-specific
+/// rescan, none of which `ExecReScanIndexOnlyScan` does on its own.
 pub fn ExecIndexOnlyScan<'mcx>(
-    node: &mut IndexOnlyScanState<'mcx>,
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // If we have runtime keys and they've not already been set up, do it now.
-    if node.ioss_NumRuntimeKeys != 0 && !node.ioss_RuntimeKeysReady {
-        ExecReScanIndexOnlyScan(node, estate)?;
+    //   if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
+    //       ExecReScan((PlanState *) node);
+    let (num_runtime_keys, ready) = match pstate {
+        types_nodes::PlanStateNode::IndexOnlyScan(n) => {
+            (n.ioss_NumRuntimeKeys, n.ioss_RuntimeKeysReady)
+        }
+        _ => return Err(elog("ExecIndexOnlyScan dispatched to wrong node type")),
+    };
+    if num_runtime_keys != 0 && !ready {
+        // Generic ExecReScan dispatcher (execAmi) — instrument loop end,
+        // chgParam propagation, expr-context rescan, then the node switch
+        // dispatches to ExecReScanIndexOnlyScan.
+        execAmi::exec_re_scan::call(pstate, estate)?;
     }
+
+    let node = match pstate {
+        types_nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
+        _ => return Err(elog("ExecIndexOnlyScan dispatched to wrong node type")),
+    };
 
     // return ExecScan(&node->ss, IndexOnlyNext, IndexOnlyRecheck);
     // The execScan.c driver (qual/projection + the EvalPlanQual
@@ -1004,12 +1026,12 @@ fn exec_proc_node_trampoline<'mcx>(
     pstate: &mut types_nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
-    let node = match pstate {
-        types_nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
-        _ => return Err(elog("ExecProcNode dispatched to wrong node type")),
-    };
-    let have = ExecIndexOnlyScan(node, estate)?;
+    let have = ExecIndexOnlyScan(pstate, estate)?;
     if have {
+        let node = match pstate {
+            types_nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
+            _ => return Err(elog("ExecProcNode dispatched to wrong node type")),
+        };
         // The result tuple is in the projection result slot (or the scan slot
         // when not projecting).
         Ok(node
@@ -1083,9 +1105,3 @@ fn bridge_retrieve_instrumentation(_node: PlanStateHandle) -> PgResult<()> {
          resolution is owned by execParallel and not yet wired"
     )
 }
-
-// Keep the execAmi seam import live: ExecReScan is reached through execAmi when
-// a parent rescans this node; the node's own rescan is ExecReScanIndexOnlyScan.
-const _: fn() = || {
-    let _ = execAmi::exec_re_scan::is_installed;
-};
