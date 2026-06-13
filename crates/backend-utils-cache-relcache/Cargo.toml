@@ -34,3 +34,10 @@ types-nodes = { path = "../types-nodes" }
 types-partition = { path = "../types-partition" }
 types-reloptions = { path = "../types-reloptions" }
 types-hash = { path = "../types-hash" }
+types-catalog = { path = "../types-catalog" }
+
+# Tuple-descriptor construction (access/common/tupdesc.c) — a lower-level
+# utility relcache layers on (CreateTupleDesc / populate_compact_attribute when
+# materializing the cross-unit rd_att slice). Acyclic: tupdesc does not depend
+# on relcache.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
