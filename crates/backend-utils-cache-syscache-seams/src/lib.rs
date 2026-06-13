@@ -18,6 +18,7 @@ use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassFo
 use mcx::PgString;
 use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
+use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(
@@ -1380,4 +1381,96 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         typid: Oid,
     ) -> PgResult<Option<PgTypeDefault>>
+);
+
+/* ---------------------------------------------------------------------------
+ * pg_foreign_* catalog reads (foreign/foreign.c accessors). A cache miss is
+ * `Ok(None)`; the caller (`foreign.c`) raises its own `cache lookup failed`
+ * / `does not exist` error, exactly as the C `!HeapTupleIsValid` branches do.
+ * ------------------------------------------------------------------------- */
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid))`
+    /// projected to `Form_pg_foreign_data_wrapper`'s
+    /// `(fdwname, fdwowner, fdwhandler, fdwvalidator)`. `Ok(None)` on a cache
+    /// miss. The name is copied into `mcx`; `Err` carries OOM/catcache errors.
+    pub fn foreign_data_wrapper_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+    ) -> PgResult<Option<ForeignDataWrapperFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid))`
+    /// projected to `Form_pg_foreign_server`'s `(srvname, srvowner, srvfdw)`.
+    /// `Ok(None)` on a cache miss.
+    pub fn foreign_server_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+    ) -> PgResult<Option<ForeignServerFormRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNDATAWRAPPERNAME,
+    /// Anum_pg_foreign_data_wrapper_oid, CStringGetDatum(fdwname))`: the FDW's
+    /// OID, or `InvalidOid` when no row matches.
+    pub fn foreign_data_wrapper_oid_by_name(fdwname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(FOREIGNSERVERNAME, Anum_pg_foreign_server_oid,
+    /// CStringGetDatum(servername))`: the server's OID, or `InvalidOid` when no
+    /// row matches.
+    pub fn foreign_server_oid_by_name(servername: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver`. `Ok(None)` on a cache miss (the
+    /// caller raises `cache lookup failed for foreign table %u`).
+    pub fn foreign_table_server_by_relid(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_foreign_table`'s `ftserver` plus the raw `ftoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_foreign_table_ftoptions)`): `(ftserver,
+    /// Some(bytes))` with the detoasted option array, or `(ftserver, None)`
+    /// when `ftoptions` is SQL NULL. `Ok(None)` on a cache miss (the caller
+    /// raises `cache lookup failed for foreign table %u`). The caller runs
+    /// `untransformRelOptions` on the bytes.
+    pub fn foreign_table_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(USERMAPPINGUSERSERVER, ObjectIdGetDatum(userid),
+    /// ObjectIdGetDatum(serverid))` projected to the mapping OID
+    /// (`Form_pg_user_mapping.oid`) plus the raw `umoptions` `text[]`
+    /// (`SysCacheGetAttr(Anum_pg_user_mapping_umoptions)`): `(umid,
+    /// Some(bytes))` or `(umid, None)` when `umoptions` is SQL NULL. `Ok(None)`
+    /// on a cache miss — the caller (`GetUserMapping`) retries with
+    /// `userid = InvalidOid` (PUBLIC) and, if still absent, raises
+    /// `user mapping not found ...`. The caller runs `untransformRelOptions`.
+    pub fn user_mapping_form<'mcx>(
+        mcx: Mcx<'mcx>,
+        userid: Oid,
+        serverid: Oid,
+    ) -> PgResult<Option<(Oid, Option<PgVec<'mcx, u8>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// then `SysCacheGetAttr(Anum_pg_attribute_attfdwoptions)`: the raw
+    /// `attfdwoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+    /// `Ok(None)` on a cache miss (the caller raises
+    /// `cache lookup failed for attribute %d of relation %u`). The caller runs
+    /// `untransformRelOptions`.
+    pub fn attribute_fdwoptions<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
 );

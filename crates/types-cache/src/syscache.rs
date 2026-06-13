@@ -114,3 +114,37 @@ pub struct AuthMembersRow {
     /// `set_option` — the grant permits `SET ROLE` (`WITH SET TRUE`).
     pub set_option: bool,
 }
+
+/// Projection of one `pg_foreign_data_wrapper` row
+/// (`catalog/pg_foreign_data_wrapper.h`) as `GetForeignDataWrapperExtended`
+/// (`foreign/foreign.c`) reads it off `SearchSysCache1(FOREIGNDATAWRAPPEROID)`
+/// -> `Form_pg_foreign_data_wrapper`. The name is copied into the caller's
+/// `mcx` (`pstrdup`/`NameStr`), so it carries `'mcx`. The `fdwoptions` text[]
+/// column is *not* projected here — `foreign.c`'s callers (`foreigncmds.c`,
+/// `nodeForeignscan.c`) read only these scalar fields off the descriptor.
+#[derive(Debug)]
+pub struct ForeignDataWrapperFormRow<'mcx> {
+    /// `fdwname` — name of the FDW (`NameStr(fdwform->fdwname)`).
+    pub fdwname: mcx::PgString<'mcx>,
+    /// `fdwowner` — owning role OID.
+    pub fdwowner: types_core::Oid,
+    /// `fdwhandler` — OID of the handler function, or `InvalidOid`.
+    pub fdwhandler: types_core::Oid,
+    /// `fdwvalidator` — OID of the validator function, or `InvalidOid`.
+    pub fdwvalidator: types_core::Oid,
+}
+
+/// Projection of one `pg_foreign_server` row (`catalog/pg_foreign_server.h`)
+/// as `GetForeignServerExtended` (`foreign/foreign.c`) reads it off
+/// `SearchSysCache1(FOREIGNSERVEROID)` -> `Form_pg_foreign_server`. The name
+/// is copied into the caller's `mcx`. The `srvtype`/`srvversion`/`srvoptions`
+/// columns are not projected — `foreign.c`'s callers read only these scalars.
+#[derive(Debug)]
+pub struct ForeignServerFormRow<'mcx> {
+    /// `srvname` — name of the server (`NameStr(serverform->srvname)`).
+    pub srvname: mcx::PgString<'mcx>,
+    /// `srvowner` — owning role OID.
+    pub srvowner: types_core::Oid,
+    /// `srvfdw` — the server's foreign-data wrapper OID.
+    pub srvfdw: types_core::Oid,
+}
