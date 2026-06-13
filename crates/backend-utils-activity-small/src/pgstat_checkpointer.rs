@@ -6,10 +6,12 @@
 //! implementation and the details about individual types of statistics.
 //!
 //! `PendingCheckpointerStats` is the file-owned backend-local pending buffer
-//! (a process global in C, mutated directly by `postmaster/checkpointer.c`,
+//! (a per-backend C global, mutated directly by `postmaster/checkpointer.c`,
 //! `storage/buffer/bufmgr.c`, `access/transam/slru.c`, and
-//! `access/transam/xlog.c`); it is kept as a file-local `static mut` reached
-//! through [`pending_checkpointer_stats`].
+//! `access/transam/xlog.c`); it is a `thread_local!` reached through
+//! [`with_pending_checkpointer_stats`].
+
+use core::cell::RefCell;
 
 use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
@@ -26,34 +28,36 @@ use types_error::PgResult;
 use types_pgstat::activity_pgstat::{PgStatShared_Checkpointer, PgStat_CheckpointerStats};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-/// `PGSTAT_KIND_CHECKPOINTER` (`utils/pgstat_kind.h`).
-pub const PGSTAT_KIND_CHECKPOINTER: u32 = 9;
+pub use types_pgstat::activity_pgstat::PGSTAT_KIND_CHECKPOINTER;
 
-/// `PgStat_CheckpointerStats PendingCheckpointerStats = {0};`
-static mut PENDING_CHECKPOINTER_STATS: PgStat_CheckpointerStats = PgStat_CheckpointerStats {
-    num_timed: 0,
-    num_requested: 0,
-    num_performed: 0,
-    restartpoints_timed: 0,
-    restartpoints_requested: 0,
-    restartpoints_performed: 0,
-    write_time: 0,
-    sync_time: 0,
-    buffers_written: 0,
-    slru_written: 0,
-    stat_reset_timestamp: 0,
-};
+thread_local! {
+    /// `PgStat_CheckpointerStats PendingCheckpointerStats = {0};` —
+    /// backend-local state, so per-thread (one backend == one thread).
+    static PENDING_CHECKPOINTER_STATS: RefCell<PgStat_CheckpointerStats> = const {
+        RefCell::new(PgStat_CheckpointerStats {
+            num_timed: 0,
+            num_requested: 0,
+            num_performed: 0,
+            restartpoints_timed: 0,
+            restartpoints_requested: 0,
+            restartpoints_performed: 0,
+            write_time: 0,
+            sync_time: 0,
+            buffers_written: 0,
+            slru_written: 0,
+            stat_reset_timestamp: 0,
+        })
+    };
+}
 
-/// Borrow the file-owned backend-local `PendingCheckpointerStats` buffer. In C
-/// the global is `PGDLLIMPORT` and other files (`postmaster/checkpointer.c`,
+/// Run `f` on this backend's `PendingCheckpointerStats` buffer. In C the
+/// global is `PGDLLIMPORT` and other files (`postmaster/checkpointer.c`,
 /// `storage/buffer/bufmgr.c`, `access/transam/slru.c`, `access/transam/xlog.c`)
 /// bump its fields directly; this accessor is that access path.
-///
-/// SAFETY: backend-local process global, mirroring C's single-threaded
-/// per-backend access. Callers take one live borrow at a time within a tight
-/// scope, like C's pointer to the global.
-pub fn pending_checkpointer_stats() -> &'static mut PgStat_CheckpointerStats {
-    unsafe { &mut *core::ptr::addr_of_mut!(PENDING_CHECKPOINTER_STATS) }
+pub fn with_pending_checkpointer_stats<R>(
+    f: impl FnOnce(&mut PgStat_CheckpointerStats) -> R,
+) -> R {
+    PENDING_CHECKPOINTER_STATS.with(|p| f(&mut p.borrow_mut()))
 }
 
 /// Report checkpointer and IO statistics.
@@ -71,14 +75,14 @@ pub fn pgstat_report_checkpointer() -> PgResult<()> {
     // if (pg_memory_is_all_zeros(&PendingCheckpointerStats,
     //                            sizeof(struct PgStat_CheckpointerStats)))
     //     return;
-    let pending = *pending_checkpointer_stats();
+    let pending = with_pending_checkpointer_stats(|p| *p);
     if pending.is_all_zeros() {
         return Ok(());
     }
 
     // PgStatShared_Checkpointer *stats_shmem = &pgStatLocal.shmem->checkpointer;
     with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
-        pgstat_begin_changecount_write(&mut stats_shmem.changecount);
+        pgstat_begin_changecount_write(&stats_shmem.changecount);
 
         // #define CHECKPOINTER_ACC(fld) stats_shmem->stats.fld += PendingCheckpointerStats.fld
         stats_shmem.stats.num_timed += pending.num_timed;
@@ -92,12 +96,12 @@ pub fn pgstat_report_checkpointer() -> PgResult<()> {
         stats_shmem.stats.buffers_written += pending.buffers_written;
         stats_shmem.stats.slru_written += pending.slru_written;
 
-        pgstat_end_changecount_write(&mut stats_shmem.changecount);
+        pgstat_end_changecount_write(&stats_shmem.changecount);
     });
 
     // Clear out the statistics buffer, so it can be re-used.
     // MemSet(&PendingCheckpointerStats, 0, sizeof(PendingCheckpointerStats));
-    *pending_checkpointer_stats() = PgStat_CheckpointerStats::default();
+    with_pending_checkpointer_stats(|p| *p = PgStat_CheckpointerStats::default());
 
     // Report IO statistics
     pgstat_flush_io::call(false)?;
@@ -129,7 +133,7 @@ pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
         res = (|| {
             // see explanation above PgStatShared_Checkpointer for the reset protocol
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -143,7 +147,7 @@ pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
                 pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
             }
             stats_shmem.stats.stat_reset_timestamp = ts;
-            lwlock_release::call(&mut stats_shmem.lock)
+            lwlock_release::call(&stats_shmem.lock)
         })();
     });
     res
@@ -167,10 +171,10 @@ pub fn pgstat_checkpointer_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
-            lwlock_release::call(&mut stats_shmem.lock)?;
+            lwlock_release::call(&stats_shmem.lock)?;
 
             Ok(reset)
         })();
@@ -205,15 +209,14 @@ mod tests {
 
         pgstat_report_checkpointer().unwrap();
 
-        assert_eq!(env.checkpointer_shmem.borrow().changecount, 0);
+        assert_eq!(env.checkpointer_shmem.borrow().changecount.load(core::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(env.flush_io_calls.get(), 0);
     }
 
     #[test]
     fn report_accumulates_and_clears_pending() {
         let env = setup();
-        {
-            let p = pending_checkpointer_stats();
+        with_pending_checkpointer_stats(|p| {
             p.num_timed = 1;
             p.num_requested = 2;
             p.num_performed = 3;
@@ -224,7 +227,7 @@ mod tests {
             p.sync_time = 8;
             p.buffers_written = 9;
             p.slru_written = 10;
-        }
+        });
         env.checkpointer_shmem.borrow_mut().stats.num_timed = 100;
 
         pgstat_report_checkpointer().unwrap();
@@ -241,9 +244,9 @@ mod tests {
             assert_eq!(shmem.stats.sync_time, 8);
             assert_eq!(shmem.stats.buffers_written, 9);
             assert_eq!(shmem.stats.slru_written, 10);
-            assert_eq!(shmem.changecount, 2);
+            assert_eq!(shmem.changecount.load(core::sync::atomic::Ordering::Relaxed), 2);
         }
-        assert!(pending_checkpointer_stats().is_all_zeros());
+        assert!(with_pending_checkpointer_stats(|p| p.is_all_zeros()));
         assert_eq!(env.flush_io_calls.get(), 1);
     }
 

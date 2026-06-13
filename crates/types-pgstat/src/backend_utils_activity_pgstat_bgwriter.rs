@@ -28,11 +28,12 @@ impl PgStat_BgWriterStats {
 }
 
 /// `PgStatShared_BgWriter` (`utils/pgstat_internal.h`). Field order matches C.
-#[derive(Clone, Copy, Debug, Default)]
+/// See `PgStatShared_Archiver` (`activity_pgstat`) on `changecount`.
+#[derive(Debug, Default)]
 pub struct PgStatShared_BgWriter {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,
-    pub changecount: u32,
+    pub changecount: core::sync::atomic::AtomicU32,
     pub stats: PgStat_BgWriterStats,
     pub reset_offset: PgStat_BgWriterStats,
 }

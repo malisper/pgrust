@@ -108,7 +108,7 @@ fn install_seams() {
     });
 }
 
-const REL: PgStat_Kind = 2; // PGSTAT_KIND_RELATION
+const REL: PgStat_Kind = types_pgstat::activity_pgstat::PGSTAT_KIND_RELATION;
 
 fn drops_for(is_commit: bool) -> Vec<u64> {
     let ctx = MemoryContext::new("test");

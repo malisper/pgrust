@@ -974,7 +974,6 @@ name = "backend-utils-activity-status-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
  "types-pgstat",
 ]
 
@@ -1005,6 +1004,7 @@ dependencies = [
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

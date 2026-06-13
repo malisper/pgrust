@@ -121,7 +121,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         if procform.amproclefttype != procform.amprocrighttype {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash contains support function {} with different left and right input types",
-                regproc_seams::format_procedure::call(procform.amproc)?
+                regproc_seams::format_procedure::call(mcx, procform.amproc)?
             ))?;
             result = false;
         }
@@ -154,7 +154,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
             _ => {
                 report_info(format!(
                     "operator family \"{opfamilyname}\" of access method hash contains function {} with invalid support number {}",
-                    regproc_seams::format_procedure::call(procform.amproc)?,
+                    regproc_seams::format_procedure::call(mcx, procform.amproc)?,
                     procform.amprocnum
                 ))?;
                 result = false;
@@ -165,7 +165,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         if !ok {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash contains function {} with wrong signature for support number {}",
-                regproc_seams::format_procedure::call(procform.amproc)?,
+                regproc_seams::format_procedure::call(mcx, procform.amproc)?,
                 procform.amprocnum
             ))?;
             result = false;
@@ -186,7 +186,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         if oprform.amopstrategy < 1 || oprform.amopstrategy > HTMaxStrategyNumber as i16 {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash contains operator {} with invalid strategy number {}",
-                regproc_seams::format_operator::call(oprform.amopopr)?,
+                regproc_seams::format_operator::call(mcx, oprform.amopopr)?,
                 oprform.amopstrategy
             ))?;
             result = false;
@@ -196,7 +196,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         if oprform.amoppurpose != AMOP_SEARCH || OidIsValid(oprform.amopsortfamily) {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash contains invalid ORDER BY specification for operator {}",
-                regproc_seams::format_operator::call(oprform.amopopr)?
+                regproc_seams::format_operator::call(mcx, oprform.amopopr)?
             ))?;
             result = false;
         }
@@ -210,7 +210,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         )? {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash contains operator {} with wrong signature",
-                regproc_seams::format_operator::call(oprform.amopopr)?
+                regproc_seams::format_operator::call(mcx, oprform.amopopr)?
             ))?;
             result = false;
         }
@@ -221,7 +221,7 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash lacks support function for operator {}",
-                regproc_seams::format_operator::call(oprform.amopopr)?
+                regproc_seams::format_operator::call(mcx, oprform.amopopr)?
             ))?;
             result = false;
         }
@@ -264,8 +264,8 @@ pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
         if thisgroup.operatorset != (1u64 << HTEqualStrategyNumber) {
             report_info(format!(
                 "operator family \"{opfamilyname}\" of access method hash is missing operator(s) for types {} and {}",
-                format_type_seams::format_type_be::call(thisgroup.lefttype)?,
-                format_type_seams::format_type_be::call(thisgroup.righttype)?
+                format_type_seams::format_type_be::call(mcx, thisgroup.lefttype)?,
+                format_type_seams::format_type_be::call(mcx, thisgroup.righttype)?
             ))?;
             result = false;
         }

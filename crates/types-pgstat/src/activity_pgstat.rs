@@ -6,12 +6,32 @@
 //! [`LWLock`] from C's `PgStatShared_Common` header; the ported
 //! `LWLockInitialize`/`LWLockAcquire`/`LWLockRelease` operate on it directly.
 
+use core::sync::atomic::AtomicU32;
+
 use types_core::primitive::TimestampTz;
 use types_storage::LWLock;
 
 /// `PgStat_Kind` (`pgstat_kind.h`): `typedef uint32 PgStat_Kind;` — the id of
 /// a cumulative-statistics kind (builtin or custom).
 pub type PgStat_Kind = u32;
+
+// The statistics-kind id table (`utils/pgstat_kind.h`).
+/// use 0 for INVALID, to catch zero-initialized data
+pub const PGSTAT_KIND_INVALID: PgStat_Kind = 0;
+// stats for variable-numbered objects
+pub const PGSTAT_KIND_DATABASE: PgStat_Kind = 1;
+pub const PGSTAT_KIND_RELATION: PgStat_Kind = 2;
+pub const PGSTAT_KIND_FUNCTION: PgStat_Kind = 3;
+pub const PGSTAT_KIND_REPLSLOT: PgStat_Kind = 4;
+pub const PGSTAT_KIND_SUBSCRIPTION: PgStat_Kind = 5;
+pub const PGSTAT_KIND_BACKEND: PgStat_Kind = 6;
+// stats for fixed-numbered objects
+pub const PGSTAT_KIND_ARCHIVER: PgStat_Kind = 7;
+pub const PGSTAT_KIND_BGWRITER: PgStat_Kind = 8;
+pub const PGSTAT_KIND_CHECKPOINTER: PgStat_Kind = 9;
+pub const PGSTAT_KIND_IO: PgStat_Kind = 10;
+pub const PGSTAT_KIND_SLRU: PgStat_Kind = 11;
+pub const PGSTAT_KIND_WAL: PgStat_Kind = 12;
 
 /// `PgStat_Counter` (`pgstat.h`): `typedef int64 PgStat_Counter;`.
 pub type PgStat_Counter = i64;
@@ -59,11 +79,14 @@ impl Default for PgStat_ArchiverStats {
 }
 
 /// `PgStatShared_Archiver` (`utils/pgstat_internal.h`). Field order matches C.
-#[derive(Clone, Copy, Debug, Default)]
+/// `changecount` is the shmem-resident counter the changecount protocol
+/// (`pgstat_internal.h`) runs on; it is a real atomic because concurrent
+/// readers race the writer by design.
+#[derive(Debug, Default)]
 pub struct PgStatShared_Archiver {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,
-    pub changecount: u32,
+    pub changecount: AtomicU32,
     pub stats: PgStat_ArchiverStats,
     pub reset_offset: PgStat_ArchiverStats,
 }
@@ -101,12 +124,12 @@ impl PgStat_CheckpointerStats {
 }
 
 /// `PgStatShared_Checkpointer` (`utils/pgstat_internal.h`). Field order
-/// matches C.
-#[derive(Clone, Copy, Debug, Default)]
+/// matches C. See [`PgStatShared_Archiver`] on `changecount`.
+#[derive(Debug, Default)]
 pub struct PgStatShared_Checkpointer {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,
-    pub changecount: u32,
+    pub changecount: AtomicU32,
     pub stats: PgStat_CheckpointerStats,
     pub reset_offset: PgStat_CheckpointerStats,
 }

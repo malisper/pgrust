@@ -9,7 +9,11 @@ use types_error::PgResult;
 
 seam_core::seam!(
     /// `format_type_be(type_oid)` (format_type.c): the type's printable name
-    /// for backend error messages. `Err` carries the invalid-type
-    /// cache-lookup `elog(ERROR)`.
-    pub fn format_type_be(type_oid: Oid) -> PgResult<String>
+    /// for backend error messages, palloc'd in the caller's current context
+    /// (`mcx`). `Err` carries the invalid-type cache-lookup `elog(ERROR)`
+    /// and OOM.
+    pub fn format_type_be<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_oid: Oid,
+    ) -> PgResult<mcx::PgString<'mcx>>
 );

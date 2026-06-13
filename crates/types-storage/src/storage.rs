@@ -1,24 +1,67 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
 use types_core::{uint16, uint32, uint64, uint8, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER};
 
-/// `LWLockMode` (`storage/lwlock.h`).
-pub type LWLockMode = u32;
-pub const LW_EXCLUSIVE: LWLockMode = 0;
-pub const LW_SHARED: LWLockMode = 1;
-pub const LW_WAIT_UNTIL_FREE: LWLockMode = 2;
+/// `enum LWLockMode` (`storage/lwlock.h`). Variant order matches C.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LWLockMode {
+    LW_EXCLUSIVE = 0,
+    LW_SHARED = 1,
+    /// A special mode used in `PGPROC->lwWaitMode`, when waiting for lock to
+    /// become free. Not to be used as `LWLockAcquire` argument.
+    LW_WAIT_UNTIL_FREE = 2,
+}
+pub use LWLockMode::{LW_EXCLUSIVE, LW_SHARED, LW_WAIT_UNTIL_FREE};
+
+impl Default for LWLockMode {
+    /// C's zero value (`LW_EXCLUSIVE`), for zero-initialized shmem images.
+    fn default() -> Self {
+        LW_EXCLUSIVE
+    }
+}
 
 /// `pg_atomic_uint32` (`port/atomics.h`) — a shmem-resident atomic word.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Wraps a real [`AtomicU32`]: the value is only ever read or written through
+/// atomic operations, exactly as C's `pg_atomic_*_u32` accessors enforce.
+#[derive(Debug, Default)]
 pub struct pg_atomic_uint32 {
-    pub value: uint32,
+    pub value: AtomicU32,
+}
+
+impl pg_atomic_uint32 {
+    pub const fn new(value: uint32) -> Self {
+        Self {
+            value: AtomicU32::new(value),
+        }
+    }
+
+    /// `pg_atomic_read_u32` (no barrier semantics).
+    pub fn read(&self) -> uint32 {
+        self.value.load(Ordering::Relaxed)
+    }
 }
 
 /// `pg_atomic_uint64` (`port/atomics.h`) — a shmem-resident atomic 8-byte word.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct pg_atomic_uint64 {
-    pub value: uint64,
+    pub value: AtomicU64,
+}
+
+impl pg_atomic_uint64 {
+    pub const fn new(value: uint64) -> Self {
+        Self {
+            value: AtomicU64::new(value),
+        }
+    }
+
+    /// `pg_atomic_read_u64` (no barrier semantics).
+    pub fn read(&self) -> uint64 {
+        self.value.load(Ordering::Relaxed)
+    }
 }
 
 /// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
@@ -60,8 +103,10 @@ impl Default for proclist_head {
 }
 
 /// `LWLock` (`storage/lwlock.h`): tranche id, atomic lock state, and the list
-/// of waiting PGPROCs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// of waiting PGPROCs. Deliberately not `Copy`/`Clone`: in C an `LWLock` is a
+/// shared-memory-resident object that backends address by pointer; copying
+/// one would silently fork the lock state.
+#[derive(Debug, Default)]
 pub struct LWLock {
     pub tranche: uint16,
     pub state: pg_atomic_uint32,
@@ -76,7 +121,7 @@ pub const LWLOCK_PADDED_SIZE: usize = 128;
 /// cache line. The alignment attribute reproduces both the size and the
 /// placement guarantee.
 #[repr(align(128))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct LWLockPadded {
     pub lock: LWLock,
 }

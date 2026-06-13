@@ -2,24 +2,22 @@
 //! per process — seam slots are `OnceLock`s) with dispatchers that read a
 //! per-thread fixture [`Env`], so tests stay isolated even when the test
 //! binary runs them on multiple threads. A process-global mutex serializes
-//! tests because the `Pending*Stats` statics are process globals.
+//! tests because the seam slots are process globals.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, Once};
 
-use types_core::{Oid, TimestampTz};
+use types_core::TimestampTz;
 use types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStatShared_Checkpointer, PgStat_ArchiverStats,
     PgStat_CheckpointerStats,
 };
-use types_pgstat::backend_progress::ProgressCommandType;
+use types_pgstat::backend_status::PgBackendStatus;
 use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
 use types_storage::LWLockMode;
-
-use crate::backend_progress::PGSTAT_NUM_PROGRESS_PARAM;
 
 /// Per-thread fixture backing every seam dispatcher.
 pub(crate) struct Env {
@@ -27,10 +25,7 @@ pub(crate) struct Env {
     pub present: Cell<bool>,
     pub track: Cell<bool>,
     pub parallel: Cell<bool>,
-    pub command: Cell<ProgressCommandType>,
-    pub target: Cell<Oid>,
-    pub params: [Cell<i64>; PGSTAT_NUM_PROGRESS_PARAM],
-    pub changecount: Cell<u64>,
+    pub beentry: RefCell<PgBackendStatus>,
     // libpq message reassembly for the parallel-worker branch.
     pub sent: Cell<Option<(i32, i64)>>,
     pub pending_index: Cell<Option<i32>>,
@@ -61,10 +56,7 @@ impl Env {
             present: Cell::new(true),
             track: Cell::new(true),
             parallel: Cell::new(false),
-            command: Cell::new(ProgressCommandType::Invalid),
-            target: Cell::new(0),
-            params: Default::default(),
-            changecount: Cell::new(0),
+            beentry: RefCell::new(PgBackendStatus::default()),
             sent: Cell::new(None),
             pending_index: Cell::new(None),
             pending_incr: Cell::new(None),
@@ -89,12 +81,7 @@ impl Env {
         self.present.set(true);
         self.track.set(true);
         self.parallel.set(false);
-        self.command.set(ProgressCommandType::Invalid);
-        self.target.set(0);
-        for p in &self.params {
-            p.set(0);
-        }
-        self.changecount.set(0);
+        *self.beentry.borrow_mut() = PgBackendStatus::default();
         self.sent.set(None);
         self.pending_index.set(None);
         self.pending_incr.set(None);
@@ -140,14 +127,14 @@ impl Deref for TestGuard {
 }
 
 /// Serialize the test, install the seam dispatchers (once per process), and
-/// reset both the per-thread fixture and the process-global pending buffers.
+/// reset both the per-thread fixture and the thread-local pending buffers.
 pub(crate) fn setup() -> TestGuard {
     let guard = LK.lock().unwrap_or_else(|p| p.into_inner());
     INSTALL.call_once(install_seams);
     let e = env();
     e.reset();
-    *crate::pgstat_bgwriter::pending_bgwriter_stats() = Default::default();
-    *crate::pgstat_checkpointer::pending_checkpointer_stats() = Default::default();
+    crate::pgstat_bgwriter::with_pending_bgwriter_stats(|p| *p = Default::default());
+    crate::pgstat_checkpointer::with_pending_checkpointer_stats(|p| *p = Default::default());
     TestGuard {
         env: e,
         _guard: guard,
@@ -178,27 +165,7 @@ fn install_seams() {
 
     status::my_be_entry_present::set(|| env().present.get());
     status::track_activities::set(|| env().track.get());
-    status::begin_write_activity::set(|| {
-        let e = env();
-        e.changecount.set(e.changecount.get() + 1);
-    });
-    status::end_write_activity::set(|| {
-        let e = env();
-        e.changecount.set(e.changecount.get() + 1);
-    });
-    status::set_progress_command::set(|cmd| env().command.set(cmd));
-    status::set_progress_command_target::set(|relid| env().target.set(relid));
-    status::progress_command::set(|| env().command.get());
-    status::zero_progress_param::set(|| {
-        for p in &env().params {
-            p.set(0);
-        }
-    });
-    status::set_progress_param::set(|index, val| env().params[index as usize].set(val));
-    status::incr_progress_param::set(|index, incr| {
-        let p = &env().params[index as usize];
-        p.set(p.get() + incr);
-    });
+    status::with_my_beentry::set(|f| f(&mut env().beentry.borrow_mut()));
 
     parallel::is_parallel_worker::set(|| env().parallel.get());
 

@@ -133,13 +133,19 @@ fn stub_identify_opfamily_groups<'mcx>(
     slice_in(mcx, &groups)
 }
 
+// Allocating format-name stubs honor the seam contract: output built in the
+// caller-passed `Mcx`.
+fn stub_format_oid(mcx: Mcx<'_>, oid: Oid) -> PgResult<PgString<'_>> {
+    PgString::from_str_in(&oid.to_string(), mcx)
+}
+
 fn install_test_seams() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         backend_utils_error_seams::ereport::set(|_err| Ok(()));
-        backend_utils_adt_regproc_seams::format_procedure::set(|oid| Ok(oid.to_string()));
-        backend_utils_adt_regproc_seams::format_operator::set(|oid| Ok(oid.to_string()));
-        backend_utils_adt_format_type_seams::format_type_be::set(|oid| Ok(oid.to_string()));
+        backend_utils_adt_regproc_seams::format_procedure::set(stub_format_oid);
+        backend_utils_adt_regproc_seams::format_operator::set(stub_format_oid);
+        backend_utils_adt_format_type_seams::format_type_be::set(stub_format_oid);
         backend_utils_cache_lsyscache_seams::get_opfamily_name::set(stub_get_opfamily_name);
         backend_utils_cache_lsyscache_seams::get_opclass_input_type::set(|_oc| Ok(23));
         backend_access_transam_xact_seams::command_counter_increment::set(|| Ok(()));
