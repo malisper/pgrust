@@ -5,7 +5,13 @@
 //! is this enum. Variants are added as the nodes' executor units are ported.
 
 use mcx::{Mcx, PgBox};
-use types_core::{NodeTag, PgResult};
+use types_error::PgResult;
+
+/// `NodeTag` (nodes/nodes.h) — the numeric node-tag value. Node *identity* in
+/// the owned model is the dispatch enums' variants ([`crate::PlanStateNode`],
+/// [`Node`]); this carries the C tag value where ports read it as data (e.g.
+/// `Path.pathtype`).
+pub type NodeTag = u32;
 
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.

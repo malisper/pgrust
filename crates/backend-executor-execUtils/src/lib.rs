@@ -65,9 +65,8 @@ use backend_utils_mb_mbutils_seams as mbutils_seams;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid};
-use types_core::PgResult;
 use types_datum::Datum;
-use types_error::{PgError, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execnodes::{
     EStateData, EcxtId, ExprContext, ExprContextCallbackFunction, ExprContext_CB, RriId,

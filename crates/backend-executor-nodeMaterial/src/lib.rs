@@ -29,7 +29,7 @@ use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_init_small_seams as globals;
 use backend_utils_sort_storage_seams as tuplestore;
 use mcx::{alloc_in, PgBox};
-use types_core::PgResult;
+use types_error::PgResult;
 use types_nodes::execnodes::ScanDirectionIsForward;
 use types_nodes::{
     EStateData, Material, MaterialState, PlanStateNode, SlotId, TupleSlotKind,

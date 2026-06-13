@@ -462,7 +462,7 @@ fn attisdropped(mcx: Mcx<'_>, cacheId: i32, tup: &FormedTuple<'_>) -> PgResult<b
     let (value, is_null) = SysCacheGetAttr(mcx, cacheId, tup, Anum_pg_attribute_attisdropped)?;
     debug_assert!(!is_null);
     match value {
-        TupleValue::ByVal(d) => Ok(d.as_bool().unwrap_or(false)),
+        TupleValue::ByVal(d) => Ok(d.as_bool()),
         TupleValue::ByRef(_) => Err(PgError::error("attisdropped is not by-value")),
     }
 }

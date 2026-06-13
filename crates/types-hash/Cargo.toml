@@ -10,4 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+types-amvalidate = { path = "../types-amvalidate" }
 types-core = { path = "../types-core" }

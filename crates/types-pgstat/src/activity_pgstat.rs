@@ -59,7 +59,7 @@ impl Default for PgStat_ArchiverStats {
 }
 
 /// `PgStatShared_Archiver` (`utils/pgstat_internal.h`). Field order matches C.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct PgStatShared_Archiver {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,
@@ -102,7 +102,7 @@ impl PgStat_CheckpointerStats {
 
 /// `PgStatShared_Checkpointer` (`utils/pgstat_internal.h`). Field order
 /// matches C.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct PgStatShared_Checkpointer {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,

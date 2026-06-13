@@ -19,14 +19,14 @@ seam_core::seam!(
         randomAccess: bool,
         interXact: bool,
         maxKBytes: i32,
-    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::Tuplestorestate>>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::Tuplestorestate<'mcx>>>
 );
 
 seam_core::seam!(
     /// `tuplestore_set_eflags(state, eflags)` (tuplestore.c): decree the
     /// capabilities (EXEC_FLAG_REWIND/BACKWARD/MARK) of read pointer 0.
     pub fn tuplestore_set_eflags(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         eflags: i32,
     ) -> types_error::PgResult<()>
 );
@@ -35,7 +35,7 @@ seam_core::seam!(
     /// `tuplestore_alloc_read_pointer(state, eflags)` (tuplestore.c): create a
     /// new read pointer and return its index.
     pub fn tuplestore_alloc_read_pointer(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         eflags: i32,
     ) -> types_error::PgResult<i32>
 );
@@ -43,7 +43,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `tuplestore_ateof(state)` (tuplestore.c): is the active read pointer at
     /// end of the stored data? A pure field read in C — infallible.
-    pub fn tuplestore_ateof(state: &types_nodes::Tuplestorestate) -> bool
+    pub fn tuplestore_ateof(state: &types_nodes::Tuplestorestate<'_>) -> bool
 );
 
 seam_core::seam!(
@@ -51,7 +51,7 @@ seam_core::seam!(
     /// read pointer one step without fetching; returns `false` if it ran off
     /// the end.
     pub fn tuplestore_advance(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         forward: bool,
     ) -> types_error::PgResult<bool>
 );
@@ -61,7 +61,7 @@ seam_core::seam!(
     /// fetch the next tuple into the given slot; returns `true` when a tuple
     /// was fetched.
     pub fn tuplestore_gettupleslot(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         forward: bool,
         copy: bool,
         slot: &mut types_nodes::TupleTableSlot,
@@ -72,7 +72,7 @@ seam_core::seam!(
     /// `tuplestore_puttupleslot(state, slot)` (tuplestore.c): append a copy of
     /// the slot's tuple to the store.
     pub fn tuplestore_puttupleslot(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         slot: &types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
 );
@@ -81,7 +81,7 @@ seam_core::seam!(
     /// `tuplestore_copy_read_pointer(state, srcptr, destptr)` (tuplestore.c):
     /// copy one read pointer's position onto another.
     pub fn tuplestore_copy_read_pointer(
-        state: &mut types_nodes::Tuplestorestate,
+        state: &mut types_nodes::Tuplestorestate<'_>,
         srcptr: i32,
         destptr: i32,
     ) -> types_error::PgResult<()>
@@ -90,18 +90,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `tuplestore_trim(state)` (tuplestore.c): discard tuples no longer
     /// needed by any read pointer. Frees/moves memory only — infallible.
-    pub fn tuplestore_trim(state: &mut types_nodes::Tuplestorestate)
+    pub fn tuplestore_trim(state: &mut types_nodes::Tuplestorestate<'_>)
 );
 
 seam_core::seam!(
     /// `tuplestore_rescan(state)` (tuplestore.c): rewind the active read
     /// pointer to the start.
-    pub fn tuplestore_rescan(state: &mut types_nodes::Tuplestorestate) -> types_error::PgResult<()>
+    pub fn tuplestore_rescan(state: &mut types_nodes::Tuplestorestate<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `tuplestore_end(state)` (tuplestore.c): release the tuplestore's
     /// resources. Consumes the carrier (the C caller NULLs its pointer).
     /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.
-    pub fn tuplestore_end(state: mcx::PgBox<'_, types_nodes::Tuplestorestate>)
+    pub fn tuplestore_end(state: mcx::PgBox<'_, types_nodes::Tuplestorestate<'_>>)
 );

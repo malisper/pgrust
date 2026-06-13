@@ -34,6 +34,7 @@ name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
+ "backend-utils-adt-misc2-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -456,6 +457,7 @@ dependencies = [
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -1010,6 +1012,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-misc2-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-regproc-seams"
 version = "0.0.0"
 dependencies = [
@@ -1220,7 +1230,6 @@ dependencies = [
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "libc",
- "types-core",
  "types-dest",
  "types-error",
 ]
@@ -1443,7 +1452,6 @@ name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
  "libc",
- "types-signal",
 ]
 
 [[package]]
@@ -1591,9 +1599,6 @@ version = "0.0.0"
 [[package]]
 name = "types-core"
 version = "0.0.0"
-dependencies = [
- "types-error",
-]
 
 [[package]]
 name = "types-datum"
@@ -1619,6 +1624,7 @@ name = "types-hash"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-amvalidate",
  "types-core",
 ]
 
@@ -1636,6 +1642,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-error",
  "types-scan",
  "types-tuple",
 ]

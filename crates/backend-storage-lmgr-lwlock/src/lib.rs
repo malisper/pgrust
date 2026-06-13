@@ -39,7 +39,7 @@ use backend_utils_init_small_seams as globals;
 use types_core::{uint16, uint32, ProcNumber, Size, INVALID_PROC_NUMBER, NAMEDATALEN};
 use types_pgstat::wait_event::PG_WAIT_LWLOCK;
 use types_storage::{
-    pg_atomic_uint64, proclist_head, proclist_node, LWLock, LWLockMode,
+    pg_atomic_uint32, pg_atomic_uint64, proclist_head, proclist_node, LWLock, LWLockMode,
     LWLockPadded, BUFFER_MAPPING_LWLOCK_OFFSET, LOCK_MANAGER_LWLOCK_OFFSET, LW_EXCLUSIVE,
     LW_SHARED, LW_WAIT_UNTIL_FREE, LW_WS_NOT_WAITING, LW_WS_PENDING_WAKEUP, LW_WS_WAITING,
     LWLOCK_PADDED_SIZE, LWTRANCHE_BUFFER_MAPPING, LWTRANCHE_FIRST_USER_DEFINED,
@@ -160,7 +160,7 @@ struct HeldLWLocks {
 impl HeldLWLocks {
     const fn new() -> Self {
         Self {
-            locks: [LWLockHandle { addr: 0, mode: 0 }; MAX_SIMUL_LWLOCKS],
+            locks: [LWLockHandle { addr: 0, mode: LW_EXCLUSIVE }; MAX_SIMUL_LWLOCKS],
             num_held: 0,
         }
     }
@@ -233,21 +233,15 @@ fn lock_addr(lock: &LWLock) -> usize {
     lock as *const LWLock as usize
 }
 
-// ---------------------------------------------------------------------------
-// Atomic reinterpretation of the shared lock state. `pg_atomic_uint32` /
-// `pg_atomic_uint64` are single-field structs with the same size and
-// alignment as `AtomicU32` / `AtomicU64`.
-// ---------------------------------------------------------------------------
+// The shared lock state is a real atomic (`pg_atomic_uint32` wraps
+// `AtomicU32`); these are plain field reads.
 
 fn atomic_state(lock: &LWLock) -> &AtomicU32 {
-    // SAFETY: `pg_atomic_uint32 { value: u32 }` matches `AtomicU32`'s layout;
-    // both are a single naturally-aligned `u32`.
-    unsafe { &*(core::ptr::addr_of!(lock.state.value) as *const AtomicU32) }
+    &lock.state.value
 }
 
 fn atomic_var(valptr: &pg_atomic_uint64) -> &AtomicU64 {
-    // SAFETY: `pg_atomic_uint64 { value: u64 }` matches `AtomicU64`'s layout.
-    unsafe { &*(core::ptr::addr_of!(valptr.value) as *const AtomicU64) }
+    &valptr.value
 }
 
 fn waiters_mut(lock: &LWLock) -> &mut proclist_head {
@@ -455,7 +449,7 @@ pub fn CreateLWLocks() -> PgResult<LWLockTable> {
         locks
             .try_reserve_exact(total_locks)
             .map_err(|_| PgError::error("out of memory allocating MainLWLockArray"))?;
-        locks.resize(total_locks, LWLockPadded::default());
+        locks.resize_with(total_locks, LWLockPadded::default);
 
         // Initialize the dynamic-allocation counter for tranches, which in C
         // is stored just before the first LWLock. (Like C, no spinlock: only
@@ -473,7 +467,7 @@ pub fn CreateLWLocks() -> PgResult<LWLockTable> {
         locks
             .try_reserve_exact(total_locks)
             .map_err(|_| PgError::error("out of memory allocating MainLWLockArray"))?;
-        locks.resize(total_locks, LWLockPadded::default());
+        locks.resize_with(total_locks, LWLockPadded::default);
 
         named_tranches = Vec::new();
         NAMED_LWLOCK_TRANCHE_REQUESTS.with(|reqs| {
@@ -678,7 +672,7 @@ pub fn RequestNamedLWLockTranche(tranche_name: &str, num_lwlocks: i32) -> PgResu
 /// unlocked.
 pub fn LWLockInitialize(lock: &mut LWLock, tranche_id: i32) {
     // pg_atomic_init_u32(&lock->state, LW_FLAG_RELEASE_OK)
-    lock.state.value = LW_FLAG_RELEASE_OK;
+    lock.state = pg_atomic_uint32::new(LW_FLAG_RELEASE_OK);
     lock.tranche = tranche_id as uint16;
     proclist_init(&mut lock.waiters);
 }

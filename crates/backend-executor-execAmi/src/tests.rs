@@ -92,7 +92,6 @@ fn empty_bms(mcx: Mcx<'_>) -> PgResult<PgBox<'_, Bitmapset<'_>>> {
     alloc_in(
         mcx,
         Bitmapset {
-            nwords: 0,
             words: PgVec::new_in(mcx),
         },
     )

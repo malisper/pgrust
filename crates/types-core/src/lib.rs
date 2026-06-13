@@ -16,6 +16,5 @@ pub mod xact;
 pub use fmgr::*;
 pub use geo::*;
 pub use init::*;
-pub use types_error::{PgError, PgResult};
 pub use primitive::*;
 pub use xact::*;

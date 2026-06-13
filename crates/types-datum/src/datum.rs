@@ -7,8 +7,6 @@
 //! the raw word (`from_usize` / `as_usize`); owned payloads live in the typed
 //! node structs that reference them, not in the `Datum` itself.
 
-use core::num::NonZeroUsize;
-
 use types_core::{Oid, TransactionId};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -31,12 +29,10 @@ impl Datum {
         Self(value as usize)
     }
 
-    pub const fn as_bool(self) -> Option<bool> {
-        match self.0 {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        }
+    /// C: `DatumGetBool(X)` is `((bool) ((X) != 0))` — any nonzero word reads
+    /// back as `true`.
+    pub const fn as_bool(self) -> bool {
+        self.0 != 0
     }
 
     pub const fn from_i16(value: i16) -> Self {
@@ -73,22 +69,15 @@ impl Datum {
         self.as_u32()
     }
 
-    pub const fn from_nonzero_word(value: NonZeroUsize) -> Self {
-        Self(value.get())
-    }
-
-    pub const fn as_nonzero_word(self) -> Option<NonZeroUsize> {
-        NonZeroUsize::new(self.0)
-    }
-
     // -----------------------------------------------------------------------
     // Pass-by-value `*GetDatum` / `DatumGet*` codec family (`postgres.h`).
     //
     // Every conversion below carries a pass-by-VALUE scalar inside the single
     // `Datum` word, mirroring the C macros 1:1 on a 64-bit (`SIZEOF_DATUM == 8`,
     // `USE_FLOAT8_BYVAL`) build. A pass-by-REFERENCE type (`text`, `numeric`,
-    // every varlena) is NOT representable here — it crosses the fmgr boundary as
-    // the typed `RefPayload` side-channel (see `fmgr_boundary`), never as a word.
+    // every varlena) is NOT representable here — owned payloads live in the
+    // typed structs that reference them, and only the raw pointer word
+    // (`from_usize`/`as_usize`) crosses as a Datum.
     // -----------------------------------------------------------------------
 
     /// C: `CharGetDatum(X)` — a single `char` (PG's `char` type is the signed
@@ -194,60 +183,16 @@ impl Datum {
     }
 }
 
-/// `NullableDatum` (`postgres.h`) — a `Datum` paired with an explicit `isnull`
-/// flag, matching PostgreSQL's `struct NullableDatum { Datum value; bool isnull; }`.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct NullableDatum {
-    pub value: Datum,
-    pub isnull: bool,
-}
-
-impl NullableDatum {
-    pub const fn null() -> Self {
-        Self {
-            value: Datum::null(),
-            isnull: true,
-        }
-    }
-
-    pub const fn some(value: Datum) -> Self {
-        Self {
-            value,
-            isnull: false,
-        }
-    }
-
-    /// Constructor matching PostgreSQL call sites that build a non-null datum.
-    pub const fn value(value: Datum) -> Self {
-        Self {
-            value,
-            isnull: false,
-        }
-    }
-
-    /// `Some(value)` when not null, else `None`.
-    pub const fn get(self) -> Option<Datum> {
-        if self.isnull {
-            None
-        } else {
-            Some(self.value)
-        }
-    }
-}
-
-/// A datum comparison callback (replaces a C `int (*)(Datum, Datum)` slot).
-pub type DatumComparator = fn(Datum, Datum) -> core::cmp::Ordering;
-/// A datum transform callback (replaces a C `Datum (*)(Datum)` slot).
-pub type DatumTransformer = fn(Datum) -> Datum;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn bool_char_small_int_round_trips() {
-        assert_eq!(Datum::from_bool(true).as_bool(), Some(true));
-        assert_eq!(Datum::from_bool(false).as_bool(), Some(false));
+        assert!(Datum::from_bool(true).as_bool());
+        assert!(!Datum::from_bool(false).as_bool());
+        // C `DatumGetBool` treats any nonzero word as true.
+        assert!(Datum::from_usize(2).as_bool());
 
         // `char` is signed in PG: a negative byte round-trips, and the low byte
         // is masked off (high bits of the word are not read back).

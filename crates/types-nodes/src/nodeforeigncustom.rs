@@ -4,7 +4,7 @@
 //! is preserved.
 
 use mcx::{Mcx, PgBox};
-use types_core::PgResult;
+use types_error::PgResult;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
 use crate::funcapi::Tuplestorestate;
@@ -51,7 +51,7 @@ pub struct MaterialState<'mcx> {
     /// `Tuplestorestate *tuplestorestate` — the materialized rows. The box is
     /// context-allocated (C: `tuplestore_begin_heap` pallocs the state in the
     /// caller's current context).
-    pub tuplestorestate: Option<PgBox<'mcx, Tuplestorestate>>,
+    pub tuplestorestate: Option<PgBox<'mcx, Tuplestorestate<'mcx>>>,
 }
 
 impl<'mcx> MaterialState<'mcx> {

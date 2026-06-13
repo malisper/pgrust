@@ -1,24 +1,67 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
-use types_core::{uint16, uint32, uint64, uint8, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// `LWLockMode` (`storage/lwlock.h`).
-pub type LWLockMode = u32;
-pub const LW_EXCLUSIVE: LWLockMode = 0;
-pub const LW_SHARED: LWLockMode = 1;
-pub const LW_WAIT_UNTIL_FREE: LWLockMode = 2;
+use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, uint8, INVALID_PROC_NUMBER};
 
-/// `pg_atomic_uint32` (`port/atomics.h`) — a shmem-resident atomic word.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct pg_atomic_uint32 {
-    pub value: uint32,
+/// `enum LWLockMode` (`storage/lwlock.h:112`).
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LWLockMode {
+    LW_EXCLUSIVE = 0,
+    LW_SHARED = 1,
+    /// A special mode used in `PGPROC->lwWaitMode`, when waiting for lock to
+    /// become free. Not to be used as `LWLockAcquire` argument.
+    LW_WAIT_UNTIL_FREE = 2,
 }
 
-/// `pg_atomic_uint64` (`port/atomics.h`) — a shmem-resident atomic 8-byte word.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub use LWLockMode::*;
+
+/// `pg_atomic_uint32` (`port/atomics.h`) — a shmem-resident atomic word,
+/// concurrently read and CAS'd by every backend. A real atomic; like the C
+/// struct (whose copy would tear concurrent state) it is neither `Copy` nor
+/// `Clone`, and identity (not value) is its equality.
+#[derive(Debug, Default)]
+#[repr(transparent)]
+pub struct pg_atomic_uint32 {
+    pub value: AtomicU32,
+}
+
+impl pg_atomic_uint32 {
+    /// `pg_atomic_init_u32(ptr, val)`.
+    pub const fn new(value: uint32) -> Self {
+        Self {
+            value: AtomicU32::new(value),
+        }
+    }
+
+    /// `pg_atomic_read_u32(ptr)`.
+    pub fn read(&self) -> uint32 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// `pg_atomic_uint64` (`port/atomics.h`) — a shmem-resident atomic 8-byte
+/// word; see [`pg_atomic_uint32`] for why it is not `Copy`/`Clone`.
+#[derive(Debug, Default)]
+#[repr(transparent)]
 pub struct pg_atomic_uint64 {
-    pub value: uint64,
+    pub value: AtomicU64,
+}
+
+impl pg_atomic_uint64 {
+    /// `pg_atomic_init_u64(ptr, val)`.
+    pub const fn new(value: types_core::uint64) -> Self {
+        Self {
+            value: AtomicU64::new(value),
+        }
+    }
+
+    /// `pg_atomic_read_u64(ptr)`.
+    pub fn read(&self) -> types_core::uint64 {
+        self.value.load(Ordering::Relaxed)
+    }
 }
 
 /// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
@@ -60,8 +103,10 @@ impl Default for proclist_head {
 }
 
 /// `LWLock` (`storage/lwlock.h`): tranche id, atomic lock state, and the list
-/// of waiting PGPROCs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// of waiting PGPROCs. Shmem-resident and concurrently accessed, so (like its
+/// atomic `state`) it is neither `Copy` nor `Clone` — a copied lock would be a
+/// different lock.
+#[derive(Debug, Default)]
 pub struct LWLock {
     pub tranche: uint16,
     pub state: pg_atomic_uint32,
@@ -76,7 +121,7 @@ pub const LWLOCK_PADDED_SIZE: usize = 128;
 /// cache line. The alignment attribute reproduces both the size and the
 /// placement guarantee.
 #[repr(align(128))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct LWLockPadded {
     pub lock: LWLock,
 }

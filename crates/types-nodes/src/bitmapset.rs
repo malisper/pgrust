@@ -27,18 +27,22 @@ pub type bitmapword = u64;
 /// intersect, membership, ...) stay with the owning `nodes/bitmapset.c` unit.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Bitmapset<'mcx> {
-    /// `int nwords` — number of words in array.
-    pub nwords: i32,
-    /// `bitmapword words[]` — the bit storage.
+    /// `bitmapword words[]` — the bit storage. C's `int nwords` exists only
+    /// because the storage is a flexible array member; here the vec knows its
+    /// length ([`Bitmapset::nwords`]).
     pub words: PgVec<'mcx, bitmapword>,
 }
 
 impl Bitmapset<'_> {
+    /// `int nwords` — number of words in array.
+    pub fn nwords(&self) -> i32 {
+        self.words.len() as i32
+    }
+
     /// `bms_copy(a)`-shaped deep copy into `mcx` (C: `palloc` + `memcpy`).
     /// Fallible: copying allocates.
-    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_core::PgResult<Bitmapset<'b>> {
+    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_error::PgResult<Bitmapset<'b>> {
         Ok(Bitmapset {
-            nwords: self.nwords,
             words: mcx::slice_in(mcx, &self.words)?,
         })
     }

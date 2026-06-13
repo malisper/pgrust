@@ -5,7 +5,7 @@
 //! Variants are added as the nodes' executor units are ported.
 
 use mcx::PgBox;
-use types_core::NodeTag;
+use crate::nodes::NodeTag;
 
 use crate::execnodes::{PlanStateData, T_MaterialState};
 

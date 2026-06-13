@@ -28,7 +28,7 @@ impl PgStat_BgWriterStats {
 }
 
 /// `PgStatShared_BgWriter` (`utils/pgstat_internal.h`). Field order matches C.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct PgStatShared_BgWriter {
     /// lock protects `reset_offset` as well as `stats.stat_reset_timestamp`
     pub lock: LWLock,
