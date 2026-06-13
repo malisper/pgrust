@@ -1,0 +1,13 @@
+[package]
+name = "no-todo-guard"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Durable guard crate: a workspace test that scans every crate's src for real
+# todo!()/unimplemented!() macro invocations and fails if any re-enter the tree.
+# Intentionally has NO dependencies so it builds fast and in isolation.
+
+[lib]
+name = "no_todo_guard"
+path = "src/lib.rs"
