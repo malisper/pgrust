@@ -16,6 +16,7 @@ use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
 use types_nodes::TupleSlotKind;
 use types_storage::buf::{Buffer, BufferIsValid};
+use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 use types_tuple::heaptuple::{HeapTuple, MinimalTuple, MINIMAL_TUPLE_OFFSET};
 
 use crate::slot_ops_vtables::{
@@ -248,7 +249,7 @@ pub fn ExecStoreAllNullTuple<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) ->
     base.tts_values.clear();
     base.tts_values.try_reserve(natts).map_err(|_| mcx.oom(natts * core::mem::size_of::<Datum>()))?;
     for _ in 0..natts {
-        base.tts_values.push(Datum::null());
+        base.tts_values.push(TupleValue::ByVal(Datum::null()));
     }
     // memset(slot->tts_isnull, true, natts * sizeof(bool));
     base.tts_isnull.clear();
@@ -551,17 +552,18 @@ fn deform_composite_datum_into_slot<'mcx>(
 /// buffer-heap-target path): a self-owned copy of the source tuple in the
 /// slot's context.
 ///
-/// heaptuple.c's `heap_copytuple` is a direct dependency, but it copies a
-/// `FormedTuple` (header + data area); the scaffold's `HeapTuple` is
-/// header-only and the data-area pairing is the slot payload model's, not yet
-/// landed — so the copy is routed through that owner and panics until it does.
+/// heaptuple.c's `heap_copytuple` is a direct dependency: it copies a
+/// `FormedTuple` (header + data area), which is now the slot's `tuple` carrier.
+/// The public input is a header-only `HeapTuple`, so recovering its data-area
+/// bytes into the slot's `FormedTuple` is the slot payload model's carrier
+/// bridge, not yet landed — routed through that owner and panicking until it does.
 fn heap_copytuple_into_slot_context<'mcx>(
     _mcx: Mcx<'mcx>,
     _tuple: HeapTuple<'mcx>,
-) -> PgResult<HeapTuple<'mcx>> {
+) -> PgResult<Option<FormedTuple<'mcx>>> {
     panic!(
         "execTuples.c ExecForceStoreHeapTuple (buffer-heap target): heap_copytuple needs the \
-         payload model's heap-tuple-data carrier (slot_payload_model/slot_deform owner)"
+         payload model's HeapTuple->FormedTuple carrier bridge (slot_payload_model/slot_deform owner)"
     )
 }
 

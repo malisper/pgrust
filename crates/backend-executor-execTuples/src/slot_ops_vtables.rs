@@ -167,7 +167,7 @@ pub fn tts_virtual_copyslot<'mcx>(
         };
         let db = dst.base_mut();
         for natt in 0..srcnatts as usize {
-            db.tts_values[natt] = sv[natt];
+            db.tts_values[natt] = sv[natt].clone();
             db.tts_isnull[natt] = si[natt];
         }
         // dstslot->tts_nvalid = srcdesc->natts;
@@ -290,7 +290,8 @@ pub fn tts_heap_getsysattr<'mcx>(
 
     // return heap_getsysattr(hslot->tuple, attnum, slot->tts_tupleDescriptor,
     //                        isnull);
-    let (value, isnull) = backend_access_common_heaptuple::heap_getsysattr(mcx, tuple, attnum)?;
+    let (value, isnull) =
+        backend_access_common_heaptuple::heap_getsysattr(mcx, &tuple.tuple, attnum)?;
     Ok((tuple_value_to_datum(&value)?, isnull))
 }
 
@@ -309,6 +310,7 @@ pub fn tts_heap_is_current_xact_tuple(slot: &HeapTupleTableSlot) -> PgResult<boo
 
     // xmin = HeapTupleHeaderGetRawXmin(hslot->tuple->t_data);
     let header = tuple
+        .tuple
         .t_data
         .as_ref()
         .ok_or_else(|| elog_error("tts_heap_is_current_xact_tuple: tuple has no t_data"))?;
@@ -405,25 +407,21 @@ pub fn tts_heap_store_tuple<'mcx>(
 
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
-    // slot->tts_tid = tuple->t_self; (read before the move below)
-    let t_self = tuple
-        .as_ref()
-        .map(|t| t.t_self)
-        .unwrap_or_default();
-    // hslot->tuple = tuple;
-    slot.tuple = tuple;
-    // hslot->off = 0;
-    slot.off = 0;
-    // slot->tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
-    slot.base.header.tts_flags &=
-        !(types_nodes::executor::TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
-    // slot->tts_tid = tuple->t_self;
-    slot.base.header.tts_tid = t_self;
 
+    // hslot->tuple = tuple;
+    // hslot->off = 0;
+    // slot->tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
+    // slot->tts_tid = tuple->t_self;
     // if (shouldFree) slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-    if should_free {
-        slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
-    }
+    //
+    // The expanded slot payload model carries the stored heap tuple as the
+    // body-bearing `FormedTuple` (header + data-area bytes). The public
+    // `HeapTuple` parameter is header-only (`Option<PgBox<HeapTupleData>>`), so
+    // wrapping it into the slot's `FormedTuple` field needs the carrier bridge
+    // (recovering / referencing the tuple's user-data bytes), which is the
+    // sibling store/fetch fill family's. Mirror PG and panic until it lands.
+    let _ = (slot, tuple, should_free);
+    panic!("execTuples.c tts_heap_store_tuple: storing the HeapTuple param into the slot's FormedTuple carrier needs the slot payload model's HeapTuple->FormedTuple bridge")
 }
 
 /// `tts_heap_copyslot` (execTuples.c:438): copy `srcslot` into a heap slot by
@@ -630,16 +628,17 @@ pub fn tts_minimal_store_tuple<'mcx>(
     // Assert(mslot->tuple == &mslot->minhdr);
     // mslot->minhdr.t_len = mtup->t_len + MINIMAL_TUPLE_OFFSET;
     // mslot->minhdr.t_data = (HeapTupleHeader)((char*)mtup - MINIMAL_TUPLE_OFFSET);
-    let t_len = mtup.as_ref().map(|m| m.t_len).unwrap_or(0);
-    slot.mintuple = mtup;
-    // minhdr.t_len fix-up (the t_data aliasing is the slot payload model's
-    // raw-pointer workspace; t_len is the observable header length).
-    slot.minhdr.t_len = t_len + types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET as u32;
-
     // if (shouldFree) slot->tts_flags |= TTS_FLAG_SHOULDFREE;
-    if should_free {
-        slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
-    }
+    //
+    // The expanded slot payload model carries the stored minimal tuple as the
+    // body-bearing `FormedMinimalTuple` (header + data-area bytes), and
+    // `mslot->minhdr`/`mslot->tuple` form the `FormedTuple`-shaped view whose
+    // `t_data` aliases `MINIMAL_TUPLE_OFFSET` before the body. The public
+    // `MinimalTuple` parameter is header-only, so wrapping it into the slot's
+    // `FormedMinimalTuple` carrier + wiring the minhdr alias needs the carrier
+    // bridge owned by the sibling store/fetch fill family. Mirror PG and panic.
+    let _ = (slot, mtup, should_free);
+    panic!("execTuples.c tts_minimal_store_tuple: storing the MinimalTuple param into the slot's FormedMinimalTuple carrier + minhdr alias needs the slot payload model's MinimalTuple->FormedMinimalTuple bridge")
 }
 
 /// `tts_minimal_copyslot` (execTuples.c:635): copy `srcslot` into a minimal
@@ -737,7 +736,8 @@ pub fn tts_buffer_heap_getsysattr<'mcx>(
 
     // return heap_getsysattr(bslot->base.tuple, attnum,
     //                        slot->tts_tupleDescriptor, isnull);
-    let (value, isnull) = backend_access_common_heaptuple::heap_getsysattr(mcx, tuple, attnum)?;
+    let (value, isnull) =
+        backend_access_common_heaptuple::heap_getsysattr(mcx, &tuple.tuple, attnum)?;
     Ok((tuple_value_to_datum(&value)?, isnull))
 }
 
@@ -756,6 +756,7 @@ pub fn tts_buffer_is_current_xact_tuple(slot: &BufferHeapTupleTableSlot) -> PgRe
 
     // xmin = HeapTupleHeaderGetRawXmin(bslot->base.tuple->t_data);
     let header = tuple
+        .tuple
         .t_data
         .as_ref()
         .ok_or_else(|| elog_error("tts_buffer_is_current_xact_tuple: tuple has no t_data"))?;

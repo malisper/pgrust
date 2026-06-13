@@ -167,24 +167,26 @@ fn fetch_att_byval(data: &[u8], off: usize, attlen: i16) -> Datum {
 
 /// `values[attnum] = fetchatt(thisatt, tp + *offp)` (tupmacs.h `fetchatt`).
 ///
-/// For a by-value att, read the scalar word. For a by-reference att, C yields a
-/// pointer into the tuple data — the owned-`Datum` slot can only carry a word,
-/// so converting the on-disk by-reference bytes into a slot Datum is the
-/// owned-payload-model's job (it must carry a by-reference value alongside the
-/// `Datum`). That carrier is not yet landed, so by-reference fetch routes there
-/// and panics (mirror-PG-and-panic).
+/// For a by-value att, read the scalar word (`TupleValue::ByVal`). For a
+/// by-reference att, C yields `PointerGetDatum(tp + off)` — a pointer into the
+/// tuple data; the faithful carrier is `TupleValue::ByRef` over the on-disk
+/// bytes spanned by the field. Copying out that exact byte span is the
+/// `slot_payload_model` by-reference deform fill's job (it needs the field's
+/// length, which the byte engine computes via `att_addlength_pointer`), so the
+/// by-reference fetch routes there and panics until that fill lands
+/// (mirror-PG-and-panic).
 #[inline]
-fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> Datum {
+fn fetchatt<'mcx>(att: &CompactAttribute, data: &[u8], off: usize) -> TupleValue<'mcx> {
     if att.attbyval {
-        fetch_att_byval(data, off, att.attlen)
+        TupleValue::ByVal(fetch_att_byval(data, off, att.attlen))
     } else {
-        // C: PointerGetDatum(tp + off). The owned slot's tts_values is a
-        // PgVec<Datum>; the by-reference value carrier (TupleValue::ByRef) is
-        // owned by slot_payload_model and not yet landed.
+        // C: PointerGetDatum(tp + off). The slot's tts_values now holds a
+        // TupleValue; the by-reference lane (TupleValue::ByRef over the copied
+        // field bytes) is the slot_payload_model deform fill's job.
         panic!(
             "execTuples.c slot_deform: by-reference attribute fetch into the \
-             owned Datum slot needs the slot_payload_model by-reference value \
-             carrier (tts_values cannot hold a raw pointer into the tuple)"
+             slot needs the slot_payload_model by-reference value fill \
+             (TupleValue::ByRef over the field's on-disk bytes)"
         )
     }
 }
@@ -199,8 +201,8 @@ fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> Datum {
 ///
 /// `data` is the tuple's user-data area (`(char *) tup + tup->t_hoff`).
 #[allow(clippy::too_many_arguments)]
-fn slot_deform_heap_tuple_internal(
-    values: &mut [Datum],
+fn slot_deform_heap_tuple_internal<'mcx>(
+    values: &mut [TupleValue<'mcx>],
     isnull: &mut [bool],
     compact_attrs: &[CompactAttribute],
     bp: &[u8],
@@ -218,7 +220,7 @@ fn slot_deform_heap_tuple_internal(
         let thisatt = &compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
-            values[attnum as usize] = Datum::null();
+            values[attnum as usize] = TupleValue::ByVal(Datum::null());
             isnull[attnum as usize] = true;
             if !slow {
                 *slowp = true;
@@ -293,6 +295,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
         .as_ref()
         .ok_or_else(|| PgError::error("slot_deform_heap_tuple: slot has no physical tuple"))?;
     let tup = tuple
+        .tuple
         .t_data
         .as_ref()
         .ok_or_else(|| PgError::error("slot_deform_heap_tuple: tuple has no t_data"))?;
@@ -453,7 +456,7 @@ pub fn slot_getmissingattrs<'mcx>(
         //   memset(tts_values + start, 0, (last - start) * sizeof(Datum));
         //   memset(tts_isnull + start, 1, (last - start) * sizeof(bool));
         for i in start_att_num..last_att_num {
-            base.tts_values[i as usize] = Datum::null();
+            base.tts_values[i as usize] = TupleValue::ByVal(Datum::null());
             base.tts_isnull[i as usize] = true;
         }
     } else {
@@ -466,28 +469,17 @@ pub fn slot_getmissingattrs<'mcx>(
             .expect("slot_getmissingattrs: slot has no tuple descriptor");
         let constr = desc.constr.as_ref().unwrap();
         // Snapshot the (value, present) pairs to avoid borrowing the descriptor
-        // and the tts arrays simultaneously.
-        let mut pairs: alloc::vec::Vec<(Datum, bool)> = alloc::vec::Vec::new();
+        // and the tts arrays simultaneously. With the expanded tts_values
+        // (`TupleValue`), the missing value — by-value or by-reference — is
+        // carried verbatim: C's `tts_values[missattnum] = attrmiss->am_value`.
+        let mut pairs: alloc::vec::Vec<(TupleValue<'mcx>, bool)> = alloc::vec::Vec::new();
         for missattnum in start_att_num..last_att_num {
             let am = &constr.missing[missattnum as usize];
-            let v = match &am.am_value {
-                TupleValue::ByVal(d) => *d,
-                TupleValue::ByRef(_) => {
-                    // C stores attrmiss->am_value (a pointer Datum) directly;
-                    // the owned Datum slot needs the by-reference value carrier
-                    // owned by slot_payload_model (not yet landed).
-                    panic!(
-                        "execTuples.c slot_getmissingattrs: by-reference missing \
-                         value into the owned Datum slot needs the \
-                         slot_payload_model by-reference value carrier"
-                    )
-                }
-            };
-            pairs.push((v, !am.am_present));
+            pairs.push((am.am_value.clone(), !am.am_present));
         }
         let base = slot.base_mut();
         for (idx, missattnum) in (start_att_num..last_att_num).enumerate() {
-            base.tts_values[missattnum as usize] = pairs[idx].0;
+            base.tts_values[missattnum as usize] = pairs[idx].0.clone();
             base.tts_isnull[missattnum as usize] = pairs[idx].1;
         }
     }
@@ -583,9 +575,21 @@ pub fn slot_getattr<'mcx>(
         }
         // *isnull = slot->tts_isnull[attnum - 1];
         // return slot->tts_values[attnum - 1];
+        //
+        // Project the stored `TupleValue` back to a single `Datum`: a by-value
+        // column is the word itself; a by-reference column is C's pointer into
+        // owned bytes, whose bare-Datum projection (the owner's pointer-bytes
+        // convention) is the slot payload model's by-reference fill. Mirror PG
+        // and panic on the by-reference projection until it lands.
         let base = slot.base();
         let isnull = base.tts_isnull[(attnum - 1) as usize];
-        let value = base.tts_values[(attnum - 1) as usize];
+        let value = match &base.tts_values[(attnum - 1) as usize] {
+            TupleValue::ByVal(d) => *d,
+            TupleValue::ByRef(_) => panic!(
+                "execTuples.c slot_getattr: by-reference attribute projected to a \
+                 bare Datum needs the slot payload model's pointer-bytes convention"
+            ),
+        };
         Ok((value, isnull))
     } else {
         // slot_getsysattr(slot, attnum, &isnull) (tuptable.h:420):
