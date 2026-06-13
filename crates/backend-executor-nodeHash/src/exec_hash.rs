@@ -380,14 +380,12 @@ pub fn MultiExecParallelHash<'mcx>(
             let hashtable = node.hashtable.as_deref_mut().unwrap();
             let nbatch = hashtable.nbatch;
             for i in 0..nbatch as usize {
-                // sts_end_write is owned by utils/sort/sharedtuplestore.c; the
-                // owned accessor's per-batch inner_tuples handle is finalized
-                // there. The seam owner (sort-storage) lands it.
-                let _accessor = &mut hashtable.batches[i];
-                panic!(
-                    "backend-utils-sort-storage: sts_end_write not reachable via \
-                     its seam crate yet (nodeHash.c:285 MultiExecParallelHash)"
-                );
+                // sts_end_write(hashtable->batches[i].inner_tuples).
+                let accessor = hashtable.batches[i]
+                    .inner_tuples
+                    .as_deref_mut()
+                    .expect("MultiExecParallelHash: batch inner_tuples must be attached");
+                backend_utils_sort_storage_seams::sts_end_write::call(accessor)?;
             }
         }
 

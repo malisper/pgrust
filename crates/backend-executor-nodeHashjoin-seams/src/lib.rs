@@ -15,8 +15,8 @@ seam_core::seam!(
     /// I/O error, so the call is fallible.
     pub fn ExecHashJoinSaveTuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        tuple: &types_tuple::heaptuple::MinimalTupleData<'_>,
+        tuple: &types_tuple::heaptuple::MinimalTupleData<'mcx>,
         hashvalue: types_core::uint32,
-        fileptr: &mut Option<types_execparallel::BufFileHandle>,
+        fileptr: &mut Option<mcx::PgBox<'mcx, types_nodes::nodehash::BufFile>>,
     ) -> types_error::PgResult<()>
 );

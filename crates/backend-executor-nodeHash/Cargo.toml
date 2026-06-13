@@ -46,3 +46,4 @@ backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams
 
 # Seams: this unit's own parallel-context hooks (installed from init_seams)
 backend-executor-nodeHash-pq-seams = { path = "../backend-executor-nodeHash-pq-seams" }
+backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }

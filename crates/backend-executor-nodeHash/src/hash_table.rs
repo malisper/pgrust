@@ -19,6 +19,7 @@ use types_nodes::nodehash::{
     HashMemoryChunkLink, HashChunkIdx, HashJoinState, HashState, HashJoinTableData, HashTupleIdx,
     INVALID_SKEW_BUCKET_NO, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD,
 };
+use types_nodes::nodehash::Hash as HashPlan;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
 use crate::{
@@ -156,24 +157,152 @@ pub fn ExecHashTableCreate<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut HashState<'mcx>,
 ) -> PgResult<PgBox<'mcx, HashJoinTableData<'mcx>>> {
-    // node = (Hash *) state->ps.plan;
-    // outerNode = outerPlan(node);
+    // node = (Hash *) state->ps.plan;  outerNode = outerPlan(node);
     //
-    // `state->ps.plan` is the `Hash` plan node and `outerPlan(node)` is its
-    // left subplan (the inner-relation source). The plan-node accessors
-    // (`state.ps.plan` as `Hash`, `outerPlan`, `plan_rows`/`plan_width`) are
-    // owned by the plan-tree / execProcnode layer and are not reachable from
-    // the trimmed `PlanStateData` head here, so the rows/width inputs to
-    // `ExecChooseHashTableSize` cannot be read. The control-block init below is
-    // the real C body; this prologue is the seam-boundary panic until the
-    // plan-node access lands.
-    let _ = (&mcx, &state);
-    panic!(
-        "backend-executor-execProcnode / plan tree: outerPlan(state.ps.plan) \
-         and the Hash plan node's plan_rows/plan_width/skewTable are not \
-         reachable from the trimmed PlanStateData head yet \
-         (nodeHash.c:446 ExecHashTableCreate)"
+    // `state->ps.plan` is the inner `Hash` plan node; `outerPlan(node)` is its
+    // left subplan (the inner-relation source). Read the planner's row/width
+    // estimates and skew gating off the real plan tree.
+    let hash_node: &HashPlan<'mcx> = match state.ps.plan {
+        Some(types_nodes::nodes::Node::Hash(h)) => h,
+        Some(other) => panic!("ExecHashTableCreate: state.ps.plan is not a Hash node: {other:?}"),
+        None => panic!("ExecHashTableCreate: state.ps.plan is NULL"),
+    };
+    let outer_node = hash_node
+        .plan
+        .lefttree
+        .as_deref()
+        .expect("ExecHashTableCreate: outerPlan(node) must be present");
+    let outer_plan = outer_node.plan_head();
+
+    // If this is a shared hash table with a partial plan, we can't use
+    // outerNode->plan_rows; use the planner's total-rows estimate instead.
+    let rows = if hash_node.plan.parallel_aware {
+        hash_node.rows_total
+    } else {
+        outer_plan.plan_rows
+    };
+
+    let skew_table = hash_node.skewTable;
+    let parallel = state.parallel_state.is_some();
+    // state->parallel_state->nparticipants - 1 (parallel only); 0 in serial.
+    let parallel_workers = if parallel {
+        // The participant count lives in the DSM-resident ParallelHashJoinState,
+        // reached through the (unported) DSA area; the serial path never needs
+        // it. Defer to the parallel setup below, which panics on the unported
+        // DSA. Pass 0 here so the serial sizing is unaffected.
+        0
+    } else {
+        0
+    };
+
+    let HashTableSize {
+        space_allowed,
+        numbuckets: nbuckets,
+        numbatches: nbatch,
+        num_skew_mcvs,
+    } = ExecChooseHashTableSize(
+        rows,
+        outer_plan.plan_width,
+        types_core::OidIsValid(skew_table),
+        parallel,
+        parallel_workers,
     );
+
+    // nbuckets must be a power of 2.
+    let log2_nbuckets = my_log2(nbuckets as i64);
+    debug_assert_eq!(nbuckets, 1 << log2_nbuckets);
+
+    // Initialize the hash table control block. The control block is allocated
+    // from the per-query context (mcx); the working storage lives in the
+    // subsidiary hash/batch/spill contexts (here all modelled by mcx, since the
+    // owned arenas are dropped with the table).
+    let spaceAllowedSkew = space_allowed * SKEW_HASH_MEM_PERCENT_USIZE / 100;
+    let mut hashtable = mcx::alloc_in(
+        mcx,
+        HashJoinTableData {
+            nbuckets,
+            log2_nbuckets,
+            nbuckets_original: nbuckets,
+            nbuckets_optimal: nbuckets,
+            log2_nbuckets_optimal: log2_nbuckets,
+            buckets: HashJoinBuckets::Unshared(PgVec::new_in(mcx)),
+            skewEnabled: false,
+            skewBucket: PgVec::new_in(mcx),
+            skewBucketLen: 0,
+            nSkewBuckets: 0,
+            skewBucketNums: PgVec::new_in(mcx),
+            nbatch,
+            curbatch: 0,
+            nbatch_original: nbatch,
+            nbatch_outstart: nbatch,
+            growEnabled: true,
+            totalTuples: 0.0,
+            partialTuples: 0.0,
+            skewTuples: 0.0,
+            innerBatchFile: PgVec::new_in(mcx),
+            outerBatchFile: PgVec::new_in(mcx),
+            spaceUsed: 0,
+            spaceAllowed: space_allowed,
+            spacePeak: 0,
+            spaceUsedSkew: 0,
+            spaceAllowedSkew,
+            chunks: None,
+            current_chunk: None,
+            area: None,
+            parallel_state: state.parallel_state,
+            batches: PgVec::new_in(mcx),
+            current_chunk_shared: types_execparallel::DsaPointer::default(),
+            tuples: PgVec::new_in(mcx),
+            chunk_arena: PgVec::new_in(mcx),
+            // spillCxt is a child of hashCxt in C; modelled by the per-query
+            // context the batch spill files are charged to.
+            spillCxt: mcx,
+        },
+    )?;
+
+    if nbatch > 1 && hashtable.parallel_state.is_none() {
+        // Allocate and initialize the file arrays in spillCxt (not needed for
+        // the parallel case, which uses shared tuplestores instead of raw
+        // files). The files are not opened until needed.
+        hashtable.innerBatchFile = {
+            let mut v = PgVec::new_in(mcx);
+            v.resize_with(nbatch as usize, || None);
+            v
+        };
+        hashtable.outerBatchFile = {
+            let mut v = PgVec::new_in(mcx);
+            v.resize_with(nbatch as usize, || None);
+            v
+        };
+        // ... but make sure we have temp tablespaces established for them.
+        // PrepareTempTablespaces() is owned by backend-commands-tablespace
+        // (not yet ported); seam-and-panic.
+        panic!(
+            "backend-commands-tablespace: PrepareTempTablespaces not yet ported \
+             (nodeHash.c:569 ExecHashTableCreate, multi-batch spill path)"
+        );
+    }
+
+    if hashtable.parallel_state.is_some() {
+        // Attach to the build barrier, elect a backend to set up the shared
+        // batch state, allocate batch 0. All of this lives in the DSA-resident
+        // shared state reached through the (unported) DSA area; the parallel
+        // setup routines panic until execParallel/dsa land.
+        crate::parallel::ExecParallelHashJoinSetUpBatches(mcx, &mut hashtable, nbatch)?;
+        crate::parallel::ExecParallelHashTableAlloc(mcx, &mut hashtable, 0)?;
+    } else {
+        // Serial: allocate the bucket array and set each bucket empty.
+        hashtable.buckets =
+            HashJoinBuckets::Unshared(alloc_empty_bucket_indices(mcx, nbuckets)?);
+
+        // Set up skew optimization, if possible and there's a need for more
+        // than one batch. (In a one-batch join, there's no point.)
+        if nbatch > 1 {
+            crate::skew::ExecHashBuildSkewHash(mcx, state, &mut hashtable, hash_node, num_skew_mcvs)?;
+        }
+    }
+
+    Ok(hashtable)
 }
 
 // ===========================================================================
@@ -382,10 +511,10 @@ pub fn ExecHashTableDestroy<'mcx>(
         for i in 1..nbatch as usize {
             // if (hashtable->innerBatchFile[i]) BufFileClose(...);
             if let Some(file) = hashtable.innerBatchFile[i].take() {
-                backend_storage_file_buffile_seams::BufFileClose::call(file)?;
+                backend_storage_file_buffile_seams::buf_file_close::call(file)?;
             }
             if let Some(file) = hashtable.outerBatchFile[i].take() {
-                backend_storage_file_buffile_seams::BufFileClose::call(file)?;
+                backend_storage_file_buffile_seams::buf_file_close::call(file)?;
             }
         }
     }
@@ -817,18 +946,15 @@ pub fn ExecHashTableInsert<'mcx>(
 ) -> PgResult<()> {
     // bool shouldFree;
     // MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
+    // ... insert tuple ...
+    // if (shouldFree) heap_free_minimal_tuple(tuple);
     //
-    // ExecFetchSlotMinimalTuple is owned by backend-executor-execTuples, which
-    // does not declare it (nor heap_free_minimal_tuple) in its seam crate yet.
-    // The whole body below is the real C logic, parameterized on `tuple`; it
-    // panics at the slot-fetch boundary until that owner lands. (Same boundary
-    // as skew.rs's ExecHashSkewTableInsert.)
-    let _ = (&mcx, &hashtable, slot, hashvalue);
-    panic!(
-        "backend-executor-execTuples: ExecFetchSlotMinimalTuple / \
-         heap_free_minimal_tuple not yet ported (nodeHash.c:1749 \
-         ExecHashTableInsert)"
-    );
+    // The execTuples seam copies the slot's tuple into mcx, so the owned model
+    // never frees explicitly (the copy is dropped with the context).
+    let tuple = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
+        mcx, slot,
+    )?;
+    exec_hash_table_insert_tuple(mcx, hashtable, tuple, hashvalue)
 }
 
 /// `ExecHashTableInsert`'s tuple-half, parameterized on the already-fetched
@@ -956,68 +1082,103 @@ pub fn ExecHashGetBucketAndBatch<'mcx>(
 /// outer tuple; returns `true` when a match was found.
 pub fn ExecScanHashBucket<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    econtext: &mut types_nodes::ExprContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
     let hashvalue = hjstate.hj_CurHashValue;
-    let hashtable = hjstate
+    let cur_bucket = hjstate.hj_CurBucketNo;
+    let cur_skew = hjstate.hj_CurSkewBucketNo;
+    let hash_tuple_slot = hjstate
+        .hj_HashTupleSlot
+        .expect("ExecScanHashBucket: hj_HashTupleSlot must be set up by init");
+    let econtext_id = hjstate
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecScanHashBucket: ps_ExprContext");
+    // hashclauses ExprState (the per-node compiled hash-join clause qual).
+    let hashclauses = hjstate
+        .hashclauses
+        .as_deref()
+        .expect("ExecScanHashBucket: hashclauses must be compiled by init")
+        as *const types_nodes::execexpr::ExprState;
+
+    // Helper: next-link of an arena tuple (serial mode only follows Unshared).
+    fn tuple_next(ht: &HashJoinTableData<'_>, idx: HashTupleIdx) -> Option<HashTupleIdx> {
+        match ht.tuples[idx.0].next {
+            HashJoinTupleLink::Unshared(n) => n,
+            HashJoinTupleLink::Shared(_) => None,
+        }
+    }
+
+    let ht_ref = hjstate
         .hj_HashTable
         .as_ref()
         .expect("ExecScanHashBucket: hj_HashTable is NULL");
 
     // hj_CurTuple is the address of the tuple last returned from the current
-    // bucket, or NULL if it's time to start scanning a new bucket.
-    //
-    // If the tuple hashed to a skew bucket then scan the skew bucket otherwise
-    // scan the standard hashtable bucket.
+    // bucket, or NULL if it's time to start scanning a new bucket. If the tuple
+    // hashed to a skew bucket scan that, otherwise the standard bucket.
     let mut hash_tuple: Option<HashTupleIdx> = if let Some(cur) = hjstate.hj_CurTuple {
-        // hashTuple = hashTuple->next.unshared;
-        match hashtable.tuples[cur.0].next {
-            HashJoinTupleLink::Unshared(n) => n,
-            HashJoinTupleLink::Shared(_) => None,
-        }
-    } else if hjstate.hj_CurSkewBucketNo != INVALID_SKEW_BUCKET_NO {
-        // hashTuple = hashtable->skewBucket[hj_CurSkewBucketNo]->tuples;
-        hashtable.skewBucket[hjstate.hj_CurSkewBucketNo as usize]
+        tuple_next(ht_ref, cur)
+    } else if cur_skew != INVALID_SKEW_BUCKET_NO {
+        ht_ref.skewBucket[cur_skew as usize]
             .as_ref()
             .and_then(|b| b.tuples)
     } else {
-        // hashTuple = hashtable->buckets.unshared[hj_CurBucketNo];
-        match &hashtable.buckets {
-            HashJoinBuckets::Unshared(b) => b[hjstate.hj_CurBucketNo as usize],
+        match &ht_ref.buckets {
+            HashJoinBuckets::Unshared(b) => b[cur_bucket as usize],
             HashJoinBuckets::Shared(_) => None,
         }
     };
 
     while let Some(idx) = hash_tuple {
-        if hashtable.tuples[idx.0].hashvalue == hashvalue {
+        // Read everything needed off the table in a tight scope so the
+        // immutable borrow ends before we mutate hjstate/estate below.
+        let (next, is_match, mtup_copy) = {
+            let ht_ref = hjstate
+                .hj_HashTable
+                .as_ref()
+                .expect("ExecScanHashBucket: hj_HashTable is NULL");
+            let next = tuple_next(ht_ref, idx);
+            let is_match = ht_ref.tuples[idx.0].hashvalue == hashvalue;
+            let mtup_copy = if is_match {
+                Some(ht_ref.tuples[idx.0].mintuple.clone_in(mcx)?)
+            } else {
+                None
+            };
+            (next, is_match, mtup_copy)
+        };
+        if is_match {
             // insert hashtable's tuple into exec slot so ExecQual sees it:
             //   inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(hashTuple),
             //                                    hjstate->hj_HashTupleSlot, false);
             //   econtext->ecxt_innertuple = inntuple;
-            //   if (ExecQualAndReset(hjclauses, econtext)) {
-            //       hjstate->hj_CurTuple = hashTuple; return true;
-            //   }
-            //
-            // ExecStoreMinimalTuple (execTuples) and ExecQualAndReset (execExpr)
-            // operate on the trimmed `TupleTableSlot` (header only — no payload
-            // model yet) and need the EState the scaffold signature does not
-            // carry; neither is declared with a matching seam signature yet.
-            // The bucket-chain traversal above is the real C logic; this is the
-            // seam-boundary panic at the per-tuple qual eval.
-            let _ = (&mut *econtext, idx);
-            panic!(
-                "backend-executor-execTuples: ExecStoreMinimalTuple(hj_HashTupleSlot) \
-                 and backend-executor-execExpr: ExecQualAndReset(hashclauses) not \
-                 yet ported / un-reachable through the trimmed slot + EState-less \
-                 signature (nodeHash.c:1992 ExecScanHashBucket)"
-            );
-        }
+            // The owned arena stores the MinimalTuple once; copy it into mcx and
+            // force-store into the hash-tuple slot (the slot's ops own the copy).
+            let mtup = mcx::alloc_in(mcx, mtup_copy.expect("is_match"))?;
+            backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
+                hash_tuple_slot,
+                mtup,
+                false,
+                estate,
+            )?;
+            estate.ecxt_mut(econtext_id).ecxt_innertuple = Some(hash_tuple_slot);
 
+            // if (ExecQualAndReset(hjclauses, econtext)) {
+            //     hjstate->hj_CurTuple = hashTuple; return true; }
+            let pass = backend_executor_execExpr_seams::exec_qual_and_reset::call(
+                unsafe { &*hashclauses },
+                econtext_id,
+                estate,
+            )?;
+            if pass {
+                hjstate.hj_CurTuple = Some(idx);
+                return Ok(true);
+            }
+        }
         // hashTuple = hashTuple->next.unshared;
-        hash_tuple = match hashtable.tuples[idx.0].next {
-            HashJoinTupleLink::Unshared(n) => n,
-            HashJoinTupleLink::Shared(_) => None,
-        };
+        hash_tuple = next;
     }
 
     // no match
@@ -1047,12 +1208,19 @@ pub fn ExecPrepHashTableForUnmatched<'mcx>(hjstate: &mut HashJoinState<'mcx>) {
 /// (nodeHash.c:2190) — return the next unmatched inner tuple (serial path).
 pub fn ExecScanHashTableForUnmatched<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    econtext: &mut types_nodes::ExprContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let hash_tuple_slot = hjstate
+        .hj_HashTupleSlot
+        .expect("ExecScanHashTableForUnmatched: hj_HashTupleSlot must be set up by init");
+    let econtext_id = hjstate
+        .js
+        .ps
+        .ps_ExprContext
+        .expect("ExecScanHashTableForUnmatched: ps_ExprContext");
     // We mutate hjstate cursor fields while reading the (immutable) hashtable;
-    // take the hashtable out by reference where possible. The hashtable is
-    // borrowed read-only for the chain walk; the match-flag test is pure
-    // owned-data logic.
+    // the chain walk is read-only; the match-flag test is pure owned-data logic.
     let mut hash_tuple: Option<HashTupleIdx> = hjstate.hj_CurTuple;
 
     loop {
@@ -1088,9 +1256,20 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
         }
 
         while let Some(idx) = hash_tuple {
-            let has_match = {
+            let (has_match, next, mtup_copy) = {
                 let hashtable = hjstate.hj_HashTable.as_ref().unwrap();
-                hashtable.tuples[idx.0].mintuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0
+                let has_match =
+                    hashtable.tuples[idx.0].mintuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0;
+                let next = match hashtable.tuples[idx.0].next {
+                    HashJoinTupleLink::Unshared(n) => n,
+                    HashJoinTupleLink::Shared(_) => None,
+                };
+                let mtup_copy = if !has_match {
+                    Some(hashtable.tuples[idx.0].mintuple.clone_in(mcx)?)
+                } else {
+                    None
+                };
+                (has_match, next, mtup_copy)
             };
             if !has_match {
                 // insert hashtable's tuple into exec slot:
@@ -1099,28 +1278,25 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
                 //   econtext->ecxt_innertuple = inntuple;
                 //   ResetExprContext(econtext);
                 //   hjstate->hj_CurTuple = hashTuple; return true;
-                //
-                // ExecStoreMinimalTuple (execTuples) on the trimmed slot and the
-                // per-tuple ResetExprContext are not reachable through the
-                // EState-less scaffold signature yet. The bucket walk and the
-                // match-flag test above are the real C logic; this is the
-                // seam-boundary panic at the slot store.
+                let mtup = mcx::alloc_in(mcx, mtup_copy.expect("!has_match"))?;
+                backend_executor_execTuples_seams::exec_force_store_minimal_tuple::call(
+                    hash_tuple_slot,
+                    mtup,
+                    false,
+                    estate,
+                )?;
+                estate.ecxt_mut(econtext_id).ecxt_innertuple = Some(hash_tuple_slot);
+                // Reset temp memory each time (keeps parallel to ExecScanHashBucket).
+                backend_executor_execUtils_seams::reset_per_tuple_expr_context::call(
+                    estate,
+                    &hjstate.js.ps,
+                )?;
                 hjstate.hj_CurTuple = Some(idx);
-                let _ = &mut *econtext;
-                panic!(
-                    "backend-executor-execTuples: ExecStoreMinimalTuple(hj_HashTupleSlot) \
-                     + ResetExprContext not reachable through the trimmed slot + \
-                     EState-less signature (nodeHash.c:2190 \
-                     ExecScanHashTableForUnmatched)"
-                );
+                return Ok(true);
             }
 
             // hashTuple = hashTuple->next.unshared;
-            let hashtable = hjstate.hj_HashTable.as_ref().unwrap();
-            hash_tuple = match hashtable.tuples[idx.0].next {
-                HashJoinTupleLink::Unshared(n) => n,
-                HashJoinTupleLink::Shared(_) => None,
-            };
+            hash_tuple = next;
         }
 
         // CHECK_FOR_INTERRUPTS(): owned by the signal/interrupt subsystem; a
@@ -1226,11 +1402,9 @@ pub fn get_hash_memory_limit(work_mem: i32, hash_mem_multiplier: f64) -> Size {
 /// `work_mem * hash_mem_multiplier * 1024` formula once the values are
 /// reachable).
 fn get_hash_memory_limit_fixed() -> Size {
-    panic!(
-        "GUC subsystem: work_mem / hash_mem_multiplier not threaded into \
-         ExecChooseHashTableSize; get_hash_memory_limit() reads them as backend \
-         globals (nodeHash.c:3622) — pass them explicitly via \
-         get_hash_memory_limit(work_mem, hash_mem_multiplier) once the caller \
-         can supply them"
-    );
+    // get_hash_memory_limit() reads work_mem / hash_mem_multiplier as backend
+    // GUC globals; the parallel module carries them as a backend thread_local
+    // (per AGENTS.md) until the GUC owner installs a setter.
+    let (work_mem, hash_mem_multiplier) = crate::parallel::hash_mem_gucs();
+    get_hash_memory_limit(work_mem, hash_mem_multiplier)
 }

@@ -685,8 +685,7 @@ pub fn ExecParallelHashRepartitionFirst<'mcx>(
                 // It belongs in a later batch.
                 let tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + t_len);
                 hashtable.batches[bb.batchno as usize].estimated_size += tuple_size;
-                let inner = hashtable.batches[bb.batchno as usize]
-                    .inner_tuples
+                let inner = accessor_handle(&hashtable.batches[bb.batchno as usize].inner_tuples)
                     .expect("repartition: inner_tuples accessor missing");
                 sts_puttuple_raw(inner, hashvalue, mintuple_addr, t_len)?;
             }
@@ -753,8 +752,7 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
             hashtable.batches[bb.batchno as usize].ntuples += 1;
             hashtable.batches[i as usize].old_ntuples += 1;
 
-            let inner = hashtable.batches[bb.batchno as usize]
-                .inner_tuples
+            let inner = accessor_handle(&hashtable.batches[bb.batchno as usize].inner_tuples)
                 .expect("repartition rest: inner_tuples accessor missing");
             sts::sts_puttuple_handle::call(inner, &meta, &tuple)?;
             // CHECK_FOR_INTERRUPTS();
@@ -852,8 +850,7 @@ pub fn ExecParallelHashTableInsert<'mcx>(
             }
             debug_assert!(hashtable.batches[bb.batchno as usize].preallocated >= tuple_size);
             hashtable.batches[bb.batchno as usize].preallocated -= tuple_size;
-            let inner = hashtable.batches[bb.batchno as usize]
-                .inner_tuples
+            let inner = accessor_handle(&hashtable.batches[bb.batchno as usize].inner_tuples)
                 .expect("ParallelHashTableInsert: inner_tuples missing");
             sts_puttuple_raw(inner, hashvalue, mintuple_addr, t_len)?;
         }
@@ -979,8 +976,8 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
         {
             let hashtable = hjstate.hj_HashTable.as_mut().unwrap().as_mut();
             hashtable.batches[curbatch as usize].done = true;
-            let inner = hashtable.batches[curbatch as usize].inner_tuples;
-            let outer = hashtable.batches[curbatch as usize].outer_tuples;
+            let inner = accessor_handle(&hashtable.batches[curbatch as usize].inner_tuples);
+            let outer = accessor_handle(&hashtable.batches[curbatch as usize].outer_tuples);
             if let Some(a) = inner {
                 sts::sts_end_parallel_scan_handle::call(a);
             }
@@ -1284,7 +1281,7 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
             &outer_name,
         )?;
 
-        accessors.push(new_accessor(shared_dp, Some(inner), Some(outer)));
+        accessors.push(new_accessor(mcx, shared_dp, Some(inner), Some(outer))?);
     }
     hashtable.batches = accessors;
     Ok(())
@@ -1301,8 +1298,8 @@ pub fn ExecParallelHashCloseBatchAccessors<'mcx>(
 ) -> PgResult<()> {
     let nbatch = hashtable.nbatch;
     for i in 0..nbatch {
-        let inner = hashtable.batches[i as usize].inner_tuples;
-        let outer = hashtable.batches[i as usize].outer_tuples;
+        let inner = accessor_handle(&hashtable.batches[i as usize].inner_tuples);
+        let outer = accessor_handle(&hashtable.batches[i as usize].outer_tuples);
         if let Some(a) = inner {
             sts::sts_end_write_handle::call(a)?;
         }
@@ -1367,7 +1364,7 @@ pub fn ExecParallelHashEnsureBatchAccessors<'mcx>(
             pworker + 1,
             fileset,
         )?;
-        accessors.push(new_accessor(shared_dp, Some(inner), Some(outer)));
+        accessors.push(new_accessor(mcx, shared_dp, Some(inner), Some(outer))?);
     }
     hashtable.batches = accessors;
     Ok(())
@@ -1411,8 +1408,8 @@ pub fn ExecHashTableDetachBatch<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -
         let batch_dp = hashtable.batches[curbatch as usize].shared;
 
         // Make sure any temporary files are closed.
-        let inner = hashtable.batches[curbatch as usize].inner_tuples;
-        let outer = hashtable.batches[curbatch as usize].outer_tuples;
+        let inner = accessor_handle(&hashtable.batches[curbatch as usize].inner_tuples);
+        let outer = accessor_handle(&hashtable.batches[curbatch as usize].outer_tuples);
         if let Some(a) = inner {
             sts::sts_end_parallel_scan_handle::call(a);
         }
@@ -1497,8 +1494,8 @@ pub fn ExecHashTableDetach<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -> PgR
             if !hashtable.batches.is_empty() {
                 let nbatch = hashtable.nbatch;
                 for i in 0..nbatch {
-                    let inner = hashtable.batches[i as usize].inner_tuples;
-                    let outer = hashtable.batches[i as usize].outer_tuples;
+                    let inner = accessor_handle(&hashtable.batches[i as usize].inner_tuples);
+                    let outer = accessor_handle(&hashtable.batches[i as usize].outer_tuples);
                     if let Some(a) = inner {
                         sts::sts_end_write_handle::call(a)?;
                     }
@@ -1713,6 +1710,106 @@ pub fn ExecParallelHashTuplePrealloc<'mcx>(
 }
 
 // ===========================================================================
+//   Small nodeHash-owned shared-state accessors the parallel-aware new-batch
+//   loop reaches as seams (they touch the DSM-resident pstate / batch_barrier
+//   / distributor). Each mirrors the matching C one-liner in nodeHashjoin.c.
+// ===========================================================================
+
+#[inline]
+fn ht_ref<'a, 'mcx>(node: &'a HashJoinState<'mcx>) -> &'a HashJoinTableData<'mcx> {
+    node.hj_HashTable
+        .as_deref()
+        .expect("nodeHash: parallel seam needs a built hash table")
+}
+
+#[inline]
+fn ht_mut<'a, 'mcx>(node: &'a mut HashJoinState<'mcx>) -> &'a mut HashJoinTableData<'mcx> {
+    node.hj_HashTable
+        .as_deref_mut()
+        .expect("nodeHash: parallel seam needs a built hash table")
+}
+
+/// `BarrierPhase(&hashtable->parallel_state->build_barrier)`.
+pub fn build_barrier_phase(node: &HashJoinState<'_>) -> i32 {
+    let pstate = pstate_mut(ht_ref(node));
+    barrier::BarrierPhase::call(&pstate.build_barrier)
+}
+
+/// `BarrierArriveAndWait(&pstate->build_barrier, wait_event)`.
+pub fn build_barrier_arrive_and_wait(
+    node: &mut HashJoinState<'_>,
+    wait_event: uint32,
+) -> PgResult<bool> {
+    let pstate = pstate_mut(ht_mut(node));
+    Ok(barrier::BarrierArriveAndWait::call(&mut pstate.build_barrier, wait_event))
+}
+
+/// `pg_atomic_fetch_add_u32(&pstate->distributor, 1)`.
+pub fn parallel_distributor_next_start(node: &HashJoinState<'_>) -> u32 {
+    let pstate = pstate_mut(ht_ref(node));
+    pstate.distributor.value.fetch_add(1, Ordering::Relaxed)
+}
+
+/// `!hashtable->batches[batchno].done`.
+pub fn parallel_batch_not_done(node: &HashJoinState<'_>, batchno: i32) -> bool {
+    !ht_ref(node).batches[batchno as usize].done
+}
+
+/// `BarrierAttach(&batches[batchno].shared->batch_barrier)`.
+pub fn parallel_batch_attach(node: &mut HashJoinState<'_>, batchno: i32) -> i32 {
+    let ht = ht_mut(node);
+    let dp = ht.batches[batchno as usize].shared;
+    let batch = batch_shared_mut(ht, dp);
+    barrier::BarrierAttach::call(&mut batch.batch_barrier)
+}
+
+/// `BarrierArriveAndWait(&batches[batchno].shared->batch_barrier, wait_event)`.
+pub fn parallel_batch_arrive_and_wait(
+    node: &mut HashJoinState<'_>,
+    batchno: i32,
+    wait_event: uint32,
+) -> PgResult<bool> {
+    let ht = ht_mut(node);
+    let dp = ht.batches[batchno as usize].shared;
+    let batch = batch_shared_mut(ht, dp);
+    Ok(barrier::BarrierArriveAndWait::call(&mut batch.batch_barrier, wait_event))
+}
+
+/// `BarrierDetach(&batches[batchno].shared->batch_barrier)`.
+pub fn parallel_batch_detach(node: &mut HashJoinState<'_>, batchno: i32) -> PgResult<()> {
+    let ht = ht_mut(node);
+    let dp = ht.batches[batchno as usize].shared;
+    let batch = batch_shared_mut(ht, dp);
+    barrier::BarrierDetach::call(&mut batch.batch_barrier);
+    Ok(())
+}
+
+/// `BarrierPhase(&batches[batchno].shared->batch_barrier)`.
+pub fn parallel_batch_phase(node: &HashJoinState<'_>, batchno: i32) -> i32 {
+    let ht = ht_ref(node);
+    let dp = ht.batches[batchno as usize].shared;
+    let batch = batch_shared_mut(ht, dp);
+    barrier::BarrierPhase::call(&batch.batch_barrier)
+}
+
+/// `hashtable->batches[batchno].done = true`.
+pub fn parallel_batch_set_done(node: &mut HashJoinState<'_>, batchno: i32) -> PgResult<()> {
+    ht_mut(node).batches[batchno as usize].done = true;
+    Ok(())
+}
+
+/// `hashtable->curbatch = -1`.
+pub fn parallel_set_curbatch_invalid(node: &mut HashJoinState<'_>) -> PgResult<()> {
+    ht_mut(node).curbatch = -1;
+    Ok(())
+}
+
+/// `hashtable->curbatch >= 0`.
+pub fn parallel_has_curbatch(node: &HashJoinState<'_>) -> bool {
+    ht_ref(node).curbatch >= 0
+}
+
+// ===========================================================================
 //   Cross-module / cross-owner glue (calls into sibling modules and seams)
 // ===========================================================================
 
@@ -1766,13 +1863,20 @@ const SHARED_TUPLESTORE_SINGLE_PASS: i32 = 0x01;
 
 /// Build a zeroed `ParallelHashJoinBatchAccessor` with the given shared
 /// pointer and tuplestore accessors (C palloc0's it, then sets these fields).
+///
+/// The canonical accessor stores its two `SharedTuplestoreAccessor *` as the
+/// real (inherited-opacity) `PgBox<SharedTuplestoreAccessor>`; the
+/// shared-tuplestore subsystem is unported, so the backend-local handle this
+/// unit holds is carried inside the opaque accessor and unwrapped back to a
+/// handle at the `*_handle` seam boundary (see [`accessor_handle`]).
 #[inline]
-fn new_accessor(
+fn new_accessor<'mcx>(
+    mcx: Mcx<'mcx>,
     shared: DsaPointer,
     inner: Option<types_execparallel::SharedTuplestoreAccessorHandle>,
     outer: Option<types_execparallel::SharedTuplestoreAccessorHandle>,
-) -> types_nodes::nodehash::ParallelHashJoinBatchAccessor {
-    types_nodes::nodehash::ParallelHashJoinBatchAccessor {
+) -> PgResult<types_nodes::nodehash::ParallelHashJoinBatchAccessor<'mcx>> {
+    Ok(types_nodes::nodehash::ParallelHashJoinBatchAccessor {
         shared,
         preallocated: 0,
         ntuples: 0,
@@ -1782,9 +1886,42 @@ fn new_accessor(
         at_least_one_chunk: false,
         outer_eof: false,
         done: false,
-        inner_tuples: inner,
-        outer_tuples: outer,
+        inner_tuples: box_accessor(mcx, inner)?,
+        outer_tuples: box_accessor(mcx, outer)?,
+    })
+}
+
+/// Wrap a backend-local `SharedTuplestoreAccessorHandle` into the canonical
+/// `PgBox<SharedTuplestoreAccessor>` field (the handle rides inside the opaque
+/// accessor's `Any` payload). `None` stays the C `NULL`.
+#[inline]
+fn box_accessor<'mcx>(
+    mcx: Mcx<'mcx>,
+    h: Option<types_execparallel::SharedTuplestoreAccessorHandle>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::nodehash::SharedTuplestoreAccessor>>> {
+    match h {
+        None => Ok(None),
+        Some(handle) => {
+            let acc = types_nodes::nodehash::SharedTuplestoreAccessor(
+                types_nodes::Opaque(Some(Box::new(handle))),
+            );
+            Ok(Some(mcx::alloc_in(mcx, acc)?))
+        }
     }
+}
+
+/// Recover the backend-local `SharedTuplestoreAccessorHandle` carried by a
+/// canonical accessor field (the inverse of [`box_accessor`]).
+#[inline]
+fn accessor_handle(
+    a: &Option<mcx::PgBox<'_, types_nodes::nodehash::SharedTuplestoreAccessor>>,
+) -> Option<types_execparallel::SharedTuplestoreAccessorHandle> {
+    a.as_ref().and_then(|b| {
+        b.0 .0
+            .as_ref()
+            .and_then(|any| any.downcast_ref::<types_execparallel::SharedTuplestoreAccessorHandle>())
+            .copied()
+    })
 }
 
 /// `dsa_pointer_atomic_init(&buckets[i], val)` — initialize one bucket-head
@@ -1901,7 +2038,7 @@ fn reset_expr_context(econtext: &mut types_nodes::ExprContext<'_>) {
 /// globals; ported as backend `thread_local` per AGENTS.md until the GUC owner
 /// installs a setter. PG defaults: work_mem 4 MB (4096 KB), multiplier 2.0.
 #[inline]
-fn hash_mem_gucs() -> (i32, f64) {
+pub(crate) fn hash_mem_gucs() -> (i32, f64) {
     HASH_MEM_GUCS.with(|g| *g.borrow())
 }
 

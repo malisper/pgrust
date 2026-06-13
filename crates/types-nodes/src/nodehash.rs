@@ -15,21 +15,32 @@ use alloc::boxed::Box;
 use mcx::{Mcx, PgBox, PgVec};
 
 use types_condvar::Barrier;
-use types_core::{uint32, AttrNumber, Cardinality, Oid, Size};
+use types_core::{uint32, Oid, Size};
 use types_core::FmgrInfo;
-use types_execparallel::{
-    BufFileHandle, DsaAreaHandle, DsaPointer, SharedTuplestoreAccessorHandle,
-};
+use types_execparallel::{DsaAreaHandle, DsaPointer};
 use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
 use types_storage::fileset::SharedFileSet;
 use types_tuple::heaptuple::MinimalTupleData;
 
 use crate::execexpr::ExprState;
-use crate::execnodes::PlanStateData;
+use crate::execnodes::{Opaque, PlanStateData, SlotId};
 use crate::jointype::JoinStateData;
-use crate::nodeindexscan::Plan;
-use crate::primnodes::Expr;
-use crate::TupleTableSlot;
+
+// ===========================================================================
+//          Inherited-opacity sibling-subsystem handles (consolidated)
+// ===========================================================================
+
+/// `BufFile` (storage/buffile.h) — a buffered virtual temp file. Owned by the
+/// (unported) buffile subsystem; the hash join only stores the handle and
+/// passes it back to the buffile seams, so it is an inherited-opacity newtype.
+#[derive(Debug, Default)]
+pub struct BufFile(pub Opaque);
+
+/// `SharedTuplestoreAccessor` (utils/sharedtuplestore.h) — a backend's handle
+/// to a shared tuplestore partition. Owned by the (unported) sharedtuplestore
+/// subsystem; inherited opacity here.
+#[derive(Debug, Default)]
+pub struct SharedTuplestoreAccessor(pub Opaque);
 
 // ===========================================================================
 //                          Constants (hashjoin.h)
@@ -213,7 +224,7 @@ pub struct ParallelHashJoinBatch {
 
 /// `ParallelHashJoinBatchAccessor` (hashjoin.h) — each backend's per-batch
 /// state for interacting with a [`ParallelHashJoinBatch`].
-pub struct ParallelHashJoinBatchAccessor {
+pub struct ParallelHashJoinBatchAccessor<'mcx> {
     /// `ParallelHashJoinBatch *shared` — the shared batch this accessor wraps
     /// (resolved from the DSA area via the batches base pointer).
     pub shared: DsaPointer,
@@ -234,9 +245,9 @@ pub struct ParallelHashJoinBatchAccessor {
     /// `bool done` — flag to remember that a batch is done.
     pub done: bool,
     /// `SharedTuplestoreAccessor *inner_tuples`.
-    pub inner_tuples: Option<SharedTuplestoreAccessorHandle>,
+    pub inner_tuples: Option<PgBox<'mcx, SharedTuplestoreAccessor>>,
     /// `SharedTuplestoreAccessor *outer_tuples`.
-    pub outer_tuples: Option<SharedTuplestoreAccessorHandle>,
+    pub outer_tuples: Option<PgBox<'mcx, SharedTuplestoreAccessor>>,
 }
 
 /// `ParallelHashJoinState` (hashjoin.h) — the shared state coordinating a
@@ -322,9 +333,9 @@ pub struct HashJoinTableData<'mcx> {
     pub skewTuples: f64,
     /// `BufFile **innerBatchFile` — temp file per batch (`None` until first
     /// write opens it).
-    pub innerBatchFile: PgVec<'mcx, Option<BufFileHandle>>,
+    pub innerBatchFile: PgVec<'mcx, Option<PgBox<'mcx, BufFile>>>,
     /// `BufFile **outerBatchFile` — temp file per batch.
-    pub outerBatchFile: PgVec<'mcx, Option<BufFileHandle>>,
+    pub outerBatchFile: PgVec<'mcx, Option<PgBox<'mcx, BufFile>>>,
     /// `Size spaceUsed` — memory space currently used by tuples.
     pub spaceUsed: Size,
     /// `Size spaceAllowed` — upper limit for space used.
@@ -345,9 +356,13 @@ pub struct HashJoinTableData<'mcx> {
     /// `ParallelHashJoinState *parallel_state` — `None` in serial mode.
     pub parallel_state: Option<DsaPointer>,
     /// `ParallelHashJoinBatchAccessor *batches`.
-    pub batches: PgVec<'mcx, ParallelHashJoinBatchAccessor>,
+    pub batches: PgVec<'mcx, ParallelHashJoinBatchAccessor<'mcx>>,
     /// `dsa_pointer current_chunk_shared`.
     pub current_chunk_shared: DsaPointer,
+    /// `MemoryContext spillCxt` — child context of `hashCxt` used by
+    /// `ExecHashJoinSaveTuple` for the batch temp-file buffers. Carried as the
+    /// per-query allocator handle the spill files are charged to.
+    pub spillCxt: Mcx<'mcx>,
     /// OWNED-MODEL arena: every in-memory current-batch [`HashJoinTupleData`].
     /// C carves these out of the dense-allocation chunk byte buffers; the owned
     /// model stores them here once and indexes them with [`HashTupleIdx`].
@@ -355,6 +370,17 @@ pub struct HashJoinTableData<'mcx> {
     /// OWNED-MODEL arena: the dense-allocation chunk headers, linked by
     /// [`HashChunkIdx`].
     pub chunk_arena: PgVec<'mcx, HashMemoryChunkData>,
+}
+
+impl<'mcx> core::fmt::Debug for HashJoinTableData<'mcx> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HashJoinTableData")
+            .field("nbuckets", &self.nbuckets)
+            .field("nbatch", &self.nbatch)
+            .field("curbatch", &self.curbatch)
+            .field("spaceUsed", &self.spaceUsed)
+            .finish_non_exhaustive()
+    }
 }
 
 // ===========================================================================
@@ -391,21 +417,10 @@ pub struct AttStatsSlot<'mcx> {
 //                   Plan / executor node structs
 // ===========================================================================
 
-/// `Hash` plan node (`nodes/plannodes.h`).
-pub struct Hash<'mcx> {
-    /// `Plan plan`.
-    pub plan: Plan<'mcx>,
-    /// `List *hashkeys` — hash keys for the hashjoin condition.
-    pub hashkeys: Option<PgVec<'mcx, Expr>>,
-    /// `Oid skewTable` — outer join key's table OID, or `InvalidOid`.
-    pub skewTable: Oid,
-    /// `AttrNumber skewColumn` — outer join key's column #, or zero.
-    pub skewColumn: AttrNumber,
-    /// `bool skewInherit` — is outer join rel an inheritance tree?
-    pub skewInherit: bool,
-    /// `Cardinality rows_total` — estimate total rows if parallel_aware.
-    pub rows_total: Cardinality,
-}
+// `Hash` plan node (`nodes/plannodes.h`) is the single canonical
+// `crate::nodehashjoin::Hash` (re-exported below); the `Node` enum and the
+// nodeHash/nodeHashjoin bodies all reference that one type.
+pub use crate::nodehashjoin::Hash;
 
 /// `HashInstrumentation` (`nodes/execnodes.h`) — per-process hash-build stats.
 #[derive(Clone, Copy, Debug, Default)]
@@ -424,6 +439,7 @@ pub struct HashInstrumentation {
 
 /// `SharedHashInfo` (`nodes/execnodes.h`) — DSM-resident array of per-worker
 /// [`HashInstrumentation`] (C uses a `FLEXIBLE_ARRAY_MEMBER`).
+#[derive(Debug)]
 pub struct SharedHashInfo<'mcx> {
     /// `int num_workers`.
     pub num_workers: i32,
@@ -432,6 +448,7 @@ pub struct SharedHashInfo<'mcx> {
 }
 
 /// `HashState` (`nodes/execnodes.h`) — the Hash executor node.
+#[derive(Debug)]
 pub struct HashState<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
@@ -456,6 +473,7 @@ pub struct HashState<'mcx> {
 /// `HashJoinState` (`nodes/execnodes.h`) — the HashJoin executor node. Defined
 /// here (rather than in a future `nodeHashjoin` types module) because
 /// `nodeHash.c`'s probe routines (`ExecScanHashBucket`, …) operate on it.
+#[derive(Debug)]
 pub struct HashJoinState<'mcx> {
     /// `JoinState js` — its first field is `NodeTag`.
     pub js: JoinStateData<'mcx>,
@@ -474,16 +492,16 @@ pub struct HashJoinState<'mcx> {
     /// `HashJoinTuple hj_CurTuple` — current tuple in the scan (index into the
     /// hash table's tuple arena); `None` = NULL.
     pub hj_CurTuple: Option<HashTupleIdx>,
-    /// `TupleTableSlot *hj_OuterTupleSlot`.
-    pub hj_OuterTupleSlot: Option<PgBox<'mcx, TupleTableSlot>>,
-    /// `TupleTableSlot *hj_HashTupleSlot`.
-    pub hj_HashTupleSlot: Option<PgBox<'mcx, TupleTableSlot>>,
-    /// `TupleTableSlot *hj_NullOuterTupleSlot`.
-    pub hj_NullOuterTupleSlot: Option<PgBox<'mcx, TupleTableSlot>>,
-    /// `TupleTableSlot *hj_NullInnerTupleSlot`.
-    pub hj_NullInnerTupleSlot: Option<PgBox<'mcx, TupleTableSlot>>,
-    /// `TupleTableSlot *hj_FirstOuterTupleSlot`.
-    pub hj_FirstOuterTupleSlot: Option<PgBox<'mcx, TupleTableSlot>>,
+    /// `TupleTableSlot *hj_OuterTupleSlot` — id into `es_tupleTable`.
+    pub hj_OuterTupleSlot: Option<SlotId>,
+    /// `TupleTableSlot *hj_HashTupleSlot` — id into `es_tupleTable`.
+    pub hj_HashTupleSlot: Option<SlotId>,
+    /// `TupleTableSlot *hj_NullOuterTupleSlot` — id into `es_tupleTable`.
+    pub hj_NullOuterTupleSlot: Option<SlotId>,
+    /// `TupleTableSlot *hj_NullInnerTupleSlot` — id into `es_tupleTable`.
+    pub hj_NullInnerTupleSlot: Option<SlotId>,
+    /// `TupleTableSlot *hj_FirstOuterTupleSlot` — id into `es_tupleTable`.
+    pub hj_FirstOuterTupleSlot: Option<SlotId>,
     /// `int hj_JoinState`.
     pub hj_JoinState: i32,
     /// `bool hj_MatchedOuter`.
@@ -492,10 +510,28 @@ pub struct HashJoinState<'mcx> {
     pub hj_OuterNotEmpty: bool,
 }
 
-/// Build a zeroed [`HashInstrumentation`] in `mcx` is unnecessary (it is
-/// `Copy`/`Default`); marker kept for parity with C's palloc0 sites is omitted.
-#[allow(dead_code)]
-const _: () = ();
+impl<'mcx> Default for HashJoinState<'mcx> {
+    fn default() -> Self {
+        HashJoinState {
+            js: JoinStateData::default(),
+            hashclauses: None,
+            hj_OuterHash: None,
+            hj_HashTable: None,
+            hj_CurHashValue: 0,
+            hj_CurBucketNo: 0,
+            hj_CurSkewBucketNo: -1,
+            hj_CurTuple: None,
+            hj_OuterTupleSlot: None,
+            hj_HashTupleSlot: None,
+            hj_NullOuterTupleSlot: None,
+            hj_NullInnerTupleSlot: None,
+            hj_FirstOuterTupleSlot: None,
+            hj_JoinState: 0,
+            hj_MatchedOuter: false,
+            hj_OuterNotEmpty: false,
+        }
+    }
+}
 
 /// Silence unused-import lints in the scaffold (the bodies consume `Mcx`).
 #[allow(dead_code)]

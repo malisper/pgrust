@@ -15,6 +15,8 @@ use crate::nodemergejoin::T_MergeJoinState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
 use crate::nodenestloop::T_NestLoopState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
+use crate::nodehash::HashState;
+use crate::execstate_tags::T_HashState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -38,6 +40,8 @@ pub enum PlanStateNode<'mcx> {
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
+    /// `T_HashState` — the inner Hash node of a hash join.
+    Hash(PgBox<'mcx, HashState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -52,6 +56,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
+            PlanStateNode::Hash(_) => T_HashState,
         }
     }
 
@@ -67,6 +72,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
+            PlanStateNode::Hash(h) => &h.ps,
         }
     }
 
@@ -81,6 +87,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
+            PlanStateNode::Hash(h) => &mut h.ps,
         }
     }
 

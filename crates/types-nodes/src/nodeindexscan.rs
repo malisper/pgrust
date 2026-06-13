@@ -36,6 +36,13 @@ pub struct Plan<'mcx> {
     pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `Cardinality plan_rows` — number of rows plan is expected to emit
+    /// (`Cardinality` is `double` in C). Consumed by
+    /// `ExecHashTableCreate`/`ExecChooseHashTableSize` to size the hash table.
+    pub plan_rows: f64,
+    /// `int plan_width` — average row width in bytes. Consumed alongside
+    /// `plan_rows` when sizing the hash table.
+    pub plan_width: i32,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
@@ -77,6 +84,8 @@ impl Plan<'_> {
             targetlist,
             qual,
             parallel_aware: self.parallel_aware,
+            plan_rows: self.plan_rows,
+            plan_width: self.plan_width,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
