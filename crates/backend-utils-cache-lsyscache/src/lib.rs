@@ -5,8 +5,8 @@
 // trips `clippy::result_large_err`. The un-boxed return is the project's error
 // contract, so accept the lint crate-wide.
 #![allow(clippy::result_large_err)]
-// SCAFFOLD STAGE: family modules declare each lookup with a `todo!()` body
-// ahead of the SearchSysCache logic (catcache seam) that will fill it in.
+// Some projected-row helpers and imports are exercised only on certain code
+// paths; accept the lint crate-wide rather than gate each one.
 #![allow(dead_code)]
 
 //! `backend-utils-cache-lsyscache` — port of
@@ -20,10 +20,10 @@
 //! here), so this unit *installs* every one of those seams.
 //!
 //! The lookups themselves bottom out in the syscache / catcache layer. Until
-//! `catcache` lands, the `SearchSysCache*` calls route through that owner's
-//! per-owner seam; this unit's own family functions are `todo!()` for now (the
-//! decomposition scaffold stage). The crate COMPILES and `init_seams()` wires
-//! every owned seam to its family adapter.
+//! `syscache` lands, the `SearchSysCache*` / `GetSysCacheOid*` calls route
+//! through that owner's per-owner seam (loud panic until it lands); this unit's
+//! own `get_*` logic is ported in full. `init_seams()` wires every owned seam
+//! to its family adapter.
 //!
 //! Decomposition-track family modules (one group of `get_*` helpers each):
 //!
