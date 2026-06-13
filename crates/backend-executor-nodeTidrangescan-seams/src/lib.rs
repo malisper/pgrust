@@ -45,7 +45,7 @@ seam_core::seam!(
         node: &TidRangeScan<'mcx>,
         qual_index: usize,
         side: OperandSide,
-    ) -> PgResult<PgBox<'mcx, ExprState>>
+    ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>>
 );
 
 seam_core::seam!(

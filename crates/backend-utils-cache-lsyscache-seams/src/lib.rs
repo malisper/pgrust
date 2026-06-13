@@ -353,6 +353,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_compatible_hash_operators(opno, &lhs_opno, &rhs_opno)`
+    /// (lsyscache.c): find the single-type `=` hash operators compatible with
+    /// `opno` (which may be cross-type). Returns `Some((lhs_opno, rhs_opno))`
+    /// when `opno` is registered as the `=` operator of some hash opfamily (the
+    /// C `true`), `None` when not (the C `false`, both out-params left
+    /// `InvalidOid`). `Err` carries the `pg_amop` syscache-list `ereport(ERROR)`s.
+    pub fn get_compatible_hash_operators(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
     /// `get_opfamily_member(opfamily, lefttype, righttype, strategy)`
     /// (lsyscache.c): the operator OID registered for the given strategy/type
     /// pair, or `InvalidOid` (0) if none. `Err` carries the syscache
@@ -543,14 +553,6 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         opno: Oid,
     ) -> PgResult<PgVec<'mcx, Oid>>
-);
-
-seam_core::seam!(
-    /// `get_compatible_hash_operators(opno, &lhs_opno, &rhs_opno)` (lsyscache.c):
-    /// the hash equality operator(s) compatible with `opno` on its LHS and RHS
-    /// datatypes. This seam always requests both. Returns `Some((lhs, rhs))`
-    /// when found (the C `true`), `None` when not (the C `false`).
-    pub fn get_compatible_hash_operators(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
 );
 
 seam_core::seam!(

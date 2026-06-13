@@ -86,7 +86,7 @@ impl TableFuncRoutineKind {
 ///
 /// In the owned tree, the `ExprState *` children are owned `ExprState` values
 /// (`ExecInitExpr` output, allocated in the per-query context), and the
-/// `colexprs`/`coldefexprs`/etc. lists carry `Option<ExprState>` to mirror
+/// `colexprs`/`coldefexprs`/etc. lists carry `Option<ExprState<'mcx>>` to mirror
 /// the C `NULL` cells. `routine` is the [`TableFuncRoutineKind`] token; the
 /// builder's private space (`void *opaque`) is the type-erased [`Opaque`].
 #[derive(Debug)]
@@ -94,24 +94,24 @@ pub struct TableFuncScanState<'mcx> {
     /// `ScanState ss` — its first field is `NodeTag`.
     pub ss: ScanStateData<'mcx>,
     /// `ExprState *docexpr` — state for document expression.
-    pub docexpr: Option<PgBox<'mcx, ExprState>>,
+    pub docexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `ExprState *rowexpr` — state for row-generating expression.
-    pub rowexpr: Option<PgBox<'mcx, ExprState>>,
+    pub rowexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `List *colexprs` — state for column-generating expressions (NULL cells
     /// allowed).
-    pub colexprs: PgVec<'mcx, Option<ExprState>>,
+    pub colexprs: PgVec<'mcx, Option<ExprState<'mcx>>>,
     /// `List *coldefexprs` — state for column default expressions (NULL cells
     /// allowed).
-    pub coldefexprs: PgVec<'mcx, Option<ExprState>>,
+    pub coldefexprs: PgVec<'mcx, Option<ExprState<'mcx>>>,
     /// `List *colvalexprs` — state for column value expressions.
-    pub colvalexprs: PgVec<'mcx, Option<ExprState>>,
+    pub colvalexprs: PgVec<'mcx, Option<ExprState<'mcx>>>,
     /// `List *passingvalexprs` — state for PASSING argument expressions.
-    pub passingvalexprs: PgVec<'mcx, Option<ExprState>>,
+    pub passingvalexprs: PgVec<'mcx, Option<ExprState<'mcx>>>,
     /// `List *ns_names` — same as `TableFunc.ns_names` (DEFAULT namespace is a
     /// `None` cell).
     pub ns_names: PgVec<'mcx, Option<PgString<'mcx>>>,
     /// `List *ns_uris` — list of states of namespace URI exprs.
-    pub ns_uris: PgVec<'mcx, ExprState>,
+    pub ns_uris: PgVec<'mcx, ExprState<'mcx>>,
     /// `Bitmapset *notnulls` — nullability flag for each output column.
     pub notnulls: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `void *opaque` — table builder private space. `None` = the C `NULL`.

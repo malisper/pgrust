@@ -122,7 +122,7 @@ pub struct JoinStateData<'mcx> {
     pub single_match: bool,
     /// `ExprState *joinqual` — compiled JOIN quals (in addition to `ps.qual`).
     /// `None` = the C `NULL`.
-    pub joinqual: Option<PgBox<'mcx, crate::execexpr::ExprState>>,
+    pub joinqual: Option<PgBox<'mcx, crate::execexpr::ExprState<'mcx>>>,
 }
 
 impl Default for JoinType {

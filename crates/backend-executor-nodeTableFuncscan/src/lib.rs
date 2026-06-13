@@ -292,7 +292,7 @@ pub fn ExecInitTableFuncScan<'mcx>(
         // owned FmgrInfo carries the OID; fmgr_info_check preserves the eager
         // lookup-failure surface.
         fmgr::fmgr_info_check::call(in_funcid)?;
-        in_functions.push(FmgrInfo { fn_oid: in_funcid });
+        in_functions.push(FmgrInfo { fn_oid: in_funcid, ..Default::default() });
     }
     scanstate.in_functions = in_functions;
     scanstate.typioparams = typioparams;
@@ -807,7 +807,7 @@ fn init_opt_expr<'mcx>(
     node: &Option<PgBox<'_, types_nodes::primnodes::Expr>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState>>> {
+) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
     match node {
         Some(e) => Ok(Some(execExpr::exec_init_expr::call(e, parent, estate)?)),
         None => Ok(None),
@@ -820,7 +820,7 @@ fn init_opt_expr_list<'mcx>(
     list: &Option<PgVec<'_, Option<PgBox<'_, types_nodes::primnodes::Expr>>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState>>> {
+) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>> {
     let refs: alloc::vec::Vec<Option<&types_nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|o| o.as_deref()).collect(),
         None => alloc::vec::Vec::new(),
@@ -834,7 +834,7 @@ fn init_expr_list_required<'mcx>(
     list: &Option<PgVec<'_, PgBox<'_, types_nodes::primnodes::Expr>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, types_nodes::execexpr::ExprState>> {
+) -> PgResult<PgVec<'mcx, types_nodes::execexpr::ExprState<'mcx>>> {
     let refs: alloc::vec::Vec<Option<&types_nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|e| Some(&**e)).collect(),
         None => alloc::vec::Vec::new(),
@@ -849,12 +849,12 @@ fn init_expr_list_required<'mcx>(
 }
 
 /// `ExecInitExprList(tf->passingvalexprs, parent)` — the PASSING list, kept as
-/// `Option<ExprState>` cells.
+/// `Option<ExprState<'mcx>>` cells.
 fn init_expr_list_required_opt<'mcx>(
     list: &Option<PgVec<'_, PgBox<'_, types_nodes::primnodes::Expr>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState>>> {
+) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>> {
     let refs: alloc::vec::Vec<Option<&types_nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|e| Some(&**e)).collect(),
         None => alloc::vec::Vec::new(),

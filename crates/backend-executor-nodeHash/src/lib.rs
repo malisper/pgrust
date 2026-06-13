@@ -320,7 +320,7 @@ mod adapters {
         _collations: &[types_core::primitive::Oid],
         _keep_nulls: bool,
         estate: &mut EStateData<'mcx>,
-    ) -> PgResult<PgBox<'mcx, ExprState>> {
+    ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
         // ExecBuildHash32Expr compiles a per-side hash-value ExprState; the
         // compiler lives in execExpr (ExecBuildHash32Expr / ExecInitExprRec),
         // which is unported. The inner side is stored on the inner HashState's

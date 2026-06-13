@@ -162,7 +162,7 @@ fn mock_init_qual<'mcx>(
     qual: Option<&[types_nodes::primnodes::Expr]>,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState>>> {
+) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
     let _ = parent;
     match qual {
         Some(q) if !q.is_empty() => {

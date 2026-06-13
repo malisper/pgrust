@@ -518,7 +518,7 @@ fn exec_init_qual_for_agg<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _node: &Agg<'mcx>,
     _estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState>>> {
+) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
     panic!(
         "backend-executor-execExpr::ExecInitQual: compiling the Agg qual and \
          collecting its Aggrefs into aggstate->aggs needs the AggState parent \
@@ -630,7 +630,7 @@ fn build_phases<'mcx>(
                     let phases = aggstate.phases.as_mut().unwrap();
                     let mut eqf: PgVec<
                         'mcx,
-                        Option<PgBox<'mcx, types_nodes::execexpr::ExprState>>,
+                        Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>,
                     > = vec_with_capacity_in(mcx, num_cols as usize)?;
                     for _ in 0..num_cols {
                         eqf.push(None);

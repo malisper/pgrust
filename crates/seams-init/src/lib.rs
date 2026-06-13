@@ -45,6 +45,8 @@ pub fn init_all() {
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_executor_execAmi::init_seams();
+    backend_executor_execExpr::init_seams();
+    backend_executor_execExprInterp::init_seams();
     backend_executor_execParallel::init_seams();
     backend_executor_execPartition::init_seams();
     backend_executor_execProcnode::init_seams();
@@ -489,6 +491,7 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
         ("backend_executor_execTuples", "slot_getattr"),
         ("backend_executor_execTuples", "slot_getattr_by_id"),
+        ("backend_executor_execTuples", "slot_natts"),
         ("backend_executor_execUtils", "exec_find_junk_attribute_in_tlist"),
         ("backend_executor_execUtils", "exec_get_root_to_child_map"),
         ("backend_executor_execUtils", "exec_get_updated_cols"),

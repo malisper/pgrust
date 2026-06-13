@@ -253,7 +253,7 @@ pub fn ExecInitPartitionOnConflict<'mcx>(
             .as_ref()
             .map(|l| l.as_slice())
             .unwrap_or(&[]);
-        let on_conflict_where: Option<&types_nodes::nodes::Node<'mcx>> =
+        let on_conflict_where: Option<&[types_nodes::primnodes::Expr]> =
             node.onConflictWhere.as_deref();
 
         // Build the OnConflictSetState: oc_Existing (table_slot_create), and
@@ -312,12 +312,12 @@ pub fn ExecInitPartitionMerge<'mcx>(
         .expect("ExecInitPartitionInfo: MERGE node has an expression context");
 
     // joinCondition = linitial(node->mergeJoinConditions);
-    let ref_join_condition: Option<&'mcx types_nodes::nodes::Node<'mcx>> = node
+    let ref_join_condition: Option<&'mcx [types_nodes::primnodes::Expr]> = node
         .mergeJoinConditions
         .as_ref()
         .and_then(|jc| jc.first())
         .and_then(|c| c.as_ref())
-        .map(|b| &**b);
+        .map(|v| v.as_slice());
 
     // if (unlikely(!leaf_part_rri->ri_projectNewInfoValid))
     //     ExecInitMergeTupleSlots(mtstate, leaf_part_rri);

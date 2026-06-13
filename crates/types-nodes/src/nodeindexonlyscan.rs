@@ -123,7 +123,7 @@ pub struct IndexRuntimeKeyInfo<'mcx> {
     /// owning node's `ioss_ScanKeys`/`ioss_OrderByKeys` array.
     pub scan_key: usize,
     /// `ExprState *key_expr` — expr to evaluate to get the value.
-    pub key_expr: Option<PgBox<'mcx, ExprState>>,
+    pub key_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `bool key_toastable` — is the expr's result a toastable datatype?
     pub key_toastable: bool,
 }
@@ -224,7 +224,7 @@ pub struct IndexOnlyScanState<'mcx> {
     /// `ScanState ss` — its first field is `NodeTag`.
     pub ss: ScanStateData<'mcx>,
     /// `ExprState *recheckqual` — execution state for recheckqual expressions.
-    pub recheckqual: Option<PgBox<'mcx, ExprState>>,
+    pub recheckqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `struct ScanKeyData *ioss_ScanKeys` — Skey structures for index quals.
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
     /// `int ioss_NumScanKeys`.

@@ -214,7 +214,7 @@ fn RelationBuildPartitionKey<'mcx>(mcx: Mcx<'mcx>, relation: &RelationData<'_>) 
         // The owned FmgrInfo carries only the OID (re-resolved at call time);
         // preserve C's eager lookup-failure surface via fmgr_info_check.
         fmgr_seam::fmgr_info_check::call(funcid)?;
-        partsupfunc.push(types_core::fmgr::FmgrInfo { fn_oid: funcid });
+        partsupfunc.push(types_core::fmgr::FmgrInfo { fn_oid: funcid, ..Default::default() });
 
         // key->partcollation[i] = collation->values[i];
         partcollation[i] = collation[i];
