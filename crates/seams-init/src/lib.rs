@@ -26,13 +26,16 @@ pub fn init_all() {
     backend_executor_instrument::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMergejoin::init_seams();
+    backend_executor_nodeTableFuncscan::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
+    backend_optimizer_path_joinpath::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_startup::init_seams();
+    backend_replication_logical_logical::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_proto::init_seams();
@@ -52,6 +55,7 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();
