@@ -100,6 +100,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `make_empty_range(typcache)` (rangetypes.c): build the serialized empty
+    /// `RangeType` for the range type, allocated in `mcx`. `Err` carries
+    /// serialization `ereport(ERROR)`s and OOM.
+    pub fn make_empty_range<'mcx>(
+        mcx: Mcx<'mcx>,
+        typcache: &TypeCacheEntry,
+    ) -> PgResult<RangeTypeP<'mcx>>
+);
+
+seam_core::seam!(
     /// `range_get_flags(range)` (rangetypes.c): the range's flags byte
     /// (`RANGE_EMPTY`, `RANGE_LB_INC`, ...). Empty ranges read `RANGE_EMPTY`.
     pub fn range_get_flags(range: RangeTypeP<'_>) -> u8

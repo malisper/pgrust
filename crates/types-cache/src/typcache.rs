@@ -23,6 +23,12 @@ use types_core::primitive::Oid;
 pub struct TypeCacheEntry {
     /// `type_id` -- the type's own OID.
     pub type_id: Oid,
+    /// `typlen` -- the type's `pg_type.typlen` (length, or -1/-2 for varlena/cstring).
+    pub typlen: i16,
+    /// `typbyval` -- the type's `pg_type.typbyval` (passed by value).
+    pub typbyval: bool,
+    /// `typalign` -- the type's `pg_type.typalign` (alignment requirement char).
+    pub typalign: i8,
     /// `rng_collation` -- collation for the range's comparison/subdiff calls.
     pub rng_collation: Oid,
     /// `rng_cmp_proc_finfo` -- the subtype's `cmp` support function.
