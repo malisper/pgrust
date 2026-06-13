@@ -152,6 +152,7 @@ pub fn init_all() {
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
     backend_utils_misc_timeout::init_seams();
+    backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
     backend_utils_mmgr_portalmem::init_seams();
     backend_utils_sort_sortsupport::init_seams();

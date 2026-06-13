@@ -9082,6 +9082,7 @@ dependencies = [
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
  "backend-utils-misc-timeout",
+ "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-sortsupport",
