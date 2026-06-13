@@ -223,3 +223,18 @@ seam_core::seam!(
     /// this backend hold the built-in lock at `lock_offset` in exactly `mode`?
     pub fn lwlock_held_by_me_in_mode_main(lock_offset: usize, mode: LWLockMode) -> bool
 );
+
+seam_core::seam!(
+    /// `LWLockShmemSize()` (`storage/lmgr/lwlock.c`) — shared-memory bytes for
+    /// the LWLock arrays/tranches; summed by ipci.c `CalculateShmemSize`.
+    /// `Err` carries the `add_size`/`mul_size` overflow `ereport`. Owner
+    /// unported; scaffolded slot.
+    pub fn lwlock_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CreateLWLocks()` (lwlock.c) — allocate the LWLocks (must run first in
+    /// `CreateOrAttachShmemStructs`, before `InitShmemIndex`). `Err` carries
+    /// the out-of-shmem `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn create_lwlocks() -> types_error::PgResult<()>
+);

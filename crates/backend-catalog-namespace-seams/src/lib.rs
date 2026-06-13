@@ -35,6 +35,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `makeRangeVarFromNameList(names)` (namespace.c): build a `RangeVar`
+    /// from a 1-to-3-element qualified name list (relname / schema.relname /
+    /// catalog.schema.relname). More than three dotted names raises
+    /// `ERRCODE_SYNTAX_ERROR` (`Err`). The `RangeVar` strings are owned
+    /// `String`s (the type's own representation).
+    pub fn make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar>
+);
+
+seam_core::seam!(
     /// `RangeVarGetRelid(relation, lockmode, missing_ok)` (namespace.h macro
     /// over `RangeVarGetRelidExtended` with no callback and `RVR_MISSING_OK`
     /// per `missing_ok`). `mcx` is the C current context the lookup's

@@ -9,10 +9,63 @@
 //! lookup-failure surface of `fmgr_info` is preserved by [`fmgr_info_check`].
 
 use types_cache::DefElemString;
-use types_core::Oid;
+use types_core::{AttrNumber, Oid};
+use types_datum::varlena::Bytea;
 use types_datum::Datum;
 use types_error::PgResult;
 use types_array::ArrayElementDatum;
+use types_nodes::fmgr::FunctionCallInfoBaseData;
+
+seam_core::seam!(
+    /// The call's current memory context (C: `CurrentMemoryContext` at fmgr
+    /// dispatch). `convert_*` helpers behind the `has_*_privilege` family
+    /// allocate their transient name-list / `RangeVar` / pstrdup'd outputs in
+    /// it, mirroring the C palloc. The fmgr owner derives it from the widened
+    /// frame; `Mcx` is a `Copy` context handle, so this is a pure read.
+    pub fn pg_call_mcx<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> mcx::Mcx<'mcx>
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_NAME(n)` (fmgr.h): decode argument `n` of the call frame as
+    /// a `Name` and return its NUL-trimmed text. The fmgr owner widens the
+    /// frame with the `args`/`isnull` fields this reads.
+    pub fn pg_getarg_name(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> String
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_OID(n)` (fmgr.h): decode argument `n` as an `Oid`.
+    pub fn pg_getarg_oid(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> Oid
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_INT16(n)` (fmgr.h): decode argument `n` as an `int2`
+    /// (`AttrNumber` at the column-privilege call sites).
+    pub fn pg_getarg_int16(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> AttrNumber
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_TEXT_PP(n)` (fmgr.h): decode argument `n` as a (possibly
+    /// detoasted) `text`, returning the varlena image allocated in the call's
+    /// current context (the owner derives it from the widened frame). `Err`
+    /// carries detoast OOM / `ereport(ERROR)`.
+    pub fn pg_getarg_text_pp<'mcx>(
+        fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> PgResult<Bytea<'mcx>>
+);
+
+seam_core::seam!(
+    /// `PG_RETURN_BOOL(b)` (fmgr.h): clear `fcinfo->isnull` and return the
+    /// boolean as a `Datum`.
+    pub fn pg_return_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, b: bool) -> Datum
+);
+
+seam_core::seam!(
+    /// `PG_RETURN_NULL()` (fmgr.h): set `fcinfo->isnull = true` and return a
+    /// zero `Datum`. The owner widens the frame with the `isnull` flag this
+    /// sets.
+    pub fn pg_return_null(fcinfo: &mut FunctionCallInfoBaseData<'_>) -> Datum
+);
 
 seam_core::seam!(
     /// `FunctionCall1Coll(flinfo, collation, arg1)` (fmgr.c): invoke a

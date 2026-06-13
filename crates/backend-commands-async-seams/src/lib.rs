@@ -44,3 +44,17 @@ seam_core::seam!(
     /// LISTEN / UNLISTEN (2PC restriction).
     pub fn at_prepare_notify() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AsyncShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn async_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `AsyncShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn async_shmem_init() -> types_error::PgResult<()>
+);

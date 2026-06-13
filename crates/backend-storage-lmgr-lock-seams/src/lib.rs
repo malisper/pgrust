@@ -508,3 +508,17 @@ seam_core::seam!(
     /// `max_locks_per_xact` (lock.c GUC `max_locks_per_transaction`).
     pub fn max_locks_per_xact() -> i32
 );
+
+seam_core::seam!(
+    /// `LockManagerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn lock_manager_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `LockManagerShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn lock_manager_shmem_init() -> types_error::PgResult<()>
+);
