@@ -7359,10 +7359,8 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
- "backend-regex-core-seams",
- "backend-tcop-postgres-seams",
+ "backend-libpq-pqformat",
  "backend-utils-adt-pg-locale-seams",
- "backend-utils-adt-regexp-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-mb-mbutils-seams",
  "mcx",
@@ -7371,8 +7369,8 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-locale",
- "types-regex",
  "types-sortsupport",
+ "types-stringinfo",
 ]
 
 [[package]]
