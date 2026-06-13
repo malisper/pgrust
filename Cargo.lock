@@ -2950,6 +2950,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execProcnode"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execProcnode-seams",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
@@ -8528,6 +8539,7 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
+ "backend-executor-execProcnode",
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeForeignscan",
