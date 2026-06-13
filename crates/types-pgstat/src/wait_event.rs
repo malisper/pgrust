@@ -103,6 +103,11 @@ pub const WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE: u32 = PG_WAIT_IPC + 30
 /// c2rust.)
 pub const WAIT_EVENT_RELATION_MAP_READ: u32 = PG_WAIT_IO + 40;
 
+/// `WAIT_EVENT_XACT_GROUP_UPDATE` — "Waiting for the group leader to update
+/// transaction status at transaction end." 57th entry (0-based 56) of the
+/// `WaitEventIPC` section of `wait_event_names.txt` (APPEND_READY is index 0).
+pub const WAIT_EVENT_XACT_GROUP_UPDATE: u32 = PG_WAIT_IPC + 56;
+
 /// `WAIT_EVENT_RELATION_MAP_REPLACE` — 42nd entry (0-based 41) of the
 /// `WaitEventIO` section. (= 167772201, matching c2rust.)
 pub const WAIT_EVENT_RELATION_MAP_REPLACE: u32 = PG_WAIT_IO + 41;

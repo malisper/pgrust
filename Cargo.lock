@@ -994,6 +994,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-clog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-clog-seams"
 version = "0.0.0"
 dependencies = [
@@ -9350,6 +9377,7 @@ dependencies = [
  "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-clog",
  "backend-access-transam-generic-xlog",
  "backend-access-transam-parallel",
  "backend-access-transam-timeline",

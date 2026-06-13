@@ -39,6 +39,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AdvanceOldestClogXid(oldest_datfrozenxid)` (varsup.c) — advance
+    /// `TransamVariables->oldestClogXid` (under `XidGenLock`) so concurrent xact
+    /// status lookups never reach truncated-away clog. Called from clog's
+    /// `TruncateCLOG` / `clog_redo`. Plain shared-memory store; cannot
+    /// `ereport`, but kept fallible to match the shared-state-mutation channel.
+    pub fn advance_oldest_clog_xid(oldest_xact: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.

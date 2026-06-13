@@ -24,6 +24,7 @@ backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-transam-clog = { path = "../backend-access-transam-clog" }
 backend-access-transam-generic-xlog = { path = "../backend-access-transam-generic-xlog" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-access-transam-timeline = { path = "../backend-access-transam-timeline" }
