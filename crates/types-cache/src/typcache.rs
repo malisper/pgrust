@@ -41,10 +41,14 @@ pub struct TypeCacheEntry {
     /// `rng_subdiff_finfo` -- the subtype's optional `subdiff` support function
     /// (`fn_oid == InvalidOid` when absent).
     pub rng_subdiff_finfo: FmgrInfo,
-    /// `rng_canonical_finfo` -- the range type's optional `canonical` support
-    /// function (`fn_oid == InvalidOid` when the type has none); invoked by
-    /// `make_range` to canonicalize a freshly serialized range.
-    pub rng_canonical_finfo: FmgrInfo,
+    /// `hash_proc_finfo` -- the type's hash support function (used by
+    /// `hash_range` on the range element type's entry; `fn_oid == InvalidOid`
+    /// when absent).
+    pub hash_proc_finfo: FmgrInfo,
+    /// `hash_extended_proc_finfo` -- the type's extended (64-bit, seeded) hash
+    /// support function (used by `hash_range_extended`; `fn_oid == InvalidOid`
+    /// when absent).
+    pub hash_extended_proc_finfo: FmgrInfo,
     /// `rngelemtype` -- the range element type's cache entry (range types only).
     pub rngelemtype: Option<Box<TypeCacheEntry>>,
     /// `rngtype` -- the range type's cache entry (multirange types only).

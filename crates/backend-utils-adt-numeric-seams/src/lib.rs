@@ -11,3 +11,15 @@ seam_core::seam!(
     /// error path.
     pub fn numeric_maximum_size(typmod: i32) -> i32
 );
+
+seam_core::seam!(
+    /// `DatumGetFloat8(DirectFunctionCall1(numeric_float8,
+    /// DirectFunctionCall2(numeric_sub, v1, v2)))` — the `numrange_subdiff`
+    /// body (rangetypes.c:1703): the `numeric` subtype distance `v1 - v2` as a
+    /// `float8`. `v1` / `v2` are `numeric` `Datum`s. `Err` carries the
+    /// `numeric_sub` / `numeric_float8` `ereport(ERROR)`s (e.g. overflow).
+    pub fn numeric_subdiff(
+        v1: types_datum::Datum,
+        v2: types_datum::Datum,
+    ) -> types_error::PgResult<f64>
+);

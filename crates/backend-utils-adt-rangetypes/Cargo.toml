@@ -21,3 +21,6 @@ allocator-api2 = { version = "0.2", default-features = false, features = ["alloc
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }
