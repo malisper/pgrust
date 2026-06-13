@@ -12,6 +12,13 @@ use types_storage::lock::LOCKMODE;
 use types_tuple::access::RangeVar;
 
 seam_core::seam!(
+    /// `TypeIsVisible(typid)` (namespace.c): whether the type is visible in
+    /// the current search path (so it can be referenced unqualified). Reads
+    /// the syscache; `Err` carries the cache-lookup `elog(ERROR)` and OOM.
+    pub fn type_is_visible(mcx: Mcx<'_>, typid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
     /// text-search configuration given its possibly-qualified name list.
     /// With `missing_ok = false` a missing configuration raises
