@@ -22,6 +22,7 @@ backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }

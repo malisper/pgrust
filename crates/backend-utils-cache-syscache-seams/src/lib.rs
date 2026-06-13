@@ -495,6 +495,16 @@ seam_core::seam!(
     ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>>
 );
 seam_core::seam!(
+    /// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` (syscache.c):
+    /// look up a column of `relid` by name, returning its
+    /// `(attnum, atttypid)`; `None` when no such (non-dropped) column exists
+    /// (the C `!HeapTupleIsValid(atttuple)`).
+    pub fn search_syscache_attname(
+        relid: Oid,
+        attname: &str,
+    ) -> PgResult<Option<(types_core::primitive::AttrNumber, Oid)>>
+);
+seam_core::seam!(
     /// `SearchSysCache1 + SysCacheGetAttr(Anum_pg_class_reloptions) +
     /// ReleaseSysCache` (the make_new_heap reloptions fetch): the pg_class
     /// reloptions token (NULL when unset). `Err` "cache lookup failed for

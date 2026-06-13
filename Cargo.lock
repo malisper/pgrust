@@ -1510,6 +1510,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-catalog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-namespace",
+ "backend-common-relpath-seams",
+ "backend-storage-file-fd-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
+ "mcx",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-catalog-catalog-seams"
 version = "0.0.0"
 dependencies = [
@@ -7863,6 +7895,7 @@ dependencies = [
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
+ "backend-catalog-catalog",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
