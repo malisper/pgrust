@@ -112,6 +112,9 @@ fn install_seams() {
         dshash::dshash_get_hash_table_handle::set(|_t| 0xB000);
 
         dshash::dshash_find_or_insert::set(|table, key| {
+            // The seam now carries the raw `const void *key` bytes; the registry
+            // uses UTF-8 string names, so recover the &str for the test map.
+            let key = std::str::from_utf8(key).expect("registry key is UTF-8");
             WORLD.with(|w| {
                 let mut w = w.borrow_mut();
                 let existed = w.table.contains_key(key);

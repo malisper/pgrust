@@ -85,6 +85,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_putvalues(state, tdesc, values, nulls)` (tuplestore.c):
+    /// form a `MinimalTuple` from the `(values, nulls)` arrays under `tdesc`
+    /// and append it to the store. The tuple is built/copied into the store's
+    /// own context (fallible on OOM). `values` and `nulls` are parallel to
+    /// `tdesc`'s attributes.
+    pub fn tuplestore_putvalues(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        tdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        values: &[types_datum::Datum],
+        nulls: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `tuplestore_copy_read_pointer(state, srcptr, destptr)` (tuplestore.c):
     /// copy one read pointer's position onto another.
     pub fn tuplestore_copy_read_pointer(
@@ -111,4 +125,68 @@ seam_core::seam!(
     /// resources. Consumes the carrier (the C caller NULLs its pointer).
     /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.
     pub fn tuplestore_end(state: mcx::PgBox<'_, types_nodes::Tuplestorestate<'_>>)
+);
+
+// ===========================================================================
+// SharedTuplestore (utils/sort/sharedtuplestore.c) — the parallel hash join's
+// per-batch shared tuplestores. `SharedTuplestoreAccessor` is the opaque
+// per-backend handle (types_nodes::nodehashjoin).
+// ===========================================================================
+
+seam_core::seam!(
+    /// `sts_begin_parallel_scan(accessor)` (sharedtuplestore.c): begin a shared
+    /// read of this accessor's partition.
+    pub fn sts_begin_parallel_scan(
+        accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_end_parallel_scan(accessor)` (sharedtuplestore.c): finish a shared
+    /// read.
+    pub fn sts_end_parallel_scan(
+        accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_parallel_scan_next(accessor, &hashvalue)` (sharedtuplestore.c):
+    /// read the next tuple, returning it (copied into `mcx`, the caller's
+    /// current context) and its meta hash value, or `None` at end.
+    pub fn sts_parallel_scan_next<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
+    ) -> types_error::PgResult<
+        Option<(mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>, u32)>,
+    >
+);
+
+seam_core::seam!(
+    /// `sts_puttuple(accessor, &hashvalue, tuple)` (sharedtuplestore.c): write a
+    /// tuple (with its meta hash value) to the shared partition.
+    pub fn sts_puttuple(
+        accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
+        hashvalue: u32,
+        tuple: &types_tuple::heaptuple::MinimalTupleData<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sts_end_write(accessor)` (sharedtuplestore.c): flush and make the
+    /// partition readable by any backend.
+    pub fn sts_end_write(
+        accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_skiptuples(state, ntuples, forward)` (tuplestore.c): skip
+    /// over `ntuples` tuples in the given direction without fetching them;
+    /// returns false if it ran off the end before skipping them all. Can
+    /// `ereport(ERROR)` (read path).
+    pub fn tuplestore_skiptuples(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        ntuples: i64,
+        forward: bool,
+    ) -> types_error::PgResult<bool>
 );

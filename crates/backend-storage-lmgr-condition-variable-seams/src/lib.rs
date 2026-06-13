@@ -20,6 +20,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ConditionVariableInit(cv)` — initialize a condition variable in place
+    /// (`SpinLockInit` + `proclist_init`). Used for CVs embedded in shmem/DSM
+    /// structures that are not constructed through `ConditionVariable::new`.
+    pub fn condition_variable_init(cv: &mut ConditionVariable)
+);
+
+seam_core::seam!(
+    /// `ConditionVariableSleep(cv, wait_event_info)` — sleep until the CV is
+    /// signaled (the no-timeout form, a thin wrapper over the timed sleep).
+    /// Runs `CHECK_FOR_INTERRUPTS()`, so a cancel/terminate surfaces as `Err`.
+    pub fn condition_variable_sleep(
+        cv: &ConditionVariable,
+        wait_event_info: u32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ConditionVariableSignal(cv)` — wake one waiter. Infallible.
+    pub fn condition_variable_signal(cv: &ConditionVariable)
+);
+
+seam_core::seam!(
     /// `ConditionVariableCancelSleep()` — end the current sleep protocol;
     /// returns true if we were signaled while breaking it off. Infallible.
     pub fn condition_variable_cancel_sleep() -> bool
@@ -28,4 +50,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ConditionVariableBroadcast(cv)` — wake all waiters. Infallible.
     pub fn condition_variable_broadcast(cv: &ConditionVariable)
+);
+
+seam_core::seam!(
+    /// `ConditionVariablePrepareToSleep(cv)` — enrol this backend on `cv`'s
+    /// wakeup list before testing the wait condition. Infallible.
+    pub fn condition_variable_prepare_to_sleep(cv: &ConditionVariable)
 );
