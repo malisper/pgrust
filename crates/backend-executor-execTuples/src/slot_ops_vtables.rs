@@ -487,22 +487,100 @@ pub fn tts_minimal_clear(slot: &mut MinimalTupleTableSlot) {
 /// `tts_minimal_getsomeattrs` (execTuples.c):
 /// `slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts)`.
 pub fn tts_minimal_getsomeattrs<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     slot: &mut MinimalTupleTableSlot<'mcx>,
-    _natts: i32,
+    natts: i32,
 ) -> PgResult<()> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
 
     // slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts);
     //
-    // The minimal-tuple deform reads through `mslot->tuple` (aliased to
-    // `minhdr`, whose t_data points MINIMAL_TUPLE_OFFSET before the minimal
-    // tuple body). The sibling `slot_deform` family's `slot_deform_heap_tuple`
-    // takes a `HeapTupleTableSlot`; the minimal slot's heap-tuple view
-    // (minhdr/mintuple) is the slot payload model's workspace bridge. Route to
-    // it once the minimal-slot heap-tuple view lands. Mirror PG and panic.
-    panic!("execTuples.c tts_minimal_getsomeattrs: slot_deform_heap_tuple over the minimal slot's minhdr heap-tuple view (slot payload model workspace)")
+    // C passes `mslot->tuple` (the `&mslot->minhdr` heap-tuple view, whose
+    // `t_data` points MINIMAL_TUPLE_OFFSET before the minimal body) and
+    // `&mslot->off` explicitly. The sibling `slot_deform` family's
+    // `slot_deform_heap_tuple` reads those three pieces — `base`, `tuple`,
+    // `off` — off a `HeapTupleTableSlot`. The minimal slot carries the
+    // structurally identical `base`/`tuple`/`off`, so we briefly host them in a
+    // stack `HeapTupleTableSlot` view (moving `minhdr` in as the unused
+    // `tupdata` workspace), deform through it, then move the (now-mutated)
+    // state back. This is exactly C's "deform through mslot->tuple" with the
+    // heap-slot fields named differently on the two structs.
+    deform_minimal_through_heap_view(mcx, slot, natts)
+}
+
+/// Drive `slot_deform_heap_tuple` over a minimal slot's heap-tuple view by
+/// temporarily hosting its `base`/`tuple`/`off` in a `HeapTupleTableSlot`
+/// (C: `slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts)`). The
+/// `minhdr` workspace doubles as the borrowed slot's unused `tupdata`.
+///
+/// The keystone gave `slot_deform_heap_tuple` a `&mut HeapTupleTableSlot`
+/// receiver (it reads `slot.base`/`slot.tuple`/`slot.off`), while the minimal
+/// slot keeps the structurally identical fields under different names. We move
+/// those fields into a stack `HeapTupleTableSlot` for the duration of the
+/// deform and move them back afterwards. A `Drop` guard performs the move-back
+/// so the transfer is sound even when the deform unwinds (the current
+/// `slot_deform` body unwinds via its still-pending `heap_slot_body` carrier):
+/// the guard restores `slot` exactly once, and the consumed `borrowed` never
+/// drops the moved-out fields.
+fn deform_minimal_through_heap_view<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut MinimalTupleTableSlot<'mcx>,
+    natts: i32,
+) -> PgResult<()> {
+    // Guard that owns the borrowed HeapTupleTableSlot view and, on drop (normal
+    // or unwinding), moves base/tuple/off/minhdr back into the minimal slot.
+    struct ViewGuard<'a, 'mcx> {
+        slot: &'a mut MinimalTupleTableSlot<'mcx>,
+        borrowed: core::mem::ManuallyDrop<HeapTupleTableSlot<'mcx>>,
+    }
+    impl<'a, 'mcx> Drop for ViewGuard<'a, 'mcx> {
+        fn drop(&mut self) {
+            // Move the (possibly-mutated) view fields out of `borrowed` exactly
+            // once and back into `slot`. `borrowed` is ManuallyDrop, so the
+            // taken fields are not double-dropped; `tupdata` returns to `minhdr`.
+            let taken = unsafe { core::mem::ManuallyDrop::take(&mut self.borrowed) };
+            let HeapTupleTableSlot {
+                base,
+                tuple,
+                off,
+                tupdata,
+            } = taken;
+            // The `slot` fields are still the originals we ptr::read out of
+            // below; overwrite them without dropping the (logically moved-out)
+            // stale copies.
+            unsafe {
+                core::ptr::write(&mut self.slot.base, base);
+                core::ptr::write(&mut self.slot.tuple, tuple);
+                core::ptr::write(&mut self.slot.minhdr, tupdata);
+            }
+            self.slot.off = off;
+        }
+    }
+
+    // Move the minimal slot's heap-tuple-view fields into the borrowed slot.
+    // SlotBase/FormedTuple have no Default to `mem::replace` with, so we
+    // bit-copy them out; the guard's Drop is what makes the borrow sound by
+    // writing them back before the stale `slot` copies can be observed/dropped.
+    let base = unsafe { core::ptr::read(&slot.base) };
+    let tuple = unsafe { core::ptr::read(&slot.tuple) };
+    let off = slot.off;
+    let minhdr = unsafe { core::ptr::read(&slot.minhdr) };
+
+    let mut guard = ViewGuard {
+        slot,
+        borrowed: core::mem::ManuallyDrop::new(HeapTupleTableSlot {
+            base,
+            tuple,
+            off,
+            tupdata: minhdr,
+        }),
+    };
+
+    // slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts).
+    slot_deform_heap_tuple(mcx, &mut guard.borrowed, natts)
+    // `guard` drops here (normal return or `?`-propagated/unwinding error),
+    // moving the mutated view back into the minimal slot.
 }
 
 /// `tts_minimal_getsysattr` (execTuples.c): `ereport(ERROR,
@@ -531,7 +609,7 @@ pub fn tts_minimal_is_current_xact_tuple(slot: &MinimalTupleTableSlot) -> PgResu
 
 /// `tts_minimal_materialize` (execTuples.c).
 pub fn tts_minimal_materialize<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     slot: &mut MinimalTupleTableSlot<'mcx>,
 ) -> PgResult<()> {
     // Assert(!TTS_EMPTY(slot));
@@ -543,24 +621,87 @@ pub fn tts_minimal_materialize<'mcx>(
         return Ok(());
     }
 
+    // oldContext = MemoryContextSwitchTo(slot->tts_mcxt); — every allocation
+    // below is in `mcx`, the slot's context (the owned model's MemoryContext).
+
+    // /* Have to deform from scratch ... */
     // slot->tts_nvalid = 0; mslot->off = 0;
     slot.base.tts_nvalid = 0;
     slot.off = 0;
 
-    // if (!mslot->mintuple) mslot->mintuple =
-    //     heap_form_minimal_tuple(..., 0);
-    // else mslot->mintuple = heap_copy_minimal_tuple(mslot->mintuple, 0);
+    // if (!mslot->mintuple)
+    //     mslot->mintuple = heap_form_minimal_tuple(slot->tts_tupleDescriptor,
+    //                           slot->tts_values, slot->tts_isnull, 0);
+    // else
+    //     mslot->mintuple = heap_copy_minimal_tuple(mslot->mintuple, 0);
+    let mintuple = match slot.mintuple.as_ref() {
+        None => {
+            let desc = slot
+                .base
+                .tts_tupleDescriptor
+                .as_ref()
+                .ok_or_else(|| elog_error("tts_minimal_materialize: slot has no tuple descriptor"))?;
+            backend_access_common_heaptuple::heap_form_minimal_tuple(
+                mcx,
+                desc,
+                slot.base.tts_values.as_slice(),
+                slot.base.tts_isnull.as_slice(),
+                0,
+            )?
+        }
+        Some(mintuple) => {
+            // The minimal tuple is not in the slot's context (else SHOULDFREE
+            // would be set); copy it in.
+            backend_access_common_heaptuple::heap_copy_minimal_tuple(mcx, mintuple, 0)?
+        }
+    };
+
     // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+    slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+
     // Assert(mslot->tuple == &mslot->minhdr);
     // mslot->minhdr.t_len = mslot->mintuple->t_len + MINIMAL_TUPLE_OFFSET;
     // mslot->minhdr.t_data = (HeapTupleHeader)((char*)mslot->mintuple -
     //     MINIMAL_TUPLE_OFFSET);
     //
-    // heap_form_minimal_tuple/heap_copy_minimal_tuple produce a
-    // FormedMinimalTuple the slot's MinimalTuple carrier can't hold, and the
-    // minhdr.t_data fix-up is raw-pointer aliasing of the minimal tuple body
-    // — both the slot payload model's. Mirror PG and panic.
-    panic!("execTuples.c tts_minimal_materialize: heap_form/copy_minimal_tuple -> FormedMinimalTuple + minhdr.t_data alias fix-up are the slot payload model's carrier bridge")
+    // Wire the minhdr / tuple FormedTuple-shaped view over the freshly-owned
+    // minimal body and store the carrier.
+    slot.mintuple = Some(mintuple);
+    set_minimal_minhdr_view(mcx, slot)?;
+
+    // MemoryContextSwitchTo(oldContext);
+    Ok(())
+}
+
+/// Wire `mslot->minhdr` / `mslot->tuple` as the heap-tuple view over the slot's
+/// owned `mslot->mintuple` (execTuples.c's
+/// `minhdr.t_len = mintuple->t_len + MINIMAL_TUPLE_OFFSET; minhdr.t_data =
+/// (char*)mintuple - MINIMAL_TUPLE_OFFSET`).
+///
+/// C aliases `minhdr.t_data` MINIMAL_TUPLE_OFFSET bytes before the minimal body
+/// so `(char*)minhdr.t_data + minhdr.t_hoff` lands on the body. In the owned
+/// model the body bytes travel as `FormedTuple::data`; the equivalent
+/// heap-tuple view is `heap_tuple_from_minimal_tuple(mintuple)` — a
+/// HeapTupleData header (t_len = mintuple.t_len + MINIMAL_TUPLE_OFFSET, sharing
+/// the minimal tuple's infomask/natts/t_bits/t_hoff tail, system columns zeroed)
+/// over the minimal body. We mirror its `minhdr` into the workspace field and
+/// hand the same header+body to `slot.tuple`.
+fn set_minimal_minhdr_view<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut MinimalTupleTableSlot<'mcx>,
+) -> PgResult<()> {
+    let mintuple = slot
+        .mintuple
+        .as_ref()
+        .ok_or_else(|| elog_error("set_minimal_minhdr_view: slot has no minimal tuple"))?;
+
+    let view = backend_access_common_heaptuple::heap_tuple_from_minimal_tuple(mcx, mintuple)?;
+
+    // mslot->minhdr (the workspace HeapTupleData header `tuple` aliases).
+    slot.minhdr = view.tuple.as_ref().clone();
+    // mslot->tuple = &mslot->minhdr — the heap-tuple-shaped view over the body.
+    slot.tuple = Some(view);
+    Ok(())
 }
 
 /// `tts_minimal_get_minimal_tuple` (execTuples.c).
@@ -570,9 +711,18 @@ pub fn tts_minimal_get_minimal_tuple<'mcx>(
     // if (!mslot->mintuple) tts_minimal_materialize(slot);
     // return mslot->mintuple;
     //
-    // Returning mslot->mintuple depends on tts_minimal_materialize being able
-    // to store a FormedMinimalTuple in the slot's MinimalTuple carrier.
-    panic!("execTuples.c tts_minimal_get_minimal_tuple: depends on tts_minimal_materialize's FormedMinimalTuple->MinimalTuple carrier (slot payload model)")
+    // STOP / CONTRACT-DIVERGENCE: the keystone left this op's public return type
+    // header-only (`MinimalTuple = Option<PgBox<MinimalTupleData>>`, no body
+    // bytes). The slot now carries the body-bearing `FormedMinimalTuple`, so the
+    // faithful return must be `FormedMinimalTuple` — but widening this return
+    // forces widening the sibling `slot_store_fetch` entry point
+    // `ExecFetchSlotMinimalTuple` (and `ExecCopySlotMinimalTupleExtra`), which
+    // are public and consumed by 8 other executor crates (nodeHash, nodeAgg,
+    // nodeHashjoin, nodeSetOp, nodeMemoize). That cross-crate contract change is
+    // out of this family's scope and is the keystone's reserved carrier bridge
+    // ("Genuine ... MinimalTuple->FormedMinimalTuple carrier-bridge bodies ...
+    // stay mirror-PG-and-panic for the fill agents"). Mirror PG and panic.
+    panic!("execTuples.c tts_minimal_get_minimal_tuple: keystone left the op return header-only (MinimalTuple); the body-bearing FormedMinimalTuple return widens the public ExecFetchSlotMinimalTuple consumed by 8 crates — keystone-reserved carrier bridge")
 }
 
 /// `tts_minimal_copy_minimal_tuple` (execTuples.c).
@@ -583,9 +733,12 @@ pub fn tts_minimal_copy_minimal_tuple<'mcx>(
     // if (!mslot->mintuple) tts_minimal_materialize(slot);
     // return heap_copy_minimal_tuple(mslot->mintuple, extra);
     //
-    // heap_copy_minimal_tuple yields a FormedMinimalTuple the slot's
-    // MinimalTuple carrier can't hold; gated on tts_minimal_materialize.
-    panic!("execTuples.c tts_minimal_copy_minimal_tuple: heap_copy_minimal_tuple -> FormedMinimalTuple carrier bridge + materialize are the slot payload model's")
+    // STOP / CONTRACT-DIVERGENCE: same as tts_minimal_get_minimal_tuple —
+    // heap_copy_minimal_tuple yields a body-bearing `FormedMinimalTuple`, but the
+    // keystone left this op's public return header-only, and widening it widens
+    // the public `ExecCopySlotMinimalTupleExtra` consumed across crates. Keystone-
+    // reserved carrier bridge; mirror PG and panic.
+    panic!("execTuples.c tts_minimal_copy_minimal_tuple: keystone left the op return header-only (MinimalTuple); the FormedMinimalTuple result widens the public ExecCopySlotMinimalTupleExtra — keystone-reserved carrier bridge")
 }
 
 /// `tts_minimal_copy_heap_tuple` (execTuples.c:659).
@@ -596,12 +749,12 @@ pub fn tts_minimal_copy_heap_tuple<'mcx>(
     // if (!mslot->mintuple) tts_minimal_materialize(slot);
     // return heap_tuple_from_minimal_tuple(mslot->mintuple);
     //
-    // Gated on tts_minimal_materialize being able to store a
-    // FormedMinimalTuple in the slot's MinimalTuple carrier;
-    // heap_tuple_from_minimal_tuple then yields a FormedTuple the slot's
-    // HeapTuple carrier cannot hold either — both the slot payload model's
-    // carrier bridge. Mirror PG and panic.
-    panic!("execTuples.c tts_minimal_copy_heap_tuple: heap_tuple_from_minimal_tuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
+    // STOP / CONTRACT-DIVERGENCE: heap_tuple_from_minimal_tuple yields a
+    // body-bearing `FormedTuple`, but the keystone left this op's public return
+    // header-only (`HeapTuple`); widening it widens the public
+    // `ExecFetchSlotHeapTuple`/`ExecCopySlotHeapTuple` consumed across crates.
+    // Keystone-reserved carrier bridge; mirror PG and panic.
+    panic!("execTuples.c tts_minimal_copy_heap_tuple: keystone left the op return header-only (HeapTuple); the FormedTuple result widens the public ExecFetchSlotHeapTuple/ExecCopySlotHeapTuple — keystone-reserved carrier bridge")
 }
 
 /// `tts_minimal_store_tuple` (execTuples.c).
@@ -654,11 +807,17 @@ pub fn tts_minimal_copyslot<'mcx>(
     // MemoryContextSwitchTo(oldcontext);
     // ExecStoreMinimalTuple(mintuple, dstslot, true);
     //
-    // ExecCopySlotMinimalTuple yields a FormedMinimalTuple the slot's
-    // MinimalTuple carrier cannot hold, and forming it in dstslot->tts_mcxt is
-    // the slot payload model's per-slot context. Mirror PG and panic.
+    // STOP / CONTRACT-DIVERGENCE: the faithful body is
+    // `ExecStoreMinimalTuple(ExecCopySlotMinimalTupleExtra(src, 0), dst, true)`,
+    // but (1) `ExecCopySlotMinimalTuple` needs `&mut srcslot` (it may
+    // materialize the source) while the keystone copyslot callback hands `src`
+    // as `&SlotData` (immutable), and (2) the store leg routes through
+    // `tts_minimal_store_tuple`, whose `MinimalTuple` (header-only) param is the
+    // keystone-reserved MinimalTuple->FormedMinimalTuple carrier bridge that
+    // still panics. Both are keystone-contract blockers outside this family.
+    // Mirror PG and panic.
     let _ = (dst, src);
-    panic!("execTuples.c tts_minimal_copyslot: ExecCopySlotMinimalTuple (FormedMinimalTuple -> slot MinimalTuple carrier) into dstslot->tts_mcxt depends on the slot payload model's tuple-carrier bridge")
+    panic!("execTuples.c tts_minimal_copyslot: keystone copyslot gives src as &SlotData but ExecCopySlotMinimalTuple needs &mut to materialize; the store leg's tts_minimal_store_tuple is the keystone-reserved MinimalTuple->FormedMinimalTuple carrier bridge")
 }
 
 // --- BufferHeapTupleTableSlot ops -----------------------------------------
