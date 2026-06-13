@@ -248,6 +248,10 @@ const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE
 pub const MAX_BACKENDS_BITS: i32 = 18;
 pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
 
+/// `PROC_IS_AUTOVACUUM` (`storage/proc.h`) — `statusFlags` bit: this backend
+/// is an autovacuum worker.
+pub const PROC_IS_AUTOVACUUM: uint8 = 0x01;
+
 /// `ProcSignalReason` (`storage/procsignal.h`) — reasons for signaling a
 /// Postgres child process over the multiplexed SIGUSR1 channel.
 #[repr(u32)]

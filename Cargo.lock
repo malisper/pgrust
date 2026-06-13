@@ -2550,6 +2550,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-deadlock"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-lmgr-deadlock-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-deadlock",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-deadlock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-deadlock",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -2567,6 +2597,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-deadlock",
  "types-error",
  "types-storage",
 ]
@@ -2614,6 +2645,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-deadlock",
  "types-error",
  "types-storage",
 ]
@@ -3566,6 +3598,7 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -3672,6 +3705,14 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+]
+
+[[package]]
+name = "types-deadlock"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]

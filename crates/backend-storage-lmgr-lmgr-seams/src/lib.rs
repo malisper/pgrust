@@ -18,6 +18,8 @@
 //! * `Drop` — the abort path: an error unwinding past the guard releases the
 //!   lock, which is what C's transaction-abort resowner sweep would do.
 
+extern crate alloc;
+
 use types_core::{Oid, TransactionId, VirtualTransactionId};
 use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
@@ -168,4 +170,11 @@ seam_core::seam!(
     /// `VirtualXactLockTableInsert(vxid)` — lock our virtual transaction id
     /// before advertising it in the proc array.
     pub fn virtual_xact_lock_table_insert(vxid: VirtualTransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DescribeLockTag(buf, tag)` (lmgr.c) — render a `LOCKTAG` to a human
+    /// description for the deadlock report. C appends to a `StringInfo`; the
+    /// seam returns the rendered `String` (the detector appends it itself).
+    pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> alloc::string::String
 );

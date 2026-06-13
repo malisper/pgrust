@@ -2,6 +2,8 @@
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
     /// transaction's locks at recovery startup (slot `TWOPHASE_RM_LOCK_ID` of
@@ -219,4 +221,23 @@ seam_core::seam!(
     pub fn post_prepare_locks(
         xid: types_core::primitive::TransactionId,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the display name of a
+    /// lock mode, used by the deadlock report.
+    pub fn get_lockmode_name(
+        lockmethodid: types_storage::lock::LOCKMETHODID,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
 );
