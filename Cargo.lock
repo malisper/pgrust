@@ -420,6 +420,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-datum",
  "types-error",
  "types-tuple",
 ]
@@ -897,6 +898,7 @@ name = "backend-access-table-table"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-table-table-seams",
  "backend-catalog-pg-class-seams",
  "mcx",
  "types-core",
@@ -1534,6 +1536,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-sink"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -1818,6 +1829,15 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-class"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-class-seams",
+ "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2266,6 +2286,24 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-commands-define"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-commands-define-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-parser-parse-type-seams",
+ "backend-parser-small1-seams",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
+ "mcx",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -2950,6 +2988,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execProcnode"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-instrument-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tidbitmap",
+]
+
+[[package]]
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
@@ -2978,6 +3033,32 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execTuples"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-tupdesc",
+ "backend-access-heap-heaptoast-seams",
+ "backend-access-transam-xact-seams",
+ "backend-executor-execTuples-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-tcop-dest-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4019,6 +4100,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -4212,6 +4294,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-opclass",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -6157,6 +6240,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-cmdtag"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-numutils",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-error",
+ "types-portal",
+]
+
+[[package]]
+name = "backend-tcop-dest-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
@@ -6402,6 +6506,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-small-seams",
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
@@ -7573,6 +7678,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-hash-dynahash"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-utils-hash-dynahash-seams"
 version = "0.0.0"
 dependencies = [
@@ -7875,6 +7995,7 @@ dependencies = [
  "common-controldata-utils-seams",
  "libc",
  "mcx",
+ "types-acl",
  "types-control",
  "types-core",
  "types-datum",
@@ -8288,12 +8409,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-checksum-helper"
+version = "0.0.0"
+dependencies = [
+ "common-cryptohash-seams",
+ "port-crc32c",
+ "port-pgstrcasecmp",
+ "types-core",
+ "types-crypto",
+]
+
+[[package]]
 name = "common-controldata-utils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-control",
  "types-error",
+]
+
+[[package]]
+name = "common-cryptohash-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-crypto",
 ]
 
 [[package]]
@@ -8326,6 +8467,15 @@ name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "common-pglz"
+version = "0.0.0"
+dependencies = [
+ "common-pglz-seams",
+ "mcx",
+ "types-error",
 ]
 
 [[package]]
@@ -8548,41 +8698,86 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
+ "backend-access-common-relation",
  "backend-access-common-reloptions",
+ "backend-access-common-tupdesc",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-heap-vacuumlazy",
+ "backend-access-index-indexam",
+ "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
+ "backend-access-rmgrdesc-xactdesc",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-generic-xlog",
+ "backend-access-transam-parallel",
+ "backend-access-transam-timeline",
+ "backend-access-transam-transam",
  "backend-access-transam-twophase",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
+ "backend-access-transam-xlogutils",
+ "backend-backup-sink",
+ "backend-catalog-catalog",
  "backend-catalog-namespace",
+ "backend-catalog-objectaccess",
+ "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
+ "backend-catalog-pg-shdepend",
+ "backend-commands-cluster",
+ "backend-commands-copyto",
+ "backend-commands-define",
+ "backend-commands-foreigncmds",
+ "backend-commands-matview",
+ "backend-commands-portalcmds",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
+ "backend-executor-execProcnode",
+ "backend-executor-execTuples",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeAgg",
+ "backend-executor-nodeAppend",
+ "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeHash",
+ "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeMaterial",
+ "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSort",
+ "backend-executor-nodeSubplan",
+ "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
+ "backend-postmaster-autovacuum",
+ "backend-postmaster-bgworker",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
+ "backend-postmaster-pgarch",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-postmaster-walsummarizer",
  "backend-regex-core",
+ "backend-replication-logical-applyparallelworker",
  "backend-replication-logical-conflict",
+ "backend-replication-logical-launcher",
  "backend-replication-logical-logical",
+ "backend-replication-logical-origin",
  "backend-replication-logical-proto",
+ "backend-replication-logical-slotsync",
+ "backend-replication-slot",
+ "backend-replication-walreceiver",
+ "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
  "backend-storage-ipc",
@@ -8591,40 +8786,68 @@ dependencies = [
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
+ "backend-storage-ipc-shmem",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
+ "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-storage-sync",
+ "backend-tcop-backend-startup",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
+ "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
+ "backend-utils-adt-ri-triggers",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-inval",
  "backend-utils-cache-relfilenumbermap",
+ "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
+ "backend-utils-cache-typcache",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-dfmgr",
  "backend-utils-fmgr-funcapi",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-postinit",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-guc-file",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
+ "backend-utils-mmgr-portalmem",
+ "backend-utils-sort-sortsupport",
  "backend-utils-time-combocid",
+ "backend-utils-time-snapmgr",
+ "common-checksum-helper",
+ "common-ip",
+ "common-pglz",
  "interfaces-libpq-legacy-pqsignal",
+ "port-crc32c",
+ "port-pgsleep",
+ "port-pqsignal",
 ]
 
 [[package]]
@@ -8783,6 +9006,10 @@ dependencies = [
 
 [[package]]
 name = "types-core"
+version = "0.0.0"
+
+[[package]]
+name = "types-crypto"
 version = "0.0.0"
 
 [[package]]

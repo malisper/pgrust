@@ -282,6 +282,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InputFunctionCall(flinfo, str, typioparam, typmod)` (fmgr.c) on a
+    /// caller-cached `FmgrInfo`, returning the result classified as a
+    /// [`TupleValue`] ready for `heap_form_tuple`. Call a type's text input
+    /// function on the NUL-terminated C string `str_` (`None` is C's
+    /// `str == NULL`, supported so the call still happens for NULL fields to
+    /// support domains), then package the resulting `Datum` as `ByVal` when
+    /// `attbyval` else `ByRef` (the owner materializes the by-reference payload
+    /// bytes from its registry). Used by `BuildTupleFromCStrings`, which
+    /// pre-resolves the per-attribute input functions into its `AttInMetadata`;
+    /// the owned `FmgrInfo` carries only `fn_oid`, so it crosses by OID and the
+    /// owner re-resolves. `Err` carries invalid input syntax, the strict-NULL
+    /// `elog`, and OOM.
+    pub fn input_function_call_for_heap_form<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        str_: Option<&str>,
+        typioparam: Oid,
+        typmod: i32,
+        attbyval: bool,
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>>
+);
+
+seam_core::seam!(
     /// `FunctionCall3(flinfo, arg1, arg2, arg3)` (fmgr.c): call the function
     /// identified by `function_id` (the caller's cached `FmgrInfo`, which
     /// cannot cross the seam, so we re-resolve by OID) with three

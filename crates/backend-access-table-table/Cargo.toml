@@ -14,6 +14,7 @@ types-error = { path = "../types-error" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
 types-storage = { path = "../types-storage" }

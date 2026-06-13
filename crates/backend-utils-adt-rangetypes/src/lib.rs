@@ -57,4 +57,40 @@ pub fn init_seams() {
     seams::range_serialize::set(range_repr_serialize::range_serialize_seam);
     seams::range_deserialize::set(range_repr_serialize::range_deserialize_seam);
     seams::datum_get_range_type_p::set(range_repr_serialize::datum_get_range_type_p);
+
+    // RangeType engine constructors / flags (range_repr_serialize) — signatures
+    // match the seams exactly.
+    seams::make_range::set(range_repr_serialize::make_range);
+    seams::make_empty_range::set(range_repr_serialize::make_empty_range);
+    seams::range_get_flags::set(range_repr_serialize::range_get_flags);
+
+    // Bound comparison + `*_internal` predicate kernels (range_bounds_compare).
+    // All but two match the seams exactly; range_adjacent_internal and
+    // bounds_adjacent take an extra `mcx` for their transient probe range, so
+    // they go through scratch-context adapters.
+    seams::range_compare::set(range_bounds_compare::range_compare);
+    seams::range_contains_elem_internal::set(range_bounds_compare::range_contains_elem_internal);
+    seams::range_contains_internal::set(range_bounds_compare::range_contains_internal);
+    seams::range_before_internal::set(range_bounds_compare::range_before_internal);
+    seams::range_after_internal::set(range_bounds_compare::range_after_internal);
+    seams::range_overlaps_internal::set(range_bounds_compare::range_overlaps_internal);
+    seams::range_overleft_internal::set(range_bounds_compare::range_overleft_internal);
+    seams::range_overright_internal::set(range_bounds_compare::range_overright_internal);
+    seams::range_adjacent_internal::set(range_bounds_compare::range_adjacent_internal_seam);
+    seams::bounds_adjacent::set(range_bounds_compare::bounds_adjacent_seam);
+
+    // Set operations (range_setops). union/minus/intersect match the seams
+    // exactly; split_internal returns `(Option, Option)` vs the seam's
+    // `Option<(_, _)>`, so it goes through an adapter.
+    seams::range_union_internal::set(range_setops::range_union_internal);
+    seams::range_minus_internal::set(range_setops::range_minus_internal);
+    seams::range_intersect_internal::set(range_setops::range_intersect_internal);
+    seams::range_split_internal::set(range_setops::range_split_internal_seam);
+
+    // range_in / range_out / range_recv / range_send are NOT installed: their
+    // bodies (range_io) depend on get_range_io_data + element typioproc calls
+    // (lookup_type_cache / get_type_io_data / fmgr / pqformat) that are not
+    // ported into this unit yet and panic loudly. Installing them would wire a
+    // panic stub, not a real implementation, so they are left unset until those
+    // owners land.
 }

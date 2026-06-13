@@ -144,9 +144,9 @@ fn target_list_lengths() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut tlist: PgVec<'_, TargetEntry<'_>> = PgVec::new_in(mcx);
-    tlist.push(TargetEntry { expr: None, resjunk: false });
-    tlist.push(TargetEntry { expr: None, resjunk: true });
-    tlist.push(TargetEntry { expr: None, resjunk: false });
+    tlist.push(TargetEntry { expr: None, resname: None, resjunk: false });
+    tlist.push(TargetEntry { expr: None, resname: None, resjunk: true });
+    tlist.push(TargetEntry { expr: None, resname: None, resjunk: false });
     assert_eq!(ExecTargetListLength(&tlist), 3);
     assert_eq!(ExecCleanTargetListLength(&tlist), 2);
     assert_eq!(ExecTargetListLength(&[]), 0);
@@ -196,6 +196,7 @@ fn var_tle<'mcx>(
             )
             .unwrap(),
         ),
+        resname: None,
         resjunk: false,
     }
 }
@@ -235,7 +236,7 @@ fn tlist_matching() {
 
     // non-Var tlist item
     let mut non_var = PgVec::new_in(mcx);
-    non_var.push(TargetEntry { expr: None, resjunk: false });
+    non_var.push(TargetEntry { expr: None, resname: None, resjunk: false });
     non_var.push(var_tle(mcx, 1, 2, 25, -1));
     assert!(!tlist_matches_tupdesc(&non_var, 1, &tupdesc));
 

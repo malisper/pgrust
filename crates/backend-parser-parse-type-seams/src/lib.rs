@@ -8,6 +8,7 @@ use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
 use types_opclass::TypeName;
+use types_parsenodes::TypeName as ParseTypeName;
 
 seam_core::seam!(
     /// `NameListToString(names)` (parse_type.c): render a possibly-qualified
@@ -34,5 +35,16 @@ seam_core::seam!(
     pub fn typename_to_string<'mcx>(
         mcx: Mcx<'mcx>,
         type_name: &TypeName,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `TypeNameToString(typeName)` (parse_type.c), over the raw-parser
+    /// `TypeName` node (`nodes/parsenodes.h`) carried in a `DefElem`'s value.
+    /// `defGetString`/`defGetTypeLength` render the type name for an error
+    /// message, palloc'd in the caller's `mcx`.
+    pub fn typename_to_string_node<'mcx>(
+        mcx: Mcx<'mcx>,
+        type_name: &ParseTypeName,
     ) -> PgResult<PgString<'mcx>>
 );

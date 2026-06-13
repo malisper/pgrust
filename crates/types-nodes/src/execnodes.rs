@@ -423,6 +423,13 @@ pub struct PlanStateData<'mcx> {
     pub plan: Option<&'mcx crate::nodes::Node<'mcx>>,
     /// `ExecProcNodeMtd ExecProcNode` — function to return next tuple.
     pub ExecProcNode: ExecProcNodeMtd<'mcx>,
+    /// `ExecProcNodeMtd ExecProcNodeReal` — actual function, if above is a
+    /// wrapper. `ExecSetExecProcNode` records the per-node "real" next-tuple
+    /// routine here and installs the `ExecProcNodeFirst` first-call wrapper into
+    /// `ExecProcNode`; the wrapper dispatches through this slot (and, once past
+    /// the first call, copies it back into `ExecProcNode` or the instrumentation
+    /// wrapper).
+    pub ExecProcNodeReal: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
     /// `ExprState *qual` — boolean qual condition (compiled `plan.qual`).

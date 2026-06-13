@@ -63,14 +63,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `assign_record_type_typmod(tupDesc)` (typcache.c): register an anonymous
-    /// RECORD tuple descriptor in the per-session RecordCache and store the
-    /// assigned typmod back into `tupDesc->tdtypmod` (the C mutates the passed
-    /// descriptor in place). `funcapi`'s `internal_get_result_type` calls this
-    /// when an OUT-parameter result resolves to `RECORDOID` with `tdtypmod < 0`.
-    /// `Err` carries the C `ereport(ERROR)` surface (OOM growing the cache).
-    pub fn assign_record_type_typmod<'mcx>(
-        tup_desc: &mut types_tuple::heaptuple::TupleDescData<'mcx>,
+    /// `assign_record_type_typmod(tupDesc)` (typcache.c): for an anonymous
+    /// RECORD `TupleDesc`, find or create the matching entry in the record-type
+    /// cache and stamp its assigned `tdtypmod` (and `tdtypeid = RECORDOID`) back
+    /// into the descriptor in place, so it can be used to build composite
+    /// rowtype Datums (`BlessTupleDesc`). `Err` carries the cache-insert /
+    /// allocation surface.
+    pub fn assign_record_type_typmod(
+        tup_desc: &mut types_tuple::heaptuple::TupleDescData<'_>,
     ) -> types_error::PgResult<()>
 );
 

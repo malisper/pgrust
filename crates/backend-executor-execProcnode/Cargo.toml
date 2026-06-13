@@ -1,0 +1,28 @@
+[package]
+name = "backend-executor-execProcnode"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_execProcnode"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+# MultiExecProcNode's owned seam returns a TIDBitmap (the lone landed multiexec
+# consumer, nodeBitmapHeapscan, always demands one).
+types-tidbitmap = { path = "../types-tidbitmap" }
+mcx = { path = "../mcx" }
+# check_stack_depth() seam (utils/misc/stack_depth.c), unported owner.
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+# Seam crate this unit OWNS (installs every decl from its own init_seams()).
+backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+# Per-owner seam crates for the unported neighbours this dispatch routes through
+# (loud panic until each owner wires its init_seams()).
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }

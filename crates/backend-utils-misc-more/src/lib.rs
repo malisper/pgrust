@@ -64,6 +64,23 @@ pub fn init_seams() {
     backend_utils_misc_superuser_seams::superuser::set(superuser::superuser);
     backend_utils_misc_superuser_seams::superuser_arg::set(superuser::superuser_arg);
 
+    // utils/misc/rls.c inward seam. The seam is `Mcx`-free; the C
+    // `check_enable_rls` charges the transient `get_rel_name` copy (used only
+    // on the `noError == false` error path) to `CurrentMemoryContext`, so the
+    // adapter spins up a per-call working context, matching the repo's
+    // established `Mcx`-free-seam pattern. The crate-local result enum is
+    // mapped to the shared `types_acl::CheckEnableRlsResult` (identical
+    // `utils/rls.h` variants).
+    backend_utils_misc_more_seams::check_enable_rls::set(|relid, check_as_user, no_error| {
+        let ctx = mcx::MemoryContext::new("check_enable_rls");
+        let res = rls::check_enable_rls(ctx.mcx(), relid, check_as_user, no_error)?;
+        Ok(match res {
+            rls::CheckEnableRlsResult::RlsNone => types_acl::CheckEnableRlsResult::RlsNone,
+            rls::CheckEnableRlsResult::RlsNoneEnv => types_acl::CheckEnableRlsResult::RlsNoneEnv,
+            rls::CheckEnableRlsResult::RlsEnabled => types_acl::CheckEnableRlsResult::RlsEnabled,
+        })
+    });
+
     // The `update_process_title` GUC variable storage is owned by ps_status.c.
     vars::update_process_title.install(GucVarAccessors {
         get: ps_status::update_process_title,
