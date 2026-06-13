@@ -47,7 +47,7 @@ pub mod queryenvironment;
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    CurrentOfTid, EPQStateHandle, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
+    CurrentOfTid, EPQState, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
     ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, ModifyTableState, Opaque,
     ParamExecData,
     PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,

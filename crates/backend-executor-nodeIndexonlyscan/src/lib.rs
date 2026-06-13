@@ -35,7 +35,6 @@ use backend_access_index_indexam_seams as indexam;
 use backend_access_transam_parallel_seams as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
-use backend_executor_execMain_seams as execMain;
 use backend_executor_execScan_seams as execScan;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
@@ -67,6 +66,38 @@ fn elog(message: &'static str) -> PgError {
 /// `ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), ...))`.
 fn feature(message: &'static str) -> PgError {
     PgError::error(message).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+// --- EvalPlanQual per-relation array reads (owned EPQState in es_epq_active) -
+// C: `epqstate->relsubs_slot[idx] != NULL`.
+#[inline]
+fn epq_relsubs_slot_present(epqstate: &types_nodes::EPQState<'_>, idx: usize) -> bool {
+    epqstate
+        .relsubs_slot
+        .as_ref()
+        .and_then(|v| v.get(idx))
+        .map(|s| s.is_some())
+        .unwrap_or(false)
+}
+
+// C: `epqstate->relsubs_rowmark[idx] != NULL`.
+#[inline]
+fn epq_relsubs_rowmark_present(epqstate: &types_nodes::EPQState<'_>, idx: usize) -> bool {
+    epqstate
+        .relsubs_rowmark
+        .as_ref()
+        .and_then(|v| v.get(idx).copied())
+        .unwrap_or(false)
+}
+
+// C: `epqstate->relsubs_done[idx]`.
+#[inline]
+fn epq_relsubs_done(epqstate: &types_nodes::EPQState<'_>, idx: usize) -> bool {
+    epqstate
+        .relsubs_done
+        .as_ref()
+        .and_then(|v| v.get(idx).copied())
+        .unwrap_or(false)
 }
 
 // ===========================================================================
@@ -462,16 +493,18 @@ pub fn ExecIndexOnlyMarkPos<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    if let Some(epqstate) = estate.es_epq_active {
+    if let Some(epqstate) = estate.es_epq_active.as_deref() {
         // Inside an EvalPlanQual recheck. If a test tuple exists for this rel,
         // don't access the index; given no caller sets a mark at scan start, we
         // can only get here with relsubs_done already set (verified below).
         let scanrelid = scan_scanrelid(node)?;
         debug_assert!(scanrelid > 0);
-        if execMain::epq_relsubs_slot_present::call(epqstate, scanrelid - 1)
-            || execMain::epq_relsubs_rowmark_present::call(epqstate, scanrelid - 1)
-        {
-            if !execMain::epq_relsubs_done::call(epqstate, scanrelid - 1) {
+        let idx = (scanrelid - 1) as usize;
+        // epqstate->relsubs_slot[scanrelid - 1] != NULL ||
+        // epqstate->relsubs_rowmark[scanrelid - 1] != NULL
+        if epq_relsubs_slot_present(epqstate, idx) || epq_relsubs_rowmark_present(epqstate, idx) {
+            // if (!epqstate->relsubs_done[scanrelid - 1])
+            if !epq_relsubs_done(epqstate, idx) {
                 return Err(elog("unexpected ExecIndexOnlyMarkPos call in EPQ recheck"));
             }
             return Ok(());
@@ -491,14 +524,13 @@ pub fn ExecIndexOnlyRestrPos<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    if let Some(epqstate) = estate.es_epq_active {
+    if let Some(epqstate) = estate.es_epq_active.as_deref() {
         // See comments in ExecIndexOnlyMarkPos.
         let scanrelid = scan_scanrelid(node)?;
         debug_assert!(scanrelid > 0);
-        if execMain::epq_relsubs_slot_present::call(epqstate, scanrelid - 1)
-            || execMain::epq_relsubs_rowmark_present::call(epqstate, scanrelid - 1)
-        {
-            if !execMain::epq_relsubs_done::call(epqstate, scanrelid - 1) {
+        let idx = (scanrelid - 1) as usize;
+        if epq_relsubs_slot_present(epqstate, idx) || epq_relsubs_rowmark_present(epqstate, idx) {
+            if !epq_relsubs_done(epqstate, idx) {
                 return Err(elog("unexpected ExecIndexOnlyRestrPos call in EPQ recheck"));
             }
             return Ok(());

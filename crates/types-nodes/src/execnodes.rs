@@ -66,12 +66,53 @@ pub struct EcxtId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
 
-/// Opaque token for a live `EPQState *` (`nodes/execnodes.h`), owned by the
-/// EvalPlanQual machinery (execMain). Scan nodes hold it only to test for
-/// presence and to index its `relsubs_*` arrays through the owner's seams;
-/// the full struct lands when EvalPlanQual is ported.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EPQStateHandle(pub usize);
+/// `EPQState` (`nodes/execnodes.h`) — state for executing an EvalPlanQual
+/// recheck on a candidate tuple, owned by the EvalPlanQual machinery
+/// (execMain.c) and held by [`EStateData::es_epq_active`] for the duration of
+/// a recheck. Scan nodes read its per-relation substitute arrays (indexed by
+/// `scanrelid - 1`) directly off the owned struct.
+///
+/// Mirrors the C struct field-by-field. The fields the EvalPlanQual port
+/// (execMain.c) will need but no current consumer reads — `parentestate`,
+/// `tuple_table`, `plan`, `arowMarks`, `origslot`, `recheckestate`,
+/// `recheckplanstate` — are trimmed here and land with that port (docs/types.md
+/// rule 3); they are documented inline below so the layout stays a faithful
+/// mirror.
+///
+/// `relsubs_slot[i]` is `Some(slot_id)` when the caller has provided an EPQ
+/// test slot for that target relation (C: a non-NULL `relsubs_slot[i]` entry);
+/// the array itself is `None` for the C `NULL` (no EPQ in progress / not yet
+/// built). `relsubs_rowmark[i]` is `true` when a non-locking rowmark can fetch
+/// a replacement tuple on demand. `relsubs_done[i]` records that the EPQ tuple
+/// for that relation has already been returned (or that there is none);
+/// `relsubs_blocked[i]` records that there is no EPQ tuple this test.
+#[derive(Debug, Default)]
+pub struct EPQState<'mcx> {
+    // C: `EState *parentestate` — main query's EState. Trimmed (rule 3).
+    /// `int epqParam` — ID of the Param that forces a scan node to re-eval.
+    pub epqParam: i32,
+    /// `List *resultRelations` — integer list of RT indexes, or NIL (`None`).
+    pub resultRelations: Option<PgVec<'mcx, i32>>,
+    // C: `List *tuple_table` — tuple table for `relsubs_slot`. Trimmed (rule 3).
+    /// `TupleTableSlot **relsubs_slot` — per-relation EPQ test slots
+    /// (`Some(slot_id)` = a non-NULL C entry). `None` = the C `NULL` array.
+    pub relsubs_slot: Option<PgVec<'mcx, Option<SlotId>>>,
+    // C: `Plan *plan` — plan tree to be executed. Trimmed (rule 3).
+    // C: `List *arowMarks` — ExecAuxRowMarks (non-locking only). Trimmed.
+    // C: `TupleTableSlot *origslot` — original output tuple. Trimmed (rule 3).
+    // C: `EState *recheckestate` — EState for EPQ execution. Trimmed (rule 3).
+    /// `ExecAuxRowMark **relsubs_rowmark` — per-relation non-locking rowmarks
+    /// (`true` = a non-NULL C entry the EPQ machinery can fetch through).
+    /// `None` = the C `NULL` array.
+    pub relsubs_rowmark: Option<PgVec<'mcx, bool>>,
+    /// `bool *relsubs_done` — per-relation "EPQ tuple already returned / none".
+    /// `None` = the C `NULL` array.
+    pub relsubs_done: Option<PgVec<'mcx, bool>>,
+    /// `bool *relsubs_blocked` — per-relation "no EPQ tuple this test".
+    /// `None` = the C `NULL` array.
+    pub relsubs_blocked: Option<PgVec<'mcx, bool>>,
+    // C: `PlanState *recheckplanstate` — EPQ-specific exec nodes. Trimmed.
+}
 
 /// An opaque handle to a genuinely AM/extension-opaque object the executor
 /// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
@@ -494,11 +535,10 @@ pub struct EStateData<'mcx> {
     /// (the index/heap scan ports), per docs/types.md rule 3.
     pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
     /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
-    /// recheck state this EState belongs to. The full `EPQState` is owned by
-    /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle
-    /// here; scan nodes read its `relsubs_*` arrays through the EvalPlanQual
-    /// owner's seams.
-    pub es_epq_active: Option<EPQStateHandle>,
+    /// recheck state this EState belongs to (C: a pointer to the active
+    /// `EPQState`). The owned model holds the real `EPQState`; scan nodes read
+    /// its `relsubs_*` arrays directly. `None` is the C `NULL`.
+    pub es_epq_active: Option<PgBox<'mcx, EPQState<'mcx>>>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
