@@ -73,3 +73,9 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+# smgr (RelationGetNumberOfBlocks) is already declared above; bitmapset encode
+# (identity key), fmgr resolve (index_getprocinfo lazy init), ruleutils (opclass
+# name in the missing-options error).
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }

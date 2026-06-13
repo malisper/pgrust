@@ -1342,6 +1342,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)` —
+    /// `SearchSysCache1(INDEXRELID, index_oid)` then whether the `indpred`
+    /// attribute is non-null, i.e. the index has a partial-index predicate
+    /// (`RelationGetIndexPredicate(index) != NIL` without materializing the node
+    /// tree). `Ok(None)` on a cache miss. `Err` carries the catcache error
+    /// surface.
+    pub fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid,
     /// CStringGetDatum(pubname))` (`get_publication_oid`). `InvalidOid` (0) when
     /// not found; the caller turns that into the "publication does not exist"
