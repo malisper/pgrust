@@ -6147,6 +6147,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-page"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-page-checksum",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -8992,6 +9006,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
+ "backend-storage-page",
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",

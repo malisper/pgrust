@@ -107,6 +107,7 @@ backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-storage-page = { path = "../backend-storage-page" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }

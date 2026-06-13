@@ -54,6 +54,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DataChecksumsEnabled()` (xlog.c) — whether data-page checksums are on
+    /// for this cluster. Read from the control file's
+    /// `data_checksum_version`; `bufpage.c`'s verify/set-checksum paths gate on
+    /// it. Panics until xlog installs the control-file-backed implementation.
+    pub fn data_checksums_enabled() -> bool
+);
+
+seam_core::seam!(
     /// `wal_sync_method` (xlog.c GUC) — the WAL sync method, consulted by
     /// fd.c's `pg_fsync` to choose the writethrough vs. plain fsync path.
     pub fn wal_sync_method() -> WalSyncMethod

@@ -103,6 +103,7 @@ pub fn init_all() {
     backend_storage_lmgr_lmgr::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
+    backend_storage_page::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_storage_sync::init_seams();
     backend_tcop_backend_startup::init_seams();
