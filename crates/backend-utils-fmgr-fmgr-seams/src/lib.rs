@@ -97,6 +97,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCall3(flinfo, arg1, arg2, arg3)` (fmgr.c): call the function
+    /// identified by `function_id` (the caller's cached `FmgrInfo`, which
+    /// cannot cross the seam, so we re-resolve by OID) with three
+    /// non-collation arguments under the default (invalid) collation, returning
+    /// its `Datum` result. Used by `ri_CompareWithCast` to apply a cast
+    /// function `(value, typmod=-1, implicit=false)`. The C path asserts the
+    /// result is non-null. Can `ereport(ERROR)`.
+    pub fn function_call3(
+        function_id: Oid,
+        arg1: Datum,
+        arg2: Datum,
+        arg3: Datum,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form used
     /// by bootstrap's `InsertOneValue` DEBUG4 trace: one-shot lookup + call of
     /// a type's text output function on the bare `Datum` it just built (the
@@ -108,4 +124,31 @@ seam_core::seam!(
         function_id: Oid,
         val: Datum,
     ) -> PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` (fmgr.c): call the
+    /// function identified by `function_id` (the caller's cached `FmgrInfo`,
+    /// re-resolved by OID) with two arguments under the given input
+    /// `collation`, returning its `Datum` result. Used by `ri_CompareWithCast`
+    /// to apply the equality/contained-by operator. The C path asserts the
+    /// result is non-null. Can `ereport(ERROR)`.
+    pub fn function_call2_coll(
+        function_id: Oid,
+        collation: Oid,
+        arg1: Datum,
+        arg2: Datum,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// Render the given (1-based, relation) `attnums` of a violator
+    /// `TupleTableSlot` into printable [`ResultColumn`]s for
+    /// `ri_ReportViolation` (`getTypeOutputInfo` + `OidOutputFunctionCall`;
+    /// NULL → C's `"null"`). Allocated into `mcx`. Can `ereport(ERROR)`.
+    pub fn render_slot_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: types_ri_triggers::TupleTableSlotRef,
+        attnums: &[i16],
+    ) -> PgResult<mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>>
 );
