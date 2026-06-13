@@ -6124,6 +6124,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-spell"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-spell-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-regex",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-tsearch-spell-seams"
 version = "0.0.0"
 dependencies = [
@@ -8241,6 +8260,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
+ "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
@@ -8288,6 +8308,7 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
+ "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
