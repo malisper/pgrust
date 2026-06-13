@@ -1637,8 +1637,31 @@ fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<Tab
     Ok(opts.unwrap_or_default())
 }
 
+/// Seam target for `init_local_reloptions(relopts, relopt_struct_size)`.
+///
+/// Operates directly on the shared `types_reloptions::local_relopts` type since
+/// the seam boundary uses that cross-crate type. The operation is lossless:
+/// clear the option/validator lists and record the struct size, exactly mirroring
+/// what the C `init_local_reloptions` does.
+fn init_local_reloptions_seam(
+    relopts: &mut types_reloptions::local_relopts,
+    relopt_struct_size: usize,
+) {
+    relopts.options.clear();
+    relopts.validators.clear();
+    relopts.relopt_struct_size = relopt_struct_size;
+}
+
 /// Install every seam this crate owns.
 pub fn init_seams() {
     backend_access_common_reloptions_seams::attribute_reloptions::set(attribute_reloptions_seam);
     backend_access_common_reloptions_seams::tablespace_reloptions::set(tablespace_reloptions_seam);
+    backend_access_common_reloptions_seams::init_local_reloptions::set(
+        init_local_reloptions_seam,
+    );
+    // add_local_int_reloption is NOT installed: the seam's `local_relopts` type
+    // (types_reloptions::local_relopts) lacks fields for int-option range and
+    // default data (min, max, default_val). Installing a wrapper that silently
+    // drops those values would be a silent stub — worse than a panic per
+    // AGENTS.md "Loud panic always beats a silent stub."
 }
