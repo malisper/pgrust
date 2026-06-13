@@ -2,8 +2,10 @@
 //! (`commands/tablecmds.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+use types_core::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
+use types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `PreCommit_on_commit_actions()` — ON COMMIT DROP / DELETE ROWS work;
@@ -23,4 +25,40 @@ seam_core::seam!(
         my_subid: SubTransactionId,
         parent_subid: SubTransactionId,
     )
+);
+
+seam_core::seam!(
+    /// `ATExecChangeOwner(relationOid, newOwnerId, recursing, lockmode)`
+    /// (tablecmds.c): change a relation's owner (and its dependent objects:
+    /// indexes, owned sequences, toast tables). REASSIGN OWNED passes
+    /// `recursing = true` so visiting a dependent before its parent doesn't
+    /// fail. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn at_exec_change_owner(
+        relation_oid: Oid,
+        new_owner_id: Oid,
+        recursing: bool,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+/* ---- CLUSTER finish-heap-swap helpers (backend-commands-cluster) --------- */
+
+seam_core::seam!(
+    /// `CheckTableNotInUse(rel, stmt)` (tablecmds.c).
+    pub fn check_table_not_in_use(rel: &types_rel::Relation<'_>, stmt: &str) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `RenameRelationInternal(myrelid, newrelname, is_internal, is_index)`
+    /// (tablecmds.c).
+    pub fn rename_relation_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        myrelid: Oid,
+        newrelname: &str,
+        is_internal: bool,
+        is_index: bool,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `ResetRelRewrite(myrelid)` (tablecmds.c).
+    pub fn reset_rel_rewrite(myrelid: Oid) -> PgResult<()>
 );

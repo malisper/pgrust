@@ -50,6 +50,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_mbcliplen(mbstr, len, limit)` (mbutils.c): the byte length of the
+    /// longest prefix of the first `len` bytes of `mbstr` that does not exceed
+    /// `limit` bytes and does not split a multibyte character, in the current
+    /// database encoding. C takes `const char *` bytes in the database
+    /// encoding. Infallible.
+    pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32
+);
+
+seam_core::seam!(
     /// `pg_mb2wchar_with_len(from, to, len)` (mbutils.c): convert the first
     /// `len` (here: all) bytes of a database-encoding string to `pg_wchar`
     /// code points. In C the caller pallocs the `(len + 1) * sizeof(pg_wchar)`
@@ -107,4 +116,52 @@ seam_core::seam!(
     /// `is_encoding_supported_by_icu(encoding)` (mbutils.c): whether ICU
     /// collations work with the encoding. Pure table lookup.
     pub fn is_encoding_supported_by_icu(encoding: i32) -> bool
+);
+
+// --- backend-utils-init-postinit consumers (mbutils.c) ---
+
+seam_core::seam!(
+    /// `SetDatabaseEncoding(encoding)` (mbutils.c): set the server (database)
+    /// encoding. `Err` carries its `ereport` surface.
+    pub fn set_database_encoding(encoding: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeClientEncoding()` (mbutils.c): finalize the client_encoding
+    /// conversion setup. `Err` carries its `ereport` surface.
+    pub fn initialize_client_encoding() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pg_server_to_any(s, len, encoding)` (mbutils.c): convert from the
+    /// server encoding to an arbitrary `encoding`. As with the client/server
+    /// dispatchers, `Ok(None)` means no conversion happened (the caller's
+    /// bytes stand); `Ok(Some(v))` carries the converted bytes (no trailing
+    /// NUL) allocated in `mcx`. `Err` carries the conversion failure /
+    /// out-of-memory `ereport(ERROR)`.
+    pub fn pg_server_to_any<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: &[u8],
+        encoding: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
+    /// `pg_get_client_encoding()` (mbutils.c): the current client encoding id.
+    /// Pure global read.
+    pub fn pg_get_client_encoding() -> i32
+);
+
+seam_core::seam!(
+    /// `pg_encoding_mblen(encoding, mbstr)` (wchar.c): the byte length of the
+    /// first character of `mbstr` (the remaining bytes from the current scan
+    /// position) in the explicit `encoding`. Result is `>= 1`. Infallible.
+    pub fn pg_encoding_mblen(encoding: i32, mbstr: &[u8]) -> i32
+);
+
+seam_core::seam!(
+    /// `PG_ENCODING_IS_CLIENT_ONLY(encoding)` (`mb/pg_wchar.h`): whether the
+    /// encoding may appear only on the client side (so ASCII can be a
+    /// non-first byte of a multibyte char). Pure table predicate.
+    pub fn pg_encoding_is_client_only(encoding: i32) -> bool
 );

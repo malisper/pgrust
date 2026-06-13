@@ -2,9 +2,14 @@
 
 use mcx::PgVec;
 use types_core::{
-    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber, RmgrId,
-    TransactionId, XLogRecPtr,
+    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber,
+    RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
 };
+
+// `WAL_LEVEL_MINIMAL`/`WAL_LEVEL_REPLICA`/`WAL_LEVEL_LOGICAL` are the canonical
+// `WalLevel` enum aliases in `xlog_consts` (main's authoritative `wal_level`
+// vocabulary, re-exported at the crate root). The earlier `int`-typed copies
+// here were the slotsync branch's divergence and collided with them on merge.
 
 /// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
 /// reserved for xlog-insertion flags; the rmgr's record opcode lives in the
@@ -31,6 +36,9 @@ pub const RM_SMGR_ID: RmgrId = 2;
 
 /// `RM_DBASE_ID` — the Database resource manager (rmgrlist.h entry 4).
 pub const RM_DBASE_ID: RmgrId = 4;
+
+/// `RM_RELMAP_ID` — the RelMap resource manager (rmgrlist.h entry 7).
+pub const RM_RELMAP_ID: RmgrId = 7;
 
 /// `BKPBLOCK_WILL_INIT` (access/xlogrecord.h) — redo will re-init the page.
 pub const BKPBLOCK_WILL_INIT: uint8 = 0x40;
@@ -120,6 +128,11 @@ impl XLogRecord {
     /// `XLogRecGetInfo` — `xl_info`.
     pub const fn info(&self) -> uint8 {
         self.xl_info
+    }
+
+    /// `XLogRecGetXid` — `xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.xl_xid
     }
 
     /// `XLogRecGetRmid` — `xl_rmid`.
@@ -255,6 +268,9 @@ pub struct DecodedXLogRecord<'mcx> {
     /// `XLogRecGetData` — the record's main data.
     main_data: &'mcx [u8],
     blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
+    /// `DecodedXLogRecord.record_origin` — the replication origin decoded from
+    /// the record (`XLogRecGetOrigin`); `InvalidRepOriginId` when none.
+    record_origin: RepOriginId,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
@@ -269,11 +285,29 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
             header,
             main_data,
             blocks,
+            record_origin: types_core::InvalidRepOriginId,
         }
+    }
+
+    /// Set `record_origin` (`XLogRecGetOrigin`), builder-style; the decoder
+    /// fills it from the record's origin block-data when present.
+    pub const fn with_origin(mut self, origin: RepOriginId) -> Self {
+        self.record_origin = origin;
+        self
     }
 
     pub const fn header(&self) -> &XLogRecord {
         &self.header
+    }
+
+    /// `XLogRecGetXid(record)` — `record->header.xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.header.xid()
+    }
+
+    /// `XLogRecGetOrigin(record)` — `record->record_origin`.
+    pub const fn record_origin(&self) -> RepOriginId {
+        self.record_origin
     }
 
     pub fn blocks(&self) -> &[DecodedBkpBlock<'mcx>] {
@@ -298,6 +332,19 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
 
     fn block(&self, block_id: usize) -> Option<&DecodedBkpBlock<'mcx>> {
         self.blocks.get(block_id).filter(|b| b.in_use)
+    }
+
+    /// `XLogRecMaxBlockId(record)` — the highest block id in the record
+    /// (`record->max_block_id`); `-1` when no blocks are registered. The block
+    /// array is sized `0..=max_block_id`, so this is `blocks.len() - 1`.
+    pub fn max_block_id(&self) -> i32 {
+        self.blocks.len() as i32 - 1
+    }
+
+    /// `XLogRecHasBlockRef(record, block_id)` — whether the block id is in
+    /// range and the entry is in use.
+    pub fn has_block_ref(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some()
     }
 
     /// `XLogRecHasBlockData(record, block_id)`.
@@ -340,9 +387,17 @@ pub struct RedoRecord<'a> {
 /// `RM_STANDBY_ID` — the Standby resource manager (rmgrlist.h entry 8).
 pub const RM_STANDBY_ID: RmgrId = 8;
 
+/// `RM_GENERIC_ID` — the Generic-WAL resource manager (rmgrlist.h entry 20).
+pub const RM_GENERIC_ID: RmgrId = 20;
+
 /// `XLOG_MARK_UNIMPORTANT` (access/xlog.h) — record flag: not important for
 /// durability decisions (checkpoint / archive-timeout triggering).
 pub const XLOG_MARK_UNIMPORTANT: uint8 = 0x02;
+
+// `WalLevel` and `ArchiveMode` are the canonical enums in `xlog_consts` (main's
+// single source, re-exported at the crate root); the launcher/walreceiver ports
+// use those. No duplicate definition here.
+
 
 /// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
 /// invalidation causes.
@@ -352,6 +407,22 @@ pub const RS_INVAL_WAL_REMOVED: ReplicationSlotInvalidationCause = 1 << 0;
 pub const RS_INVAL_HORIZON: ReplicationSlotInvalidationCause = 1 << 1;
 pub const RS_INVAL_WAL_LEVEL: ReplicationSlotInvalidationCause = 1 << 2;
 pub const RS_INVAL_IDLE_TIMEOUT: ReplicationSlotInvalidationCause = 1 << 3;
+
+/// One entry of a parsed timeline-history file (`TimeLineHistoryEntry`,
+/// `access/timeline.h`): the LSN range over which `tli` was the current
+/// timeline (`begin <= lsn < end`; `end == InvalidXLogRecPtr` for the latest).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimeLineHistoryEntry {
+    pub tli: TimeLineID,
+    pub begin: XLogRecPtr,
+    pub end: XLogRecPtr,
+}
+
+impl TimeLineHistoryEntry {
+    pub const fn new(tli: TimeLineID, begin: XLogRecPtr, end: XLogRecPtr) -> Self {
+        Self { tli, begin, end }
+    }
+}
 
 /// `XLR_SPECIAL_REL_UPDATE` (`access/xlogrecord.h`) — flag bit in `xl_info`:
 /// the record modifies relation files outside the buffer manager's view.

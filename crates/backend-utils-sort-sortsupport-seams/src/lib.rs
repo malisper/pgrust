@@ -37,19 +37,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `PrepareSortSupportFromOrderingOp(orderingOp, ssup)` (sortsupport.c):
-    /// fill `ssup` (its `ssup_reverse` and resolved `comparator`) from a btree
-    /// ordering operator OID — the setup `nodeSetOp`'s `ExecInitSetOp` does for
-    /// each grouping column in `SETOP_SORTED` mode. Looks up the operator's
-    /// opfamily/sortfunction via the catalog and may install a comparison shim;
-    /// fallible (catalog lookups / fmgr `ereport(ERROR)`).
-    pub fn prepare_sort_support_from_ordering_op(
-        ordering_op: Oid,
-        ssup: &mut SortSupportData<'_>,
-    ) -> PgResult<()>
-);
-
-seam_core::seam!(
     /// `ssup->comparator(datum1, datum2, ssup)` (sortsupport.h): invoke the
     /// installed comparator (identified by the `SortComparatorId` carried in
     /// `ssup.comparator`) on two non-null datums, returning `<0`/`0`/`>0`. The
@@ -60,4 +47,17 @@ seam_core::seam!(
         datum2: Datum,
         ssup: &SortSupportData<'_>,
     ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `PrepareSortSupportFromOrderingOp(orderingOp, ssup)` (sortsupport.c):
+    /// fill in `ssup` (sets `ssup_reverse` and resolves/installs the type's
+    /// comparator) from the ordering operator `orderingOp` (a "<" or ">" btree
+    /// operator). Catalog lookups and comparator setup allocate / can
+    /// `ereport(ERROR)`, hence `PgResult`. `ssup.ssup_cxt` selects the context
+    /// the comparator state is built in.
+    pub fn prepare_sort_support_from_ordering_op(
+        ordering_op: Oid,
+        ssup: &mut SortSupportData<'_>,
+    ) -> PgResult<()>
 );

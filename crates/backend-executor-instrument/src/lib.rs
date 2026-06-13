@@ -349,9 +349,10 @@ pub fn WalUsageAccumDiff(dst: &mut WalUsage, add: &WalUsage, sub: &WalUsage) {
     dst.wal_buffers_full += add.wal_buffers_full - sub.wal_buffers_full;
 }
 
-/// This crate declares no seams; nothing to install.
+/// Install this unit's outward seams.
 pub fn init_seams() {
     backend_executor_instrument_seams::instr_end_loop::set(InstrEndLoop);
+    backend_executor_instrument_seams::instr_update_tuple_count::set(InstrUpdateTupleCount);
 }
 
 #[cfg(test)]

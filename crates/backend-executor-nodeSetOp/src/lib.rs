@@ -53,10 +53,10 @@ use mcx::{Mcx, MemoryContext, PgBox};
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use types_nodes::nodeagg::TupleHashEntryData;
 use types_nodes::nodesetop::{
-    SetOp, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, TupleHashEntryData,
-    SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
-    SETOP_HASHED,
+    SetOp, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SETOPCMD_EXCEPT,
+    SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL, SETOP_HASHED,
 };
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 use types_sortsupport::SortSupportData;
@@ -546,6 +546,13 @@ fn setop_fill_hash_table<'mcx>(
         //   pergroup = TupleHashEntryGetAdditional(hashtable, entry);
         //   if (isnew) { pergroup->numLeft = 0; pergroup->numRight = 0; }
         //   pergroup->numLeft++;
+        //
+        // The execGrouping `lookup_tuple_hash_entry` seam always creates and
+        // zeroes a fresh entry's additional space (the C `BuildTupleHashTable`
+        // additionalsize MemSet on creation), so reading then bumping `numLeft`
+        // in the callback yields 0→1 for a new entry and N→N+1 otherwise —
+        // matching the C `if (isnew) zero; numLeft++`. `isnew`/`hash` from the
+        // return are not needed here.
         let hashtable = setopstate
             .hashtable
             .as_mut()
@@ -553,20 +560,9 @@ fn setop_fill_hash_table<'mcx>(
         execGrouping::lookup_tuple_hash_entry::call(
             hashtable,
             outerslot,
-            true,
             estate,
-            &mut |isnew: bool, _entry: &mut TupleHashEntryData<'mcx>, additional: &mut [u8]| {
-                // pergroup = TupleHashEntryGetAdditional(hashtable, entry);
-                // if (isnew) { pergroup->numLeft = 0; pergroup->numRight = 0; }
-                let mut pergroup = if isnew {
-                    SetOpStatePerGroupData {
-                        numLeft: 0,
-                        numRight: 0,
-                    }
-                } else {
-                    read_pergroup(additional)
-                };
-                // pergroup->numLeft++;
+            &mut |_entry: &mut TupleHashEntryData<'mcx>, additional: &mut [u8]| {
+                let mut pergroup = read_pergroup(additional);
                 pergroup.numLeft += 1;
                 write_pergroup(additional, &pergroup);
             },
@@ -594,20 +590,33 @@ fn setop_fill_hash_table<'mcx>(
             // For tuples not seen previously, do not make hashtable entry.
             //   entry = LookupTupleHashEntry(hashtable, innerslot, NULL, NULL);
             //   if (entry) { pergroup = ...; pergroup->numRight++; }
+            //
+            // The C `LookupTupleHashEntry(.., NULL, NULL)` is the no-create
+            // probe (it computes the hash itself). The owned model splits that
+            // into `TupleHashTableHash` + `lookup_tuple_hash_entry_hash` with
+            // `create == false`; a miss leaves the entry untouched, a hit bumps
+            // `numRight`.
             let hashtable = setopstate
                 .hashtable
                 .as_mut()
                 .expect("setop_fill_hash_table: hashtable is NULL");
-            execGrouping::lookup_tuple_hash_entry::call(
+            let hash = execGrouping::tuple_hash_table_hash::call(hashtable, innerslot, estate)?;
+            let hashtable = setopstate
+                .hashtable
+                .as_mut()
+                .expect("setop_fill_hash_table: hashtable is NULL");
+            execGrouping::lookup_tuple_hash_entry_hash::call(
                 hashtable,
                 innerslot,
+                hash,
                 false,
                 estate,
-                &mut |_isnew: bool, _entry: &mut TupleHashEntryData<'mcx>, additional: &mut [u8]| {
-                    // entry present (create == false ⇒ never new): pergroup->numRight++.
-                    let mut pergroup = read_pergroup(additional);
-                    pergroup.numRight += 1;
-                    write_pergroup(additional, &pergroup);
+                &mut |entry: Option<(&mut TupleHashEntryData<'mcx>, &mut [u8])>| {
+                    if let Some((_entry, additional)) = entry {
+                        let mut pergroup = read_pergroup(additional);
+                        pergroup.numRight += 1;
+                        write_pergroup(additional, &pergroup);
+                    }
                 },
             )?;
 
@@ -623,7 +632,7 @@ fn setop_fill_hash_table<'mcx>(
         .hashtable
         .as_mut()
         .expect("setop_fill_hash_table: hashtable is NULL");
-    setopstate.hashiter = execGrouping::reset_tuple_hash_iterator::call(hashtable);
+    setopstate.hashiter = execGrouping::init_tuple_hash_iterator::call(hashtable);
     Ok(())
 }
 
@@ -924,7 +933,7 @@ pub fn ExecReScanSetOp<'mcx>(
                 .hashtable
                 .as_mut()
                 .expect("ExecReScanSetOp: hashtable is NULL");
-            node.hashiter = execGrouping::reset_tuple_hash_iterator::call(hashtable);
+            node.hashiter = execGrouping::init_tuple_hash_iterator::call(hashtable);
             return Ok(());
         }
 

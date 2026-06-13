@@ -5,6 +5,23 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `HeapTupleHeaderGetDatum(tuple)` (execTuples.c): convert a freshly-formed
+    /// `HeapTupleHeader` to a composite `Datum`. If the tuple has no external
+    /// TOAST pointers this is C's `PointerGetDatum(tuple)` (the tuple is returned
+    /// unchanged and the `Datum` references it); otherwise the rowtype is looked
+    /// up (`lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId/TypMod)`) and the
+    /// tuple flattened via `toast_flatten_tuple_to_datum`, returning the new
+    /// inlined tuple and a `Datum` referencing it. Producing a composite `Datum`
+    /// token from a tuple is the heap/datum owner's concern; the execTuples
+    /// caller reaches it through this seam. `Err` carries the detoast
+    /// `ereport(ERROR)` surface and OOM.
+    pub fn heap_tuple_header_get_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+    ) -> types_error::PgResult<(types_tuple::heaptuple::HeapTuple<'mcx>, types_datum::Datum)>
+);
+
+seam_core::seam!(
     /// `toast_flatten_tuple_to_datum(tup, tup_len, tupleDesc)`
     /// (access/heap/heaptoast.c): inline a tuple's external TOAST pointers to
     /// produce a self-contained composite-type Datum. Reached from

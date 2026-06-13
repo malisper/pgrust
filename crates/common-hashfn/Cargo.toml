@@ -1,0 +1,12 @@
+[package]
+name = "common-hashfn"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_hashfn"
+path = "src/lib.rs"
+
+[dependencies]
+common-hashfn-seams = { path = "../common-hashfn-seams" }

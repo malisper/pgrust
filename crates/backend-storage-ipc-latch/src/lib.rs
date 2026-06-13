@@ -178,11 +178,11 @@ pub fn InitializeLatchWaitSet() -> PgResult<()> {
         debug_assert!(slot.is_none());
 
         let set = WaitEventSet::create(2)?;
-        let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, my_latch())?;
+        let latch_pos = set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, my_latch(), None)?;
         debug_assert_eq!(latch_pos, LatchWaitSetLatchPos);
 
         if is_under_postmaster() {
-            let latch_pos = set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None)?;
+            let latch_pos = set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None)?;
             debug_assert_eq!(latch_pos, LatchWaitSetPostmasterDeathPos);
         }
 
@@ -337,7 +337,7 @@ pub fn WaitLatchOrSocket(
     }
 
     if wakeEvents & WL_LATCH_SET != 0 {
-        set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, latch)?;
+        set.add_event(WL_LATCH_SET, PGINVALID_SOCKET, latch, None)?;
     }
 
     // Postmaster-managed callers must handle postmaster death somehow.
@@ -346,16 +346,16 @@ pub fn WaitLatchOrSocket(
     );
 
     if wakeEvents & WL_POSTMASTER_DEATH != 0 && is_under_postmaster() {
-        set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None)?;
+        set.add_event(WL_POSTMASTER_DEATH, PGINVALID_SOCKET, None, None)?;
     }
 
     if wakeEvents & WL_EXIT_ON_PM_DEATH != 0 && is_under_postmaster() {
-        set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None)?;
+        set.add_event(WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None)?;
     }
 
     if wakeEvents & WL_SOCKET_MASK != 0 {
         let ev = wakeEvents & WL_SOCKET_MASK;
-        set.add_event(ev, sock, None)?;
+        set.add_event(ev, sock, None, None)?;
     }
 
     let mut event = [WaitEvent::default()];
@@ -442,10 +442,47 @@ fn set_latch_my_latch() {
     SetLatch(latch);
 }
 
+/// `ResetLatch(MyLatch)` for the seam's parameterless shape. A NULL `MyLatch`
+/// would crash the C; surface it loudly.
+fn reset_latch_my_latch() {
+    let latch = my_latch().expect("ResetLatch(MyLatch): MyLatch is not set");
+    ResetLatch(latch);
+}
+
+/// `WaitLatch(MyLatch, ...)` for the seam's MyLatch shape.
+fn wait_latch_my_latch(
+    wake_events: u32,
+    timeout: i64,
+    wait_event_info: u32,
+) -> types_error::PgResult<u32> {
+    WaitLatch(my_latch(), wake_events, timeout, wait_event_info)
+}
+
+/// `WaitLatch(latch, ...)` for the seam's explicit-handle shape. The seam
+/// takes a non-optional `LatchHandle` (C call sites that pass a concrete
+/// latch pointer) and returns `PgResult<i32>` matching the C return type.
+fn wait_latch_seam(
+    latch: LatchHandle,
+    wake_events: u32,
+    timeout: i64,
+    wait_event_info: u32,
+) -> types_error::PgResult<i32> {
+    WaitLatch(Some(latch), wake_events, timeout, wait_event_info).map(|v| v as i32)
+}
+
 /// Install this unit's seams (`backend-storage-ipc-latch-seams`).
 pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::set(set_latch_my_latch);
     backend_storage_ipc_latch_seams::reset_latch::set(ResetLatch);
+    backend_storage_ipc_latch_seams::set_latch::set(SetLatch);
+    backend_storage_ipc_latch_seams::reset_latch_my_latch::set(reset_latch_my_latch);
+    backend_storage_ipc_latch_seams::wait_latch_my_latch::set(wait_latch_my_latch);
+    backend_storage_ipc_latch_seams::wait_latch::set(wait_latch_seam);
+    // `MyLatch` (globals.c): the seam returns a non-optional `LatchHandle`
+    // (the few C callers that need the handle deref a non-NULL `MyLatch`); a
+    // NULL `MyLatch` would crash the C, so surface it loudly, matching the
+    // `set_latch_my_latch`/`reset_latch_my_latch` convention above.
+    backend_storage_ipc_latch_seams::my_latch::set(|| my_latch().expect("MyLatch is not set"));
 }
 
 #[cfg(test)]

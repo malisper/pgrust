@@ -6,18 +6,10 @@
 //! use other nodes). In `SETOP_SORTED` mode the per-group counts come from a
 //! merge over the two sorted inputs (`SetOpStatePerInput` cursors); in
 //! `SETOP_HASHED` mode the `SetOpStatePerGroupData` lives in each tuple-hash
-//! entry's MAXALIGN'd "additional space".
-//!
-//! # `TupleHashTable` family placement
-//!
-//! `executor/execnodes.h` exposes `TupleHashTableData` / `TupleHashEntryData` /
-//! `TupleHashIterator` as public types (the SetOp/Agg state structs embed them
-//! by value/pointer). They are owned by the `execGrouping.c` subsystem, which is
-//! not yet ported; only the underlying `tuplehash` simplehash bucket array is
-//! execGrouping-internal (modelled here as [`crate::execnodes::Opaque`]). They
-//! live in this module (the lowest types crate that stays acyclic) so SetOp can
-//! embed them and the execGrouping seam can name them; when a sibling grouping
-//! node (Agg) lands it re-uses these same definitions.
+//! entry's MAXALIGN'd "additional space". The `TupleHashTable` /
+//! `TupleHashIterator` types the hashed-mode state embeds are the public
+//! `execnodes.h` types defined alongside the other grouping node in
+//! [`crate::nodeagg`].
 
 extern crate alloc;
 
@@ -28,10 +20,9 @@ use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::MinimalTuple;
 
-use crate::execexpr::ExprState;
-use crate::execnodes::{EcxtId, Opaque, PlanStateData, SlotId};
+use crate::execnodes::{PlanStateData, SlotId};
+use crate::nodeagg::{TupleHashIterator, TupleHashTable};
 use crate::nodeindexscan::Plan;
 use crate::nodes::NodeTag;
 
@@ -68,105 +59,6 @@ pub type SetOpStrategy = i32;
 pub const SETOP_SORTED: SetOpStrategy = 0;
 /// `SETOP_HASHED` — use internal hash table.
 pub const SETOP_HASHED: SetOpStrategy = 1;
-
-// ===========================================================================
-// TupleHashTable family (executor/execnodes.h) — public, owned by execGrouping.
-// ===========================================================================
-
-/// `TupleHashEntryData` (execnodes.h):
-///
-/// ```c
-/// typedef struct TupleHashEntryData {
-///     MinimalTuple firstTuple;   /* copy of first tuple in this group */
-///     uint32       status;       /* hash status */
-///     uint32       hash;         /* hash value (cached) */
-/// } TupleHashEntryData;
-/// ```
-///
-/// The MAXALIGN'd per-group "additional space" the C lays out after the entry
-/// (`TupleHashEntryGetAdditional`) is owned by execGrouping; SetOp stores its
-/// `SetOpStatePerGroupData` there.
-#[derive(Debug, Default)]
-pub struct TupleHashEntryData<'mcx> {
-    /// `MinimalTuple firstTuple` — copy of first tuple in this group.
-    pub firstTuple: MinimalTuple<'mcx>,
-    /// `uint32 status` — hash status.
-    pub status: u32,
-    /// `uint32 hash` — cached hash value.
-    pub hash: u32,
-}
-
-/// `TupleHashEntry` (execnodes.h) — `TupleHashEntryData *`.
-pub type TupleHashEntry<'mcx> = Option<PgBox<'mcx, TupleHashEntryData<'mcx>>>;
-
-/// `TupleHashTableData` (execnodes.h):
-///
-/// ```c
-/// typedef struct TupleHashTableData {
-///     tuplehash_hash *hashtab;
-///     int          numCols;
-///     AttrNumber  *keyColIdx;
-///     ExprState   *tab_hash_expr;
-///     ExprState   *tab_eq_func;
-///     Oid         *tab_collations;
-///     MemoryContext tablecxt;
-///     MemoryContext tempcxt;
-///     Size         additionalsize;
-///     TupleTableSlot *tableslot;
-///     /* transient per-search: */
-///     TupleTableSlot *inputslot;
-///     ExprState   *in_hash_expr;
-///     ExprState   *cur_eq_func;
-///     ExprContext *exprcontext;
-/// } TupleHashTableData;
-/// ```
-///
-/// `TupleHashTable` in C is `TupleHashTableData *`; the owned model carries it
-/// by value (`Box`). The `tuplehash` simplehash bucket array (`hashtab`) is
-/// execGrouping-internal and stays [`Opaque`] until that unit lands.
-#[derive(Debug)]
-pub struct TupleHashTable<'mcx> {
-    /// `tuplehash_hash *hashtab` — the underlying simplehash; execGrouping
-    /// owner-internal, so opaque until that unit lands.
-    pub hashtab: Opaque,
-    /// `int numCols` — number of columns in the lookup key.
-    pub numCols: i32,
-    /// `AttrNumber *keyColIdx` — attr numbers of key columns.
-    pub keyColIdx: Option<PgVec<'mcx, AttrNumber>>,
-    /// `ExprState *tab_hash_expr` — ExprState for hashing table datatype(s).
-    pub tab_hash_expr: Option<PgBox<'mcx, ExprState>>,
-    /// `ExprState *tab_eq_func` — comparator for table datatype(s).
-    pub tab_eq_func: Option<PgBox<'mcx, ExprState>>,
-    /// `Oid *tab_collations` — collations for hash and comparison.
-    pub tab_collations: Option<PgVec<'mcx, Oid>>,
-    /// `MemoryContext tablecxt` — memory context containing the table.
-    pub tablecxt: Option<MemoryContext>,
-    /// `MemoryContext tempcxt` — context for per-search function evaluations.
-    pub tempcxt: Option<MemoryContext>,
-    /// `Size additionalsize` — size of the per-entry additional data.
-    pub additionalsize: usize,
-    /// `TupleTableSlot *tableslot` — slot for referencing table entries (id
-    /// into the EState slot pool).
-    pub tableslot: Option<SlotId>,
-    /// `TupleTableSlot *inputslot` — current input tuple's slot (transient).
-    pub inputslot: Option<SlotId>,
-    /// `ExprState *in_hash_expr` — ExprState for hashing input datatype(s)
-    /// (transient).
-    pub in_hash_expr: Option<PgBox<'mcx, ExprState>>,
-    /// `ExprState *cur_eq_func` — comparator for input vs. table (transient).
-    pub cur_eq_func: Option<PgBox<'mcx, ExprState>>,
-    /// `ExprContext *exprcontext` — expression context for the evaluations.
-    pub exprcontext: Option<EcxtId>,
-}
-
-/// `TupleHashIterator` (execnodes.h) — iteration cursor over a
-/// `TupleHashTable`. C is `tuplehash_iterator`; trimmed to the opaque cursor
-/// word the iterate seams round-trip.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TupleHashIterator {
-    /// The opaque `tuplehash_iterator` cursor word.
-    pub cur: usize,
-}
 
 // ===========================================================================
 // SetOp plan node (nodes/plannodes.h).

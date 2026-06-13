@@ -6,6 +6,14 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `pgstat_report_tempfile(size_t filesize)` (`utils/activity/pgstat_database.c`)
+    /// — account for a temporary file of `filesize` bytes against the current
+    /// database's stats. A `filesize == 0` call is a no-op in C (it is only
+    /// reached on a nonzero size, but the guard is preserved).
+    pub fn pgstat_report_tempfile(filesize: u64)
+);
+
+seam_core::seam!(
     /// `pgstat_flush_io(bool nowait)` (`utils/activity/pgstat_io.c`) — flush
     /// the backend's pending IO statistics. Returns true if some stats could
     /// not be flushed because of contention (`pgstat_io_flush_cb`'s result).
@@ -111,6 +119,13 @@ seam_core::seam!(
     /// `AtEOXact_PgStat(isCommit, parallel=false)` (`pgstat.c`) — end-of-xact
     /// cumulative-stats cleanup for a finished prepared transaction.
     pub fn at_eoxact_pgstat(is_commit: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_report_deadlock()` (`pgstat_database.c`) — bump the per-database
+    /// deadlock counter. Called once by `DeadLockReport` just before it
+    /// `ereport`s. Pending-stats bookkeeping only; infallible.
+    pub fn report_deadlock()
 );
 
 seam_core::seam!(

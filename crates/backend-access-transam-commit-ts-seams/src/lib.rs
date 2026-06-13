@@ -42,3 +42,25 @@ seam_core::seam!(
         types_core::primitive::RepOriginId,
     )>
 );
+
+seam_core::seam!(
+    /// `committssyncfiletag(const FileTag *ftag, char *path)` (commit_ts.c, the
+    /// `syncsw[SYNC_HANDLER_COMMIT_TS]` sync callback) — fsync the SLRU segment
+    /// the tag names, returning the `0`/`<0` code, resolved path, and saved
+    /// `errno`.
+    pub fn committssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+);
+
+seam_core::seam!(
+    /// `CommitTsShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn commit_ts_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CommitTsShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn commit_ts_shmem_init() -> types_error::PgResult<()>
+);

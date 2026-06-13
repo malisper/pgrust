@@ -43,6 +43,7 @@ use backend_replication_syncrep_seams as syncrep; // SyncRepWaitForLSN
 use backend_access_transam_twophase_fileio_seams as files; // pg_twophase file body I/O
 use backend_storage_ipc_procarray_seams as procarray; // dummy-proc ProcArray add/remove
 use backend_storage_ipc_seams as ipc; // before_shmem_exit
+use backend_storage_ipc_shmem_seams as ipc_shmem; // ShmemInitStruct (2PC shmem stand-up)
 use backend_storage_ipc_standby_seams as standby;
 use backend_storage_lmgr_lwlock_seams as lwlock; // TwoPhaseStateLock
 use backend_storage_lmgr_predicate_seams as predicate;
@@ -90,6 +91,9 @@ pub const XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK: i32 = 1 << 1;
 
 /// `MaxAllocSize` (memutils.h) = 0x3fffffff.
 pub const MAX_ALLOC_SIZE: u32 = 0x3fff_ffff;
+
+/// `TWOPHASE_DIR` (twophase.c:112) — the subdirectory holding 2PC state files.
+pub const TWOPHASE_DIR: &str = "pg_twophase";
 
 /// Two-phase resource-manager ids (twophase_rmgr.h).
 pub const TWOPHASE_RM_END_ID: u8 = 0;
@@ -354,8 +358,11 @@ pub struct StartPrepareInput<'a> {
     pub owner: Oid,
     pub databaseid: Oid,
     pub children: &'a [TransactionId],
-    pub commitrels: &'a [RelFileLocator],
-    pub abortrels: &'a [RelFileLocator],
+    /// Already-serialized `RelFileLocator[]` (12 bytes each) + element count.
+    pub commitrels: &'a [u8],
+    pub ncommitrels: i32,
+    pub abortrels: &'a [u8],
+    pub nabortrels: i32,
     /// Already-serialized `xl_xact_stats_item[]` bodies (16 bytes each).
     pub commitstats: &'a [u8],
     pub ncommitstats: i32,
@@ -383,8 +390,8 @@ pub fn start_prepare(input: &StartPrepareInput, pgprocno: ProcNumber) -> PgResul
         prepared_at: input.prepared_at,
         owner: input.owner,
         nsubxacts: input.children.len() as i32,
-        ncommitrels: input.commitrels.len() as i32,
-        nabortrels: input.abortrels.len() as i32,
+        ncommitrels: input.ncommitrels,
+        nabortrels: input.nabortrels,
         ncommitstats: input.ncommitstats,
         nabortstats: input.nabortstats,
         ninvalmsgs: input.ninvalmsgs,
@@ -415,11 +422,11 @@ pub fn start_prepare(input: &StartPrepareInput, pgprocno: ProcNumber) -> PgResul
         // While we have the child-xact data, stuff it in the gxact's PGPROC.
         proc::gxact_load_subxact_data::call(pgprocno, input.children)?;
     }
-    if !input.commitrels.is_empty() {
-        st.save_state_data(&serialize_rels(input.commitrels)?)?;
+    if input.ncommitrels > 0 {
+        st.save_state_data(input.commitrels)?;
     }
-    if !input.abortrels.is_empty() {
-        st.save_state_data(&serialize_rels(input.abortrels)?)?;
+    if input.nabortrels > 0 {
+        st.save_state_data(input.abortrels)?;
     }
     if input.ncommitstats > 0 {
         st.save_state_data(input.commitstats)?;
@@ -434,17 +441,6 @@ pub fn start_prepare(input: &StartPrepareInput, pgprocno: ProcNumber) -> PgResul
     Ok(st)
 }
 
-fn serialize_rels(rels: &[RelFileLocator]) -> PgResult<Vec<u8>> {
-    let mut v = Vec::new();
-    v.try_reserve(rels.len() * SIZEOF_REL_FILE_LOCATOR)
-        .map_err(|_| oom_msg("two-phase relfilelocators"))?;
-    for r in rels {
-        v.extend_from_slice(&r.spc_oid().to_le_bytes());
-        v.extend_from_slice(&r.db_oid().to_le_bytes());
-        v.extend_from_slice(&r.rel_number().to_le_bytes());
-    }
-    Ok(v)
-}
 
 /// A snapshot of the replication-origin session globals
 /// (`replorigin_session_origin`, `_lsn`, `_timestamp`). C reads these ambient
@@ -840,7 +836,7 @@ pub fn lock_gxact(
                     )));
             }
 
-            if user != owner && !miscinit::superuser_arg::call(user) {
+            if user != owner && !miscinit::superuser_arg::call(user)? {
                 return raise(ereport(ERROR)
                     .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg("permission denied to finish prepared transaction")
@@ -2137,6 +2133,251 @@ pub fn two_phase_file_basename(epoch: u32, xid: TransactionId) -> String {
     alloc::format!("{:08X}{:08X}", epoch, xid)
 }
 
+/// `TwoPhaseFilePath` (twophase.c:945) — the full `pg_twophase/%08X%08X` path
+/// for `xid`. The epoch is `EpochFromFullTransactionId(AdjustToFullTransactionId
+/// (xid))`, where `AdjustToFullTransactionId` =
+/// `FullTransactionIdFromAllowableAt(ReadNextFullTransactionId(), xid)`
+/// (twophase.c:938). This path-format + epoch-adjustment is twophase.c's OWN
+/// logic; only the raw filesystem syscalls below are delegated to fd.c.
+fn two_phase_file_path(xid: TransactionId) -> String {
+    let fxid = adjust_to_full_transaction_id(xid);
+    alloc::format!(
+        "{}/{}",
+        TWOPHASE_DIR,
+        two_phase_file_basename(fxid.epoch(), fxid.xid())
+    )
+}
+
+/// `AdjustToFullTransactionId(xid)` / `FullTransactionIdFromAllowableAt(
+/// ReadNextFullTransactionId(), xid)` (transam.h:380, twophase.c:938) — recover
+/// the full xid (epoch) for a bare `xid` that is known to precede-or-equal the
+/// next full xid.
+fn adjust_to_full_transaction_id(xid: TransactionId) -> types_core::FullTransactionId {
+    use types_core::xact::TransactionIdIsNormal;
+    use types_core::FullTransactionId;
+
+    // Special transaction ID.
+    if !TransactionIdIsNormal(xid) {
+        return FullTransactionId::from_epoch_and_xid(0, xid);
+    }
+
+    let next_full_xid = varsup::read_next_full_transaction_id::call();
+    let mut epoch = next_full_xid.epoch();
+    // xid must be from the epoch of nextFullXid or the epoch before.
+    if xid > next_full_xid.xid() {
+        debug_assert!(epoch != 0);
+        epoch -= 1;
+    }
+    FullTransactionId::from_epoch_and_xid(epoch, xid)
+}
+
+// ---------------------------------------------------------------------------
+// pg_twophase state-file raw I/O — fileio-seam bodies.
+//
+// These are twophase.c's own `ReadTwoPhaseFile` / `RecreateTwoPhaseFile` /
+// `RemoveTwoPhaseFile` / `restoreTwoPhaseData`-scan / `CheckPointTwoPhase`-fsync
+// / `PrepareRedoAdd`-probe syscall glue. The path format + epoch adjustment and
+// (in the read/recreate callers above) the magic/length/CRC validation stay
+// in-crate; only the raw filesystem syscalls are delegated to fd.c's installed
+// primitives (`OpenTransientFile`/`CloseTransientFile`/`pg_fsync`/`fsync_fname`/
+// `AllocateDir`/`ReadDir`/`FreeDir`, and the `unlink_file`/`access_f_ok` seams).
+// ---------------------------------------------------------------------------
+
+use backend_storage_file_fd as fd;
+use backend_storage_file_fd_seams as fd_seams;
+
+/// fd-access ereport at `here()` with the live errno's SQLSTATE.
+fn file_access_error<T>(level: types_error::ErrorLevel, msg: String) -> PgResult<T> {
+    Err(ereport(level)
+        .errcode_for_file_access()
+        .errmsg(msg)
+        .into_error()
+        .with_error_location(here()))
+}
+
+/// `ReadTwoPhaseFile`'s raw read (twophase.c:1288) — `OpenTransientFile + fstat
+/// + read + close`. Returns the raw file bytes, or `None` when `missing_ok` and
+/// the file does not exist (`ENOENT`).
+fn seam_read_twophase_file(
+    xid: TransactionId,
+    missing_ok: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+
+    let path = two_phase_file_path(xid);
+
+    // C: fd = OpenTransientFile(path, O_RDONLY); if (fd < 0) { if (missing_ok &&
+    // errno == ENOENT) return NULL; ereport(ERROR, ...). fd.c's OpenTransientFile
+    // raises the open ERROR eagerly, so to honour `missing_ok` we probe for
+    // existence first (access(path, F_OK)) and report any non-ENOENT errno here.
+    if missing_ok {
+        match fd_seams::access_f_ok::call(&path)? {
+            fd_seams::AccessResult::Ok => {}
+            fd_seams::AccessResult::NoEnt => return Ok(None),
+            fd_seams::AccessResult::Other(_) => {
+                return file_access_error(
+                    ERROR,
+                    alloc::format!("could not access file \"{}\": %m", path),
+                );
+            }
+        }
+    }
+
+    let raw = fd::allocated_desc::OpenTransientFile(&path, libc::O_RDONLY)?;
+    // Borrow the kernel fd as a std File without taking ownership (the close is
+    // CloseTransientFile's job, mirroring C's CloseTransientFile(fd)).
+    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+
+    let mut read_body = || -> PgResult<Vec<u8>> {
+        // C: fstat(fd, &stat) for the length; here std::fs::Metadata.
+        let st_size = file
+            .metadata()
+            .map_err(|_| {
+                ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(alloc::format!("could not stat file \"{}\": %m", path))
+                    .into_error()
+                    .with_error_location(here())
+            })?
+            .len() as usize;
+
+        // The lower/upper size bounds and all format validation live in the
+        // caller (`read_twophase_file`); here we just slurp the file.
+        let mut buf = alloc::vec![0u8; st_size];
+        let r = file.read(&mut buf).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not read file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        if r != st_size {
+            return raise(ereport(ERROR).errmsg(alloc::format!(
+                "could not read file \"{}\": read {} of {}",
+                path,
+                r,
+                st_size
+            )));
+        }
+        Ok(buf)
+    };
+
+    let result = read_body();
+    // C: if (CloseTransientFile(fd) != 0) ereport(ERROR, ...). Close on every
+    // path; surface a close error only when the read itself succeeded.
+    let close = fd::allocated_desc::CloseTransientFile(raw);
+    let buf = result?;
+    close.map_err(|e| e.with_error_location(here()))?;
+    Ok(Some(buf))
+}
+
+/// `RecreateTwoPhaseFile`'s store (twophase.c:1727) — `OpenTransientFile(O_CREAT
+/// |O_TRUNC|O_WRONLY) + write(content) + write(crc) + pg_fsync + close`. The CRC
+/// is computed in-crate by the caller (`recreate_two_phase_file`) and passed in.
+fn seam_recreate_twophase_file(xid: TransactionId, content: &[u8], crc: u32) -> PgResult<()> {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+
+    let path = two_phase_file_path(xid);
+
+    let raw = fd::allocated_desc::OpenTransientFile(
+        &path,
+        libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY,
+    )
+    .map_err(|_| {
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(alloc::format!("could not recreate file \"{}\": %m", path))
+            .into_error()
+            .with_error_location(here())
+    })?;
+    let mut file = core::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(raw) });
+
+    let mut write_body = || -> PgResult<()> {
+        // C: write(fd, content, len); write(fd, &statefile_crc, sizeof(crc)).
+        file.write_all(content).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not write file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        file.write_all(&crc.to_ne_bytes()).map_err(|_| {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!("could not write file \"{}\": %m", path))
+                .into_error()
+                .with_error_location(here())
+        })?;
+        // C: if (pg_fsync(fd) != 0) ereport(ERROR, ...).
+        fd::sync_cleanup::pg_fsync(&file).map_err(|e| e.with_error_location(here()))?;
+        Ok(())
+    };
+
+    let result = write_body();
+    let close = fd::allocated_desc::CloseTransientFile(raw);
+    result?;
+    close.map_err(|e| e.with_error_location(here()))?;
+    Ok(())
+}
+
+/// `RemoveTwoPhaseFile(xid, giveWarning)` (twophase.c:1707) — `unlink(path)`;
+/// a missing file warns only when `give_warning`.
+fn seam_remove_twophase_file(xid: TransactionId, give_warning: bool) -> PgResult<()> {
+    let path = two_phase_file_path(xid);
+    let rc = fd_seams::unlink_file::call(&path);
+    if rc != 0 {
+        // rc is -errno; C: if (errno != ENOENT || giveWarning) ereport(WARNING).
+        let errno = -rc;
+        if errno != backend_utils_error::errno::ENOENT || give_warning {
+            return file_access_error(
+                WARNING,
+                alloc::format!("could not remove file \"{}\": %m", path),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `restoreTwoPhaseData`'s scan (twophase.c:1895) — `AllocateDir/ReadDir(
+/// TWOPHASE_DIR)`, keeping the 16-hex-char basenames decoded to their full-xid
+/// `u64` values.
+fn seam_scan_twophase_dir() -> PgResult<Vec<u64>> {
+    let mut out: Vec<u64> = Vec::new();
+    fd::allocated_desc::with_allocated_dir(TWOPHASE_DIR, &mut |name: &str| {
+        // C: strlen == 16 && strspn(name, "0123456789ABCDEF") == 16.
+        if name.len() == 16 && name.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        {
+            // C: FullTransactionIdFromU64(strtou64(name, NULL, 16)).
+            if let Ok(v) = u64::from_str_radix(name, 16) {
+                out.push(v);
+            }
+        }
+        Ok(false)
+    })?;
+    Ok(out)
+}
+
+/// `CheckPointTwoPhase`'s `fsync_fname(TWOPHASE_DIR, true)` (twophase.c:1866).
+fn seam_fsync_twophase_dir() -> PgResult<()> {
+    fd::sync_cleanup::fsync_fname(TWOPHASE_DIR, true).map_err(|e| e.with_error_location(here()))
+}
+
+/// `PrepareRedoAdd`'s `access(TwoPhaseFilePath(xid), F_OK)` probe
+/// (twophase.c:2509). `Ok(true)` if it exists, `Ok(false)` on `ENOENT`, `Err`
+/// for any other errno.
+fn seam_twophase_file_exists(xid: TransactionId) -> PgResult<bool> {
+    let path = two_phase_file_path(xid);
+    match fd_seams::access_f_ok::call(&path)? {
+        fd_seams::AccessResult::Ok => Ok(true),
+        fd_seams::AccessResult::NoEnt => Ok(false),
+        fd_seams::AccessResult::Other(_) => {
+            file_access_error(ERROR, alloc::format!("could not access file \"{}\": %m", path))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exit-hook registration (AtProcExit_Twophase / before_shmem_exit)
 // ---------------------------------------------------------------------------
@@ -2174,14 +2415,232 @@ pub fn set_proc_exit_cleanup(f: alloc::boxed::Box<dyn Fn() -> PgResult<()>>) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared-memory substrate — the process-global `TwoPhaseState`
+// ---------------------------------------------------------------------------
+//
+// C keeps `TwoPhaseStateData *TwoPhaseState` in main shared memory, stood up by
+// `TwoPhaseShmemInit` and reached by every backend. This port models the
+// genuinely-shared state as a single process-global [`TwoPhaseStateData`]
+// behind a `Mutex` (`TwoPhaseStateLock` serializes access in C; the lock-guard
+// seams still bracket the algorithmic functions, and this `Mutex` is the owned
+// model of the shared allocation). `with_twophase_state` is the per-backend
+// accessor the prepare/abort/redo seams use to reach `&mut TwoPhaseStateData`.
+
+/// The process-global 2PC shared state, built by [`two_phase_shmem_init`].
+static TWO_PHASE_STATE: std::sync::OnceLock<std::sync::Mutex<TwoPhaseStateData>> =
+    std::sync::OnceLock::new();
+
+/// `TwoPhaseShmemSize()` (seam-facing) — mirrors C's `TwoPhaseShmemSize(void)`,
+/// which reads the `max_prepared_xacts` GUC global itself. The zero-arg
+/// inward seam reads the owner's per-backend GUC here (the ipci consumer has
+/// no value to thread, exactly as C's `add_size(size, TwoPhaseShmemSize())`).
+fn two_phase_shmem_size_seam() -> usize {
+    two_phase_shmem_size(max_prepared_xacts_guc())
+}
+
+/// `TwoPhaseShmemInit()` — allocate-or-attach the global `TwoPhaseState` in
+/// main shared memory and (non-`IsUnderPostmaster` path) build the GXACT
+/// freelist over the preallocated dummy PGPROCs. The real bytes are reserved
+/// via the `ShmemInitStruct` seam (whose `found` mirrors C's `*foundPtr`); the
+/// owned [`TwoPhaseStateData`] model is then materialized over the GUC-sized
+/// freelist. Idempotent per process (the `OnceLock` matches the C invariant
+/// that `TwoPhaseShmemInit` runs once at shmem creation).
+pub fn two_phase_shmem_init() -> PgResult<()> {
+    let max_prepared_xacts = max_prepared_xacts_guc();
+    // Reserve/attach the shared allocation (mirrors C's ShmemInitStruct call;
+    // `found` is the C `*foundPtr`). The owned model below is the live state.
+    let _ = ipc_shmem::shmem_init_struct::call(
+        "Prepared Transaction Table",
+        two_phase_shmem_size(max_prepared_xacts),
+    )?;
+    // GetNumberFromPGProc(&PreparedXactProcs[i]) for each slot is consulted by
+    // `TwoPhaseStateData::new`. Build once; ignore the redundant-init case.
+    let _ = TWO_PHASE_STATE.set(std::sync::Mutex::new(TwoPhaseStateData::new(max_prepared_xacts)));
+    Ok(())
+}
+
+/// Run `f` with `&mut TwoPhaseStateData` over the process-global shared state.
+/// Panics if [`two_phase_shmem_init`] has not run (the C invariant: the shmem
+/// struct exists before any prepare/abort/redo path touches it).
+pub fn with_twophase_state<R>(f: impl FnOnce(&mut TwoPhaseStateData) -> R) -> R {
+    let mtx = TWO_PHASE_STATE
+        .get()
+        .expect("TwoPhaseState accessed before TwoPhaseShmemInit");
+    let mut guard = mtx.lock().expect("TwoPhaseStateLock poisoned");
+    f(&mut guard)
+}
+
+// ---------------------------------------------------------------------------
+// Per-backend bookkeeping (C file-scope statics: MyLockedGxact,
+// twophaseExitRegistered)
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// `MyLockedGxact` (twophase.c) — the prepXacts index this backend has
+    /// locked while preparing/finishing, threaded into the algorithmic
+    /// functions and cleared by post-prepare / abort.
+    static MY_LOCKED_GXACT: core::cell::RefCell<Option<usize>> =
+        const { core::cell::RefCell::new(None) };
+
+    /// `twophaseExitRegistered` (twophase.c) — once-only guard for the
+    /// `before_shmem_exit(AtProcExit_Twophase)` registration.
+    static TWOPHASE_EXIT_REGISTERED: core::cell::RefCell<bool> =
+        const { core::cell::RefCell::new(false) };
+
+    /// `reachedConsistency` (xlogrecovery.c) — the recovery-consistency flag
+    /// `PrepareRedoAdd` consults to choose ERROR vs WARNING on a duplicate
+    /// 2PC file. Backend-private; the startup/redo path sets it (defaults to
+    /// false, i.e. pre-consistency early recovery).
+    static REACHED_CONSISTENCY: core::cell::RefCell<bool> =
+        const { core::cell::RefCell::new(false) };
+
+    /// The in-flight 2PC state-file builder between this backend's
+    /// `StartPrepare` and `EndPrepare` (C's file-scope `records` workspace).
+    static PREPARE_BUILDER: core::cell::RefCell<Option<SaveState>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Set `reachedConsistency` for the install of [`prepare_redo_add`] (called by
+/// the WAL-recovery driver when consistency is reached).
+pub fn set_reached_consistency(v: bool) {
+    REACHED_CONSISTENCY.with(|c| *c.borrow_mut() = v);
+}
+
+// ---------------------------------------------------------------------------
 // Seam install
 // ---------------------------------------------------------------------------
 
 /// Install this crate's inward seams (`backend-access-transam-twophase-seams`).
 pub fn init_seams() {
-    backend_access_transam_twophase_seams::standby_transaction_id_is_prepared::set(|xid| {
+    use backend_access_transam_twophase_seams as seams;
+
+    seams::standby_transaction_id_is_prepared::set(|xid| {
         standby_transaction_id_is_prepared(xid, max_prepared_xacts_guc())
     });
+
+    // `MarkAsPreparing` — over the global state + this backend's
+    // MyLockedGxact / twophaseExitRegistered statics. The returned slot is
+    // stashed in MyLockedGxact for the matching StartPrepare/EndPrepare.
+    seams::mark_as_preparing::set(|xid, gid, prepared_at, owner, databaseid| {
+        with_twophase_state(|state| {
+            MY_LOCKED_GXACT.with(|locked| {
+                TWOPHASE_EXIT_REGISTERED.with(|reg| {
+                    mark_as_preparing(
+                        state,
+                        &mut reg.borrow_mut(),
+                        &mut locked.borrow_mut(),
+                        xid,
+                        gid,
+                        prepared_at,
+                        owner,
+                        databaseid,
+                    )
+                    .map(|_slot| ())
+                })
+            })
+        })
+    });
+
+    // `StartPrepare` — build the 2PC state-file workspace from the gathered
+    // args over the locked gxact's dummy PGPROC; stash the builder.
+    seams::start_prepare::set(|args| {
+        let pgprocno = with_twophase_state(|state| {
+            let slot = my_locked_gxact_slot();
+            state.prep_xact(slot).pgprocno
+        });
+        let input = StartPrepareInput {
+            xid: args.xid,
+            gid: &args.gid,
+            prepared_at: args.prepared_at,
+            owner: args.owner,
+            databaseid: args.databaseid,
+            children: &args.children,
+            commitrels: &args.commitrels,
+            ncommitrels: args.ncommitrels,
+            abortrels: &args.abortrels,
+            nabortrels: args.nabortrels,
+            commitstats: &args.commitstats,
+            ncommitstats: args.ncommitstats,
+            abortstats: &args.abortstats,
+            nabortstats: args.nabortstats,
+            invalmsgs: &args.invalmsgs,
+            ninvalmsgs: args.ninvalmsgs,
+            initfileinval: args.initfileinval,
+        };
+        let builder = start_prepare(&input, pgprocno)?;
+        PREPARE_BUILDER.with(|b| *b.borrow_mut() = Some(builder));
+        Ok(())
+    });
+
+    // `EndPrepare` — finish the stashed builder for the locked gxact, reading
+    // the ambient replication-origin session via the origin seams.
+    seams::end_prepare::set(|| {
+        let builder = PREPARE_BUILDER
+            .with(|b| b.borrow_mut().take())
+            .expect("EndPrepare called without a matching StartPrepare builder");
+        let repl = ReplOriginSession {
+            origin: origin::replorigin_session_origin::call(),
+            origin_lsn: origin::replorigin_session_origin_lsn::call(),
+            origin_timestamp: origin::replorigin_session_origin_timestamp::call(),
+        };
+        let slot = my_locked_gxact_slot();
+        with_twophase_state(|state| end_prepare(state, slot, builder, repl))
+    });
+
+    // `PostPrepare_Twophase` / `AtAbort_Twophase` — void cleanup in C (no
+    // ereport); the PgResult is from the lock seams / Assert-equivalent
+    // RemoveGXact, surfaced as a panic on the impossible-error path.
+    seams::post_prepare_twophase::set(|| {
+        with_twophase_state(|state| {
+            MY_LOCKED_GXACT.with(|locked| {
+                post_prepare_twophase(state, &mut locked.borrow_mut())
+            })
+        })
+        .expect("PostPrepare_Twophase failed")
+    });
+
+    seams::at_abort_twophase::set(|| {
+        with_twophase_state(|state| {
+            MY_LOCKED_GXACT.with(|locked| at_abort_twophase(state, &mut locked.borrow_mut()))
+        })
+        .expect("AtAbort_Twophase failed")
+    });
+
+    // `PrepareRedoAdd` / `PrepareRedoRemove` — recovery paths, under
+    // TwoPhaseStateLock (the lock-guard seams bracket inside the fns).
+    seams::prepare_redo_add::set(|data, start_lsn, end_lsn, origin_id| {
+        let reached = REACHED_CONSISTENCY.with(|c| *c.borrow());
+        with_twophase_state(|state| {
+            prepare_redo_add(state, data, start_lsn, end_lsn, origin_id, reached)
+        })
+    });
+
+    seams::prepare_redo_remove::set(|xid, give_warning| {
+        with_twophase_state(|state| prepare_redo_remove(state, xid, give_warning))
+    });
+
+    // `TwoPhaseShmemSize` / `TwoPhaseShmemInit` — shmem sizing/stand-up
+    // (consumed by ipci.c when it lands).
+    seams::two_phase_shmem_size::set(two_phase_shmem_size_seam);
+    seams::two_phase_shmem_init::set(two_phase_shmem_init);
+
+    // pg_twophase state-file raw I/O (`backend-access-transam-twophase-fileio-
+    // seams`). These are twophase.c's own file helpers; the path-format/CRC/
+    // scan logic is in-crate and only the raw syscalls are seamed to fd.c.
+    files::read_twophase_file::set(seam_read_twophase_file);
+    files::recreate_twophase_file::set(seam_recreate_twophase_file);
+    files::remove_twophase_file::set(seam_remove_twophase_file);
+    files::scan_twophase_dir::set(seam_scan_twophase_dir);
+    files::fsync_twophase_dir::set(seam_fsync_twophase_dir);
+    files::twophase_file_exists::set(seam_twophase_file_exists);
+}
+
+/// Read this backend's `MyLockedGxact` slot, panicking if unset (the prepare
+/// flow always marks-as-preparing before start/end).
+fn my_locked_gxact_slot() -> usize {
+    MY_LOCKED_GXACT
+        .with(|c| *c.borrow())
+        .expect("no MyLockedGxact set for the in-flight prepare")
 }
 
 /// `max_prepared_xacts` GUC, a per-backend value (thread_local). The inward

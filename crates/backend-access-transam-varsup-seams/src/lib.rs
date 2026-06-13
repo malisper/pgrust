@@ -2,7 +2,7 @@
 //! (`access/transam/varsup.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{FullTransactionId, TransactionId};
+use types_core::{FullTransactionId, Oid, TransactionId};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -36,4 +36,32 @@ seam_core::seam!(
     /// assignments. Takes `XidGenLock`; the SLRU extension it triggers can
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn advance_next_full_xid_past_xid(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `VarsupShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetNewObjectId()` (varsup.c): allocate the next system-wide OID,
+    /// skipping the pinned range on wraparound. Takes `OidGenLock`; can
+    /// `ereport(ERROR)` if pinned-object generation has been stopped.
+    pub fn get_new_object_id() -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `StopGeneratingPinnedObjectIds()` (varsup.c): the initdb-only call that
+    /// advances the OID counter past the pinned range so no further objects are
+    /// pinned. Takes `OidGenLock`.
+    pub fn stop_generating_pinned_object_ids() -> PgResult<()>
 );

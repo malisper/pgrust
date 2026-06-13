@@ -1,0 +1,16 @@
+[package]
+name = "backend-utils-adt-jsonfuncs-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_jsonfuncs_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-json = { path = "../types-json" }
