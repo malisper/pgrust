@@ -1637,8 +1637,64 @@ fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<Tab
     Ok(opts.unwrap_or_default())
 }
 
+/// Seam target for `init_local_reloptions(relopts, relopt_struct_size)`.
+///
+/// Operates directly on the shared `types_reloptions::local_relopts` (the
+/// cross-crate seam type). Lossless, exactly mirroring C: clear the
+/// option/validator lists and record the struct size.
+fn init_local_reloptions_seam(
+    relopts: &mut types_reloptions::local_relopts,
+    relopt_struct_size: usize,
+) {
+    relopts.options.clear();
+    relopts.validators.clear();
+    relopts.relopt_struct_size = relopt_struct_size;
+}
+
+/// Seam target for `add_local_int_reloption(relopts, name, desc, default, min,
+/// max, offset)`.
+///
+/// Operates on the shared `types_reloptions::local_relopts`, mirroring the C:
+/// `init_int_reloption(RELOPT_KIND_LOCAL, ...)` builds a `relopt_int` whose
+/// `relopt_gen` tail carries `default_val`/`min`/`max`, then
+/// `add_local_reloption` appends it at `offset`. The range/default are stored on
+/// the option's [`types_reloptions::relopt_typed::Int`] payload, so nothing is
+/// dropped at the seam boundary.
+fn add_local_int_reloption_seam(
+    relopts: &mut types_reloptions::local_relopts,
+    name: &str,
+    desc: Option<&str>,
+    default_val: i32,
+    min_val: i32,
+    max_val: i32,
+    offset: i32,
+) {
+    let newoption = types_reloptions::relopt_gen {
+        name: Some(name.to_string()),
+        desc: desc.map(|d| d.to_string()),
+        kinds: RELOPT_KIND_LOCAL as types_reloptions::bits32,
+        lockmode: 0,
+        namelen: name.len() as i32,
+        type_: types_reloptions::relopt_type::RELOPT_TYPE_INT,
+        data: types_reloptions::relopt_typed::Int {
+            default_val,
+            min: min_val,
+            max: max_val,
+        },
+    };
+    debug_assert!((offset as usize) < relopts.relopt_struct_size);
+    relopts.options.push(types_reloptions::local_relopt {
+        option: Some(Box::new(newoption)),
+        offset,
+    });
+}
+
 /// Install every seam this crate owns.
 pub fn init_seams() {
     backend_access_common_reloptions_seams::attribute_reloptions::set(attribute_reloptions_seam);
     backend_access_common_reloptions_seams::tablespace_reloptions::set(tablespace_reloptions_seam);
+    backend_access_common_reloptions_seams::init_local_reloptions::set(init_local_reloptions_seam);
+    backend_access_common_reloptions_seams::add_local_int_reloption::set(
+        add_local_int_reloption_seam,
+    );
 }
