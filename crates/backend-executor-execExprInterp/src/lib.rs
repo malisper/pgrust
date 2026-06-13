@@ -35,6 +35,7 @@ pub mod eval_misc;
 pub mod eval_scalar;
 pub mod interp_loop;
 pub mod justs;
+pub mod saophash;
 
 /// Install this unit's seams. The interpreter owns
 /// `backend-executor-execExprInterp-seams`: `exec_ready_interpreted_expr`
