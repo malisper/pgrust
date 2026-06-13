@@ -48,6 +48,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h): true when the current
+    /// transaction isolation level is REPEATABLE READ or higher
+    /// (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read of the backend-local
+    /// `XactIsoLevel`.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);
+
+seam_core::seam!(
     /// `IsInParallelMode()` (xact.c): true when the current transaction (or
     /// subtransaction) has entered parallel mode
     /// (`CurrentTransactionState->parallelModeLevel != 0`). Pure read of
@@ -111,6 +119,44 @@ seam_core::seam!(
     /// `AbortOutOfAnyTransaction()` (xact.c): abort the current transaction
     /// (at any nesting level) and return to default state.
     pub fn abort_out_of_any_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AbortCurrentTransaction()` (xact.c): abort the current transaction
+    /// command. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn abort_current_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BeginTransactionBlock()` (xact.c): begin a transaction block (the
+    /// `BEGIN`/`START TRANSACTION` driver). Can `ereport(ERROR)`/`WARNING`,
+    /// carried on `Err`.
+    pub fn begin_transaction_block() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `EndTransactionBlock(chain)` (xact.c): end a transaction block
+    /// (`COMMIT`/`END`); `chain` requests `AND CHAIN`. Returns whether the
+    /// commit should be fully performed now. Can `ereport`, carried on `Err`.
+    pub fn end_transaction_block(chain: bool) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `DefineSavepoint(name)` (xact.c): define a savepoint with `name`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn define_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RollbackToSavepoint(name)` (xact.c): roll back to the named savepoint.
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn rollback_to_savepoint(name: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IsTransactionBlock()` (xact.c): true when inside an explicit
+    /// transaction block (`BEGIN`...). Pure read of backend-local state.
+    pub fn is_transaction_block() -> bool
 );
 
 seam_core::seam!(
@@ -179,11 +225,4 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PreventInTransactionBlock(isTopLevel, stmtType)` (xact.c).
     pub fn prevent_in_transaction_block(is_top_level: bool, stmt_type: &str) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `IsolationUsesXactSnapshot()` (xact.h/xact.c): true under REPEATABLE
-    /// READ or SERIALIZABLE (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read
-    /// of the per-backend isolation level.
-    pub fn isolation_uses_xact_snapshot() -> bool
 );

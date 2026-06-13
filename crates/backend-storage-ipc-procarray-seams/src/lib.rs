@@ -142,6 +142,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TransactionIdIsInProgress(xid)` (procarray.c) — is the given XID still
+    /// shown running in the ProcArray (or a still-running subxact)? Allocates a
+    /// scratch xids array via palloc on first use, so its OOM `ereport` surface
+    /// is carried on `Err`.
+    pub fn transaction_id_is_in_progress(xid: TransactionId) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `ProcArrayEndTransaction(MyProc, latestXid)` — advertise no transaction
     /// in progress (the proc argument is always `MyProc` from xact.c).
     pub fn proc_array_end_transaction(latest_xid: TransactionId) -> PgResult<()>
