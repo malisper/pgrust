@@ -44,3 +44,9 @@ seam_core::seam!(
     /// walreceiver must be restarted because a critical option changed.
     pub fn startup_request_wal_receiver_restart()
 );
+
+seam_core::seam!(
+    /// `reachedConsistency` (xlogrecovery.c global) — true once recovery has
+    /// reached a consistent state. Pure read of backend-local/shared state.
+    pub fn reached_consistency() -> bool
+);

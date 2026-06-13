@@ -25,3 +25,12 @@ seam_core::seam!(
     /// Signal-handler-safe flag flipping; infallible.
     pub fn handle_recovery_conflict_interrupt(reason: types_storage::ProcSignalReason)
 );
+
+seam_core::seam!(
+    /// `PostgresMain(dbname, username)` (tcop/postgres.c) — the regular
+    /// backend's main loop, entered after the startup packet is processed and
+    /// the PGPROC is set up. Never returns (it exits the process through
+    /// `proc_exit`). `dbname`/`username` are `MyProcPort->database_name` /
+    /// `->user_name`, `None` mirroring a C NULL.
+    pub fn postgres_main(dbname: Option<&str>, username: Option<&str>) -> !
+);

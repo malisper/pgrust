@@ -1752,8 +1752,10 @@ dependencies = [
 name = "backend-libpq-pqcomm-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
+ "types-net",
 ]
 
 [[package]]
@@ -2649,6 +2651,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-backend-startup"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-libpq-be-secure-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat",
+ "backend-libpq-pqsignal",
+ "backend-postmaster-postmaster-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-backend-startup-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-more-seams",
+ "backend-utils-misc-ps-status-seams",
+ "backend-utils-misc-timeout-seams",
+ "common-ip-seams",
+ "common-string-seams",
+ "libc",
+ "mcx",
+ "port-pgsleep-seams",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-net",
+ "types-signal",
+ "types-startup",
+ "types-timeout",
+]
+
+[[package]]
 name = "backend-tcop-backend-startup-seams"
 version = "0.0.0"
 dependencies = [
@@ -2880,6 +2923,13 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-scalar-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -3405,6 +3455,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-string-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -3569,6 +3628,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-tcop-backend-startup",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-utils-activity-small",

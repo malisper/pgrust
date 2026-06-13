@@ -108,3 +108,12 @@ seam_core::seam!(
     /// twophase caller's purposes.
     pub fn superuser_arg(roleid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `GetBackendTypeDesc(backend_type)` (miscinit.c) — the human-readable,
+    /// `_()`-translatable description of a `BackendType` (e.g. "walsender").
+    /// C returns a `const char *` static literal; infallible.
+    pub fn get_backend_type_desc(
+        backend_type: types_core::init::BackendType,
+    ) -> &'static str
+);

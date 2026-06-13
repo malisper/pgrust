@@ -206,3 +206,12 @@ seam_core::seam!(
     /// prepare/commit WAL insert. Plain shared-memory field write.
     pub fn set_delay_chkpt_start(on: bool)
 );
+
+seam_core::seam!(
+    /// `InitProcess()` (`storage/lmgr/proc.c`) — create this backend's PGPROC
+    /// struct in shared memory; must run before any LWLock / shared-memory
+    /// use. The "sorry, too many clients already" overflow path
+    /// `ereport(FATAL)`s, which terminates the process inside the owner, so
+    /// this is modeled infallible at the boundary.
+    pub fn init_process()
+);
