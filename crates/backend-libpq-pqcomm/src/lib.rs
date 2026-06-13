@@ -2002,7 +2002,7 @@ pub fn pq_check_connection() -> PgResult<bool> {
 
         // It's OK to modify the socket event filter without restoring,
         // because all FeBeWaitSet socket wait sites do the same.
-        set.modify_event(FeBeWaitSetSocketPos, WL_SOCKET_CLOSED)?;
+        set.modify_event(FeBeWaitSetSocketPos, WL_SOCKET_CLOSED, None)?;
 
         'retry: loop {
             let mut events = [WaitEvent::default(); FeBeWaitSetNEvents];

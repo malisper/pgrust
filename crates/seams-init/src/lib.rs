@@ -25,6 +25,7 @@ pub fn init_all() {
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
+    backend_storage_ipc_latch::init_seams();
     backend_storage_ipc_procsignal::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();

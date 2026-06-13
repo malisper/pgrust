@@ -36,13 +36,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ModifyWaitEvent(set, pos, events, NULL /* latch */)` — change the
-    /// event mask of position `pos` (latchless shape; the only one current
-    /// consumers need). Can `elog(ERROR)`.
+    /// `ModifyWaitEvent(set, pos, events, latch)` — change the event mask
+    /// (and, for a `WL_LATCH_SET` position, the latch) of position `pos`.
+    /// `latch` mirrors the C `Latch *` argument (`None` = `NULL`). Can
+    /// `elog(ERROR)`.
     pub fn modify_wait_event(
         set: WaitEventSetHandle,
         pos: i32,
         events: u32,
+        latch: Option<LatchHandle>,
     ) -> types_error::PgResult<()>
 );
 
@@ -64,6 +66,20 @@ seam_core::seam!(
     /// Infallible in C. Called from [`WaitEventSet`]'s `Drop`, never
     /// directly by consumers.
     pub fn free_wait_event_set(set: WaitEventSetHandle)
+);
+
+seam_core::seam!(
+    /// `WakeupMyProc(void)` — wake this process's own blocked
+    /// `WaitEventSetWaitBlock()` (self-pipe byte or `kill(MyProcPid,
+    /// SIGURG)`, only when `waiting`). Async-signal-safe and infallible in
+    /// C; `SetLatch` uses it when the latch owner is the current process.
+    pub fn wakeup_my_proc()
+);
+
+seam_core::seam!(
+    /// `WakeupOtherProc(pid)` — `kill(pid, SIGURG)` to wake another
+    /// process's blocked wait; errors are ignored in C. Infallible.
+    pub fn wakeup_other_proc(pid: i32)
 );
 
 /// Owned `WaitEventSet *` (`storage/waiteventset.h`). Dropping the value is
@@ -90,9 +106,15 @@ impl WaitEventSet {
         add_wait_event_to_set::call(self.0, events, fd, latch)
     }
 
-    /// `ModifyWaitEvent(set, pos, events, NULL)`.
-    pub fn modify_event(&self, pos: i32, events: u32) -> types_error::PgResult<()> {
-        modify_wait_event::call(self.0, pos, events)
+    /// `ModifyWaitEvent(set, pos, events, latch)`; `latch` as in
+    /// [`add_wait_event_to_set`] (`None` = `NULL`).
+    pub fn modify_event(
+        &self,
+        pos: i32,
+        events: u32,
+        latch: Option<LatchHandle>,
+    ) -> types_error::PgResult<()> {
+        modify_wait_event::call(self.0, pos, events, latch)
     }
 
     /// `WaitEventSetWait(set, timeout, occurred_events, nevents,
