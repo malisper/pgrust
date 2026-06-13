@@ -28,19 +28,17 @@ struct MockStore {
     positions: [usize; 2],
 }
 
-fn store_mut(state: &mut Tuplestorestate) -> &mut MockStore {
+fn store_mut<'a>(state: &'a mut Tuplestorestate<'_>) -> &'a mut MockStore {
     state
-        .store
-        .as_mut()
+        .payload_mut()
         .expect("live tuplestore")
         .downcast_mut::<MockStore>()
         .expect("MockStore payload")
 }
 
-fn store_ref(state: &Tuplestorestate) -> &MockStore {
+fn store_ref<'a>(state: &'a Tuplestorestate<'_>) -> &'a MockStore {
     state
-        .store
-        .as_ref()
+        .payload()
         .expect("live tuplestore")
         .downcast_ref::<MockStore>()
         .expect("MockStore payload")
@@ -60,33 +58,28 @@ fn mock_begin_heap<'mcx>(
     _random_access: bool,
     _inter_xact: bool,
     _max_kbytes: i32,
-) -> PgResult<PgBox<'mcx, Tuplestorestate>> {
+) -> PgResult<PgBox<'mcx, Tuplestorestate<'mcx>>> {
     LIVE_STORES.with(|c| c.set(c.get() + 1));
-    alloc_in(
-        mcx,
-        Tuplestorestate {
-            store: Some(Box::new(MockStore::default())),
-        },
-    )
+    alloc_in(mcx, Tuplestorestate::begin(mcx, MockStore::default())?)
 }
 
-fn mock_set_eflags(state: &mut Tuplestorestate, eflags: i32) -> PgResult<()> {
+fn mock_set_eflags(state: &mut Tuplestorestate<'_>, eflags: i32) -> PgResult<()> {
     store_mut(state).eflags = eflags;
     Ok(())
 }
 
-fn mock_alloc_read_pointer(state: &mut Tuplestorestate, _eflags: i32) -> PgResult<i32> {
+fn mock_alloc_read_pointer(state: &mut Tuplestorestate<'_>, _eflags: i32) -> PgResult<i32> {
     let s = store_mut(state);
     s.extra_ptrs += 1;
     Ok(s.extra_ptrs)
 }
 
-fn mock_ateof(state: &Tuplestorestate) -> bool {
+fn mock_ateof(state: &Tuplestorestate<'_>) -> bool {
     let s = store_ref(state);
     s.positions[0] >= s.ntuples
 }
 
-fn mock_advance(state: &mut Tuplestorestate, forward: bool) -> PgResult<bool> {
+fn mock_advance(state: &mut Tuplestorestate<'_>, forward: bool) -> PgResult<bool> {
     let s = store_mut(state);
     if forward {
         if s.positions[0] < s.ntuples {
@@ -104,7 +97,7 @@ fn mock_advance(state: &mut Tuplestorestate, forward: bool) -> PgResult<bool> {
 }
 
 fn mock_gettupleslot(
-    state: &mut Tuplestorestate,
+    state: &mut Tuplestorestate<'_>,
     forward: bool,
     _copy: bool,
     slot: &mut TupleTableSlot,
@@ -129,7 +122,7 @@ fn mock_gettupleslot(
     Ok(fetched)
 }
 
-fn mock_puttupleslot(state: &mut Tuplestorestate, _slot: &TupleTableSlot) -> PgResult<()> {
+fn mock_puttupleslot(state: &mut Tuplestorestate<'_>, _slot: &TupleTableSlot) -> PgResult<()> {
     let s = store_mut(state);
     s.ntuples += 1;
     // The store is at EOF when material appends, so the active read pointer
@@ -138,20 +131,20 @@ fn mock_puttupleslot(state: &mut Tuplestorestate, _slot: &TupleTableSlot) -> PgR
     Ok(())
 }
 
-fn mock_copy_read_pointer(state: &mut Tuplestorestate, src: i32, dst: i32) -> PgResult<()> {
+fn mock_copy_read_pointer(state: &mut Tuplestorestate<'_>, src: i32, dst: i32) -> PgResult<()> {
     let s = store_mut(state);
     s.positions[dst as usize] = s.positions[src as usize];
     Ok(())
 }
 
-fn mock_trim(_state: &mut Tuplestorestate) {}
+fn mock_trim(_state: &mut Tuplestorestate<'_>) {}
 
-fn mock_rescan(state: &mut Tuplestorestate) -> PgResult<()> {
+fn mock_rescan(state: &mut Tuplestorestate<'_>) -> PgResult<()> {
     store_mut(state).positions[0] = 0;
     Ok(())
 }
 
-fn mock_end(state: PgBox<'_, Tuplestorestate>) {
+fn mock_end(state: PgBox<'_, Tuplestorestate<'_>>) {
     LIVE_STORES.with(|c| c.set(c.get() - 1));
     drop(state);
 }
@@ -446,7 +439,6 @@ fn rescan_with_changed_params_drops_store_and_rescans_child() {
         alloc_in(
             mcx,
             Bitmapset {
-                nwords: 1,
                 words: mcx::slice_in(mcx, &[1u64]).unwrap(),
             },
         )

@@ -22,8 +22,9 @@ use std::cell::{Cell, RefCell};
 
 use types_dest::{CommandDest, DestNone};
 use types_error::{
-    ErrorLevel, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
-    LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, PGERROR_DEFAULT, WARNING,
+    ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE,
+    PGERROR_DEFAULT, WARNING,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,17 +81,17 @@ pub fn set_log_min_error_statement(level: ErrorLevel) {
 // Server-log formatting GUCs (elog.c file-level globals)
 // ---------------------------------------------------------------------------
 
-thread_local! { static LOG_ERROR_VERBOSITY: Cell<i32> = const { Cell::new(PGERROR_DEFAULT) }; }
+thread_local! { static LOG_ERROR_VERBOSITY: Cell<PGErrorVerbosity> = const { Cell::new(PGERROR_DEFAULT) }; }
 thread_local! { static LOG_LINE_PREFIX: RefCell<Option<String>> = const { RefCell::new(None) }; }
 thread_local! { static LOG_DESTINATION: Cell<i32> = const { Cell::new(LOG_DESTINATION_STDERR) }; }
 thread_local! { static SYSLOG_SEQUENCE_NUMBERS: Cell<bool> = const { Cell::new(true) }; }
 thread_local! { static SYSLOG_SPLIT_MESSAGES: Cell<bool> = const { Cell::new(true) }; }
 
-pub fn log_error_verbosity() -> i32 {
+pub fn log_error_verbosity() -> PGErrorVerbosity {
     LOG_ERROR_VERBOSITY.with(Cell::get)
 }
 
-pub fn set_log_error_verbosity(verbosity: i32) {
+pub fn set_log_error_verbosity(verbosity: PGErrorVerbosity) {
     LOG_ERROR_VERBOSITY.with(|c| c.set(verbosity));
 }
 

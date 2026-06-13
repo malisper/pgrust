@@ -28,7 +28,8 @@ use backend_executor_nodeMaterial as nodeMaterial;
 use backend_executor_nodeSubplan_seams as nodeSubplan;
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_error::elog;
-use types_core::{NodeTag, Oid};
+use types_core::Oid;
+use types_nodes::nodes::NodeTag;
 use types_error::{PgError, PgResult, DEBUG2};
 use types_nodes::nodeindexscan::CUSTOMPATH_SUPPORT_MARK_RESTORE;
 use types_nodes::nodes::{

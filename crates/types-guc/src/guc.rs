@@ -2,15 +2,20 @@
 //! items current ports consume. Discriminants match the C enum order.
 
 /// `enum GucContext` (`utils/guc.h`): in which context a GUC variable may be
-/// set.
-pub type GucContext = u32;
-pub const PGC_INTERNAL: GucContext = 0;
-pub const PGC_POSTMASTER: GucContext = 1;
-pub const PGC_SIGHUP: GucContext = 2;
-pub const PGC_SU_BACKEND: GucContext = 3;
-pub const PGC_BACKEND: GucContext = 4;
-pub const PGC_SUSET: GucContext = 5;
-pub const PGC_USERSET: GucContext = 6;
+/// set. `Ord` mirrors the C `context >= PGC_*` privilege comparisons.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum GucContext {
+    PGC_INTERNAL = 0,
+    PGC_POSTMASTER = 1,
+    PGC_SIGHUP = 2,
+    PGC_SU_BACKEND = 3,
+    PGC_BACKEND = 4,
+    PGC_SUSET = 5,
+    PGC_USERSET = 6,
+}
+
+pub use GucContext::*;
 
 /// `enum GucSource` (`utils/guc.h`): where a setting's current value came
 /// from. Ordered so that higher values override lower ones.

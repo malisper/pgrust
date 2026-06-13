@@ -8,7 +8,7 @@
 //! fields are added as their consuming units are ported.
 
 use mcx::{PgBox, PgVec};
-use types_core::NodeTag;
+use crate::nodes::NodeTag;
 
 /// `Path` (pathnodes.h) — the abstract base every path node embeds first.
 /// Trimmed to the fields ports consume.

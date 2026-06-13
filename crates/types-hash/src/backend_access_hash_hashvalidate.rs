@@ -2,12 +2,12 @@
 //! seams.
 //!
 //! Plain owned mirrors of the catalog `Form_pg_opclass` / `Form_pg_amproc` /
-//! `Form_pg_amop` rows, the `amvalidate.h` `OpFamilyOpFuncGroup` group
-//! descriptor, and the `amapi.h` `OpFamilyMember` dependency-adjustment record
-//! the hash opclass validator (`hashvalidate`/`hashadjustmembers`) consults.
-//! These are validator-local shapes (they differ from the same-named records of
-//! the other AM validators and the parser-side `OpFamilyMember`), so they live
-//! under this module's own C-path.
+//! `Form_pg_amop` rows and the `amapi.h` `OpFamilyMember` dependency-adjustment
+//! record the hash opclass validator (`hashvalidate`/`hashadjustmembers`)
+//! consults. These are validator-local shapes (they differ from the same-named
+//! records of the other AM validators and the parser-side `OpFamilyMember`),
+//! so they live under this module's own C-path. The cross-validator
+//! `OpFamilyOpFuncGroup` is types-amvalidate's shared definition.
 
 use mcx::PgString;
 use types_core::Oid;
@@ -57,20 +57,9 @@ pub struct AmopRow {
     pub amoprighttype: Oid,
 }
 
-/// `OpFamilyOpFuncGroup` (amvalidate.h) — one datatype-pair group with its
-/// operator and function presence bitmaps, as produced by
-/// `identify_opfamily_groups`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OpFamilyOpFuncGroup {
-    /// `lefttype`.
-    pub lefttype: Oid,
-    /// `righttype`.
-    pub righttype: Oid,
-    /// `operatorset` — bitmask of present strategy operators.
-    pub operatorset: u64,
-    /// `functionset` — bitmask of present support functions.
-    pub functionset: u64,
-}
+// `OpFamilyOpFuncGroup` (amvalidate.h) is the canonical shared definition in
+// types-amvalidate, re-exported here for the hashvalidate seam signatures.
+pub use types_amvalidate::backend_access_index_amvalidate::OpFamilyOpFuncGroup;
 
 /// `OpFamilyMember` (amapi.h) — the dependency-adjustment record mutated by
 /// `hashadjustmembers`.

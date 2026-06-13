@@ -22,12 +22,23 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
 
 // ---- process-wide test fakes for the genuine externals --------------------
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct FakeProc {
     lw_waiting: LWLockWaitState,
     lw_wait_mode: LWLockMode,
     lw_wait_link: proclist_node,
     sem_count: i32,
+}
+
+impl Default for FakeProc {
+    fn default() -> Self {
+        FakeProc {
+            lw_waiting: LWLockWaitState::default(),
+            lw_wait_mode: LW_EXCLUSIVE,
+            lw_wait_link: proclist_node::default(),
+            sem_count: 0,
+        }
+    }
 }
 
 thread_local! {
@@ -121,12 +132,12 @@ fn initializes_lwlock_like_postgres() {
     let _g = guard();
     let mut lock = LWLock {
         tranche: 0,
-        state: pg_atomic_uint32 { value: 0 },
+        state: pg_atomic_uint32::new(0),
         waiters: proclist_head { head: 0, tail: 0 },
     };
     LWLockInitialize(&mut lock, LWTRANCHE_BUFFER_MAPPING);
     assert_eq!(lock.tranche, LWTRANCHE_BUFFER_MAPPING as uint16);
-    assert_eq!(lock.state.value, LW_FLAG_RELEASE_OK);
+    assert_eq!(lock.state.read(), LW_FLAG_RELEASE_OK);
     assert_eq!(lock.waiters.head, INVALID_PROC_NUMBER);
     assert_eq!(lock.waiters.tail, INVALID_PROC_NUMBER);
 }
@@ -230,7 +241,7 @@ fn create_lwlocks_initializes_fixed_and_named_tranches() {
     assert_eq!(named.len(), 2);
     for slot in named.iter() {
         assert_eq!(slot.lock.tranche as i32, LWTRANCHE_FIRST_USER_DEFINED);
-        assert_eq!(slot.lock.state.value, LW_FLAG_RELEASE_OK);
+        assert_eq!(slot.lock.state.read(), LW_FLAG_RELEASE_OK);
     }
     assert_eq!(
         GetLWTrancheName(LWTRANCHE_FIRST_USER_DEFINED as uint16),
@@ -271,17 +282,17 @@ fn conditional_acquire_and_release_update_state() {
 
     let mut lock = make_lock();
     assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
-    assert_eq!(lock.state.value & LW_SHARED_MASK, 1);
+    assert_eq!(lock.state.read() & LW_SHARED_MASK, 1);
     assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
-    assert_eq!(lock.state.value & LW_SHARED_MASK, 2);
+    assert_eq!(lock.state.read() & LW_SHARED_MASK, 2);
     LWLockRelease(&mut lock).unwrap();
     LWLockRelease(&mut lock).unwrap();
-    assert_eq!(lock.state.value & LW_LOCK_MASK, 0);
+    assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 
     assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
     assert!(!LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
     LWLockRelease(&mut lock).unwrap();
-    assert_eq!(lock.state.value & LW_LOCK_MASK, 0);
+    assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
 
 #[test]
@@ -317,9 +328,9 @@ fn disown_stops_tracking_without_releasing_lock() {
     assert!(LWLockConditionalAcquire(&mut lock, LW_SHARED).unwrap());
     LWLockDisown(&mut lock).unwrap();
     assert!(!LWLockHeldByMe(&lock));
-    assert_eq!(lock.state.value & LW_SHARED_MASK, 1);
+    assert_eq!(lock.state.read() & LW_SHARED_MASK, 1);
     LWLockReleaseDisowned(&mut lock, LW_SHARED);
-    assert_eq!(lock.state.value & LW_LOCK_MASK, 0);
+    assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
 
 #[test]
@@ -332,8 +343,8 @@ fn release_all_releases_held_locks() {
     assert!(LWLockConditionalAcquire(&mut first, LW_SHARED).unwrap());
     assert!(LWLockConditionalAcquire(&mut second, LW_EXCLUSIVE).unwrap());
     LWLockReleaseAll().unwrap();
-    assert_eq!(first.state.value & LW_LOCK_MASK, 0);
-    assert_eq!(second.state.value & LW_LOCK_MASK, 0);
+    assert_eq!(first.state.read() & LW_LOCK_MASK, 0);
+    assert_eq!(second.state.read() & LW_LOCK_MASK, 0);
     assert!(!LWLockHeldByMe(&first));
     assert!(!LWLockHeldByMe(&second));
 }
@@ -367,11 +378,11 @@ fn release_clear_var_stores_value_before_unlock() {
     reset_world(0, INVALID_PROC_NUMBER);
 
     let mut lock = make_lock();
-    let value = pg_atomic_uint64 { value: 1 };
+    let value = pg_atomic_uint64::new(1);
     assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
     LWLockReleaseClearVar(&mut lock, &value, 42).unwrap();
-    assert_eq!(value.value, 42);
-    assert_eq!(lock.state.value & LW_LOCK_MASK, 0);
+    assert_eq!(value.read(), 42);
+    assert_eq!(lock.state.read() & LW_LOCK_MASK, 0);
 }
 
 #[test]
@@ -387,7 +398,7 @@ fn queue_self_orders_head_and_tail_by_mode() {
     }
     assert_eq!(lock.waiters.head, 1);
     assert_eq!(lock.waiters.tail, 3);
-    assert_ne!(lock.state.value & LW_FLAG_HAS_WAITERS, 0);
+    assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
 
     // A LW_WAIT_UNTIL_FREE waiter jumps to the head.
     set_my(0);
@@ -428,9 +439,9 @@ fn wakeup_wakes_one_exclusive_and_clears_flags() {
     assert_eq!(waiting(2), LW_WS_WAITING); // still queued
     assert_eq!(lock.waiters.head, 2);
     assert_eq!(lock.waiters.tail, 2);
-    assert_eq!(lock.state.value & LW_FLAG_RELEASE_OK, 0);
-    assert_ne!(lock.state.value & LW_FLAG_HAS_WAITERS, 0);
-    assert_eq!(lock.state.value & LW_FLAG_LOCKED, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_RELEASE_OK, 0);
+    assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_LOCKED, 0);
 }
 
 #[test]
@@ -449,8 +460,8 @@ fn wakeup_wakes_all_shared_waiters() {
 
     assert_eq!(SEM_UNLOCKS.with(|s| s.borrow().clone()), vec![1, 2, 3]);
     assert!(proclist_is_empty(&lock.waiters));
-    assert_eq!(lock.state.value & LW_FLAG_HAS_WAITERS, 0);
-    assert_eq!(lock.state.value & LW_FLAG_RELEASE_OK, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_RELEASE_OK, 0);
 }
 
 #[test]
@@ -460,11 +471,11 @@ fn dequeue_self_removes_and_clears_has_waiters() {
 
     let lock = make_lock();
     LWLockQueueSelf(&lock, LW_EXCLUSIVE);
-    assert_ne!(lock.state.value & LW_FLAG_HAS_WAITERS, 0);
+    assert_ne!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
 
     LWLockDequeueSelf(&lock);
     assert!(proclist_is_empty(&lock.waiters));
-    assert_eq!(lock.state.value & LW_FLAG_HAS_WAITERS, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_HAS_WAITERS, 0);
     assert_eq!(waiting(1), LW_WS_NOT_WAITING);
 }
 
@@ -474,11 +485,11 @@ fn wait_list_lock_unlock_round_trips_the_flag() {
     reset_world(0, INVALID_PROC_NUMBER);
 
     let lock = make_lock();
-    assert_eq!(lock.state.value & LW_FLAG_LOCKED, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_LOCKED, 0);
     LWLockWaitListLock(&lock);
-    assert_ne!(lock.state.value & LW_FLAG_LOCKED, 0);
+    assert_ne!(lock.state.read() & LW_FLAG_LOCKED, 0);
     LWLockWaitListUnlock(&lock);
-    assert_eq!(lock.state.value & LW_FLAG_LOCKED, 0);
+    assert_eq!(lock.state.read() & LW_FLAG_LOCKED, 0);
 }
 
 #[test]
@@ -487,7 +498,7 @@ fn wait_for_var_returns_free_when_unlocked() {
     reset_world(0, INVALID_PROC_NUMBER);
 
     let mut lock = make_lock();
-    let value = pg_atomic_uint64 { value: 7 };
+    let value = pg_atomic_uint64::new(7);
     let mut newval = 0u64;
     // Lock is free (not exclusive): WaitForVar returns true immediately.
     assert!(LWLockWaitForVar(&mut lock, &value, 7, &mut newval).unwrap());
@@ -501,7 +512,7 @@ fn wait_for_var_returns_false_on_value_mismatch() {
     let mut lock = make_lock();
     // Hold exclusively so the slot is not free.
     assert!(LWLockConditionalAcquire(&mut lock, LW_EXCLUSIVE).unwrap());
-    let value = pg_atomic_uint64 { value: 99 };
+    let value = pg_atomic_uint64::new(99);
     let mut newval = 0u64;
     // oldval (7) != current (99): no wait, returns false, newval = 99.
     assert!(!LWLockWaitForVar(&mut lock, &value, 7, &mut newval).unwrap());
@@ -523,10 +534,10 @@ fn update_var_wakes_until_free_waiters() {
     LWLockQueueSelf(&lock, LW_WAIT_UNTIL_FREE);
     set_my(0);
 
-    let value = pg_atomic_uint64 { value: 0 };
+    let value = pg_atomic_uint64::new(0);
     LWLockUpdateVar(&mut lock, &value, 123);
 
-    assert_eq!(value.value, 123);
+    assert_eq!(value.read(), 123);
     assert_eq!(SEM_UNLOCKS.with(|s| s.borrow().clone()), vec![1]);
     assert_eq!(waiting(1), LW_WS_NOT_WAITING);
 

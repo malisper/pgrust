@@ -25,7 +25,7 @@
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
 use types_core::primitive::{Index, Oid};
 use types_core::xact::CommandId;
-use types_core::PgResult;
+use types_error::PgResult;
 use types_datum::Datum;
 use types_tuple::heaptuple::TupleDescData;
 use types_tuple::tupconvert::TupleConversionMap;
@@ -37,29 +37,17 @@ use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
 use crate::planstate::PlanStateNode;
-use types_core::NodeTag;
+use crate::nodes::NodeTag;
 
 /// `T_MaterialState` (nodes/nodetags.h) — the executor-state node tag for a
 /// Material node.
 pub const T_MaterialState: NodeTag = 424;
 
-/// `ScanDirection` (access/sdir.h). Kept as the raw C scale so direction
-/// comparisons read like the original.
-pub type ScanDirection = i32;
-
-pub const BackwardScanDirection: ScanDirection = -1;
-pub const NoMovementScanDirection: ScanDirection = 0;
-pub const ForwardScanDirection: ScanDirection = 1;
-
-/// `ScanDirectionIsForward(direction)` (sdir.h).
-pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
-    direction == ForwardScanDirection
-}
-
-/// `ScanDirectionIsBackward(direction)` (sdir.h).
-pub const fn ScanDirectionIsBackward(direction: ScanDirection) -> bool {
-    direction == BackwardScanDirection
-}
+// `ScanDirection` (access/sdir.h) — canonical definition in types-scan.
+pub use types_scan::sdir::{
+    BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
+    ScanDirectionIsBackward, ScanDirectionIsForward,
+};
 
 /// `TupleTableSlot *` in the owned model: a `Copy` index into the owning
 /// [`EStateData::es_tupleTable`] slot pool.

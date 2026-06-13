@@ -457,6 +457,7 @@ dependencies = [
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -1598,9 +1599,6 @@ version = "0.0.0"
 [[package]]
 name = "types-core"
 version = "0.0.0"
-dependencies = [
- "types-error",
-]
 
 [[package]]
 name = "types-datum"
@@ -1626,6 +1624,7 @@ name = "types-hash"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-amvalidate",
  "types-core",
 ]
 
@@ -1643,6 +1642,8 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-error",
+ "types-scan",
  "types-tuple",
 ]
 

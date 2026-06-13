@@ -58,87 +58,6 @@ pub const DEFAULT_TYPDELIM: i8 = b',' as i8;
 // (ATTRIBUTE_GENERATED_STORED / _VIRTUAL); not redefined here (merge-time
 // ambiguous-glob collision when catalog-core + commands-ddl landed).
 
-// CheckAttributeType() flags (`catalog/heap.h`).
-pub const CHKATYPE_ANYARRAY: i32 = 1 << 0;
-pub const CHKATYPE_ANYRECORD: i32 = 1 << 1;
-pub const CHKATYPE_IS_PARTKEY: i32 = 1 << 2;
-pub const CHKATYPE_IS_VIRTUAL: i32 = 1 << 3;
-
-/// `pg_type.typtype` value for a domain type (`'d'`, pg_type.h).
-pub const TYPTYPE_DOMAIN: i8 = b'd' as i8;
-pub const TIMEOID: Oid = 1083;
-pub const TIMESTAMPOID: Oid = 1114;
-pub const TIMESTAMPTZOID: Oid = 1184;
-pub const TIMETZOID: Oid = 1266;
-pub const DEFAULT_COLLATION_OID: Oid = 100;
-
-// Additional built-in type OIDs used by the SQL/XML type-name mapping in
-// `backend-utils-adt-xml` (see `catalog/pg_type.dat`).  These are fixed,
-// catalog-stable OIDs.
-pub const BYTEAOID: Oid = 17;
-pub const BPCHAROID: Oid = 1042;
-// DATEOID/TIMEOID/TIMESTAMPOID/TIMESTAMPTZOID/TIMETZOID/NUMERICOID already
-// defined above (the merge brought a second copy from the xml branch).
-
-// Pseudo-type + handler OIDs used by the backend-commands ports
-// (conversioncmds/aggregatecmds/operatorcmds/proclang/amcmds).  Values from
-// `catalog/pg_type.dat`.  (The polymorphic-type OIDs ANYELEMENTOID/ANYARRAYOID/
-// … are already defined in `funccache.rs`.)
-pub const INTERNALOID: Oid = 2281;
-/// `TSQUERYOID` — `tsquery` (`catalog/pg_type.dat`), used by tsearchcmds.c's
-/// `prsheadline` parser-support-function signature check.
-pub const TSQUERYOID: Oid = 3615;
-// Pseudo-type OIDs used by functioncmds.c's VARIADIC / shell-type checks
-// (`catalog/pg_type.dat`).
-pub const ANYOID: Oid = 2276;
-// VOIDOID is already defined earlier in this module (= 2278); not redefined here.
-pub const CHAROID: Oid = 18;
-// Built-in procedural-language OIDs (`catalog/pg_language.dat`, verified vs
-// build-rust/.../pg_language_d.h: INTERNAL=12, C=13, SQL=14).
-pub const INTERNALlanguageId: Oid = 12;
-pub const ClanguageId: Oid = 13;
-pub const SQLlanguageId: Oid = 14;
-pub const LANGUAGE_HANDLEROID: Oid = 2280;
-pub const FDW_HANDLEROID: Oid = 3115;
-pub const INDEX_AM_HANDLEROID: Oid = 325;
-pub const TABLE_AM_HANDLEROID: Oid = 269;
-pub const TSM_HANDLEROID: Oid = 3310;
-
-// pg_type.typtype values (`catalog/pg_type.h`) used by aggregatecmds.
-pub const TYPTYPE_BASE: i8 = b'b' as i8;
-pub const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
-pub const TYPTYPE_ENUM: i8 = b'e' as i8;
-pub const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
-pub const TYPTYPE_PSEUDO: i8 = b'p' as i8;
-pub const TYPTYPE_RANGE: i8 = b'r' as i8;
-
-// pg_aggregate.aggkind values (`catalog/pg_aggregate.h`).
-pub const AGGKIND_NORMAL: i8 = b'n' as i8;
-pub const AGGKIND_ORDERED_SET: i8 = b'o' as i8;
-pub const AGGKIND_HYPOTHETICAL: i8 = b'h' as i8;
-
-// pg_aggregate aggfinalmodify/aggmfinalmodify values
-// (`catalog/pg_aggregate.h`).
-pub const AGGMODIFY_READ_ONLY: i8 = b'r' as i8;
-pub const AGGMODIFY_SHAREABLE: i8 = b's' as i8;
-pub const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
-
-// pg_proc.proparallel values (`catalog/pg_proc.h`).
-pub const PROPARALLEL_SAFE: i8 = b's' as i8;
-pub const PROPARALLEL_RESTRICTED: i8 = b'r' as i8;
-pub const PROPARALLEL_UNSAFE: i8 = b'u' as i8;
-
-// pg_proc.provolatile values (`catalog/pg_proc.h`).
-pub const PROVOLATILE_IMMUTABLE: i8 = b'i' as i8;
-pub const PROVOLATILE_STABLE: i8 = b's' as i8;
-pub const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
-
-// pg_proc.prokind values (`catalog/pg_proc.h`).
-pub const PROKIND_FUNCTION: i8 = b'f' as i8;
-pub const PROKIND_AGGREGATE: i8 = b'a' as i8;
-pub const PROKIND_WINDOW: i8 = b'w' as i8;
-pub const PROKIND_PROCEDURE: i8 = b'p' as i8;
-
 pub const TYPALIGN_CHAR: i8 = b'c' as i8;
 pub const TYPALIGN_SHORT: i8 = b's' as i8;
 pub const TYPALIGN_INT: i8 = b'i' as i8;
@@ -148,10 +67,6 @@ pub const TYPSTORAGE_EXTERNAL: i8 = b'e' as i8;
 pub const TYPSTORAGE_MAIN: i8 = b'm' as i8;
 pub const TYPSTORAGE_EXTENDED: i8 = b'x' as i8;
 pub const InvalidCompressionMethod: i8 = 0;
-
-pub const ATTNULLABLE_UNRESTRICTED: i8 = b'f' as i8;
-pub const ATTNULLABLE_UNKNOWN: i8 = b'u' as i8;
-pub const ATTNULLABLE_VALID: i8 = b'v' as i8;
 
 pub const MaxTupleAttributeNumber: i32 = 1664;
 pub const MaxHeapAttributeNumber: i32 = 1600;
@@ -201,11 +116,6 @@ const _: () = assert!(FirstLowInvalidHeapAttributeNumber == -7);
 pub const VARHDRSZ: usize = core::mem::size_of::<i32>();
 pub const HIGHBIT: i32 = 0x80;
 pub const MINIMAL_TUPLE_OFFSET: usize = 8;
-/// `ATTRIBUTE_FIXED_PART_SIZE` (access/tupdesc.h): the on-disk size of the
-/// fixed-width part of `FormData_pg_attribute`, i.e. through `attcollation`.
-/// The C macro computes `offsetof(FormData_pg_attribute, attcollation) +
-/// sizeof(Oid)`; on the catalog ABI this is a fixed 100 bytes.
-pub const ATTRIBUTE_FIXED_PART_SIZE: usize = 100;
 pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;
@@ -654,20 +564,33 @@ pub const fn HeapTupleHeaderXminCommitted(tup: &HeapTupleHeaderData) -> bool {
     (tup.t_infomask & HEAP_XMIN_COMMITTED) != 0
 }
 
+/// `HeapTupleHeaderGetRawXmin(tup)` (`htup_details.h`) —
+/// `tup->t_choice.t_heap.t_xmin`. Only meaningful for a heap tuple's header;
+/// panics if the header carries the composite-Datum union arm (C would read
+/// the other arm's bytes — a caller bug there too).
 pub fn HeapTupleHeaderGetRawXmin(tup: &HeapTupleHeaderData) -> TransactionId {
     match &tup.t_choice {
         HeapTupleHeaderChoice::THeap(t_heap) => t_heap.t_xmin,
-        HeapTupleHeaderChoice::TDatum(_) => 0,
+        HeapTupleHeaderChoice::TDatum(_) => {
+            panic!("HeapTupleHeaderGetRawXmin: header is a composite Datum")
+        }
     }
 }
 
+/// `HeapTupleHeaderGetRawCommandId(tup)` (`htup_details.h`) —
+/// `tup->t_choice.t_heap.t_field3.t_cid`. Panics on the TXvac / composite-Datum
+/// arms (C would reinterpret the union bytes — a caller bug there too).
 pub fn HeapTupleHeaderGetRawCommandId(tup: &HeapTupleHeaderData) -> CommandId {
     match &tup.t_choice {
         HeapTupleHeaderChoice::THeap(t_heap) => match t_heap.t_field3 {
             HeapTupleField3::TCid(t_cid) => t_cid,
-            HeapTupleField3::TXvac(_) => 0,
+            HeapTupleField3::TXvac(_) => {
+                panic!("HeapTupleHeaderGetRawCommandId: t_field3 holds t_xvac")
+            }
         },
-        HeapTupleHeaderChoice::TDatum(_) => 0,
+        HeapTupleHeaderChoice::TDatum(_) => {
+            panic!("HeapTupleHeaderGetRawCommandId: header is a composite Datum")
+        }
     }
 }
 

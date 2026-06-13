@@ -16,9 +16,12 @@ impl<'a> PgWCharStr<'a> {
 
     /// Creates a `PgWCharStr` without checking for a terminating zero.
     ///
-    /// Use this only when the caller has already guaranteed that `chars`
-    /// contains a zero terminator.
-    pub unsafe fn from_slice_unchecked(chars: &'a [PgWChar]) -> Self {
+    /// Logical precondition (not a memory-safety one, so this is a safe fn):
+    /// `chars` should contain a zero terminator. If it does not, [`len`]
+    /// falls back to the full slice length.
+    ///
+    /// [`len`]: Self::len
+    pub fn from_slice_unchecked(chars: &'a [PgWChar]) -> Self {
         Self { chars }
     }
 

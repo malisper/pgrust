@@ -24,8 +24,8 @@ use std::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::{
-    BlockNumber, ForkNumber, Oid, BLCKSZ, InvalidBlockNumber,
-    InvalidForkNumber, MAIN_FORKNUM, MAX_FORKNUM, MaxBlockNumber,
+    BlockNumber, ForkNumber, Oid, BLCKSZ, InvalidBlockNumber, InvalidForkNumber, FSM_FORKNUM,
+    MAIN_FORKNUM, MaxBlockNumber, VISIBILITYMAP_FORKNUM,
 };
 use types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
@@ -799,9 +799,11 @@ pub fn table_block_relation_size(rel: Oid, forkNumber: ForkNumber) -> PgResult<u
 
     // InvalidForkNumber indicates returning the size for all forks
     if forkNumber == InvalidForkNumber {
-        for i in 0..MAX_FORKNUM {
+        // C: `for (int i = 0; i < MAX_FORKNUM; i++)` — i.e. every fork below
+        // MAX_FORKNUM (INIT_FORKNUM is excluded).
+        for fork in [MAIN_FORKNUM, FSM_FORKNUM, VISIBILITYMAP_FORKNUM] {
             nblocks = nblocks.wrapping_add(backend_storage_smgr_seams::smgrnblocks::call(
-                rlocator, backend, i,
+                rlocator, backend, fork,
             )? as u64);
         }
     } else {

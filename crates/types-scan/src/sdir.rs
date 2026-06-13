@@ -1,7 +1,22 @@
 //! `ScanDirection` (`access/sdir.h`).
 
-pub type ScanDirection = i32;
+/// `enum ScanDirection` (`access/sdir.h:24`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ScanDirection {
+    BackwardScanDirection = -1,
+    NoMovementScanDirection = 0,
+    ForwardScanDirection = 1,
+}
 
-pub const BackwardScanDirection: ScanDirection = -1;
-pub const NoMovementScanDirection: ScanDirection = 0;
-pub const ForwardScanDirection: ScanDirection = 1;
+pub use ScanDirection::*;
+
+/// `ScanDirectionIsForward(direction)` (sdir.h).
+pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
+    matches!(direction, ScanDirection::ForwardScanDirection)
+}
+
+/// `ScanDirectionIsBackward(direction)` (sdir.h).
+pub const fn ScanDirectionIsBackward(direction: ScanDirection) -> bool {
+    matches!(direction, ScanDirection::BackwardScanDirection)
+}

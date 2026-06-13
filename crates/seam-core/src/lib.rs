@@ -11,7 +11,7 @@
 /// Declare one seam.
 ///
 /// ```ignore
-/// seam_core::seam!(pub fn vacuum_rel(relid: types_core::Oid) -> types_core::PgResult<()>);
+/// seam_core::seam!(pub fn vacuum_rel(relid: types_core::Oid) -> types_error::PgResult<()>);
 /// ```
 ///
 /// expands to a module `vacuum_rel` with:

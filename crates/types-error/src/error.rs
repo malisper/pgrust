@@ -411,10 +411,21 @@ pub const PG_DIAG_SOURCE_FILE: ErrorField = ErrorField(b'F' as i32);
 pub const PG_DIAG_SOURCE_LINE: ErrorField = ErrorField(b'L' as i32);
 pub const PG_DIAG_SOURCE_FUNCTION: ErrorField = ErrorField(b'R' as i32);
 
-/// `Log_error_verbosity` values (`elog.h` `PGErrorVerbosity`).
-pub const PGERROR_TERSE: i32 = 0;
-pub const PGERROR_DEFAULT: i32 = 1;
-pub const PGERROR_VERBOSE: i32 = 2;
+/// `PGErrorVerbosity` (`elog.h`) — `Log_error_verbosity` values. `Ord`
+/// mirrors the C `Log_error_verbosity >= PGERROR_*` comparisons.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[allow(non_camel_case_types)]
+pub enum PGErrorVerbosity {
+    /// single-line error messages
+    PGERROR_TERSE = 0,
+    /// recommended style
+    PGERROR_DEFAULT = 1,
+    /// all the facts, ma'am
+    PGERROR_VERBOSE = 2,
+}
+
+pub use PGErrorVerbosity::*;
 
 /// `Log_destination` bitmask values (`elog.h`).
 pub const LOG_DESTINATION_STDERR: i32 = 1;

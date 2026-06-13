@@ -2,7 +2,7 @@
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::{AttrNumber, Index, Oid};
-use types_core::PgResult;
+use types_error::PgResult;
 
 /// `Var` (nodes/primnodes.h), trimmed to the fields ports consume.
 #[derive(Clone, Copy, Debug, Default)]
