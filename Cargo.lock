@@ -869,6 +869,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-instrument"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-instrument-seams",
+ "mcx",
+ "portability-instr-time",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-executor-instrument-seams"
 version = "0.0.0"
 dependencies = [
@@ -2022,6 +2033,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "portability-instr-time"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "types-core",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2055,6 +2074,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-executor-execAmi",
  "backend-executor-execUtils",
+ "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",

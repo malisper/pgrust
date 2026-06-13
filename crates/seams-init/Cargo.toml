@@ -18,6 +18,7 @@ backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
