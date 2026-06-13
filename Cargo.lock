@@ -2981,6 +2981,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execTuples"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-tupdesc",
+ "backend-executor-execTuples-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
@@ -8528,6 +8545,7 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
+ "backend-executor-execTuples",
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeForeignscan",

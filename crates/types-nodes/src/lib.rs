@@ -49,6 +49,7 @@ pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
 pub mod queryenvironment;
+pub mod tuptable;
 
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
@@ -109,6 +110,10 @@ pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
+pub use tuptable::{
+    AttInMetadata, BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase,
+    SlotData, TupOutputState, TupleTableSlotOps, VirtualTupleTableSlot,
+};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{
     AsyncRequest, FdwRoutine, ForeignScan, ForeignScanState, Material, MaterialState,
