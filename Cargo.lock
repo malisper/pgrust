@@ -1591,6 +1591,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogbackup"
+version = "0.0.0"
+dependencies = [
+ "backend-timezone-localtime",
+ "backend-timezone-strftime",
+ "backend-utils-error",
+ "state-pgtz",
+ "types-core",
+ "types-pgtime",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xloginsert-seams"
 version = "0.0.0"
 dependencies = [
