@@ -14,6 +14,11 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+libc = "0.2"
 # Seam crates this unit OWNS (installs every decl from its own init_seams()).
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+# Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
+backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
