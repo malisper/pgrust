@@ -54,7 +54,7 @@ use backend_catalog_pg_depend_seams::{recordDependencyOn, recordDependencyOnCurr
 use backend_parser_parse_func_seams::lookup_func_name;
 use backend_utils_adt_format_type_seams::format_type_be;
 use backend_utils_cache_lsyscache_seams::{get_func_name, get_func_rettype};
-use backend_utils_cache_syscache_seams::{get_am_oid_by_name, search_am_by_name};
+use backend_utils_cache_syscache_seams::{get_am_oid_by_name, search_am_by_name, search_am_name};
 use backend_utils_init_miscinit_seams::superuser;
 
 /// `AMTYPE_INDEX` — index access method (`catalog/pg_am.h`).
@@ -206,11 +206,16 @@ pub fn get_am_oid(mcx: Mcx<'_>, amname: &str, missing_ok: bool) -> PgResult<Oid>
  * Returns `None` (the C `NULL`) when the OID has no `pg_am` tuple.
  */
 pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, amOid: Oid) -> PgResult<Option<PgString<'mcx>>> {
-    // `get_am_name` in lsyscache is the canonical OID→name worker
-    // (`SearchSysCache1(AMOID, ...)` + `pstrdup(NameStr(amform->amname))`); it
-    // already owns the `ReleaseSysCache`. amcmds.c's `get_am_name` is the
-    // identical body, so delegate rather than duplicate the syscache read.
-    backend_utils_cache_lsyscache_seams::get_am_name::call(mcx, amOid)
+    let mut result: Option<PgString<'mcx>> = None; /* char *result = NULL; */
+
+    // `SearchSysCache1(AMOID, ObjectIdGetDatum(amOid))` + (when valid)
+    // `pstrdup(NameStr(amform->amname))`; the syscache projection seam does the
+    // GETSTRUCT + name copy into `mcx` and owns the `ReleaseSysCache`. A cache
+    // miss (`!HeapTupleIsValid`) returns `Ok(None)`, leaving `result` NULL.
+    if let Some(amname) = search_am_name::call(mcx, amOid)? {
+        result = Some(amname);
+    }
+    Ok(result)
 }
 
 /*
