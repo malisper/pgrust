@@ -55,3 +55,17 @@ seam_core::seam!(
 );
 
 // shared_inval_backend_init already declared above (used by postinit).
+
+seam_core::seam!(
+    /// `SharedInvalShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn shared_inval_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `SharedInvalShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn shared_inval_shmem_init() -> types_error::PgResult<()>
+);

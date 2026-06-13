@@ -97,3 +97,17 @@ seam_core::seam!(
     /// that don't need the timeline pass `NULL`; this seam discards it.
     pub fn get_standby_flush_rec_ptr() -> XLogRecPtr
 );
+
+seam_core::seam!(
+    /// `WalSndShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn wal_snd_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `WalSndShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn wal_snd_shmem_init() -> types_error::PgResult<()>
+);

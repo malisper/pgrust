@@ -9,6 +9,7 @@ name = "backend_postmaster_checkpointer_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-core = { path = "../types-core" }
 seam-core = { path = "../seam-core" }
 types-startup = { path = "../types-startup" }
 types-error = { path = "../types-error" }

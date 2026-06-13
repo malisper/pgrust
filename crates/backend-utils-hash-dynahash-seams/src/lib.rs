@@ -45,6 +45,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `hash_estimate_size(long num_entries, Size entrysize)` (dynahash.c) —
+    /// estimate the shared-memory bytes a hash table with `num_entries` of
+    /// `entrysize` bytes each will consume (header + directory + segments +
+    /// elements). Summed by ipci.c `CalculateShmemSize` for the shmem index.
+    /// Infallible (pure arithmetic). Owner unported; scaffolded slot.
+    pub fn hash_estimate_size(num_entries: i64, entrysize: usize) -> usize
+);
+
+seam_core::seam!(
     /// `hash_seq_init(status, hashp)` (dynahash.c) — start a sequential scan.
     pub fn hash_seq_init(status: &mut HASH_SEQ_STATUS, hashp: *mut HTAB)
 );

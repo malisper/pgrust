@@ -607,6 +607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-nbtree-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-brindesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -1440,6 +1449,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogprefetcher-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-xlogreader-seams"
 version = "0.0.0"
 dependencies = [
@@ -1583,6 +1601,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -1912,6 +1931,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-largeobject-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+]
+
+[[package]]
 name = "backend-catalog-pg-namespace-seams"
 version = "0.0.0"
 dependencies = [
@@ -2058,6 +2087,7 @@ name = "backend-commands-async-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -2521,6 +2551,15 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-proclang-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3770,6 +3809,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-bloomfilter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-dshash"
 version = "0.0.0"
 dependencies = [
@@ -4231,11 +4278,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-pg-sema-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-port-sysv-shmem-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -4269,6 +4327,8 @@ name = "backend-postmaster-autovacuum-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
  "types-startup",
 ]
 
@@ -4316,6 +4376,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-bgworker",
+ "types-core",
  "types-error",
  "types-startup",
 ]
@@ -4333,6 +4394,7 @@ name = "backend-postmaster-checkpointer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
  "types-startup",
  "types-storage",
@@ -4460,6 +4522,8 @@ name = "backend-postmaster-pgarch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
  "types-startup",
 ]
 
@@ -4614,6 +4678,8 @@ name = "backend-postmaster-walsummarizer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
  "types-startup",
 ]
 
@@ -4623,6 +4689,22 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-startup",
+]
+
+[[package]]
+name = "backend-regex-core"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-locale",
+ "types-regex",
 ]
 
 [[package]]
@@ -5109,6 +5191,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-startup",
 ]
 
@@ -5312,6 +5395,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-syncscan-seams",
+ "backend-access-nbtree-seams",
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogprefetcher-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-commands-async-seams",
+ "backend-port-pg-sema-seams",
+ "backend-port-sysv-shmem-seams",
+ "backend-postmaster-autovacuum-seams",
+ "backend-postmaster-bgworker-seams",
+ "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-pgarch-seams",
+ "backend-postmaster-walsummarizer-seams",
+ "backend-replication-logical-launcher-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-dsm-registry-seams",
+ "backend-storage-ipc-injection-point-seams",
+ "backend-storage-ipc-ipci-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-shmem",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-barrier-seams"
 version = "0.0.0"
 dependencies = [
@@ -5353,6 +5495,9 @@ name = "backend-storage-ipc-dsm-core-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -5369,6 +5514,24 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-dsm-registry-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-injection-point-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -5416,6 +5579,7 @@ name = "backend-storage-ipc-pmsignal-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -5571,6 +5735,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -6096,6 +6261,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-spell"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-spell-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-regex",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-tsearch-spell-seams"
 version = "0.0.0"
 dependencies = [
@@ -6232,6 +6416,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -6268,6 +6453,45 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-utils-adt-acl"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-proclang-seams",
+ "backend-commands-tablespace-seams",
+ "backend-commands-user-seams",
+ "backend-foreign-foreign-seams",
+ "backend-lib-bloomfilter-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-acl",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6446,7 +6670,9 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
+ "types-locale",
 ]
 
 [[package]]
@@ -7206,6 +7432,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-ri-triggers",
  "types-tuple",
 ]
@@ -8197,6 +8424,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
@@ -8229,9 +8457,12 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
+ "backend-regex-core",
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-storage-file-buffile",
+ "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -8247,6 +8478,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-acl",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-rangetypes",
@@ -8260,7 +8492,6 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
- "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
@@ -8297,6 +8528,9 @@ dependencies = [
 [[package]]
 name = "types-acl"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-amapi"

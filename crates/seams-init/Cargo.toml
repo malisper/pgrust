@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
@@ -41,10 +42,13 @@ backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-postmaster-launch-backend = { path = "../backend-postmaster-launch-backend" }
 backend-postmaster-startup = { path = "../backend-postmaster-startup" }
+backend-regex-core = { path = "../backend-regex-core" }
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-postmaster-syslogger = { path = "../backend-postmaster-syslogger" }
 backend-replication-logical-conflict = { path = "../backend-replication-logical-conflict" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
+backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
+backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
@@ -60,6 +64,7 @@ backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-activity-xact = { path = "../backend-utils-activity-xact" }
+backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
