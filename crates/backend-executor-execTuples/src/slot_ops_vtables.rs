@@ -7,7 +7,9 @@
 //! Each callback takes a `&mut` to the concrete payload subtype (the analog of
 //! the C downcast of `TupleTableSlot *`); allocating callbacks take `Mcx`.
 
-use mcx::Mcx;
+extern crate alloc;
+
+use mcx::{slice_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::AttrNumber;
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -17,9 +19,103 @@ use types_nodes::tuptable::{
 };
 use types_storage::buf::{BufferIsValid, InvalidBuffer};
 use types_tuple::backend_access_common_heaptuple::TupleValue;
-use types_tuple::heaptuple::{HeapTuple, MinimalTuple};
+use types_tuple::heaptuple::{CompactAttribute, HeapTuple, MinimalTuple};
 
 use crate::slot_deform::slot_deform_heap_tuple;
+
+// --- alignment / varlena-length helpers (tupmacs.h / varatt.h) ------------
+//
+// Mirror the same primitives used by `slot_deform` and
+// `backend-access-common-heaptuple`'s form path; `tts_virtual_materialize`
+// sizes/copies a by-reference column from its owned on-disk bytes the same way.
+
+/// `TYPEALIGN(ALIGNVAL, LEN)` (c.h).
+#[inline]
+fn type_align(alignval: usize, len: usize) -> usize {
+    (len + (alignval - 1)) & !(alignval - 1)
+}
+
+/// `att_nominal_alignby(cur_offset, attalignby)` (tupmacs.h):
+/// `TYPEALIGN(attalignby, cur_offset)`.
+#[inline]
+fn att_nominal_alignby(cur_offset: usize, attalignby: u8) -> usize {
+    type_align(attalignby as usize, cur_offset)
+}
+
+#[inline]
+fn varatt_is_1b_e(b: &[u8]) -> bool {
+    b[0] == 0x01
+}
+#[inline]
+fn varatt_is_1b(b: &[u8]) -> bool {
+    (b[0] & 0x01) == 0x01
+}
+#[inline]
+fn varsize_1b(b: &[u8]) -> usize {
+    ((b[0] >> 1) & 0x7F) as usize
+}
+#[inline]
+fn varsize_4b(b: &[u8]) -> usize {
+    let hdr = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+    ((hdr >> 2) & 0x3FFF_FFFF) as usize
+}
+#[inline]
+fn vartag_size(tag: u8) -> usize {
+    const VARTAG_INDIRECT: u8 = 1;
+    const VARTAG_EXPANDED_RO: u8 = 2;
+    const VARTAG_ONDISK: u8 = 18;
+    if tag == VARTAG_INDIRECT {
+        8
+    } else if (tag & !1) == VARTAG_EXPANDED_RO {
+        8
+    } else if tag == VARTAG_ONDISK {
+        16
+    } else {
+        0
+    }
+}
+#[inline]
+fn varsize_external(b: &[u8]) -> usize {
+    2 + vartag_size(b[1])
+}
+/// `VARSIZE_ANY(ptr)` (varatt.h) for an in-line varlena starting at `b[0]`.
+#[inline]
+fn varsize_any(b: &[u8]) -> usize {
+    if varatt_is_1b_e(b) {
+        varsize_external(b)
+    } else if varatt_is_1b(b) {
+        varsize_1b(b)
+    } else {
+        varsize_4b(b)
+    }
+}
+
+/// `VARATT_IS_EXTERNAL_EXPANDED(PTR)` (varatt.h): a 1-byte external varlena
+/// (`0x01`) whose tag is an expanded-object tag (`VARTAG_EXPANDED_RO`/`_RW`).
+#[inline]
+fn varatt_is_external_expanded(b: &[u8]) -> bool {
+    const VARTAG_EXPANDED_RO: u8 = 2;
+    b.len() >= 2 && b[0] == 0x01 && ((b[1] & !1) == VARTAG_EXPANDED_RO)
+}
+
+/// `att_addlength_datum(cur_offset, attlen, attdatum)` (tupmacs.h) over the
+/// by-reference column's owned bytes (C's `DatumGetPointer(attdatum)`).
+#[inline]
+fn att_addlength_datum(cur_offset: usize, attlen: i16, val: &[u8]) -> usize {
+    if attlen > 0 {
+        cur_offset + attlen as usize
+    } else if attlen == -1 {
+        cur_offset + varsize_any(val)
+    } else {
+        debug_assert_eq!(attlen, -2);
+        // strlen + 1
+        let mut len = 0usize;
+        while val[len] != 0 {
+            len += 1;
+        }
+        cur_offset + len + 1
+    }
+}
 
 // ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("...")))
 fn feature_not_supported(msg: &'static str) -> PgError {
@@ -97,28 +193,142 @@ pub fn tts_virtual_is_current_xact_tuple(slot: &VirtualTupleTableSlot) -> PgResu
 /// `tts_virtual_materialize` (execTuples.c): flatten the slot's
 /// `tts_values`/`tts_isnull` so they no longer point at external memory.
 pub fn tts_virtual_materialize<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     slot: &mut VirtualTupleTableSlot<'mcx>,
 ) -> PgResult<()> {
+    // VirtualTupleTableSlot *vslot = (VirtualTupleTableSlot *) slot;
+    // TupleDesc desc = slot->tts_tupleDescriptor;
+    // Size sz = 0;
+    // char *data;
+
     // /* already materialized */
     // if (TTS_SHOULDFREE(slot)) return;
     if slot.base.should_free() {
         return Ok(());
     }
 
-    // The C body computes the byte size of every non-NULL by-reference datum
-    // (att_addlength_datum / EOH_get_flat_size), allocates `vslot->data` in
-    // slot->tts_mcxt, copies each datum into it, and repoints
-    // slot->tts_values[natt] = PointerGetDatum(data). That copy is raw-pointer
-    // datum manipulation keyed off the unported `utils/adt/datum.c`
-    // primitives (att_addlength_datum, datumGetSize) and the expanded-object
-    // flatten path (EOH_get_flat_size / EOH_flatten_into) owned by
-    // utils/adt/expandeddatum.c. The slot's `tts_values: PgVec<Datum>` carry
-    // bare machine words, so repointing them into `vslot->data` requires those
-    // owners' substrate. Mirror PG and panic until the slot payload model's
-    // datum-flatten bridge lands (slot_payload_model + datum.c owners).
-    let _ = slot;
-    panic!("execTuples.c tts_virtual_materialize: datum flatten into vslot->data needs unported utils/adt/datum.c (att_addlength_datum/datumGetSize) + expandeddatum.c (EOH_get_flat_size/EOH_flatten_into) over the slot's raw tts_values words")
+    // Snapshot the descriptor's compact attrs (read-only) so we don't hold a
+    // borrow of the descriptor while mutating tts_values/vslot->data below.
+    let compact_attrs: alloc::vec::Vec<CompactAttribute> = slot
+        .base
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("tts_virtual_materialize: slot has no tuple descriptor")
+        .compact_attrs
+        .iter()
+        .copied()
+        .collect();
+    let natts = compact_attrs.len();
+
+    // /* compute size of memory required */
+    // for (int natt = 0; natt < desc->natts; natt++) { ... }
+    //
+    // The slot's tts_values now carry a `TupleValue`: a by-value column is
+    // `ByVal` (skipped here, exactly as C skips `att->attbyval`), a
+    // by-reference column is `ByRef` over the verbatim on-disk bytes (C's
+    // `DatumGetPointer(val)`). Sizing/copying reads from those owned ByRef
+    // bytes via the engine's own att_nominal_alignby / att_addlength_datum.
+    let mut sz: usize = 0;
+    for natt in 0..natts {
+        let att = &compact_attrs[natt];
+
+        // if (att->attbyval || slot->tts_isnull[natt]) continue;
+        if att.attbyval || slot.base.tts_isnull[natt] {
+            continue;
+        }
+
+        // val = slot->tts_values[natt]; (by-reference => owned bytes)
+        let val = slot.base.tts_values[natt].as_ref_bytes();
+
+        if att.attlen == -1 && varatt_is_external_expanded(val) {
+            // /* flatten the expanded value so the materialized slot doesn't
+            //  * depend on it. */
+            // sz = att_nominal_alignby(sz, att->attalignby);
+            // sz += EOH_get_flat_size(DatumGetEOHP(val));
+            sz = att_nominal_alignby(sz, att.attalignby);
+            sz += backend_utils_adt_misc2_seams::eoh_get_flat_size::call(
+                types_datum::ExpandedObjectRef::from_expanded_datum_bytes(val),
+            )?;
+        } else {
+            // sz = att_nominal_alignby(sz, att->attalignby);
+            // sz = att_addlength_datum(sz, att->attlen, val);
+            sz = att_nominal_alignby(sz, att.attalignby);
+            sz = att_addlength_datum(sz, att.attlen, val);
+        }
+    }
+
+    // /* all data is byval */
+    // if (sz == 0) return;
+    if sz == 0 {
+        return Ok(());
+    }
+
+    // /* allocate memory */
+    // vslot->data = data = MemoryContextAlloc(slot->tts_mcxt, sz);
+    // slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+    //
+    // tts_mcxt == the slot's context, modeled by `mcx`. C leaves the bytes
+    // uninitialized (MemoryContextAlloc); we zero-fill so the alignment pad
+    // bytes between fields are deterministic (behaviour-preserving — only the
+    // copied field spans are read back).
+    let mut data: mcx::PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
+    data.resize(sz, 0u8);
+    slot.base.header.tts_flags |= TTS_FLAG_SHOULDFREE;
+
+    // /* and copy all attributes into the pre-allocated space */
+    // The C cursor `data` walks the buffer; here `cur` is the byte offset into
+    // `data`, and after copying a field we repoint
+    // `slot->tts_values[natt] = PointerGetDatum(data)` — in the owned model the
+    // re-pointed value is a fresh `ByRef` over the materialized field bytes
+    // (the slot now owns them in `vslot->data`, no external dependency).
+    let mut cur: usize = 0;
+    for natt in 0..natts {
+        let att = &compact_attrs[natt];
+
+        // if (att->attbyval || slot->tts_isnull[natt]) continue;
+        if att.attbyval || slot.base.tts_isnull[natt] {
+            continue;
+        }
+
+        // val = slot->tts_values[natt];
+        // (clone the source bytes so we can borrow `data` mutably below)
+        let val: alloc::vec::Vec<u8> = slot.base.tts_values[natt].as_ref_bytes().to_vec();
+
+        let data_length: usize;
+        if att.attlen == -1 && varatt_is_external_expanded(&val) {
+            // ExpandedObjectHeader *eoh = DatumGetEOHP(val);
+            // data = (char *) att_nominal_alignby(data, att->attalignby);
+            // data_length = EOH_get_flat_size(eoh);
+            // EOH_flatten_into(eoh, data, data_length);
+            let eoh = types_datum::ExpandedObjectRef::from_expanded_datum_bytes(&val);
+            cur = att_nominal_alignby(cur, att.attalignby);
+            data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(eoh)?;
+            backend_utils_adt_misc2_seams::eoh_flatten_into::call(
+                eoh,
+                &mut data[cur..cur + data_length],
+            )?;
+        } else {
+            // data = (char *) att_nominal_alignby(data, att->attalignby);
+            // data_length = att_addlength_datum(0, att->attlen, val);
+            // memcpy(data, DatumGetPointer(val), data_length);
+            cur = att_nominal_alignby(cur, att.attalignby);
+            data_length = att_addlength_datum(0, att.attlen, &val);
+            data[cur..cur + data_length].copy_from_slice(&val[..data_length]);
+        }
+
+        // slot->tts_values[natt] = PointerGetDatum(data);
+        // (re-point at the materialized field bytes — now owned by the slot)
+        slot.base.tts_values[natt] =
+            TupleValue::ByRef(slice_in(mcx, &data[cur..cur + data_length])?);
+
+        // data += data_length;
+        cur += data_length;
+    }
+
+    // vslot->data = data (the materialized buffer is now the slot's own).
+    slot.data = data;
+
+    Ok(())
 }
 
 /// `tts_virtual_copyslot` (execTuples.c): copy `src`'s attributes into `dst`,
@@ -146,15 +356,20 @@ pub fn tts_virtual_copyslot<'mcx>(
     }
 
     // slot_getallattrs(srcslot): deconstruct all of the source's attributes
-    // into its tts_values/tts_isnull. The source slot is borrowed immutably
-    // here (C mutates it); deforming a non-virtual source needs &mut. Since
-    // the only safe-to-deform-in-place source is a virtual slot (already fully
-    // valid: tts_nvalid == natts), and a non-virtual source would require a
-    // &mut borrow the callback signature doesn't grant, route the deform for
-    // non-virtual sources to the owner once the slot payload model's
-    // shared-deform path lands. For a virtual source nothing to deform.
+    // into its tts_values/tts_isnull (C mutates srcslot here, caching the
+    // deformed values). The shared deform path (`slot_deform::slot_getallattrs`)
+    // is fully ported, but it needs `&mut SlotData` to write the cache, whereas
+    // this callback receives `src: &SlotData<'mcx>` — the `copyslot(dst, src)`
+    // contract fixed at the keystone hands the source immutably (matching the
+    // dispatch `slot_copyslot` / `ExecCopySlot`). A virtual source is already
+    // fully valid (`tts_nvalid == natts`, nothing to deform), so the copy below
+    // is correct for it; a non-virtual source would require deforming through
+    // the immutable borrow, which the callback signature forbids. Migrating the
+    // copyslot src to `&mut` is a cross-family contract change (the dispatch +
+    // store/fetch consumers), out of this family's scope — so the non-virtual
+    // source arm stays mirror-PG-and-panic on that signature contract.
     if !matches!(src, SlotData::Virtual(_)) {
-        panic!("execTuples.c tts_virtual_copyslot: slot_getallattrs(srcslot) on a non-virtual source needs the slot payload model's deform-through-shared-ref path")
+        panic!("execTuples.c tts_virtual_copyslot: slot_getallattrs(srcslot) on a non-virtual source needs a &mut source borrow the copyslot(dst, &src) callback contract (fixed at the keystone) does not grant")
     }
 
     // for (natt = 0; natt < srcdesc->natts; natt++) {
@@ -197,15 +412,21 @@ pub fn tts_virtual_copy_heap_tuple<'mcx>(
     // return heap_form_tuple(slot->tts_tupleDescriptor, slot->tts_values,
     //                        slot->tts_isnull);
     //
-    // heap_form_tuple returns a `FormedTuple` (the owned header + a separate
-    // user-data byte buffer), which cannot be carried by the slot's
-    // `HeapTuple = Option<PgBox<HeapTupleData>>` field (header-only, no data
-    // bytes). The slot's `tts_values` are also raw `Datum` words rather than
-    // `TupleValue`s heap_form_tuple consumes. Both gaps are the sibling
-    // `slot_payload_model` family's tuple-carrier bridge. Mirror PG and panic
-    // until it lands.
+    // The form-tuple body is itself ready: the slot's `tts_values` now carry
+    // `TupleValue`s (the by-ref lane heap_form_tuple consumes), and
+    // `backend_access_common_heaptuple::heap_form_tuple` returns the body-bearing
+    // `FormedTuple`. The block is purely the RETURN-TYPE contract: this callback
+    // (and its consumers `ExecCopySlotHeapTuple` / `ExecFetchSlotHeapTuple` in
+    // the store/fetch family) still return the header-only
+    // `HeapTuple = Option<PgBox<HeapTupleData>>`, which cannot hold a
+    // `FormedTuple`'s data-area bytes. Migrating this callback's return to
+    // `Option<FormedTuple>` requires the same migration across the store/fetch
+    // family's dispatch (and the sibling heap/minimal/buffer `copy_heap_tuple`
+    // callbacks, all still on the header-only type) — a cross-family contract
+    // change the keystone did not perform and this virtual-ops family cannot
+    // make alone. Mirror PG and panic until that return contract is migrated.
     let _ = slot;
-    panic!("execTuples.c tts_virtual_copy_heap_tuple: heap_form_tuple over the slot's raw tts_values + the FormedTuple->HeapTuple carrier bridge are owned by the slot payload model")
+    panic!("execTuples.c tts_virtual_copy_heap_tuple: heap_form_tuple body is ready, but the callback's header-only HeapTuple return type cannot carry the FormedTuple's data bytes; migrating it to Option<FormedTuple> is a cross-family (store/fetch dispatch) contract change the keystone left unmade")
 }
 
 /// `tts_virtual_copy_minimal_tuple` (execTuples.c):
@@ -220,10 +441,16 @@ pub fn tts_virtual_copy_minimal_tuple<'mcx>(
 
     // return heap_form_minimal_tuple(slot->tts_tupleDescriptor,
     //                                slot->tts_values, slot->tts_isnull, extra);
-    // Same carrier gap as tts_virtual_copy_heap_tuple (FormedMinimalTuple ->
-    // the slot's MinimalTuple header-only carrier + raw tts_values words).
+    //
+    // Same return-type contract block as tts_virtual_copy_heap_tuple: the
+    // `heap_form_minimal_tuple` body over the slot's `TupleValue` tts_values is
+    // ready and yields a body-bearing `FormedMinimalTuple`, but this callback
+    // (and `ExecCopySlotMinimalTupleExtra` / `ExecFetchSlotMinimalTuple` in the
+    // store/fetch family) still return the header-only `MinimalTuple`, which
+    // can't carry the body bytes. Migrating to `Option<FormedMinimalTuple>` is a
+    // cross-family contract change the keystone did not perform. Mirror+panic.
     let _ = slot;
-    panic!("execTuples.c tts_virtual_copy_minimal_tuple: heap_form_minimal_tuple over raw tts_values + FormedMinimalTuple->MinimalTuple carrier bridge are owned by the slot payload model")
+    panic!("execTuples.c tts_virtual_copy_minimal_tuple: heap_form_minimal_tuple body is ready, but the callback's header-only MinimalTuple return type cannot carry the FormedMinimalTuple's body bytes; migrating it to Option<FormedMinimalTuple> is a cross-family (store/fetch dispatch) contract change the keystone left unmade")
 }
 
 // --- HeapTupleTableSlot ops -----------------------------------------------
