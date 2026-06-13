@@ -222,3 +222,21 @@ seam_core::seam!(
         form: &FormData_pg_amproc,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid)` +
+    /// `namein(amname)` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_am row (amcmds.c `CreateAccessMethod`): assign the row OID, form the
+    /// tuple (`values[]` = oid / `namein(amname)` / amhandler / amtype) against
+    /// the descriptor, insert it with index maintenance, and return the
+    /// assigned OID. pg_am has no shared `FormData_pg_am` mirror in the type
+    /// crates, and the C fills `values[]` inline rather than from a struct, so
+    /// the row's four columns cross as scalars. `Err` carries the
+    /// heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_am(
+        rel: &RelationData<'_>,
+        amname: &str,
+        amhandler: Oid,
+        amtype: u8,
+    ) -> PgResult<Oid>
+);

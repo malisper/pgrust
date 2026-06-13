@@ -71,6 +71,16 @@ pub const INTERNALOID: Oid = 2281;
 /// `BTREE_AM_OID` (`catalog/pg_am_d.h`) — the OID of the btree access method.
 pub const BTREE_AM_OID: Oid = 403;
 
+/// `INDEX_AM_HANDLEROID` (`catalog/pg_type_d.h`, `pg_type.dat` oid 325) — the
+/// OID of the `index_am_handler` pseudo-type (the required return type of an
+/// index access method's handler function).
+pub const INDEX_AM_HANDLEROID: Oid = 325;
+
+/// `TABLE_AM_HANDLEROID` (`catalog/pg_type_d.h`, `pg_type.dat` oid 269) — the
+/// OID of the `table_am_handler` pseudo-type (the required return type of a
+/// table access method's handler function).
+pub const TABLE_AM_HANDLEROID: Oid = 269;
+
 /// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation. The
 /// `ScanKeyInit` shorthand always stamps this into `sk_collation` (correct
 /// for all collation-aware catalog columns, ignored for the rest).

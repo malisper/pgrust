@@ -616,6 +616,29 @@ seam_core::seam!(
     /// the caller raises `cache lookup failed for access method %u`.
     pub fn search_am_handler(amoid: Oid) -> PgResult<Option<Oid>>
 );
+
+seam_core::seam!(
+    /// `GetSysCacheOid1(AMNAME, Anum_pg_am_oid, CStringGetDatum(amname))`
+    /// (syscache.c): the OID of the `pg_am` row named `amname`, or
+    /// `InvalidOid` when no such access method exists. amcmds.c's
+    /// `CreateAccessMethod` uses this for its "already exists" duplicate-name
+    /// check.
+    pub fn get_am_oid_by_name(amname: &str) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AMNAME, CStringGetDatum(amname))` +
+    /// `GETSTRUCT(Form_pg_am)` (syscache.c) projected to the
+    /// `(oid, amtype, amname)` fields amcmds.c's `get_am_type_oid` reads.
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises its
+    /// own "access method does not exist" error. The name copy lands in the
+    /// caller's `Mcx`; the installer owns the `ReleaseSysCache`.
+    pub fn search_am_by_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        amname: &str,
+    ) -> PgResult<Option<types_namespace::backend_catalog_namespace::PgAmInfo<'mcx>>>
+);
+
 seam_core::seam!(
     /// `SearchSysCacheAttName(relid, attname)` + `GETSTRUCT` (syscache.c):
     /// look up a column of `relid` by name, returning its

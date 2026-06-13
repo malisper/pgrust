@@ -2146,6 +2146,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-amcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-commands-amcmds-seams",
+ "backend-parser-parse-func-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-commands-amcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -9430,6 +9454,7 @@ dependencies = [
  "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-shdepend",
+ "backend-commands-amcmds",
  "backend-commands-cluster",
  "backend-commands-copyto",
  "backend-commands-define",
