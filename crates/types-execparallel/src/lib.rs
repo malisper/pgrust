@@ -223,6 +223,12 @@ handle!(
     /// In-DSM `SharedFileSet *` (`storage/sharedfileset.h`) — names a group of
     /// shared temp files, owned by `storage/file/sharedfileset.c`.
     SharedFileSetHandle);
+handle!(
+    /// `FileSet *` (`storage/fileset.h`) — names a group of temporary files
+    /// shared by a set of backends, owned by `storage/file/fileset.c`. A
+    /// fileset-backed `BufFile` borrows this pointer (never owns the body), so
+    /// it is an inherited-opacity handle here.
+    FileSetHandle);
 
 /// Cursor over a serialized buffer in DSA/DSM storage that the
 /// (de)serialization helpers advance as they read/write

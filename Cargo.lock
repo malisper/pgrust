@@ -5080,6 +5080,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-buffile"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-tablespace-seams",
+ "backend-executor-instrument",
+ "backend-storage-file-buffile-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-fileset-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "portability-instr-time",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-buffile-seams"
 version = "0.0.0"
 dependencies = [
@@ -5098,6 +5120,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -5106,6 +5129,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-file-fileset-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
 ]
 
 [[package]]
@@ -7886,6 +7919,7 @@ dependencies = [
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
+ "backend-storage-file-buffile",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",

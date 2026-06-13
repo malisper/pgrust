@@ -41,6 +41,7 @@ pub fn init_all() {
     backend_postmaster_syslogger::init_seams();
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_proto::init_seams();
+    backend_storage_file_buffile::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
     backend_storage_ipc_latch::init_seams();
     backend_storage_ipc_procsignal::init_seams();
