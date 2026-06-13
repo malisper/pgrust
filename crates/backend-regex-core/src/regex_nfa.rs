@@ -1333,6 +1333,33 @@ fn cleartraverse(nfa: &mut Nfa, s: StateId, depth: u32) -> RegResult<()> {
     Ok(())
 }
 
+/// Cross-NFA `dupnfa`: copy the sub-NFA reachable from `start`..`stop` in `src`
+/// into `dst`, hanging it from `from`..`to`. Both NFAs share the colormap `cm`.
+///
+/// In C, `dupnfa(struct nfa *nfa, start, stop, from, to)` is inherently
+/// cross-NFA — `start`/`stop` may be states of a *different* NFA than `nfa`
+/// (this is exactly how `nfanode` copies a parent sub-NFA into a fresh child
+/// NFA), because states are heap pointers and `duptraverse` scribbles `s->tmp`
+/// on the source states. The arena split forces the two NFAs to be distinct
+/// arguments; the single-NFA [`dupnfa`] is the `src == dst` special case.
+#[allow(clippy::too_many_arguments)]
+pub fn dupnfa_cross<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _dst: &mut Nfa,
+    _src: &mut Nfa,
+    _cm: &mut ColorMap,
+    _start: StateId,
+    _stop: StateId,
+    _from: StateId,
+    _to: StateId,
+) -> RegResult<()> {
+    todo!("regc_nfa.c:dupnfa (cross-NFA)")
+}
+
+// ---------------------------------------------------------------------------
+// optimization / analysis passes
+// ---------------------------------------------------------------------------
+
 /// `markreachable(struct nfa *nfa, struct state *s, struct state *okay, struct
 /// state *mark)` — recursive marking of reachable states.
 fn markreachable(
