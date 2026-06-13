@@ -40,6 +40,7 @@ pub mod proc_shmem;
 pub mod proc_waitqueue;
 
 mod inward_seams;
+mod seam;
 
 /// Install this crate's implementations of every seam declared in
 /// `backend-storage-lmgr-proc-seams` (the `PGPROC`-field accessors and the
