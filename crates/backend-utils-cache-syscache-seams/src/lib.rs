@@ -125,6 +125,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(nspid))` projected to
+    /// `NameStr(Form_pg_namespace->nspname)`, copied into `mcx` (C: `pstrdup`).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`. `Err` includes OOM from the copy. Consumed by
+    /// lsyscache.c's `get_namespace_name`.
+    pub fn search_namespace_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        nspid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AMOID, ObjectIdGetDatum(amOid))` projected to
+    /// `NameStr(Form_pg_am->amname)`, copied into `mcx` (C: `pstrdup`).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`. `Err` includes OOM from the copy. Consumed by
+    /// lsyscache.c's `get_am_name`.
+    pub fn search_am_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        am_oid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(oidtypeid))` +
     /// `GETSTRUCT(Form_pg_type)` projected to the type-dependent attribute
     /// fields `TupleDescInitEntry` (`access/common/tupdesc.c`) stamps onto a

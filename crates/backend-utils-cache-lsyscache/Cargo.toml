@@ -29,3 +29,4 @@ backend-catalog-pg-opclass-seams = { path = "../backend-catalog-pg-opclass-seams
 backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
