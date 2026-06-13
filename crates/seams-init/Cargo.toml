@@ -129,6 +129,7 @@ backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-catcache = { path = "../backend-utils-cache-catcache" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-relmapper = { path = "../backend-utils-cache-relmapper" }

@@ -1971,6 +1971,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-opclass-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-pg-shdepend"
 version = "0.0.0"
 dependencies = [
@@ -4099,6 +4108,8 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-parsenodes",
@@ -7249,6 +7260,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-lsyscache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amapi-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-opclass-seams",
+ "backend-nodes-copyfuncs-pc-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-read-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-opclass",
+ "types-selfuncs",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
@@ -7259,6 +7300,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-selfuncs",
 ]
 
@@ -7505,12 +7547,14 @@ dependencies = [
  "types-cache",
  "types-cluster",
  "types-core",
+ "types-datum",
  "types-error",
  "types-fmgr",
  "types-format-type",
  "types-hash",
  "types-namespace",
  "types-partition",
+ "types-selfuncs",
  "types-storage",
  "types-tuple",
 ]
@@ -8880,6 +8924,7 @@ dependencies = [
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
