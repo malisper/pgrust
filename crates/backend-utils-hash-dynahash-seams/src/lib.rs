@@ -58,8 +58,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `AtEOXact_HashTables(isCommit)` (`utils/hash/dynahash.c`) — clean up
-    /// dynahash tables at transaction end (WARNs about leaks at commit).
-    /// Infallible.
+    /// `AtEOXact_HashTables(isCommit)` (dynahash.c) — at transaction end, free
+    /// any hash tables created in the (sub)transaction memory context. Called
+    /// from auxiliary-process error recovery with `isCommit = false`. Pure
+    /// bookkeeping; infallible.
     pub fn at_eoxact_hash_tables(is_commit: bool)
 );

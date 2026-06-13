@@ -100,6 +100,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
+    /// catalog snapshot so the next catalog read takes a fresh one — driven by
+    /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;
+    /// infallible.
+    pub fn invalidate_catalog_snapshot()
+);
+
+seam_core::seam!(
     /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
     /// `None` (the C may return NULL when no snapshot is active). Snapshots
     /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
@@ -119,4 +127,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
     pub fn pop_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLatestSnapshot()` (snapmgr.c): a fresh MVCC snapshot reflecting all
+    /// committed transactions as of now. Snapshot acquisition can
+    /// `ereport(ERROR)` (e.g. too-old-snapshot / xmin), carried on `Err`.
+    pub fn get_latest_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `GetTransactionSnapshot()` (snapmgr.c): the transaction snapshot
+    /// (serializable: the registered xact snapshot; otherwise a fresh one).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
 );

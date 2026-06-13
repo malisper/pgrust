@@ -364,6 +364,51 @@ seam_core::seam!(
     ) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)>
 );
 
+/* ------------------------------------------------------------------------
+ *  Catalog-tuple field projections for inval.c (`GETSTRUCT` reads).
+ *
+ *  inval.c deforms the on-disk `Form_*` struct of a catalog tuple to decide
+ *  which relcache/snapshot invalidation a heap-tuple change implies. The
+ *  deform lives behind syscache (it owns the tupdescs), so each projection
+ *  takes a borrowed `HeapTupleData` and returns just the field(s) inval.c
+ *  reads. Pure deform reads; infallible.
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `((Form_pg_class) GETSTRUCT(tuple))` projected to `{ oid, relisshared }`
+    /// — the `pg_class` fields inval.c reads to route a relcache invalidation.
+    pub fn pg_class_shape(
+        tuple: &types_tuple::HeapTupleData<'_>,
+    ) -> types_storage::PgClassShape
+);
+
+seam_core::seam!(
+    /// `((Form_pg_attribute) GETSTRUCT(tuple))->attrelid` — the table a
+    /// `pg_attribute` tuple belongs to.
+    pub fn pg_attribute_attrelid(tuple: &types_tuple::HeapTupleData<'_>) -> Oid
+);
+
+seam_core::seam!(
+    /// `((Form_pg_index) GETSTRUCT(tuple))->indexrelid` — the index OID of a
+    /// `pg_index` tuple.
+    pub fn pg_index_indexrelid(tuple: &types_tuple::HeapTupleData<'_>) -> Oid
+);
+
+seam_core::seam!(
+    /// The FK target table of a `pg_constraint` tuple: for a foreign-key
+    /// constraint (`contype == CONSTRAINT_FOREIGN`), `Form_pg_constraint.confrelid`;
+    /// `None` for any other constraint type (inval.c skips those).
+    pub fn pg_constraint_fk_target(tuple: &types_tuple::HeapTupleData<'_>) -> Option<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `{ oid, relisshared }` (the `CacheInvalidateRelcacheByRelid` lookup);
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`). The installer owns the
+    /// `ReleaseSysCache`. `Err` carries the underlying catalog-scan errors.
+    pub fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<types_storage::PgClassShape>>
+);
+
 seam_core::seam!(
     /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
     /// `Form_pg_class.relrowsecurity`/`relforcerowsecurity` flags
@@ -406,4 +451,15 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         language_id: Oid,
     ) -> PgResult<Option<types_fmgr::LangInfo<'mcx>>>
+);
+
+seam_core::seam!(
+    /// The collation's schema-qualified name for `ri_GenerateQualCollation`:
+    /// `SearchSysCache1(COLLOID)` then `(get_namespace_name(collnamespace),
+    /// NameStr(collname))`, both copied into `mcx` as raw name bytes.
+    /// `Ok(None)` on a cache miss (the C `elog(ERROR)`s); `Err` carries OOM.
+    pub fn collation_qualified_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        collation: Oid,
+    ) -> PgResult<Option<(PgVec<'mcx, u8>, PgVec<'mcx, u8>)>>
 );
