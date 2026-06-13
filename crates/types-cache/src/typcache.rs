@@ -36,11 +36,24 @@ pub struct TypeCacheEntry {
     /// `rng_subdiff_finfo` -- the subtype's optional `subdiff` support function
     /// (`fn_oid == InvalidOid` when absent).
     pub rng_subdiff_finfo: FmgrInfo,
+    /// `hash_proc_finfo` -- the type's hash support function
+    /// (`fn_oid == InvalidOid` when not yet resolved / unavailable).
+    pub hash_proc_finfo: FmgrInfo,
+    /// `hash_extended_proc_finfo` -- the type's extended (64-bit, seeded) hash
+    /// support function (`fn_oid == InvalidOid` when not yet resolved).
+    pub hash_extended_proc_finfo: FmgrInfo,
     /// `rngelemtype` -- the range element type's cache entry (range types only).
     pub rngelemtype: Option<Box<TypeCacheEntry>>,
     /// `rngtype` -- the range type's cache entry (multirange types only).
     pub rngtype: Option<Box<TypeCacheEntry>>,
 }
+
+/// `TYPECACHE_HASH_PROC_FINFO` (`typcache.h`) -- request the type's hash
+/// support function be resolved into `hash_proc_finfo`.
+pub const TYPECACHE_HASH_PROC_FINFO: i32 = 0x00080;
+/// `TYPECACHE_HASH_EXTENDED_PROC_FINFO` (`typcache.h`) -- request the type's
+/// extended hash support function be resolved into `hash_extended_proc_finfo`.
+pub const TYPECACHE_HASH_EXTENDED_PROC_FINFO: i32 = 0x08000;
 
 /// Opaque handle to a planned domain CHECK `Expr *` (the output of
 /// `stringToNode(conbin)` + `expression_planner()`). The planner is a
