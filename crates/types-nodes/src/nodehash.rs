@@ -17,9 +17,11 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_condvar::Barrier;
 use types_core::{uint32, Oid, Size};
 use types_core::FmgrInfo;
-use types_execparallel::{DsaAreaHandle, DsaPointer};
+use types_execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle};
 use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
 use types_storage::fileset::SharedFileSet;
+use types_storage::file::{File, PGAlignedBlock};
+use types_storage::lock::ResourceOwnerHandle;
 use types_tuple::heaptuple::MinimalTupleData;
 
 use crate::execexpr::ExprState;
@@ -30,11 +32,53 @@ use crate::jointype::JoinStateData;
 //          Inherited-opacity sibling-subsystem handles (consolidated)
 // ===========================================================================
 
-/// `BufFile` (storage/buffile.h) — a buffered virtual temp file. Owned by the
-/// (unported) buffile subsystem; the hash join only stores the handle and
-/// passes it back to the buffile seams, so it is an inherited-opacity newtype.
-#[derive(Debug, Default)]
-pub struct BufFile(pub Opaque);
+/// `struct BufFile` (storage/file/buffile.c) — a buffered virtual temp file
+/// consisting of one or more `MAX_PHYSICAL_FILESIZE`-byte physical segments,
+/// each a VFD [`File`] managed by fd.c. Owned by `storage/file/buffile.c`,
+/// which holds the buffered-I/O behaviour; the hash join only stores the value
+/// (in a `PgBox`) and passes it back to the buffile seams.
+///
+/// This is a backend-local handle, NOT a shmem-resident ABI struct, so the
+/// fields carry no layout invariant. The C `File *files` palloc'd array and the
+/// `pstrdup`'d `const char *name` become owned `Vec`/`String`: the canonical
+/// type is lifetime-free (every consumer stores it as `PgBox<'mcx, BufFile>`
+/// and the buffile seams are typed `&mut BufFile`), so it cannot carry the
+/// `'mcx` an in-arena `PgVec`/`PgString` would require.
+#[derive(Debug)]
+pub struct BufFile {
+    /// `int numFiles` — number of physical files in the set. Kept equal to
+    /// `files.len()` at every push/pop/append/truncate (C's `numFiles` is the
+    /// segment count).
+    pub numFiles: i32,
+    /// `File *files` — the physical segments. All but the last have length
+    /// exactly `MAX_PHYSICAL_FILESIZE`.
+    pub files: alloc::vec::Vec<File>,
+    /// `bool isInterXact` — keep open over transactions?
+    pub isInterXact: bool,
+    /// `bool dirty` — does the buffer need to be written?
+    pub dirty: bool,
+    /// `bool readOnly` — has the file been set to read only?
+    pub readOnly: bool,
+    /// `FileSet *fileset` — the fileset backing the segment files, or `None`
+    /// for a standalone temp file. Borrowed (the body is owned by fileset.c).
+    pub fileset: Option<FileSetHandle>,
+    /// `const char *name` — name of a fileset-based BufFile (`None` otherwise).
+    pub name: Option<alloc::string::String>,
+    /// `ResourceOwner resowner` — the resource owner for the underlying temp
+    /// files, captured at creation (`CurrentResourceOwner`).
+    pub resowner: Option<ResourceOwnerHandle>,
+    /// `int curFile` — file index (0..n) part of the current position.
+    pub curFile: i32,
+    /// `off_t curOffset` — offset part of the current position (start of buffer
+    /// within the logical file).
+    pub curOffset: i64,
+    /// `int pos` — next read/write position in the buffer.
+    pub pos: i32,
+    /// `int nbytes` — total number of valid bytes in the buffer.
+    pub nbytes: i32,
+    /// `PGAlignedBlock buffer` — the `BLCKSZ` I/O buffer.
+    pub buffer: PGAlignedBlock,
+}
 
 /// `SharedTuplestoreAccessor` (utils/sharedtuplestore.h) — a backend's handle
 /// to a shared tuplestore partition. Owned by the (unported) sharedtuplestore
