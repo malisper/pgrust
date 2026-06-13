@@ -60,3 +60,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn clog_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExtendCLOG(newestXact)` (clog.c): zero the clog page that would hold
+    /// `newestXact` if it is the first XID of a new page, while the caller
+    /// holds `XidGenLock`. The SLRU page write can `ereport(ERROR)`, carried
+    /// on `Err`. Owner unported; scaffolded slot.
+    pub fn extend_clog(newest_xact: TransactionId) -> PgResult<()>
+);

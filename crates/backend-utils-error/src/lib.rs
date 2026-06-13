@@ -63,10 +63,12 @@
 //!     error context attaches on propagation —
 //!     `result.map_err(|e| e.add_context("while ..."))` at the boundaries
 //!     where C pushed `ErrorContextCallback`s. There is no ambient callback
-//!     chain, so errfinish's callback walk, `GetErrorContextStack`, and the
-//!     recursion-trouble `error_context_stack = NULL` reset have no
-//!     counterpart here (`errcontext_msg` still appends to the in-flight
-//!     frame, as C's `errcontext()` does).
+//!     chain, so errfinish's callback walk and the recursion-trouble
+//!     `error_context_stack = NULL` reset have no counterpart here
+//!     (`errcontext_msg` still appends to the in-flight frame, as C's
+//!     `errcontext()` does). `GetErrorContextStack` reproduces C's control
+//!     flow faithfully (recursion_depth bracket, scratch entry, callback walk,
+//!     pop) but the retired chain fires no callbacks, so it returns `None`.
 
 mod builder;
 pub mod config;
@@ -106,7 +108,8 @@ pub use stack::{
     errstart_cold, emit_error_report_for, err_generic_string, geterrcode, geterrposition,
     getinternalerrposition, in_error_recursion_trouble, internalerrposition, internalerrquery,
     pg_re_throw, reset_statement_suppressed, set_errcontext_domain, CopyErrorData, EmitErrorReport,
-    FlushErrorState, FreeErrorData, ReThrowError, ThrowErrorData, ERRORDATA_STACK_SIZE,
+    FlushErrorState, FreeErrorData, GetErrorContextStack, ReThrowError, ThrowErrorData,
+    ERRORDATA_STACK_SIZE,
 };
 pub use syslog::write_syslog;
 pub use types_error::{ErrorLevel, PgError, PgResult, SoftErrorContext, SqlState};
