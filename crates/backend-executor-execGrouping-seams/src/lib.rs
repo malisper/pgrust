@@ -113,18 +113,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// Allocate the `ncols`-sized control arrays on `node`
-    /// (`keyColIdx`/`tab_eq_funcoids`/`tab_collations`/`tab_hash_funcs`/
-    /// `cur_eq_funcs`, plus the transient `lhs_hash_funcs`/`cross_eq_funcoids`)
-    /// and set `node->numCols = ncols` (nodeSubplan.c:942-950). Allocating;
-    /// fallible.
-    pub fn alloc_hash_control_arrays<'mcx>(
-        node: &mut SubPlanState<'mcx>,
-        ncols: i32,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `hashtable->numCols` for the named table (execGrouping.c). Infallible.
     pub fn hash_table_num_cols(node: &SubPlanState<'_>, which: HashTableKind) -> i32
 );
@@ -221,4 +209,23 @@ seam_core::seam!(
         attr1: types_datum::Datum,
         attr2: types_datum::Datum,
     ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `execTuplesMatchPrepare(desc, numCols, keyColIdx, eqOperators,
+    /// collations, parent)` (execGrouping.c): build the `ExprState` that tests
+    /// two tuples of the given descriptor for equality on the named key
+    /// columns (used for `LIMIT ... WITH TIES` peer detection, `DISTINCT`,
+    /// etc.). A zero-column key compiles to `None` (the C `NULL` ExprState).
+    /// The compiled state is allocated in the EState's per-query context
+    /// (fallible on OOM); preparation can also `ereport(ERROR)`.
+    pub fn exec_tuples_match_prepare<'mcx>(
+        desc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        num_cols: i32,
+        key_col_idx: &[types_core::primitive::AttrNumber],
+        eq_operators: &[types_core::primitive::Oid],
+        collations: &[types_core::primitive::Oid],
+        parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>>
 );

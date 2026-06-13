@@ -35,6 +35,79 @@ pub use standbydesc::{standby_desc, standby_desc_invalidations, standby_identify
 
 use mcx::PgString;
 use types_error::{PgError, PgResult};
+use types_wal::rmgr::XLogReaderState;
+
+/// Install all seams owned by this crate. Called once at startup from
+/// `seams_init::init_all()`.
+pub fn init_seams() {
+    use backend_access_rmgrdesc_brindesc_seams as brindesc_seams;
+    use backend_access_rmgrdesc_gindesc_seams as gindesc_seams;
+    use backend_access_rmgrdesc_gistdesc_seams as gistdesc_seams;
+    use backend_access_rmgrdesc_hashdesc_seams as hashdesc_seams;
+    use backend_access_rmgrdesc_heapdesc_seams as heapdesc_seams;
+    use backend_access_rmgrdesc_mxactdesc_seams as mxactdesc_seams;
+    use backend_access_rmgrdesc_nbtdesc_seams as nbtdesc_seams;
+    use backend_access_rmgrdesc_spgdesc_seams as spgdesc_seams;
+    use backend_access_rmgrdesc_standbydesc_seams as standbydesc_seams;
+
+    // Adapter shims: the seams expose the RmDesc signature
+    // fn(buf: &mut PgString<'_>, record: &XLogReaderState<'_>) -> PgResult<()>
+    // while the implementations take &DecodedXLogRecord<'_>.
+    // The C rm_desc callbacks access the record via state->record, so we
+    // unwrap the Option<DecodedXLogRecord> field (None is a programming error
+    // equivalent to a NULL-deref in C).
+    fn brin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        brindesc::brin_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn gin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        gindesc::gin_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn gist_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        gistdesc::gist_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn hash_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        hashdesc::hash_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn heap_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        heapdesc::heap_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn heap2_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        heapdesc::heap2_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn multixact_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        mxactdesc::multixact_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn btree_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        nbtdesc::btree_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn spg_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        spgdesc::spg_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+    fn standby_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+        standbydesc::standby_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
+    }
+
+    brindesc_seams::brin_desc::set(brin_desc_shim);
+    brindesc_seams::brin_identify::set(brindesc::brin_identify);
+    gindesc_seams::gin_desc::set(gin_desc_shim);
+    gindesc_seams::gin_identify::set(gindesc::gin_identify);
+    gistdesc_seams::gist_desc::set(gist_desc_shim);
+    gistdesc_seams::gist_identify::set(gistdesc::gist_identify);
+    hashdesc_seams::hash_desc::set(hash_desc_shim);
+    hashdesc_seams::hash_identify::set(hashdesc::hash_identify);
+    heapdesc_seams::heap_desc::set(heap_desc_shim);
+    heapdesc_seams::heap_identify::set(heapdesc::heap_identify);
+    heapdesc_seams::heap2_desc::set(heap2_desc_shim);
+    heapdesc_seams::heap2_identify::set(heapdesc::heap2_identify);
+    mxactdesc_seams::multixact_desc::set(multixact_desc_shim);
+    mxactdesc_seams::multixact_identify::set(mxactdesc::multixact_identify);
+    nbtdesc_seams::btree_desc::set(btree_desc_shim);
+    nbtdesc_seams::btree_identify::set(nbtdesc::btree_identify);
+    spgdesc_seams::spg_desc::set(spg_desc_shim);
+    spgdesc_seams::spg_identify::set(spgdesc::spg_identify);
+    standbydesc_seams::standby_desc::set(standby_desc_shim);
+    standbydesc_seams::standby_identify::set(standbydesc::standby_identify);
+}
 
 /// `appendStringInfo(buf, fmt, ...)`: format straight into the buffer,
 /// surfacing the allocation failure as the OOM `PgError` (not `fmt::Error`).

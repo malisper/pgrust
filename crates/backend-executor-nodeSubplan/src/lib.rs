@@ -47,8 +47,9 @@ use backend_utils_adt_arrayfuncs_seams as arrayfuncs;
 
 use exec_expr::ProjectionKind;
 use exec_grouping::HashTableKind;
-use mcx::PgBox;
-use types_core::AttrNumber;
+use mcx::{vec_with_capacity_in, PgBox, PgVec};
+use types_core::fmgr::FmgrInfo;
+use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::SubPlanState;
@@ -212,8 +213,20 @@ fn ExecScanSubPlan<'mcx>(
     let mut astate: Astate<'mcx> = None;
 
     // Initialize ArrayBuildStateAny in caller's context, if needed.
+    //   astate = initArrayResultAny(subplan->firstColType,
+    //                               CurrentMemoryContext, true);
+    // `CurrentMemoryContext` at entry to ExecScanSubPlan — which is invoked
+    // from expression evaluation — is `econtext->ecxt_per_tuple_memory`, the
+    // short-lived per-tuple eval context. The whole array (accumulator and the
+    // final `makeArrayResultAny`) is built there (C `oldcontext`), so the result
+    // lives only until the caller resets that context on the next outer tuple.
     if subLinkType == SubLinkType::Array {
-        astate = arrayfuncs::init_array_result_any::call(estate.es_query_cxt, firstColType)?;
+        astate = arrayfuncs::init_array_result_any::call(
+            estate,
+            econtext,
+            arrayfuncs::ArrayBuildCtx::PerTuple,
+            firstColType,
+        )?;
     }
 
     // We are probably in a short-lived expression-evaluation context. The
@@ -294,9 +307,18 @@ fn ExecScanSubPlan<'mcx>(
         if subLinkType == SubLinkType::Array {
             found = true;
             // stash away current value: dvalue = slot_getattr(slot, 1, &disnull)
-            let attr = exec_tuples::slot_getattr::call(estate, slot, 1)?;
+            let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, 1)?;
+            //   astate = accumArrayResultAny(astate, dvalue, disnull,
+            //                                subplan->firstColType, oldcontext);
+            // `oldcontext` is the entry-time per-tuple eval context.
             astate = arrayfuncs::accum_array_result_any::call(
-                per_query, astate, attr.value, attr.isnull, firstColType,
+                estate,
+                econtext,
+                arrayfuncs::ArrayBuildCtx::PerTuple,
+                astate,
+                attr.value,
+                attr.isnull,
+                firstColType,
             )?;
             // keep scanning subplan to collect all values
             continue;
@@ -313,7 +335,7 @@ fn ExecScanSubPlan<'mcx>(
         // columns, then evaluate the combining expression.
         let mut col: AttrNumber = 1;
         for &paramid in paramIds.iter() {
-            let attr = exec_tuples::slot_getattr::call(estate, slot, col)?;
+            let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, col)?;
             set_exec_param(estate, paramid, attr.value, attr.isnull)?;
             col += 1;
         }
@@ -348,7 +370,14 @@ fn ExecScanSubPlan<'mcx>(
 
     if subLinkType == SubLinkType::Array {
         // We return the result in the caller's context.
-        result = arrayfuncs::make_array_result_any::call(per_query, astate)?;
+        //   result = makeArrayResultAny(astate, oldcontext, true);
+        // `oldcontext` is the entry-time per-tuple eval context.
+        result = arrayfuncs::make_array_result_any::call(
+            estate,
+            econtext,
+            arrayfuncs::ArrayBuildCtx::PerTuple,
+            astate,
+        )?;
     } else if !found {
         // deal with empty subplan result.  result/isNull were previously
         // initialized correctly for all sublink types except EXPR and
@@ -438,7 +467,7 @@ fn buildSubPlanHash<'mcx>(
         //   prmdata->value = slot_getattr(slot, col, &(prmdata->isnull));
         let mut col: AttrNumber = 1;
         for &paramid in paramIds.iter() {
-            let attr = exec_tuples::slot_getattr::call(estate, slot, col)?;
+            let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, col)?;
             set_exec_param(estate, paramid, attr.value, attr.isnull)?;
             col += 1;
         }
@@ -654,8 +683,31 @@ pub fn ExecInitSubPlan<'mcx>(
             }
         };
 
-        // Allocate the ncols-sized control arrays and set numCols.
-        exec_grouping::alloc_hash_control_arrays::call(&mut sstate, ncols)?;
+        // lefttlist = righttlist = NIL;
+        // sstate->numCols = ncols;
+        // sstate->keyColIdx     = palloc(ncols * sizeof(AttrNumber));
+        // sstate->tab_eq_funcoids = palloc(ncols * sizeof(Oid));
+        // sstate->tab_collations  = palloc(ncols * sizeof(Oid));
+        // sstate->tab_hash_funcs  = palloc(ncols * sizeof(FmgrInfo));
+        // lhs_hash_funcs          = palloc(ncols * sizeof(FmgrInfo));
+        // sstate->cur_eq_funcs    = palloc(ncols * sizeof(FmgrInfo));
+        // cross_eq_funcoids       = palloc(ncols * sizeof(Oid));
+        //
+        // The control arrays are this crate's own concretely-typed
+        // `SubPlanState` fields, so they are allocated and written here, not
+        // behind a seam. `lhs_hash_funcs` / `cross_eq_funcoids` are the two
+        // transient arrays the C keeps on the stack ("not in sstate"); they are
+        // built here and handed to the execExpr projection/ExprState builder.
+        let mcx = estate.es_query_cxt;
+        let n = ncols as usize;
+        sstate.numCols = ncols;
+        let mut key_col_idx: PgVec<'mcx, AttrNumber> = vec_with_capacity_in(mcx, n)?;
+        let mut tab_eq_funcoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, n)?;
+        let mut tab_collations: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, n)?;
+        let mut tab_hash_funcs: PgVec<'mcx, FmgrInfo> = vec_with_capacity_in(mcx, n)?;
+        let mut cur_eq_funcs: PgVec<'mcx, FmgrInfo> = vec_with_capacity_in(mcx, n)?;
+        let mut lhs_hash_funcs: PgVec<'mcx, FmgrInfo> = vec_with_capacity_in(mcx, n)?;
+        let mut cross_eq_funcoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, n)?;
 
         // foreach(l, oplist) with i = 1..
         let mut i: i32 = 1;
@@ -663,24 +715,54 @@ pub fn ExecInitSubPlan<'mcx>(
             let idx = (i - 1) as usize;
             // Resolve the per-column combining op (opfuncid, RHS eq op, hash
             // functions, collation); the catalog "could not find ..." errors
-            // propagate from inside the seam.
+            // propagate from inside the seam (lsyscache-owned lookups:
+            // get_compatible_hash_operators / get_opcode / get_op_hash_functions).
             let info = exec_expr::resolve_combining_op::call(&sstate, idx)?;
-            // Append the left/right target entries, fmgr_info the equality/hash
-            // functions, record the cross-type eq oid, and store the scalar
-            // control fields (tab_eq_funcoids/tab_collations/keyColIdx).
-            exec_expr::fill_combining_column::call(
-                &mut sstate,
-                estate,
-                idx,
-                i as AttrNumber,
-                info,
-            )?;
+
+            // cross_eq_funcoids[i-1] = opexpr->opfuncid;
+            cross_eq_funcoids.push(info.opfuncid);
+            // fmgr_info(opexpr->opfuncid, &sstate->cur_eq_funcs[i-1]);
+            // fmgr_info_set_expr((Node *) opexpr, &sstate->cur_eq_funcs[i-1]);
+            // (the trimmed FmgrInfo carries only fn_oid; the expr back-link is
+            // not represented, so fmgr_info_set_expr is a no-op here.)
+            cur_eq_funcs.push(FmgrInfo { fn_oid: info.opfuncid });
+            // sstate->tab_eq_funcoids[i-1] = get_opcode(rhs_eq_oper);
+            tab_eq_funcoids.push(info.rhs_eq_funcoid);
+            // fmgr_info(left_hashfn,  &lhs_hash_funcs[i-1]);
+            // fmgr_info(right_hashfn, &sstate->tab_hash_funcs[i-1]);
+            lhs_hash_funcs.push(FmgrInfo { fn_oid: info.left_hashfn });
+            tab_hash_funcs.push(FmgrInfo { fn_oid: info.right_hashfn });
+            // sstate->tab_collations[i-1] = opexpr->inputcollid;
+            tab_collations.push(info.inputcollid);
+            // keyColIdx is just column numbers 1..n
+            //   sstate->keyColIdx[i-1] = i;
+            key_col_idx.push(i as AttrNumber);
+
             i += 1;
         }
 
-        // Build tupdescs/slots/projection nodes for both sides and the
-        // lhs_hash_expr / cur_eq_comp ExprStates.
-        exec_expr::build_hash_projections_and_exprs::call(&mut sstate, estate)?;
+        sstate.keyColIdx = Some(key_col_idx);
+        sstate.tab_eq_funcoids = Some(tab_eq_funcoids);
+        sstate.tab_collations = Some(tab_collations);
+        sstate.tab_hash_funcs = Some(tab_hash_funcs);
+        sstate.cur_eq_funcs = Some(cur_eq_funcs);
+
+        // Construct tupdescs, slots and projection nodes for left and right
+        // sides, and build the lhs_hash_expr / cur_eq_comp ExprStates
+        // (nodeSubplan.c:1009-1053). The lefthand/righthand tlists are assembled
+        // from the combining `oplist` (makeTargetEntry over each OpExpr's two
+        // args) and then fed to ExecTypeFromTL / ExecBuildProjectionInfo /
+        // ExecBuildHash32FromAttrs / ExecBuildGroupingEqual — all execExpr-owned
+        // machinery that also reads the raw `subplan->testexpr` Expr tree. The
+        // two transient fmgr arrays the C keeps on the stack are handed over:
+        // `lhs_hash_funcs` (for ExecBuildHash32FromAttrs) and `cross_eq_funcoids`
+        // (for ExecBuildGroupingEqual).
+        exec_expr::build_hash_projections_and_exprs::call(
+            &mut sstate,
+            estate,
+            &lhs_hash_funcs,
+            &cross_eq_funcoids,
+        )?;
     }
 
     Ok(sstate)
@@ -729,11 +811,22 @@ pub fn ExecSetParamPlan<'mcx>(
     estate.es_direction = types_nodes::ScanDirection::ForwardScanDirection;
 
     // Initialize ArrayBuildStateAny in caller's context, if needed.
+    //   astate = initArrayResultAny(subplan->firstColType,
+    //                               CurrentMemoryContext, true);
+    // ExecSetParamPlan runs an initplan; its entry `CurrentMemoryContext` and
+    // the `oldcontext` it captures are the per-query context, and the final
+    // `makeArrayResultAny` is built explicitly in
+    // `econtext->ecxt_per_query_memory` (== es_query_cxt) so the array survives
+    // until query end (stashed in node->curArray for cross-call reuse).
     if subLinkType == SubLinkType::Array {
-        astate = arrayfuncs::init_array_result_any::call(estate.es_query_cxt, firstColType)?;
+        astate = arrayfuncs::init_array_result_any::call(
+            estate,
+            econtext,
+            arrayfuncs::ArrayBuildCtx::PerQuery,
+            firstColType,
+        )?;
     }
 
-    let per_query = estate.es_query_cxt;
     let setParam = clone_int_list(estate.es_query_cxt, &subplan_ref(node)?.setParam)?;
 
     // Run the plan.  (If it needs rescanning, the first ExecProcNode handles it.)
@@ -751,9 +844,15 @@ pub fn ExecSetParamPlan<'mcx>(
         if subLinkType == SubLinkType::Array {
             found = true;
             // stash away current value
-            let attr = exec_tuples::slot_getattr::call(estate, slot, 1)?;
+            let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, 1)?;
             astate = arrayfuncs::accum_array_result_any::call(
-                per_query, astate, attr.value, attr.isnull, firstColType,
+                estate,
+                econtext,
+                arrayfuncs::ArrayBuildCtx::PerQuery,
+                astate,
+                attr.value,
+                attr.isnull,
+                firstColType,
             )?;
             // keep scanning subplan to collect all values
             continue;
@@ -787,8 +886,16 @@ pub fn ExecSetParamPlan<'mcx>(
 
         // Build the result array in query context; to avoid leaking memory
         // across calls, remember the latest value (as for curTuple).
+        //   node->curArray = makeArrayResultAny(astate,
+        //                                       econtext->ecxt_per_query_memory,
+        //                                       true);
         arrayfuncs::pfree_array_datum::call(node.curArray);
-        let arr = arrayfuncs::make_array_result_any::call(per_query, astate)?;
+        let arr = arrayfuncs::make_array_result_any::call(
+            estate,
+            econtext,
+            arrayfuncs::ArrayBuildCtx::PerQuery,
+            astate,
+        )?;
         node.curArray = arr;
         set_exec_param_clear_execplan(estate, paramid, arr, false)?;
     } else if !found {

@@ -16,17 +16,41 @@ use types_core::Oid;
 use types_datum::array_build::ArrayBuildStateAny;
 use types_datum::datum::Datum;
 use types_error::PgResult;
+use types_nodes::{EStateData, EcxtId};
 
 /// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.
 /// `None` is the C `NULL` (no accumulator yet / empty result).
 pub type ArrayBuildStateAnyHandle<'mcx> = Option<PgBox<'mcx, ArrayBuildStateAny>>;
 
+/// Which of an `ExprContext`'s two memory contexts a polymorphic-array build
+/// step allocates in. The C reaches the live memory context through the
+/// ambient `CurrentMemoryContext` / `econtext->ecxt_per_query_memory`; the
+/// owned model has no ambient current context, so the caller names the target
+/// relative to its `econtext` (`EcxtId`) and the arrayfuncs owner resolves the
+/// real `MemoryContext` (and its `'mcx`-lived handle) off the EState.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayBuildCtx {
+    /// `CurrentMemoryContext` at entry — for a SubPlan evaluated inside
+    /// expression evaluation that is `econtext->ecxt_per_tuple_memory` (the
+    /// short-lived per-tuple eval context that the caller resets between outer
+    /// tuples). Used by `ExecScanSubPlan`'s ARRAY_SUBLINK path.
+    PerTuple,
+    /// `econtext->ecxt_per_query_memory` (== the EState's `es_query_cxt`) — the
+    /// per-query context that survives until query end. Used by
+    /// `ExecSetParamPlan`'s ARRAY_SUBLINK path (the result is stashed in
+    /// `node->curArray` for cross-call reuse).
+    PerQuery,
+}
+
 seam_core::seam!(
     /// `initArrayResultAny(input_type, CurrentMemoryContext, true)`
     /// (arrayfuncs.c): create a fresh polymorphic array accumulator for
-    /// elements of `input_type`, allocated in `mcx`. Fallible on OOM.
+    /// elements of `input_type`, allocated in the memory context the `econtext`
+    /// names with `ctx`. Fallible on OOM.
     pub fn init_array_result_any<'mcx>(
-        mcx: Mcx<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
         input_type: Oid,
     ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>>
 );
@@ -34,10 +58,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `accumArrayResultAny(astate, dvalue, disnull, input_type, ctx)`
     /// (arrayfuncs.c): accumulate one value into the accumulator (creating it
-    /// if `None`), in context `ctx`. Returns the (possibly newly created)
-    /// accumulator. Fallible on OOM.
+    /// if `None`), in the memory context the `econtext` names with `ctx`.
+    /// Returns the (possibly newly created) accumulator. Fallible on OOM.
     pub fn accum_array_result_any<'mcx>(
-        ctx: Mcx<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
         astate: ArrayBuildStateAnyHandle<'mcx>,
         dvalue: Datum,
         disnull: bool,
@@ -47,10 +73,13 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `makeArrayResultAny(astate, ctx, true)` (arrayfuncs.c): finalize the
-    /// accumulator into an array `Datum`, allocated in `ctx`. A `None`
-    /// accumulator yields an empty array (not NULL). Fallible on OOM.
+    /// accumulator into an array `Datum`, allocated in the memory context the
+    /// `econtext` names with `ctx`. A `None` accumulator yields an empty array
+    /// (not NULL). Fallible on OOM.
     pub fn make_array_result_any<'mcx>(
-        ctx: Mcx<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
         astate: ArrayBuildStateAnyHandle<'mcx>,
     ) -> PgResult<Datum>
 );
