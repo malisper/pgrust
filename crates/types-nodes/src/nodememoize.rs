@@ -26,8 +26,11 @@ use alloc::vec::Vec;
 
 use mcx::{PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
+use types_core::fmgr::FmgrInfo;
+use types_datum::Datum;
 
 use crate::bitmapset::Bitmapset;
+use crate::execexpr::ExprState;
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Plan;
 use crate::nodes::NodeTag;
@@ -279,6 +282,21 @@ impl<'mcx> MemoizeCache<'mcx> {
     }
 }
 
+/// One key column's `CompactAttribute` fields consumed by the binary-mode hash
+/// and equality loops (`TupleDescCompactAttr(hashkeydesc, i)`): the by-value
+/// flag and the type length used by `datum_image_hash` / `datum_image_eq`.
+///
+/// These come from `mstate->hashkeydesc` (`ExecTypeFromExprList(param_exprs)`),
+/// which the owned model resolves into this per-key vector at init time so the
+/// in-crate hash/equal loops do not need the full `TupleDesc`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoizeKeyAttr {
+    /// `attr->attbyval` — whether the datum is passed by value.
+    pub attbyval: bool,
+    /// `attr->attlen` — the type length (-1 = varlena, -2 = cstring).
+    pub attlen: i16,
+}
+
 // ===========================================================================
 // Node state (idiomatic `MemoizeState`).
 // ===========================================================================
@@ -323,6 +341,32 @@ pub struct MemoizeScanState<'mcx> {
     pub mstatus: MemoStatus,
     /// `int nkeys` — number of cache keys.
     pub nkeys: i32,
+    /// Per-key `CompactAttribute` (`attbyval`/`attlen`) drawn from
+    /// `mstate->hashkeydesc` (`TupleDesc hashkeydesc`); consumed by the
+    /// binary-mode hash and equality loops. `nkeys` long.
+    pub key_attrs: PgVec<'mcx, MemoizeKeyAttr>,
+    /// `TupleTableSlot *tableslot` — minimal-tuple slot the equality/probe code
+    /// deforms a cached entry's `key->params` into. Modeled as the owned
+    /// deformed values/nulls (`tts_values`/`tts_isnull`), `nkeys` long.
+    pub table_values: PgVec<'mcx, Datum>,
+    /// `tableslot->tts_isnull`.
+    pub table_isnull: PgVec<'mcx, bool>,
+    /// `TupleTableSlot *probeslot` — virtual slot holding the current lookup's
+    /// key values, populated by `prepare_probe_slot`. Modeled as the owned
+    /// values/nulls (`tts_values`/`tts_isnull`), `nkeys` long.
+    pub probe_values: PgVec<'mcx, Datum>,
+    /// `probeslot->tts_isnull`.
+    pub probe_isnull: PgVec<'mcx, bool>,
+    /// `ExprState *cache_eq_expr` — compiled non-binary key-equality expression
+    /// (`ExecBuildParamSetEqual`). `None` until built in `ExecInitMemoize`.
+    pub cache_eq_expr: Option<PgBox<'mcx, ExprState>>,
+    /// `ExprState **param_exprs` — the compiled cache-key parameter expressions
+    /// evaluated by `prepare_probe_slot`. `nkeys` long.
+    pub param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState>>,
+    /// `FmgrInfo *hashfunctions` — the per-key hash function lookup info
+    /// (`fmgr_info(left_hashfn, ...)`), used by the non-binary hash loop.
+    /// `nkeys` long.
+    pub hashfunctions: PgVec<'mcx, FmgrInfo>,
     /// `struct memoize_hash *hashtable` — the cache. `None` until the first call
     /// (the C node delays building the hash table until executor run) and after
     /// `cache_purge_all`.

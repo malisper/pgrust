@@ -36,7 +36,7 @@ use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMO
 use types_nodes::execnodes::EStateData;
 use types_nodes::nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
-    MemoizeScanState, SharedMemoizeInfo,
+    MemoizeScanState,
 };
 use types_tuple::heaptuple::MinimalTupleData;
 
@@ -68,9 +68,190 @@ fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
         .ok_or_else(|| PgError::error("requested shared memory size overflows size_t"))
 }
 
+/// `pg_rotate_left32(word, n)` (pg_bitutils.h).
+#[inline]
+fn pg_rotate_left32(word: u32, n: u32) -> u32 {
+    (word << n) | (word >> (32 - n))
+}
+
+/// `murmurhash32(data)` (hashfn.h) — simple inline 32-bit finalizer.
+#[inline]
+fn murmurhash32(data: u32) -> u32 {
+    let mut h = data;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
 // ===========================================================================
 // nodeMemoize.c static helpers, ported against the owned cache.
 // ===========================================================================
+
+/// `prepare_probe_slot(mstate, key)` — populate `mstate`'s probe slot
+/// (`probe_values`/`probe_isnull`) with the lookup key. When `key` is `None`,
+/// evaluate `mstate->param_exprs` against the current scan parameters (the
+/// `ExecEvalExpr` leaf, in the per-tuple context); when `key` is `Some(params)`,
+/// deform the cached entry's `params` (the `slot_getallattrs` leaf) and copy its
+/// values/nulls into the probe slot. This control flow is nodeMemoize.c's own.
+fn prepare_probe_slot<'mcx>(
+    mstate: &mut MemoizeScanState<'mcx>,
+    key: Option<&MinimalTupleData<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let num_keys = mstate.nkeys as usize;
+
+    // ExecClearTuple(pslot): reset the probe slot's owned values/nulls.
+    mstate.probe_values.clear();
+    mstate.probe_isnull.clear();
+
+    match key {
+        None => {
+            // oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+            // for (i) pslot->tts_values[i] = ExecEvalExpr(param_exprs[i], econtext,
+            //                                             &pslot->tts_isnull[i]);
+            // (the per-tuple context switch is handled inside the eval leaf, which
+            // evaluates in the node's ps_ExprContext->ecxt_per_tuple_memory.)
+            for i in 0..num_keys {
+                let (value, isnull) = seam::eval_param_expr::call(mstate, i, estate)?;
+                mstate.probe_values.push(value);
+                mstate.probe_isnull.push(isnull);
+            }
+        }
+        Some(params) => {
+            // ExecStoreMinimalTuple(key->params, tslot, false); slot_getallattrs(tslot);
+            // memcpy(pslot->tts_values, tslot->tts_values, sizeof(Datum) * numKeys);
+            // memcpy(pslot->tts_isnull, tslot->tts_isnull, sizeof(bool) * numKeys);
+            let mcx = estate.es_query_cxt;
+            let (values, isnull) = seam::deform_key_params::call(params, num_keys, mcx)?;
+            // tableslot also holds the deformed values (used by MemoizeHash_equal
+            // in non-binary mode via the cache_eq_expr ecxt_innertuple).
+            mstate.table_values.clear();
+            mstate.table_isnull.clear();
+            for i in 0..num_keys {
+                mstate.table_values.push(values[i]);
+                mstate.table_isnull.push(isnull[i]);
+                mstate.probe_values.push(values[i]);
+                mstate.probe_isnull.push(isnull[i]);
+            }
+        }
+    }
+
+    // ExecStoreVirtualTuple(pslot): the probe slot now holds num_keys virtual
+    // attributes (the owned values/nulls vectors are the materialized slot).
+    Ok(())
+}
+
+/// `MemoizeHash_hash(tb, NULL)` — hash the current probe slot. The probe slot
+/// must already have been populated by [`prepare_probe_slot`]. In binary mode
+/// each non-null key is `datum_image_hash`ed; otherwise each key's hash function
+/// is invoked via `FunctionCall1Coll`. Successive keys are combined by rotating
+/// left one bit and XORing; the accumulator is finalized with `murmurhash32`.
+fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32> {
+    let numkeys = mstate.nkeys as usize;
+    let mut hashkey: u32 = 0;
+
+    // oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory): the
+    // datum-image hash / fmgr leaves run their transient allocations in the
+    // node's per-tuple context; the leaves perform that switch themselves.
+
+    if mstate.binary_mode {
+        for i in 0..numkeys {
+            // combine successive hashkeys by rotating
+            hashkey = pg_rotate_left32(hashkey, 1);
+
+            if !mstate.probe_isnull[i] {
+                // treat nulls as having hash key 0
+                let attr = mstate.key_attrs[i];
+                let value = mstate.probe_values[i];
+                let hkey = seam::datum_image_hash::call(value, attr.attbyval, attr.attlen)?;
+                hashkey ^= hkey;
+            }
+        }
+    } else {
+        for i in 0..numkeys {
+            // combine successive hashkeys by rotating
+            hashkey = pg_rotate_left32(hashkey, 1);
+
+            if !mstate.probe_isnull[i] {
+                let collation = mstate.collations[i];
+                let value = mstate.probe_values[i];
+                let hkey =
+                    seam::function_call1_coll_uint32::call(mstate, i, collation, value)?;
+                hashkey ^= hkey;
+            }
+        }
+    }
+
+    Ok(murmurhash32(hashkey))
+}
+
+/// `MemoizeHash_equal(tb, key1, NULL)` — confirm the cached entry whose key is
+/// `params` matches the current probe slot. The probe slot must already have
+/// been populated. In binary mode this deforms `params` into the table slot and
+/// compares each attribute with `datum_image_eq` (mismatched null-ness or datum
+/// breaks the match); otherwise it runs `ExecQual(cache_eq_expr)` with the table
+/// slot as inner and the probe slot as outer tuple. This decision logic is
+/// nodeMemoize.c's own.
+fn memoize_hash_equal<'mcx>(
+    mstate: &mut MemoizeScanState<'mcx>,
+    params: &MinimalTupleData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    // probeslot should have already been prepared by prepare_probe_slot().
+    // ExecStoreMinimalTuple(key1->params, tslot, false): deform params into the
+    // owned table slot.
+    let numkeys = mstate.nkeys as usize;
+    {
+        let mcx = estate.es_query_cxt;
+        let (values, isnull) = seam::deform_key_params::call(params, numkeys, mcx)?;
+        mstate.table_values.clear();
+        mstate.table_isnull.clear();
+        for i in 0..numkeys {
+            mstate.table_values.push(values[i]);
+            mstate.table_isnull.push(isnull[i]);
+        }
+    }
+
+    if mstate.binary_mode {
+        // oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+        // slot_getallattrs(tslot); slot_getallattrs(pslot): both slots are
+        // already fully deformed in the owned model.
+        let mut is_match = true;
+
+        for i in 0..numkeys {
+            if mstate.table_isnull[i] != mstate.probe_isnull[i] {
+                is_match = false;
+                break;
+            }
+
+            // both NULL? they're equal
+            if mstate.table_isnull[i] {
+                continue;
+            }
+
+            // perform binary comparison on the two datums
+            let attr = mstate.key_attrs[i];
+            if !seam::datum_image_eq::call(
+                mstate.table_values[i],
+                mstate.probe_values[i],
+                attr.attbyval,
+                attr.attlen,
+            )? {
+                is_match = false;
+                break;
+            }
+        }
+
+        Ok(is_match)
+    } else {
+        // econtext->ecxt_innertuple = tslot; econtext->ecxt_outertuple = pslot;
+        // return ExecQual(mstate->cache_eq_expr, econtext);
+        seam::exec_qual_cache_eq::call(mstate, estate)
+    }
+}
 
 /// `build_hash_table(mstate, size)` — initialize the cache to empty.
 ///
@@ -204,7 +385,7 @@ fn cache_reduce_memory<'mcx>(
         // preparation so the executor-owned probe slot tracks the C behaviour
         // (later lookups during eviction must repopulate it anyway).
         let params = entry_params_clone(mstate, slot_id, estate)?;
-        seam::prepare_probe_from_key::call(mstate, &params, estate)?;
+        prepare_probe_slot(mstate, Some(&params), estate)?;
 
         // Sanity check that we found the entry belonging to the LRU list item.
         if !slot_is_live(mstate, slot_id) {
@@ -243,10 +424,10 @@ fn cache_lookup<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<usize>> {
     // Prepare the probe slot with the current scan parameters.
-    seam::prepare_probe_from_params::call(mstate, estate)?;
+    prepare_probe_slot(mstate, None, estate)?;
 
     // Hash the probe slot (mirrors memoize_insert -> MemoizeHash_hash).
-    let hash = seam::hash_probe_slot::call(mstate, estate)?;
+    let hash = memoize_hash_hash(mstate)?;
 
     // Look for an existing entry with this hash whose key matches the probe.
     if let Some(slot_id) = cache_find_matching(mstate, hash, estate)? {
@@ -846,30 +1027,22 @@ fn exec_memoize_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandl
 
     let plan_node_id = sup::plan_node_id::call(node);
 
-    // node->shared_info = shm_toc_allocate(pcxt->toc, size); zero-fill;
-    // num_workers = pcxt->nworkers; shm_toc_insert(pcxt->toc, plan_node_id, ...).
+    // node->shared_info = shm_toc_allocate(pcxt->toc, size);
     let size = add_size(
         OFFSETOF_SHARED_MEMOIZE_INFO_SINSTRUMENT,
         mul_size(nworkers as Size, SIZEOF_MEMOIZE_INSTRUMENTATION)?,
     )?;
     let toc = parallel::pcxt_toc::call(pcxt);
     let chunk = parallel::shm_toc_allocate::call(toc, size);
-    parallel::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
 
-    // Keep the node's own mirror in step (the owned canonical copy of the
-    // per-worker stats the retrieve path reads back).
-    let mut sinstrument: Vec<MemoizeInstrumentation> = Vec::new();
-    sinstrument
-        .try_reserve(nworkers.max(0) as usize)
-        .map_err(|_| out_of_memory("SharedMemoizeInfo"))?;
-    sinstrument.resize(nworkers.max(0) as usize, MemoizeInstrumentation::default());
-    seam::set_memoize_shared_info::call(
-        node,
-        SharedMemoizeInfo {
-            num_workers: nworkers,
-            sinstrument,
-        },
-    )?;
+    // MemSet(node->shared_info, 0, size); node->shared_info->num_workers =
+    // pcxt->nworkers — write the canonical store into the DSM chunk and install
+    // it as the node's shared_info (aliasing the chunk).
+    let info = seam::store_shared_memoize_info::call(chunk, nworkers)?;
+    seam::set_memoize_shared_info::call(node, info)?;
+
+    // shm_toc_insert(pcxt->toc, plan_node_id, node->shared_info).
+    parallel::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
     Ok(())
 }
 
@@ -891,13 +1064,16 @@ fn exec_memoize_initialize_worker(
 
 /// `ExecMemoizeRetrieveInstrumentation(node)` — copy DSM stats into local memory.
 fn exec_memoize_retrieve_instrumentation(node: PlanStateHandle) -> PgResult<()> {
-    // si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info
-    // = si. With the owned mirror the shared_info already holds the worker
-    // counts; there is nothing to copy out of a raw DSM pointer here. If there
-    // is no shared info, there is nothing to retrieve.
+    // SharedMemoizeInfo *si;
+    // if (node->shared_info == NULL) return;
     if !seam::memoize_shared_info_present::call(node)? {
         return Ok(());
     }
+
+    // si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info
+    // = si — copy the per-worker stats out of the DSM chunk into local memory so
+    // they survive the parallel context teardown for EXPLAIN.
+    seam::memoize_copy_shared_info_local::call(node)?;
     Ok(())
 }
 
@@ -1034,7 +1210,7 @@ fn cache_find_matching<'mcx>(
             continue;
         }
         let params = entry_params_clone(mstate, slot_id, estate)?;
-        if seam::probe_equals_params::call(mstate, &params, estate)? {
+        if memoize_hash_equal(mstate, &params, estate)? {
             return Ok(Some(slot_id));
         }
     }
@@ -1146,16 +1322,22 @@ fn out_of_memory(what: &str) -> PgError {
 /// Install every seam declared in `backend-executor-nodeMemoize-seams` that this
 /// crate owns: the four parallel-executor entry points.
 ///
-/// The downward run-time / init seams (slot/expr substrate, simplehash leaves,
-/// catalog lookups, fmgr, outer-child dispatch, memory budget) are owned by the
+/// The downward run-time / init seams (slot/expr substrate, the hash/equality
+/// leaf ops `datum_image_hash` / `function_call1_coll_uint32` / `datum_image_eq`
+/// / `eval_param_expr` / `exec_qual_cache_eq` / `deform_key_params`, catalog
+/// lookups, fmgr, outer-child dispatch, memory budget) are owned by the
 /// subsystems below the node layer and are installed by those crates when they
-/// land — this node calls them and they panic loudly until then.
+/// land — this node calls them and they panic loudly until then. (The
+/// `MemoizeHash_hash` / `MemoizeHash_equal` / `prepare_probe_slot` orchestration
+/// that drives those leaves is in-crate.)
 ///
 /// The memoize-specific live-node accessors (`memoize_instrument_present`,
 /// `memoize_shared_info_present`, `set_memoize_shared_info`,
-/// `memoize_finalize_worker_stats`) resolve a `PlanStateHandle` to the concrete
-/// `MemoizeScanState` — owned by whoever manages the live PlanState tree under
-/// parallel execution, installed by that owner.
+/// `memoize_attach_shared_info`, `memoize_copy_shared_info_local`) and the DSM
+/// canonical-store leaves (`store_shared_memoize_info`,
+/// `shared_memoize_info_from_chunk`) resolve a `PlanStateHandle` / DSM chunk to
+/// the concrete `MemoizeScanState` — owned by whoever manages the live
+/// PlanState tree and the parallel DSM, installed by that owner.
 pub fn init_seams() {
     seam::exec_memoize_estimate::set(exec_memoize_estimate);
     seam::exec_memoize_initialize_dsm::set(exec_memoize_initialize_dsm);

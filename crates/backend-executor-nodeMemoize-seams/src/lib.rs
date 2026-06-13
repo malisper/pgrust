@@ -71,12 +71,54 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `node->shared_info = shm_toc_lookup(pwcxt->toc, plan_node_id, true)` —
-    /// attach the worker to the existing shared-stats DSM chunk. Reads the
-    /// chunk's `num_workers` header and installs the node's mirror over it.
+    /// attach the worker to the existing shared-stats DSM chunk, installing it as
+    /// `node->shared_info` so `ExecEndMemoize`'s worker copyback writes its slot
+    /// into the canonical shared store.
     pub fn memoize_attach_shared_info(
         node: PlanStateHandle,
         chunk: types_execparallel::SerializeCursor,
     ) -> PgResult<()>
+);
+
+// ---------------------------------------------------------------------------
+// Shared-memory (DSM) canonical store for `SharedMemoizeInfo`. The C code
+// `shm_toc_allocate`s the chunk, writes `num_workers` and zero-fills the
+// `sinstrument` array, and points `node->shared_info` directly at it; workers
+// `shm_toc_lookup` the same chunk and write their slot in-place, and the leader
+// `memcpy`s the chunk into local memory. These leaves reproduce that aliasing:
+// the chunk is the canonical store, owned by the DSM/execParallel substrate
+// (cf. `store_instrumentation_header` / `instrumentation_from_chunk`).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `MemSet(node->shared_info, 0, size); node->shared_info->num_workers =
+    /// pcxt->nworkers` — write the `SharedMemoizeInfo` header (`num_workers`) and
+    /// a zeroed `sinstrument[num_workers]` array into the freshly-allocated DSM
+    /// `chunk`, returning a `SharedMemoizeInfo` aliasing that chunk for the node
+    /// to install as `shared_info`.
+    pub fn store_shared_memoize_info(
+        chunk: types_execparallel::SerializeCursor,
+        num_workers: i32,
+    ) -> PgResult<types_nodes::nodememoize::SharedMemoizeInfo>
+);
+
+seam_core::seam!(
+    /// Read the `SharedMemoizeInfo` (header + per-worker `sinstrument`) out of an
+    /// existing DSM `chunk` (`memcpy(si, node->shared_info, size)`), for the
+    /// leader's `ExecMemoizeRetrieveInstrumentation` copy-out and the worker's
+    /// attach.
+    pub fn shared_memoize_info_from_chunk(
+        chunk: types_execparallel::SerializeCursor,
+    ) -> PgResult<types_nodes::nodememoize::SharedMemoizeInfo>
+);
+
+seam_core::seam!(
+    /// Copy the node's current `shared_info` into freshly-`palloc`'d local memory
+    /// and repoint `node->shared_info` at the copy
+    /// (`si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info
+    /// = si`). After this the node owns its stats independently of the DSM chunk,
+    /// which is torn down with the parallel context.
+    pub fn memoize_copy_shared_info_local(node: PlanStateHandle) -> PgResult<()>
 );
 
 // ===========================================================================
@@ -147,9 +189,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `mstate->hashkeydesc = ExecTypeFromExprList(node->param_exprs)` and build
     /// the two single tuple-table slots `mstate->tableslot`
-    /// (`&TTSOpsMinimalTuple`) and `mstate->probeslot` (`&TTSOpsVirtual`), plus
-    /// allocate the `param_exprs` / `hashfunctions` arrays (`nkeys` long). All
-    /// executor-owned.
+    /// (`&TTSOpsMinimalTuple`) and `mstate->probeslot` (`&TTSOpsVirtual`). In the
+    /// owned model this resolves the `hashkeydesc` into `mstate.key_attrs` (the
+    /// per-key `attbyval`/`attlen`) and sizes the owned slot value/null vectors
+    /// (`table_values`/`table_isnull`/`probe_values`/`probe_isnull`) and the
+    /// `param_exprs` / `hashfunctions` arrays (all `nkeys` long). All
+    /// executor-owned (`ExecTypeFromExprList` / `MakeSingleTupleTableSlot`).
     pub fn init_hashkeydesc_and_slots<'mcx>(
         mstate: &mut MemoizeScanState<'mcx>,
         node: &Memoize<'mcx>,
@@ -227,44 +272,77 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `prepare_probe_slot(mstate, NULL)` — clear the probe slot and populate it
-    /// by evaluating `mstate->param_exprs` against the current scan parameters in
-    /// the per-tuple context, then `ExecStoreVirtualTuple`. Executor-owned slots.
-    pub fn prepare_probe_from_params<'mcx>(
+    /// `pslot->tts_values[i] = ExecEvalExpr(mstate->param_exprs[i], econtext,
+    /// &pslot->tts_isnull[i])` (execExprInterp.c) — evaluate the `key_index`-th
+    /// compiled cache-key parameter expression against the current scan
+    /// parameters, in the node's per-tuple expression context. The
+    /// `prepare_probe_slot(mstate, NULL)` orchestration (the per-key loop, the
+    /// context switch, the slot framing) is in-crate; this is the genuine leaf
+    /// call into the expression engine.
+    pub fn eval_param_expr<'mcx>(
         mstate: &mut MemoizeScanState<'mcx>,
+        key_index: usize,
         estate: &mut EStateData<'mcx>,
-    ) -> PgResult<()>
+    ) -> PgResult<(types_datum::Datum, bool)>
 );
 
 seam_core::seam!(
-    /// `prepare_probe_slot(mstate, key)` — clear the probe slot, store `params`
-    /// into the table slot, `slot_getallattrs`, copy its values/nulls into the
-    /// probe slot, then `ExecStoreVirtualTuple`.
-    pub fn prepare_probe_from_key<'mcx>(
-        mstate: &mut MemoizeScanState<'mcx>,
+    /// `slot_getallattrs` on a minimal-tuple slot holding `params`
+    /// (`ExecStoreMinimalTuple(params, tslot, false); slot_getallattrs(tslot)`):
+    /// deform a cached entry's key `params` into `numkeys` values/nulls. This is
+    /// the genuine tuple-deform leaf (execTuples / heaptuple); the
+    /// `prepare_probe_slot(mstate, key)` / `MemoizeHash_equal` orchestration that
+    /// consumes the result is in-crate.
+    pub fn deform_key_params<'mcx>(
         params: &MinimalTupleData<'mcx>,
-        estate: &mut EStateData<'mcx>,
-    ) -> PgResult<()>
+        numkeys: usize,
+        mcx: mcx::Mcx<'mcx>,
+    ) -> PgResult<(alloc::vec::Vec<types_datum::Datum>, alloc::vec::Vec<bool>)>
 );
 
 seam_core::seam!(
-    /// `MemoizeHash_hash(tb, NULL)` — hash the current probe slot. In binary
-    /// mode this `datum_image_hash`es each non-null key (rotating + XOR);
-    /// otherwise it `FunctionCall1Coll`s each key's hash function. Returns the
-    /// final `murmurhash32(hashkey)` value.
-    pub fn hash_probe_slot<'mcx>(
-        mstate: &mut MemoizeScanState<'mcx>,
-        estate: &mut EStateData<'mcx>,
+    /// `DatumGetUInt32(FunctionCall1Coll(&hashfunctions[i], collation, value))`
+    /// (fmgr.c) — the non-binary-mode per-key hash leaf. The rotating-XOR
+    /// accumulation and `murmurhash32` finalization (`MemoizeHash_hash`) are
+    /// in-crate; this is the catalog hash function invocation.
+    pub fn function_call1_coll_uint32<'mcx>(
+        mstate: &MemoizeScanState<'mcx>,
+        key_index: usize,
+        collation: types_core::Oid,
+        value: types_datum::Datum,
     ) -> PgResult<u32>
 );
 
 seam_core::seam!(
-    /// `MemoizeHash_equal(tb, key1, NULL)` — compare the cached entry `params`
-    /// against the current probe slot. In binary mode this is a per-attribute
-    /// `datum_image_eq`; otherwise it is `ExecQual(mstate->cache_eq_expr, ...)`.
-    pub fn probe_equals_params<'mcx>(
+    /// `datum_image_hash(value, attbyval, attlen)` (datum.c) — the binary-mode
+    /// per-key hash leaf.
+    pub fn datum_image_hash(
+        value: types_datum::Datum,
+        attbyval: bool,
+        attlen: i16,
+    ) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `datum_image_eq(v1, v2, attbyval, attlen)` (datum.c) — the binary-mode
+    /// per-key equality leaf used by `MemoizeHash_equal`.
+    pub fn datum_image_eq(
+        v1: types_datum::Datum,
+        v2: types_datum::Datum,
+        attbyval: bool,
+        attlen: i16,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecQual(mstate->cache_eq_expr, econtext)` (execExprInterp.c) with
+    /// `econtext->ecxt_innertuple` = the table slot (the cached entry's deformed
+    /// `params`, `table_values`/`table_isnull`) and `econtext->ecxt_outertuple` =
+    /// the probe slot (`probe_values`/`probe_isnull`). The non-binary-mode
+    /// equality leaf; the `MemoizeHash_equal` branch selection and the table-slot
+    /// deform are in-crate.
+    pub fn exec_qual_cache_eq<'mcx>(
         mstate: &mut MemoizeScanState<'mcx>,
-        params: &MinimalTupleData<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool>
 );
