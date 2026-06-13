@@ -40,7 +40,9 @@ use types_nodes::executor::TTS_FLAG_EMPTY;
 use types_nodes::nodetidrangescan::TidRangeScan;
 use types_nodes::primnodes::Expr;
 use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
-use types_tidrange::{ExprStateHandle, OperandSide, TidExprType, TidOpExpr, TidRangeScanState};
+use mcx::PgBox;
+use types_nodes::execexpr::ExprState;
+use types_tidrange::{OperandSide, TidExprType, TidOpExpr, TidRangeScanState};
 
 // ===========================================================================
 // Catalog operator OIDs (`pg_operator.dat`) used to classify the TID range op.
@@ -184,13 +186,13 @@ fn MakeTidOpExpr<'mcx>(
     tidstate: &mut TidRangeScanState<'mcx>,
     node: &TidRangeScan<'mcx>,
     qual_index: usize,
-) -> PgResult<TidOpExpr> {
+) -> PgResult<TidOpExpr<'mcx>> {
     // Node *arg1 = get_leftop((Expr *) expr);
     // Node *arg2 = get_rightop((Expr *) expr);
     let arg1_is_ctid = is_ctid_var(node, qual_index, OperandSide::Left);
     let arg2_is_ctid = is_ctid_var(node, qual_index, OperandSide::Right);
 
-    let exprstate: ExprStateHandle;
+    let exprstate: PgBox<'mcx, ExprState>;
     let mut invert = false;
 
     if arg1_is_ctid {
@@ -246,7 +248,7 @@ fn MakeTidOpExpr<'mcx>(
 
     Ok(TidOpExpr {
         exprtype,
-        exprstate,
+        exprstate: Some(exprstate),
         inclusive,
     })
 }
@@ -310,18 +312,29 @@ fn TidRangeEval<'mcx>(
     ItemPointerSet(&mut lower_bound, 0, 0);
     ItemPointerSet(&mut upper_bound, InvalidBlockNumber, PG_UINT16_MAX);
 
+    // ExprContext *econtext = node->ss.ps.ps_ExprContext;
+    let econtext = node
+        .ss
+        .ps
+        .ps_ExprContext
+        .ok_or_else(|| elog_internal("TID range scan has no expression context"))?;
+
     // foreach(l, node->trss_tidexprs)
     let n = node.trss_tidexprs.len();
     for i in 0..n {
-        let exprstate = node.trss_tidexprs[i].exprstate;
         let exprtype = node.trss_tidexprs[i].exprtype;
         let inclusive = node.trss_tidexprs[i].inclusive;
 
         let mut is_null = false;
         // itemptr = (ItemPointer) DatumGetPointer(
         //     ExecEvalExprSwitchContext(tidopexpr->exprstate, econtext, &isNull));
-        let itemptr =
-            seam::exec_eval_expr_switch_context::call(node, exprstate, &mut is_null, estate)?;
+        let itemptr = {
+            let exprstate = node.trss_tidexprs[i]
+                .exprstate
+                .as_deref()
+                .ok_or_else(|| elog_internal("TID range bound has no compiled expression"))?;
+            seam::exec_eval_expr_switch_context::call(exprstate, econtext, &mut is_null, estate)?
+        };
 
         // If the bound is NULL, *nothing* matches the qual.
         if is_null {

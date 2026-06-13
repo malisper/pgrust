@@ -60,7 +60,7 @@ fn install() {
         log("exec_scan_rescan");
         Ok(())
     });
-    exec_eval_expr_switch_context::set(|_node, _handle, is_null, _estate| {
+    exec_eval_expr_switch_context::set(|_exprstate, _econtext, is_null, _estate| {
         let (b, o, n) = EVAL_RESULTS.with(|q| q.borrow_mut().pop_front().unwrap());
         *is_null = n;
         Ok(ItemPointerData::new(b, o))
@@ -96,8 +96,24 @@ fn install() {
     exec_init_result_type_tl::set(|_, _| Ok(()));
     exec_assign_scan_projection_info::set(|_, _| Ok(()));
     exec_init_qual::set(|_, _| Ok(()));
-    // Each compiled bound resolves to a default handle.
-    exec_init_expr::set(|_tidstate, _node, _qual_index, _side| Ok(ExprStateHandle::default()));
+    // Each compiled bound resolves to a freshly-allocated ExprState. In the
+    // real flow ExecInitExpr allocates in CurrentMemoryContext; the test uses a
+    // process-lived context so the returned `PgBox<'mcx, ExprState>` outlives
+    // any per-test `'mcx`.
+    exec_init_expr::set(|_tidstate, _node, _qual_index, _side| {
+        mcx::alloc_in(expr_state_mcx(), ExprState)
+    });
+}
+
+/// A leaked, thread-lived `MemoryContext` used to mint `ExprState` boxes in the
+/// `exec_init_expr` test seam (it is `'static`, so the boxes satisfy any
+/// per-test `'mcx`). `MemoryContext` is not `Sync`, so it is held per-thread.
+fn expr_state_mcx() -> mcx::Mcx<'static> {
+    thread_local! {
+        static CTX: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("test-exprstate")));
+    }
+    CTX.with(|c| c.mcx())
 }
 
 fn setup() -> MutexGuard<'static, ()> {
@@ -121,28 +137,61 @@ fn log_has(s: &str) -> bool {
     LOG.with(|l| l.borrow().iter().any(|e| *e == s))
 }
 
-fn bound(exprtype: TidExprType, inclusive: bool) -> TidOpExpr {
-    TidOpExpr {
-        exprtype,
-        exprstate: ExprStateHandle::default(),
-        inclusive,
-    }
+/// A `(exprtype, inclusive)` bound spec — the bound's compiled `ExprState` is
+/// minted by `set_bounds` from the per-query context.
+type BoundSpec = (TidExprType, bool);
+
+fn bound(exprtype: TidExprType, inclusive: bool) -> BoundSpec {
+    (exprtype, inclusive)
 }
 
-/// Set a charged `trss_tidexprs` bound list from plain bounds.
-fn set_bounds<'mcx>(st: &mut TidRangeScanState<'mcx>, estate: &EStateData<'mcx>, bounds: &[TidOpExpr]) {
+/// Set a charged `trss_tidexprs` bound list from plain bound specs, minting a
+/// fresh `ExprState` per bound in the per-query context.
+fn set_bounds<'mcx>(
+    st: &mut TidRangeScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    bounds: &[BoundSpec],
+) {
     let mcx = estate.es_query_cxt;
     let mut v = vec_with_capacity_in(mcx, bounds.len()).unwrap();
-    for b in bounds {
-        v.push(*b);
+    for &(exprtype, inclusive) in bounds {
+        v.push(TidOpExpr {
+            exprtype,
+            exprstate: Some(mcx::alloc_in(mcx, ExprState).unwrap()),
+            inclusive,
+        });
     }
     st.trss_tidexprs = v;
 }
 
-fn empty_state<'mcx>(estate: &EStateData<'mcx>) -> TidRangeScanState<'mcx> {
+/// A minimal `ExprContext` charged to `mcx` (mirrors `ExecAssignExprContext`).
+fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> types_nodes::execnodes::ExprContext<'mcx> {
+    use types_datum::Datum;
+    types_nodes::execnodes::ExprContext {
+        ecxt_scantuple: None,
+        ecxt_innertuple: None,
+        ecxt_outertuple: None,
+        ecxt_per_query_memory: mcx,
+        ecxt_per_tuple_memory: mcx.context().new_child("ExprContext"),
+        ecxt_aggvalues: mcx::PgVec::new_in(mcx),
+        ecxt_aggnulls: mcx::PgVec::new_in(mcx),
+        caseValue_datum: Datum::null(),
+        caseValue_isNull: true,
+        domainValue_datum: Datum::null(),
+        domainValue_isNull: true,
+        ecxt_callbacks: None,
+    }
+}
+
+fn empty_state<'mcx>(estate: &mut EStateData<'mcx>) -> TidRangeScanState<'mcx> {
     let mcx = estate.es_query_cxt;
+    // ExecAssignExprContext sets ss.ps.ps_ExprContext; mirror that so
+    // TidRangeEval can resolve the per-tuple context.
+    let econtext = estate.add_expr_context(make_expr_context(mcx)).unwrap();
+    let mut ss = ScanStateData::default();
+    ss.ps.ps_ExprContext = Some(econtext);
     TidRangeScanState {
-        ss: ScanStateData::default(),
+        ss,
         ss_currentRelation: None,
         ss_currentScanDesc: None,
         trss_tidexprs: vec_with_capacity_in(mcx, 0).unwrap(),
@@ -245,7 +294,7 @@ fn tid_range_eval_narrows_inclusive_bounds() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(3, 4, false), (9, 2, false)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     set_bounds(
         &mut st,
         &estate,
@@ -266,7 +315,7 @@ fn tid_range_eval_normalizes_exclusive_bounds() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(3, 4, false), (9, 2, false)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     set_bounds(
         &mut st,
         &estate,
@@ -289,7 +338,7 @@ fn tid_range_eval_returns_false_on_null_bound() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(0, 0, true)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
     let ok = TidRangeEval(&mut st, &mut estate).unwrap();
     assert!(!ok);
@@ -304,7 +353,7 @@ fn tid_range_next_begins_scan_then_fetches() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(5, 1, false)]);
     push_getnext(&[true]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
@@ -323,7 +372,7 @@ fn tid_range_next_exhausted_clears_slot_and_resets_inscan() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(5, 1, false)]);
     push_getnext(&[false]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
@@ -340,7 +389,7 @@ fn tid_range_next_returns_false_when_range_empty() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(0, 0, true)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
@@ -359,7 +408,7 @@ fn tid_range_recheck_in_range_true() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(1, 1, false), (9, 9, false)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let mut slot = TupleTableSlot::default();
     slot.tts_tid = ItemPointerData::new(5, 5);
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(slot).unwrap());
@@ -380,7 +429,7 @@ fn tid_range_recheck_out_of_range_false() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(1, 1, false), (9, 9, false)]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let mut slot = TupleTableSlot::default();
     slot.tts_tid = ItemPointerData::new(20, 1);
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(slot).unwrap());
@@ -404,7 +453,7 @@ fn exec_tid_range_scan_no_qual_no_proj_returns_tuple() {
     let mut estate = EStateData::new_in(ctx.mcx());
     push_eval(&[(5, 1, false)]);
     push_getnext(&[true]);
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     let slot = estate.make_slot(TupleTableSlot::default()).unwrap();
     st.ss.ss_ScanTupleSlot = Some(slot);
     set_bounds(&mut st, &estate, &[bound(TidExprType::LowerBound, true)]);
@@ -419,7 +468,7 @@ fn end_scan_skips_endscan_when_no_scan_desc() {
     let _g = setup();
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     ExecEndTidRangeScan(&mut st, &mut estate).unwrap();
     assert!(!log_has("table_endscan"));
 }
@@ -429,7 +478,7 @@ fn rescan_resets_inscan_and_calls_exec_scan_rescan() {
     let _g = setup();
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut st = empty_state(&estate);
+    let mut st = empty_state(&mut estate);
     st.trss_inScan = true;
     ExecReScanTidRangeScan(&mut st, &mut estate).unwrap();
     assert!(!st.trss_inScan);

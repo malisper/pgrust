@@ -1701,6 +1701,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-tidrange",
@@ -1711,6 +1712,7 @@ dependencies = [
 name = "backend-executor-nodeTidrangescan-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

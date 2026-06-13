@@ -17,7 +17,8 @@
 
 #![allow(non_snake_case)]
 
-use mcx::PgVec;
+use mcx::{PgBox, PgVec};
+use types_nodes::execexpr::ExprState;
 use types_rel::Relation;
 use types_tableam::relscan::TableScanDesc;
 use types_tuple::heaptuple::ItemPointerData;
@@ -34,23 +35,14 @@ pub enum TidExprType {
     LowerBound,
 }
 
-/// Opaque handle to a compiled `ExprState`, owned by the executor's expression
-/// subsystem (behind the seam). The node identifies a bound's compiled
-/// expression by this handle, which the `exec_eval_expr_switch_context` seam
-/// resolves back to the live `ExprState` at evaluation time. Modelled as a
-/// generation index so this crate never holds a raw pointer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct ExprStateHandle(pub u64);
-
 /// `TidOpExpr` (nodeTidrangescan.c) — an upper or lower range bound for the
 /// scan. In C this is a `palloc`'d node referenced from `trss_tidexprs`.
-#[derive(Clone, Copy, Debug)]
-pub struct TidOpExpr {
+pub struct TidOpExpr<'mcx> {
     /// `TidExprType exprtype` — type of op; lower or upper.
     pub exprtype: TidExprType,
     /// `ExprState *exprstate` — compiled `ExprState` for a TID-yielding
-    /// subexpr, addressed by the opaque [`ExprStateHandle`].
-    pub exprstate: ExprStateHandle,
+    /// subexpr (the real `ExprState` the expression subsystem owns).
+    pub exprstate: Option<PgBox<'mcx, ExprState>>,
     /// `bool inclusive` — whether op is inclusive.
     pub inclusive: bool,
 }
@@ -81,7 +73,7 @@ pub struct TidRangeScanState<'mcx> {
     /// descriptor, `None` until `table_beginscan_tidrange`.
     pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
     /// `List *trss_tidexprs` — compiled TID-yielding bound expressions.
-    pub trss_tidexprs: PgVec<'mcx, TidOpExpr>,
+    pub trss_tidexprs: PgVec<'mcx, TidOpExpr<'mcx>>,
     /// `ItemPointerData trss_mintid` — lower bound of the TID range.
     pub trss_mintid: ItemPointerData,
     /// `ItemPointerData trss_maxtid` — upper bound of the TID range.

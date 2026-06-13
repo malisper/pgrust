@@ -17,3 +17,6 @@ types-nodes = { path = "../types-nodes" }
 types-tidrange = { path = "../types-tidrange" }
 backend-executor-nodeTidrangescan-seams = { path = "../backend-executor-nodeTidrangescan-seams" }
 mcx = { path = "../mcx" }
+
+[dev-dependencies]
+types-datum = { path = "../types-datum" }

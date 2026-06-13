@@ -14,9 +14,11 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
+use mcx::PgBox;
 use types_error::PgResult;
-use types_nodes::execnodes::EStateData;
-use types_tidrange::{ExprStateHandle, OperandSide, TidRangeScanState};
+use types_nodes::execexpr::ExprState;
+use types_nodes::execnodes::{EStateData, EcxtId};
+use types_tidrange::{OperandSide, TidRangeScanState};
 use types_nodes::nodetidrangescan::TidRangeScan;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -37,24 +39,23 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecInitExpr((Expr *) get_leftop/get_rightop(expr), &tidstate->ss.ps)` —
     /// compile the `side` operand of the `qual_index`-th qual `OpExpr` into an
-    /// `ExprState`, returning an opaque handle to the executor-owned compiled
-    /// expression.
+    /// `ExprState`, returning the executor-owned compiled expression.
     pub fn exec_init_expr<'mcx>(
         tidstate: &mut TidRangeScanState<'mcx>,
         node: &TidRangeScan<'mcx>,
         qual_index: usize,
         side: OperandSide,
-    ) -> PgResult<ExprStateHandle>
+    ) -> PgResult<PgBox<'mcx, ExprState>>
 );
 
 seam_core::seam!(
     /// `(ItemPointer) DatumGetPointer(ExecEvalExprSwitchContext(exprstate,
-    /// econtext, &isNull))` — evaluate the bound expression in the node's
-    /// per-tuple `ExprContext`, returning the resulting TID. Sets `is_null`
-    /// when the bound is SQL NULL.
+    /// econtext, &isNull))` — evaluate the bound expression `exprstate` in the
+    /// node's per-tuple `ExprContext` (`econtext`), returning the resulting TID.
+    /// Sets `is_null` when the bound is SQL NULL.
     pub fn exec_eval_expr_switch_context<'mcx>(
-        node: &mut TidRangeScanState<'mcx>,
-        exprstate: ExprStateHandle,
+        exprstate: &ExprState,
+        econtext: EcxtId,
         is_null: &mut bool,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<ItemPointerData>
