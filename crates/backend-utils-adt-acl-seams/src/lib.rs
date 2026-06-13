@@ -21,3 +21,10 @@ seam_core::seam!(
     /// Catalog/syscache lookups can `ereport(ERROR)`.
     pub fn has_privs_of_role(member: Oid, role: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `has_bypassrls_privilege(roleid)` (acl.c): whether `roleid` has the
+    /// BYPASSRLS attribute (superusers always do). Performs catalog/syscache
+    /// lookups, which can `ereport(ERROR)`.
+    pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool>
+);

@@ -11,10 +11,8 @@ pub fn init_all() {
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_rmgrdesc_small::init_seams();
-    backend_rmgrdesc_next::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
-    backend_access_transam_transam::init_seams();
     backend_access_transam_twophase::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
@@ -46,6 +44,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
+    backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();

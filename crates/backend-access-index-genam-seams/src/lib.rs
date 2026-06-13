@@ -58,6 +58,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `systable_recheck_tuple(sysscan, tup)` (genam.c): recheck visibility of
+    /// the most-recently-fetched tuple under a fresh catalog snapshot,
+    /// returning whether it is still live. The C `tup` argument only asserts
+    /// it matches `sysscan->slot`; the recheck itself reads the scan's live
+    /// slot, so the owned model passes only the scan descriptor (the caller
+    /// invokes this immediately after the `systable_getnext` that produced the
+    /// current row). `Err` carries the snapshot-acquisition / heap-fetch error
+    /// surface as well as any concurrent-abort handling.
+    pub fn systable_recheck_tuple(
+        sysscan: &mut types_scan::genam::SysScanDescData,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `systable_beginscan_ordered(heapRelation, indexRelation, snapshot,
     /// nkeys, key)` (genam.c): begin an index scan on a system(-like) table,
     /// ordered by the index. The caller has the index open (`index_open`),

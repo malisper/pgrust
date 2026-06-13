@@ -35,8 +35,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PostgresMain(dbname, username)` (tcop/postgres.c) — the regular
+    /// backend's main loop, entered after the startup packet is processed and
+    /// the PGPROC is set up. Never returns (it exits the process through
+    /// `proc_exit`). `dbname`/`username` are `MyProcPort->database_name` /
+    /// `->user_name`, `None` mirroring a C NULL.
+    pub fn postgres_main(dbname: Option<&str>, username: Option<&str>) -> !
+);
+
+seam_core::seam!(
     /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the SIGTERM handler: set
     /// `ShutdownRequestPending`/`InterruptPending` and the latch.
     /// Async-signal-safe and infallible; installed as the SIGTERM handler.
     pub fn die(postgres_signal_arg: i32)
+);
+
+seam_core::seam!(
+    /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the standard SIGTERM handler that
+    /// sets `ProcDiePending`/`InterruptPending` and the latch so the next
+    /// `CHECK_FOR_INTERRUPTS` exits. Returns the handler so callers can install
+    /// it with `pqsignal(SIGTERM, ...)`; tcop owns the handler body, so this
+    /// resolves only once tcop lands.
+    pub fn die_signal_handler() -> fn(i32)
+);
+
+seam_core::seam!(
+    /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
+    /// (tcop/postgres.c) — plan a single already-rewritten query, returning a
+    /// `PlannedStmt` allocated in `mcx`. Runs the planner; can
+    /// `ereport(ERROR)`.
+    pub fn pg_plan_query<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        querytree: types_nodes::portalcmds::Query,
+        query_string: std::string::String,
+        cursor_options: i32,
+        bound_params: types_nodes::portalcmds::ParamListInfo,
+    ) -> types_error::PgResult<types_nodes::nodeindexscan::PlannedStmt<'mcx>>
 );

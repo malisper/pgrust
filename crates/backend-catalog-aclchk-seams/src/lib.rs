@@ -39,3 +39,37 @@ seam_core::seam!(
         objectname: Option<String>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RemoveRoleFromObjectACL(roleid, classid, objid)` (aclchk.c): during
+    /// DROP OWNED, revoke any privileges the role holds on the object — a
+    /// REVOKE-equivalent that rewrites the object's ACL. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn remove_role_from_object_acl(roleid: Oid, classid: Oid, objid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RemoveRoleFromInitPriv(roleid, classid, objid, objsubid)` (aclchk.c):
+    /// during DROP OWNED, remove all mentions of the role from the object's
+    /// pg_init_privs entry. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn remove_role_from_init_priv(
+        roleid: Oid,
+        classid: Oid,
+        objid: Oid,
+        objsubid: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ReplaceRoleInInitPriv(oldroleid, newroleid, classid, objid, objsubid)`
+    /// (aclchk.c): during REASSIGN OWNED, substitute newrole for oldrole in
+    /// the object's pg_init_privs entry. Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn replace_role_in_init_priv(
+        oldroleid: Oid,
+        newroleid: Oid,
+        classid: Oid,
+        objid: Oid,
+        objsubid: i32,
+    ) -> PgResult<()>
+);

@@ -937,7 +937,7 @@ pub(crate) fn AtSubStart_ResourceOwner() {
 fn AtCCI_LocalCache() -> PgResult<()> {
     // Make any pending relation map changes visible BEFORE processing local
     // sinval messages, so the map changes reach the relcache on inval.
-    relmapper_seams::at_cci_relation_map::call();
+    relmapper_seams::at_cci_relation_map::call()?;
     // Make catalog changes visible to me for the next command.
     inval_seams::command_end_invalidation_messages::call()
 }

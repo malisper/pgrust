@@ -85,6 +85,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_putvalues(state, tdesc, values, nulls)` (tuplestore.c):
+    /// form a `MinimalTuple` from the `(values, nulls)` arrays under `tdesc`
+    /// and append it to the store. The tuple is built/copied into the store's
+    /// own context (fallible on OOM). `values` and `nulls` are parallel to
+    /// `tdesc`'s attributes.
+    pub fn tuplestore_putvalues(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        tdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        values: &[types_datum::Datum],
+        nulls: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `tuplestore_copy_read_pointer(state, srcptr, destptr)` (tuplestore.c):
     /// copy one read pointer's position onto another.
     pub fn tuplestore_copy_read_pointer(
@@ -163,4 +177,16 @@ seam_core::seam!(
     pub fn sts_end_write(
         accessor: &mut types_nodes::nodehashjoin::SharedTuplestoreAccessor,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_skiptuples(state, ntuples, forward)` (tuplestore.c): skip
+    /// over `ntuples` tuples in the given direction without fetching them;
+    /// returns false if it ran off the end before skipping them all. Can
+    /// `ereport(ERROR)` (read path).
+    pub fn tuplestore_skiptuples(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        ntuples: i64,
+        forward: bool,
+    ) -> types_error::PgResult<bool>
 );

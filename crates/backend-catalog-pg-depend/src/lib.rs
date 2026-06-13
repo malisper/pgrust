@@ -186,6 +186,15 @@ fn name_or_null<'a>(name: &'a Option<PgString<'_>>) -> &'a str {
     }
 }
 
+/// `getObjectDescription` can return NULL (empty buffer for a vanished
+/// object); `snprintf` renders that `%s` as `"(null)"`.
+fn desc_or_null<'a>(desc: &'a Option<PgString<'_>>) -> &'a str {
+    match desc {
+        Some(d) => d.as_str(),
+        None => "(null)",
+    }
+}
+
 /// Record a dependency between 2 objects via their respective ObjectAddress.
 /// The first argument is the dependent object, the second the one it
 /// references.
@@ -333,7 +342,7 @@ pub fn recordDependencyOnCurrentExtension(
                     ERROR,
                     format!(
                         "{} is already a member of extension \"{}\"",
-                        objectaddress_seams::get_object_description::call(mcx, object, false)?,
+                        desc_or_null(&objectaddress_seams::get_object_description::call(mcx, object, false)?),
                         name_or_null(&extension_seams::get_extension_name::call(mcx, oldext)?),
                     ),
                 )
@@ -344,7 +353,7 @@ pub fn recordDependencyOnCurrentExtension(
                 ERROR,
                 format!(
                     "{} is not a member of extension \"{}\"",
-                    objectaddress_seams::get_object_description::call(mcx, object, false)?,
+                    desc_or_null(&objectaddress_seams::get_object_description::call(mcx, object, false)?),
                     name_or_null(&extension_seams::get_extension_name::call(
                         mcx,
                         extension_seams::current_extension_object::call(),
@@ -402,7 +411,7 @@ pub fn checkMembershipInCurrentExtension(mcx: Mcx<'_>, object: &ObjectAddress) -
             ERROR,
             format!(
                 "{} is not a member of extension \"{}\"",
-                objectaddress_seams::get_object_description::call(mcx, object, false)?,
+                desc_or_null(&objectaddress_seams::get_object_description::call(mcx, object, false)?),
                 name_or_null(&extension_seams::get_extension_name::call(
                     mcx,
                     extension_seams::current_extension_object::call(),
@@ -711,7 +720,7 @@ pub fn changeDependenciesOn(
             ERROR,
             format!(
                 "cannot remove dependency on {} because it is a system object",
-                objectaddress_seams::get_object_description::call(mcx, &objAddr, false)?
+                desc_or_null(&objectaddress_seams::get_object_description::call(mcx, &objAddr, false)?)
             ),
         )
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));

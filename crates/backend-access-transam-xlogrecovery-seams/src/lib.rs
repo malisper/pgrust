@@ -46,6 +46,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `reachedConsistency` (xlogrecovery.c global) — true once recovery has
+    /// reached a consistent state. Pure read of backend-local/shared state.
+    pub fn reached_consistency() -> bool
+);
+
+seam_core::seam!(
     /// `InRecovery` (`access/xlogutils.h`, owned by xlogrecovery.c) — true
     /// while this process is performing WAL replay (the startup process's
     /// local flag, distinct from the shared `RecoveryInProgress()`). Pure

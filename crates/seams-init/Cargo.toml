@@ -15,10 +15,8 @@ backend-access-common-reloptions = { path = "../backend-access-common-reloptions
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
-backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
-backend-access-transam-transam = { path = "../backend-access-transam-transam" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
@@ -50,6 +48,7 @@ backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
+backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }

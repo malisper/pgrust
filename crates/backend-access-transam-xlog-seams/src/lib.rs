@@ -27,8 +27,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `wal_level` (xlog.c GUC).
+    /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
+);
+
+seam_core::seam!(
+    /// `wal_segment_size` (xlog.c global, bytes-per-WAL-segment). A plain
+    /// global read — infallible.
+    pub fn wal_segment_size() -> i32
 );
 
 seam_core::seam!(
@@ -46,8 +52,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `RecoveryInProgress()` (xlog.c): true while hot-standby recovery is
-    /// running. Reads backend-local + shared state; cannot `ereport`.
+    /// `bool RecoveryInProgress(void)` (xlog.c) — true if WAL recovery is
+    /// still in progress (we are a standby / in crash recovery). Reads
+    /// backend-local + shared state; cannot `ereport`.
     pub fn recovery_in_progress() -> bool
 );
 
@@ -117,17 +124,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BootStrapXLOG(data_checksum_version)` (xlog.c): create the initial WAL
+    /// segment and control file at bootstrap. `ereport(PANIC)` on an I/O
+    /// failure (modeled as `Err`).
+    pub fn boot_strap_xlog(data_checksum_version: u32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckpointStats.ckpt_slru_written++` (xlog.c's `CheckpointStats`
     /// global, bumped directly by slru.c during checkpoint write-all).
     /// Narrow write-side capability on the owner's global, same shape as
     /// `set_my_backend_type` (see DESIGN_DEBT.md).
     pub fn count_ckpt_slru_written()
-);
-
-seam_core::seam!(
-    /// `RecoveryInProgress()` (xlog.c): true while the server is in archive
-    /// recovery / standby mode. Shared-state read; infallible.
-    pub fn RecoveryInProgress() -> bool
 );
 
 seam_core::seam!(
@@ -138,8 +146,46 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `wal_segment_size` (xlog.c GUC) — bytes per WAL segment file.
-    pub fn wal_segment_size() -> i32
+    /// `XLogRecPtr GetRedoRecPtr(void)` (xlog.c) — the current redo pointer.
+    pub fn get_redo_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `XLogRecPtr GetXLogInsertRecPtr(void)` (xlog.c) — current insert position.
+    pub fn get_xlog_insert_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `XLogRecPtr GetXLogReplayRecPtr(TimeLineID *)` (xlogrecovery.c) — last
+    /// replayed position (called with NULL by slot.c, so no TLI out).
+    pub fn get_xlog_replay_rec_ptr() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `void XLogSetReplicationSlotMinimumLSN(XLogRecPtr lsn)` (xlog.c) —
+    /// publish the oldest LSN required by replication slots.
+    pub fn xlog_set_replication_slot_minimum_lsn(lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `XLogSegNo XLogGetLastRemovedSegno(void)` (xlog.c).
+    pub fn xlog_get_last_removed_segno() -> XLogSegNo
+);
+
+seam_core::seam!(
+    /// `XLogRecPtr LogStandbySnapshot(void)` (standby.c) — log an
+    /// `xl_running_xacts` record and return the end LSN. Can `ereport(ERROR)`.
+    pub fn log_standby_snapshot() -> types_error::PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `bool StandbyMode` (xlogrecovery.c) — running in standby mode.
+    pub fn standby_mode() -> bool
+);
+
+seam_core::seam!(
+    /// `bool EnableHotStandby` (xlog.c) — the `hot_standby` GUC value.
+    pub fn enable_hot_standby() -> bool
 );
 
 seam_core::seam!(

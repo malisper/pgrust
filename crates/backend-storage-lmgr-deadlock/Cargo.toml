@@ -1,0 +1,33 @@
+[package]
+name = "backend-storage-lmgr-deadlock"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_lmgr_deadlock"
+path = "src/lib.rs"
+
+[features]
+# DEBUG_DEADLOCK build flag (deadlock.c): the PrintLockQueue debug aid.
+debug_deadlock = []
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+types-error = { path = "../types-error" }
+types-deadlock = { path = "../types-deadlock" }
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+seam-core = { path = "../seam-core" }
+
+# Inward seam crate (installed by init_seams).
+backend-storage-lmgr-deadlock-seams = { path = "../backend-storage-lmgr-deadlock-seams" }
+
+# Outward owner seam crates (the genuine externals).
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

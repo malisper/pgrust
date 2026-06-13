@@ -31,6 +31,8 @@ pub const TEXTOID: Oid = 25;
 pub const OIDOID: Oid = 26;
 pub const JSONOID: Oid = 114;
 pub const JSONBOID: Oid = 3802;
+/// `TSQUERYOID` — `tsquery` type OID (`pg_type_d.h`).
+pub const TSQUERYOID: Oid = 3615;
 pub const XMLOID: Oid = 142;
 pub const FLOAT4OID: Oid = 700;
 pub const FLOAT8OID: Oid = 701;
@@ -51,6 +53,14 @@ pub const CIDOID: Oid = 29;
 /// `refcursor` — reference to a cursor (portal name); uses `text`'s I/O routines
 /// (`catalog/pg_type.dat`, oid 1790).
 pub const REFCURSOROID: Oid = 1790;
+/// `internal` pseudo-type (`pg_type_d.h`, oid 2281).
+pub const INTERNALOID: Oid = 2281;
+/// `anyarray` pseudo-type (`pg_type_d.h`, oid 2277).
+pub const ANYARRAYOID: Oid = 2277;
+/// `any` pseudo-type (`pg_type_d.h`, oid 2276).
+pub const ANYOID: Oid = 2276;
+/// `anycompatiblearray` pseudo-type (`pg_type_d.h`, oid 5078).
+pub const ANYCOMPATIBLEARRAYOID: Oid = 5078;
 
 /// Default array element delimiter (`','`, `catalog/pg_type.h`).
 pub const DEFAULT_TYPDELIM: i8 = b',' as i8;
@@ -117,6 +127,11 @@ const _: () = assert!(FirstLowInvalidHeapAttributeNumber == -7);
 pub const VARHDRSZ: usize = core::mem::size_of::<i32>();
 pub const HIGHBIT: i32 = 0x80;
 pub const MINIMAL_TUPLE_OFFSET: usize = 8;
+/// `ATTRIBUTE_FIXED_PART_SIZE` (access/tupdesc.h): the on-disk size of the
+/// fixed-width part of `FormData_pg_attribute`, i.e. through `attcollation`.
+/// The C macro computes `offsetof(FormData_pg_attribute, attcollation) +
+/// sizeof(Oid)`; on the catalog ABI this is a fixed 100 bytes.
+pub const ATTRIBUTE_FIXED_PART_SIZE: usize = 100;
 pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;
