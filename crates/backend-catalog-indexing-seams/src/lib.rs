@@ -222,3 +222,19 @@ seam_core::seam!(
         form: &FormData_pg_amproc,
     ) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `GetNewOidWithIndex(rel, NamespaceOidIndexId, Anum_pg_namespace_oid)` +
+    /// `namestrcpy` + `heap_form_tuple` + `CatalogTupleInsert` for one
+    /// pg_namespace row (pg_namespace.c `NamespaceCreate`): assigns and returns
+    /// the new namespace OID, building the row from the schema name, owner, and
+    /// optional default ACL (`acl == None` ⇒ `nulls[Anum_pg_namespace_nspacl
+    /// - 1] = true`). The `acl` varlena (`Acl *` = `ArrayType`) crosses
+    /// unchanged. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_namespace(
+        rel: &RelationData<'_>,
+        nspname: &str,
+        nspowner: Oid,
+        nspacl: Option<types_array::ArrayType>,
+    ) -> PgResult<Oid>
+);
