@@ -7351,6 +7351,7 @@ dependencies = [
  "backend-storage-ipc-latch-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-more2-seams",
  "backend-utils-misc-timeout-seams",
  "libc",
  "port-pqsignal-seams",

@@ -708,7 +708,33 @@ fn elog_fatal_code(message: String, code: types_error::SqlState) -> PgError {
 #[cfg(test)]
 mod tests;
 
-/// Install this crate's seams. Owner of `backend-utils-misc-timeout-seams`.
+/// Adapter: `enable_timeout_after` for the `more2-seams` declaration, whose
+/// `TimeoutId` is `types_core::TimeoutId` (an identical-discriminant copy of
+/// the timeout-reason enum that the xact/postinit consumers use).
+fn enable_timeout_after_core(id: types_core::TimeoutId, delay_ms: i32) -> PgResult<()> {
+    enable_timeout_after(TimeoutId::from_index(id as usize), delay_ms)
+}
+
+/// Adapter: `disable_timeout` for the `more2-seams` declaration. The C
+/// function is `void`; the seam's `PgResult` failure surface is never
+/// exercised here, so we always return `Ok`.
+fn disable_timeout_core(id: types_core::TimeoutId, keep_indicator: bool) -> PgResult<()> {
+    disable_timeout(TimeoutId::from_index(id as usize), keep_indicator);
+    Ok(())
+}
+
+/// Adapter: `reschedule_timeouts` for the `more2-seams` declaration. The C
+/// function is `void`; always returns `Ok`.
+fn reschedule_timeouts_seam() -> PgResult<()> {
+    reschedule_timeouts();
+    Ok(())
+}
+
+/// Install this crate's seams. This unit owns `timeout.c`, hence both
+/// `backend-utils-misc-timeout-seams` and the timeout declarations of the
+/// pre-existing `backend-utils-misc-more2-seams` (the seam crate the xact and
+/// postinit consumers actually call). Both map to `timeout.c`, so both must be
+/// installed here.
 pub fn init_seams() {
     use backend_utils_misc_timeout_seams as s;
 
@@ -721,4 +747,10 @@ pub fn init_seams() {
     s::enable_timeout_after::set(enable_timeout_after);
     s::disable_timeouts::set(disable_timeouts);
     s::get_timeout_start_time::set(get_timeout_start_time);
+
+    use backend_utils_misc_more2_seams as m2;
+
+    m2::enable_timeout_after::set(enable_timeout_after_core);
+    m2::disable_timeout::set(disable_timeout_core);
+    m2::reschedule_timeouts::set(reschedule_timeouts_seam);
 }

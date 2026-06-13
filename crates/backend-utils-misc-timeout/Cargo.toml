@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-signal = { path = "../types-signal" }
 types-timeout = { path = "../types-timeout" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-utils-misc-more2-seams = { path = "../backend-utils-misc-more2-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
