@@ -56,7 +56,7 @@ fn set_self_both(mq: ShmMq) {
     shm_mq_set_receiver(mq, TEST_PROCNO);
 }
 
-fn attach(mq: ShmMq) -> ShmMqHandle<'static> {
+fn attach(mq: ShmMq) -> PgBox<'static, ShmMqHandle<'static>> {
     shm_mq_attach(mq, test_mcx(), None, None, test_latch()).unwrap()
 }
 

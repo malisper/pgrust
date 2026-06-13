@@ -9,6 +9,7 @@ name = "backend_utils_mmgr_mcxt_seams"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
