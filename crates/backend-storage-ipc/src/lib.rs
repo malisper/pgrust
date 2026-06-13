@@ -37,10 +37,18 @@ pub mod ipci_seams_xlog_clog;
 
 /// Install every seam this unit owns.
 ///
-/// ipci.c installs no inward seams of its own — nothing in PostgreSQL calls
-/// back into `CreateSharedMemoryAndSemaphores`/`CalculateShmemSize` across a
-/// dependency cycle; they are leaf entry points invoked from the postmaster
-/// bootstrap. (The `proc_exit`/`shmem_exit` family that *would* be seamed
-/// lives in `ipc.c`, owned by `backend-storage-ipc-dsm-core`.) This stays an
-/// empty placeholder for the uniform `seams-init` shape.
-pub fn init_seams() {}
+/// ipci.c owns the `backend-storage-ipc-ipci-seams` crate, which declares
+/// `CreateSharedMemoryAndSemaphores` — `backend-bootstrap-bootstrap` reaches
+/// it across the bootstrap/shmem-setup dependency cycle. The C path
+/// `ereport(FATAL)`s if it cannot create the segment (never a recoverable
+/// ERROR), so the seam is infallible; the adapter `.expect()`s on the port's
+/// `PgResult`, faithfully turning the FATAL into process termination.
+///
+/// (The `proc_exit`/`shmem_exit` family that *would otherwise* be seamed lives
+/// in `ipc.c`, owned by `backend-storage-ipc-dsm-core`, not here.)
+pub fn init_seams() {
+    backend_storage_ipc_ipci_seams::create_shared_memory_and_semaphores::set(|| {
+        ipci_core::create_shared_memory_and_semaphores()
+            .expect("CreateSharedMemoryAndSemaphores")
+    });
+}

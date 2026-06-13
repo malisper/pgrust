@@ -19,6 +19,8 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
 # IsUnderPostmaster (globals.c) — the !IsUnderPostmaster InitProcGlobal gate
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# this unit's own inward seam declarations (ipci.c), installed by init_seams()
+backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
 
 # ipci-core boundary owners
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
