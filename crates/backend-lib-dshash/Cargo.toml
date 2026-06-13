@@ -1,0 +1,21 @@
+[package]
+name = "backend-lib-dshash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_lib_dshash"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-execparallel = { path = "../types-execparallel" }
+seam-core = { path = "../seam-core" }
+backend-lib-dshash-seams = { path = "../backend-lib-dshash-seams" }
+backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }

@@ -741,7 +741,7 @@ fn SanityCheckBackgroundWorker(
 /// the FATAL report (the handler is installed via the signal-handler seam,
 /// which carries this body).
 pub fn bgworker_die(bgw_type: &[u8]) -> PgResult<()> {
-    port_pqsignal_seams::block_signals::call();
+    backend_libpq_pqsignal_seams::block_signals::call();
     Err(PgError::new(
         FATAL,
         format!(
@@ -808,7 +808,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
     // bgworker_die SIGTERM handler, the SIG_IGN/SIG_DFL dispositions, and
     // InitializeTimeouts().
     let db_connection = (worker.bgw_flags & BGWORKER_BACKEND_DATABASE_CONNECTION) != 0;
-    port_pqsignal_seams::install_bgworker_signal_handlers::call(db_connection);
+    backend_tcop_postgres_seams::install_bgworker_signal_handlers::call(db_connection);
 
     // We can now handle ereport(ERROR). C arms the sigsetjmp here; the
     // idiomatic model is `?` propagation: run the body and, on Err, clean up,
@@ -937,12 +937,12 @@ fn my_bgworker_entry() -> BackgroundWorker {
 
 /// `BackgroundWorkerBlockSignals(void)`.
 pub fn BackgroundWorkerBlockSignals() {
-    port_pqsignal_seams::block_signals::call();
+    backend_libpq_pqsignal_seams::block_signals::call();
 }
 
 /// `BackgroundWorkerUnblockSignals(void)`.
 pub fn BackgroundWorkerUnblockSignals() {
-    port_pqsignal_seams::unblock_signals::call();
+    backend_libpq_pqsignal_seams::unblock_signals::call();
 }
 
 // ---------------------------------------------------------------------------

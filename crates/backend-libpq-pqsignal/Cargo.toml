@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
