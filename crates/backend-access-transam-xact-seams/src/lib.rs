@@ -169,6 +169,13 @@ seam_core::seam!(
     pub fn set_bsysscan(value: bool)
 );
 
+seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h/xact.c): true under REPEATABLE
+    /// READ or SERIALIZABLE (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read
+    /// of the per-backend isolation level.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);
+
 // --- backend-utils-init-postinit consumers (xact.c) ---
 
 seam_core::seam!(

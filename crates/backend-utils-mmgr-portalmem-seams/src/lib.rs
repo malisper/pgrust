@@ -10,6 +10,24 @@ use types_core::SubTransactionId;
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `GetPortalByName(name)` (portalmem.c) lending the named cursor's live
+    /// state to a callback. The portal owner looks up the `PortalData`, and —
+    /// when it has a live `queryDesc`/`estate` — lends the scalar portal fields
+    /// plus borrows of the running `EState` and `PlanState` tree as a
+    /// [`RunningCursorState`]; `None` is the C `!PortalIsValid` (no such
+    /// portal). The borrow is lent for the callback's duration only (no
+    /// `&'static mut` escapes), per the seam rules. `execCurrentOf` runs all of
+    /// its decision logic inside `f` and returns the resolved
+    /// [`CurrentOfTid`]. Owner: `backend-utils-mmgr-portalmem`.
+    pub fn with_running_cursor(
+        name: &str,
+        f: &mut dyn FnMut(
+            Option<types_nodes::RunningCursorState>,
+        ) -> PgResult<types_nodes::CurrentOfTid>,
+    ) -> PgResult<types_nodes::CurrentOfTid>
+);
+
+seam_core::seam!(
     /// `PreCommit_Portals(isPrepare)` — close open portals before commit;
     /// returns true if it did anything (the caller loops). Runs user code:
     /// can `ereport(ERROR)`.

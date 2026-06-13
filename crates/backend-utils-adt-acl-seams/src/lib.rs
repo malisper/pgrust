@@ -30,6 +30,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `object_ownercheck(classid, objectid, roleid)` (catalog/aclchk.c):
+    /// whether `roleid` owns the catalog object. Catalog lookup; can
+    /// `ereport(ERROR)`.
+    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `initialize_acl()` (acl.c): set up the ACL framework (role membership
     /// cache). `Err` carries its `ereport` surface.
     pub fn initialize_acl() -> types_error::PgResult<()>

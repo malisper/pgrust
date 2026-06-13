@@ -28,3 +28,31 @@ seam_core::seam!(
 );
 
 // (quote_identifier is already declared above; postinit reuses it.)
+
+seam_core::seam!(
+    /// `generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
+    /// rightoptype)` (ruleutils.c): the schema-qualified, casted
+    /// `leftop OPERATOR(...) rightop` fragment `ri_GenerateQual` appends.
+    /// `leftop`/`rightop` are raw server-encoded identifier/parameter bytes;
+    /// the returned fragment is likewise raw bytes (C operates on `char *`
+    /// end-to-end), copied into `mcx`. Catalog lookups can `ereport(ERROR)`.
+    pub fn generate_operator_clause<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        leftop: &[u8],
+        leftoptype: types_core::Oid,
+        opoid: types_core::Oid,
+        rightop: &[u8],
+        rightoptype: types_core::Oid,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `pg_get_partconstrdef_string(RelationGetRelid(pk_rel), "pk")`
+    /// (ruleutils.c): the partition's bound constraint as SQL text, copied
+    /// into `mcx`; `Ok(None)` for the empty default-partition constraint. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn partition_constraint_def<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pk_relid: types_core::Oid,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);

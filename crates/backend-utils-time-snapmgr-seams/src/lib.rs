@@ -29,6 +29,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnregisterSnapshot(snapshot)` (snapmgr.c): drop the resource-owner
+    /// registration taken by [`register_snapshot`], freeing the snapshot when
+    /// its last registration goes away. The owned `SnapshotData` is consumed.
+    /// Cannot `ereport` in C; modeled infallible bare.
+    pub fn unregister_snapshot(snapshot: types_snapshot::SnapshotData)
+);
+
+seam_core::seam!(
     /// `EstimateSnapshotSpace(snapshot)` (snapmgr.c): bytes needed to
     /// serialize the snapshot. Pure size computation; cannot `ereport`.
     pub fn estimate_snapshot_space(snapshot: &types_snapshot::SnapshotData) -> usize
@@ -111,6 +119,20 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
     pub fn pop_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLatestSnapshot()` (snapmgr.c): a fresh MVCC snapshot reflecting all
+    /// committed transactions as of now. Snapshot acquisition can
+    /// `ereport(ERROR)` (e.g. too-old-snapshot / xmin), carried on `Err`.
+    pub fn get_latest_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `GetTransactionSnapshot()` (snapmgr.c): the transaction snapshot
+    /// (serializable: the registered xact snapshot; otherwise a fresh one).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
 );
 
 // --- backend-utils-init-postinit consumer (snapmgr.c) ---

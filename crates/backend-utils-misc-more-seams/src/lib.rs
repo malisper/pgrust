@@ -11,6 +11,19 @@ seam_core::seam!(
     pub fn init_ps_display(fixed_part: Option<&str>)
 );
 
+seam_core::seam!(
+    /// `check_enable_rls(relid, checkAsUser, noError)` (`rls.c`) — decide
+    /// whether row-level security applies to `relid` for the given (or
+    /// current) user. Can `ereport(ERROR, ERRCODE_INSUFFICIENT_PRIVILEGE)`
+    /// when `noError` is false and `row_security` is off (and via the syscache
+    /// lookups it performs), carried on `Err`.
+    pub fn check_enable_rls(
+        relid: types_core::Oid,
+        check_as_user: types_core::Oid,
+        no_error: bool,
+    ) -> types_error::PgResult<types_acl::CheckEnableRlsResult>
+);
+
 // --- backend-utils-init-postinit consumer (ps_status.c) ---
 
 seam_core::seam!(

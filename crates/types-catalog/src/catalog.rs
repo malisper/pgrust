@@ -29,6 +29,13 @@ pub const DEFAULTTABLESPACE_OID: Oid = 1663;
 /// `ROLE_PG_USE_RESERVED_CONNECTIONS` (`pg_authid_d.h`).
 pub const ROLE_PG_USE_RESERVED_CONNECTIONS: Oid = 4550;
 
+/// `AccessMethodRelationId` — `pg_am` (`pg_am_d.h`).
+pub const ACCESS_METHOD_RELATION_ID: Oid = 2601;
+/// `AccessMethodOperatorRelationId` — `pg_amop` (`pg_amop_d.h`).
+pub const ACCESS_METHOD_OPERATOR_RELATION_ID: Oid = 2602;
+/// `AccessMethodProcedureRelationId` — `pg_amproc` (`pg_amproc_d.h`).
+pub const ACCESS_METHOD_PROCEDURE_RELATION_ID: Oid = 2603;
+
 /// `PG_CATALOG_NAMESPACE` — the `pg_catalog` schema's OID
 /// (`pg_namespace_d.h`).
 pub const PG_CATALOG_NAMESPACE: Oid = 11;
