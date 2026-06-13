@@ -4,49 +4,61 @@
 //! push/pop, result-tuple dispatch) and `CallStmtResultDesc` (polymorphic
 //! output-argument tuple descriptor).
 //!
-//! DECOMP STATUS — the genuine remaining work for this unit. Both bodies are
-//! currently delegated to the `execute_call_stmt` / `call_stmt_result_desc`
-//! seams; the in-crate port is blocked on FuncExpr field access + a CallContext
-//! carrier node + fcinfo/FmgrInfo ABI in the layered `types-*` stack and on
-//! seams to genuinely-unported owners: the executor (CreateExecutorState,
-//! CreateExprContext, ExecPrepareExpr, ExecEvalExprSwitchContext,
-//! FreeExecutorState, begin/end_tup_output, ExecStoreHeapTuple), fmgr
-//! (fmgr_info, InitFunctionCallInfoData, FunctionCallInvoke), snapmgr
-//! (Push/PopActiveSnapshot, GetTransactionSnapshot, EnsurePortalSnapshotExists),
-//! typcache/funcapi (lookup_rowtype_tupdesc, build_function_result_tupdesc_t),
-//! and pgstat (pgstat_init/end_function_usage). All ARE merged in this repo, so
-//! the in-crate port wires real seams rather than re-stubbing.
+//! DECOMP STATUS — both bodies are genuine unported-owner work, not
+//! functioncmds' own logic, so they cross seams to their *real* owners (the
+//! re-home this decomp performs — they no longer live in this crate's
+//! `*-seams` crate):
+//!
+//!   * `ExecuteCallStmt` — re-homed to `backend-executor-execMain-seams`
+//!     (`execute_call_stmt`). The entire body operates on the unported planner
+//!     expression node `stmt->funcexpr` (`FuncExpr.funcid` / `args` /
+//!     `inputcollid` / `funcresulttype` — not modelled by the layered node
+//!     tree; `CallStmt.funcexpr` is opaque here), the unported execExpr
+//!     evaluation (`ExecPrepareExpr` / `ExecEvalExprSwitchContext`), the fmgr
+//!     CALL invocation (`fmgr_info` / `InitFunctionCallInfoData` /
+//!     `FunctionCallInvoke`), the snapmgr non-atomic snapshot push/pop, the
+//!     funcapi/typcache RECORD result handling, and — crucially — the *runtime*
+//!     `ParamListInfo params` / `DestReceiver *dest`, which are live portal
+//!     values that are NOT part of the owned CALL parse tree. The executor's
+//!     CALL runtime owns all of this; the owner threads `params`/`dest` from the
+//!     live portal.
+//!   * `CallStmtResultDesc` — re-homed to `backend-nodes-nodeFuncs-seams`
+//!     (`call_stmt_result_desc`). The function is keyed entirely by the unported
+//!     `fexpr->funcid` (`CallStmt.funcexpr` is opaque here — the layered node
+//!     tree does not model `FuncExpr`), runs `build_function_result_tupdesc_t`
+//!     over the PROCOID tuple, then per-column re-types from `stmt->outargs` via
+//!     `exprType` — all nodeFuncs/nodes-core expression-tree territory, not
+//!     functioncmds logic.
 
-use backend_commands_functioncmds_seams as seam;
 use mcx::Mcx;
 use types_error::PgResult;
 use types_parsenodes::CallStmt;
 use types_tuple::TupleDesc;
 
+use backend_executor_execMain_seams as exec_seam;
+use backend_nodes_nodeFuncs_seams as nodefuncs_seam;
+
 // ===========================================================================
-// ExecuteCallStmt (functioncmds.c:2205)
+// ExecuteCallStmt (functioncmds.c:2206)
 // ===========================================================================
 
-/// `ExecuteCallStmt(stmt, params, atomic, dest)` (functioncmds.c:2205).
+/// `ExecuteCallStmt(stmt, params, atomic, dest)` (functioncmds.c:2206).
 ///
-/// TODO(decomp Family 4): port the body in-crate — ACL_EXECUTE check, syscache
-/// PROCOID fetch + proconfig/prosecdef -> force-atomic, FUNC_MAX_ARGS guard,
-/// fmgr_info + InitFunctionCallInfoData, executor-state arg eval under a pushed
-/// snapshot when non-atomic, FunctionCallInvoke with pgstat usage, then the
-/// VOID / RECORD (tuple-to-dest) / unexpected-type result dispatch.
+/// The body is owned by the executor's CALL runtime (see module docs); it
+/// crosses the `backend-executor-execMain` seam, which additionally threads the
+/// live-portal `params`/`dest` not carried by the owned `CallStmt`.
 pub fn ExecuteCallStmt(stmt: &CallStmt, atomic: bool) -> PgResult<()> {
-    seam::execute_call_stmt::call(stmt.clone(), atomic)
+    exec_seam::execute_call_stmt::call(stmt.clone(), atomic)
 }
 
 // ===========================================================================
-// CallStmtResultDesc (functioncmds.c:2382)
+// CallStmtResultDesc (functioncmds.c:2383)
 // ===========================================================================
 
-/// `CallStmtResultDesc(stmt)` (functioncmds.c:2382).
+/// `CallStmtResultDesc(stmt)` (functioncmds.c:2383).
 ///
-/// TODO(decomp Family 4): port the body in-crate — syscache PROCOID fetch,
-/// build_function_result_tupdesc_t, then re-type each output column from
-/// `stmt->outargs` via `exprType` (typmod -1, default collation).
+/// The body is nodeFuncs/nodes-core expression-tree machinery (see module
+/// docs); it crosses the `backend-nodes-nodeFuncs` seam.
 pub fn CallStmtResultDesc<'mcx>(mcx: Mcx<'mcx>, stmt: &CallStmt) -> PgResult<TupleDesc<'mcx>> {
-    seam::call_stmt_result_desc::call(mcx, stmt.clone())
+    nodefuncs_seam::call_stmt_result_desc::call(mcx, stmt.clone())
 }
