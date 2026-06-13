@@ -1204,6 +1204,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-cluster"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-commands-cluster-deps-seams",
+ "backend-commands-cluster-seams",
+ "backend-commands-define-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-misc-guc-file-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-cluster-deps-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-cluster-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-commands-dbcommands-seams"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3599,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-cluster",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3646,6 +3703,14 @@ name = "types-catalog"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-cluster"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-tuple",
 ]
 
 [[package]]
