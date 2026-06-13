@@ -16,6 +16,7 @@ extern crate alloc;
 pub mod bitmapset;
 pub mod execexpr;
 pub mod execnodes;
+pub mod execstate_tags;
 pub mod executor;
 pub mod fmgr;
 pub mod funcapi;

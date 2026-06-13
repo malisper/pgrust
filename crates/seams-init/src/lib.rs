@@ -21,6 +21,7 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_executor_execAmi::init_seams();
+    backend_executor_execParallel::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
     backend_executor_nodeMaterial::init_seams();

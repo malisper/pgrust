@@ -636,6 +636,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-execparallel",
 ]
 
 [[package]]
@@ -1334,6 +1335,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execParallel"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execParallel-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-nodeAgg-pq-seams",
+ "backend-executor-nodeAppend-seams",
+ "backend-executor-nodeBitmapHeapscan-seams",
+ "backend-executor-nodeBitmapIndexscan-seams",
+ "backend-executor-nodeCustom-seams",
+ "backend-executor-nodeForeignscan-seams",
+ "backend-executor-nodeHash-pq-seams",
+ "backend-executor-nodeHashjoin-pq-seams",
+ "backend-executor-nodeIncrementalSort-seams",
+ "backend-executor-nodeIndexonlyscan-seams",
+ "backend-executor-nodeIndexscan-pq-seams",
+ "backend-executor-nodeMemoize-seams",
+ "backend-executor-nodeSeqscan-seams",
+ "backend-executor-nodeSort-seams",
+ "backend-executor-tqueue-seams",
+ "backend-storage-ipc-shm-mq-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-executor-execParallel-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execParallel-support-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
@@ -1429,6 +1486,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeAgg-pq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeAppend-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeBitmapHeapscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeBitmapIndexscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeCustom-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeForeignscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeHash-pq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeHashjoin-pq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeIncrementalSort-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeIndexonlyscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeIndexscan-pq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
 name = "backend-executor-nodeMaterial"
 version = "0.0.0"
 dependencies = [
@@ -1443,6 +1599,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeMemoize-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
 ]
 
 [[package]]
@@ -1477,6 +1642,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSeqscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeSort-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
 name = "backend-executor-nodeSubplan-seams"
 version = "0.0.0"
 dependencies = [
@@ -1493,6 +1676,15 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-executor-tqueue-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
 ]
 
 [[package]]
@@ -2230,6 +2422,15 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-shm-mq-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
 ]
 
 [[package]]
@@ -3092,6 +3293,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mmgr-dsa-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-execparallel",
+]
+
+[[package]]
 name = "backend-utils-mmgr-freepage"
 version = "0.0.0"
 dependencies = [
@@ -3334,6 +3544,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
+ "backend-executor-execParallel",
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
@@ -3470,6 +3681,15 @@ version = "0.0.0"
 [[package]]
 name = "types-error"
 version = "0.0.0"
+
+[[package]]
+name = "types-execparallel"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+]
 
 [[package]]
 name = "types-freepage"
