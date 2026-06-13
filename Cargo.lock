@@ -2550,6 +2550,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-lmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-subtrans-seams",
+ "backend-catalog-catalog-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-small",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -3566,6 +3587,7 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
  "backend-storage-lmgr-condition-variable",
+ "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",

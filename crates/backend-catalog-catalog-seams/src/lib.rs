@@ -12,3 +12,11 @@ seam_core::seam!(
     /// infallible.
     pub fn is_pinned_object(class_id: Oid, object_id: Oid) -> bool
 );
+
+seam_core::seam!(
+    /// `IsSharedRelation(relationId)` (catalog/catalog.c): is the relation one
+    /// of the shared catalogs/indexes/toast tables (lives in pg_global, OID
+    /// below `FirstNormalObjectId` matched against a fixed list)? Pure
+    /// OID-membership test — infallible.
+    pub fn is_shared_relation(relation_id: Oid) -> bool
+);
