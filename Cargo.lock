@@ -5187,13 +5187,18 @@ dependencies = [
 name = "backend-storage-file-fd"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-postmaster-startup-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-file-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error-seams",
  "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-storage",
+ "types-wal",
 ]
 
 [[package]]

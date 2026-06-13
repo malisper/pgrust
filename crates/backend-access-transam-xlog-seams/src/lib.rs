@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
-use types_wal::{ArchiveMode, WalLevel};
+use types_wal::{ArchiveMode, WalLevel, WalSyncMethod};
 
 seam_core::seam!(
     /// `xlog_redo(record)` (xlog.c) — WAL redo for this resource manager's
@@ -44,6 +44,19 @@ seam_core::seam!(
 seam_core::seam!(
     /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
+);
+
+seam_core::seam!(
+    /// `enableFsync` (xlog.c GUC) — whether the server issues `fsync`/
+    /// `fdatasync` for durability. fd.c's `pg_fsync` family early-outs when
+    /// this is off.
+    pub fn enable_fsync() -> bool
+);
+
+seam_core::seam!(
+    /// `wal_sync_method` (xlog.c GUC) — the WAL sync method, consulted by
+    /// fd.c's `pg_fsync` to choose the writethrough vs. plain fsync path.
+    pub fn wal_sync_method() -> WalSyncMethod
 );
 
 seam_core::seam!(
