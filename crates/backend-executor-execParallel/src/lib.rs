@@ -631,7 +631,6 @@ pub fn ExecInitParallelPlan<'mcx>(
                 instrument_offset,
                 num_workers: nworkers,
                 num_plan_nodes: e.nnodes,
-                plan_node_id: Vec::new(),
             },
         );
         for i in 0..(nworkers * e.nnodes) {

@@ -1486,6 +1486,8 @@ pub fn init_seams() {
     backend_postmaster_bgworker_seams::background_worker_unblock_signals::set(
         background_worker_unblock_signals_seam,
     );
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    backend_postmaster_bgworker_seams::background_worker_shmem_init::set(BackgroundWorkerShmemInit);
 }
 
 /// Marshal for the `background_worker_main` inward seam.

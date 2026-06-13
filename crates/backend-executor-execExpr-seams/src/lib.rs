@@ -793,3 +793,27 @@ seam_core::seam!(
         result_rel_info: types_nodes::RriId,
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
+
+seam_core::seam!(
+    /// `ExecBuildParamSetEqual(desc, lops, rops, eqfunctions, collations,
+    /// param_exprs, parent)` (execExpr.c): build an `ExprState` evaluable with
+    /// `ExecQual()` that returns true when the expression context's inner/outer
+    /// tuples are equal, comparing each of `param_exprs`'s columns with the
+    /// matching `eqfunctions[i]` under `collations[i]` (NULLs compare equal).
+    /// Used by `ExecInitMemoize` to build the non-binary `cache_eq_expr` over the
+    /// node's `hashkeydesc`; the inner slot ops are `TTSOpsMinimalTuple` and the
+    /// outer slot ops `TTSOpsVirtual`. The owned model lends the `parent`
+    /// plan-state (for slot descriptors / param context) and the estate. The
+    /// compiled `ExprState` is allocated in the per-query context; fallible on
+    /// OOM / `ereport(ERROR)`.
+    pub fn exec_build_param_set_equal<'mcx>(
+        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        lops: types_nodes::TupleSlotKind,
+        rops: types_nodes::TupleSlotKind,
+        eqfunctions: &[types_core::Oid],
+        collations: &[types_core::Oid],
+        param_exprs: &[types_nodes::primnodes::Expr],
+        parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+);

@@ -58,10 +58,9 @@ fn gettype_returns_typinfo_index_when_typ_nil() {
 /// array.
 #[test]
 fn boot_get_type_io_data_uses_typinfo_when_typ_nil() {
-    let mcx = test_mcx();
     set_typ(None);
 
-    let io = boot_get_type_io_data(mcx, INT4OID).unwrap();
+    let io = boot_get_type_io_data(INT4OID).unwrap();
     assert_eq!(io.typlen, 4);
     assert!(io.typbyval);
     assert_eq!(io.typalign, TYPALIGN_INT);
@@ -70,22 +69,21 @@ fn boot_get_type_io_data_uses_typinfo_when_typ_nil() {
     assert_eq!(io.typinput, F_INT4IN);
     assert_eq!(io.typoutput, F_INT4OUT);
 
-    let io = boot_get_type_io_data(mcx, INT4ARRAYOID).unwrap();
+    let io = boot_get_type_io_data(INT4ARRAYOID).unwrap();
     assert_eq!(io.typlen, -1);
     assert!(!io.typbyval);
     assert_eq!(io.typioparam, INT4OID);
     assert_eq!(io.typinput, F_ARRAY_IN);
     assert_eq!(io.typoutput, F_ARRAY_OUT);
 
-    let io = boot_get_type_io_data(mcx, NAMEOID).unwrap();
+    let io = boot_get_type_io_data(NAMEOID).unwrap();
     assert_eq!(io.typioparam, CHAROID);
 }
 
 #[test]
 fn boot_get_type_io_data_errors_on_unknown_oid_when_typ_nil() {
-    let mcx = test_mcx();
     set_typ(None);
-    let err = boot_get_type_io_data(mcx, 999_999).unwrap_err();
+    let err = boot_get_type_io_data(999_999).unwrap_err();
     assert!(err.message().contains("not found in TypInfo"));
 }
 

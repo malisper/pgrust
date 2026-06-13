@@ -13,6 +13,7 @@ backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams
 backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
+backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeSubplan-seams = { path = "../backend-executor-nodeSubplan-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

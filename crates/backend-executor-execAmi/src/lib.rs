@@ -24,6 +24,7 @@
 use backend_access_index_amapi_seams as amapi;
 use backend_executor_execUtils as execUtils;
 use backend_executor_instrument_seams as instrument;
+use backend_executor_nodeLimit as nodeLimit;
 use backend_executor_nodeMaterial as nodeMaterial;
 use backend_executor_nodeSubplan_seams as nodeSubplan;
 use backend_utils_cache_syscache_seams as syscache;
@@ -182,9 +183,12 @@ pub fn exec_re_scan<'mcx>(
         // case T_MaterialState: ExecReScanMaterial(...)
         PlanStateNode::Material(m) => nodeMaterial::ExecReScanMaterial(m, estate)?,
 
-        // The remaining C arms (ResultState ... LimitState) gain match arms as
-        // their node-state variants are added to PlanStateNode; until then the
-        // only reachable wildcard case is the C default:
+        // case T_LimitState: ExecReScanLimit((LimitState *) node);
+        PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
+
+        // The remaining C arms (ResultState ...) gain match arms as their
+        // node-state variants are added to PlanStateNode; until then the only
+        // reachable wildcard case is the C default:
         //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
         other => return Err(unrecognized_node_type(other.tag())),
     }

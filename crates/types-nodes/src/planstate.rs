@@ -15,6 +15,8 @@ use crate::nodelimit::T_LimitState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::noderesult::T_ResultState;
+use crate::nodesetop::T_SetOpState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
 use crate::nodenestloop::T_NestLoopState;
 use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
@@ -35,6 +37,10 @@ pub enum PlanStateNode<'mcx> {
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_ResultState`.
+    Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
+    /// `T_SetOpState`.
+    SetOp(PgBox<'mcx, crate::nodesetop::SetOpStateData<'mcx>>),
     /// `T_MemoizeState`.
     Memoize(PgBox<'mcx, crate::nodememoize::MemoizeScanState<'mcx>>),
     /// `T_IndexOnlyScanState`.
@@ -65,6 +71,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::Result(_) => T_ResultState,
+            PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::Limit(_) => T_LimitState,
@@ -86,6 +94,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::Result(r) => &r.ps,
+            PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
@@ -106,6 +116,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::Result(r) => &mut r.ps,
+            PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,

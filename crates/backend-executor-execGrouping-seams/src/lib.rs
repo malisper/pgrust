@@ -38,6 +38,20 @@ use types_nodes::planstate::PlanStateNode;
 use types_nodes::{EStateData, TupleSlotKind};
 
 seam_core::seam!(
+    /// `execTuplesHashPrepare(numCols, eqOperators, &eqFuncOids, &hashFunctions)`
+    /// (execGrouping.c): look up the equality-function OIDs and hash `FmgrInfo`s
+    /// for the `num_cols` grouping columns described by `eq_operators`. The C
+    /// pallocs the two output arrays in `CurrentMemoryContext`; the owned model
+    /// returns the two `num_cols`-long vectors (in `mcx`). Fallible (catalog
+    /// lookups can `ereport`). Driven by nodeSetOp/nodeAgg's hashed-mode init.
+    pub fn exec_tuples_hash_prepare<'mcx>(
+        mcx: Mcx<'mcx>,
+        num_cols: i32,
+        eq_operators: &[Oid],
+    ) -> PgResult<(mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, FmgrInfo>)>
+);
+
+seam_core::seam!(
     /// `BuildTupleHashTable(parent, inputDesc, inputOps, numCols, keyColIdx,
     /// eqfuncoids, hashfunctions, collations, nbuckets, additionalsize,
     /// metacxt, tablecxt, tempcxt, use_variable_hash_iv)` (execGrouping.c):

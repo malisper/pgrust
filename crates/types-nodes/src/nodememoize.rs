@@ -31,7 +31,8 @@ use types_datum::Datum;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
-use crate::execnodes::ScanStateData;
+use crate::execnodes::{ScanStateData, SlotId};
+use types_tuple::heaptuple::TupleDesc;
 use crate::nodeindexscan::Plan;
 use crate::nodes::NodeTag;
 use crate::primnodes::Expr;
@@ -341,13 +342,28 @@ pub struct MemoizeScanState<'mcx> {
     pub mstatus: MemoStatus,
     /// `int nkeys` — number of cache keys.
     pub nkeys: i32,
+    /// `TupleDesc hashkeydesc` — the row type of the cache keys
+    /// (`ExecTypeFromExprList(node->param_exprs)`). The `tableslot`/`probeslot`
+    /// are fixed to it, and the minimal-tuple deform/form that builds and reads
+    /// cache-entry `params` runs against it. `None` until `ExecInitMemoize`.
+    pub hashkeydesc: TupleDesc<'mcx>,
     /// Per-key `CompactAttribute` (`attbyval`/`attlen`) drawn from
     /// `mstate->hashkeydesc` (`TupleDesc hashkeydesc`); consumed by the
     /// binary-mode hash and equality loops. `nkeys` long.
     pub key_attrs: PgVec<'mcx, MemoizeKeyAttr>,
     /// `TupleTableSlot *tableslot` — minimal-tuple slot the equality/probe code
-    /// deforms a cached entry's `key->params` into. Modeled as the owned
-    /// deformed values/nulls (`tts_values`/`tts_isnull`), `nkeys` long.
+    /// deforms a cached entry's `key->params` into (id into the EState slot
+    /// pool, created by `MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsMinimalTuple)`).
+    /// `None` until `ExecInitMemoize`.
+    pub tableslot: Option<SlotId>,
+    /// `TupleTableSlot *probeslot` — virtual slot holding the current lookup's
+    /// key values (id into the EState slot pool, created by
+    /// `MakeSingleTupleTableSlot(hashkeydesc, &TTSOpsVirtual)`). `None` until
+    /// `ExecInitMemoize`.
+    pub probeslot: Option<SlotId>,
+    /// `tableslot->tts_values` — the deformed cache-key values read out of
+    /// `tableslot` by the equality/probe code. Modeled as the owned deformed
+    /// values/nulls, `nkeys` long.
     pub table_values: PgVec<'mcx, Datum>,
     /// `tableslot->tts_isnull`.
     pub table_isnull: PgVec<'mcx, bool>,

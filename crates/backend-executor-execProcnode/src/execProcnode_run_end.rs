@@ -248,9 +248,9 @@ pub fn exec_end_node<'mcx>(
              ExecEndIndexOnlyScan seam"
         ),
         // case T_LimitState: ExecEndLimit((LimitState *) node);
-        PlanStateNode::Limit(_) => panic!(
-            "ExecEndNode(T_LimitState): route to backend-executor-nodeLimit ExecEndLimit seam"
-        ),
+        PlanStateNode::Limit(limit_state) => {
+            backend_executor_nodeLimit::ExecEndLimit(limit_state, estate)
+        }
         // case T_SortState: ExecEndSort((SortState *) node);
         PlanStateNode::Sort(_) => panic!(
             "ExecEndNode(T_SortState): route to backend-executor-nodeSort ExecEndSort seam"

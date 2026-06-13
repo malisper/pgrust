@@ -869,6 +869,14 @@ pub fn init_seams() {
         SetMyBackendType(BackendType::WalSummarizer)
     });
     s::am_wal_summarizer_process::set(|| GetMyBackendType() == BackendType::WalSummarizer);
+
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match the
+    // declared seam signatures exactly; the remaining miscinit seams either
+    // diverge (extra Mcx / Result wrapper) or are mis-homed (pg_usleep lives in
+    // port-pgsleep) and are tracked in DESIGN_DEBT.
+    s::get_session_user_id::set(GetSessionUserId);
+    s::initialize_session_user_id_standalone::set(InitializeSessionUserIdStandalone);
+    s::validate_pg_version::set(ValidatePgVersion);
 }
 
 #[cfg(test)]

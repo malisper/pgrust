@@ -243,6 +243,9 @@ pub fn init_seams() {
     common_hashfn_seams::hash_bytes_uint32_extended::set(hash_bytes_uint32_extended);
     common_hashfn_seams::tag_hash::set(tag_hash);
     common_hashfn_seams::string_hash::set(string_hash);
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match.
+    common_hashfn_seams::hash_bytes::set(hash_bytes);
+    common_hashfn_seams::hash_bytes_extended::set(hash_bytes_extended);
 }
 
 #[cfg(test)]

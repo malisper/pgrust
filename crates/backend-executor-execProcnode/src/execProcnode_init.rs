@@ -6,7 +6,7 @@
 //! `ExecSetExecProcNode` (installs the `ExecProcNode` callback wrapper).
 
 use backend_utils_misc_stack_depth_seams as stack_depth;
-use mcx::{Mcx, PgBox};
+use mcx::{alloc_in, Mcx, PgBox};
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::Node;
 use types_nodes::{EStateData, ExecProcNodeMtd, PlanStateNode};
@@ -207,10 +207,10 @@ pub fn exec_init_node<'mcx>(
         // case T_LockRows: ExecInitLockRows(...) (nodeLockRows.c)
 
         // case T_Limit: ExecInitLimit((Limit *) node, estate, eflags)
-        Node::Limit(_) => panic!(
-            "backend-executor-nodeLimit::ExecInitLimit: ExecInitNode T_Limit arm; \
-             not ported / no seam declared"
-        ),
+        Node::Limit(_) => {
+            let limitstate = backend_executor_nodeLimit::ExecInitLimit(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Limit(limitstate))?
+        }
 
         // default:
         //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
