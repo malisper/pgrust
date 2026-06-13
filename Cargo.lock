@@ -6576,7 +6576,6 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
- "types-namespace",
  "types-nodes",
  "types-tuple",
 ]
@@ -7528,10 +7527,16 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
- "backend-access-common-toastdesc-seams",
+ "backend-access-common-relation-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-common-tupdesc-seams",
+ "backend-catalog-namespace-seams",
  "backend-utils-adt-arrayfuncs-seams",
- "backend-utils-cache-syscache-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
  "mcx",
  "types-core",
@@ -7539,6 +7544,8 @@ dependencies = [
  "types-error",
  "types-namespace",
  "types-nodes",
+ "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 
