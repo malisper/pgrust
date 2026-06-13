@@ -43,14 +43,39 @@ seam_core::seam!(
 seam_core::seam!(
     /// `dshash_find_or_insert(dshash_table *hash_table, const void *key,
     /// bool *found)` — find the entry for `key`, inserting a zeroed one if
-    /// absent. Holds the entry's partition lock; the returned
-    /// [`DshashEntryGuard`] carries the raw entry pointer (into the table's
-    /// DSA-shared memory) and releases the lock on drop. `Err` carries the
-    /// `ereport(ERROR)` for an allocation failure while inserting.
+    /// absent. `key` is the raw `const void *key` bytes (the first
+    /// `params.key_size` bytes of the entry): a string consumer passes its
+    /// fixed-width NUL-padded name, a binary consumer passes the key's byte
+    /// image (e.g. `subid.to_ne_bytes()`). Holds the entry's partition lock;
+    /// the returned [`DshashEntryGuard`] carries the raw entry pointer (into the
+    /// table's DSA-shared memory) and releases the lock on drop. `Err` carries
+    /// the `ereport(ERROR)` for an allocation failure while inserting.
     pub fn dshash_find_or_insert(
         hash_table: *mut DshashTable,
-        key: &str,
+        key: &[u8],
     ) -> PgResult<DshashEntryGuard>
+);
+
+seam_core::seam!(
+    /// `dshash_find(dshash_table *hash_table, const void *key, bool exclusive)`
+    /// — find the entry for `key` without inserting. `key` is the raw
+    /// `const void *key` bytes (see [`dshash_find_or_insert`]). Returns
+    /// `Some(guard)` holding the entry's partition lock when present, `None`
+    /// when the C `dshash_find` returns NULL (no entry). `exclusive` selects the
+    /// lock mode (`false` = shared, as the launcher's read path uses).
+    pub fn dshash_find(
+        hash_table: *mut DshashTable,
+        key: &[u8],
+        exclusive: bool,
+    ) -> PgResult<Option<DshashEntryGuard>>
+);
+
+seam_core::seam!(
+    /// `dshash_delete_key(dshash_table *hash_table, const void *key)` — remove
+    /// the entry for `key` if present, returning whether one was deleted. `key`
+    /// is the raw `const void *key` bytes (see [`dshash_find_or_insert`]). No
+    /// lock is left held on return.
+    pub fn dshash_delete_key(hash_table: *mut DshashTable, key: &[u8]) -> PgResult<bool>
 );
 
 seam_core::seam!(

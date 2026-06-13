@@ -1,6 +1,57 @@
-//! Seam declarations for the `backend-replication-walreceiverfuncs` unit
-//! (`replication/walreceiverfuncs.c`). The owning unit installs these from
-//! its `init_seams()` when it lands; until then a call panics loudly.
+//! (`replication/walreceiverfuncs.c`) — access to the `WalRcvData` shared-memory
+//! control block plus the apply-delay / transfer-latency helpers it owns.
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.  These seams are thin: they hand the walreceiver
+//! port a lock-guarded handle on the shared block (`with_walrcv`, which brackets
+//! the caller's closure with `SpinLockAcquire`/`SpinLockRelease`) and the
+//! lock-free atomic words.  All `switch(walRcvState)` / state-transition
+//! branching stays in the walreceiver crate, inside those closures.
+
+use types_walreceiver::WalRcvData;
+
+seam_core::seam!(
+    /// `SpinLockAcquire(&WalRcv->mutex); f(WalRcv); SpinLockRelease(...)`.
+    /// Runs the caller's closure with exclusive access to the spinlock-guarded
+    /// fields of the shared block; the lock is released on return.
+    pub fn with_walrcv(f: &mut dyn FnMut(&mut WalRcvData))
+);
+
+seam_core::seam!(
+    /// `pg_atomic_write_u64(&WalRcv->writtenUpto, val)`.
+    pub fn set_written_upto(val: types_core::XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u64(&WalRcv->writtenUpto)`.
+    pub fn get_written_upto() -> types_core::XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `WalRcv->force_reply = true` (with the memory barrier `WalRcvForceReply`
+    /// relies on).
+    pub fn set_force_reply()
+);
+
+seam_core::seam!(
+    /// Read-and-clear `WalRcv->force_reply` with the `pg_memory_barrier()`.
+    pub fn take_force_reply() -> bool
+);
+
+seam_core::seam!(
+    /// `ConditionVariableBroadcast(&WalRcv->walRcvStoppedCV)`.
+    pub fn wal_rcv_stopped_cv_broadcast()
+);
+
+seam_core::seam!(
+    /// `GetReplicationApplyDelay()` (walreceiverfuncs.c) — ms, or -1 if N/A.
+    pub fn get_replication_apply_delay() -> i32
+);
+
+seam_core::seam!(
+    /// `GetReplicationTransferLatency()` (walreceiverfuncs.c) — ms.
+    pub fn get_replication_transfer_latency() -> i32
+);
 
 seam_core::seam!(
     /// `XLogRequestWalReceiverReply()` — ask walreceiver to send a reply

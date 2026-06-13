@@ -36,6 +36,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `enable_timeout_after(id, delay_ms)` (timeout.c) — arm a one-shot
+    /// timeout firing `delay_ms` milliseconds from now.
+    pub fn enable_timeout_after(id: TimeoutId, delay_ms: i32)
+);
+
+seam_core::seam!(
     /// `disable_timeout(id, keep_indicator)` (timeout.c) — cancel a timeout,
     /// optionally preserving its already-fired indicator.
     pub fn disable_timeout(id: TimeoutId, keep_indicator: bool)

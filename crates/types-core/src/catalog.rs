@@ -32,6 +32,10 @@ pub const BOOTSTRAP_SUPERUSERID: Oid = 10;
 /// predefined role.
 pub const ROLE_PG_DATABASE_OWNER: Oid = 6171;
 
+/// `FirstNormalObjectId` (`access/transam.h`) — first OID assignable to
+/// user-created objects; OIDs below this belong to built-in system objects.
+pub const FirstNormalObjectId: Oid = 16384;
+
 /// `OIDOID` (`catalog/pg_type_d.h`) — the OID of the `oid` type.
 pub const OIDOID: Oid = 26;
 
