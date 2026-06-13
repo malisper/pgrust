@@ -15,9 +15,30 @@
 use std::cell::Cell;
 use std::mem::MaybeUninit;
 
-/// Install this crate's seams. The unit is a leaf with no inward seam
-/// declarations, so there is nothing to `set()`.
-pub fn init_seams() {}
+/// Install this crate's seams: the `sigprocmask` mask-install primitives that
+/// operate over the masks this crate owns.
+pub fn init_seams() {
+    backend_libpq_pqsignal_seams::block_signals::set(block_signals);
+    backend_libpq_pqsignal_seams::unblock_signals::set(unblock_signals);
+}
+
+/// `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — block all signals.
+fn block_signals() {
+    let masks = signal_masks();
+    // SAFETY: `block_sig()` points to a valid, initialized sigset_t.
+    unsafe {
+        libc::sigprocmask(libc::SIG_SETMASK, masks.block_sig(), core::ptr::null_mut());
+    }
+}
+
+/// `sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)` — restore the normal mask.
+fn unblock_signals() {
+    let masks = signal_masks();
+    // SAFETY: `unblock_sig()` points to a valid, initialized sigset_t.
+    unsafe {
+        libc::sigprocmask(libc::SIG_SETMASK, masks.unblock_sig(), core::ptr::null_mut());
+    }
+}
 
 /// The three backend signal masks initialized by [`pqinitmask`].
 ///

@@ -31,7 +31,7 @@ backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-sea
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
-port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
 
 # Direct deps (acyclic): error reporting.
