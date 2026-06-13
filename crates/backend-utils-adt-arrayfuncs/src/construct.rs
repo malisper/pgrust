@@ -165,6 +165,33 @@ pub fn construct_empty_array<'mcx>(mcx: Mcx<'mcx>, elmtype: Oid) -> PgResult<PgV
     Ok(result)
 }
 
+/// `construct_empty_expanded_array(element_type, parentcontext, metacache)`
+/// (arrayfuncs.c:3597): build the flat empty array, then hand it to
+/// `expand_array` to produce an `ExpandedArrayHeader`.
+///
+/// C:
+/// ```c
+/// ArrayType *array = construct_empty_array(element_type);
+/// d = expand_array(PointerGetDatum(array), parentcontext, metacache);
+/// pfree(array);
+/// return (ExpandedArrayHeader *) DatumGetEOHP(d);
+/// ```
+/// The flat empty array is built in-crate; the `expand_array` step belongs to
+/// the expanded-array subsystem (`array_expanded.c`), which is not ported —
+/// mirror PG and panic loudly at that boundary rather than invent the
+/// `ExpandedArrayHeader` vocabulary (consistent with
+/// `array_get_element_expanded` / `array_set_element_expanded`).
+pub fn construct_empty_expanded_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    element_type: Oid,
+) -> PgResult<()> {
+    let _array = construct_empty_array(mcx, element_type)?;
+    panic!(
+        "construct_empty_expanded_array: expand_array / ExpandedArrayHeader belong to the \
+         expanded-array subsystem (array_expanded.c), which is not ported"
+    )
+}
+
 /// `deconstruct_array(array, elmtype, elmlen, elmbyval, elmalign, &elemsp,
 /// &nullsp, &nelemsp)` (arrayfuncs.c): split an array buffer into per-element
 /// `(Datum, isnull)` pairs.
@@ -228,6 +255,20 @@ pub fn deconstruct_array<'mcx>(
     }
 
     Ok(out)
+}
+
+/// `deconstruct_array_builtin(array, elmtype, &elemsp, &nullsp, &nelemsp)`
+/// (arrayfuncs.c:3697): the convenience wrapper over [`deconstruct_array`] for
+/// the handful of built-in element types whose `(typlen, typbyval, typalign)`
+/// are hard-coded (avoiding a syscache lookup). Unsupported `elmtype` raises
+/// the C `elog(ERROR, "type %u not supported …")`.
+pub fn deconstruct_array_builtin<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    elmtype: Oid,
+) -> PgResult<PgVec<'mcx, (Datum, bool)>> {
+    let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(elmtype)?;
+    deconstruct_array(mcx, array, elmtype, elmlen, elmbyval, elmalign)
 }
 
 /// `array_contains_nulls(array)` (arrayfuncs.c): whether any element is null.
