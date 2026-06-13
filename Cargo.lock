@@ -1255,6 +1255,7 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-ipc-standby-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-predicate-seams",
@@ -1300,6 +1301,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
 ]
 
 [[package]]
