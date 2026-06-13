@@ -15,3 +15,11 @@ seam_core::seam!(
     /// `ereport(ERROR)` on I/O failure, carried on `Err`.
     pub fn sub_trans_get_parent(xid: TransactionId) -> PgResult<TransactionId>
 );
+
+seam_core::seam!(
+    /// `SubTransSetParent(xid, parent)` (subtrans.c): record `parent` as the
+    /// immediate parent of subtransaction `xid` in pg_subtrans (idempotent if
+    /// the same parent is already recorded). The SLRU page write can
+    /// `ereport(ERROR)` on I/O failure, carried on `Err`.
+    pub fn sub_trans_set_parent(xid: TransactionId, parent: TransactionId) -> PgResult<()>
+);

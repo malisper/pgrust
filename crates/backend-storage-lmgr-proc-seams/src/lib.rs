@@ -89,3 +89,68 @@ seam_core::seam!(
     /// PGPROC storage belongs to proc.c). Plain shared-memory field write.
     pub fn set_my_proc_temp_namespace_id(nspid: Oid)
 );
+
+// ---- dummy-PGPROC stand-up for prepared transactions (twophase.c) ----
+
+seam_core::seam!(
+    /// `MarkAsPreparingGuts`'s `MemSet(proc, 0, ...)` + fixed-field init of the
+    /// dummy PGPROC numbered `pgprocno`: clones `MyProc`'s VXID when a valid
+    /// LXID exists (else uses `xid` / `INVALID_PROC_NUMBER`), zeroes the lock
+    /// lists/wait state, and stows `xid` / `owner` / `databaseid`. Plain
+    /// shared-memory writes; cannot `ereport`.
+    pub fn proc_init_prepared(
+        pgprocno: ProcNumber,
+        xid: types_core::TransactionId,
+        owner: Oid,
+        databaseid: Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GXactLoadSubxactData(gxact, nsubxacts, children)` — copy up to
+    /// `PGPROC_MAX_CACHED_SUBXIDS` of `children` into the dummy PGPROC's
+    /// `subxids`, setting the overflow flag when the count exceeds the cache.
+    pub fn gxact_load_subxact_data(
+        pgprocno: ProcNumber,
+        children: &[types_core::TransactionId],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MyProcNumber` (proc.c global) — this backend's proc number, stamped into
+    /// `gxact->locking_backend`. Pure read of backend-local state.
+    pub fn my_proc_number() -> ProcNumber
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(pgprocno)->databaseId` — the dummy PGPROC's database,
+    /// read by `LockGXact`/`pg_prepared_xact`. Plain shared-memory read.
+    pub fn proc_database_id(pgprocno: ProcNumber) -> Oid
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(pgprocno)->xid` — the dummy PGPROC's running xid, read
+    /// by `pg_prepared_xact`. Plain shared-memory read.
+    pub fn proc_xid(pgprocno: ProcNumber) -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// `GET_VXID_FROM_PGPROC(vxid, *GetPGProcByNumber(pgprocno))` — the dummy
+    /// PGPROC's `(procNumber, localTransactionId)` pair, read by
+    /// `TwoPhaseGetXidByVirtualXID`. Plain shared-memory read.
+    pub fn proc_vxid(pgprocno: ProcNumber) -> (ProcNumber, u32)
+);
+
+seam_core::seam!(
+    /// `GetNumberFromPGProc(&PreparedXactProcs[i])` — the proc number assigned
+    /// to the i-th preallocated dummy proc by `InitProcGlobal`; used by
+    /// `TwoPhaseShmemInit` to build the freelist. Pure read.
+    pub fn prepared_xact_procno(i: i32) -> ProcNumber
+);
+
+seam_core::seam!(
+    /// `MyProc->delayChkptFlags |= DELAY_CHKPT_START` (on=true) / `&=
+    /// ~DELAY_CHKPT_START` (on=false) — the checkpoint-delay bracket around the
+    /// prepare/commit WAL insert. Plain shared-memory field write.
+    pub fn set_delay_chkpt_start(on: bool)
+);

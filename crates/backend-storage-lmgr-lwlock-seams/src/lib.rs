@@ -95,3 +95,27 @@ seam_core::seam!(
     /// during error recovery and at shmem exit.
     pub fn lwlock_release_all()
 );
+
+// ---- TwoPhaseStateLock (the named LWLock guarding the 2PC shared state) ----
+//
+// twophase.c acquires `TwoPhaseStateLock` in LW_SHARED or LW_EXCLUSIVE and
+// releases it mid-function at points C chooses; the lock object itself lives
+// in shmem stood up by `TwoPhaseShmemInit` (deferred). These model that
+// acquire/release on the named lock. A guard form is preferred per AGENTS.md
+// "Locks and held resources"; until the 2PC shmem lock owner lands and can
+// hand back a guard, the explicit acquire/release pair is recorded in
+// DESIGN_DEBT.
+
+seam_core::seam!(
+    /// `LWLockAcquire(TwoPhaseStateLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
+    pub fn lock_twophase_state(exclusive: bool) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockRelease(TwoPhaseStateLock)`.
+    pub fn unlock_twophase_state() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(TwoPhaseStateLock, LW_EXCLUSIVE)` — the assertion
+    /// predicate guarding the redo/scan entry points. Pure read.
+    pub fn twophase_state_held_exclusive() -> bool
+);

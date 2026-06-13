@@ -50,3 +50,22 @@ seam_core::seam!(
         tsid: Oid,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RelationCacheInitFilePreInvalidate()` (relcache.c, dispatched here):
+    /// take `RelCacheInitLock` and unlink the init file ahead of sending
+    /// invalidations. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn relcache_init_file_pre_invalidate() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `RelationCacheInitFilePostInvalidate()` (relcache.c): release
+    /// `RelCacheInitLock` after invalidations are sent.
+    pub fn relcache_init_file_post_invalidate() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `SendSharedInvalidMessages(msgs, nmsgs)` (inval.c) — broadcast the
+    /// shared cache-invalidation messages carried on a COMMIT PREPARED. `msgs`
+    /// is the raw on-disk `SharedInvalidationMessage[]` slice from the 2PC
+    /// buffer (the owner decodes it). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn send_shared_invalid_messages(msgs: &[u8], nmsgs: i32) -> PgResult<()>
+);

@@ -104,3 +104,29 @@ seam_core::seam!(
     /// (at any nesting level) and return to default state.
     pub fn abort_out_of_any_transaction() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `XactLogCommitRecord(...)` (xact.c): assemble and `XLogInsert` the
+    /// transaction commit record (incl. the 2PC variant when `twophase_xid` is
+    /// set) and return its end LSN. The WAL insert can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn xact_log_commit_record(
+        args: &types_wal::xact_records::XactLogCommitRecordArgs,
+    ) -> PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `XactLogAbortRecord(...)` (xact.c): assemble and `XLogInsert` the
+    /// transaction abort record (incl. the 2PC variant) and return its end LSN.
+    /// The WAL insert can `ereport(ERROR)`, carried on `Err`.
+    pub fn xact_log_abort_record(
+        args: &types_wal::xact_records::XactLogAbortRecordArgs,
+    ) -> PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `XactLastRecEnd` (xact.c global): the end LSN of the last record this
+    /// backend inserted; read after the commit/abort emit for
+    /// `replorigin_session_advance`. Pure read of backend-local state.
+    pub fn xact_last_rec_end() -> types_core::XLogRecPtr
+);

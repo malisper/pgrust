@@ -680,6 +680,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-twophase"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-commit-ts-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam",
+ "backend-access-transam-twophase-fileio-seams",
+ "backend-access-transam-twophase-rmgr",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-storage-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-replication-syncrep-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "port-crc32c-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-twophase-fileio-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-twophase-rmgr"
 version = "0.0.0"
 dependencies = [
@@ -706,6 +749,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1600,6 +1644,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-replication-syncrep-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2638,6 +2691,15 @@ name = "pg-prng"
 version = "0.0.0"
 
 [[package]]
+name = "port-crc32c-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "port-noblock-seams"
 version = "0.0.0"
 dependencies = [
@@ -2707,6 +2769,7 @@ dependencies = [
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-twophase",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",

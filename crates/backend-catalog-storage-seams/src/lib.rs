@@ -12,3 +12,10 @@ seam_core::seam!(
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
     pub fn smgr_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `DropRelationFiles(delrels, ndelrels, isRedo=false)` (storage.c) — drop
+    /// the physical files a finished prepared transaction was supposed to
+    /// delete. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn drop_relation_files(rels: &[types_wal::RelFileLocator]) -> types_error::PgResult<()>
+);

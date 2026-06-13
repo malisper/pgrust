@@ -95,3 +95,20 @@ seam_core::seam!(
     /// not alive). Shared-memory read; cannot `ereport`.
     pub fn proc_status(proc_number: ProcNumber) -> Option<(Oid, Oid)>
 );
+
+seam_core::seam!(
+    /// `ProcArrayAdd(GetPGProcByNumber(pgprocno))` (procarray.c) — enter the
+    /// dummy prepared-xact proc into the global ProcArray so
+    /// `TransactionIdIsInProgress` sees its XID running. Takes
+    /// `ProcArrayLock`; the `ereport(FATAL)` past `maxProcs` is carried on
+    /// `Err`.
+    pub fn proc_array_add(pgprocno: ProcNumber) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcArrayRemove(GetPGProcByNumber(pgprocno), latestXid)` (procarray.c)
+    /// — remove the dummy proc from the global ProcArray on COMMIT/ABORT
+    /// PREPARED, advancing the latest-completed xid to `latest_xid`. Takes
+    /// `ProcArrayLock`; cannot `ereport` at ERROR but carries the surface.
+    pub fn proc_array_remove(pgprocno: ProcNumber, latest_xid: TransactionId) -> PgResult<()>
+);
