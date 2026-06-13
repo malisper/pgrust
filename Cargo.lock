@@ -408,6 +408,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-rmgrdesc-small"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-rmgrdesc-smgrdesc-seams"
 version = "0.0.0"
 dependencies = [
@@ -640,6 +650,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-subtrans-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-transam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-twophase-rmgr"
 version = "0.0.0"
 dependencies = [
@@ -866,6 +896,17 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-instrument"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-instrument-seams",
+ "mcx",
+ "portability-instr-time",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1151,6 +1192,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rmgrdesc-next"
+version = "0.0.0"
+dependencies = [
+ "backend-rmgrdesc-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
+name = "backend-rmgrdesc-small-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -1398,6 +1463,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-timezone-localtime"
+version = "0.0.0"
+dependencies = [
+ "backend-timezone-pgtz-seams",
+ "types-core",
+ "types-pgtime",
+]
+
+[[package]]
 name = "backend-timezone-pgtz-seams"
 version = "0.0.0"
 dependencies = [
@@ -1517,6 +1591,13 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-datum",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-numutils"
+version = "0.0.0"
+dependencies = [
  "types-error",
 ]
 
@@ -2022,6 +2103,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "portability-instr-time"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "types-core",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2050,11 +2139,13 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xlogstats",
  "backend-executor-execAmi",
  "backend-executor-execUtils",
+ "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
@@ -2067,9 +2158,11 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
+ "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-numutils",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
@@ -2187,6 +2280,9 @@ dependencies = [
 [[package]]
 name = "types-pgtime"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-rel"
@@ -2271,6 +2367,15 @@ name = "types-wchar"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-xlog-records"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

@@ -1,0 +1,12 @@
+[package]
+name = "backend-utils-adt-numutils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_numutils"
+path = "src/lib.rs"
+
+[dependencies]
+types-error = { path = "../types-error" }

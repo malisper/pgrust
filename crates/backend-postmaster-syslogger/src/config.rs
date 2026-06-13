@@ -36,9 +36,10 @@ thread_local! {
     /// crate's config facet (like elog's `log_destination` mirror) and set
     /// by the pgtz/guc owner when it lands. guc.c guarantees `log_timezone`
     /// is at least GMT before anything can log, hence the GMT boot value.
-    static LOG_TIMEZONE: RefCell<pg_tz> = RefCell::new(pg_tz {
-        TZname: String::from("GMT"),
-    });
+    static LOG_TIMEZONE: RefCell<pg_tz> = RefCell::new(pg_tz::new(
+        String::from("GMT"),
+        types_pgtime::state::default(),
+    ));
 }
 
 pub fn logging_collector() -> bool {

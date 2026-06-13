@@ -9,11 +9,13 @@ pub fn init_all() {
     backend_access_common_heaptuple::init_seams();
     backend_access_hashvalidate::init_seams();
     backend_access_heap_heaptoast::init_seams();
+    backend_access_rmgrdesc_small::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execUtils::init_seams();
+    backend_executor_instrument::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
@@ -26,9 +28,11 @@ pub fn init_all() {
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
+    backend_timezone_localtime::init_seams();
     backend_timezone_strftime::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_activity_xact::init_seams();
+    backend_utils_adt_numutils::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();

@@ -523,17 +523,38 @@ unsafe impl Allocator for Mcx<'_> {
     }
 }
 
+/// `MaxAllocSize` (`memutils.h`): the cap `palloc` enforces on a single
+/// request — `((Size) 0x3fffffff)`, 1 gigabyte minus one.
+pub const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
+
+/// `AllocSizeIsValid` gate: requests above [`MAX_ALLOC_SIZE`] fail the way
+/// `mcxt.c` does — `elog(ERROR, "invalid memory alloc request size %zu")`.
+/// Like `palloc`, this catches negative C sizes too: an `int` count converted
+/// to `Size` becomes huge, so callers porting `palloc(n * sizeof(T))` with a
+/// signed `n` should sign-extend `n` to `usize` and let this gate reject it.
+pub fn check_alloc_size(request: usize) -> PgResult<()> {
+    if request > MAX_ALLOC_SIZE {
+        return Err(PgError::error(alloc::format!(
+            "invalid memory alloc request size {request}"
+        )));
+    }
+    Ok(())
+}
+
 /// `palloc`-shaped convenience: a boxed value in `mcx`, failing with the
 /// context's OOM error (C: `MemoryContextAlloc`).
 pub fn alloc_in<'mcx, T>(mcx: Mcx<'mcx>, value: T) -> PgResult<PgBox<'mcx, T>> {
+    check_alloc_size(core::mem::size_of::<T>())?;
     PgBox::try_new_in(value, mcx).map_err(|_| mcx.oom(core::mem::size_of::<T>()))
 }
 
-/// Fallible `Vec` construction with the context's OOM error.
+/// Fallible `Vec` construction with the context's OOM error. Enforces
+/// `palloc`'s `MaxAllocSize` gate on the byte size of the request.
 pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgVec<'mcx, T>> {
+    let request = cap.saturating_mul(core::mem::size_of::<T>());
+    check_alloc_size(request)?;
     let mut v = PgVec::new_in(mcx);
-    v.try_reserve_exact(cap)
-        .map_err(|_| mcx.oom(cap.saturating_mul(core::mem::size_of::<T>())))?;
+    v.try_reserve_exact(cap).map_err(|_| mcx.oom(request))?;
     Ok(v)
 }
 
