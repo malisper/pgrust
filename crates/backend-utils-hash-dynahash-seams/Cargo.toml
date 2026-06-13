@@ -1,0 +1,14 @@
+[package]
+name = "backend-utils-hash-dynahash-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_hash_dynahash_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-error = { path = "../types-error" }
+types-hash = { path = "../types-hash" }
