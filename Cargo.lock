@@ -5777,6 +5777,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-walreceiverfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-replication-walreceiverfuncs-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-pmsignal",
+ "backend-storage-lmgr-condition-variable",
+ "backend-utils-adt-timestamp-seams",
+ "libc",
+ "seams-init",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-walreceiver",
+]
+
+[[package]]
 name = "backend-replication-walreceiverfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -9763,6 +9784,7 @@ dependencies = [
  "backend-replication-logical-slotsync",
  "backend-replication-slot",
  "backend-replication-walreceiver",
+ "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
