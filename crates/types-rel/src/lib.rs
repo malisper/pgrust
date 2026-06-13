@@ -36,6 +36,9 @@ use types_tuple::heaptuple::TupleDescData;
 pub struct FormData_pg_class<'mcx> {
     /// `NameData relname` — name of the relation.
     pub relname: PgString<'mcx>,
+    /// `Oid relnamespace` — OID of the namespace containing the relation
+    /// (`RelationGetNamespace`).
+    pub relnamespace: Oid,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
@@ -54,6 +57,14 @@ pub struct FormData_pg_class<'mcx> {
     pub relispopulated: bool,
     /// `bool relispartition` — is the relation a partition?
     pub relispartition: bool,
+}
+
+/// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
+/// consume (the `rd_index` payload of an index's relcache entry).
+#[derive(Clone, Copy, Debug)]
+pub struct FormData_pg_index {
+    /// `bool indimmediate` — is uniqueness enforced immediately?
+    pub indimmediate: bool,
 }
 
 /// `StdRdOptions` (`utils/rel.h`), trimmed: the parsed heap reloptions the
@@ -88,6 +99,9 @@ pub struct RelationData<'mcx> {
     pub rd_att: PgBox<'mcx, TupleDescData<'mcx>>,
     /// `bytea *rd_options` — parsed reloptions (trimmed), or `None`.
     pub rd_options: Option<StdRdOptions>,
+    /// `Form_pg_index rd_index` — the pg_index row (trimmed); `None` (the C
+    /// NULL) for non-index relations.
+    pub rd_index: Option<FormData_pg_index>,
 }
 
 impl<'mcx> RelationData<'mcx> {

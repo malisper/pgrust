@@ -226,10 +226,23 @@ dependencies = [
  "seam-core",
  "types-cache",
  "types-core",
+ "types-datum",
  "types-error",
  "types-rel",
  "types-scan",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-index-indexam-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -720,6 +733,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-index-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-catalog-indexing-seams"
 version = "0.0.0"
 dependencies = [
@@ -925,6 +950,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -938,11 +964,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execReplication-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+]
+
+[[package]]
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -1246,6 +1284,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-conflict"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-tableam",
+ "backend-access-transam-commit-ts-seams",
+ "backend-catalog-index-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execReplication-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-nodes-core-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-replication",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-replication-logical-decode-seams"
 version = "0.0.0"
 dependencies = [
@@ -1269,6 +1336,7 @@ dependencies = [
 name = "backend-replication-logical-origin-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -1633,6 +1701,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-replication",
 ]
 
 [[package]]
@@ -1715,8 +1784,10 @@ dependencies = [
 name = "backend-utils-adt-timestamp-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2246,6 +2317,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-interrupt",
  "backend-postmaster-syslogger",
+ "backend-replication-logical-conflict",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
  "backend-storage-lmgr-lwlock",
@@ -2397,6 +2469,10 @@ dependencies = [
 
 [[package]]
 name = "types-reloptions"
+version = "0.0.0"
+
+[[package]]
+name = "types-replication"
 version = "0.0.0"
 
 [[package]]

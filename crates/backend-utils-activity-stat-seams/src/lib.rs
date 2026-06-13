@@ -80,3 +80,14 @@ seam_core::seam!(
     /// Frees only; infallible.
     pub fn post_prepare_pgstat_relations()
 );
+
+seam_core::seam!(
+    /// `pgstat_report_subscription_conflict(subid, type)`
+    /// (pgstat_subscription.c): bump the subscription's conflict counter for
+    /// the given conflict type. Preparing the pending stats entry can
+    /// allocate (`ereport(ERROR)` on OOM), carried on `Err`.
+    pub fn pgstat_report_subscription_conflict(
+        subid: types_core::Oid,
+        conflict_type: types_replication::conflict::ConflictType,
+    ) -> types_error::PgResult<()>
+);

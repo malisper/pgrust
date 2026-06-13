@@ -23,3 +23,21 @@ seam_core::seam!(
         instrument_options: i32,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecBuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
+    /// maxfieldlen)` (execMain.c): build a "(col, ...) = (val, ...)"
+    /// description of the slot's contents, limited to the columns the current
+    /// user has SELECT rights on (all columns when `modified_cols` names only
+    /// accessible ones); `Ok(None)` when permissions allow no column (the C
+    /// NULL). The string is allocated in `mcx`; column out-functions can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn exec_build_slot_value_description<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        reloid: types_core::Oid,
+        slot: &types_nodes::TupleTableSlot,
+        tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        modified_cols: Option<&types_nodes::Bitmapset<'_>>,
+        maxfieldlen: i32,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
