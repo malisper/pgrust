@@ -11,13 +11,18 @@
 //!
 //! # The leader/worker process boundary
 //!
-//! `ParallelApplyWorkerShared` lives in the DSM segment and is read/written by
-//! *both* the leader and the parallel apply worker; the two `shm_mq`s and the
-//! `dsm_segment` likewise live in / point into the segment. Those bytes are
-//! owned by the DSM/shm_mq subsystems, so the leader-local
-//! `ParallelApplyWorkerInfo` carries them as opaque `u64` handles the worker
-//! seams resolve against the segment they own. The worker **pool** is an owned
-//! `Vec<ParallelApplyWorkerInfo>` and workers are addressed by **index** (a
+//! `ParallelApplyWorkerShared` is owned by **this** file in C (`MyParallelShared`
+//! is defined here, C line 239); it is a fixed header (a spinlock plus scalars
+//! and a `FileSet`) that merely *lives in* the DSM segment so the leader and the
+//! parallel apply worker can both reach it. The spinlock-protected field
+//! accessors — the commit-ordering / deadlock-detection state machine — are this
+//! file's native logic, so the header is modeled here as a real synchronized
+//! type ([`ParallelApplyWorkerShared`]) with an in-crate [`Mutex`] (the C
+//! `slock_t mutex`) and an [`AtomicU32`] (`pending_stream_count`), shared across
+//! the leader/worker threads via [`Arc`]. The two `shm_mq`s and the
+//! `dsm_segment` are still owned by the DSM/shm_mq subsystems and are carried as
+//! opaque `u64` handles the worker seams resolve. The worker **pool** is an
+//! owned `Vec<ParallelApplyWorkerInfo>` and workers are addressed by **index** (a
 //! [`WorkerHandle`]) rather than by raw pointer, mirroring C's
 //! List-of-pointers + HTAB-of-pointers model.
 
@@ -27,9 +32,13 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 
 use backend_utils_error::{ereport, PgError, PgResult};
-use types_applyparallel::{DsmSetupResult, ParallelTransState, PartialFileSetState, ShmMqResult};
+use types_applyparallel::{
+    DsmSetupResult, FileSet, ParallelTransState, PartialFileSetState, ShmMqResult,
+};
 use types_core::{
     InvalidTransactionId, InvalidXLogRecPtr, Oid, Size, TimestampTz, TransactionId, XLogRecPtr,
     INVALID_PROC_NUMBER,
@@ -86,6 +95,70 @@ const WL_EXIT_ON_PM_DEATH: i32 = 1 << 5;
 const NAMEDATALEN: Size = 64;
 
 // ---------------------------------------------------------------------------
+// `ParallelApplyWorkerShared` (worker_internal.h lines 135-180) — owned here.
+// ---------------------------------------------------------------------------
+
+/// The fields of [`ParallelApplyWorkerShared`] protected by `slock_t mutex`.
+/// (`pending_stream_count` is independently atomic and lives outside the lock,
+/// exactly as in C.)
+#[derive(Debug)]
+struct SharedLocked {
+    /// `TransactionId xid`.
+    xid: TransactionId,
+    /// `ParallelTransState xact_state` — the commit-ordering state.
+    xact_state: ParallelTransState,
+    /// `uint16 logicalrep_worker_generation`.
+    logicalrep_worker_generation: u16,
+    /// `int logicalrep_worker_slot_no`.
+    logicalrep_worker_slot_no: i32,
+    /// `XLogRecPtr last_commit_end`.
+    last_commit_end: XLogRecPtr,
+    /// `PartialFileSetState fileset_state`.
+    fileset_state: PartialFileSetState,
+    /// `FileSet fileset`.
+    fileset: FileSet,
+}
+
+/// `ParallelApplyWorkerShared` (`worker_internal.h`). This file owns the struct
+/// (`MyParallelShared` is defined in applyparallelworker.c); the header lives in
+/// the DSM segment in C only so both the leader and the parallel apply worker
+/// reach it. Here the `slock_t mutex` is a host [`Mutex`] guarding exactly the
+/// fields C documents it as protecting; `pending_stream_count` is the
+/// independent `pg_atomic_uint32`. The handle is shared across the
+/// leader/worker threads via [`Arc`].
+#[derive(Debug)]
+pub struct ParallelApplyWorkerShared {
+    /// `slock_t mutex` + the fields it protects.
+    locked: Mutex<SharedLocked>,
+    /// `pg_atomic_uint32 pending_stream_count`.
+    pending_stream_count: AtomicU32,
+}
+
+impl ParallelApplyWorkerShared {
+    /// A fresh header (`palloc0`-equivalent: zero/initial values).
+    fn new() -> Self {
+        ParallelApplyWorkerShared {
+            locked: Mutex::new(SharedLocked {
+                xid: InvalidTransactionId,
+                xact_state: ParallelTransState::PARALLEL_TRANS_UNKNOWN,
+                logicalrep_worker_generation: 0,
+                logicalrep_worker_slot_no: 0,
+                last_commit_end: InvalidXLogRecPtr,
+                fileset_state: PartialFileSetState::FS_EMPTY,
+                fileset: FileSet::default(),
+            }),
+            pending_stream_count: AtomicU32::new(0),
+        }
+    }
+}
+
+/// An opaque token the worker seam uses to carry a shared-header [`Arc`] across
+/// the DSM TOC: the leader registers an `Arc<ParallelApplyWorkerShared>` under a
+/// token in [`Globals::shared_registry`] before `setup_dsm`; the worker recovers
+/// the same token from `worker_attach_dsm` and binds `MyParallelShared`.
+type SharedToken = u64;
+
+// ---------------------------------------------------------------------------
 // `ParallelApplyWorkerInfo` (worker_internal.h lines 188-218).
 // ---------------------------------------------------------------------------
 
@@ -97,11 +170,12 @@ const NAMEDATALEN: Size = 64;
 pub type WorkerHandle = usize;
 
 /// `ParallelApplyWorkerInfo` (worker_internal.h lines 188-218). The `shm_mq`
-/// handles, the `dsm_segment`, and the shared header live in / point into the
-/// DSM segment and are owned by the worker seams, so they are carried here as
-/// opaque `u64` handle slots; the `serialize_changes`/`in_use` booleans and the
-/// pool policy are this file's own state.
-#[derive(Clone, Copy, Debug, Default)]
+/// handles and the `dsm_segment` live in / point into the DSM segment and are
+/// owned by the worker seams, so they are carried here as opaque `u64` handle
+/// slots; the `shared` header is owned in-crate ([`Arc`]); the
+/// `serialize_changes`/`in_use` booleans and the pool policy are this file's own
+/// state.
+#[derive(Clone, Debug, Default)]
 pub struct ParallelApplyWorkerInfo {
     /// Opaque handle to `winfo->mq_handle` (leader→worker change queue), or 0.
     pub mq_handle: u64,
@@ -113,8 +187,9 @@ pub struct ParallelApplyWorkerInfo {
     pub serialize_changes: bool,
     /// `winfo->in_use`.
     pub in_use: bool,
-    /// Opaque handle to `winfo->shared` (the in-DSM `ParallelApplyWorkerShared`).
-    pub shared: u64,
+    /// `winfo->shared` (`ParallelApplyWorkerShared *`) — the in-crate header,
+    /// shared with the worker thread via [`Arc`]. `None` until `pa_setup_dsm`.
+    pub shared: Option<Arc<ParallelApplyWorkerShared>>,
 }
 
 /// `ParallelApplyWorkerEntry` (C lines 215-219): xid → winfo hash entry. The C
@@ -140,26 +215,34 @@ struct Globals {
     pool: Vec<Option<ParallelApplyWorkerInfo>>,
     /// `stream_apply_worker` cache (NULL) — a pool index when set.
     stream_apply_worker: Option<WorkerHandle>,
-    /// Whether `MyParallelShared` has been set (worker side, C line 239).
-    my_parallel_shared_set: bool,
+    /// `ParallelApplyWorkerShared *MyParallelShared` (C line 239) — set on the
+    /// worker side by `ParallelApplyWorkerMain` after attaching to the segment.
+    my_parallel_shared: Option<Arc<ParallelApplyWorkerShared>>,
+    /// Maps a [`SharedToken`] to the leader-created `Arc` so the worker can
+    /// recover the same header from `worker_attach_dsm`. The next token to hand
+    /// out is `next_shared_token`.
+    shared_registry: BTreeMap<SharedToken, Arc<ParallelApplyWorkerShared>>,
+    next_shared_token: SharedToken,
     /// `volatile sig_atomic_t ParallelApplyMessagePending` (C line 245).
     parallel_apply_message_pending: bool,
 }
 
 impl Globals {
-    const fn seed() -> Self {
+    fn seed() -> Self {
         Globals {
             txn_hash: None,
             pool: Vec::new(),
             stream_apply_worker: None,
-            my_parallel_shared_set: false,
+            my_parallel_shared: None,
+            shared_registry: BTreeMap::new(),
+            next_shared_token: 1,
             parallel_apply_message_pending: false,
         }
     }
 }
 
 thread_local! {
-    static GLOBALS: RefCell<Globals> = const { RefCell::new(Globals::seed()) };
+    static GLOBALS: RefCell<Globals> = RefCell::new(Globals::seed());
 }
 
 #[inline]
@@ -190,7 +273,31 @@ fn set_parallel_apply_message_pending(v: bool) {
 
 /// Whether `MyParallelShared` has been set (worker side).
 pub fn my_parallel_shared_is_set() -> bool {
-    with_globals(|g| g.my_parallel_shared_set)
+    with_globals(|g| g.my_parallel_shared.is_some())
+}
+
+/// `MyParallelShared` — the worker-side shared header. Panics if read before
+/// `ParallelApplyWorkerMain` bound it (the C `MyParallelShared` NULL deref).
+fn my_parallel_shared() -> Arc<ParallelApplyWorkerShared> {
+    with_globals(|g| g.my_parallel_shared.clone())
+        .expect("MyParallelShared dereferenced before ParallelApplyWorkerMain attached")
+}
+
+// ---------------------------------------------------------------------------
+// `ParallelApplyWorkerShared` accessors — the spinlock-protected state machine
+// this file owns (C 1313-1335, 1504-1536) plus the `pending_stream_count`
+// atomics (C 1606/1614). All field access goes through the in-crate `Mutex`
+// (the `slock_t mutex`) so the leader and worker threads stay coordinated.
+// ---------------------------------------------------------------------------
+
+/// `winfo->shared->xid` (read under the mutex).
+fn shared_xid(shared: &Arc<ParallelApplyWorkerShared>) -> TransactionId {
+    shared.locked.lock().unwrap().xid
+}
+
+/// `winfo->shared->last_commit_end` (read under the mutex).
+fn shared_last_commit_end(shared: &Arc<ParallelApplyWorkerShared>) -> XLogRecPtr {
+    shared.locked.lock().unwrap().last_commit_end
 }
 
 // Helpers mirroring the trivial C inline checks.
@@ -258,23 +365,39 @@ fn pa_can_start() -> PgResult<bool> {
 
 /// `static bool pa_setup_dsm(ParallelApplyWorkerInfo *winfo)`.
 ///
-/// The DSM sizing / TOC build / queue creation / header init / endpoint attach
-/// are all owned by the DSM/shm_toc/shm_mq machinery, so the worker seam
-/// performs them in one call against the winfo's pool index; on success it
-/// returns the four handles this function writes back into the winfo, matching
-/// the C `winfo->{dsm_seg,shared,mq_handle,error_mq_handle}` assignments and the
-/// success/failure contract (C returns false when `dsm_create` failed).
+/// The DSM sizing / TOC build / queue creation / endpoint attach are owned by
+/// the DSM/shm_toc/shm_mq machinery, so the worker seam performs them in one
+/// call; the **shared header** is owned here, so this function `palloc0`s the
+/// `ParallelApplyWorkerShared` (C 357-359 `shm_toc_allocate` + the field inits
+/// at C 360-372), registers it under a token the worker recovers on attach, and
+/// hands the token to `setup_dsm` to place in the TOC. On success it writes the
+/// `winfo->{dsm_seg,shared,mq_handle,error_mq_handle}` assignments and returns
+/// true; C returns false when `dsm_create` failed.
 fn pa_setup_dsm(winfo_index: WorkerHandle, winfo: &mut ParallelApplyWorkerInfo) -> PgResult<bool> {
-    match worker::setup_dsm::call(winfo_index as u64)? {
-        None => Ok(false),
+    /* Create the shared header (palloc0 + SpinLockInit + field inits). */
+    let shared = Arc::new(ParallelApplyWorkerShared::new());
+    let token = with_globals(|g| {
+        let token = g.next_shared_token;
+        g.next_shared_token += 1;
+        g.shared_registry.insert(token, Arc::clone(&shared));
+        token
+    });
+
+    match worker::setup_dsm::call(winfo_index as u64, token)? {
+        None => {
+            /* dsm_create failed: drop the just-registered header. */
+            with_globals(|g| {
+                g.shared_registry.remove(&token);
+            });
+            Ok(false)
+        }
         Some(DsmSetupResult {
             dsm_seg,
-            shared,
             mq_handle,
             error_mq_handle,
         }) => {
             winfo.dsm_seg = dsm_seg;
-            winfo.shared = shared;
+            winfo.shared = Some(shared);
             winfo.mq_handle = mq_handle;
             winfo.error_mq_handle = error_mq_handle;
             Ok(true)
@@ -319,7 +442,7 @@ fn pa_launch_parallel_worker() -> PgResult<Option<WorkerHandle>> {
         idx
     });
 
-    let mut winfo = with_globals(|g| g.pool[winfo_index])
+    let mut winfo = with_globals(|g| g.pool[winfo_index].clone())
         .expect("pa_launch_parallel_worker: just-installed pool slot must be present");
 
     /* Setup shared memory. */
@@ -336,10 +459,11 @@ fn pa_launch_parallel_worker() -> PgResult<Option<WorkerHandle>> {
         with_globals(|g| g.pool[winfo_index] = None);
         return Ok(None);
     }
+    let dsm_seg = winfo.dsm_seg;
     /* Persist the handles written by pa_setup_dsm. */
     with_globals(|g| g.pool[winfo_index] = Some(winfo));
 
-    let handle = worker::dsm_segment_handle::call(winfo.dsm_seg)?;
+    let handle = worker::dsm_segment_handle::call(dsm_seg)?;
 
     let launched = worker::logicalrep_worker_launch_parallel_apply::call(
         worker::my_worker_dbid::call(),
@@ -398,7 +522,12 @@ pub fn pa_allocate_worker(xid: TransactionId) -> PgResult<()> {
 
     /* Update the transaction information in shared memory. (C 504-507) */
     let shared = winfo_shared_or_panic(winfo_index);
-    worker::init_worker_shared_for_xid::call(shared, xid);
+    {
+        /* SpinLockAcquire(&winfo->shared->mutex); ... SpinLockRelease(...) */
+        let mut s = shared.locked.lock().unwrap();
+        s.xact_state = ParallelTransState::PARALLEL_TRANS_UNKNOWN;
+        s.xid = xid;
+    }
 
     with_globals(|g| {
         let winfo = g.pool[winfo_index].as_mut().unwrap();
@@ -433,7 +562,7 @@ pub fn pa_find_worker(xid: TransactionId) -> Option<WorkerHandle> {
         if let Some(entry) = g.txn_hash.as_ref().unwrap().get(&xid) {
             let winfo = entry.winfo;
             /* The worker must not have exited. (Assert(entry->winfo->in_use)) */
-            debug_assert!(g.pool[winfo].map(|w| w.in_use).unwrap_or(false));
+            debug_assert!(g.pool[winfo].as_ref().map(|w| w.in_use).unwrap_or(false));
             return Some(winfo);
         }
 
@@ -451,16 +580,19 @@ fn pa_free_worker(winfo_index: WorkerHandle) -> PgResult<()> {
 
     let (shared, serialize_changes) = {
         let w = winfo_or_err(winfo_index, "pa_free_worker")?;
-        (w.shared, w.serialize_changes)
+        (
+            w.shared.expect("pa_free_worker: winfo->shared is NULL"),
+            w.serialize_changes,
+        )
     };
 
-    debug_assert!(with_globals(|g| g.pool[winfo_index].unwrap().in_use));
+    debug_assert!(with_globals(|g| g.pool[winfo_index].as_ref().unwrap().in_use));
     debug_assert_eq!(
-        worker::get_winfo_xact_state::call(shared),
+        pa_get_xact_state(&shared),
         ParallelTransState::PARALLEL_TRANS_FINISHED
     );
 
-    let xid = worker::winfo_shared_xid::call(shared);
+    let xid = shared_xid(&shared);
 
     /* hash_search(..., HASH_REMOVE, NULL) — error if not found. */
     with_globals(|g| {
@@ -479,7 +611,26 @@ fn pa_free_worker(winfo_index: WorkerHandle) -> PgResult<()> {
     if serialize_changes
         || pool_len > (worker::max_parallel_apply_workers_per_subscription::call() / 2)
     {
-        worker::logicalrep_pa_worker_stop::call(shared)?;
+        /*
+         * logicalrep_pa_worker_stop reads winfo->shared->{generation,slot_no}
+         * (under the in-crate mutex), detaches and NULLs winfo->error_mq_handle
+         * (launcher.c 661-665), then runs the launcher-owned LWLock stop
+         * sequence (LWLock + generation/proc check + SIGUSR2).
+         */
+        let (generation, slot_no) = {
+            let s = shared.locked.lock().unwrap();
+            (s.logicalrep_worker_generation, s.logicalrep_worker_slot_no)
+        };
+        let error_mq_handle = winfo_or_err(winfo_index, "pa_free_worker")?.error_mq_handle;
+        if error_mq_handle != 0 {
+            worker::shm_mq_detach_error::call(error_mq_handle)?;
+            with_globals(|g| {
+                if let Some(w) = g.pool[winfo_index].as_mut() {
+                    w.error_mq_handle = 0;
+                }
+            });
+        }
+        worker::logicalrep_pa_worker_stop::call(generation, slot_no)?;
         pa_free_worker_info(winfo_index)?;
         return Ok(());
     }
@@ -513,10 +664,12 @@ fn pa_free_worker_info(winfo_index: WorkerHandle) -> PgResult<()> {
 
     /* Unlink the files with serialized changes. */
     if winfo.serialize_changes {
-        worker::stream_cleanup_files::call(
-            worker::my_worker_subid::call(),
-            worker::winfo_shared_xid::call(winfo.shared),
-        )?;
+        let xid = winfo
+            .shared
+            .as_ref()
+            .map(shared_xid)
+            .expect("pa_free_worker_info: winfo->shared is NULL");
+        worker::stream_cleanup_files::call(worker::my_worker_subid::call(), xid)?;
     }
 
     if winfo.dsm_seg != 0 {
@@ -543,7 +696,8 @@ pub fn pa_detach_all_error_mq() -> PgResult<()> {
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| {
-                slot.and_then(|w| (w.error_mq_handle != 0).then_some((i, w.error_mq_handle)))
+                slot.as_ref()
+                    .and_then(|w| (w.error_mq_handle != 0).then_some((i, w.error_mq_handle)))
             })
             .collect()
     });
@@ -586,7 +740,7 @@ fn pa_process_spooled_messages_if_required() -> PgResult<bool> {
      * acquire the stream lock now and wait for the leader worker to finish.
      */
     if fileset_state == PartialFileSetState::FS_SERIALIZE_IN_PROGRESS {
-        let xid = worker::my_parallel_shared_xid::call();
+        let xid = shared_xid(&my_parallel_shared());
         pa_lock_stream(xid, AccessShareLock)?;
         pa_unlock_stream(xid, AccessShareLock)?;
 
@@ -749,8 +903,23 @@ pub fn pa_shutdown(_code: i32, seg: u32) -> PgResult<()> {
 pub fn ParallelApplyWorkerMain(main_arg: i32) -> PgResult<()> {
     let worker_slot = main_arg;
 
-    worker::worker_attach_dsm::call(worker_slot)?;
-    with_globals(|g| g.my_parallel_shared_set = true);
+    /*
+     * Attach to the segment (signal setup, dsm_attach, toc lookups, queue
+     * attach, slot attach, before_shmem_exit, error-queue redirect,
+     * InitializeLogRepWorker, origin setup, syscache callback) and recover the
+     * in-crate shared-header token from the TOC. Binding MyParallelShared is
+     * `MyParallelShared = shared;` (C 907); the spinlock write of generation /
+     * slot_no (C 930-933) follows.
+     */
+    let token = worker::worker_attach_dsm::call(worker_slot)?;
+    let shared = with_globals(|g| g.shared_registry.remove(&token))
+        .expect("ParallelApplyWorkerMain: shared-header token not found in registry");
+    {
+        let mut s = shared.locked.lock().unwrap();
+        s.logicalrep_worker_generation = worker::my_worker_generation::call();
+        s.logicalrep_worker_slot_no = worker_slot;
+    }
+    with_globals(|g| g.my_parallel_shared = Some(shared));
 
     LogicalParallelApplyLoop()?;
 
@@ -851,7 +1020,7 @@ pub fn ProcessParallelApplyMessages() -> PgResult<()> {
             g.pool
                 .iter()
                 .enumerate()
-                .filter_map(|(i, slot)| slot.map(|w| (i, w.error_mq_handle)))
+                .filter_map(|(i, slot)| slot.as_ref().map(|w| (i, w.error_mq_handle)))
                 .collect()
         });
 
@@ -957,7 +1126,7 @@ pub fn pa_switch_to_partial_serialize(
     stream_locked: bool,
 ) -> PgResult<()> {
     let shared = winfo_shared_or_panic(winfo_index);
-    let xid = worker::winfo_shared_xid::call(shared);
+    let xid = shared_xid(&shared);
 
     ereport(LOG)
         .errmsg(format!(
@@ -983,7 +1152,7 @@ pub fn pa_switch_to_partial_serialize(
     }
 
     /* pa_set_fileset_state(winfo->shared, FS_SERIALIZE_IN_PROGRESS) */
-    worker::set_winfo_fileset_state::call(shared, PartialFileSetState::FS_SERIALIZE_IN_PROGRESS)
+    pa_set_fileset_state_handle(&shared, PartialFileSetState::FS_SERIALIZE_IN_PROGRESS)
 }
 
 // ===========================================================================
@@ -991,10 +1160,13 @@ pub fn pa_switch_to_partial_serialize(
 // ===========================================================================
 
 /// `static void pa_wait_for_xact_state(ParallelApplyWorkerInfo *winfo, ParallelTransState xact_state)`.
-fn pa_wait_for_xact_state(shared: u64, xact_state: ParallelTransState) -> PgResult<()> {
+fn pa_wait_for_xact_state(
+    shared: &Arc<ParallelApplyWorkerShared>,
+    xact_state: ParallelTransState,
+) -> PgResult<()> {
     loop {
         /* Stop if the transaction state has reached or exceeded xact_state. */
-        if worker::get_winfo_xact_state::call(shared) >= xact_state {
+        if pa_get_xact_state(shared) >= xact_state {
             break;
         }
 
@@ -1019,7 +1191,7 @@ fn pa_wait_for_xact_state(shared: u64, xact_state: ParallelTransState) -> PgResu
 // ===========================================================================
 
 /// `static void pa_wait_for_xact_finish(ParallelApplyWorkerInfo *winfo)`.
-fn pa_wait_for_xact_finish(shared: u64) -> PgResult<()> {
+fn pa_wait_for_xact_finish(shared: &Arc<ParallelApplyWorkerShared>) -> PgResult<()> {
     /*
      * Wait until the PA worker set the state to PARALLEL_TRANS_STARTED, meaning
      * it has acquired the transaction lock.
@@ -1027,7 +1199,7 @@ fn pa_wait_for_xact_finish(shared: u64) -> PgResult<()> {
     pa_wait_for_xact_state(shared, ParallelTransState::PARALLEL_TRANS_STARTED)?;
 
     /* Wait for the transaction lock to be released. (deadlock detection) */
-    let xid = worker::winfo_shared_xid::call(shared);
+    let xid = shared_xid(shared);
     pa_lock_transaction(xid, AccessShareLock)?;
     pa_unlock_transaction(xid, AccessShareLock)?;
 
@@ -1035,7 +1207,7 @@ fn pa_wait_for_xact_finish(shared: u64) -> PgResult<()> {
      * Check if the state became PARALLEL_TRANS_FINISHED in case the PA worker
      * failed while applying changes causing the lock to be released.
      */
-    if worker::get_winfo_xact_state::call(shared) != ParallelTransState::PARALLEL_TRANS_FINISHED {
+    if pa_get_xact_state(shared) != ParallelTransState::PARALLEL_TRANS_FINISHED {
         /* C 1305-1307: "parallel apply worker" wording. */
         return Err(ereport_oops_lost_connection_parallel());
     }
@@ -1046,23 +1218,30 @@ fn pa_wait_for_xact_finish(shared: u64) -> PgResult<()> {
 // 22. pa_set_xact_state (C 1313-1320)
 // ===========================================================================
 
-/// `void pa_set_xact_state(ParallelApplyWorkerShared *wshared, ParallelTransState xact_state)`.
+/// `void pa_set_xact_state(ParallelApplyWorkerShared *wshared, ParallelTransState xact_state)`
+/// (C 1313-1320): `SpinLockAcquire; wshared->xact_state = x; SpinLockRelease`.
 ///
-/// Every C caller passes either `winfo->shared` (addressed here by the shared
-/// handle) or `MyParallelShared`. This public entry takes the shared handle; the
-/// worker-side `MyParallelShared` path uses [`pa_set_xact_state_my`].
-pub fn pa_set_xact_state(shared: u64, xact_state: ParallelTransState) {
-    worker::set_winfo_xact_state::call(shared, xact_state);
+/// The C callers pass either `winfo->shared` (the leader, addressed here by the
+/// pool handle, [`pa_set_xact_state_handle`]) or `MyParallelShared` (the worker,
+/// [`pa_set_xact_state_my`]). This public entry takes the pool handle so cross-
+/// crate callers (e.g. the worker) can drive the leader-side header.
+pub fn pa_set_xact_state(winfo_index: WorkerHandle, xact_state: ParallelTransState) {
+    pa_set_xact_state_handle(&winfo_shared_or_panic(winfo_index), xact_state);
+}
+
+/// `pa_set_xact_state(wshared, ...)` against a resolved header.
+fn pa_set_xact_state_handle(shared: &Arc<ParallelApplyWorkerShared>, xact_state: ParallelTransState) {
+    shared.locked.lock().unwrap().xact_state = xact_state;
 }
 
 // ===========================================================================
 // 23. pa_get_xact_state (C 1325-1335)
 // ===========================================================================
 
-/// `static ParallelTransState pa_get_xact_state(ParallelApplyWorkerShared *wshared)`.
-#[allow(dead_code)]
-fn pa_get_xact_state(shared: u64) -> ParallelTransState {
-    worker::get_winfo_xact_state::call(shared)
+/// `static ParallelTransState pa_get_xact_state(ParallelApplyWorkerShared *wshared)`
+/// (C 1325-1335): `SpinLockAcquire; x = wshared->xact_state; SpinLockRelease`.
+fn pa_get_xact_state(shared: &Arc<ParallelApplyWorkerShared>) -> ParallelTransState {
+    shared.locked.lock().unwrap().xact_state
 }
 
 // ===========================================================================
@@ -1234,32 +1413,79 @@ pub fn pa_stream_abort(abort_data: &LogicalRepStreamAbortData) -> PgResult<()> {
 
 /// `pa_set_xact_state(MyParallelShared, ...)` (worker side).
 fn pa_set_xact_state_my(xact_state: ParallelTransState) {
-    worker::set_my_xact_state::call(xact_state);
+    pa_set_xact_state_handle(&my_parallel_shared(), xact_state);
 }
 
 // ===========================================================================
 // 29. pa_set_fileset_state (C 1504-1519)
 // ===========================================================================
 
-/// `void pa_set_fileset_state(ParallelApplyWorkerShared *wshared, PartialFileSetState fileset_state)`.
-pub fn pa_set_fileset_state(shared: u64, fileset_state: PartialFileSetState) -> PgResult<()> {
-    worker::set_winfo_fileset_state::call(shared, fileset_state)
+/// `void pa_set_fileset_state(ParallelApplyWorkerShared *wshared, PartialFileSetState fileset_state)`
+/// (C 1504-1519). The leader entry takes the pool handle.
+pub fn pa_set_fileset_state(
+    winfo_index: WorkerHandle,
+    fileset_state: PartialFileSetState,
+) -> PgResult<()> {
+    pa_set_fileset_state_handle(&winfo_shared_or_panic(winfo_index), fileset_state)
+}
+
+/// `pa_set_fileset_state(wshared, ...)` against a resolved header (C 1504-1519):
+///
+/// ```c
+/// SpinLockAcquire(&wshared->mutex);
+/// wshared->fileset_state = fileset_state;
+/// if (fileset_state == FS_SERIALIZE_DONE) {
+///     Assert(am_leader_apply_worker());
+///     Assert(MyLogicalRepWorker->stream_fileset);
+///     wshared->fileset = *MyLogicalRepWorker->stream_fileset;
+/// }
+/// SpinLockRelease(&wshared->mutex);
+/// ```
+fn pa_set_fileset_state_handle(
+    shared: &Arc<ParallelApplyWorkerShared>,
+    fileset_state: PartialFileSetState,
+) -> PgResult<()> {
+    /*
+     * The `stream_fileset` source read crosses an ownership boundary (it is
+     * `MyLogicalRepWorker->stream_fileset`, owned by the worker), so read its
+     * value before taking the mutex. The C reads it inside the spinlock, but
+     * the value is stable for the duration and the mutex only protects the
+     * destination `wshared` fields.
+     */
+    let stream_fileset = if fileset_state == PartialFileSetState::FS_SERIALIZE_DONE {
+        debug_assert!(worker::am_leader_apply_worker::call());
+        Some(
+            worker::my_worker_stream_fileset::call()
+                .expect("pa_set_fileset_state: MyLogicalRepWorker->stream_fileset is NULL"),
+        )
+    } else {
+        None
+    };
+
+    let mut s = shared.locked.lock().unwrap();
+    s.fileset_state = fileset_state;
+    if fileset_state == PartialFileSetState::FS_SERIALIZE_DONE {
+        s.fileset = stream_fileset.unwrap();
+    }
+    Ok(())
 }
 
 /// `pa_set_fileset_state(MyParallelShared, ...)` — the worker-side wrapper used
 /// by `pa_process_spooled_messages_if_required`.
 fn pa_set_fileset_state_my(fileset_state: PartialFileSetState) -> PgResult<()> {
-    worker::set_my_fileset_state::call(fileset_state)
+    pa_set_fileset_state_handle(&my_parallel_shared(), fileset_state)
 }
 
 // ===========================================================================
 // 30. pa_get_fileset_state (C 1524-1536)
 // ===========================================================================
 
-/// `static PartialFileSetState pa_get_fileset_state(void)`.
+/// `static PartialFileSetState pa_get_fileset_state(void)` (C 1524-1536):
+/// `Assert(am_parallel_apply_worker()); SpinLockAcquire; x =
+/// MyParallelShared->fileset_state; SpinLockRelease`.
 fn pa_get_fileset_state() -> PartialFileSetState {
     debug_assert!(worker::am_parallel_apply_worker::call());
-    worker::get_my_fileset_state::call()
+    my_parallel_shared().locked.lock().unwrap().fileset_state
 }
 
 // ===========================================================================
@@ -1315,11 +1541,14 @@ pub fn pa_unlock_transaction(xid: TransactionId, lockmode: LOCKMODE) -> PgResult
 pub fn pa_decr_and_wait_stream_block() -> PgResult<()> {
     debug_assert!(worker::am_parallel_apply_worker::call());
 
+    let shared = my_parallel_shared();
+
     /*
      * It is only possible to not have any pending stream chunks when we are
      * applying spooled messages.
      */
-    if worker::pending_stream_count_read::call() == 0 {
+    /* pg_atomic_read_u32(&MyParallelShared->pending_stream_count) (C 1606) */
+    if shared.pending_stream_count.load(SeqCst) == 0 {
         if pa_has_spooled_message_pending() {
             return Ok(());
         }
@@ -1327,8 +1556,9 @@ pub fn pa_decr_and_wait_stream_block() -> PgResult<()> {
         return Err(elog_error("invalid pending streaming chunk 0"));
     }
 
-    if worker::pending_stream_count_sub_fetch_1::call() == 0 {
-        let xid = worker::my_parallel_shared_xid::call();
+    /* pg_atomic_sub_fetch_u32(&MyParallelShared->pending_stream_count, 1) (C 1614) */
+    if shared.pending_stream_count.fetch_sub(1, SeqCst) - 1 == 0 {
+        let xid = shared_xid(&shared);
         pa_lock_stream(xid, AccessShareLock)?;
         pa_unlock_stream(xid, AccessShareLock)?;
     }
@@ -1344,7 +1574,7 @@ pub fn pa_xact_finish(winfo_index: WorkerHandle, remote_lsn: XLogRecPtr) -> PgRe
     debug_assert!(worker::am_leader_apply_worker::call());
 
     let shared = winfo_shared_or_panic(winfo_index);
-    let xid = worker::winfo_shared_xid::call(shared);
+    let xid = shared_xid(&shared);
 
     /*
      * Unlock the shared object lock so that the parallel apply worker can
@@ -1353,10 +1583,10 @@ pub fn pa_xact_finish(winfo_index: WorkerHandle, remote_lsn: XLogRecPtr) -> PgRe
     pa_unlock_stream(xid, AccessExclusiveLock)?;
 
     /* Wait for that worker to finish (preserves commit order). */
-    pa_wait_for_xact_finish(shared)?;
+    pa_wait_for_xact_finish(&shared)?;
 
     if !XLogRecPtrIsInvalid(remote_lsn) {
-        let last_commit_end = worker::winfo_shared_last_commit_end::call(shared);
+        let last_commit_end = shared_last_commit_end(&shared);
         worker::store_flush_position::call(remote_lsn, last_commit_end)?;
     }
 
@@ -1372,18 +1602,19 @@ fn pool_length() -> i32 {
     with_globals(|g| g.pool.iter().filter(|s| s.is_some()).count() as i32)
 }
 
-/// Copy a live winfo or surface the C "dangling winfo" deref as an error.
+/// Clone a live winfo or surface the C "dangling winfo" deref as an error.
 fn winfo_or_err(winfo_index: WorkerHandle, who: &str) -> PgResult<ParallelApplyWorkerInfo> {
-    with_globals(|g| g.pool.get(winfo_index).copied().flatten())
+    with_globals(|g| g.pool.get(winfo_index).cloned().flatten())
         .ok_or_else(|| PgError::error(format!("{who}: worker pool slot is empty")))
 }
 
-/// `winfo->shared` — the in-DSM shared header handle. A live winfo always has
-/// it; a stale handle is the C dangling-pointer deref, so panic loudly.
-fn winfo_shared_or_panic(winfo_index: WorkerHandle) -> u64 {
-    with_globals(|g| g.pool.get(winfo_index).copied().flatten())
+/// `winfo->shared` — the in-crate shared header. A live winfo always has it; a
+/// stale handle (or a winfo before `pa_setup_dsm`) is the C dangling/NULL deref,
+/// so panic loudly.
+fn winfo_shared_or_panic(winfo_index: WorkerHandle) -> Arc<ParallelApplyWorkerShared> {
+    with_globals(|g| g.pool.get(winfo_index).cloned().flatten())
+        .and_then(|w| w.shared)
         .unwrap_or_else(|| panic!("stale winfo handle {winfo_index}"))
-        .shared
 }
 
 /// `elog(ERROR, ...)` — an internal error (elog uses ERRCODE_INTERNAL_ERROR,

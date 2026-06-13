@@ -14,6 +14,25 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use types_core::Oid;
+
+/// `FileSet` (`storage/fileset.h`) — a set of named temporary files. The
+/// parallel-apply shared header keeps a copy (`ParallelApplyWorkerShared.fileset`)
+/// so the leader can hand the serialized-changes fileset to the parallel apply
+/// worker and re-use it for the next streaming transaction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct FileSet {
+    /// `pid_t creator_pid` — PID of the creating process.
+    pub creator_pid: i32,
+    /// `uint32 number` — per-PID identifier.
+    pub number: u32,
+    /// `int ntablespaces` — number of tablespaces to use.
+    pub ntablespaces: i32,
+    /// `Oid tablespaces[8]` — OIDs of tablespaces to use.
+    pub tablespaces: [Oid; 8],
+}
+
 /// `shm_mq_result` (`storage/shm_mq.h`) — outcome of a non-blocking send/receive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -37,12 +56,14 @@ pub struct ParsedErrorNotice {
     pub context: Option<String>,
 }
 
-/// The four handles `pa_setup_dsm` writes back into the winfo on success.
+/// The DSM-resident handles `pa_setup_dsm` writes back into the winfo on
+/// success. The `ParallelApplyWorkerShared` header itself is owned and created
+/// in-crate (the coordinator owns `MyParallelShared`); only the segment and the
+/// two `shm_mq` queues are owned by the DSM/shm_mq machinery, so only their
+/// handles cross the seam.
 pub struct DsmSetupResult {
     /// `winfo->dsm_seg`.
     pub dsm_seg: u64,
-    /// `winfo->shared`.
-    pub shared: u64,
     /// `winfo->mq_handle`.
     pub mq_handle: u64,
     /// `winfo->error_mq_handle`.

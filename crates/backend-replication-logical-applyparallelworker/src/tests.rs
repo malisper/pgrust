@@ -98,6 +98,56 @@ fn parallel_trans_state_ordering() {
 }
 
 #[test]
+fn shared_header_xact_state_roundtrips_under_mutex() {
+    // The spinlock-protected xact_state accessors are this file's own logic
+    // (pa_set_xact_state / pa_get_xact_state, C 1313-1335); drive them directly
+    // on an in-crate header without any installed seam.
+    let shared = std::sync::Arc::new(ParallelApplyWorkerShared::new());
+    assert_eq!(
+        pa_get_xact_state(&shared),
+        ParallelTransState::PARALLEL_TRANS_UNKNOWN
+    );
+    pa_set_xact_state_handle(&shared, ParallelTransState::PARALLEL_TRANS_STARTED);
+    assert_eq!(
+        pa_get_xact_state(&shared),
+        ParallelTransState::PARALLEL_TRANS_STARTED
+    );
+    pa_set_xact_state_handle(&shared, ParallelTransState::PARALLEL_TRANS_FINISHED);
+    assert_eq!(
+        pa_get_xact_state(&shared),
+        ParallelTransState::PARALLEL_TRANS_FINISHED
+    );
+}
+
+#[test]
+fn shared_header_fileset_state_serialize_done_needs_no_stream_fileset_for_other_states() {
+    // pa_set_fileset_state's non-DONE arm only writes the field (no
+    // stream_fileset read), so it works without the worker seam (C 1504-1519).
+    let shared = std::sync::Arc::new(ParallelApplyWorkerShared::new());
+    pa_set_fileset_state_handle(&shared, PartialFileSetState::FS_SERIALIZE_IN_PROGRESS).unwrap();
+    assert_eq!(
+        shared.locked.lock().unwrap().fileset_state,
+        PartialFileSetState::FS_SERIALIZE_IN_PROGRESS
+    );
+    pa_set_fileset_state_handle(&shared, PartialFileSetState::FS_READY).unwrap();
+    assert_eq!(
+        shared.locked.lock().unwrap().fileset_state,
+        PartialFileSetState::FS_READY
+    );
+}
+
+#[test]
+fn pending_stream_count_sub_fetch_semantics() {
+    // pa_decr_and_wait_stream_block uses pg_atomic_sub_fetch_u32 == 0 (C 1614):
+    // fetch_sub returns the old value, so old-1 is the new value.
+    let shared = ParallelApplyWorkerShared::new();
+    shared.pending_stream_count.store(2, SeqCst);
+    assert_eq!(shared.pending_stream_count.fetch_sub(1, SeqCst) - 1, 1);
+    assert_eq!(shared.pending_stream_count.fetch_sub(1, SeqCst) - 1, 0);
+    assert_eq!(shared.pending_stream_count.load(SeqCst), 0);
+}
+
+#[test]
 fn partial_fileset_state_distinct() {
     use PartialFileSetState::*;
     assert_ne!(FS_EMPTY, FS_READY);
