@@ -1,13 +1,15 @@
 //! Seam declarations for the `backend-access-transam-xlogreader` unit
-//! (`access/transam/xlogreader.c`): the generic WAL read/decode facility.
+//! (`access/transam/xlogreader.c`): the generic WAL read/decode facility,
+//! including the handle-based subset consumed by logical decoding.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 //!
-//! Every seam takes the reader explicitly (`XLogReaderState`, the trimmed
-//! shared shape in `types_wal::rmgr`) — the reader is a function parameter in
-//! C, never ambient state. The reader's `ReadRecPtr`/`EndRecPtr`/`record`
-//! fields are public on the shared struct and need no seam.
+//! Every record/queue seam takes the reader explicitly (`XLogReaderState`, the
+//! trimmed shared shape in `types_wal::rmgr`) — the reader is a function
+//! parameter in C, never ambient state. The reader's
+//! `ReadRecPtr`/`EndRecPtr`/`record` fields are public on the shared struct and
+//! need no seam.
 //!
 //! The C WAL prefetcher holds the `DecodedXLogRecord *` that `XLogReadAhead`
 //! returns and dereferences it across calls; that record lives in the
@@ -18,10 +20,13 @@
 //! `read_ahead_record_*` seams re-read the same record — the reader's
 //! decode-queue tail — through a fresh borrow.
 
+#![allow(non_snake_case)]
+
 use types_core::{Buffer, XLogRecPtr};
 use types_error::PgResult;
 use types_wal::rmgr::XLogReaderState;
 use types_wal::{DecodedBkpBlock, ReadAheadRecordInfo};
+use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
 
 seam_core::seam!(
     /// `XLogReaderHasQueuedRecordOrError(reader)` (xlogreader.h inline) —
@@ -114,4 +119,28 @@ seam_core::seam!(
     /// to read records starting at `rec_ptr`, forgetting queued-up decoded
     /// records. Infallible.
     pub fn xlog_begin_read(reader: &mut XLogReaderState<'_>, rec_ptr: XLogRecPtr)
+);
+
+// --- Handle-based subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// `XLogReaderAllocate(wal_segment_size, NULL, xl_routine, ctx_private)` —
+    /// `None` on OOM (the caller `ereport`s).
+    pub fn XLogReaderAllocate(wal_segment_size: i32, xl_routine: XLogReaderRoutineHandle) -> Option<XLogReaderHandle>
+);
+seam_core::seam!(
+    /// `XLogReaderFree(reader)`.
+    pub fn XLogReaderFree(reader: XLogReaderHandle)
+);
+seam_core::seam!(
+    /// `XLogBeginRead(reader, lsn)`.
+    pub fn XLogBeginRead(reader: XLogReaderHandle, lsn: XLogRecPtr)
+);
+seam_core::seam!(
+    /// `XLogReadRecord(reader, &err)`.
+    pub fn XLogReadRecord(reader: XLogReaderHandle) -> XLogReadResult
+);
+seam_core::seam!(
+    /// `reader->EndRecPtr`.
+    pub fn reader_EndRecPtr(reader: XLogReaderHandle) -> XLogRecPtr
 );
