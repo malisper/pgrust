@@ -1,17 +1,14 @@
 [package]
-name = "backend-commands-trigger-seams"
+name = "backend-parser-coerce-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_commands_trigger_seams"
+name = "backend_parser_coerce_seams"
 path = "src/lib.rs"
 
 [dependencies]
-mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-datum = { path = "../types-datum" }
-types-ri-triggers = { path = "../types-ri-triggers" }
