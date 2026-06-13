@@ -15,6 +15,7 @@ backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }

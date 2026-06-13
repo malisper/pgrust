@@ -9,6 +9,32 @@ pub type CommandId = u32;
 /// `InvalidTransactionId` (`access/transam.h`).
 pub const InvalidTransactionId: crate::primitive::TransactionId = 0;
 
+/// `FullTransactionId` (`access/transam.h`) — a 64-bit transaction id carrying
+/// the epoch in the high 32 bits and the `TransactionId` in the low 32 bits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FullTransactionId {
+    pub value: u64,
+}
+
+impl FullTransactionId {
+    /// `FullTransactionIdFromEpochAndXid(epoch, xid)` (`access/transam.h`).
+    pub const fn from_epoch_and_xid(epoch: u32, xid: crate::primitive::TransactionId) -> Self {
+        Self {
+            value: ((epoch as u64) << 32) | xid as u64,
+        }
+    }
+
+    /// `XidFromFullTransactionId(fxid)` (`access/transam.h`).
+    pub const fn xid(self) -> crate::primitive::TransactionId {
+        self.value as crate::primitive::TransactionId
+    }
+
+    /// `FullTransactionIdIsValid(fxid)` (`access/transam.h`).
+    pub const fn is_valid(self) -> bool {
+        self.xid() != InvalidTransactionId
+    }
+}
+
 /// `TransactionIdIsValid(xid)` (`access/transam.h`).
 #[inline]
 pub const fn TransactionIdIsValid(xid: crate::primitive::TransactionId) -> bool {

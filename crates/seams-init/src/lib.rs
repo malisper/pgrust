@@ -11,6 +11,7 @@ pub fn init_all() {
     backend_access_heap_heaptoast::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_transam_xlog::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execUtils::init_seams();

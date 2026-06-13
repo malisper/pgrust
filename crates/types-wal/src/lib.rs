@@ -8,5 +8,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod wal;
+pub mod xlog_consts;
 
 pub use wal::*;
+pub use xlog_consts::*;

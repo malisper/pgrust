@@ -280,6 +280,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "mcx",
+ "types-control",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlog-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-xlogstats"
 version = "0.0.0"
 dependencies = [
@@ -1533,6 +1555,7 @@ dependencies = [
  "backend-access-heap-heaptoast",
  "backend-access-table-table",
  "backend-access-table-tableam",
+ "backend-access-transam-xlog",
  "backend-access-transam-xlogstats",
  "backend-executor-execAmi",
  "backend-executor-execUtils",
@@ -1594,6 +1617,13 @@ dependencies = [
 [[package]]
 name = "types-condvar"
 version = "0.0.0"
+
+[[package]]
+name = "types-control"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-core"
