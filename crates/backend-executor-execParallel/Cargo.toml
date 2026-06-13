@@ -14,6 +14,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
 types-execparallel = { path = "../types-execparallel" }
 
 backend-executor-execParallel-seams = { path = "../backend-executor-execParallel-seams" }

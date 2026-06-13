@@ -94,8 +94,9 @@ const fn maxalign(len: usize) -> usize {
     (len + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
 }
 
-/// `LWTRANCHE_PARALLEL_QUERY_DSA` (storage/lwlock.h).
-const LWTRANCHE_PARALLEL_QUERY_DSA: i32 = 56;
+/// `LWTRANCHE_PARALLEL_QUERY_DSA` (storage/lwlock.h) — the canonical
+/// build-derived value (`NUM_INDIVIDUAL_LWLOCKS` + tranche offset = 71).
+use types_storage::LWTRANCHE_PARALLEL_QUERY_DSA;
 
 /// `ForwardScanDirection` (access/sdir.h) — value `1`.
 const FORWARD_SCAN_DIRECTION: i32 = 1;

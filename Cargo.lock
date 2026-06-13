@@ -959,6 +959,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-storage",
 ]
 
 [[package]]
