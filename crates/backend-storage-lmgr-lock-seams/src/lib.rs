@@ -1,7 +1,6 @@
 //! Seam declarations for the `backend-storage-lmgr-lock` unit
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
-
 extern crate alloc;
 
 seam_core::seam!(
@@ -277,14 +276,16 @@ seam_core::seam!(
     /// `GetLockmodeName(lockmethodid, mode)` — the human-readable lock mode
     /// name.
     pub fn get_lockmode_name(
-        lockmethodid: u8,
+        lockmethodid: types_storage::lock::LOCKMETHODID,
         mode: types_storage::lock::LOCKMODE,
     ) -> alloc::string::String
 );
 
 seam_core::seam!(
-    /// `LockReleaseAll(lockmethodid, allLocks)` — release all of this backend's
-    /// locks for the given method.
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// of this backend's locks for the given method. Used by the logical apply
+    /// worker on exit to drop session-level locks; can `ereport` on a corrupt
+    /// lock table, carried on `Err`.
     pub fn lock_release_all(
         lockmethodid: u8,
         all_locks: bool,
@@ -410,4 +411,14 @@ seam_core::seam!(
     pub fn describe_lock_tag(
         tag: types_storage::lock::LOCKTAG,
     ) -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
 );

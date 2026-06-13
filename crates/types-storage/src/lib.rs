@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod buf;
 pub mod ilist;
 pub mod latch;
 pub mod lock;

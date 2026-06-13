@@ -404,6 +404,23 @@ fn TimestampTzPlusMilliseconds(tz: TimestampTz, ms: i64) -> TimestampTz {
     tz + ms * 1000
 }
 
+/// Seam-compatible entry point: adapts `StartupProcessMain` to the
+/// `fn(&types_startup::StartupData) -> !` signature required by
+/// `backend-postmaster-startup-seams`.
+///
+/// `startup.c`'s `StartupProcessMain` always asserts `startup_data_len == 0`
+/// (the Startup process receives no typed startup data from the postmaster).
+/// The call to `StartupProcessMain` ends with `proc_exit(0)` and never
+/// returns `Ok`; the unreachable below mirrors that contract.
+fn startup_process_main_entry(startup_data: &types_startup::StartupData) -> ! {
+    let bytes: &[u8] = match startup_data {
+        types_startup::StartupData::None => &[],
+        _ => panic!("startup_process_main: unexpected non-None StartupData"),
+    };
+    let _ = StartupProcessMain(bytes);
+    unreachable!("StartupProcessMain ended without calling proc_exit")
+}
+
 /// Install this crate's implementations into `backend-postmaster-startup-seams`.
 pub fn init_seams() {
     backend_postmaster_startup_seams::process_startup_proc_interrupts::set(
@@ -431,4 +448,5 @@ pub fn init_seams() {
     backend_postmaster_startup_seams::set_log_startup_progress_interval::set(
         set_log_startup_progress_interval,
     );
+    backend_postmaster_startup_seams::startup_process_main::set(startup_process_main_entry);
 }

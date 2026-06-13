@@ -44,3 +44,11 @@ seam_core::seam!(
         arg: types_datum::Datum,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `check_on_shmem_exit_lists_are_empty()` (`storage/ipc/ipc.c`) — assert
+    /// that no `on_shmem_exit` handlers have been registered yet (the
+    /// startup-packet safety check). `ereport(FATAL)` on violation, which
+    /// terminates inside the owner; modeled infallible at the boundary.
+    pub fn check_on_shmem_exit_lists_are_empty()
+);

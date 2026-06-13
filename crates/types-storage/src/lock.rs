@@ -11,6 +11,16 @@ use crate::ilist::{dclist_head, dlist_head, dlist_node};
 /// `LOCKMODE` (`storage/lockdefs.h`) — was C `int`.
 pub type LOCKMODE = i32;
 
+/// `LOCKMASK` (`storage/lock.h`) — a bitmask of lock modes (`typedef int`).
+pub type LOCKMASK = i32;
+
+/// `LOCKMETHODID` (`storage/lock.h`) — index of a lock method (`typedef uint16`).
+pub type LOCKMETHODID = uint16;
+
+/// `MAX_LOCKMODES` (`storage/lock.h`) — max number of lock modes; cannot be
+/// larger than the number of bits in `LOCKMASK`.
+pub const MAX_LOCKMODES: usize = 10;
+
 pub const NoLock: LOCKMODE = 0;
 pub const AccessShareLock: LOCKMODE = 1;
 pub const RowShareLock: LOCKMODE = 2;
@@ -78,17 +88,6 @@ pub enum DeadLockState {
     /// worker.
     BlockedByAutoVacuum = 4,
 }
-
-/// `MAX_LOCKMODES` (`storage/lock.h`) — cannot exceed the # of bits in
-/// `LOCKMASK`.
-pub const MAX_LOCKMODES: usize = 10;
-
-/// `LOCKMASK` (`storage/lockdefs.h`, `typedef int LOCKMASK`) — a bitmask of
-/// lock modes (bit `1 << mode`).
-pub type LOCKMASK = i32;
-
-/// `LOCKMETHODID` (`storage/lock.h`, `typedef uint16 LOCKMETHODID`).
-pub type LOCKMETHODID = uint16;
 
 /// `LockMethodData` (`storage/lock.h`) — the per-lock-method descriptor: how
 /// many modes it has, the mode-vs-mode conflict table, the mode names, and an

@@ -44,13 +44,13 @@ use types_storage::storage::{
 };
 
 use crate::globals;
+use crate::seam;
 
 use backend_access_transam_xlog_seams as xlog;
 use backend_access_transam_xlogrecovery_seams as xlogrecovery;
 use backend_access_transam_xlogutils_seams as xlogutils;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_standby_seams as standby;
-use backend_storage_lmgr_deadlock_seams as deadlock;
 use backend_storage_lmgr_lock_seams as lock;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_storage_lmgr_proc_seams as proc;
@@ -167,7 +167,7 @@ pub fn JoinWaitQueue(
                 if (lock::conflict_tab::call(lockmethodid, lockmode) & waiter_held_locks) != 0 {
                     // Yes -> deadlock. Record it; clean-up happens once we're on
                     // the queue (CheckDeadLock's recovery code agrees).
-                    deadlock::remember_simple_deadlock::call(myproc, lockmode, lock_tag, waiter);
+                    seam::remember_simple_deadlock(myproc, lockmode, lock_tag, waiter);
                     early_deadlock = true;
                     break;
                 }
@@ -345,7 +345,7 @@ pub fn ProcSleep(
         // Not deadlocked but waiting on an autovacuum-induced task: signal it.
         if globals::deadlock_state() == DeadLockState::BlockedByAutoVacuum && allow_autovacuum_cancel
         {
-            let autovac_proc = deadlock::get_blocking_autovacuum_pgproc::call();
+            let autovac_proc = seam::get_blocking_autovacuum_pgproc();
 
             // Grab info under ProcArrayLock, then release immediately.
             lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
@@ -364,7 +364,8 @@ pub fn ProcSleep(
                 // Report the case, if configured to do so (DEBUG1).
                 if backend_utils_error::message_level_is_interesting(types_error::DEBUG1) {
                     let locktagbuf = lock::describe_lock_tag::call(locktag_copy);
-                    let modename = lock::get_lockmode_name::call(lockmethod_copy, lockmode);
+                    let modename =
+                        lock::get_lockmode_name::call(lockmethod_copy as u16, lockmode);
                     let logbuf = format!(
                         "Process {} waits for {} on {}.",
                         initsmall::my_proc_pid::call(),
@@ -388,7 +389,7 @@ pub fn ProcSleep(
         let mut dlstate = globals::deadlock_state();
         if globals::log_lock_waits() && dlstate != DeadLockState::NotYetChecked {
             let buf = lock::describe_lock_tag::call(lock_tag);
-            let modename = lock::get_lockmode_name::call(lockmethodid, lockmode);
+            let modename = lock::get_lockmode_name::call(lockmethodid as u16, lockmode);
             let start = timeout::get_timeout_start_time::call(TimeoutId::DEADLOCK_TIMEOUT);
             let (secs, mut usecs) = timestamp_difference(start, timestamp::get_current_timestamp::call());
             let msecs = secs * 1000 + (usecs as i64) / 1000;
@@ -616,7 +617,7 @@ pub fn CheckDeadLock() -> PgResult<()> {
     // unlinked from the wait queue (safe: we hold the partition locks).
     if !proc::proc_unlinked_from_wait_queue::call(myproc) {
         // Run the deadlock check; set deadlock_state for ProcSleep.
-        let state = deadlock::deadlock_check::call(myproc);
+        let state = seam::deadlock_check(myproc);
         globals::set_deadlock_state(state);
 
         if state == DeadLockState::HardDeadLock {

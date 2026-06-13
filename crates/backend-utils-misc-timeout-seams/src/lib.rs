@@ -42,8 +42,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `enable_timeout_after(id, delay_ms)` (timeout.c) — arm a single timeout
-    /// to fire `delay_ms` milliseconds from now.
+    /// `enable_timeout_after(id, delay_ms)` (timeout.c) — arm a single one-shot
+    /// timeout to fire `delay_ms` milliseconds from now. Can `ereport(ERROR)` on
+    /// a bad timeout state, carried on `Err`.
     pub fn enable_timeout_after(id: TimeoutId, delay_ms: i32) -> PgResult<()>
 );
 

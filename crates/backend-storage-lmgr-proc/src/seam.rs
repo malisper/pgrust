@@ -28,6 +28,7 @@
 use types_core::{LocalTransactionId, ProcNumber, TransactionId};
 use types_datum::Datum;
 use types_error::PgResult;
+use types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
 use types_storage::storage::PGPROC;
 
 /// Which of the four `ProcGlobal` freelists supplies / receives a `PGPROC`,
@@ -371,10 +372,42 @@ pub(crate) fn lwlock_release(_lock: LWLockHandle) {
 }
 
 // ---- deadlock checker ----
+//
+// proc.c's relationship to deadlock.c is the C `DeadLockCheck(MyProc)` boundary:
+// proc.c hands the checker its `MyProc` (a `ProcNumber` here) and reads back a
+// `DeadLockState` / the blocking-autovacuum proc, while the checker walks the
+// lock.c-owned shmem LOCK/PROCLOCK tables. That arena is owned by lock.c (still
+// unported), so these stay Class-B panic-through with proc.c's own narrow
+// `ProcNumber`/`DeadLockState` capability. (The merged `*-deadlock-seams` crate
+// models the same calls over a lock.c-built `LockSpace` arena; wiring proc.c to
+// that interface is the lock.c-integration step, not this unit's own logic.)
 
 /// `InitDeadLockChecking()`.
 pub(crate) fn init_deadlock_checking() {
     todo!("deadlock: InitDeadLockChecking()")
+}
+
+/// `DeadLockCheck(MyProc)` — run the deadlock check rooted at this backend's
+/// proc, returning the resulting state. Walks lock.c-owned shmem tables.
+pub(crate) fn deadlock_check(_procno: ProcNumber) -> DeadLockState {
+    todo!("deadlock: DeadLockCheck(MyProc)")
+}
+
+/// `GetBlockingAutoVacuumPgproc()` — the autovacuum worker found by the last
+/// `DeadLockCheck` to be directly blocking us, as a `ProcNumber`.
+pub(crate) fn get_blocking_autovacuum_pgproc() -> ProcNumber {
+    todo!("deadlock: GetBlockingAutoVacuumPgproc()")
+}
+
+/// `RememberSimpleDeadLock(proc1, lockmode, lock, proc2)` — record an
+/// already-detected (non-search) two-way deadlock for the eventual report.
+pub(crate) fn remember_simple_deadlock(
+    _proc1: ProcNumber,
+    _lockmode: LOCKMODE,
+    _lock: LOCKTAG,
+    _proc2: ProcNumber,
+) {
+    todo!("deadlock: RememberSimpleDeadLock(proc1, lockmode, lock, proc2)")
 }
 
 // ---- condition variable ----
