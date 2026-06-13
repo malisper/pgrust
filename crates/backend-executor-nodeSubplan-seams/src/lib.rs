@@ -21,3 +21,17 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecSubPlan(node, econtext, isNull)` (nodeSubplan.c): process a
+    /// sub-select and return its result `Datum`. The C `bool *isNull`
+    /// out-parameter is returned alongside the result as `(Datum, bool)`. This
+    /// is the entry point the interpreter's `EEOP_SUBPLAN` step calls
+    /// (`*op->resvalue = ExecSubPlan(sstate, econtext, op->resnull)`). Can
+    /// `ereport(ERROR)` (sanity checks, sub-execution); carried on `Err`.
+    pub fn exec_sub_plan<'mcx>(
+        node: &mut types_nodes::SubPlanState<'mcx>,
+        econtext: types_nodes::EcxtId,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+);

@@ -163,6 +163,32 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// `castNode(AggState, node)` — the `AggState` an aggregate-owned
+    /// `ExprState`'s `parent` points at (read by `EEOP_GROUPING_FUNC` for
+    /// `aggstate->grouped_cols`). `None` until nodeAgg threads its `AggState`
+    /// into this enum (the same not-yet-landed-variant gap as
+    /// [`Self::as_scan_state`]); the C `castNode` asserts the tag, so a caller
+    /// that reaches this for a non-Agg parent is a planner/compiler bug.
+    pub fn as_agg_state(&self) -> Option<&crate::nodeagg::AggStateData<'mcx>> {
+        match self {
+            // nodeAgg's `T_AggState` variant lands here when it threads into
+            // this enum; no current variant carries an `AggState`.
+            _ => None,
+        }
+    }
+
+    /// `castNode(ModifyTableState, node)` — the `ModifyTableState` a
+    /// MERGE-owned `ExprState`'s `parent` points at (read by
+    /// `EEOP_MERGE_SUPPORT_FUNC` for `mtstate->mt_merge_action`). `None` until
+    /// nodeModifyTable threads its `ModifyTableState` into this enum.
+    pub fn as_modify_table_state(&self) -> Option<&crate::modifytable::ModifyTableState<'mcx>> {
+        match self {
+            // nodeModifyTable's `T_ModifyTableState` variant lands here when it
+            // threads into this enum.
+            _ => None,
+        }
+    }
+
     /// `((SubqueryScanState *) node)->subplan` — the SubqueryScan's child plan
     /// state (kept separately from `lefttree`). `None` until the
     /// `SubqueryScanState` variant lands.

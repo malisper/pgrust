@@ -51,6 +51,14 @@ seam_core::seam!(
     pub fn switch_to_top_memory_context()
 );
 
+seam_core::seam!(
+    /// `TopMemoryContext` (`mcxt.c`) — the long-lived backend context, as an
+    /// `Mcx<'static>` handle. Callers that must allocate something outliving any
+    /// short-lived caller context (e.g. a DSM descriptor / `on_dsm_detach`
+    /// callback record) source the context here. Infallible.
+    pub fn top_memory_context() -> mcx::Mcx<'static>
+);
+
 // ---------------------------------------------------------------------------
 // Named-child-context lifecycle handles consumed by logical decoding.
 //

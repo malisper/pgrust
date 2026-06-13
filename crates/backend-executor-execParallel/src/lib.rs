@@ -426,7 +426,7 @@ fn ExecParallelSetupTupleQueues<'mcx>(
     for i in 0..nworkers {
         let mq = shmmq::shm_mq_create_at::call(tqueuespace, i, PARALLEL_TUPLE_QUEUE_SIZE);
         shmmq::shm_mq_set_receiver_to_myproc::call(mq);
-        responseq.push(shmmq::shm_mq_attach::call(mq, seg));
+        responseq.push(shmmq::shm_mq_attach::call(mq, seg)?);
     }
 
     // Add array of queues to shm_toc, so others can find it.
@@ -1026,13 +1026,15 @@ fn ExecParallelGetReceiver(
     let mqspace = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_TUPLE_QUEUE, false)
         .ok_or_else(|| PgError::error("ExecParallelGetReceiver: PARALLEL_KEY_TUPLE_QUEUE present"))?;
     // mqspace += ParallelWorkerNumber * PARALLEL_TUPLE_QUEUE_SIZE
-    let mq = shmmq::shm_mq_create_at::call(
+    // C: mq = (shm_mq *) mqspace — the worker *casts* the leader-created queue,
+    // it does not re-create it (that would wipe the leader's mq_set_receiver).
+    let mq = shmmq::shm_mq_at::call(
         mqspace,
         parallel::parallel_worker_number::call(),
         PARALLEL_TUPLE_QUEUE_SIZE,
     );
     shmmq::shm_mq_set_sender_to_myproc::call(mq);
-    Ok(tqueue::create_tuple_queue_dest_receiver::call(shmmq::shm_mq_attach::call(mq, Some(seg))))
+    Ok(tqueue::create_tuple_queue_dest_receiver::call(shmmq::shm_mq_attach::call(mq, Some(seg))?))
 }
 
 // ===========================================================================
