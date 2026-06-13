@@ -226,6 +226,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_ordering_op_properties(opno, &opfamily, &opcintype, &cmptype)`
+    /// (lsyscache.c): given an ordering operator (a btree "<" or ">"
+    /// operator), return its containing opfamily, the opclass input type, and
+    /// the comparison type. `Some((opfamily, opcintype, cmptype))` is the C
+    /// `true`; `None` is the C `false` (the operator is not a valid ordering
+    /// operator). `Err` carries the syscache machinery's `ereport(ERROR)`s.
+    pub fn get_ordering_op_properties(
+        opno: Oid,
+    ) -> PgResult<Option<(Oid, Oid, i32)>>
+);
+
+seam_core::seam!(
     /// `get_opfamily_method(opfid)` (lsyscache.c): the access-method OID
     /// (`opfmethod`) of the opfamily. A missing opfamily is the C `elog(ERROR,
     /// "cache lookup failed for operator family %u")`, carried on `Err`.
