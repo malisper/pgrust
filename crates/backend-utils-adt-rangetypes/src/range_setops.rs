@@ -217,6 +217,24 @@ pub fn range_split_internal<'mcx>(
     Ok((None, None))
 }
 
+/// Inward seam shape for `range_split_internal`.
+///
+/// The kernel returns `(Some, Some)` only when `r2` splits `r1` and `(None,
+/// None)` otherwise (the two outputs are always set or unset together, exactly
+/// as the C `*output1`/`*output2` pair and its `true`/`false` return). The seam
+/// folds that into `Some((left, right))` / `None`.
+pub fn range_split_internal_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typcache: &TypeCacheEntry,
+    r1: RangeTypeP<'mcx>,
+    r2: RangeTypeP<'mcx>,
+) -> PgResult<Option<(RangeTypeP<'mcx>, RangeTypeP<'mcx>)>> {
+    match range_split_internal(mcx, typcache, r1, r2)? {
+        (Some(output1), Some(output2)) => Ok(Some((output1, output2))),
+        _ => Ok(None),
+    }
+}
+
 /// `range_intersect_agg_transfn(fcinfo)` body (rangetypes.c:1221): running
 /// intersection aggregate. Both arguments are strict (the SQL aggregate marks
 /// the state and the input non-null), so `state`/`current` model the

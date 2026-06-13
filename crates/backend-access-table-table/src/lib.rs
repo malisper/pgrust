@@ -25,10 +25,10 @@ use types_tuple::access::{
     RangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
 };
 
-/// Install this crate's seam implementations. Every consumer reaches this
-/// unit by direct dependency (no cycle exists), so there is no seams crate
-/// and nothing to install.
-pub fn init_seams() {}
+/// Install this crate's seam implementations.
+pub fn init_seams() {
+    backend_access_table_table_seams::table_open::set(table_open);
+}
 
 /// `table_open(relationId, lockmode)` — open a table relation by relation
 /// OID.
