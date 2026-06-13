@@ -1085,7 +1085,7 @@ fn ExecHashJoinNewBatch<'mcx>(
             let file = ht.innerBatchFile[curbatch as usize]
                 .as_deref_mut()
                 .expect("checked Some above");
-            if buffile::buf_file_seek::call(file, 0, 0, SEEK_SET) != 0 {
+            if buffile::buf_file_seek::call(file, 0, 0, SEEK_SET)? != 0 {
                 return Err(could_not_rewind_temp_file());
             }
         }
@@ -1113,7 +1113,7 @@ fn ExecHashJoinNewBatch<'mcx>(
         let file = ht.outerBatchFile[curbatch as usize]
             .as_deref_mut()
             .expect("checked Some above");
-        if buffile::buf_file_seek::call(file, 0, 0, SEEK_SET) != 0 {
+        if buffile::buf_file_seek::call(file, 0, 0, SEEK_SET)? != 0 {
             return Err(could_not_rewind_temp_file());
         }
     }

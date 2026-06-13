@@ -4,7 +4,7 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use types_core::primitive::{ForkNumber, Oid, ProcNumber, RelFileNumber};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -16,5 +16,20 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         db_oid: Oid,
         spc_oid: Oid,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `GetRelationPath(dbOid, spcOid, relNumber, backend, forknum)` (relpath.c)
+    /// — the `relpathbackend(rlocator, backend, forknum)` macro expansion: the
+    /// filesystem path of one fork of a relation's file. Allocates the result
+    /// in `mcx`; `Err` carries OOM.
+    pub fn relpath_backend<'mcx>(
+        mcx: Mcx<'mcx>,
+        db_oid: Oid,
+        spc_oid: Oid,
+        rel_number: RelFileNumber,
+        backend: ProcNumber,
+        forknum: ForkNumber,
     ) -> PgResult<PgString<'mcx>>
 );
