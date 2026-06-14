@@ -1620,6 +1620,20 @@ fn seam_xact_log_abort_record(
     )
 }
 
+/// `DefineSavepoint(name)` — seam adapter for `define_savepoint`. The sole
+/// consumer always supplies a name, so the seam contract is `&str`; this
+/// wraps it in `Some()` for the owner's `Option<&str>` body (same wrapping
+/// pattern as `engine::BeginTransactionBlock`).
+fn seam_define_savepoint(name: &str) -> PgResult<()> {
+    engine::DefineSavepoint(Some(name))
+}
+
+/// `XactIsoLevel = XACT_READ_COMMITTED` — seam adapter for
+/// `set_xact_iso_level_read_committed`.
+fn seam_set_xact_iso_level_read_committed() {
+    SetXactIsoLevel(XACT_READ_COMMITTED);
+}
+
 // ---------------------------------------------------------------------------
 //  Seam installation
 // ---------------------------------------------------------------------------
@@ -1666,6 +1680,9 @@ pub fn init_seams() {
     // `PreventInTransactionBlock(isTopLevel, stmtType)` — signature matches the
     // owner body exactly.
     seams::prevent_in_transaction_block::set(PreventInTransactionBlock);
+    // Reconciled adapters: seam contract differs slightly from the owner body.
+    seams::define_savepoint::set(seam_define_savepoint);
+    seams::set_xact_iso_level_read_committed::set(seam_set_xact_iso_level_read_committed);
 }
 
 #[cfg(test)]
