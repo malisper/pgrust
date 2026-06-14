@@ -28,6 +28,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `format_procedure_extended(procedure_oid, flags)` (regproc.c): the
+    /// function's printable name with the `FORMAT_PROC_*` flag bits applied.
+    /// `Ok(None)` is the C `NULL` (only with `FORMAT_PROC_INVALID_AS_NULL`, when
+    /// the proc is gone). palloc'd in `mcx`; `Err` carries the catalog-lookup
+    /// `elog(ERROR)` and OOM.
+    pub fn format_procedure_extended<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        procedure_oid: Oid,
+        flags: u16,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `format_operator_extended(operator_oid, flags)` (regproc.c): the
+    /// operator's printable name with the `FORMAT_OPERATOR_*` flag bits applied.
+    /// `Ok(None)` is the C `NULL` (only with `FORMAT_OPERATOR_INVALID_AS_NULL`).
+    /// palloc'd in `mcx`.
+    pub fn format_operator_extended<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        operator_oid: Oid,
+        flags: u16,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `regprocedurein(signature)` (regproc.c) via the
     /// `DirectFunctionCall1(regprocedurein, CStringGetDatum(...))` shape:
     /// parse a function signature (e.g. `int4pl(int4,int4)`) to its

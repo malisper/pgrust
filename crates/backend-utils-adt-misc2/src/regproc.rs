@@ -47,7 +47,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgString};
+use mcx::{vec_with_capacity_in, Mcx, PgString, PgVec};
 use types_core::{InvalidOid, Oid, OidIsValid, FUNC_MAX_ARGS};
 use types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_AMBIGUOUS_FUNCTION,
@@ -335,7 +335,7 @@ pub fn format_procedure_parts<'mcx>(
     mcx: Mcx<'mcx>,
     procedure_oid: Oid,
     missing_ok: bool,
-) -> PgResult<Option<(Vec<PgString<'mcx>>, Vec<PgString<'mcx>>)>> {
+) -> PgResult<Option<(PgVec<'mcx, PgString<'mcx>>, PgVec<'mcx, PgString<'mcx>>)>> {
     let procform = match syscache::proc_row_by_oid::call(mcx, procedure_oid)? {
         Some(p) => p,
         None => {
@@ -357,11 +357,11 @@ pub fn format_procedure_parts<'mcx>(
                 procform.pronamespace
             ))
         })?;
-    let mut objnames = Vec::with_capacity(2);
+    let mut objnames = vec_with_capacity_in(mcx, 2)?;
     objnames.push(nspname);
     objnames.push(PgString::from_str_in(procform.proname.as_str(), mcx)?);
 
-    let mut objargs = Vec::new();
+    let mut objargs = vec_with_capacity_in(mcx, nargs as usize)?;
     for i in 0..nargs as usize {
         let thisargtype = procform.proargtypes[i];
         objargs.push(format_type::format_type_be_qualified::call(mcx, thisargtype)?);
@@ -624,7 +624,7 @@ pub fn format_operator_parts<'mcx>(
     mcx: Mcx<'mcx>,
     operator_oid: Oid,
     missing_ok: bool,
-) -> PgResult<Option<(Vec<PgString<'mcx>>, Vec<PgString<'mcx>>)>> {
+) -> PgResult<Option<(PgVec<'mcx, PgString<'mcx>>, PgVec<'mcx, PgString<'mcx>>)>> {
     let opr_form = match syscache::oper_row_by_oid::call(mcx, operator_oid)? {
         Some(o) => o,
         None => {
@@ -644,11 +644,11 @@ pub fn format_operator_parts<'mcx>(
                 opr_form.oprnamespace
             ))
         })?;
-    let mut objnames = Vec::with_capacity(2);
+    let mut objnames = vec_with_capacity_in(mcx, 2)?;
     objnames.push(nspname);
     objnames.push(PgString::from_str_in(opr_form.oprname.as_str(), mcx)?);
 
-    let mut objargs = Vec::new();
+    let mut objargs = vec_with_capacity_in(mcx, 2)?;
     if OidIsValid(opr_form.oprleft) {
         objargs.push(format_type::format_type_be_qualified::call(mcx, opr_form.oprleft)?);
     }

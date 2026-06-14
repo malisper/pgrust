@@ -42,7 +42,26 @@ use alloc::string::String;
 
 use mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
 use types_core::Oid;
-use types_datum::Datum;
+// The canonical unified value type (`types_tuple::Datum<'mcx>`, the ByVal/ByRef
+// enum — the faithful idiomatic substitute for C's `Datum`).
+//
+// `json.c` is a pure value *relay*: every value it touches arrives already
+// extracted at the executor/fmgr boundary and flows straight back out across a
+// type-classification / output-function / datetime-encode seam. Those consumed
+// seam contracts — `backend-utils-adt-jsonfuncs-seams` (`output_function_call`,
+// `cast_function_call`, `text_datum_bytes`, `deconstruct_array`,
+// `walk_composite`) and `backend-utils-adt-timestamp-seams`
+// (`json_encode_datetime`), plus the `json_encode_datetime` decl this crate
+// owns in `backend-utils-adt-json-seams`, and the `ArrayForJson` /
+// `CompositeFieldForJson` value carriers in `types-json` — all already speak the
+// canonical `Datum<'mcx>` (by reference). So every value here is carried as the
+// canonical enum and forwarded unchanged across those edges; there is no
+// in-crate scalar-word logic (no `DatumGet*`/`*GetDatum` forges, no pointer
+// forges, no `datum_ref_registry` tokens, no `_as_datum` forges, no deprecated
+// bare-word `datum_*` `_v` seam variants). The lone codec read (`DatumGetBool`)
+// is the canonical `Datum::as_bool` accessor. The bare-word
+// `types_datum::Datum(usize)` shim is no longer referenced internally.
+use types_tuple::Datum;
 use types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
@@ -160,8 +179,8 @@ pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> 
 ///
 /// Appends the JSON text for `val` onto `result`. Array/composite rendering and
 /// the fmgr output/cast functions are reached through the seams.
-pub fn datum_to_json_internal(
-    val: Datum,
+pub fn datum_to_json_internal<'mcx>(
+    val: &Datum<'mcx>,
     is_null: bool,
     result: &mut PgVec<'_, u8>,
     tcategory: JsonTypeCategory,
@@ -205,7 +224,7 @@ pub fn datum_to_json_internal(
             if key_scalar {
                 buf_push(result, b'"')?;
             }
-            if DatumGetBool(val) {
+            if val.as_bool() {
                 buf_extend(result, b"true")?;
             } else {
                 buf_extend(result, b"false")?;
@@ -287,7 +306,14 @@ pub fn datum_to_json_internal(
 /// the formatted string. `tzp`, if `Some`, is the time-zone offset in seconds
 /// for `timestamptz`. The body is entirely the datetime subsystem's field
 /// conversions + `Encode*` routines, reached through the seam.
-pub fn JsonEncodeDateTime(value: Datum, typid: Oid, tzp: Option<i32>) -> PgResult<String> {
+pub fn JsonEncodeDateTime<'mcx>(
+    value: &Datum<'mcx>,
+    typid: Oid,
+    tzp: Option<i32>,
+) -> PgResult<String> {
+    // The actual datetime field-conversion owner (`timestamp.c`) is unported;
+    // its `json_encode_datetime` seam now carries the canonical
+    // `types_tuple::Datum<'mcx>` (by reference), so forward the value unchanged.
     backend_utils_adt_timestamp_seams::json_encode_datetime::call(value, typid, tzp)
 }
 
@@ -297,12 +323,12 @@ pub fn JsonEncodeDateTime(value: Datum, typid: Oid, tzp: Option<i32>) -> PgResul
 ///
 /// Process a single dimension of an array, recursing into inner dimensions.
 /// `valcount` is advanced as innermost values are consumed.
-pub fn array_dim_to_json(
+pub fn array_dim_to_json<'mcx>(
     result: &mut PgVec<'_, u8>,
     dim: usize,
     ndims: usize,
     dims: &[i32],
-    vals: &[Datum],
+    vals: &[Datum<'mcx>],
     nulls: &[bool],
     valcount: &mut usize,
     tcategory: JsonTypeCategory,
@@ -323,7 +349,7 @@ pub fn array_dim_to_json(
 
         if dim + 1 == ndims {
             datum_to_json_internal(
-                vals[*valcount],
+                &vals[*valcount],
                 nulls[*valcount],
                 result,
                 tcategory,
@@ -357,12 +383,17 @@ pub fn array_dim_to_json(
 
 /// C: `array_to_json_internal(Datum array, StringInfo result, bool
 /// use_line_feeds)` (json.c:473). Turn an array into JSON.
-pub fn array_to_json_internal(
-    array: Datum,
+pub fn array_to_json_internal<'mcx>(
+    array: &Datum<'mcx>,
     result: &mut PgVec<'_, u8>,
     use_line_feeds: bool,
 ) -> PgResult<()> {
     let arr = catalog_fmgr::deconstruct_array::call(array)?;
+    // `deconstruct_array` yields the canonical `Datum<'mcx>` element model
+    // (`ArrayForJson.elements`); `array_dim_to_json` / `datum_to_json_internal`
+    // drive the per-element `OutputFunctionCall` directly off the canonical
+    // value (each by-value element rides `ByVal`, each detoasted by-reference
+    // element rides `ByRef`), so no scalar-word collapse is needed.
 
     // nitems = ArrayGetNItems(ndim, dim). The overflow guard
     // (ArrayGetNItemsSafe) is enforced by the seam (it owns
@@ -400,8 +431,8 @@ pub fn array_to_json_internal(
 
 /// C: `composite_to_json(Datum composite, StringInfo result, bool
 /// use_line_feeds)` (json.c:520). Turn a composite / record into JSON.
-pub fn composite_to_json(
-    composite: Datum,
+pub fn composite_to_json<'mcx>(
+    composite: &Datum<'mcx>,
     result: &mut PgVec<'_, u8>,
     use_line_feeds: bool,
 ) -> PgResult<()> {
@@ -424,7 +455,9 @@ pub fn composite_to_json(
         buf_push(result, b':')?;
 
         datum_to_json_internal(
-            field.val,
+            // `walk_composite` yields the canonical `Datum<'mcx>` per attribute
+            // (`CompositeFieldForJson.val`); forward it directly.
+            &field.val,
             field.is_null,
             result,
             field.tcategory,
@@ -440,8 +473,8 @@ pub fn composite_to_json(
 /// C: `add_json(Datum val, bool is_null, StringInfo result, Oid val_type, bool
 /// key_scalar)` (json.c:601). Thin wrapper around `datum_to_json` that
 /// classifies `val_type` first.
-pub fn add_json(
-    val: Datum,
+pub fn add_json<'mcx>(
+    val: &Datum<'mcx>,
     is_null: bool,
     result: &mut PgVec<'_, u8>,
     val_type: Oid,
@@ -486,7 +519,7 @@ pub fn to_json_is_immutable(typoid: Oid) -> PgResult<bool> {
 /// (json.c:762). Turn a Datum into JSON text (returned as content bytes).
 pub fn datum_to_json<'mcx>(
     mcx: Mcx<'mcx>,
-    val: Datum,
+    val: &Datum<'mcx>,
     tcategory: JsonTypeCategory,
     outfuncoid: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -504,28 +537,28 @@ pub fn datum_to_json<'mcx>(
 // ===========================================================================
 
 /// C: `array_to_json(PG_FUNCTION_ARGS)` (json.c:629).
-pub fn array_to_json<'mcx>(mcx: Mcx<'mcx>, array: Datum) -> PgResult<PgVec<'mcx, u8>> {
+pub fn array_to_json<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     build(mcx, |buf| array_to_json_internal(array, buf, false))
 }
 
 /// C: `array_to_json_pretty(PG_FUNCTION_ARGS)` (json.c:645).
 pub fn array_to_json_pretty<'mcx>(
     mcx: Mcx<'mcx>,
-    array: Datum,
+    array: &Datum<'mcx>,
     use_line_feeds: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     build(mcx, |buf| array_to_json_internal(array, buf, use_line_feeds))
 }
 
 /// C: `row_to_json(PG_FUNCTION_ARGS)` (json.c:662).
-pub fn row_to_json<'mcx>(mcx: Mcx<'mcx>, array: Datum) -> PgResult<PgVec<'mcx, u8>> {
+pub fn row_to_json<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
     build(mcx, |buf| composite_to_json(array, buf, false))
 }
 
 /// C: `row_to_json_pretty(PG_FUNCTION_ARGS)` (json.c:678).
 pub fn row_to_json_pretty<'mcx>(
     mcx: Mcx<'mcx>,
-    array: Datum,
+    array: &Datum<'mcx>,
     use_line_feeds: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
     build(mcx, |buf| composite_to_json(array, buf, use_line_feeds))
@@ -534,7 +567,7 @@ pub fn row_to_json_pretty<'mcx>(
 /// C: `to_json(PG_FUNCTION_ARGS)` (json.c:738).
 ///
 /// `val_type` is `get_fn_expr_argtype(fcinfo->flinfo, 0)` (executor boundary).
-pub fn to_json<'mcx>(mcx: Mcx<'mcx>, val: Datum, val_type: Oid) -> PgResult<PgVec<'mcx, u8>> {
+pub fn to_json<'mcx>(mcx: Mcx<'mcx>, val: &Datum<'mcx>, val_type: Oid) -> PgResult<PgVec<'mcx, u8>> {
     if val_type == InvalidOid {
         return Err(PgError::error("could not determine input data type")
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
@@ -801,7 +834,7 @@ pub fn json_agg_transfn_worker<'mcx>(
     mcx: Mcx<'mcx>,
     state: Option<JsonAggState<'mcx>>,
     arg_type: Oid,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
     absent_on_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
@@ -834,7 +867,7 @@ pub fn json_agg_transfn_worker<'mcx>(
     // fast path for NULLs
     if val_is_null {
         datum_to_json_internal(
-            Datum::null(),
+            &Datum::null(),
             true,
             &mut state.str,
             JsonTypeCategory::JSONTYPE_NULL,
@@ -867,7 +900,7 @@ pub fn json_agg_transfn<'mcx>(
     mcx: Mcx<'mcx>,
     state: Option<JsonAggState<'mcx>>,
     arg_type: Oid,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_agg_transfn_worker(mcx, state, arg_type, val, val_is_null, false)
@@ -878,7 +911,7 @@ pub fn json_agg_strict_transfn<'mcx>(
     mcx: Mcx<'mcx>,
     state: Option<JsonAggState<'mcx>>,
     arg_type: Oid,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_agg_transfn_worker(mcx, state, arg_type, val, val_is_null, true)
@@ -904,9 +937,9 @@ pub fn json_object_agg_transfn_worker<'mcx>(
     state: Option<JsonAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
-    key: Datum,
+    key: &Datum<'mcx>,
     key_is_null: bool,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
     absent_on_null: bool,
     unique_keys: bool,
@@ -990,7 +1023,8 @@ pub fn json_object_agg_transfn_worker<'mcx>(
 
     buf_extend(&mut state.str, b" : ")?;
 
-    let arg = if val_is_null { Datum::null() } else { val };
+    let null_arg = Datum::null();
+    let arg = if val_is_null { &null_arg } else { val };
     let val_category = state.val_category.expect("val_category set on first call");
     let val_output_func = state.val_output_func;
     datum_to_json_internal(arg, val_is_null, &mut state.str, val_category, val_output_func, false)?;
@@ -1004,9 +1038,9 @@ pub fn json_object_agg_transfn<'mcx>(
     state: Option<JsonAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
-    key: Datum,
+    key: &Datum<'mcx>,
     key_is_null: bool,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_object_agg_transfn_worker(
@@ -1020,9 +1054,9 @@ pub fn json_object_agg_strict_transfn<'mcx>(
     state: Option<JsonAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
-    key: Datum,
+    key: &Datum<'mcx>,
     key_is_null: bool,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_object_agg_transfn_worker(
@@ -1036,9 +1070,9 @@ pub fn json_object_agg_unique_transfn<'mcx>(
     state: Option<JsonAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
-    key: Datum,
+    key: &Datum<'mcx>,
     key_is_null: bool,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_object_agg_transfn_worker(
@@ -1052,9 +1086,9 @@ pub fn json_object_agg_unique_strict_transfn<'mcx>(
     state: Option<JsonAggState<'mcx>>,
     key_arg_type: Oid,
     val_arg_type: Oid,
-    key: Datum,
+    key: &Datum<'mcx>,
     key_is_null: bool,
-    val: Datum,
+    val: &Datum<'mcx>,
     val_is_null: bool,
 ) -> PgResult<JsonAggState<'mcx>> {
     json_object_agg_transfn_worker(
@@ -1097,7 +1131,7 @@ pub fn catenate_stringinfo_string<'mcx>(
 /// (json.c:1223).
 pub fn json_build_object_worker<'mcx>(
     mcx: Mcx<'mcx>,
-    args: &[Datum],
+    args: &[Datum<'mcx>],
     nulls: &[bool],
     types: &[Oid],
     absent_on_null: bool,
@@ -1145,13 +1179,13 @@ pub fn json_build_object_worker<'mcx>(
                 // C uses a throwaway StringInfo to hold the key bytes just long
                 // enough to copy them for the uniqueness check.
                 let mut out = PgVec::new_in(mcx);
-                add_json(args[i], false, &mut out, types[i], true)?;
+                add_json(&args[i], false, &mut out, types[i], true)?;
                 key_bytes = out.as_slice().to_vec();
             } else {
                 buf_extend(result, sep)?;
                 sep = b", ";
                 let key_offset = result.len();
-                add_json(args[i], false, result, types[i], true)?;
+                add_json(&args[i], false, result, types[i], true)?;
                 key_bytes = result[key_offset..].to_vec();
             }
 
@@ -1174,7 +1208,7 @@ pub fn json_build_object_worker<'mcx>(
             buf_extend(result, b" : ")?;
 
             // process value
-            add_json(args[i + 1], nulls[i + 1], result, types[i + 1], false)?;
+            add_json(&args[i + 1], nulls[i + 1], result, types[i + 1], false)?;
 
             i += 2;
         }
@@ -1190,7 +1224,7 @@ pub fn json_build_object_worker<'mcx>(
 /// case (C `nargs < 0` -> `PG_RETURN_NULL`), modeled as `extracted == None`.
 pub fn json_build_object<'mcx>(
     mcx: Mcx<'mcx>,
-    extracted: Option<(&[Datum], &[bool], &[Oid])>,
+    extracted: Option<(&[Datum<'mcx>], &[bool], &[Oid])>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     match extracted {
         None => Ok(None),
@@ -1209,7 +1243,7 @@ pub fn json_build_object_noargs<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8
 /// const Oid *types, bool absent_on_null)` (json.c:1343).
 pub fn json_build_array_worker<'mcx>(
     mcx: Mcx<'mcx>,
-    args: &[Datum],
+    args: &[Datum<'mcx>],
     nulls: &[bool],
     types: &[Oid],
     absent_on_null: bool,
@@ -1227,7 +1261,7 @@ pub fn json_build_array_worker<'mcx>(
 
             buf_extend(result, sep)?;
             sep = b", ";
-            add_json(args[i], nulls[i], result, types[i], false)?;
+            add_json(&args[i], nulls[i], result, types[i], false)?;
         }
 
         buf_push(result, b']')
@@ -1237,7 +1271,7 @@ pub fn json_build_array_worker<'mcx>(
 /// C: `json_build_array(PG_FUNCTION_ARGS)` (json.c:1373).
 pub fn json_build_array<'mcx>(
     mcx: Mcx<'mcx>,
-    extracted: Option<(&[Datum], &[bool], &[Oid])>,
+    extracted: Option<(&[Datum<'mcx>], &[bool], &[Oid])>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     match extracted {
         None => Ok(None),
@@ -1553,16 +1587,6 @@ fn token_type_int(t: JsonTokenType) -> i32 {
         JSON_TOKEN_NULL => 11,
         JSON_TOKEN_END => 12,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Datum helpers.
-// ---------------------------------------------------------------------------
-
-/// C: `DatumGetBool(val)` — any nonzero value is true (postgres.h).
-#[inline]
-fn DatumGetBool(val: Datum) -> bool {
-    val.as_bool()
 }
 
 /// Internal-invariant guard for the hard-error parser paths (`json_recv`,

@@ -15,7 +15,11 @@
 //! | `ReceiveFunctionCall`| `StringInfo buf` → `Datum`| `&[u8]` → [`FmgrOut`]|
 //! | `SendFunctionCall`   | `Datum` → `bytea *`       | [`FmgrArg`] → Vec<u8>|
 
-use types_datum::Datum;
+// Datum-unification migration: the by-value boundary arms carry the canonical
+// value type `types_tuple::Datum<'mcx>` (its `ByVal` arm is the bare machine
+// word; `from_*`/`as_*` are the conversion methods). The deprecated shim newtype
+// `types_datum::Datum` is no longer used by this crate's own code.
+use types_tuple::Datum;
 
 /// Mirror of PG's `ExpandedObjectMethods` vtable (`utils/expandeddatum.h`): the
 /// two method pointers every expanded (`VARATT_IS_EXPANDED`) object exposes.
@@ -154,18 +158,19 @@ impl Eq for RefPayload {}
 
 /// What an fmgr function **returns** at the call boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FmgrOut {
-    /// A pass-by-value result: the `Datum` word is the value.
-    ByVal(Datum),
+pub enum FmgrOut<'mcx> {
+    /// A pass-by-value result: the canonical `Datum` (its `ByVal` arm is the
+    /// machine word the value lives in).
+    ByVal(Datum<'mcx>),
     /// A pass-by-reference result: the owned referent.
     Ref(RefPayload),
 }
 
-impl FmgrOut {
+impl<'mcx> FmgrOut<'mcx> {
     /// The by-value `Datum`, if this is a by-value result.
-    pub fn by_val(&self) -> Option<Datum> {
+    pub fn by_val(&self) -> Option<Datum<'mcx>> {
         match self {
-            FmgrOut::ByVal(d) => Some(*d),
+            FmgrOut::ByVal(d) => Some(d.clone()),
             FmgrOut::Ref(_) => None,
         }
     }
@@ -180,19 +185,24 @@ impl FmgrOut {
 }
 
 /// A single fmgr **argument** at the call boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FmgrArg<'a> {
-    /// A pass-by-value argument: the `Datum` word is the value.
-    ByVal(Datum),
+///
+/// `'a` borrows the by-reference referent; `'mcx` is the canonical value's
+/// allocation lifetime. (No longer `Copy`: the canonical `Datum<'mcx>` owns its
+/// by-reference bytes and so is not `Copy`.)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FmgrArg<'a, 'mcx> {
+    /// A pass-by-value argument: the canonical `Datum` (its `ByVal` arm is the
+    /// machine word the value lives in).
+    ByVal(Datum<'mcx>),
     /// A pass-by-reference argument: a borrow of the caller-owned referent.
     Ref(&'a RefPayload),
 }
 
-impl<'a> FmgrArg<'a> {
+impl<'a, 'mcx> FmgrArg<'a, 'mcx> {
     /// The by-value `Datum`, if this argument is by value.
-    pub fn by_val(&self) -> Option<Datum> {
+    pub fn by_val(&self) -> Option<Datum<'mcx>> {
         match self {
-            FmgrArg::ByVal(d) => Some(*d),
+            FmgrArg::ByVal(d) => Some(d.clone()),
             FmgrArg::Ref(_) => None,
         }
     }

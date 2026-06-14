@@ -488,6 +488,7 @@ pub fn init_seams() {
     s::invoke_object_post_create_hook::set(|class_id, object_id, sub_id| {
         invoke_object_post_create_hook(class_id, object_id, sub_id, false)
     });
+    s::invoke_object_post_create_hook_arg::set(invoke_object_post_create_hook);
     s::invoke_object_post_alter_hook::set(|class_id, object_id, sub_id| {
         invoke_object_post_alter_hook(class_id, object_id, sub_id, InvalidOid, false)
     });

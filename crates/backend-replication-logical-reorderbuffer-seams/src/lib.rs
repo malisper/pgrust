@@ -9,6 +9,22 @@
 use types_logical::{ReorderBufferHandle, ReorderBufferStats};
 
 seam_core::seam!(
+    /// `ResolveCminCmaxDuringDecoding(tuplecid_data, snapshot, htup, buffer,
+    /// &cmin, &cmax)` (reorderbuffer.c) — look up the actual cmin/cmax for a
+    /// tuple seen by a historic (logical-decoding) MVCC snapshot, resolving any
+    /// combo CID via the decoded tuplecid hash. `cmin`/`cmax` carry the C
+    /// in/out-parameter values; the returned [`ResolveCminCmaxResult`] bundles
+    /// the C `bool` return with the resolved out-parameters.
+    pub fn resolve_cmin_cmax_during_decoding(
+        snapshot: types_snapshot::SnapshotData,
+        htup: types_tuple::heaptuple::HeapTupleData<'_>,
+        buffer: types_storage::storage::Buffer,
+        cmin: types_core::CommandId,
+        cmax: types_core::CommandId,
+    ) -> types_error::PgResult<types_snapshot::snapshot::ResolveCminCmaxResult>
+);
+
+seam_core::seam!(
     /// `ReorderBufferAllocate()`.
     pub fn ReorderBufferAllocate() -> ReorderBufferHandle
 );

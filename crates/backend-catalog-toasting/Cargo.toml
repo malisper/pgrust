@@ -18,6 +18,10 @@ types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-catalog = { path = "../types-catalog" }
 types-storage = { path = "../types-storage" }
+types-cluster = { path = "../types-cluster" }
+
+# This unit's own inward seam declarations (installed by `init_seams`).
+backend-catalog-toasting-seams = { path = "../backend-catalog-toasting-seams" }
 
 # Direct deps (no cycle): table open/close, namespace lookups, the
 # binary-upgrade backend globals, and recordDependencyOn.

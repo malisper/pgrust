@@ -91,6 +91,7 @@ pub fn init_seams() {
     fd_seams::close_transient_file::set(seams::close_transient_file_i32);
     fd_seams::transient_read::set(seams::transient_read);
     fd_seams::transient_write::set(seams::transient_write);
+    fd_seams::pg_pread::set(seams::pg_pread);
 
     // Directory / tree helpers (decls owned here; logic in `seams`).
     fd_seams::rmtree::set(seams::rmtree);
@@ -101,6 +102,7 @@ pub fn init_seams() {
 
     // AllocateFile-based reads/writes (snapmgr, timeline).
     fd_seams::allocate_file_write::set(seams::allocate_file_write);
+    fd_seams::create_empty_file::set(seams::create_empty_file);
     fd_seams::allocate_file_read::set(seams::allocate_file_read);
     fd_seams::read_file_or_absent::set(seams::read_file_or_absent);
     fd_seams::file_exists::set(seams::file_exists);

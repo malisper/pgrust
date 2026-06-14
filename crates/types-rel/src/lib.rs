@@ -21,6 +21,8 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use mcx::{PgBox, PgString};
@@ -76,6 +78,10 @@ pub struct FormData_pg_class<'mcx> {
     pub relreplident: u8,
     /// `bool relispartition` — is the relation a partition?
     pub relispartition: bool,
+    /// `TransactionId relfrozenxid` — all xids before this are frozen in this
+    /// table (`InvalidTransactionId` for relations without storage). Read by
+    /// `heap_abort_speculative` to pick a safe prune xid.
+    pub relfrozenxid: types_core::primitive::TransactionId,
 }
 
 /// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
@@ -219,38 +225,160 @@ impl<'mcx> RelationData<'mcx> {
 /// by the relcache/relation owner when it opens the relation.
 pub type RelationCloser = fn(Oid, LOCKMODE) -> PgResult<()>;
 
+/// A type-erased CLONE of the relcache's shared entry cell — C's live
+/// `RelationData *` into the cache, held as `Rc<dyn Any>`.
+///
+/// The concrete value is the relcache owner's
+/// `Rc<RefCell<types_relcache_entry::RelationData>>`. It is erased to `dyn Any`
+/// at this boundary purely to break the crate-dependency cycle: the entry-store
+/// crate (`types-relcache-entry`) transitively depends on `types-rel`
+/// (`types-relcache-entry → backend-access-common-tupdesc →
+/// backend-catalog-catalog-seams → types-rel`), so `types-rel` cannot name the
+/// entry type directly. The erasure is LOSSLESS — the `Rc` (and therefore the
+/// `strong_count` pin) is preserved, and the concrete cell is recovered by
+/// downcast through [`Relation::entry_as`] / [`Relation::borrow_entry_as`] (or
+/// the typed convenience accessors the relcache-seams crate re-exports). No
+/// opacity is introduced: the real shared pointer flows through unchanged; only
+/// its static type is hidden across this one crate edge.
+///
+/// Holding a clone keeps `Rc::strong_count > 1`, the safe analog of
+/// `rd_refcnt > 0` pinning the allocation: the relcache's `strong_count == 1`
+/// eviction sees an open relation as a live external holder.
+pub type RelcacheCell = Rc<dyn Any>;
+
 /// An open relation (the C `Relation`).
 ///
-/// The handle created by the opening function ([`Relation::open`] with a
-/// closer) owns the close: [`Relation::close`] is `relation_close(rel,
-/// lockmode)`, and `Drop` is the abort path (`relation_close(rel, NoLock)` —
-/// refcount release only; lock release belongs to transaction cleanup, as in
-/// C). [`Relation::alias`] yields the C pointer alias: same data, no release
+/// DUAL-CARRY (F1): the handle carries BOTH representations of the relcache
+/// entry:
+///
+/// - `cell` — a CLONE of the relcache's shared `Rc<RefCell<RelationData>>`
+///   (C's live `RelationData *`). While an open `Relation` lives, this clone
+///   makes `Rc::strong_count > 1`, so the relcache's `strong_count == 1`
+///   eviction is gated on external holders — the user-visible eviction
+///   semantic is real *now*. Dropping the `Relation` (or calling
+///   [`Relation::close`]) drops the clone and frees the cache for eviction.
+///   `None` only for handles built without a cache cell (tests, genuinely
+///   transient rels that were never in the cache).
+/// - `data` — the trimmed projected copy ([`RelationData`]), copied into the
+///   caller's `mcx`. The [`Deref`] target stays the trimmed copy so every
+///   existing consumer (the ~48 crates reading fields through `Deref`)
+///   compiles UNCHANGED. Consumers migrate off the copy onto
+///   [`Relation::entry_as`] / [`Relation::with_entry`] in later gated waves.
+///
+/// The handle created by the opening function ([`Relation::open`] /
+/// [`Relation::open_with_cell`] with a closer) owns the close:
+/// [`Relation::close`] is `relation_close(rel, lockmode)`, and `Drop` is the
+/// abort path (`relation_close(rel, NoLock)` — refcount release only; lock
+/// release belongs to transaction cleanup, as in C). [`Relation::alias`]
+/// yields the C pointer alias: same data + a clone of the same cell (a second
+/// live `RelationData *`, as C aliasing bumps `rd_refcnt`), but no release
 /// authority.
-#[derive(Debug)]
+///
+/// [`Deref`]: core::ops::Deref
+// No `#[derive(Debug)]`: the type-erased `Rc<dyn Any>` cell is not `Debug`. A
+// manual impl (below) prints the trimmed copy + whether a cache cell is held.
 pub struct Relation<'mcx> {
+    /// CLONE of the shared relcache cell (see struct docs); `None` for
+    /// cache-less handles.
+    cell: Option<RelcacheCell>,
     data: Rc<RelationData<'mcx>>,
     closer: Option<RelationCloser>,
 }
 
 impl<'mcx> Relation<'mcx> {
-    /// Wrap a freshly opened relation. The opening owner passes its close
-    /// function; `None` builds a handle without release authority (tests,
-    /// or relations whose lifecycle someone else owns).
+    /// Wrap a freshly opened relation WITHOUT a shared cache cell. The opening
+    /// owner passes its close function; `None` builds a handle without release
+    /// authority (tests, or relations whose lifecycle someone else owns).
+    ///
+    /// Prefer [`Relation::open_with_cell`] for relations that came from the
+    /// relcache: carrying the cell is what makes eviction gate on open
+    /// handles. This `cell`-less constructor is for genuinely transient rels
+    /// (bootstrap/dummy/test descriptors never inserted into the cache), where
+    /// there is no shared allocation to pin and `strong_count` semantics are
+    /// vacuous.
     pub fn open(data: RelationData<'mcx>, closer: Option<RelationCloser>) -> Self {
         Relation {
+            cell: None,
+            data: Rc::new(data),
+            closer,
+        }
+    }
+
+    /// Wrap a freshly opened relation that came from the relcache, carrying a
+    /// CLONE of the shared cache cell alongside the trimmed projected copy.
+    ///
+    /// `cell` is the relcache's `Rc<RefCell<RelationData>>` for this relation
+    /// (from `relation_id_get_relation_shared`); holding it keeps
+    /// `Rc::strong_count > 1` so the cache's `strong_count == 1` eviction is
+    /// gated on this open handle. `data` is the trimmed copy that the [`Deref`]
+    /// target still yields for not-yet-migrated consumers.
+    ///
+    /// [`Deref`]: core::ops::Deref
+    pub fn open_with_cell(
+        cell: RelcacheCell,
+        data: RelationData<'mcx>,
+        closer: Option<RelationCloser>,
+    ) -> Self {
+        Relation {
+            cell: Some(cell),
             data: Rc::new(data),
             closer,
         }
     }
 
     /// The C pointer alias: shares the relation data, carries no release
-    /// authority (dropping an alias releases nothing).
+    /// authority (dropping an alias releases nothing). It DOES clone the shared
+    /// cache cell — an alias is a second live `RelationData *` into the cache,
+    /// so it pins the allocation against eviction exactly as C's aliased
+    /// pointer does (C bumps `rd_refcnt` for each held pointer).
     pub fn alias(&self) -> Relation<'mcx> {
         Relation {
+            cell: self.cell.clone(),
             data: Rc::clone(&self.data),
             closer: None,
         }
+    }
+
+    /// The type-erased shared relcache pin this handle carries: `Some` for
+    /// relations opened from the cache via [`Relation::open_with_cell`], `None`
+    /// for cache-less handles. This is the raw `Rc<dyn Any>`; consumers that
+    /// want the concrete entry use [`Relation::entry_as`] /
+    /// [`Relation::borrow_entry_as`] (or the relcache-seams typed wrappers).
+    pub fn raw_cell(&self) -> Option<&RelcacheCell> {
+        self.cell.as_ref()
+    }
+
+    /// The shared relcache cell this handle carries, downcast to the concrete
+    /// entry-cell type `Rc<RefCell<T>>` (the migration target). `T` is the
+    /// relcache owner's entry struct (`types_relcache_entry::RelationData`);
+    /// callers that can name it pass it (the relcache-seams crate re-exports a
+    /// monomorphized convenience wrapper). `None` for a cache-less handle or
+    /// (defensively) a type mismatch — the relcache owner always stores the one
+    /// concrete cell type, so a mismatch cannot happen in practice.
+    ///
+    /// Consumers migrate their field reads off the [`Deref`]-to-copy onto this
+    /// shared entry in later gated waves; e.g.
+    /// `rel.entry_as::<Entry>().unwrap().borrow().rd_rel.relname`.
+    ///
+    /// [`Deref`]: core::ops::Deref
+    pub fn entry_as<T: 'static>(&self) -> Option<Rc<RefCell<T>>> {
+        let cell = self.cell.clone()?;
+        cell.downcast::<RefCell<T>>().ok()
+    }
+
+    /// Borrow the shared relcache entry downcast to the concrete entry type
+    /// `T` and run `f` against it (`f(&*cell.borrow())`), if this handle
+    /// carries a cache cell of that type. `f` sees the live entry — a holder
+    /// observes the in-place rebuild (`*cell.borrow_mut() = rebuilt`, true C
+    /// `RelationData *` semantics). Returns `None` for cache-less handles / a
+    /// type mismatch (without calling `f`). This is the borrow helper consumers
+    /// use during the off-Deref migration; it matches the relcache owner's
+    /// `with`/`with_relation` closure idiom and avoids leaking a self-borrowing
+    /// guard across the type-erasure boundary.
+    pub fn with_entry<T: 'static, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let rc = self.entry_as::<T>()?;
+        let guard = rc.borrow();
+        Some(f(&guard))
     }
 
     /// `relation_close(relation, lockmode)` / `table_close(...)`: release
@@ -273,6 +401,16 @@ impl<'mcx> core::ops::Deref for Relation<'mcx> {
     }
 }
 
+impl core::fmt::Debug for Relation<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Relation")
+            .field("data", &self.data)
+            .field("has_cell", &self.cell.is_some())
+            .field("has_closer", &self.closer.is_some())
+            .finish()
+    }
+}
+
 impl Drop for Relation<'_> {
     /// The abort path: release the relcache reference, leave any lock to
     /// transaction cleanup (C `relation_close(rel, NoLock)`). The C close
@@ -281,5 +419,147 @@ impl Drop for Relation<'_> {
         if let Some(closer) = self.closer.take() {
             let _ = closer(self.data.rd_id, NoLock);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    /// A standalone `'static` entry-cell stand-in for the cell-semantics tests.
+    /// (`types-relcache-entry` is not a dep here — and cannot be, the cycle this
+    /// crate's type-erasure works around — so the tests exercise the
+    /// `Rc<dyn Any>` pin + downcast over a local `'static` type. The relcache
+    /// owner's `RelationData` is the real concrete type in production.)
+    #[derive(Debug, PartialEq)]
+    struct FakeEntry {
+        rd_id: u32,
+        name: String,
+    }
+
+    fn trimmed<'mcx>(mcx: mcx::Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
+        let td = TupleDescData {
+            natts: 0,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs: mcx::PgVec::new_in(mcx),
+            attrs: mcx::PgVec::new_in(mcx),
+        };
+        RelationData {
+            rd_id: oid,
+            rd_locator: RelFileLocator {
+                spcOid: 0,
+                dbOid: 0,
+                relNumber: 0,
+            },
+            rd_backend: types_core::primitive::INVALID_PROC_NUMBER,
+            rd_rel: FormData_pg_class {
+                relname: PgString::from_str_in("t", mcx).unwrap(),
+                relnamespace: 0,
+                relowner: 0,
+                relrowsecurity: false,
+                relpages: 0,
+                reltuples: 0.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                reltablespace: 0,
+                relfilenode: 0,
+                relisshared: false,
+                relhasindex: false,
+                relhassubclass: false,
+                relpersistence: b'p',
+                relkind: b'r',
+                relispopulated: true,
+                relreplident: b'd',
+                relispartition: false,
+                relfrozenxid: 0,
+            },
+            rd_att: mcx::alloc_in(mcx, td).unwrap(),
+            rd_options: None,
+            rd_index: None,
+            rd_opcintype: mcx::PgVec::new_in(mcx),
+        }
+    }
+
+    /// An open relation holding a cell clone makes `strong_count > 1` (the safe
+    /// analog of `rd_refcnt > 0`), and dropping/closing it releases the pin —
+    /// so the cache's `strong_count == 1` eviction is now gated on open handles.
+    #[test]
+    fn open_relation_pins_the_cell_strong_count() {
+        let ctx = MemoryContext::new("test");
+        let cache_cell: Rc<RefCell<FakeEntry>> = Rc::new(RefCell::new(FakeEntry {
+            rd_id: 100,
+            name: "t".into(),
+        }));
+        // Cache holds the only reference: evictable.
+        assert_eq!(Rc::strong_count(&cache_cell), 1);
+
+        let erased: RelcacheCell = cache_cell.clone() as RelcacheCell;
+        let rel = Relation::open_with_cell(erased, trimmed(ctx.mcx(), 100), None);
+        // Now an open relation pins it: NOT evictable.
+        assert_eq!(Rc::strong_count(&cache_cell), 2);
+
+        // An alias is a second live pointer (C bumps rd_refcnt per pointer).
+        let a = rel.alias();
+        assert_eq!(Rc::strong_count(&cache_cell), 3);
+        drop(a);
+        assert_eq!(Rc::strong_count(&cache_cell), 2);
+
+        // Dropping the relation releases the pin: evictable again.
+        drop(rel);
+        assert_eq!(Rc::strong_count(&cache_cell), 1);
+    }
+
+    /// `entry_as` / `with_entry` recover the concrete cell through the erasure,
+    /// and the borrow sees in-place mutation (true `RelationData *` semantics).
+    #[test]
+    fn entry_accessors_recover_live_cell() {
+        let ctx = MemoryContext::new("test");
+        let cache_cell: Rc<RefCell<FakeEntry>> = Rc::new(RefCell::new(FakeEntry {
+            rd_id: 7,
+            name: "before".into(),
+        }));
+        let rel = Relation::open_with_cell(
+            cache_cell.clone() as RelcacheCell,
+            trimmed(ctx.mcx(), 7),
+            None,
+        );
+
+        // entry_as downcasts back to the concrete cell.
+        let recovered = rel.entry_as::<FakeEntry>().unwrap();
+        assert!(Rc::ptr_eq(&recovered, &cache_cell));
+
+        // In-place rebuild via the cache's handle is observed through the rel.
+        cache_cell.borrow_mut().name = "after".into();
+        let seen = rel.with_entry::<FakeEntry, String>(|e| e.name.clone()).unwrap();
+        assert_eq!(seen, "after");
+
+        // A type mismatch yields None (defensive; cannot happen in production).
+        assert!(rel.entry_as::<u32>().is_none());
+    }
+
+    /// The `Deref` target stays the trimmed copy, and a cache-less handle has
+    /// no cell — both required for the additive (zero-consumer-edit) wave.
+    #[test]
+    fn deref_to_copy_alive_and_cacheless_handle_has_no_cell() {
+        let ctx = MemoryContext::new("test");
+
+        // Cache-backed handle: Deref->copy works, cell present.
+        let cell: Rc<RefCell<FakeEntry>> =
+            Rc::new(RefCell::new(FakeEntry { rd_id: 9, name: "n".into() }));
+        let rel =
+            Relation::open_with_cell(cell as RelcacheCell, trimmed(ctx.mcx(), 9), None);
+        assert_eq!(rel.rd_id, 9); // Deref to the trimmed copy.
+        assert!(rel.raw_cell().is_some());
+
+        // Cache-less handle (transient/test rel): valid, no cell, no panic.
+        let transient = Relation::open(trimmed(ctx.mcx(), 11), None);
+        assert_eq!(transient.rd_id, 11);
+        assert!(transient.raw_cell().is_none());
+        assert!(transient.entry_as::<FakeEntry>().is_none());
+        assert!(transient.with_entry::<FakeEntry, ()>(|_| ()).is_none());
     }
 }

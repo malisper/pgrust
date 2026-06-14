@@ -25,7 +25,14 @@
 use backend_utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgString};
 use types_core::{Oid, OidIsValid};
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what
+// `ExtractedVariadicArgs.values` carries (a `PgVec<Datum<'mcx>>` owned by
+// `types-nodes`). `extract_variadic_args` builds each element directly as this
+// canonical value: the raw argument words from `pg_getarg_datum` /
+// `deconstruct_array` (still bare-word at the sanctioned fmgr PG_GETARG ABI
+// edge) flow into its by-value arm, while `cstring_get_text_datum` already
+// returns the canonical value verbatim.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
@@ -203,7 +210,10 @@ pub fn extract_variadic_args<'mcx>(
 
     // *args = NULL; *types = NULL; *nulls = NULL; (no-op in the owned model).
 
-    let mut args_res: mcx::PgVec<'mcx, Datum>;
+    // The extracted argument values are returned as the canonical unified
+    // value type (`ExtractedVariadicArgs.values`); the per-element words from
+    // deconstruct_array / PG_GETARG cross into its by-value arm.
+    let mut args_res: mcx::PgVec<'mcx, DatumV<'mcx>>;
     let mut nulls_res: mcx::PgVec<'mcx, bool>;
     let mut types_res: mcx::PgVec<'mcx, Oid>;
 
@@ -253,7 +263,7 @@ pub fn extract_variadic_args<'mcx>(
         types_res = vec_with_capacity_in(mcx, elems.len())?;
 
         for (value, isnull) in elems.iter().copied() {
-            args_res.push(value);
+            args_res.push(DatumV::ByVal(value.as_usize()));
             nulls_res.push(isnull);
             // All the elements of the array have the same type.
             types_res.push(element_type);
@@ -279,7 +289,7 @@ pub fn extract_variadic_args<'mcx>(
             // types_res[i] = get_fn_expr_argtype(fcinfo->flinfo, i + variadic_start);
             let mut argtype =
                 backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, argnum);
-            let value: Datum;
+            let value: DatumV<'mcx>;
 
             // Turn a constant (more or less literal) value that's of unknown
             // type into text if required. Unknowns come in as a cstring
@@ -292,11 +302,12 @@ pub fn extract_variadic_args<'mcx>(
 
                 if backend_utils_fmgr_fmgr_seams::pg_argisnull::call(fcinfo, argnum as usize) {
                     // args_res[i] = (Datum) 0;
-                    value = Datum::null();
+                    value = DatumV::null();
                 } else {
                     // args_res[i] = CStringGetTextDatum(PG_GETARG_POINTER(...));
                     // The pointer read is fmgr's; the text construction is the
-                    // funcapi-owned CStringGetTextDatum seam.
+                    // funcapi-owned CStringGetTextDatum seam, which already
+                    // yields the canonical value.
                     let s = backend_utils_fmgr_fmgr_seams::pg_getarg_cstring::call(
                         fcinfo,
                         argnum as usize,
@@ -304,8 +315,14 @@ pub fn extract_variadic_args<'mcx>(
                     value = backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::call(mcx, s)?;
                 }
             } else {
-                // no conversion needed, just take the datum as given
-                value = backend_utils_fmgr_fmgr_seams::pg_getarg_datum::call(fcinfo, argnum as usize);
+                // no conversion needed, just take the datum as given. The fmgr
+                // PG_GETARG seam returns the bare machine word (the sanctioned
+                // PGFunction-argument ABI edge); carry it in the by-value arm
+                // of the canonical value.
+                value = DatumV::ByVal(
+                    backend_utils_fmgr_fmgr_seams::pg_getarg_datum::call(fcinfo, argnum as usize)
+                        .as_usize(),
+                );
             }
             // (C keeps nulls_res[i] as captured from PG_ARGISNULL — the value
             // is taken as given regardless of NULL, matching funcapi.c.)

@@ -4,7 +4,7 @@
 use mcx::{Mcx, PgString};
 use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
 use types_core::primitive::{InvalidOid, OidIsValid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgResult, ERRCODE_CHECK_VIOLATION};
 use types_nodes::nodes::CmdType;
 use types_nodes::partition::PartitionStrategy;
@@ -76,7 +76,8 @@ pub fn ExecFindPartition<'mcx>(
         estate.ecxt_mut(ecxt).ecxt_scantuple = Some(cur_slot);
 
         // FormPartitionKeyDatum(dispatch, slot, estate, values, isnull);
-        let mut values = [Datum::null(); crate::PARTITION_MAX_KEYS];
+        let mut values: [Datum; crate::PARTITION_MAX_KEYS] =
+            core::array::from_fn(|_| Datum::null());
         let mut isnull = [false; crate::PARTITION_MAX_KEYS];
         FormPartitionKeyDatum(
             mcx,
@@ -293,6 +294,19 @@ pub fn ExecFindPartition<'mcx>(
     Ok(rri.expect("ExecFindPartition produced no ResultRelInfo"))
 }
 
+/// Copy a partition-key value for a seam ABI edge.
+///
+/// The partition-bound comparison / hashing seams (`partition_*_datum_cmp`,
+/// `compute_partition_hash_value`, `partition_*_bsearch`) and the
+/// `PartitionBoundInfoData.datums` store all now trade in the canonical
+/// `Datum<'mcx>`. C threads the raw `Datum` machine word straight through these
+/// boundaries; the canonical carrier forwards the same value (by-value scalar
+/// or detoasted by-reference image) verbatim.
+#[inline]
+fn key_word<'mcx>(d: &Datum<'mcx>) -> Datum<'mcx> {
+    d.clone()
+}
+
 /// `rootResultRelInfo->ri_RelationDesc->rd_rel->relispartition`.
 fn root_result_rel_info_relispartition(estate: &EStateData<'_>, rri: RriId) -> bool {
     estate
@@ -350,7 +364,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
     slot: SlotId,
     estate: &mut EStateData<'mcx>,
     proute: &mut PartitionTupleRouting<'mcx>,
-    values: &mut [Datum],
+    values: &mut [Datum<'mcx>],
     isnull: &mut [bool],
 ) -> PgResult<()> {
     let _ = (mcx, slot);
@@ -396,9 +410,11 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
         if keycol != 0 {
             // Plain column; get the value directly from the heap tuple.
             let (d, n) = backend_executor_execTuples_seams::slot_getattr::call(
+                mcx,
                 estate.slot_mut(slot),
                 keycol,
             )?;
+            // slot_getattr now yields the canonical Datum directly.
             datum = d;
             is_null = n;
         } else {
@@ -420,6 +436,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
                     exprstate, ecxt, estate,
                 )?
             };
+            // ExecEvalExprSwitchContext now returns the canonical Datum directly.
             datum = d;
             is_null = n;
             // partexpr_item = lnext(pd->keystate, partexpr_item);
@@ -498,17 +515,19 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                 if last_found_count >= PARTITION_CACHED_FIND_THRESHOLD {
                     let last_datum_offset =
                         dispatch.partdesc.as_ref().unwrap().last_found_datum_index;
-                    let last_datum = dispatch
-                        .partdesc
-                        .as_ref()
-                        .unwrap()
-                        .boundinfo
-                        .as_ref()
-                        .unwrap()
-                        .datums[last_datum_offset as usize][0];
+                    let last_datum = key_word(
+                        &dispatch
+                            .partdesc
+                            .as_ref()
+                            .unwrap()
+                            .boundinfo
+                            .as_ref()
+                            .unwrap()
+                            .datums[last_datum_offset as usize][0],
+                    );
                     let cmpval =
                         backend_partitioning_partbounds_seams::partition_list_datum_cmp::call(
-                            key, last_datum, values[0],
+                            key, last_datum, key_word(&values[0]),
                         )?;
                     if cmpval == 0 {
                         return Ok(dispatch.partdesc.as_ref().unwrap().boundinfo.as_ref().unwrap()
@@ -522,7 +541,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                     backend_partitioning_partbounds_seams::partition_list_bsearch::call(
                         key,
                         boundinfo,
-                        values[0],
+                        key_word(&values[0]),
                     )?;
                 bound_offset = off;
                 if bound_offset >= 0 && equal {
@@ -644,11 +663,11 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
 /// `boundinfo->datums[off]` / `boundinfo->kind[off]` for a RANGE bound — copy
 /// the per-bound datum and kind rows out so the partbounds seam can borrow them
 /// independently of the dispatch.
-fn range_bound_at(
-    dispatch: &crate::PartitionDispatchData<'_>,
+fn range_bound_at<'mcx>(
+    dispatch: &crate::PartitionDispatchData<'mcx>,
     off: usize,
 ) -> (
-    alloc_vec::Vec<Datum>,
+    alloc_vec::Vec<Datum<'mcx>>,
     alloc_vec::Vec<types_nodes::partition::PartitionRangeDatumKind>,
 ) {
     let boundinfo = dispatch
@@ -658,7 +677,8 @@ fn range_bound_at(
         .boundinfo
         .as_ref()
         .unwrap();
-    let datums: alloc_vec::Vec<Datum> = boundinfo.datums[off].iter().copied().collect();
+    let datums: alloc_vec::Vec<Datum<'mcx>> =
+        boundinfo.datums[off].iter().map(key_word).collect();
     let kind: alloc_vec::Vec<types_nodes::partition::PartitionRangeDatumKind> = boundinfo
         .kind
         .as_ref()
@@ -743,7 +763,7 @@ pub(crate) fn ExecBuildSlotPartitionKeyDescription<'mcx>(
             // val = OidOutputFunctionCall(foutoid, values[i]);
             let out =
                 backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
-                    mcx, foutoid, values[i],
+                    mcx, foutoid, values[i].clone(),
                 )?;
             val_bytes = out.as_bytes().to_vec();
             val = &val_bytes;

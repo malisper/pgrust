@@ -18,6 +18,7 @@ types-rel = { path = "../types-rel" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
+backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-common-syncscan-seams = { path = "../backend-access-common-syncscan-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }

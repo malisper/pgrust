@@ -480,14 +480,14 @@ fn wal_summarizer_main_iteration(
 }
 
 /// `on_shmem_exit` adapter for [`WalSummarizerShutdown`].
-fn wal_summarizer_shutdown_callback(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn wal_summarizer_shutdown_callback(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     WalSummarizerShutdown()
 }
 
 #[inline]
-fn types_datum_unit() -> types_datum::Datum {
+fn types_datum_unit() -> types_tuple::Datum<'static> {
     // C: `(Datum) 0`.
-    types_datum::Datum::null()
+    types_tuple::Datum::null()
 }
 
 // ===========================================================================

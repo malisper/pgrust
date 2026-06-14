@@ -36,20 +36,23 @@
 //! tuple-descriptor constructors and the `begin/do/end_tup_output` family — is
 //! implemented as own-logic over the body-bearing carriers: the slot fields
 //! carry the full `FormedTuple` / `FormedMinimalTuple` (header + data-area
-//! bytes), `tts_values` carries the by-reference `TupleValue::ByRef` lane, and
+//! bytes), `tts_values` carries the by-reference `Datum::ByRef` lane, and
 //! the op return / store-param types are the body-bearing carriers so no data
 //! bytes are dropped at any boundary.
 //!
-//! Two genuinely-unported dependencies remain mirror-PG-and-panic:
+//! The slot attribute reads (`slot_getattr` / `slot_getsysattr` and their
+//! `tts_ops` dispatch) now return the canonical unified `Datum<'mcx>` value
+//! (`ByVal` for a scalar column, `ByRef` carrying the owned column bytes for a
+//! by-reference column), threaded through `'mcx`. A by-reference column no
+//! longer has to collapse to a bare machine word — it crosses verbatim as
+//! `ByRef`, so the former by-reference→bare-`Datum` projection panic is gone.
+//!
+//! One genuinely-unported dependency remains mirror-PG-and-panic:
 //! * the **composite-`Datum` bridge** (`DatumGetHeapTupleHeader` /
 //!   `HeapTupleGetDatum`) used by `ExecStoreHeapTupleDatum` /
 //!   `ExecFetchSlotHeapTupleDatum` — the bare-word owned `Datum` has no
 //!   pointer-to-tuple lane and the decode/mint is unported workspace-wide (the
-//!   same bridge execExprInterp's row steps panic on); and
-//! * the **by-reference→bare-`Datum` projection** in the pool-seam form of
-//!   `slot_getattr` (a by-reference column is C's `PointerGetDatum`, which the
-//!   bare-word `Datum` cannot represent; in-crate callers read the `TupleValue`
-//!   directly).
+//!   same bridge execExprInterp's row steps panic on).
 //!
 //! The `SlotId`/`es_tupleTable` pool bridge seams in [`exec_init_slots`] stay
 //! provisional (the separate pool-convergence campaign); they are unrelated to

@@ -6,6 +6,27 @@
 
 use mcx::{Mcx, PgString, PgVec};
 use types_error::PgResult;
+// The canonical unified value type (Datum-unification keystone). The `*_v` seam
+// variants below take/return it and are the migration target for this unit's
+// value-carrying seams; migrated consumers call them.
+//
+// Wave 3 (Datum-completion) status for this seam-decl crate: every
+// value-carrying seam already has its canonical `DatumV<'mcx>` form
+// (`cstring_to_text_v`, `bytes_to_varlena_v`, `text_to_cstring_v`). A seam-decl
+// crate has no function bodies, so there is no this-crate-owned shim
+// construction/read site (`from_usize`/`as_usize`/`from_*`/`as_*`) to migrate.
+//
+// The three bare-word `types_datum::Datum` variants that remain
+// (`cstring_to_text`, `bytes_to_varlena`, `text_to_cstring`) are NOT one of the
+// two genuinely-sanctioned ABI edges (store_att_byval/fetch_att + the PGFunction
+// bare-word return); they are transitional shims that stay only because they are
+// externally pinned — the owner unit (backend-utils-adt-varlena) installs them
+// via `init_seams()` (`cstring_to_text::set` / `text_to_cstring::set` / …) and
+// ~22 consumer crates still `::call` the bare-word shape. Dropping them here
+// would break those out-of-scope consumers + the owner's `::set`, so it is the
+// consumer-reconcile Cleanup follow-on (cf. #112 / the "execExpr datum-mig is
+// contract-blocked" pattern), not this gate.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 seam_core::seam!(
     /// `int varstr_cmp(const char *arg1, int len1, const char *arg2, int len2,
@@ -38,10 +59,25 @@ seam_core::seam!(
     /// context), returned as the `Datum` callers pass on (the
     /// `CStringGetTextDatum(s)` macro of builtins.h). OOM `ereport(ERROR)`
     /// carried on `Err`.
+    ///
+    /// TRANSITIONAL SHIM: superseded by [`cstring_to_text_v`], which returns the
+    /// unified `types_tuple::Datum` value. Kept until callers migrate.
     pub fn cstring_to_text<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         s: &str,
     ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `cstring_to_text(s)` (varlena.c) over the unified value type — the
+    /// migration-target form of [`cstring_to_text`]. The `text` varlena is
+    /// always pass-by-reference, so the result is a `Datum::ByRef` holding the
+    /// freshly built varlena bytes (header + payload) allocated in `mcx`. OOM
+    /// `ereport(ERROR)` carried on `Err`.
+    pub fn cstring_to_text_v<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        s: &str,
+    ) -> types_error::PgResult<DatumV<'mcx>>
 );
 
 seam_core::seam!(
@@ -50,10 +86,25 @@ seam_core::seam!(
     /// `SET_VARSIZE(buf, len + VARHDRSZ)`. The bytes are copied into `mcx`. For
     /// `text` results the caller has already run `pg_verifymbstr`; the
     /// representation is identical. OOM `ereport(ERROR)` carried on `Err`.
+    ///
+    /// TRANSITIONAL SHIM: superseded by [`bytes_to_varlena_v`], which returns the
+    /// unified `types_tuple::Datum` value. Kept until callers migrate.
     pub fn bytes_to_varlena<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         bytes: &[u8],
     ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// Wrap raw bytes into a `bytea`/`text` varlena over the unified value type —
+    /// the migration-target form of [`bytes_to_varlena`]. The varlena is
+    /// pass-by-reference, so the result is a `Datum::ByRef` holding the built
+    /// varlena bytes (`VARHDRSZ` header + payload) copied into `mcx`. OOM
+    /// `ereport(ERROR)` carried on `Err`.
+    pub fn bytes_to_varlena_v<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        bytes: &[u8],
+    ) -> types_error::PgResult<DatumV<'mcx>>
 );
 
 seam_core::seam!(
@@ -125,8 +176,24 @@ seam_core::seam!(
     /// `text` varlena `d` points at and copy its payload out as a NUL-free
     /// `String` in `mcx` (C: palloc in the caller's current context). `Err`
     /// carries detoast/OOM `ereport(ERROR)`.
+    ///
+    /// TRANSITIONAL SHIM: superseded by [`text_to_cstring_v`], which takes the
+    /// unified `types_tuple::Datum` value. Kept until callers migrate.
     pub fn text_to_cstring<'mcx>(
         mcx: Mcx<'mcx>,
         d: types_datum::Datum,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `text_to_cstring(t)` (varlena.c) over the unified value type — the
+    /// migration-target form of [`text_to_cstring`]. The `text` argument is a
+    /// pass-by-reference value, so `d` is a `Datum::ByRef` whose bytes are the
+    /// `text` varlena (`TextDatumGetCString` detoasts then copies the payload
+    /// out as a NUL-free `String` in `mcx`). `Err` carries detoast/OOM
+    /// `ereport(ERROR)`.
+    pub fn text_to_cstring_v<'mcx>(
+        mcx: Mcx<'mcx>,
+        d: &DatumV<'_>,
     ) -> PgResult<PgString<'mcx>>
 );

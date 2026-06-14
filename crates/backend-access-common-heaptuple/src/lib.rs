@@ -22,9 +22,9 @@
 //! area as a `Vec<u8>` / `&[u8]` (the same approach `backend-utils-adt-array`
 //! takes for `ArrayType` buffers — see its `access`/`lowlevel` modules). A
 //! per-attribute value that C would pass as a `Datum` is modelled by
-//! [`TupleValue`]:
+//! [`Datum`]:
 //!
-//! * `ByVal(Datum)` — a pass-by-value scalar (`att->attbyval`), stored with
+//! * `ByVal(word)` — a pass-by-value scalar (`att->attbyval`), stored with
 //!   `store_att_byval` / read with `fetch_att`;
 //! * `ByRef(Vec<u8>)` — the *already-detoasted on-disk bytes* of a
 //!   by-reference / varlena / cstring value. This is the faithful idiomatic
@@ -44,7 +44,7 @@
 //! model cannot carry it (a `ByRef` blob of pointer bytes would be invented
 //! opacity), so those branches panic loudly until the expanded-object owner
 //! lands and contributes a real owned representation (e.g. a
-//! `TupleValue::Expanded` variant defined with its types).
+//! `Datum::Expanded` variant defined with its types).
 //! `heap_copy_tuple_as_datum` can reach `toast_flatten_tuple_to_datum`
 //! (`access/heap/heaptoast.c`); that goes through the owner's seam crate
 //! (`backend-access-heap-heaptoast-seams`). The common catalog/tuple path
@@ -71,7 +71,6 @@ use types_tuple::heaptuple::{
 };
 use types_core::{Oid, Size};
 use types_error::{PgError, PgResult};
-use types_datum::Datum;
 
 // ---------------------------------------------------------------------------
 // Per-attribute value model (the faithful idiomatic `Datum` substitute).
@@ -82,8 +81,8 @@ use types_datum::Datum;
 /// representation (see the module docs).
 ///
 /// Defined in `types_tuple::backend_access_common_heaptuple` so seam signatures can
-/// reference it; re-exported here as `crate::TupleValue`.
-pub use types_tuple::backend_access_common_heaptuple::TupleValue;
+/// reference it; re-exported here as `crate::Datum`.
+pub use types_tuple::backend_access_common_heaptuple::Datum;
 
 // ---------------------------------------------------------------------------
 // Alignment + varlena helpers (access/tupmacs.h, varatt.h, c.h), ported 1:1.
@@ -266,16 +265,17 @@ fn att_isnull(att: usize, bits: &[bits8]) -> bool {
 /// `fetch_att(T, attbyval=true, attlen)` for a by-value field at `src[off..]`.
 /// (The by-reference case in C returns `PointerGetDatum(T)`; in the byte model
 /// the caller takes the slice directly, so it is not represented here.)
+///
+/// Returns the raw machine word at the storage edge (C's bare `Datum`); the
+/// caller wraps it into a [`Datum::ByVal`] via [`Datum::from_usize`].
 #[inline]
-fn fetch_att_byval(src: &[u8], off: usize, attlen: i16) -> Datum {
+fn fetch_att_byval(src: &[u8], off: usize, attlen: i16) -> usize {
     match attlen {
-        1 => Datum::from_usize(src[off] as i8 as i64 as usize),
-        2 => Datum::from_usize(i16::from_ne_bytes([src[off], src[off + 1]]) as i64 as usize),
-        4 => Datum::from_usize(
-            i32::from_ne_bytes([src[off], src[off + 1], src[off + 2], src[off + 3]]) as i64
-                as usize,
-        ),
-        8 => Datum::from_usize(usize::from_ne_bytes([
+        1 => src[off] as i8 as i64 as usize,
+        2 => i16::from_ne_bytes([src[off], src[off + 1]]) as i64 as usize,
+        4 => i32::from_ne_bytes([src[off], src[off + 1], src[off + 2], src[off + 3]]) as i64
+            as usize,
+        8 => usize::from_ne_bytes([
             src[off],
             src[off + 1],
             src[off + 2],
@@ -284,7 +284,7 @@ fn fetch_att_byval(src: &[u8], off: usize, attlen: i16) -> Datum {
             src[off + 5],
             src[off + 6],
             src[off + 7],
-        ])),
+        ]),
         _ => {
             // C: elog(ERROR, "unsupported byval length: %d", attlen)
             panic!("unsupported byval length: {attlen}")
@@ -292,10 +292,11 @@ fn fetch_att_byval(src: &[u8], off: usize, attlen: i16) -> Datum {
     }
 }
 
-/// `store_att_byval(T=&dest[off..], newdatum, attlen)` (tupmacs.h).
+/// `store_att_byval(T=&dest[off..], newdatum, attlen)` (tupmacs.h). `newdatum`
+/// is the raw machine word at the storage edge (C's bare `Datum`).
 #[inline]
-fn store_att_byval(dest: &mut [u8], off: usize, newdatum: Datum, attlen: i16) {
-    let word = newdatum.as_usize() as u64;
+fn store_att_byval(dest: &mut [u8], off: usize, newdatum: usize, attlen: i16) {
+    let word = newdatum as u64;
     match attlen {
         1 => dest[off] = word as u8,
         2 => dest[off..off + 2].copy_from_slice(&(word as u16).to_ne_bytes()),
@@ -315,7 +316,7 @@ fn store_att_byval(dest: &mut [u8], off: usize, newdatum: Datum, attlen: i16) {
 /// `values[i]` is consulted only for non-null attributes (`isnull[i] == false`).
 pub fn heap_compute_data_size(
     tuple_desc: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> PgResult<Size> {
     let mut data_length: Size = 0;
@@ -362,7 +363,7 @@ fn compact_attr_is_packable(att: &CompactAttribute) -> bool {
 /// `att_datum_alignby(cur_offset, attalignby, attlen, attdatum)` (tupmacs.h):
 /// no alignment for a short varlena, else `TYPEALIGN(attalignby, cur_offset)`.
 #[inline]
-fn att_datum_alignby(cur_offset: usize, attalignby: u8, attlen: i16, val: &TupleValue) -> usize {
+fn att_datum_alignby(cur_offset: usize, attalignby: u8, attlen: i16, val: &Datum) -> usize {
     if attlen == -1 && varatt_is_short(val.as_ref_bytes()) {
         cur_offset
     } else {
@@ -373,7 +374,7 @@ fn att_datum_alignby(cur_offset: usize, attalignby: u8, attlen: i16, val: &Tuple
 /// `att_addlength_datum(cur_offset, attlen, attdatum)` (tupmacs.h):
 /// `att_addlength_pointer(cur_offset, attlen, DatumGetPointer(attdatum))`.
 #[inline]
-fn att_addlength_datum(cur_offset: usize, attlen: i16, val: &TupleValue) -> usize {
+fn att_addlength_datum(cur_offset: usize, attlen: i16, val: &Datum) -> usize {
     if attlen > 0 {
         cur_offset + attlen as usize
     } else if attlen == -1 {
@@ -419,7 +420,7 @@ fn fill_val(
     data: &mut [u8],
     data_off: &mut usize,
     infomask: &mut u16,
-    datum: &TupleValue,
+    datum: &Datum,
     isnull: bool,
 ) -> PgResult<()> {
     let mut off = *data_off;
@@ -520,16 +521,17 @@ fn varsize_short(b: &[u8]) -> usize {
     varsize_1b(b)
 }
 
-/// The pass-by-value word for a [`TupleValue`] (C's `datum` in the byval arm).
-/// A by-value attribute must carry a `ByVal`; a `ByRef` here is a caller type
-/// error (the mirror of [`TupleValue::as_ref_bytes`]'s panic on `ByVal`) —
-/// never silently reassemble a Datum word from bytes.
+/// The pass-by-value machine word for a [`Datum`] (C's `datum` in the byval
+/// arm). A by-value attribute must carry a `ByVal`; a `ByRef` here is a caller
+/// type error (the mirror of [`Datum::as_ref_bytes`]'s panic on `ByVal`) —
+/// never silently reassemble a Datum word from bytes. The raw `usize` is the
+/// storage-edge ABI value handed to [`store_att_byval`].
 #[inline]
-fn byval_datum(datum: &TupleValue) -> Datum {
+fn byval_datum(datum: &Datum) -> usize {
     match datum {
-        TupleValue::ByVal(d) => *d,
-        TupleValue::ByRef(_) => {
-            panic!("byval_datum: by-value attribute handed a TupleValue::ByRef")
+        Datum::ByVal(_) => datum.as_usize(),
+        Datum::ByRef(_) => {
+            panic!("byval_datum: by-value attribute handed a Datum::ByRef")
         }
     }
 }
@@ -557,7 +559,7 @@ pub struct FilledData<'mcx> {
 pub fn heap_fill_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_desc: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
     data_size: Size,
     with_bitmap: bool,
@@ -659,7 +661,7 @@ pub use types_tuple::backend_access_common_heaptuple::FormedTuple;
 pub fn heap_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_descriptor: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> Result<FormedTuple<'mcx>, HeapTupleError> {
     let number_of_attributes = tuple_descriptor.natts;
@@ -806,7 +808,7 @@ pub fn heap_deform_tuple<'mcx>(
         let thisatt = &tuple_desc.compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
-            out.push((TupleValue::ByVal(Datum::null()), true));
+            out.push((Datum::null(), true));
             slow = true; // can't use attcacheoff anymore
             attnum += 1;
             continue;
@@ -864,12 +866,12 @@ fn fetchatt<'mcx>(
     att: &CompactAttribute,
     data: &[u8],
     off: usize,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if att.attbyval {
-        Ok(TupleValue::ByVal(fetch_att_byval(data, off, att.attlen)))
+        Ok(Datum::from_usize(fetch_att_byval(data, off, att.attlen)))
     } else {
         let end = att_addlength_pointer(off, att.attlen, data, off);
-        Ok(TupleValue::ByRef(slice_in(mcx, &data[off..end])?))
+        Ok(Datum::ByRef(slice_in(mcx, &data[off..end])?))
     }
 }
 
@@ -921,7 +923,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// heaptuple.c:96-215) — machinery whose sole purpose is giving the returned
 /// pointer Datum a lifetime that survives tupleDesc destruction. In the owned
 /// model the value *is* its bytes (`AttrMissing.am_value` is a
-/// [`TupleValue`]), so the cache dissolves (`docs/mctx-design.md`): the bytes
+/// [`Datum`]), so the cache dissolves (`docs/mctx-design.md`): the bytes
 /// are copied into the caller's `mcx` (the `datumCopy`), and lifetime safety
 /// is the `'mcx` bound. Fallible: the copy allocates.
 pub fn getmissingattr<'mcx>(
@@ -954,7 +956,7 @@ pub fn getmissingattr<'mcx>(
     }
 
     // *isnull = true; return PointerGetDatum(NULL);
-    Ok((TupleValue::ByVal(Datum::null()), true))
+    Ok((Datum::null(), true))
 }
 
 /// Borrow `tupleDesc->constr->missing` (the `AttrMissing[]` array), if present.
@@ -1135,7 +1137,7 @@ pub fn heap_modify_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: &FormedTuple<'_>,
     tuple_desc: &TupleDescData<'_>,
-    repl_values: &[TupleValue<'_>],
+    repl_values: &[Datum<'_>],
     repl_isnull: &[bool],
     do_replace: &[bool],
 ) -> Result<FormedTuple<'mcx>, HeapTupleError> {
@@ -1144,7 +1146,7 @@ pub fn heap_modify_tuple<'mcx>(
     // values = palloc(natts * sizeof(Datum)); isnull = palloc(natts * sizeof(bool));
     // heap_deform_tuple(tuple, tupleDesc, values, isnull);
     let deformed = heap_deform_tuple(mcx, &tuple.tuple, tuple_desc, &tuple.data)?;
-    let mut values: PgVec<'mcx, TupleValue<'mcx>> =
+    let mut values: PgVec<'mcx, Datum<'mcx>> =
         vec_with_capacity_in(mcx, number_of_attributes)?;
     let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, number_of_attributes)?;
     for (val, null) in deformed {
@@ -1187,7 +1189,7 @@ pub fn heap_modify_tuple_by_cols<'mcx>(
     tuple_desc: &TupleDescData<'_>,
     n_cols: i32,
     repl_cols: &[i32],
-    repl_values: &[TupleValue<'_>],
+    repl_values: &[Datum<'_>],
     repl_isnull: &[bool],
 ) -> Result<FormedTuple<'mcx>, HeapTupleError> {
     let number_of_attributes = tuple_desc.natts;
@@ -1195,7 +1197,7 @@ pub fn heap_modify_tuple_by_cols<'mcx>(
     // values = palloc(natts * sizeof(Datum)); isnull = palloc(natts * sizeof(bool));
     // heap_deform_tuple(tuple, tupleDesc, values, isnull);
     let deformed = heap_deform_tuple(mcx, &tuple.tuple, tuple_desc, &tuple.data)?;
-    let mut values: PgVec<'mcx, TupleValue<'mcx>> =
+    let mut values: PgVec<'mcx, Datum<'mcx>> =
         vec_with_capacity_in(mcx, number_of_attributes as usize)?;
     let mut isnull: PgVec<'mcx, bool> =
         vec_with_capacity_in(mcx, number_of_attributes as usize)?;
@@ -1250,7 +1252,7 @@ fn copy_tuple_identity(new_tuple: &mut FormedTuple, old: &FormedTuple) {
 /// [`types_tuple::backend_access_common_heaptuple`] (where it lives so the
 /// `types-nodes` slot payload model can carry it as the
 /// `MinimalTupleTableSlot.mintuple` field), matching the homing of
-/// [`FormedTuple`]/[`TupleValue`].
+/// [`FormedTuple`]/[`Datum`].
 pub use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 /// `heap_form_minimal_tuple(tupleDescriptor, values, isnull, extra)`
@@ -1271,7 +1273,7 @@ pub use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 pub fn heap_form_minimal_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_descriptor: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
     extra: Size,
 ) -> Result<FormedMinimalTuple<'mcx>, HeapTupleError> {
@@ -1464,7 +1466,7 @@ pub fn nocachegetattr<'mcx>(
     attnum: i32,
     tuple_desc: &TupleDescData<'_>,
     data: &[u8],
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     debug_assert!(attnum > 0, "nocachegetattr: attnum must be > 0");
     let td = tuple
         .t_data
@@ -1602,25 +1604,21 @@ pub fn heap_getsysattr<'mcx>(
     // Currently, no sys attribute ever reads as NULL.
     let value = if attnum == SelfItemPointerAttributeNumber as i32 {
         // PointerGetDatum(&(tup->t_self)): the ItemPointerData bytes.
-        TupleValue::ByRef(item_pointer_bytes(mcx, &tuple.t_self)?)
+        Datum::ByRef(item_pointer_bytes(mcx, &tuple.t_self)?)
     } else if attnum == MinTransactionIdAttributeNumber as i32 {
         // TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(tup->t_data))
-        TupleValue::ByVal(Datum::from_u32(
-            types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header),
-        ))
+        Datum::from_u32(types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header))
     } else if attnum == MaxTransactionIdAttributeNumber as i32 {
         // TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(tup->t_data))
-        TupleValue::ByVal(Datum::from_u32(header_raw_xmax(header)))
+        Datum::from_u32(header_raw_xmax(header))
     } else if attnum == MinCommandIdAttributeNumber as i32
         || attnum == MaxCommandIdAttributeNumber as i32
     {
         // CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(tup->t_data))
-        TupleValue::ByVal(Datum::from_u32(
-            types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId(header),
-        ))
+        Datum::from_u32(types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId(header))
     } else if attnum == TableOidAttributeNumber as i32 {
         // ObjectIdGetDatum(tup->t_tableOid)
-        TupleValue::ByVal(Datum::from_oid(tuple.t_tableOid))
+        Datum::from_oid(tuple.t_tableOid)
     } else {
         panic!("invalid attnum: {attnum}");
     };
@@ -1825,7 +1823,7 @@ fn expand_tuple<'mcx>(
                 &mut data,
                 &mut cursor,
                 &mut infomask,
-                &TupleValue::ByVal(Datum::null()),
+                &Datum::null(),
                 true,
             )?;
         }
@@ -1845,11 +1843,11 @@ fn expand_tuple<'mcx>(
     })
 }
 
-/// The [`TupleValue`] for a present missing attribute (shared by
+/// The [`Datum`] for a present missing attribute (shared by
 /// [`getmissingattr`] and [`expand_tuple`]). C stores `attrmiss->am_value` as
 /// a `Datum`: the scalar word for a by-value attribute, a pointer to the
 /// value's bytes for a by-reference one. `AttrMissing.am_value` carries
-/// exactly that as a [`TupleValue`]; this only checks (debug) that the stored
+/// exactly that as a [`Datum`]; this only checks (debug) that the stored
 /// shape matches the attribute's `attbyval` — in C a mismatch would be the
 /// same caller/catalog corruption, read through the wrong Datum
 /// interpretation.
@@ -1857,9 +1855,9 @@ fn expand_tuple<'mcx>(
 fn missing_value<'a, 'mcx>(
     attrmiss: &'a types_tuple::heaptuple::AttrMissing<'mcx>,
     att: &CompactAttribute,
-) -> &'a TupleValue<'mcx> {
+) -> &'a Datum<'mcx> {
     debug_assert_eq!(
-        matches!(attrmiss.am_value, TupleValue::ByVal(_)),
+        matches!(attrmiss.am_value, Datum::ByVal(_)),
         att.attbyval,
         "missing_value: AttrMissing.am_value shape disagrees with attbyval (attlen={})",
         att.attlen

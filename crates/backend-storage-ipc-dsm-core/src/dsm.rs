@@ -387,7 +387,10 @@ pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader, max_backends: i32) -> Pg
     let control = control_address as *mut dsm_control_header;
     DSM_CONTROL.with(|c| c.set(control));
 
-    on_shmem_exit(dsm_postmaster_shutdown, Datum::from_usize(shim as usize))?;
+    on_shmem_exit(
+        dsm_postmaster_shutdown,
+        types_tuple::Datum::from_usize(shim as usize),
+    )?;
     elog(
         DEBUG2,
         format!(
@@ -537,7 +540,7 @@ fn dsm_cleanup_for_mmap() -> PgResult<()> {
 /// control segment and remove all remaining segments, avoiding errors
 /// (non-critical cleanup; the postmaster is exiting either way). Registered
 /// with `on_shmem_exit` by [`dsm_postmaster_startup`].
-fn dsm_postmaster_shutdown(_code: i32, arg: Datum) -> PgResult<()> {
+fn dsm_postmaster_shutdown(_code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
     let mut junk_mapped_address: *mut u8 = std::ptr::null_mut();
     let mut junk_impl_private = DsmImplPrivate::None;
     let mut junk_mapped_size: usize = 0;

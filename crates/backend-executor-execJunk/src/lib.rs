@@ -33,7 +33,6 @@ use backend_executor_execTuples::exectype_tupoutput::ExecCleanTypeFromTL;
 use backend_executor_execTuples_seams as execTuples;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::executor::TupleSlotKind;
 use types_nodes::execnodes::{EStateData, JunkFilter, SlotId};
@@ -297,12 +296,20 @@ pub fn ExecFilterJunk<'mcx>(
     //       if (j == 0) { values[i] = (Datum) 0; isnull[i] = true; }
     //       else        { values[i] = old_values[j - 1]; isnull[i] = old_isnull[j - 1]; }
     //   }
-    let mut values = vec_with_capacity_in::<Datum>(mcx, cleanLength)?;
+    // `values` flows verbatim into `store_virtual_values` and is fed from
+    // `slot_getattr_by_id`; both are the execTuples slot-payload seam, whose
+    // canonical carrier is `types_tuple::backend_access_common_heaptuple::Datum`
+    // (the ByVal/ByRef enum). No scalar is constructed or inspected here — the
+    // per-column `tts_values` images are carried whole through the canonical
+    // type, so by-reference values cross intact (no bare-word `as_usize` edge).
+    let mut values = vec_with_capacity_in::<
+        types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    >(mcx, cleanLength)?;
     let mut isnull = vec_with_capacity_in::<bool>(mcx, cleanLength)?;
     for i in 0..cleanLength {
         let j = junkfilter.jf_cleanMap[i];
         if j == 0 {
-            values.push(Datum::null());
+            values.push(types_tuple::backend_access_common_heaptuple::Datum::null());
             isnull.push(true);
         } else {
             // old_values[j - 1] / old_isnull[j - 1]: read source attribute j

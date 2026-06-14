@@ -12,6 +12,11 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_namespace::FuncArgInfo;
+// The canonical unified value type (Datum-unification keystone). The seam
+// signatures below take/return it (`ByVal`/`ByRef`) with the call frame's
+// `'mcx` lifetime; the bare-word `types_datum::Datum` shim is retained
+// elsewhere until cleanup.
+use types_tuple::Datum;
 
 seam_core::seam!(
     /// `InitMaterializedSRF(fcinfo, flags)` (funcapi.c) — set up the calling
@@ -34,7 +39,7 @@ seam_core::seam!(
     /// `Err`.
     pub fn materialized_srf_putvalues<'mcx>(
         rsinfo: &mut types_nodes::funcapi::ReturnSetInfo<'mcx>,
-        values: &[types_datum::Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
     ) -> types_error::PgResult<()>
 );
@@ -62,9 +67,9 @@ seam_core::seam!(
     pub fn record_from_values<'mcx>(
         mcx: Mcx<'mcx>,
         coltypes: &[Oid],
-        values: &[types_datum::Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
-    ) -> PgResult<types_datum::Datum>
+    ) -> PgResult<Datum<'mcx>>
 );
 
 seam_core::seam!(
@@ -74,10 +79,12 @@ seam_core::seam!(
     /// `multi_call_memory_ctx` and `user_fctx`) is funcapi-owned and not yet
     /// modeled (only the materialize-mode tuplestore path is). The
     /// `pg_partition_tree` / `pg_partition_ancestors` / `pg_lock_status`
-    /// value-SRFs cross here until that owner lands: the seam runs the whole
-    /// function for the caller given a closure producing its full row set.
-    /// Declared genuinely-unported so the call panics loudly rather than
-    /// silently degrading the SRF protocol.
+    /// value-SRFs cross here until that machinery lands. funcapi (the owner)
+    /// INSTALLS this seam in its `init_seams()` with an EXPLICIT honest
+    /// seam-and-panic body (mirror-pg-and-panic): the call panics loudly,
+    /// owner-rooted, naming the missing value-per-call protocol instead of
+    /// silently degrading the SRF or aborting on an uninstalled seam. Replace
+    /// the body with the real per-call `FuncCallContext` machinery when ported.
     pub fn value_srf_unported() -> ()
 );
 
@@ -99,5 +106,5 @@ seam_core::seam!(
     pub fn cstring_get_text_datum<'mcx>(
         mcx: Mcx<'mcx>,
         s: &str,
-    ) -> PgResult<types_datum::Datum>
+    ) -> PgResult<Datum<'mcx>>
 );

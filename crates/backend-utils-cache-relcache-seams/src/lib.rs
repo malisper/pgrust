@@ -7,6 +7,42 @@
 //! plain field reads need no seam; only `rd_tableam` — whose vtable type
 //! lives above `types-rel` — is resolved through the owner.
 
+/// The owned relcache entry-store type family, relocated to the standalone
+/// `types-relcache-entry` crate in F0'. Re-exported here so this seam crate can
+/// name `RelationData` (+ companions) for the forthcoming cross-crate
+/// shared-`Rc<RefCell<RelationData>>` seam (`relation_id_get_relation_shared`,
+/// promoted in a later wave). No seam consumes it yet — this is the naming
+/// enabler only.
+pub use types_relcache_entry::{
+    FormPgClass, FormPgIndex, LockInfoData, OwnedAttr, OwnedAttrDefault, OwnedConstrCheck,
+    OwnedTupleConstr, OwnedTupleDesc, RelationData,
+};
+
+/// The dual-carry shared relcache cell type: `Rc<RefCell<RelationData>>` — a
+/// CLONE of C's live `RelationData *` into the cache. `types_rel::Relation`
+/// carries this (type-erased to `Rc<dyn Any>` to dodge the crate cycle); these
+/// monomorphized wrappers recover the concrete cell for consumers that cannot
+/// (or would rather not) spell the downcast.
+pub type RelcacheEntryCell = std::rc::Rc<std::cell::RefCell<RelationData>>;
+
+/// The concrete shared relcache cell a [`types_rel::Relation`] carries, if it
+/// was opened from the cache (the dual-carry migration target). `None` for a
+/// cache-less handle (transient/bootstrap/test rels). Monomorphizes
+/// [`types_rel::Relation::entry_as`] over the relcache owner's `RelationData`.
+pub fn relation_entry_cell(rel: &types_rel::Relation<'_>) -> Option<RelcacheEntryCell> {
+    rel.entry_as::<RelationData>()
+}
+
+/// Borrow the shared relcache entry a [`types_rel::Relation`] carries and run
+/// `f` against it (the live entry — sees in-place rebuilds). `None` for a
+/// cache-less handle. Monomorphizes [`types_rel::Relation::with_entry`] over
+/// the relcache owner's `RelationData`; the off-`Deref` migration helper.
+pub fn relation_with_entry<R>(
+    rel: &types_rel::Relation<'_>,
+    f: impl FnOnce(&RelationData) -> R,
+) -> Option<R> {
+    rel.with_entry::<RelationData, R>(f)
+}
 
 seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
@@ -19,6 +55,31 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         relation_id: types_core::primitive::Oid,
     ) -> types_error::PgResult<Option<types_rel::RelationData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `RelationIdGetRelation(relationId)` + hand back C's live shared pointer
+    /// (relcache.c): the ADDITIVE shared-ref entry point. Same lookup/build/pin
+    /// logic as [`relation_id_get_relation`], but instead of projecting a *copy*
+    /// of the entry it returns a CLONE of the cache's
+    /// `Rc<RefCell<RelationData>>` (C's `RelationData *` into the cache). A
+    /// holder of this clone sees the in-place `*cell.borrow_mut() = rebuilt`
+    /// rebuild (true C semantics) and makes `Rc::strong_count > 1` (the safe
+    /// analog of `rd_refcnt > 0` pinning the allocation). The pin is tracked on
+    /// `rd_refcnt`; the holder must `relation_close`/drop a paired pin to
+    /// release it. `Ok(None)` is the C NULL (no `pg_class` row).
+    ///
+    /// This is the cross-crate promotion of the relcache owner's crate-local
+    /// `relation_id_get_relation_shared`, declared here so the later Deref-flip
+    /// wave can re-key `types_rel::Relation` onto the shared entry cell across
+    /// crates. It coexists with the copy-projecting [`relation_id_get_relation`]
+    /// (kept alive for the consumers that have not migrated yet); both
+    /// representations are produced from the same cell.
+    pub fn relation_id_get_relation_shared(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<
+        Option<std::rc::Rc<std::cell::RefCell<types_relcache_entry::RelationData>>>,
+    >
 );
 
 seam_core::seam!(
@@ -141,6 +202,33 @@ seam_core::seam!(
         my_subid: types_core::SubTransactionId,
         parent_subid: types_core::SubTransactionId,
     ) -> types_error::PgResult<()>
+);
+
+/// `IndexAttrBitmapKind` (relcache.h) — which attribute bitmap
+/// `RelationGetIndexAttrBitmap` should return. Mirrors the owner's enum (kept
+/// here so cross-crate callers can name the kind without depending on the
+/// relcache crate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexAttrBitmapKind {
+    Keys,
+    PrimaryKey,
+    Identity,
+    HotBlocking,
+    Summarized,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexAttrBitmap(relation, attrKind)` (relcache.c): the set of
+    /// table column numbers (offset by `FirstLowInvalidHeapAttributeNumber`)
+    /// indexed under the requested `attrKind`, or `None` when the relation has
+    /// no indexes contributing to that bitmap (the C NULL). Built once and
+    /// cached on the entry; the returned set is `bms_copy`d into `mcx`. Opens
+    /// the relation's indexes, so it can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_get_index_attr_bitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::RelationData<'_>,
+        attr_kind: IndexAttrBitmapKind,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -403,6 +491,12 @@ seam_core::seam!(
     /// output (i.e. supports btree-style ordering). `Err` only on a relcache
     /// miss (the C dereferences `rd_indam` unconditionally).
     pub fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
+seam_core::seam!(
+    /// `indexRel->rd_indam->amsearcharray` — whether the index AM expands
+    /// `ScalarArrayOpExpr` quals itself (the `SK_SEARCHARRAY` build path in
+    /// `ExecIndexBuildScanKeys`). `Err` only on a relcache miss.
+    pub fn rd_indam_amsearcharray(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

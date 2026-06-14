@@ -23,11 +23,13 @@
 //! parser-setup hooks are never invoked from `params.c` itself.
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use mcx::Mcx;
 use types_core::primitive::{Oid, ParseLoc};
-use types_datum::Datum;
+use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::nodes::NodeTag;
 
@@ -36,10 +38,10 @@ use crate::nodes::NodeTag;
 pub const PARAM_FLAG_CONST: u16 = 0x0001;
 
 /// `ParamExternData` (`nodes/params.h`) — one external parameter value.
-#[derive(Clone, Copy, Debug)]
-pub struct ParamExternData {
+#[derive(Clone, Debug)]
+pub struct ParamExternData<'mcx> {
     /// `Datum value` — parameter value.
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// `bool isnull` — is it NULL?
     pub isnull: bool,
     /// `uint16 pflags` — flag bits, see [`PARAM_FLAG_CONST`].
@@ -48,16 +50,28 @@ pub struct ParamExternData {
     pub ptype: Oid,
 }
 
-impl ParamExternData {
+impl ParamExternData<'_> {
     /// A fresh, fully-NULL slot — the `palloc`'d initial state of each
     /// flexible-array entry and the C stack `prmdata` workspace.
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         ParamExternData {
             value: Datum::null(),
             isnull: false,
             pflags: 0,
             ptype: 0,
         }
+    }
+
+    /// Deep copy into `mcx` (C: `copyParamList`/`datumCopy` shape — each entry's
+    /// by-reference [`Datum`] is re-allocated in the target context). Fallible:
+    /// copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ParamExternData<'b>> {
+        Ok(ParamExternData {
+            value: self.value.clone_in(mcx)?,
+            isnull: self.isnull,
+            pflags: self.pflags,
+            ptype: self.ptype,
+        })
     }
 }
 
@@ -69,12 +83,21 @@ pub struct ParamHookArg {
     _private: (),
 }
 
+impl ParamHookArg {
+    /// Deep copy into `mcx` (C: `copyObject` shape). The opaque caller user-data
+    /// carries no owned children, so this is a trivial reproduction; it stays
+    /// fallible to mirror the rest of the `clone_in` family.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<ParamHookArg> {
+        Ok(ParamHookArg { _private: () })
+    }
+}
+
 /// `ParamListInfoData` (`nodes/params.h`) — the bound-parameter payload.
 ///
 /// `params` is the C flexible array member: length `numParams`, or length zero
 /// when `param_fetch` is supplied (the dynamic path).
 #[derive(Clone, Debug)]
-pub struct ParamListInfoData {
+pub struct ParamListInfoData<'mcx> {
     /// `ParamFetchHook paramFetch` — whether a dynamic parameter-fetch hook is
     /// installed. The hook itself lives in the caller's subsystem; the params
     /// operations only branch on its presence (`paramFetch != NULL`).
@@ -97,16 +120,62 @@ pub struct ParamListInfoData {
     /// `int numParams` — nominal/maximum number of params represented.
     pub num_params: i32,
     /// `ParamExternData params[FLEXIBLE_ARRAY_MEMBER]`.
-    pub params: Vec<ParamExternData>,
+    pub params: Vec<ParamExternData<'mcx>>,
+}
+
+impl ParamListInfoData<'_> {
+    /// Deep copy into `mcx` (C: `copyParamList` shape — the hook flags/args and
+    /// the per-parameter values are reproduced into the target context).
+    /// Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ParamListInfoData<'b>> {
+        let mut params = Vec::with_capacity(self.params.len());
+        for p in &self.params {
+            params.push(p.clone_in(mcx)?);
+        }
+        Ok(ParamListInfoData {
+            param_fetch: self.param_fetch,
+            param_fetch_arg: match &self.param_fetch_arg {
+                Some(a) => Some(Box::new(a.clone_in(mcx)?)),
+                None => None,
+            },
+            param_compile: self.param_compile,
+            param_compile_arg: match &self.param_compile_arg {
+                Some(a) => Some(Box::new(a.clone_in(mcx)?)),
+                None => None,
+            },
+            parser_setup: self.parser_setup,
+            parser_setup_arg: match &self.parser_setup_arg {
+                Some(a) => Some(Box::new(a.clone_in(mcx)?)),
+                None => None,
+            },
+            param_values_str: self.param_values_str.as_ref().map(|s| s.to_string()),
+            num_params: self.num_params,
+            params,
+        })
+    }
 }
 
 /// `ParamsErrorCbData` (`nodes/params.h`) — argument for `ParamsErrorCallback`.
 #[derive(Clone, Debug)]
-pub struct ParamsErrorCbData {
+pub struct ParamsErrorCbData<'mcx> {
     /// `const char *portalName`.
     pub portal_name: Option<String>,
     /// `ParamListInfo params`.
-    pub params: Option<Box<ParamListInfoData>>,
+    pub params: Option<Box<ParamListInfoData<'mcx>>>,
+}
+
+impl ParamsErrorCbData<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ParamsErrorCbData<'b>> {
+        Ok(ParamsErrorCbData {
+            portal_name: self.portal_name.as_ref().map(|s| s.to_string()),
+            params: match &self.params {
+                Some(p) => Some(Box::new(p.clone_in(mcx)?)),
+                None => None,
+            },
+        })
+    }
 }
 
 /// `T_Param` (`nodes/nodetags.h`) — node tag of a [`crate::primnodes::Param`]
@@ -133,5 +202,12 @@ impl ParamRef {
     /// `makeNode(ParamRef)` with the given parameter number and location.
     pub fn new(number: i32, location: ParseLoc) -> Self {
         ParamRef { number, location }
+    }
+
+    /// Deep copy into `mcx` (C: `copyObject` shape). `ParamRef` is a flat
+    /// `Copy` node with no owned children, so this is a trivial reproduction;
+    /// it stays fallible to mirror the rest of the `clone_in` family.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<ParamRef> {
+        Ok(*self)
     }
 }

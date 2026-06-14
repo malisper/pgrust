@@ -2,9 +2,10 @@
 //! (`access/transam/xloginsert.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
+use types_core::primitive::{BlockNumber, ForkNumber};
 use types_core::{RmgrId, XLogRecPtr};
 use types_error::PgResult;
-use types_storage::Buffer;
+use types_storage::{Buffer, RelFileLocator};
 
 seam_core::seam!(
     /// One whole-record insertion: C's `XLogBeginInsert()`, one
@@ -39,6 +40,26 @@ seam_core::seam!(
     /// the record under construction (`flags` is the `REGBUF_*` bitmask).
     /// `elog(ERROR)` on a bad block_id or double registration.
     pub fn xlog_register_buffer(block_id: u8, buffer: Buffer, flags: u8) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogRegisterBlock(block_id, rlocator, forknum, blknum, page, flags)`
+    /// (xloginsert.c) — register a block with the record by an explicit
+    /// relation/fork/block identity and a caller-supplied `page` image (rather
+    /// than a live `Buffer`). Used by `heap_inplace_update_and_unlock`, which
+    /// builds the post-mutation block image on the stack so the FPI captures
+    /// the page as it will look *after* the in-place memcpy (WAL-before-data
+    /// ordering). `page` is `BLCKSZ` long. `elog(ERROR)` on a bad block_id or
+    /// double registration. **Owned by `backend-access-transam-xloginsert`;
+    /// uninstalled — and panics — until that unit lands.**
+    pub fn xlog_register_block(
+        block_id: u8,
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+        blknum: BlockNumber,
+        page: &[u8],
+        flags: u8,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

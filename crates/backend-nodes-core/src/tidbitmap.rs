@@ -1579,6 +1579,18 @@ fn provide_tbm_add_tuple(
     registry_with(tbm.0, |inner| inner.add_tuples(&[tid], false))?
 }
 
+/// Provider for `backend_nodes_core_seams::tbm_add_tuples`: add an array of heap
+/// TIDs to the bitmap referenced by `tbm` (`tbm_add_tuples(tbm, tids, ntids,
+/// recheck)`). Bridges the opaque `TbmHandle` seam contract onto the real
+/// registry-keyed bitmap mutation, mirroring `provide_tbm_add_tuple`.
+fn provide_tbm_add_tuples(
+    tbm: backend_nodes_core_seams::TbmHandle,
+    tids: &[ItemPointerData],
+    recheck: bool,
+) -> PgResult<()> {
+    registry_with(tbm.0, |inner| inner.add_tuples(tids, recheck))?
+}
+
 /// Provider for `tbm_free(tbm)` (`tidbitmap.c`): free the bitmap and any buffers
 /// it holds. Drops the registered inner (the C `pfree(pagetable)` /
 /// `pfree(spages/schunks)` / `pfree(tbm)`) and clears the carrier.
@@ -1892,6 +1904,7 @@ fn provide_tbm_union(
 /// [`crate::init_seams`] once the family is filled.
 pub fn init_seams() {
     backend_nodes_core_seams::tbm_add_tuple::set(provide_tbm_add_tuple);
+    backend_nodes_core_seams::tbm_add_tuples::set(provide_tbm_add_tuples);
 
     backend_nodes_core_tidbitmap_seams::tbm_create::set(provide_tbm_create);
     backend_nodes_core_tidbitmap_seams::tbm_union::set(provide_tbm_union);

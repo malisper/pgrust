@@ -51,9 +51,9 @@ seam_core::seam!(
     /// serialized `bytea *` (or `None` for the C NULL). The fmgr invocation of
     /// `procinfo` and the option-validation `ereport(ERROR)`s are carried on
     /// `Err`; OOM from the built varlena too.
-    pub fn index_build_local_reloptions(
+    pub fn index_build_local_reloptions<'mcx>(
         procinfo: types_core::fmgr::FmgrInfo,
-        attoptions: types_datum::Datum,
+        attoptions: types_tuple::Datum<'mcx>,
         validate: bool,
     ) -> PgResult<Option<std::vec::Vec<u8>>>
 );

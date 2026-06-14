@@ -13,6 +13,12 @@ use super::*;
 use mcx::MemoryContext;
 use std::sync::Once;
 
+// The canonical unified value type (`types_tuple::Datum<'mcx>`) is the
+// seam-contract currency these tests feed into the `output_function_call` /
+// aggregate / build relay paths, matching the migrated crate body. The fixtures
+// construct scalar by-value Datums via the canonical `from_*` codec API.
+use types_tuple::Datum;
+
 use types_json::{JsonParseErrorType as PErr, JsonTokenType as Tok, JsonTypeCategory as Cat};
 
 fn ctx() -> MemoryContext {
@@ -181,7 +187,7 @@ fn install_catalog() {
         backend_utils_adt_jsonfuncs_seams::categorize_type::set(|_typoid| {
             Ok((Cat::JSONTYPE_NUMERIC, 42))
         });
-        backend_utils_adt_jsonfuncs_seams::output_function_call::set(|_oid, val: Datum| {
+        backend_utils_adt_jsonfuncs_seams::output_function_call::set(|_oid, val: &Datum| {
             Ok(alloc::format!("{}", val.as_i32()).into_bytes())
         });
         // datum_to_json_internal (post-audit) guards recursion with
@@ -196,9 +202,9 @@ fn json_agg_builds_array() {
     install_catalog();
     let c = ctx();
     let mut state: Option<JsonAggState> = None;
-    state = Some(json_agg_transfn(c.mcx(), state, 23, Datum::from_i32(1), false).unwrap());
+    state = Some(json_agg_transfn(c.mcx(), state, 23, &Datum::from_i32(1), false).unwrap());
     state = Some(
-        json_agg_transfn(c.mcx(), state, 23, Datum::from_i32(2), false).unwrap(),
+        json_agg_transfn(c.mcx(), state, 23, &Datum::from_i32(2), false).unwrap(),
     );
     let out = json_agg_finalfn(c.mcx(), state.as_ref()).unwrap().unwrap();
     assert_eq!(s(&out), "[1, 2]");
@@ -222,9 +228,9 @@ fn json_object_agg_builds_object() {
             state,
             23,
             23,
-            Datum::from_i32(1),
+            &Datum::from_i32(1),
             false,
-            Datum::from_i32(10),
+            &Datum::from_i32(10),
             false,
         )
         .unwrap(),
@@ -243,9 +249,9 @@ fn json_object_agg_null_key_errors() {
         None,
         23,
         23,
-        Datum::null(),
+        &Datum::null(),
         true,
-        Datum::from_i32(1),
+        &Datum::from_i32(1),
         false,
     );
     assert!(r.is_err());

@@ -22,10 +22,17 @@ use backend_utils_cache_syscache as syscache;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use types_cache::SysCacheKey;
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// The system-cache search keys (`SysCacheKey::Value`) and the syscache
+// invalidation callback's `arg` (`SyscacheCallbackFunction`) are audited bare
+// words (C: `Datum key1..key4`, `Datum arg`); both contracts live in
+// `types-cache`, so the word stays here at that edge.
+use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
 use types_reloptions::AttributeOpts;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical owned `Datum<'mcx>` enum — the value carried by a deformed
+// catalog column (`SysCacheGetAttr`).
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `Anum_pg_attribute_attoptions` (`catalog/pg_attribute.h`).
 const Anum_pg_attribute_attoptions: i32 = 23;
@@ -67,7 +74,7 @@ thread_local! {
 ///
 /// When pg_attribute is updated, we must flush the cache entry at least for
 /// that attribute.
-fn InvalidateAttoptCacheCallback(_arg: Datum, _cacheid: i32, hashvalue: u32) {
+fn InvalidateAttoptCacheCallback(_arg: ScalarWord, _cacheid: i32, hashvalue: u32) {
     ATTOPT_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let Some(owned) = slot.as_mut() else { return };
@@ -95,8 +102,8 @@ fn InvalidateAttoptCacheCallback(_arg: Datum, _cacheid: i32, hashvalue: u32) {
 fn relatt_cache_syshash(key: &AttoptCacheKey) -> PgResult<u32> {
     syscache::GetSysCacheHashValue2(
         syscache::ATTNUM,
-        SysCacheKey::Value(Datum::from_oid(key.attrelid)),
-        SysCacheKey::Value(Datum::from_i32(key.attnum)),
+        SysCacheKey::Value(ScalarWord::from_oid(key.attrelid)),
+        SysCacheKey::Value(ScalarWord::from_i32(key.attnum)),
     )
 }
 
@@ -117,7 +124,7 @@ fn InitializeAttoptCache() -> PgResult<()> {
     inval_seams::cache_register_syscache_callback::call(
         syscache::ATTNUM,
         InvalidateAttoptCacheCallback,
-        Datum::null(),
+        ScalarWord::null(),
     )
 }
 
@@ -155,8 +162,8 @@ pub fn get_attribute_options(attrelid: Oid, attnum: i32) -> PgResult<Option<Attr
         let tp = syscache::SearchSysCache2(
             mcx,
             syscache::ATTNUM,
-            SysCacheKey::Value(Datum::from_oid(attrelid)),
-            SysCacheKey::Value(Datum::from_i16(attnum as i16)),
+            SysCacheKey::Value(ScalarWord::from_oid(attrelid)),
+            SysCacheKey::Value(ScalarWord::from_i16(attnum as i16)),
         )?;
 
         // If we don't find a valid HeapTuple, it must mean someone has
@@ -175,8 +182,8 @@ pub fn get_attribute_options(attrelid: Oid, attnum: i32) -> PgResult<Option<Attr
                     None
                 } else {
                     let bytes = match &datum {
-                        TupleValue::ByRef(b) => &b[..],
-                        TupleValue::ByVal(_) => {
+                        Datum::ByRef(b) => &b[..],
+                        Datum::ByVal(_) => {
                             return Err(PgError::error("attoptions datum is not by-reference"))
                         }
                     };

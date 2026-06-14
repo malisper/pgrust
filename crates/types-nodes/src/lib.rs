@@ -30,7 +30,9 @@ pub mod nodeappend;
 pub mod nodebitmapindexscan;
 pub mod nodectescan;
 pub mod nodebitmapand;
+pub mod nodebitmapor;
 pub mod nodeforeigncustom;
+pub mod nodegather;
 pub mod nodegathermerge;
 pub mod nodegroup;
 pub mod nodehash;
@@ -48,6 +50,9 @@ pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
 pub mod nodes;
+/// Central generated leaf-node tree (`Node<'mcx>` + `node_tag`/`copy_node_in`/
+/// `equal_node`), built by `build.rs` from `nodetags.h` + `nodes.list`.
+pub mod node_tree;
 pub mod nodesamplescan;
 pub mod nodeseqscan;
 pub mod nodesort;
@@ -64,9 +69,13 @@ pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
+pub mod querydesc;
 pub mod queryenvironment;
 pub mod saophash;
 pub mod tuptable;
+/// Value nodes (`nodes/value.h`): the leaf literal nodes Integer/Float/Boolean/
+/// String/BitString, `#[derive(PgNode)]`-enabled and re-homed onto `mcx`.
+pub mod value;
 
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
@@ -89,6 +98,7 @@ pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
 };
+pub use nodegather::{Gather, GatherStateData, T_Gather, T_GatherState};
 pub use nodegathermerge::{
     GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE, T_GatherMerge,
     T_GatherMergeState,
@@ -109,14 +119,15 @@ pub use nodehash::{
 };
 pub use nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
-    IndexScanInstrumentation, ParallelIndexScanDesc, ParallelIndexScanDescData, Scan,
-    SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+    IndexScanInstrumentation, IndexScanState, ParallelIndexScanDesc, ParallelIndexScanDescData,
+    ReorderTuple, Scan, SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
 };
 pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
 };
 pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
+pub use nodebitmapor::{BitmapOr, BitmapOrState, T_BitmapOrState};
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,

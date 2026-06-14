@@ -42,13 +42,21 @@ use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
 use types_cache::SysCacheKey;
 use types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, OidIsValid};
-use types_datum::Datum;
+// The migrated by-value tuple surface uses the canonical
+// `types_tuple::...::Datum<'mcx>` enum directly. The bare-word newtype
+// `types_datum::Datum` (here aliased `ScalarWord`) survives only at the
+// audited ABI edges where an *unchanged* cross-crate contract still speaks the
+// plain scalar word: the syscache key (`SysCacheKey::Value`), the scankey
+// argument (`ScanKeyData::sk_argument`), the syscache-invalidation callback
+// `arg` (`SyscacheCallbackFunction`), and the opaque per-template `dictData`
+// `void *` word returned by the dictionary-init fmgr seam.
+use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, NOTICE};
 use types_guc::{GucSource, PGC_S_TEST};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_scan::sdir::ForwardScanDirection;
 use types_storage::lock::AccessShareLock;
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 
 /// `MAXTOKENTYPE` / `MAXDICTSPERTT` — arbitrary limits on the workspace size
 /// used in `lookup_ts_config_cache`. We could avoid hardwiring a limit by
@@ -106,7 +114,7 @@ pub struct TSDictionaryCacheEntry {
     pub dictId: Oid,
     pub isvalid: bool,
     pub lexizeOid: Oid,
-    pub dict_data: Option<Datum>,
+    pub dict_data: Option<ScalarWord>,
 }
 
 /// `ListDictionary` — one token type's dictionary list.
@@ -218,7 +226,7 @@ const TS_CACHE_CONFIG: usize = 3;
 /// doesn't seem worth the trouble to determine that; we just flush all the
 /// entries of the related hash table. The same function serves all TS caches,
 /// selected by `arg`.
-fn InvalidateTSCacheCallBack(arg: Datum, _cacheid: i32, _hashvalue: u32) {
+fn InvalidateTSCacheCallBack(arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     with_state(|st| {
         match arg.as_usize() {
             TS_CACHE_PARSER => {
@@ -261,10 +269,10 @@ fn elog_error<T>(message: String) -> PgResult<T> {
     Err(PgError::error(message))
 }
 
-fn byval_oid(value: TupleValue<'_>) -> PgResult<Oid> {
-    match value {
-        TupleValue::ByVal(d) => Ok(d.as_oid()),
-        TupleValue::ByRef(_) => elog_error("ts_cache: expected a by-value oid".into()),
+fn byval_oid(value: Datum<'_>) -> PgResult<Oid> {
+    match &value {
+        Datum::ByVal(_) => Ok(value.as_oid()),
+        Datum::ByRef(_) => elog_error("ts_cache: expected a by-value oid".into()),
     }
 }
 
@@ -281,11 +289,11 @@ fn getattr_name(
 ) -> PgResult<String> {
     let value = syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
     match &value {
-        TupleValue::ByRef(b) => {
+        Datum::ByRef(b) => {
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             Ok(String::from_utf8_lossy(&b[..len]).into_owned())
         }
-        TupleValue::ByVal(_) => elog_error("ts_cache: name attribute is by-value".into()),
+        Datum::ByVal(_) => elog_error("ts_cache: name attribute is by-value".into()),
     }
 }
 
@@ -306,7 +314,7 @@ pub fn lookup_ts_parser_cache(prsId: Oid) -> PgResult<TSParserCacheEntry> {
         inval_seams::cache_register_syscache_callback::call(
             syscache::TSPARSEROID,
             InvalidateTSCacheCallBack,
-            Datum::from_usize(TS_CACHE_PARSER),
+            ScalarWord::from_usize(TS_CACHE_PARSER),
         )?;
     }
 
@@ -336,7 +344,7 @@ pub fn lookup_ts_parser_cache(prsId: Oid) -> PgResult<TSParserCacheEntry> {
                 let tp = syscache::SearchSysCache1(
                     mcx,
                     syscache::TSPARSEROID,
-                    SysCacheKey::Value(Datum::from_oid(prsId)),
+                    SysCacheKey::Value(ScalarWord::from_oid(prsId)),
                 )?;
                 let Some(tup) = tp else {
                     return elog_error(format!(
@@ -424,12 +432,12 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
         inval_seams::cache_register_syscache_callback::call(
             syscache::TSDICTOID,
             InvalidateTSCacheCallBack,
-            Datum::from_usize(TS_CACHE_DICT),
+            ScalarWord::from_usize(TS_CACHE_DICT),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             syscache::TSTEMPLATEOID,
             InvalidateTSCacheCallBack,
-            Datum::from_usize(TS_CACHE_DICT),
+            ScalarWord::from_usize(TS_CACHE_DICT),
         )?;
     }
 
@@ -461,7 +469,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
             let tpdict = syscache::SearchSysCache1(
                 mcx,
                 syscache::TSDICTOID,
-                SysCacheKey::Value(Datum::from_oid(dictId)),
+                SysCacheKey::Value(ScalarWord::from_oid(dictId)),
             )?;
             let Some(tpdict) = tpdict else {
                 return elog_error(format!(
@@ -481,7 +489,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
             let tptmpl = syscache::SearchSysCache1(
                 mcx,
                 syscache::TSTEMPLATEOID,
-                SysCacheKey::Value(Datum::from_oid(dicttemplate)),
+                SysCacheKey::Value(ScalarWord::from_oid(dicttemplate)),
             )?;
             let Some(tptmpl) = tptmpl else {
                 return elog_error(format!(
@@ -536,7 +544,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
                 ctx
             };
 
-            let mut dict_data: Option<Datum> = None;
+            let mut dict_data: Option<ScalarWord> = None;
             if OidIsValid(tmplinit) {
                 // Init method runs in dictionary's private memory context in
                 // C (MemoryContextSwitchTo(entry->dictCtx)); the ambient
@@ -555,8 +563,8 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
                     // TextDatumGetCString detoast + conversion; the verbatim
                     // varlena bytes cross the seam.
                     let bytes = match &opt {
-                        TupleValue::ByRef(b) => &b[..],
-                        TupleValue::ByVal(_) => {
+                        Datum::ByRef(b) => &b[..],
+                        Datum::ByVal(_) => {
                             return elog_error("dictinitoption is not by-reference".into())
                         }
                     };
@@ -613,12 +621,12 @@ fn init_ts_config_cache() -> PgResult<()> {
     inval_seams::cache_register_syscache_callback::call(
         syscache::TSCONFIGOID,
         InvalidateTSCacheCallBack,
-        Datum::from_usize(TS_CACHE_CONFIG),
+        ScalarWord::from_usize(TS_CACHE_CONFIG),
     )?;
     inval_seams::cache_register_syscache_callback::call(
         syscache::TSCONFIGMAP,
         InvalidateTSCacheCallBack,
-        Datum::from_usize(TS_CACHE_CONFIG),
+        ScalarWord::from_usize(TS_CACHE_CONFIG),
     )?;
     Ok(())
 }
@@ -654,7 +662,7 @@ pub fn lookup_ts_config_cache<'mcx>(
         let tp = syscache::SearchSysCache1(
             smcx,
             syscache::TSCONFIGOID,
-            SysCacheKey::Value(Datum::from_oid(cfgId)),
+            SysCacheKey::Value(ScalarWord::from_oid(cfgId)),
         )?;
         let Some(tup) = tp else {
             return elog_error(format!(
@@ -681,6 +689,8 @@ pub fn lookup_ts_config_cache<'mcx>(
             Anum_pg_ts_config_map_mapcfg as i16,
             BTEqualStrategyNumber,
             F_OIDEQ,
+            // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+            // (the Datum-unification keystone flipped this edge).
             Datum::from_oid(cfgId),
         )?;
         let maprel = table_open(smcx, TSConfigMapRelationId, AccessShareLock)?;
@@ -698,15 +708,17 @@ pub fn lookup_ts_config_cache<'mcx>(
             genam_seams::systable_getnext_ordered::call(smcx, mapscan.desc_mut(), ForwardScanDirection)?
         {
             let row = heap_deform_tuple(smcx, &maptup.tuple, &maprel.rd_att, &maptup.data)?;
-            let toktype = match &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0 {
-                TupleValue::ByVal(d) => d.as_i32(),
-                TupleValue::ByRef(_) => {
+            let toktype_d = &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0;
+            let toktype = match toktype_d {
+                Datum::ByVal(_) => toktype_d.as_i32(),
+                Datum::ByRef(_) => {
                     return elog_error("maptokentype is not by-value".into())
                 }
             };
-            let mapdict = match &row[(Anum_pg_ts_config_map_mapdict - 1) as usize].0 {
-                TupleValue::ByVal(d) => d.as_oid(),
-                TupleValue::ByRef(_) => return elog_error("mapdict is not by-value".into()),
+            let mapdict_d = &row[(Anum_pg_ts_config_map_mapdict - 1) as usize].0;
+            let mapdict = match mapdict_d {
+                Datum::ByVal(_) => mapdict_d.as_oid(),
+                Datum::ByRef(_) => return elog_error("mapdict is not by-value".into()),
             };
 
             if toktype <= 0 || toktype as usize > MAXTOKENTYPE {
@@ -899,7 +911,7 @@ pub fn check_default_text_search_config(
         let tuple = syscache::SearchSysCache1(
             mcx,
             syscache::TSCONFIGOID,
-            SysCacheKey::Value(Datum::from_oid(cfg_id)),
+            SysCacheKey::Value(ScalarWord::from_oid(cfg_id)),
         )?;
         let Some(tup) = tuple else {
             return elog_error(format!(

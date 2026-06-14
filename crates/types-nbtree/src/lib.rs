@@ -11,17 +11,18 @@
 
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
 
 use mcx::PgVec;
 use types_core::primitive::{
-    uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, XLogRecPtr, BLCKSZ,
+    uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
 use types_core::xact::FullTransactionId;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
 use types_storage::storage::{Buffer, InvalidBuffer, LocationIndex};
-use types_tuple::heaptuple::ItemPointerData;
+use types_tuple::heaptuple::{IndexTuple, ItemPointerData};
 
 /// There's room for a 16-bit vacuum cycle ID in `BTPageOpaqueData`.
 pub type BTCycleId = uint16;
@@ -110,12 +111,198 @@ pub const BT_PIVOT_HEAP_TID_ATTR: uint16 = 0x1000;
 /// to indicate a posting-list tuple.
 pub const BT_IS_POSTING: uint16 = 0x2000;
 
-/// `XLOG_BTREE_DEDUP` (`access/nbtxlog.h`) — WAL info bits for a dedup record.
+// ===========================================================================
+// WAL record info-bit op codes (`access/nbtxlog.h`).
+// ===========================================================================
+
+/// add index tuple without split
+pub const XLOG_BTREE_INSERT_LEAF: u8 = 0x00;
+/// same, on a non-leaf page
+pub const XLOG_BTREE_INSERT_UPPER: u8 = 0x10;
+/// same, plus update metapage
+pub const XLOG_BTREE_INSERT_META: u8 = 0x20;
+/// add index tuple with split
+pub const XLOG_BTREE_SPLIT_L: u8 = 0x30;
+/// as above, new item on right
+pub const XLOG_BTREE_SPLIT_R: u8 = 0x40;
+/// add index tuple with posting split
+pub const XLOG_BTREE_INSERT_POST: u8 = 0x50;
+/// `XLOG_BTREE_DEDUP` (`access/nbtxlog.h`) — deduplicate tuples for a page.
 pub const XLOG_BTREE_DEDUP: u8 = 0x60;
+/// delete leaf index tuples for a page
+pub const XLOG_BTREE_DELETE: u8 = 0x70;
+/// delete a half-dead page
+pub const XLOG_BTREE_UNLINK_PAGE: u8 = 0x80;
+/// same, and update metapage
+pub const XLOG_BTREE_UNLINK_PAGE_META: u8 = 0x90;
+/// new root page
+pub const XLOG_BTREE_NEWROOT: u8 = 0xA0;
+/// mark a leaf as half-dead
+pub const XLOG_BTREE_MARK_PAGE_HALFDEAD: u8 = 0xB0;
+/// delete entries on a page during vacuum
+pub const XLOG_BTREE_VACUUM: u8 = 0xC0;
+/// old page is about to be reused from FSM
+pub const XLOG_BTREE_REUSE_PAGE: u8 = 0xD0;
+/// update cleanup-related data in the metapage
+pub const XLOG_BTREE_META_CLEANUP: u8 = 0xE0;
 
 /// `SizeOfBtreeDedup` (`access/nbtxlog.h`) — `offsetof(xl_btree_dedup,`
 /// `nintervals) + sizeof(uint16)` = 2 (the record is a single `uint16`).
 pub const SizeOfBtreeDedup: usize = 2;
+
+/// `SizeOfBtreeUpdate` (`access/nbtxlog.h`) — `offsetof(xl_btree_update,`
+/// `ndeletedtids) + sizeof(uint16)` = 2 (just the `ndeletedtids` count; the
+/// posting-list deleted-TID offsets follow in the block data).
+pub const SizeOfBtreeUpdate: usize = 2;
+
+// ===========================================================================
+// Metapage layout (`access/nbtree.h`).
+// ===========================================================================
+
+/// `BTREE_METADATA_MAGIC` (`access/nbtree.h`) — magic number identifying a
+/// btree metapage.
+pub const BTREE_MAGIC: u32 = 0x053162;
+/// `BTREE_VERSION` (`access/nbtree.h`) — current version number.
+pub const BTREE_VERSION: u32 = 4;
+/// `BTREE_MIN_VERSION` (`access/nbtree.h`) — minimal supported version number.
+pub const BTREE_MIN_VERSION: u32 = 2;
+/// `BTREE_NOVAC_VERSION` (`access/nbtree.h`) — minimal version with support for
+/// `btpo_level` in `last_cleanup_num_delpages`.
+pub const BTREE_NOVAC_VERSION: u32 = 3;
+
+/// `BTMetaPageData` (`access/nbtree.h`) — the contents of a btree metapage,
+/// stored at `PageGetContents` of block [`BTREE_METAPAGE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BTMetaPageData {
+    /// should contain `BTREE_MAGIC`
+    pub btm_magic: u32,
+    /// should contain `BTREE_VERSION`
+    pub btm_version: u32,
+    /// current root location
+    pub btm_root: BlockNumber,
+    /// tree level of the root page
+    pub btm_level: u32,
+    /// current "fast" root location
+    pub btm_fastroot: BlockNumber,
+    /// tree level of the "fast" root page
+    pub btm_fastlevel: u32,
+    /// number of deleted, non-recyclable pages during last cleanup
+    pub btm_last_cleanup_num_delpages: u32,
+    /// number of heap tuples during last cleanup (deprecated)
+    pub btm_last_cleanup_num_heap_tuples: f64,
+    /// are all columns "equalimage"?
+    pub btm_allequalimage: bool,
+}
+
+// ===========================================================================
+// WAL record on-disk structs (`access/nbtxlog.h`). The redo path decodes
+// these field-by-field out of the (possibly unaligned) WAL byte buffers, so
+// they carry no `#[repr(C)]` ABI contract here.
+// ===========================================================================
+
+/// `xl_btree_metadata` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_metadata {
+    pub version: u32,
+    pub root: BlockNumber,
+    pub level: u32,
+    pub fastroot: BlockNumber,
+    pub fastlevel: u32,
+    pub last_cleanup_num_delpages: u32,
+    pub allequalimage: bool,
+}
+
+/// `xl_btree_insert` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_insert {
+    pub offnum: OffsetNumber,
+}
+
+/// `xl_btree_split` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_split {
+    /// tree level of page being split
+    pub level: u32,
+    /// first origpage item on rightpage
+    pub firstrightoff: OffsetNumber,
+    /// new item's offset
+    pub newitemoff: OffsetNumber,
+    /// offset inside orig posting tuple
+    pub postingoff: uint16,
+}
+
+/// `xl_btree_dedup` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_dedup {
+    pub nintervals: uint16,
+}
+
+/// `xl_btree_reuse_page` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_reuse_page {
+    pub locator: types_storage::RelFileLocator,
+    pub block: BlockNumber,
+    pub snapshotConflictHorizon: FullTransactionId,
+    pub isCatalogRel: bool,
+}
+
+/// `xl_btree_vacuum` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_vacuum {
+    pub ndeleted: uint16,
+    pub nupdated: uint16,
+}
+
+/// `xl_btree_delete` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_delete {
+    pub snapshotConflictHorizon: types_core::primitive::TransactionId,
+    pub ndeleted: uint16,
+    pub nupdated: uint16,
+    pub isCatalogRel: bool,
+}
+
+/// `xl_btree_mark_page_halfdead` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_mark_page_halfdead {
+    /// deleted tuple id in parent page
+    pub poffset: OffsetNumber,
+    /// leaf block ultimately being deleted
+    pub leafblk: BlockNumber,
+    /// leaf block's left sibling, if any
+    pub leftblk: BlockNumber,
+    /// leaf block's right sibling
+    pub rightblk: BlockNumber,
+    /// topmost internal page in the subtree
+    pub topparent: BlockNumber,
+}
+
+/// `xl_btree_unlink_page` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_unlink_page {
+    /// target block's left sibling, if any
+    pub leftsib: BlockNumber,
+    /// target block's right sibling
+    pub rightsib: BlockNumber,
+    /// target block's level
+    pub level: u32,
+    /// target block's `BTPageSetDeleted()` XID
+    pub safexid: FullTransactionId,
+    /// last child of the to-be-deleted subtree's leftmost leaf-level sibling
+    pub leafleftsib: BlockNumber,
+    /// next child of the to-be-deleted subtree
+    pub leafrightsib: BlockNumber,
+    /// next remaining child in to-be-deleted subtree
+    pub leaftopparent: BlockNumber,
+}
+
+/// `xl_btree_newroot` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_newroot {
+    pub rootblk: BlockNumber,
+    pub level: u32,
+}
 
 /// `BTPageOpaqueData` (`access/nbtree.h`) — the btree-specific special-area
 /// header at the end of every btree page (16 bytes, `#[repr(C)]`).
@@ -296,12 +483,12 @@ impl BTParallelScanDescData {
 }
 
 /// `BTSkipSupport` opclass sentinels for a skip array (`access/nbtree.h`).
-#[derive(Clone, Copy, Debug)]
-pub struct BTSkipSupport {
+#[derive(Clone, Debug)]
+pub struct BTSkipSupport<'mcx> {
     /// lowest sorting non-NULL value
-    pub low_elem: Datum,
+    pub low_elem: Datum<'mcx>,
     /// highest sorting non-NULL value
-    pub high_elem: Datum,
+    pub high_elem: Datum<'mcx>,
     /// 1-based attribute number the skip support is for
     pub attno: AttrNumber,
 }
@@ -315,7 +502,7 @@ pub struct BTArrayKeyInfo<'mcx> {
     /// number of elems (-1 means skip array)
     pub num_elems: i32,
     /// array of num_elems Datums (skip arrays leave this empty)
-    pub elem_values: PgVec<'mcx, Datum>,
+    pub elem_values: PgVec<'mcx, Datum<'mcx>>,
     /// index of current element in elem_values
     pub cur_elem: i32,
     /// attr's length, in bytes
@@ -327,7 +514,7 @@ pub struct BTArrayKeyInfo<'mcx> {
     /// skip support fmgr handle (`None` if opclass lacks it)
     pub sksup: Option<u64>,
     /// skip-support sentinels (only meaningful when `sksup.is_some()`)
-    pub sksup_data: Option<BTSkipSupport>,
+    pub sksup_data: Option<BTSkipSupport<'mcx>>,
 }
 
 /// `BTScanPosItem` — what we remember about each match (`access/nbtree.h`).
@@ -428,7 +615,7 @@ pub struct BTScanOpaqueData<'mcx> {
     /// number of preprocessed scan keys
     pub numberOfKeys: i32,
     /// array of preprocessed scan keys
-    pub keyData: PgVec<'mcx, ScanKeyData>,
+    pub keyData: PgVec<'mcx, ScanKeyData<'mcx>>,
 
     /// number of equality-type array keys
     pub numArrayKeys: i32,
@@ -568,3 +755,98 @@ pub struct IndexBulkDeleteResult {
     /// `BlockNumber pages_free` — pages available for reuse.
     pub pages_free: BlockNumber,
 }
+
+// ===========================================================================
+// Insertion / search scankey descriptor model (access/nbtree.h)
+// ---------------------------------------------------------------------------
+// These are the btree-private "insertion scankey" and tree-descent stack
+// structures used by `_bt_search` / `_bt_compare` / `_bt_binsrch_insert`.
+// They are runtime (not on-disk) state, `palloc`'d in C. amcheck
+// (verify_nbtree.c) is a heavy consumer: every cross-page invariant check
+// builds a `BTScanInsert` via `_bt_mkscankey` and descends with `_bt_search`.
+// ===========================================================================
+
+/// `BTStackData` (`access/nbtree.h`) — as we descend a tree, we push the
+/// location of pivot tuples whose downlink we are about to follow onto a
+/// private stack. Used to walk back up after a leaf split, and by
+/// `_bt_rootdescend` in amcheck. The C `bts_parent` is a `BTStackData *`
+/// chain; here it is an owned boxed link.
+#[derive(Clone, Debug)]
+pub struct BTStackData {
+    /// `bts_blkno` — block number of the page the downlink was found on.
+    pub bts_blkno: BlockNumber,
+    /// `bts_offset` — offset of the pivot tuple whose downlink we followed.
+    pub bts_offset: OffsetNumber,
+    /// `bts_parent` — the next stack frame up the tree (the page one level
+    /// above), or `None` at the root.
+    pub bts_parent: Option<Box<BTStackData>>,
+}
+
+/// `BTStackData *` (`access/nbtree.h`).
+pub type BTStack = Option<Box<BTStackData>>;
+
+/// `BTScanInsertData` (`access/nbtree.h`) — the btree-private state needed to
+/// find an initial position for an indexscan, or to insert new tuples: an
+/// "insertion scankey" (not to be confused with a search scankey). Used to
+/// descend a B-tree using `_bt_search`.
+///
+/// The C struct sizes `scankeys[INDEX_MAX_KEYS]` as a flexible array member
+/// (sized to `keysz` at alloc time); here it is a heap [`Vec`], so `keysz`
+/// equals `scankeys.len()`.
+#[derive(Clone, Debug)]
+pub struct BTScanInsertData<'mcx> {
+    /// `heapkeyspace` — do we expect all keys in the index to be physically
+    /// unique because heap TID is used as a tiebreaker (index version >= 4)?
+    pub heapkeyspace: bool,
+    /// `allequalimage` — is deduplication safe for the index?
+    pub allequalimage: bool,
+    /// `anynullkeys` — did any key have a NULL value when the scankey was
+    /// built from an index tuple?
+    pub anynullkeys: bool,
+    /// `nextkey` — see comments in `_bt_first` for nextkey/backward.
+    pub nextkey: bool,
+    /// `backward` — backward index scan?
+    pub backward: bool,
+    /// `scantid` — the heap TID used as a final tiebreaker attribute, or
+    /// `None` when the scan doesn't need to find a position for a specific
+    /// physical tuple.
+    pub scantid: Option<ItemPointerData>,
+    /// `keysz` — size of the `scankeys` array (== `scankeys.len()`).
+    pub keysz: i32,
+    /// `scankeys[]` — scan key entries for attributes compared before
+    /// `scantid` (user-visible attributes). Flexible array member in C.
+    pub scankeys: Vec<ScanKeyData<'mcx>>,
+}
+
+/// `BTScanInsertData *` (`access/nbtree.h`).
+pub type BTScanInsert<'mcx> = Option<Box<BTScanInsertData<'mcx>>>;
+
+/// `BTInsertStateData` (`access/nbtree.h`) — a working area used during
+/// insertion, filled in after descending the tree to the first leaf page the
+/// new tuple might belong on. Tracks the current position while performing the
+/// uniqueness check. Also used by `_bt_binsrch_insert`.
+#[derive(Clone, Debug)]
+pub struct BTInsertStateData<'mcx> {
+    /// `itup` — the item we're inserting.
+    pub itup: IndexTuple<'mcx>,
+    /// `itemsz` — size of `itup`, should be `MAXALIGN()`'d.
+    pub itemsz: Size,
+    /// `itup_key` — insertion scankey.
+    pub itup_key: BTScanInsert<'mcx>,
+    /// `buf` — buffer containing the leaf page we're likely to insert on.
+    pub buf: Buffer,
+    /// `bounds_valid` — is the cached `low`/`stricthigh` bound within `buf`
+    /// still valid?
+    pub bounds_valid: bool,
+    /// `low` — cached lower bound offset within `buf`.
+    pub low: OffsetNumber,
+    /// `stricthigh` — cached strict upper bound offset within `buf`.
+    pub stricthigh: OffsetNumber,
+    /// `postingoff` — if `_bt_binsrch_insert` found the location inside an
+    /// existing posting list, the position inside that list. `-1` indicates
+    /// overlap with an existing LP_DEAD posting-list tuple.
+    pub postingoff: i32,
+}
+
+/// `BTInsertStateData *` (`access/nbtree.h`).
+pub type BTInsertState<'mcx> = Option<Box<BTInsertStateData<'mcx>>>;

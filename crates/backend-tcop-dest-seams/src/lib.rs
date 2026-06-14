@@ -11,10 +11,19 @@
 
 #![allow(non_snake_case)]
 
+use types_dest::CommandDest;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::tuptable::SlotData;
 use types_tuple::heaptuple::TupleDescData;
+
+seam_core::seam!(
+    /// `DestReceiver *CreateDestReceiver(CommandDest dest)` (tcop/dest.c) —
+    /// return (a router-keyed handle to) the receiver function set for `dest`.
+    /// `PerformPortalFetch` calls this with `DestNone` to discard `MOVE`
+    /// output. Infallible in C; the seam returns a plain handle.
+    pub fn create_dest_receiver(dest: CommandDest) -> DestReceiverHandle
+);
 
 seam_core::seam!(
     /// `dest->rStartup(dest, operation, tupdesc)` (tcop/dest.h): tell the

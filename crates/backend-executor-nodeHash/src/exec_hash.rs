@@ -22,6 +22,7 @@ use crate::skew::{ExecHashGetSkewBucket, ExecHashSkewTableInsert};
 use crate::INVALID_SKEW_BUCKET_NO;
 
 use backend_executor_execAmi_seams as execAmi;
+use backend_executor_instrument_seams as instrument;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
@@ -96,14 +97,8 @@ pub fn MultiExecHash<'mcx>(
 ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
     // must provide our own instrumentation support
     //   if (node->ps.instrument) InstrStartNode(node->ps.instrument);
-    if node.ps.instrument.is_some() {
-        // InstrStartNode is owned by backend-executor-instrument, which does
-        // not declare it in its seam crate; the timing path lands with that
-        // owner. (instrument == None on the common, non-EXPLAIN-ANALYZE path.)
-        panic!(
-            "backend-executor-instrument: InstrStartNode not reachable via its \
-             seam crate yet (nodeHash.c:108 MultiExecHash)"
-        );
+    if let Some(instr) = node.ps.instrument.as_deref_mut() {
+        instrument::instr_start_node::call(instr)?;
     }
 
     //   if (node->parallel_state != NULL) MultiExecParallelHash(node);
@@ -118,10 +113,17 @@ pub fn MultiExecHash<'mcx>(
     //   if (node->ps.instrument)
     //       InstrStopNode(node->ps.instrument, node->hashtable->partialTuples);
     if node.ps.instrument.is_some() {
-        panic!(
-            "backend-executor-instrument: InstrStopNode not reachable via its \
-             seam crate yet (nodeHash.c:115 MultiExecHash)"
-        );
+        let partial_tuples = node
+            .hashtable
+            .as_deref()
+            .expect("MultiExecHash: node->hashtable is NULL")
+            .partialTuples;
+        let instr = node
+            .ps
+            .instrument
+            .as_deref_mut()
+            .expect("MultiExecHash: node->ps.instrument is NULL");
+        instrument::instr_stop_node::call(instr, partial_tuples)?;
     }
 
     // We do not return the hash table directly because it's not a subtype of

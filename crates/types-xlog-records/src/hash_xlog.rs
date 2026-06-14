@@ -118,14 +118,15 @@ impl xl_hash_move_page_contents {
     }
 }
 
-/// `xl_hash_squeeze_page`: trimmed of the trailing
-/// `is_prev_bucket_same_wrt` flag.
+/// `xl_hash_squeeze_page`: `{BlockNumber prevblkno; BlockNumber nextblkno;
+/// uint16 ntups; bool is_prim_bucket_same_wrt; bool is_prev_bucket_same_wrt;}`.
 #[derive(Clone, Copy, Debug)]
 pub struct xl_hash_squeeze_page {
     pub prevblkno: BlockNumber,
     pub nextblkno: BlockNumber,
     pub ntups: u16,
     pub is_prim_bucket_same_wrt: bool,
+    pub is_prev_bucket_same_wrt: bool,
 }
 
 impl xl_hash_squeeze_page {
@@ -135,6 +136,7 @@ impl xl_hash_squeeze_page {
             nextblkno: u32_at(rec, 4),
             ntups: u16_at(rec, 8),
             is_prim_bucket_same_wrt: bool_at(rec, 10),
+            is_prev_bucket_same_wrt: bool_at(rec, 11),
         }
     }
 }

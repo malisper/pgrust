@@ -137,7 +137,7 @@ pub struct BitmapIndexScanState<'mcx> {
     /// the bitmap owner.
     pub biss_result: Option<PgBox<'mcx, types_tidbitmap::TIDBitmap>>,
     /// `struct ScanKeyData *biss_ScanKeys` — Skey structures for index quals.
-    pub biss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    pub biss_ScanKeys: PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `int biss_NumScanKeys`.
     pub biss_NumScanKeys: i32,
     /// `IndexRuntimeKeyInfo *biss_RuntimeKeys`.

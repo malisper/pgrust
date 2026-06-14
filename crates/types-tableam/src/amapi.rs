@@ -14,7 +14,7 @@
 use std::boxed::Box;
 use std::vec::Vec;
 
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_rel::Relation;
 use types_scan::sdir::ScanDirection;
@@ -73,7 +73,7 @@ pub struct IndexAmRoutine {
     #[allow(clippy::type_complexity)]
     pub aminsert: fn(
         index_relation: &Relation<'_>,
-        values: &[Datum],
+        values: &[Datum<'_>],
         isnull: &[bool],
         heap_tid: &ItemPointerData,
         heap_relation: &Relation<'_>,

@@ -155,39 +155,6 @@ impl ResourceOwner {
     }
 }
 
-/// `QueryDesc` (`executor/execdesc.h`), trimmed to the fields the portal
-/// subsystem reads or writes. The executor (`executor/execMain.c`) owns it;
-/// portalcmds reads `snapshot`, swaps `dest`, and hands the whole thing to the
-/// executor seams.
-pub struct QueryDesc {
-    /// `Snapshot snapshot` — snapshot to use for query (`None` = C NULL).
-    pub snapshot: Option<Rc<SnapshotData>>,
-    /// `DestReceiver *dest` — destination for tuple output (`None` = C NULL).
-    pub dest: Option<DestReceiver>,
-}
-
-/// `DestReceiver` (`tcop/dest.h`) — opaque output sink, owned by the receiver
-/// implementation (e.g. tstoreReceiver.c). portalcmds only stores it into the
-/// queryDesc and calls `rDestroy`; modeled as a handle to the receiver's
-/// not-yet-defined state plus its `mydest` tag.
-#[derive(Clone)]
-pub struct DestReceiver {
-    pub mydest: types_dest::CommandDest,
-    state: Rc<()>,
-}
-
-impl DestReceiver {
-    pub fn new(mydest: types_dest::CommandDest) -> Self {
-        DestReceiver {
-            mydest,
-            state: Rc::new(()),
-        }
-    }
-    fn _keep(&self) -> &Rc<()> {
-        &self.state
-    }
-}
-
 /// Identity token for an object owned by a subsystem the portal subsystem does
 /// not own — the executor `QueryDesc`, the `ParamListInfo`, the
 /// `QueryEnvironment`, the held `Tuplestorestate`, the result `TupleDesc`. The
@@ -333,8 +300,12 @@ pub struct PortalData {
     pub autoHeld: bool,
 
     /// `QueryDesc *queryDesc` — info needed for executor invocation
-    /// (`None` = C NULL).
-    pub queryDesc: Option<QueryDesc>,
+    /// (`None` = C NULL). The canonical owned executor invocation handle
+    /// (`types_nodes::querydesc::QueryDesc`): lifetime-free, storable by value
+    /// (its `'mcx` lives inside the `McxOwned<QueryWorkState>` bundle), so it
+    /// does not infect `PortalData`. portalcmds reads `snapshot`/`dest` off it
+    /// and hands it to the execMain driver seams — QueryDesc de-handle F1b.
+    pub queryDesc: Option<types_nodes::querydesc::QueryDesc>,
 
     /// `TupleDesc tupDesc` — descriptor for result tuples (`None` = C NULL).
     pub tupDesc: Option<TupleDescData<'static>>,

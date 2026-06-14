@@ -371,11 +371,22 @@ impl<'a> PageRef<'a> {
         self.read_u16(OFF_PD_FLAGS)
     }
 
-    fn pd_lower(&self) -> LocationIndex {
+    /// `((PageHeader) page)->pd_prune_xid` — public read accessor (heap page
+    /// pruning reads the prune-hint XID directly, mirroring C's `PageHeader`
+    /// field read).
+    pub fn pd_prune_xid(&self) -> TransactionId {
+        self.read_u32(OFF_PD_PRUNE_XID)
+    }
+
+    /// `((PageHeader) page)->pd_lower` — public read accessor (the heap-AM
+    /// in-place update builds a post-mutation FPI image and must read the page's
+    /// free-space boundaries directly, mirroring C's `PageHeader` field reads).
+    pub fn pd_lower(&self) -> LocationIndex {
         self.read_u16(OFF_PD_LOWER)
     }
 
-    fn pd_upper(&self) -> LocationIndex {
+    /// `((PageHeader) page)->pd_upper` — public read accessor (see `pd_lower`).
+    pub fn pd_upper(&self) -> LocationIndex {
         self.read_u16(OFF_PD_UPPER)
     }
 
@@ -448,7 +459,9 @@ impl<'a> PageMut<'a> {
         self.as_ref().pd_flags()
     }
 
-    fn pd_prune_xid(&self) -> TransactionId {
+    /// `((PageHeader) page)->pd_prune_xid` — public read accessor (heap page
+    /// pruning reads the prune-hint XID directly).
+    pub fn pd_prune_xid(&self) -> TransactionId {
         self.as_ref().read_u32(OFF_PD_PRUNE_XID)
     }
 
@@ -481,7 +494,10 @@ impl<'a> PageMut<'a> {
         self.write_u16(OFF_PD_PAGESIZE_VERSION, value);
     }
 
-    fn set_pd_prune_xid(&mut self, value: TransactionId) {
+    /// `((PageHeader) page)->pd_prune_xid = value` — public write accessor.
+    /// `heap_page_prune_and_freeze`'s `do_hint` step sets the prune-hint XID to
+    /// either zero or the lowest soon-prunable XID directly.
+    pub fn set_pd_prune_xid(&mut self, value: TransactionId) {
         self.write_u32(OFF_PD_PRUNE_XID, value);
     }
 

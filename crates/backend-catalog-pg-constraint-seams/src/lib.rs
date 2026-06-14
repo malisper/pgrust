@@ -45,3 +45,14 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn find_fk_period_opers(conindid: Oid, nkeys: i32) -> PgResult<PeriodOpers>
 );
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(pg_constraint, Anum_pg_constraint_oid,
+    /// constroid)` + `((Form_pg_constraint) GETSTRUCT(constrTup))` projected to
+    /// `(conrelid, contypid, oid)` — the table- vs domain-constraint
+    /// disambiguation `getConstraintTypeDescription` /
+    /// `getConstraintIdentity` perform (objectaddress.c). `Ok(None)` when no
+    /// such row exists (the C caller's `missing_ok` fallback / `elog(ERROR)`);
+    /// the installer owns the `table_open`/`table_close(AccessShareLock)`. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn constraint_type_oids(constroid: Oid) -> PgResult<Option<(Oid, Oid, Oid)>>
+);

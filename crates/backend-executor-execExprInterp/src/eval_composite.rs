@@ -38,7 +38,11 @@
 //! it aborts with a loud panic naming the unported owner rather than silently
 //! stubbing a result.
 
-use types_datum::Datum;
+// The bare-word newtype: the scalar form the composite eval helpers operate on.
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ExprState.resvalue` / `ResultCell.value` carry, and what the
+// composite helpers operate on directly.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, STATE_RESULT_CELL,
@@ -71,10 +75,10 @@ fn composite_datum_owner_unported(what: &str) -> ! {
 /// `*op->resnull`). [`STATE_RESULT_CELL`] aliases the owning `ExprState`'s own
 /// `resvalue`/`resnull` (the C `&state->resvalue`/`&state->resnull` default
 /// target); any other id reads the per-step cell from the arena.
-fn load_result(state: &ExprState<'_>, op: usize) -> (Datum, bool) {
+fn load_result<'mcx>(state: &ExprState<'mcx>, op: usize) -> (Datum<'mcx>, bool) {
     let cell = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
-        (state.resvalue, state.resnull)
+        (state.resvalue.clone(), state.resnull)
     } else {
         let c = state.result_cells.get(cell);
         (c.value, c.isnull)
@@ -84,13 +88,15 @@ fn load_result(state: &ExprState<'_>, op: usize) -> (Datum, bool) {
 /// Write a step's `(value, isnull)` result (the C `*op->resvalue = value;
 /// *op->resnull = isnull;`). [`STATE_RESULT_CELL`] writes through the owning
 /// `ExprState`'s own `resvalue`/`resnull`; any other id writes the arena cell.
-fn store_result(state: &mut ExprState<'_>, op: usize, value: Datum, isnull: bool) {
+fn store_result<'mcx>(state: &mut ExprState<'mcx>, op: usize, value: Datum<'mcx>, isnull: bool) {
     let cell: ResultCellId = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
         state.resvalue = value;
         state.resnull = isnull;
     } else {
-        state.result_cells.set(cell, ResultCell { value, isnull });
+        state
+            .result_cells
+            .set(cell, ResultCell { value, isnull });
     }
 }
 
@@ -261,7 +267,7 @@ pub fn ExecEvalMinMax<'mcx>(
         if cur_isnull {
             // /* first nonnull input, adopt value */
             // *op->resvalue = values[off]; *op->resnull = false;
-            store_result(state, op, values[off], false);
+            store_result(state, op, values[off].clone(), false);
         } else {
             // /* apply comparison function */
             // fcinfo->args[0].value = *op->resvalue;

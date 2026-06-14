@@ -42,7 +42,6 @@ use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_adt_misc2_seams as expandeddatum;
 
 use mcx::alloc_in;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_execparallel::PGJIT_NONE;
 use types_nodes::nodes::Node;
@@ -136,20 +135,20 @@ fn ValuesNext<'mcx>(
         if node.exprstatelists[row].is_empty() {
             // ExecInitExprList(exprlist, NULL) — the row's expressions, compiled
             // with no parent plan-state.
-            let exprrefs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> = {
+            let built = {
                 let mcx = estate.es_query_cxt;
+                // The row's `Expr`s are read through a shared borrow of the
+                // node's `exprlists`; the resulting `Option<&Expr>` refs live
+                // only for the seam call. The compiled states are allocated in
+                // the per-query context by the seam.
                 let exprs = &node.exprlists[row];
-                let mut refs = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+                let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> =
+                    mcx::vec_with_capacity_in(mcx, exprs.len())?;
                 for e in exprs.iter() {
-                    // SAFETY of borrow: the row's `Expr`s live in the node's
-                    // arrays for the node's lifetime; the compiled states are
-                    // allocated in the per-query context by the seam.
-                    refs.push(Some(unsafe { &*(e as *const types_nodes::primnodes::Expr) }));
+                    refs.push(Some(e));
                 }
-                refs
+                backend_executor_execExpr_seams::exec_init_expr_list_no_parent::call(&refs, estate)?
             };
-            let built =
-                backend_executor_execExpr_seams::exec_init_expr_list_no_parent::call(&exprrefs, estate)?;
             node.exprstatelists[row] = built;
         }
 
@@ -187,7 +186,8 @@ fn ValuesNext<'mcx>(
         //
         //   resind = 0; foreach(lc, exprstatelist) { ...; resind++; }
         let mcx = estate.es_query_cxt;
-        let mut values: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, ncols)?;
+        let mut values: mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, ncols)?;
         let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, ncols)?;
         for resind in 0..ncols {
             // values[resind] = ExecEvalExpr(estate, econtext, &isnull[resind]);
@@ -195,17 +195,13 @@ fn ValuesNext<'mcx>(
             // The row's compiled `ExprState` is owned by the node; evaluation is
             // seamed into the expression interpreter (execExpr.c).
             let (value, col_isnull) = {
-                // Re-borrow the state mutably for the call; the seam takes the
-                // state by mut ref and the estate by mut ref (disjoint).
-                let state_ptr: *mut types_nodes::execexpr::ExprState<'mcx> = node.exprstatelists
-                    [row][resind]
+                // The row's compiled `ExprState` is borrowed mutably from the
+                // node's owned `exprstatelists`; the seam also takes `estate`
+                // mutably, but the two borrows are disjoint (the eval call
+                // never touches the node's `exprstatelists`).
+                let state = node.exprstatelists[row][resind]
                     .as_mut()
-                    .expect("ValuesNext: row ExprState cell is NULL after build")
-                    as *mut _;
-                // SAFETY: `state_ptr` points into the node's owned array, which
-                // is not aliased by the eval call (the seam borrows the estate,
-                // not the node's exprstatelists).
-                let state = unsafe { &mut *state_ptr };
+                    .expect("ValuesNext: row ExprState cell is NULL after build");
                 backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
                     state, econtext, estate,
                 )?
@@ -265,15 +261,15 @@ fn ValuesRecheck<'mcx>(
 /// expandeddatum owner's seam (the `Datum` pointer dereference is its job).
 fn MakeExpandedObjectReadOnly<'mcx>(
     estate: &mut EStateData<'mcx>,
-    d: Datum,
+    d: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
     typlen: i16,
-) -> PgResult<Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if isnull || typlen != -1 {
         Ok(d)
     } else {
         let mcx = estate.es_query_cxt;
-        expandeddatum::make_expanded_object_read_only_internal::call(mcx, d)
+        expandeddatum::make_expanded_object_read_only_internal_v::call(mcx, &d)
     }
 }
 
@@ -436,19 +432,25 @@ pub fn ExecInitValuesScan<'mcx>(
 
             //   scanstate->exprstatelists[i] =
             //       ExecInitExprList(exprs, &scanstate->ss.ps);
-            let exprrefs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> = {
-                let exprs = &scanstate.exprlists[i];
-                let mut refs = mcx::vec_with_capacity_in(mcx, exprs.len())?;
-                for e in exprs.iter() {
-                    // SAFETY: the row's `Expr`s live in the node's arrays for the
-                    // node's lifetime; the compiled states are allocated by the
-                    // seam in the per-query context.
-                    refs.push(Some(unsafe { &*(e as *const types_nodes::primnodes::Expr) }));
-                }
-                refs
-            };
-            let built = execExpr::exec_init_expr_list::call(&exprrefs, &mut scanstate.ss.ps, estate)?;
-            scanstate.exprstatelists[i] = built;
+            // Split-borrow the node: the shared `exprlists` borrow (for the
+            // row's `Expr`s) and the mutable `ss` borrow (for `ss.ps`) are
+            // disjoint fields, so they coexist without aliasing. Binding each
+            // field explicitly makes the disjointness visible to the borrow
+            // checker (an indexed expr through the whole struct would not).
+            let ValuesScanState {
+                exprlists,
+                ss,
+                exprstatelists,
+                ..
+            } = &mut *scanstate;
+            let exprs = &exprlists[i];
+            let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> =
+                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+            for e in exprs.iter() {
+                refs.push(Some(e));
+            }
+            let built = execExpr::exec_init_expr_list::call(&refs, &mut ss.ps, estate)?;
+            exprstatelists[i] = built;
 
             //   estate->es_jit_flags = saved_jit_flags;
             estate.es_jit_flags = saved_jit_flags;

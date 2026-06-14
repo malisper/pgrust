@@ -39,13 +39,19 @@ seam_core::seam!(
     /// `ExprSingleResult`). `fcache` is mutated across a value-per-call series
     /// (`setArgsValid`, the tuplestore, the cached `FmgrInfo`/`fcinfo`).
     /// Fallible on `ereport(ERROR)` from the function or argument evaluation.
+    ///
+    /// The function-produced result word crosses as the canonical unified value
+    /// [`Datum`](types_tuple::backend_access_common_heaptuple::Datum):
+    /// a `ByVal` scalar word for a pass-by-value return type, or the
+    /// materialized `ByRef` payload bytes otherwise (the C `Datum` result of
+    /// `FunctionCallInvoke` / the dematerialized tuplestore row).
     pub fn exec_make_function_result_set<'mcx>(
         fcache: &mut types_nodes::execexpr::SetExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         arg_context: &mcx::MemoryContext,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(
-        types_datum::Datum,
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
         bool,
         types_nodes::execexpr::ExprDoneCond,
     )>

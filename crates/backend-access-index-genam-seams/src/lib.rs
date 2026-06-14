@@ -219,7 +219,7 @@ seam_core::seam!(
     pub fn build_index_value_description<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         index_relation: &types_rel::Relation<'_>,
-        values: &[types_datum::Datum],
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
         isnull: &[bool],
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );

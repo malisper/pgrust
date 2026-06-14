@@ -1,6 +1,6 @@
 //! Type vocabulary for `access/common/heaptuple.c`'s form/deform core. Lives
 //! here (not in the owning crate) so seam-crate signatures can reference
-//! [`FormedTuple`] / [`TupleValue`] / [`DeformedColumn`] without depending on
+//! [`FormedTuple`] / [`Datum`] / [`DeformedColumn`] without depending on
 //! the owning crate; `backend-access-common-heaptuple` re-exports them.
 
 extern crate alloc;
@@ -9,43 +9,231 @@ use mcx::{alloc_in, slice_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 
 use crate::heaptuple::{HeapTupleData, MinimalTupleData};
-use types_datum::Datum;
+use types_core::{Oid, TransactionId};
 
-// Per-attribute value model (the faithful idiomatic `Datum` substitute).
+// ---------------------------------------------------------------------------
+// The canonical value type (Datum unification — KEYSTONE / type-carrier root).
+//
+// CANONICAL shape (datum-redesign-plan, Option A):
+//     pub enum Datum<'mcx> { ByVal(usize /*bare word*/), ByRef(PgVec<'mcx, u8>) }
+//
+// The by-value arm carries the raw machine word directly as `usize` (C's
+// `uintptr_t` Datum). The former `ByVal(types_datum::Datum)` indirection was
+// retired in the keystone payload swap: the bare-word codec (`*GetDatum` /
+// `DatumGet*` bit-math) is now inlined into the `from_*` / `as_*` methods
+// below, which are the canonical codec API on this enum. The bare-word
+// `types_datum::Datum` survives only at the two irreducible ABI edges (the
+// `store_att_byval`/`fetch_att` on-disk by-value codec and the
+// `PGFunction -> Datum` fmgr return slot), reachable here via `from_usize` /
+// `as_usize`.
+//
+// All bit-math below mirrors `postgres.h`'s `*GetDatum` / `DatumGet*` macros
+// 1:1 on a 64-bit (`SIZEOF_DATUM == 8`, `USE_FLOAT8_BYVAL`) build.
+// ---------------------------------------------------------------------------
 
-/// A single attribute's value handed to / produced by the tuple
-/// (de)serializers, modelling C's per-attribute `Datum` over the safe byte
-/// representation (see the `backend-access-common-heaptuple` module docs).
+/// The one canonical value type — the faithful idiomatic substitute for C's
+/// `Datum`. A by-value scalar (`att->attbyval`) or a detoasted by-reference
+/// image.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TupleValue<'mcx> {
-    /// Pass-by-value scalar (`att->attbyval`); the machine word itself.
-    ByVal(Datum),
+pub enum Datum<'mcx> {
+    /// Pass-by-value scalar (`att->attbyval`); the machine word itself
+    /// (C's `uintptr_t` Datum).
+    ByVal(usize),
     /// By-reference value (varlena `attlen == -1`, cstring `attlen == -2`, or
     /// fixed-length pass-by-reference `attlen > 0`): the verbatim on-disk
     /// bytes, already detoasted, including any varlena header.
     ByRef(PgVec<'mcx, u8>),
 }
 
-impl TupleValue<'_> {
+impl Default for Datum<'_> {
+    /// C's `(Datum) 0` — the zero machine word, as the by-value arm. Used by
+    /// struct-literal `..Default::default()` initializers of
+    /// `ExprContext.caseValue_datum`/`domainValue_datum` etc.
+    fn default() -> Self {
+        Datum::ByVal(0)
+    }
+}
+
+impl Datum<'_> {
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
     /// if this is a by-value scalar (a caller bug — C would have a type/length
     /// mismatch here too).
     #[inline]
     pub fn as_ref_bytes(&self) -> &[u8] {
         match self {
-            TupleValue::ByRef(b) => b,
-            TupleValue::ByVal(_) => {
-                panic!("TupleValue::as_ref_bytes called on a by-value attribute")
+            Datum::ByRef(b) => b,
+            Datum::ByVal(_) => {
+                panic!("Datum::as_ref_bytes called on a by-value attribute")
             }
         }
     }
 
     /// Deep copy into `mcx` (C: `datumCopy` into the caller's context).
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TupleValue<'b>> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Datum<'b>> {
         Ok(match self {
-            TupleValue::ByVal(d) => TupleValue::ByVal(*d),
-            TupleValue::ByRef(b) => TupleValue::ByRef(slice_in(mcx, b)?),
+            Datum::ByVal(d) => Datum::ByVal(*d),
+            Datum::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // The `*GetDatum` / `DatumGet*` codec family as constructors/accessors on
+    // the canonical enum's by-value arm. The bit-math is inlined here (it used
+    // to forward to the bare-word `types_datum::Datum` newtype).
+    //
+    // `as_*` panic on a `ByRef` value — C would equally read garbage by
+    // treating a by-reference image as a scalar word.
+    // -----------------------------------------------------------------------
+
+    /// The raw machine word of a by-value scalar. Panics on a by-reference
+    /// value (a caller bug — C would read garbage too).
+    #[inline]
+    fn byval_word(&self) -> usize {
+        match self {
+            Datum::ByVal(d) => *d,
+            Datum::ByRef(_) => panic!("Datum: scalar accessor called on a by-reference value"),
+        }
+    }
+
+    /// A SQL NULL / zero scalar word (`(Datum) 0`).
+    pub fn null() -> Self {
+        Datum::ByVal(0)
+    }
+
+    /// C: `from_usize` — carry a raw machine word.
+    pub fn from_usize(value: usize) -> Self {
+        Datum::ByVal(value)
+    }
+    /// C: `as_usize` — the raw machine word.
+    pub fn as_usize(&self) -> usize {
+        self.byval_word()
+    }
+
+    /// C: `BoolGetDatum(X)`.
+    pub fn from_bool(value: bool) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetBool(X)` is `((bool) ((X) != 0))` — any nonzero word is true.
+    pub fn as_bool(&self) -> bool {
+        self.byval_word() != 0
+    }
+
+    /// C: `CharGetDatum(X)` — a single signed `char`, sign-extended into the word.
+    pub fn from_char(value: i8) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetChar(X)` — read back the low byte as a signed `char`.
+    pub fn as_char(&self) -> i8 {
+        self.byval_word() as u8 as i8
+    }
+
+    /// C: `Int8GetDatum(X)` (PG 1-byte signed, not SQL int8).
+    pub fn from_i8(value: i8) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetInt8(X)`.
+    pub fn as_i8(&self) -> i8 {
+        self.byval_word() as u8 as i8
+    }
+
+    /// C: `UInt8GetDatum(X)`.
+    pub fn from_u8(value: u8) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetUInt8(X)`.
+    pub fn as_u8(&self) -> u8 {
+        self.byval_word() as u8
+    }
+
+    /// C: `Int16GetDatum(X)`.
+    pub fn from_i16(value: i16) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetInt16(X)`.
+    pub fn as_i16(&self) -> i16 {
+        self.byval_word() as i16
+    }
+
+    /// C: `UInt16GetDatum(X)`.
+    pub fn from_u16(value: u16) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetUInt16(X)`.
+    pub fn as_u16(&self) -> u16 {
+        self.byval_word() as u16
+    }
+
+    /// C: `Int32GetDatum(X)` — sign-extends a negative int32 into the full word.
+    pub fn from_i32(value: i32) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetInt32(X)`.
+    pub fn as_i32(&self) -> i32 {
+        self.byval_word() as u32 as i32
+    }
+
+    /// C: `UInt32GetDatum(X)`.
+    pub fn from_u32(value: u32) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetUInt32(X)`.
+    pub fn as_u32(&self) -> u32 {
+        self.byval_word() as u32
+    }
+
+    /// C: `Int64GetDatum(X)` (SQL int8/bigint; pass-by-value on 64-bit).
+    pub fn from_i64(value: i64) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetInt64(X)`.
+    pub fn as_i64(&self) -> i64 {
+        self.byval_word() as u64 as i64
+    }
+
+    /// C: `UInt64GetDatum(X)`.
+    pub fn from_u64(value: u64) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetUInt64(X)`.
+    pub fn as_u64(&self) -> u64 {
+        self.byval_word() as u64
+    }
+
+    /// C: `Float4GetDatum(X)` — reinterpret the IEEE-754 bits (no numeric cast).
+    pub fn from_f32(value: f32) -> Self {
+        Datum::ByVal(value.to_bits() as usize)
+    }
+    /// C: `DatumGetFloat4(X)` — reinterpret the low 32 bits as a `float`.
+    pub fn as_f32(&self) -> f32 {
+        f32::from_bits(self.byval_word() as u32)
+    }
+
+    /// C: `Float8GetDatum(X)` — reinterpret the IEEE-754 bits (pass-by-value on
+    /// a `USE_FLOAT8_BYVAL` build).
+    pub fn from_f64(value: f64) -> Self {
+        Datum::ByVal(value.to_bits() as usize)
+    }
+    /// C: `DatumGetFloat8(X)` — reinterpret the word as a `double`.
+    pub fn as_f64(&self) -> f64 {
+        f64::from_bits(self.byval_word() as u64)
+    }
+
+    /// C: `ObjectIdGetDatum(X)`.
+    pub fn from_oid(value: Oid) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetObjectId(X)`.
+    pub fn as_oid(&self) -> Oid {
+        self.byval_word() as u32
+    }
+
+    /// C: `TransactionIdGetDatum(X)` — a `TransactionId` (`xid`) is a `uint32`.
+    pub fn from_transaction_id(value: TransactionId) -> Self {
+        Datum::ByVal(value as usize)
+    }
+    /// C: `DatumGetTransactionId(X)`.
+    pub fn as_transaction_id(&self) -> TransactionId {
+        self.byval_word() as TransactionId
     }
 }
 
@@ -56,7 +244,7 @@ impl TupleValue<'_> {
 /// area (`ByRef`) — the faithful idiomatic stand-in for C's bare pointer into
 /// the tuple (the C contract that the pointer "points into the given tuple" is
 /// preserved by copying the exact bytes spanned by the field).
-pub type DeformedColumn<'mcx> = (TupleValue<'mcx>, bool);
+pub type DeformedColumn<'mcx> = (Datum<'mcx>, bool);
 
 /// A fully-formed heap tuple: the owned [`HeapTupleData`] plus its user-data
 /// area bytes (`td + t_hoff .. td + t_len`).

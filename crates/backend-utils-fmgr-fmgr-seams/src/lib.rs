@@ -11,11 +11,23 @@
 use types_cache::DefElemString;
 use types_core::{AttrNumber, Oid};
 use types_datum::varlena::Bytea;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// Migration target: the canonical per-attribute value enum. The former
+// transitional `Datum<'mcx>` alias resolved to this exact type, so every
+// seam that carried a typed per-attribute value (the deformed-slot/`Datum`
+// readers) now names the canonical `Datum<'mcx>` enum directly.
+use types_tuple::backend_access_common_heaptuple::Datum;
+// The bare-word `Datum` shim (`types_datum::Datum(usize)`), still named at the
+// raw-fmgr-ABI dispatch seams (`FunctionCallN` / `Oid*FunctionCall`) whose owner
+// `backend-utils-fmgr-core` and all consumers have NOT yet migrated off the
+// shim word. Those seams carry the literal call-frame `Datum` word — a by-value
+// scalar or a `datum_ref_registry` pointer token decoded by the owner — an
+// audited ABI/storage edge that must stay a bare word until its owner migrates.
+// Migrating the contract here ahead of the owner would diverge it from the
+// landed `types_datum::Datum`-typed `set()` closures and every consumer.
+use types_datum::Datum as DatumWord;
 
 seam_core::seam!(
     /// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID
@@ -75,7 +87,7 @@ seam_core::seam!(
     /// (`fcinfo->args[n].value`) of the widened frame, taken as given with no
     /// detoasting. Used by `extract_variadic_args` for the VARIADIC array
     /// argument and the as-given non-VARIADIC datums.
-    pub fn pg_getarg_datum(fcinfo: &FunctionCallInfoBaseData<'_>, n: usize) -> Datum
+    pub fn pg_getarg_datum(fcinfo: &FunctionCallInfoBaseData<'_>, n: usize) -> DatumWord
 );
 
 seam_core::seam!(
@@ -159,14 +171,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PG_RETURN_BOOL(b)` (fmgr.h): clear `fcinfo->isnull` and return the
     /// boolean as a `Datum`.
-    pub fn pg_return_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, b: bool) -> Datum
+    pub fn pg_return_bool(fcinfo: &mut FunctionCallInfoBaseData<'_>, b: bool) -> DatumWord
 );
 
 seam_core::seam!(
     /// `PG_RETURN_NULL()` (fmgr.h): set `fcinfo->isnull = true` and return a
     /// zero `Datum`. The owner widens the frame with the `isnull` flag this
     /// sets.
-    pub fn pg_return_null(fcinfo: &mut FunctionCallInfoBaseData<'_>) -> Datum
+    pub fn pg_return_null(fcinfo: &mut FunctionCallInfoBaseData<'_>) -> DatumWord
 );
 
 seam_core::seam!(
@@ -183,8 +195,8 @@ seam_core::seam!(
     pub fn function_call1_coll(
         function_id: Oid,
         collation: Oid,
-        arg1: Datum,
-    ) -> PgResult<Datum>
+        arg1: DatumWord,
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -240,7 +252,7 @@ seam_core::seam!(
     /// `nodes/subscripting.h`, outside this TU; the c2rust translation likewise
     /// types it as `*const c_void`). `Err` carries whatever the called function
     /// raises.
-    pub fn oid_function_call0(function_id: Oid) -> PgResult<Datum>
+    pub fn oid_function_call0(function_id: Oid) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -256,7 +268,7 @@ seam_core::seam!(
     pub fn oid_function_call_1_deflist(
         function_id: Oid,
         options: &[DefElemString<'_>],
-    ) -> PgResult<Datum>
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -273,7 +285,7 @@ seam_core::seam!(
         str: Option<&str>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Datum>
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -288,7 +300,7 @@ seam_core::seam!(
         buf: &[u8],
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Datum>
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -296,14 +308,14 @@ seam_core::seam!(
     /// function through an already-resolved `FmgrInfo`. The owned `FmgrInfo`
     /// carries only the resolved function's OID (the lookup key), so the owner
     /// re-resolves and calls. The argument crosses as the owned per-attribute
-    /// value model (`TupleValue`, as the deformed-slot readers produce). The C
+    /// value model (`Datum`, as the deformed-slot readers produce). The C
     /// `char *` result crosses as its NUL-excluded bytes allocated in `mcx`.
     /// `Err` carries the strict-null `elog` and whatever the output function
     /// raises.
     pub fn output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         flinfo: &types_core::fmgr::FmgrInfo,
-        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -317,7 +329,7 @@ seam_core::seam!(
     pub fn send_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         flinfo: &types_core::fmgr::FmgrInfo,
-        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -325,7 +337,7 @@ seam_core::seam!(
     /// `OidSendFunctionCall(functionId, val)` (fmgr.c): one-shot lookup +
     /// call of a type's binary send function. The C argument `Datum` crosses
     /// as the owned per-attribute value model
-    /// ([`types_tuple::backend_access_common_heaptuple::TupleValue`]); the C
+    /// ([`types_tuple::backend_access_common_heaptuple::Datum`]); the C
     /// `bytea *` result crosses as its payload bytes with the varlena header
     /// already stripped (`VARDATA`, `VARSIZE - VARHDRSZ` bytes), allocated in
     /// `mcx`. `Err` carries the lookup failure, the strict-null `elog`, and
@@ -333,7 +345,7 @@ seam_core::seam!(
     pub fn oid_send_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
-        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -354,7 +366,7 @@ seam_core::seam!(
         column_data: Option<&str>,
         atttypmod: i32,
         escontext: Option<&mut types_error::SoftErrorContext>,
-    ) -> PgResult<Option<TupleValue<'mcx>>>
+    ) -> PgResult<Option<Datum<'mcx>>>
 );
 
 seam_core::seam!(
@@ -374,7 +386,7 @@ seam_core::seam!(
         item: Option<&[u8]>,
         atttypmod: i32,
         colno: i32,
-    ) -> PgResult<TupleValue<'mcx>>
+    ) -> PgResult<Datum<'mcx>>
 );
 
 seam_core::seam!(
@@ -387,7 +399,7 @@ seam_core::seam!(
     pub fn record_column_output<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         coltype: Oid,
-        val: &TupleValue<'_>,
+        val: &Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -402,7 +414,7 @@ seam_core::seam!(
     pub fn record_column_send<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         coltype: Oid,
-        val: &TupleValue<'_>,
+        val: &Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -415,7 +427,7 @@ seam_core::seam!(
     pub fn oid_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
-        val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -430,6 +442,14 @@ seam_core::seam!(
     /// subsystems, so the resolution and call are the loader's job. `Err`
     /// carries the FATAL "internal function not found" and any error the
     /// worker body raises.
+    ///
+    /// `main_arg` is the raw `Datum` word `BackgroundWorker.bgw_main_arg`
+    /// carries through the postmaster's DSM worker slot (`bgw_main_arg
+    /// (Datum)`, an 8-byte stored word in that ABI layout). It stays the
+    /// bare-word `types_datum::Datum` at this storage/ABI edge: the
+    /// `types-bgworker` model owns the field and is not part of this
+    /// migration, and the loader hands the word straight to a C-ABI
+    /// `bgworker_main_type` entry point with no enum classification available.
     pub fn call_bgworker_entrypoint(
         worker: types_bgworker::BackgroundWorker,
         main_arg: types_datum::Datum,
@@ -440,20 +460,24 @@ seam_core::seam!(
     /// `OidInputFunctionCall(functionId, str, typioparam, typmod)` (fmgr.c) as
     /// used by bootstrap's `InsertOneValue`: one-shot lookup + call of a type's
     /// text input function on the NUL-terminated C string `str_` (`typmod` is
-    /// `-1` at bootstrap). Returns the resulting `Datum`. `Err` carries invalid
-    /// input syntax, cache-lookup failure, and OOM.
-    pub fn oid_input_function_call(
+    /// `-1` at bootstrap). Returns the resulting value as the canonical
+    /// `Datum<'mcx>` (a by-value scalar is `ByVal`; a by-reference result is an
+    /// owned `ByRef` over the input function's flattened payload bytes in `mcx`,
+    /// C's `PointerGetDatum(palloc'd result)`). `Err` carries invalid input
+    /// syntax, cache-lookup failure, and OOM.
+    pub fn oid_input_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         str_: &str,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Datum>
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(
     /// `InputFunctionCall(flinfo, str, typioparam, typmod)` (fmgr.c) on a
     /// caller-cached `FmgrInfo`, returning the result classified as a
-    /// [`TupleValue`] ready for `heap_form_tuple`. Call a type's text input
+    /// [`Datum`] ready for `heap_form_tuple`. Call a type's text input
     /// function on the NUL-terminated C string `str_` (`None` is C's
     /// `str == NULL`, supported so the call still happens for NULL fields to
     /// support domains), then package the resulting `Datum` as `ByVal` when
@@ -470,7 +494,7 @@ seam_core::seam!(
         typioparam: Oid,
         typmod: i32,
         attbyval: bool,
-    ) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>>
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(
@@ -483,23 +507,24 @@ seam_core::seam!(
     /// result is non-null. Can `ereport(ERROR)`.
     pub fn function_call3(
         function_id: Oid,
-        arg1: Datum,
-        arg2: Datum,
-        arg3: Datum,
-    ) -> PgResult<Datum>
+        arg1: DatumWord,
+        arg2: DatumWord,
+        arg3: DatumWord,
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
     /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form used
     /// by bootstrap's `InsertOneValue` DEBUG4 trace: one-shot lookup + call of
-    /// a type's text output function on the bare `Datum` it just built (the
-    /// typed `TupleValue` form is unavailable there). The C `char *` result
+    /// a type's text output function on the canonical `Datum<'mcx>` it just
+    /// built (its `ByVal` arm is the by-value word; its `ByRef` arm carries the
+    /// referent bytes — no per-backend registry token). The C `char *` result
     /// crosses as its NUL-excluded bytes in `mcx`. `Err` carries the lookup
     /// failure, the strict-null `elog`, and whatever the output function raises.
     pub fn oid_output_function_call_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
-        val: Datum,
+        val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     ) -> PgResult<mcx::PgString<'mcx>>
 );
 
@@ -513,9 +538,9 @@ seam_core::seam!(
     pub fn function_call2_coll(
         function_id: Oid,
         collation: Oid,
-        arg1: Datum,
-        arg2: Datum,
-    ) -> PgResult<Datum>
+        arg1: DatumWord,
+        arg2: DatumWord,
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -550,7 +575,7 @@ seam_core::seam!(
         str_: &str,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Option<Datum>>
+    ) -> PgResult<Option<DatumWord>>
 );
 
 seam_core::seam!(
@@ -558,7 +583,7 @@ seam_core::seam!(
     /// it: call the element type's text output function on a materialized
     /// element value, returning the printable bytes (NUL excluded) in `mcx`.
     /// `Err` carries the strict-null `elog` and whatever the output function
-    /// raises. (Array-element form; distinct from the `TupleValue`-based
+    /// raises. (Array-element form; distinct from the `Datum`-based
     /// `output_function_call` above.)
     pub fn array_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -577,7 +602,7 @@ seam_core::seam!(
         buf: &[u8],
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Datum>
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -652,7 +677,7 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 // Generic raw-`Datum` fmgr dispatch driven by `tcop/fastpath.c`
 // (backend-tcop-fastpath, the server side of `PQfn`). Unlike the
-// record/rowtypes consumers above (which classify values as `TupleValue`),
+// record/rowtypes consumers above (which classify values as `Datum`),
 // the fastpath path marshals raw argument `Datum` words straight through
 // `FunctionCallInvoke`, so these seams keep the values as opaque `Datum`s.
 // C's `FmgrInfo` cannot cross a seam, so each call dispatches by OID and the
@@ -670,7 +695,7 @@ seam_core::seam!(
         str_: Option<&str>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<Datum>
+    ) -> PgResult<DatumWord>
 );
 
 seam_core::seam!(
@@ -687,7 +712,7 @@ seam_core::seam!(
         buf: Option<&[u8]>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<(Datum, usize)>
+    ) -> PgResult<(DatumWord, usize)>
 );
 
 seam_core::seam!(
@@ -699,7 +724,7 @@ seam_core::seam!(
     pub fn fastpath_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         typoutput: Oid,
-        retval: Datum,
+        retval: DatumWord,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -714,7 +739,7 @@ seam_core::seam!(
     pub fn fastpath_send_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         typsend: Oid,
-        retval: Datum,
+        retval: DatumWord,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
@@ -730,5 +755,5 @@ seam_core::seam!(
         fn_oid: Oid,
         collation: Oid,
         args: &[types_datum::NullableDatum],
-    ) -> PgResult<(Datum, bool)>
+    ) -> PgResult<(DatumWord, bool)>
 );

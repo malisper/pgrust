@@ -44,8 +44,12 @@ use backend_tcop_postgres_seams as tcop_postgres;
 
 use types_error::PgResult;
 use types_nodes::execnodes::ScanStateData;
+use types_nodes::nodectescan::CteScanState;
+use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
 use types_nodes::nodes::Node;
-use types_nodes::{EStateData, IndexOnlyScanState, SlotId, TableFuncScanState};
+use types_nodes::{
+    EStateData, IndexOnlyScanState, SlotId, SubqueryScanState, TableFuncScanState,
+};
 
 /// A scan node whose embedded `ScanState` head ([`ScanStateData`]) the generic
 /// `execScan.c` driver mutates. In C the driver receives a `ScanState *` and
@@ -71,6 +75,34 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
     }
 }
 
+impl<'mcx> ScanNode<'mcx> for types_nodes::IndexScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
+impl<'mcx> ScanNode<'mcx> for SubqueryScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
+impl<'mcx> ScanNode<'mcx> for CteScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
+impl<'mcx> ScanNode<'mcx> for NamedTuplestoreScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
 /// Install this crate's implementations into the `execScan` seam slots.
 ///
 /// Every seam declared in `backend-executor-execScan-seams` is set here to the
@@ -82,7 +114,13 @@ pub fn init_seams() {
     execScan_seams::exec_assign_scan_projection_info::set(exec_assign_scan_projection_info);
     execScan_seams::exec_scan_rescan::set(exec_scan_rescan_tablefunc);
     execScan_seams::exec_scan_indexonly::set(exec_scan_indexonly);
+    execScan_seams::exec_scan_index::set(exec_scan_index);
     execScan_seams::exec_scan_rescan_ss::set(exec_scan_rescan_ss);
+    execScan_seams::exec_scan_subquery::set(exec_scan_subquery);
+    execScan_seams::exec_scan_cte::set(exec_scan_cte);
+    execScan_seams::exec_scan_rescan_cte::set(exec_scan_rescan_cte);
+    execScan_seams::exec_assign_scan_projection_info_cte::set(exec_assign_scan_projection_info_cte);
+    execScan_seams::exec_scan_namedtuplestore::set(exec_scan_namedtuplestore);
 }
 
 // ===========================================================================
@@ -214,13 +252,26 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
 /// `ExecScanFetch` (execScan.h) — check interrupts & fetch the next potential
 /// tuple, substituting an EvalPlanQual test tuple if inside a recheck. Returns
 /// the slot id of the fetched tuple, or `None` (the C `NULL` / a cleared slot).
-fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>>(
+///
+/// The access method is abstracted as a closure yielding the produced slot id
+/// (the C `(*accessMtd)(node)` returning a `TupleTableSlot *` / `NULL`). The
+/// relation-scan nodes (TableFunc / IndexOnly / Cte / NamedTuplestore) store the
+/// next tuple into `node->ss_ScanTupleSlot` and report a `bool`, which the
+/// per-node entry points wrap into "return `ss_ScanTupleSlot` (or `None`)"; the
+/// subquery scan node returns the subplan's own result slot id directly (the C
+/// `SubqueryNext` avoids `ExecCopySlot`).
+fn exec_scan_fetch<'mcx, N, A, R>(
     node: &mut N,
     epq_active: bool,
-    access_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
-    recheck_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+    mut access_mtd: A,
+    mut recheck_mtd: R,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<SlotId>> {
+) -> PgResult<Option<SlotId>>
+where
+    N: ScanNode<'mcx>,
+    A: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>,
+    R: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+{
     // CHECK_FOR_INTERRUPTS();
     tcop_postgres::check_for_interrupts::call()?;
 
@@ -316,14 +367,15 @@ fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>>(
 
     // Run the node-type-specific access method function to get the next tuple.
     //   return (*accessMtd)(node);
-    // The access method stores the next tuple into node->ss_ScanTupleSlot and
-    // reports (the C slot/NULL return as) whether a non-empty tuple is there.
-    let got = access_mtd(node, estate)?;
-    let scan_slot = node.ss().ss_ScanTupleSlot;
-    if got && !tup_is_null(estate, scan_slot) {
-        Ok(scan_slot)
-    } else {
+    // The access closure yields the produced slot id (the C `TupleTableSlot *` /
+    // `NULL`). For relation-scan nodes this is `ss_ScanTupleSlot` when the bool
+    // method reported a tuple; for the subquery scan node it is the subplan's
+    // own result slot. A returned slot that is empty maps to `None` (TupIsNull).
+    let slot = access_mtd(node, estate)?;
+    if tup_is_null(estate, slot) {
         Ok(None)
+    } else {
+        Ok(slot)
     }
 }
 
@@ -331,15 +383,20 @@ fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>>(
 /// checking the tuple against `qual` (`has_qual`) and applying projection
 /// (`has_proj`). Returns the slot id of the produced (possibly projected)
 /// tuple, or `None` (the C `NULL`).
-fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
+fn exec_scan_extended<'mcx, N, A, R>(
     node: &mut N,
     epq_active: bool,
-    access_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
-    recheck_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+    mut access_mtd: A,
+    mut recheck_mtd: R,
     has_qual: bool,
     has_proj: bool,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<SlotId>> {
+) -> PgResult<Option<SlotId>>
+where
+    N: ScanNode<'mcx>,
+    A: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>,
+    R: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+{
     // ExprContext *econtext = node->ps.ps_ExprContext;
     // (interrupt checks are in ExecScanFetch)
 
@@ -348,7 +405,7 @@ fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
     if !has_qual && !has_proj {
         // ResetExprContext(econtext);
         reset_expr_context(node.ss(), estate);
-        return exec_scan_fetch(node, epq_active, access_mtd, recheck_mtd, estate);
+        return exec_scan_fetch(node, epq_active, &mut access_mtd, &mut recheck_mtd, estate);
     }
 
     // Reset per-tuple memory context to free any expression-evaluation storage
@@ -358,7 +415,7 @@ fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
     // Get a tuple from the access method. Loop until we obtain a tuple that
     // passes the qualification.
     loop {
-        let slot = exec_scan_fetch(node, epq_active, access_mtd, recheck_mtd, estate)?;
+        let slot = exec_scan_fetch(node, epq_active, &mut access_mtd, &mut recheck_mtd, estate)?;
 
         // If the slot returned by the accessMtd contains NULL, there is nothing
         // more to scan, so return an empty slot --- being careful to use the
@@ -429,12 +486,17 @@ fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
 /// `ExecScan` (execScan.c) — scan the relation using the indicated access
 /// method, returning the next qualifying tuple after checking the node's qual
 /// and applying projection. Generic over the concrete node type `N`.
-fn exec_scan_core<'mcx, N: ScanNode<'mcx>>(
+fn exec_scan_core<'mcx, N, A, R>(
     node: &mut N,
-    access_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
-    recheck_mtd: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+    access_mtd: A,
+    recheck_mtd: R,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<SlotId>> {
+) -> PgResult<Option<SlotId>>
+where
+    N: ScanNode<'mcx>,
+    A: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>,
+    R: FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+{
     // epqstate = node->ps.state->es_epq_active;
     // qual = node->ps.qual; projInfo = node->ps.ps_ProjInfo;
     let epq_active = estate.es_epq_active.is_some();
@@ -536,6 +598,21 @@ fn exec_assign_scan_projection_info<'mcx>(
 // Per-node seam entry points (marshal the concrete node type to the core).
 // ===========================================================================
 
+/// Wrap a relation-scan node's `bool`-returning access method into the
+/// slot-yielding closure the generic core expects. The C access method stores
+/// the next tuple into `node->ss_ScanTupleSlot` and returns the slot pointer (or
+/// `NULL`); these node crates instead report `true`/`false`, so "produced a
+/// tuple" maps to "return `ss_ScanTupleSlot`", and "end of scan" to `None`.
+#[inline]
+fn into_slot_access<'mcx, N: ScanNode<'mcx>>(
+    access: fn(&mut N, &mut EStateData<'mcx>) -> PgResult<bool>,
+) -> impl FnMut(&mut N, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>> {
+    move |node, estate| {
+        let got = access(node, estate)?;
+        Ok(if got { node.ss().ss_ScanTupleSlot } else { None })
+    }
+}
+
 /// `exec_scan` seam — `ExecScan(&node->ss, accessMtd, recheckMtd)` for a
 /// table-func-scan node. The access/recheck methods are the node's own
 /// `TableFuncNext` / `TableFuncRecheck`.
@@ -545,7 +622,7 @@ fn exec_scan_tablefunc<'mcx>(
     access: execScan_seams::TableFuncScanAccessMtd,
     recheck: execScan_seams::TableFuncScanRecheckMtd,
 ) -> PgResult<Option<SlotId>> {
-    exec_scan_core(node, access, recheck, estate)
+    exec_scan_core(node, into_slot_access(access), recheck, estate)
 }
 
 /// `exec_scan_rescan` seam — `ExecScanReScan(&node->ss)` for a table-func-scan
@@ -571,6 +648,77 @@ fn exec_scan_indexonly<'mcx>(
     access: execScan_seams::IndexOnlyScanAccessMtd,
     recheck: execScan_seams::IndexOnlyScanRecheckMtd,
 ) -> PgResult<bool> {
-    let produced = exec_scan_core(node, access, recheck, estate)?;
+    let produced = exec_scan_core(node, into_slot_access(access), recheck, estate)?;
     Ok(!tup_is_null(estate, produced))
+}
+
+/// `exec_scan_index` seam — `ExecScan(&node->ss, IndexNext{,WithReorder},
+/// IndexRecheck)` for a plain index scan node. Like the index-only variant, the
+/// C returns the result `TupleTableSlot *`; this seam reports `!TupIsNull(slot)`.
+fn exec_scan_index<'mcx>(
+    node: &mut types_nodes::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::IndexScanAccessMtd,
+    recheck: execScan_seams::IndexScanRecheckMtd,
+) -> PgResult<bool> {
+    let produced = exec_scan_core(node, into_slot_access(access), recheck, estate)?;
+    Ok(!tup_is_null(estate, produced))
+}
+
+/// `exec_scan_subquery` seam — `ExecScan(&node->ss, SubqueryNext,
+/// SubqueryRecheck)` for a subquery scan node. Unlike the relation-scan nodes,
+/// `SubqueryNext` returns the subplan's own result slot id directly (the C
+/// avoids `ExecCopySlot`), so the access method already yields a `SlotId`; pass
+/// it straight to the generic core.
+fn exec_scan_subquery<'mcx>(
+    node: &mut SubqueryScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::SubqueryScanAccessMtd,
+    recheck: execScan_seams::SubqueryScanRecheckMtd,
+) -> PgResult<Option<SlotId>> {
+    exec_scan_core(node, access, recheck, estate)
+}
+
+/// `exec_scan_cte` seam — `ExecScan(&node->ss, CteScanNext, CteScanRecheck)` for
+/// a CTE scan node. The access method is the node's own `CteScanNext`, which
+/// stores the next tuple into `ss_ScanTupleSlot` and reports a `bool`.
+fn exec_scan_cte<'mcx>(
+    node: &mut CteScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::CteScanAccessMtd,
+    recheck: execScan_seams::CteScanRecheckMtd,
+) -> PgResult<Option<SlotId>> {
+    exec_scan_core(node, into_slot_access(access), recheck, estate)
+}
+
+/// `exec_scan_rescan_cte` seam — `ExecScanReScan(&node->ss)` for a CTE scan
+/// node.
+fn exec_scan_rescan_cte<'mcx>(
+    node: &mut CteScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_scan_rescan_ss(&mut node.ss, estate)
+}
+
+/// `exec_assign_scan_projection_info_cte` seam —
+/// `ExecAssignScanProjectionInfo(&node->ss)` for a CTE scan node. Same generic
+/// `ExecAssignScanProjectionInfo` over the node's [`ScanStateData`] head.
+fn exec_assign_scan_projection_info_cte<'mcx>(
+    node: &mut CteScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_assign_scan_projection_info(&mut node.ss, estate)
+}
+
+/// `exec_scan_namedtuplestore` seam — `ExecScan(&node->ss,
+/// NamedTuplestoreScanNext, NamedTuplestoreScanRecheck)` for a
+/// named-tuplestore-scan node. The access method stores the next tuple into
+/// `ss_ScanTupleSlot` and reports a `bool`.
+fn exec_scan_namedtuplestore<'mcx>(
+    node: &mut NamedTuplestoreScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::NamedTuplestoreScanAccessMtd,
+    recheck: execScan_seams::NamedTuplestoreScanRecheckMtd,
+) -> PgResult<Option<SlotId>> {
+    exec_scan_core(node, into_slot_access(access), recheck, estate)
 }

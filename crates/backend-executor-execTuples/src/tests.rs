@@ -12,10 +12,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
-use types_datum::Datum;
 use types_nodes::tuptable::SlotData;
 use types_nodes::TupleSlotKind;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum};
 use types_tuple::heaptuple::{CompactAttribute, TupleDesc, TupleDescData};
 
 use crate::slot_payload_model::MakeTupleTableSlot;
@@ -105,15 +105,15 @@ fn fill_virtual<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>, text: &[u8]) {
     base.tts_isnull.clear();
     let v: PgVec<'mcx, u8> = slice_in(mcx, &varlena_4b(text)).unwrap();
     base.tts_values
-        .push(TupleValue::ByVal(Datum::from_i32(0x01020304)));
-    base.tts_values.push(TupleValue::ByRef(v));
+        .push(Datum::from_i32(0x01020304));
+    base.tts_values.push(Datum::ByRef(v));
     base.tts_isnull.push(false);
     base.tts_isnull.push(false);
     ExecStoreVirtualTuple(slot).unwrap();
 }
 
 /// The deformed `(value, isnull)` of every attribute, via slot_getallattrs.
-fn deform_all<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) -> Vec<(TupleValue<'mcx>, bool)> {
+fn deform_all<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) -> Vec<(Datum<'mcx>, bool)> {
     crate::slot_deform::slot_getallattrs(mcx, slot).unwrap();
     let base = slot.base();
     base.tts_values
@@ -151,10 +151,10 @@ fn virtual_to_heap_carrier_roundtrip() {
     // Deform the heap slot and confirm the round-tripped values match.
     let cols = deform_all(mcx, &mut hslot);
     assert_eq!(cols.len(), 2);
-    assert_eq!(cols[0].0, TupleValue::ByVal(Datum::from_i32(0x01020304)));
+    assert_eq!(cols[0].0, Datum::from_i32(0x01020304));
     assert_eq!(cols[0].1, false);
     match &cols[1].0 {
-        TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"hello world"),
+        Datum::ByRef(b) => assert_eq!(varlena_payload(b), b"hello world"),
         other => panic!("expected by-reference text column, got {other:?}"),
     }
     assert_eq!(cols[1].1, false);
@@ -187,9 +187,9 @@ fn virtual_to_minimal_carrier_roundtrip() {
     assert!(!fetched.data.is_empty(), "fetched minimal tuple lost its body");
 
     let cols = deform_all(mcx, &mut mslot);
-    assert_eq!(cols[0].0, TupleValue::ByVal(Datum::from_i32(0x01020304)));
+    assert_eq!(cols[0].0, Datum::from_i32(0x01020304));
     match &cols[1].0 {
-        TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"minimal!"),
+        Datum::ByRef(b) => assert_eq!(varlena_payload(b), b"minimal!"),
         other => panic!("expected by-reference text column, got {other:?}"),
     }
 }
@@ -221,7 +221,7 @@ fn copyslot_virtual_to_heap_then_heap_to_minimal() {
 
     let cols = deform_all(mcx, &mut mslot);
     match &cols[1].0 {
-        TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"copyslot"),
+        Datum::ByRef(b) => assert_eq!(varlena_payload(b), b"copyslot"),
         other => panic!("expected by-reference text column, got {other:?}"),
     }
 }
@@ -247,10 +247,10 @@ fn force_store_heap_tuple_into_virtual_deforms() {
     let base = dst.base();
     assert_eq!(
         base.tts_values[0],
-        TupleValue::ByVal(Datum::from_i32(0x01020304))
+        Datum::from_i32(0x01020304)
     );
     match &base.tts_values[1] {
-        TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"force"),
+        Datum::ByRef(b) => assert_eq!(varlena_payload(b), b"force"),
         other => panic!("expected by-reference text column, got {other:?}"),
     }
 }

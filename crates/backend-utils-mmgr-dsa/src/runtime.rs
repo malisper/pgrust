@@ -21,7 +21,16 @@ use backend_storage_lmgr_lwlock_seams as lwlock_seams;
 use backend_utils_init_small_seams::my_proc_number;
 use backend_utils_mmgr_freepage_seams as fpm_seams;
 use types_core::Size;
-use types_datum::Datum;
+// `Datum` here is the transitional bare-word shim type (`types_datum::Datum`),
+// retained ONLY at the audited DSM-cursor ABI edge this crate touches: the
+// `on_dsm_detach` / `on_shmem_exit` callback registry in the still-unmigrated
+// `backend-storage-ipc-dsm-core` whose `OnDsmDetachCallback` / `PgOnExitCallback`
+// type aliases fix the callback arg as `types_datum::Datum`. The arg carries a
+// raw control-base machine word (C `PointerGetDatum(place)` / `DatumGetPointer`),
+// not a typed SQL value, and a process-lifetime callback fn-pointer cannot carry
+// the canonical `Datum<'mcx>`'s borrow. So these two hooks and their marshaling
+// helpers stay fully-qualified `types_datum::Datum` at the edge, rather than
+// constructing a canonical `Datum<'mcx>`.
 use types_dsa::{
     DsaHandle, DsaPointer, DsaSegmentIndex, DSA_ALLOC_NO_OOM, DSA_ALLOC_ZERO, DSA_FULLNESS_CLASSES,
     DSA_HANDLE_INVALID, DSA_MAX_SEGMENTS, DSA_MAX_SEGMENT_SIZE, DSA_MIN_SEGMENT_SIZE,
@@ -478,13 +487,16 @@ pub fn dsa_attach_in_place(
 }
 
 /// `dsa_on_dsm_detach_release_in_place(segment, place)` — the detach hook.
-pub fn dsa_on_dsm_detach_release_in_place(_segment: DsmSegmentId, place: Datum) -> PgResult<()> {
+pub fn dsa_on_dsm_detach_release_in_place(
+    _segment: DsmSegmentId,
+    place: types_datum::Datum,
+) -> PgResult<()> {
     dsa_release_in_place(datum_get_pointer(place))
 }
 
 /// `dsa_on_shmem_exit_release_in_place(code, place)` — the on_shmem_exit hook.
 /// `code` is ignored; `place` carries the control base as a `Datum`.
-pub fn dsa_on_shmem_exit_release_in_place(_code: i32, place: Datum) -> PgResult<()> {
+pub fn dsa_on_shmem_exit_release_in_place(_code: i32, place: types_datum::Datum) -> PgResult<()> {
     dsa_release_in_place(datum_get_pointer(place))
 }
 
@@ -1734,10 +1746,10 @@ fn pool_spans_set_via_pointer(
 // Datum <-> pointer marshaling for the detach hook.
 // ---------------------------------------------------------------------------
 
-fn pointer_get_datum(p: u64) -> Datum {
-    Datum::from_usize(p as usize)
+fn pointer_get_datum(p: u64) -> types_datum::Datum {
+    types_datum::Datum::from_usize(p as usize)
 }
 
-fn datum_get_pointer(d: Datum) -> u64 {
+fn datum_get_pointer(d: types_datum::Datum) -> u64 {
     d.as_usize() as u64
 }

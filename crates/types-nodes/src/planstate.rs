@@ -9,7 +9,7 @@ use crate::nodes::NodeTag;
 
 use crate::nodememoize::T_MemoizeState;
 use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
-use crate::nodeindexonlyscan::T_IndexOnlyScanState;
+use crate::nodeindexonlyscan::{T_IndexOnlyScanState, T_IndexScanState};
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
 use crate::nodeunique::T_UniqueState;
@@ -36,12 +36,16 @@ pub enum PlanStateNode<'mcx> {
     Append(PgBox<'mcx, AppendStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
+    /// `T_GatherState`.
+    Gather(PgBox<'mcx, crate::nodegather::GatherStateData<'mcx>>),
     /// `T_GatherMergeState`.
     GatherMerge(PgBox<'mcx, crate::nodegathermerge::GatherMergeStateData<'mcx>>),
     /// `T_MergeAppendState`.
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_BitmapAndState`.
     BitmapAnd(PgBox<'mcx, crate::nodebitmapand::BitmapAndState<'mcx>>),
+    /// `T_BitmapOrState`.
+    BitmapOr(PgBox<'mcx, crate::nodebitmapor::BitmapOrState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
     /// `T_RecursiveUnionState`.
@@ -56,6 +60,8 @@ pub enum PlanStateNode<'mcx> {
     SetOp(PgBox<'mcx, crate::nodesetop::SetOpStateData<'mcx>>),
     /// `T_MemoizeState`.
     Memoize(PgBox<'mcx, crate::nodememoize::MemoizeScanState<'mcx>>),
+    /// `T_IndexScanState`.
+    IndexScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexScanState<'mcx>>),
     /// `T_IndexOnlyScanState`.
     IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     /// `T_BitmapIndexScanState`.
@@ -98,9 +104,11 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
+            PlanStateNode::Gather(_) => crate::nodegather::T_GatherState,
             PlanStateNode::GatherMerge(_) => crate::nodegathermerge::T_GatherMergeState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
+            PlanStateNode::BitmapOr(_) => crate::nodebitmapor::T_BitmapOrState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::RecursiveUnion(_) => T_RecursiveUnionState,
             PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
@@ -108,6 +116,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
+            PlanStateNode::IndexScan(_) => T_IndexScanState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::BitmapIndexScan(_) => crate::execstate_tags::T_BitmapIndexScanState,
             PlanStateNode::Limit(_) => T_LimitState,
@@ -135,9 +144,11 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
+            PlanStateNode::Gather(g) => &g.ps,
             PlanStateNode::GatherMerge(g) => &g.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::BitmapAnd(b) => &b.ps,
+            PlanStateNode::BitmapOr(b) => &b.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::RecursiveUnion(r) => &r.ps,
             PlanStateNode::Group(g) => &g.ss.ps,
@@ -145,6 +156,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
+            PlanStateNode::IndexScan(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
@@ -169,9 +181,11 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
+            PlanStateNode::Gather(g) => &mut g.ps,
             PlanStateNode::GatherMerge(g) => &mut g.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::BitmapAnd(b) => &mut b.ps,
+            PlanStateNode::BitmapOr(b) => &mut b.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::RecursiveUnion(r) => &mut r.ps,
             PlanStateNode::Group(g) => &mut g.ss.ps,
@@ -179,6 +193,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
+            PlanStateNode::IndexScan(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
@@ -211,6 +226,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
+            // `IndexScanState` begins with a `ScanState`.
+            PlanStateNode::IndexScan(i) => Some(&i.ss),
             // `BitmapIndexScanState` begins with a `ScanState`.
             PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
             // `SubqueryScanState` begins with a `ScanState`.

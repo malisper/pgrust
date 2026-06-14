@@ -34,7 +34,7 @@ use std::ffi::CString;
 use backend_utils_error::ereport;
 use mcx::{McxOwned, Mcx, MemoryContext, PgString, PgVec};
 use types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONNECTION_DOES_NOT_EXIST,
     ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
@@ -402,7 +402,7 @@ fn socket_comm_reset() {
 /// `on_proc_exit` callback registered by [`pq_init`]). Must be safe to run at
 /// any instant. Never errors itself; the `PgResult` is the
 /// `pg_on_exit_callback` surface.
-fn socket_close(_code: i32, _arg: Datum) -> PgResult<()> {
+fn socket_close(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
     // Nothing to do in a standalone backend, where MyProcPort is NULL.
     with_my_proc_port(&mut |port| {
         if let Some(port) = port {

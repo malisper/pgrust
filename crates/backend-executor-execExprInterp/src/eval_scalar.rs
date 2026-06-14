@@ -32,7 +32,19 @@
 //! are written out faithfully.
 
 use backend_utils_fmgr_fmgr_seams::{function_call1_coll, function_call2_coll};
+// The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
+// step-payload eval helpers operate on.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ResultCell.value` / `ExprState.resvalue` carry.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+
+/// Recover the bare scalar word from a stored canonical by-value datum (the
+/// transitional bridge: the fmgr/arrayfuncs/saophash seams take a word).
+#[inline]
+fn word_of(v: &DatumV<'_>) -> Datum {
+    Datum::from_usize(v.as_usize())
+}
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NOT_NULL_VIOLATION,
@@ -144,12 +156,12 @@ pub fn ExecEvalParamExec<'mcx>(
         _ => unreachable!("ExecEvalParamExec: step is not an EEOP_PARAM_EXEC"),
     };
 
-    let prm = estate.es_param_exec_vals[paramid as usize];
+    let prm = &estate.es_param_exec_vals[paramid as usize];
 
     let (resvalue_id, resnull_id) = res_cells(state, op);
     state
         .result_cells
-        .set(resvalue_id, ResultCell { value: prm.value, isnull: prm.isnull });
+        .set(resvalue_id, ResultCell { value: prm.value.clone(), isnull: prm.isnull });
     let _ = resnull_id; // value/is-null share one cell
     Ok(())
 }
@@ -516,7 +528,7 @@ pub fn ExecEvalSysVar<'mcx>(
         let (resvalue_id, _resnull_id) = res_cells(state, op);
         state
             .result_cells
-            .set(resvalue_id, ResultCell { value: Datum::null(), isnull: true });
+            .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
         return Ok(());
     }
 
@@ -721,7 +733,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
         // arr = DatumGetArrayTypeP(*op->resvalue);
         // nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
         // get_typlenbyvalalign(ARR_ELEMTYPE(arr), &typlen, &typbyval, &typalign);
-        let arraydatum = state.result_cells.get(resvalue_id).value;
+        let arraydatum = word_of(&state.result_cells.get(resvalue_id).value);
         let mcx = estate.es_query_cxt;
 
         let elemtype =
@@ -799,7 +811,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
                 .expect("ExecEvalHashedScalarArrayOp: elements_tab just built"),
             _ => unreachable!(),
         };
-        crate::saophash::saophash_lookup(&table.hashtab, scalar_value, &mut hash_key, &mut equal)?
+        crate::saophash::saophash_lookup(&table.hashtab, word_of(&scalar_value), &mut hash_key, &mut equal)?
     };
 
     // result = inclause ? BoolGetDatum(hashfound) : BoolGetDatum(!hashfound);
@@ -845,7 +857,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
     // *op->resvalue = result; *op->resnull = resultnull;
     state.result_cells.set(
         resvalue_id,
-        ResultCell { value: Datum::from_bool(result), isnull: resultnull },
+        ResultCell { value: DatumV::from_bool(result), isnull: resultnull },
     );
     Ok(())
 }

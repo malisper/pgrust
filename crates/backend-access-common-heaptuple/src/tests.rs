@@ -9,12 +9,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{slice_in, Mcx, MemoryContext, PgVec};
-use types_datum::Datum;
 use types_tuple::heaptuple::{
     CompactAttribute, TupleDescData, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT,
 };
 
-use crate::{heap_compute_data_size, heap_deform_tuple, heap_form_tuple, TupleValue};
+use crate::{heap_compute_data_size, heap_deform_tuple, heap_form_tuple, Datum};
 
 /// Build a `CompactAttribute` for a by-value type of the given `attlen`/align.
 fn byval(attlen: i16, attalignby: u8) -> CompactAttribute {
@@ -60,9 +59,9 @@ fn tupdesc<'mcx>(mcx: Mcx<'mcx>, attrs: &[CompactAttribute]) -> TupleDescData<'m
     }
 }
 
-/// A by-reference [`TupleValue`] over `bytes`, allocated in `mcx`.
-fn byref<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> TupleValue<'mcx> {
-    TupleValue::ByRef(slice_in(mcx, bytes).unwrap())
+/// A by-reference [`Datum`] over `bytes`, allocated in `mcx`.
+fn byref<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> Datum<'mcx> {
+    Datum::ByRef(slice_in(mcx, bytes).unwrap())
 }
 
 /// A 4-byte-header varlena datum carrying `payload` (length-word includes the
@@ -83,9 +82,9 @@ fn form_deform_all_byval_no_nulls() {
     // int4, int2, int4
     let td = tupdesc(mcx, &[byval(4, 4), byval(2, 2), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(0x01020304)),
-        TupleValue::ByVal(Datum::from_i16(0x0506)),
-        TupleValue::ByVal(Datum::from_i32(-1)),
+        Datum::from_i32(0x01020304),
+        Datum::from_i16(0x0506),
+        Datum::from_i32(-1),
     ];
     let isnull = vec![false, false, false];
 
@@ -99,9 +98,9 @@ fn form_deform_all_byval_no_nulls() {
 
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
     assert_eq!(cols.len(), 3);
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(0x01020304)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i16(0x0506)), false));
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(-1)), false));
+    assert_eq!(cols[0], (Datum::from_i32(0x01020304), false));
+    assert_eq!(cols[1], (Datum::from_i16(0x0506), false));
+    assert_eq!(cols[2], (Datum::from_i32(-1), false));
 }
 
 #[test]
@@ -110,9 +109,9 @@ fn form_deform_with_nulls_sets_bitmap() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(8, 8), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(11)),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(33)),
+        Datum::from_i32(11),
+        Datum::null(),
+        Datum::from_i32(33),
     ];
     let isnull = vec![false, true, false];
 
@@ -126,9 +125,9 @@ fn form_deform_with_nulls_sets_bitmap() {
     assert_eq!(hdr.t_bits[0] & 0b0000_0100, 0b0000_0100);
 
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(11)), false));
+    assert_eq!(cols[0], (Datum::from_i32(11), false));
     assert_eq!(cols[1].1, true);
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(33)), false));
+    assert_eq!(cols[2], (Datum::from_i32(33), false));
 }
 
 #[test]
@@ -144,7 +143,7 @@ fn form_deform_varlena_roundtrip() {
     let payload = vec![b'x'; 130];
     let vl = varlena_4b(&payload);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(42)),
+        Datum::from_i32(42),
         byref(mcx, &vl),
     ];
     let isnull = vec![false, false];
@@ -154,10 +153,10 @@ fn form_deform_varlena_roundtrip() {
     assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASVARWIDTH, 0);
 
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(42)), false));
+    assert_eq!(cols[0], (Datum::from_i32(42), false));
     // The non-packable varlena keeps its 4-byte header verbatim.
     match &cols[1].0 {
-        TupleValue::ByRef(b) => assert_eq!(&b[..], &vl[..]),
+        Datum::ByRef(b) => assert_eq!(&b[..], &vl[..]),
         other => panic!("expected ByRef, got {other:?}"),
     }
     assert_eq!(cols[1].1, false);
@@ -179,7 +178,7 @@ fn non_packable_varlena_short_header_preserved() {
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
     match &cols[0].0 {
-        TupleValue::ByRef(b) => assert_eq!(&b[..], &vl[..]),
+        Datum::ByRef(b) => assert_eq!(&b[..], &vl[..]),
         other => panic!("expected ByRef 4-byte varlena, got {other:?}"),
     }
 }
@@ -200,7 +199,7 @@ fn short_varlena_conversion() {
     // After conversion the stored datum has a 1-byte header: total = payload+1.
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
     match &cols[0].0 {
-        TupleValue::ByRef(b) => {
+        Datum::ByRef(b) => {
             // 1-byte header (low bit set), length = payload.len() + 1.
             assert_eq!(b[0] & 0x01, 0x01);
             assert_eq!(((b[0] >> 1) & 0x7F) as usize, payload.len() + 1);
@@ -217,8 +216,8 @@ fn compute_data_size_matches_form() {
     let td = tupdesc(mcx, &[byval(4, 4), byval(8, 8), varlena()]);
     let vl = varlena_4b(b"payload-bytes");
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(1)),
-        TupleValue::ByVal(Datum::from_usize(2)),
+        Datum::from_i32(1),
+        Datum::from_usize(2),
         byref(mcx, &vl),
     ];
     let isnull = vec![false, false, false];
@@ -246,7 +245,7 @@ fn cstring_roundtrip() {
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
     match &cols[0].0 {
-        TupleValue::ByRef(b) => assert_eq!(&b[..], &cstr[..]),
+        Datum::ByRef(b) => assert_eq!(&b[..], &cstr[..]),
         other => panic!("expected cstring ByRef, got {other:?}"),
     }
 }
@@ -287,18 +286,18 @@ fn alignment_padding_double() {
     // field must start at offset 8 (7 pad bytes).
     let td = tupdesc(mcx, &[byval(1, 1), byval(8, 8)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_usize(0x7f)),
-        TupleValue::ByVal(Datum::from_usize(0x1122_3344_5566_7788)),
+        Datum::from_usize(0x7f),
+        Datum::from_usize(0x1122_3344_5566_7788),
     ];
     let isnull = vec![false, false];
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     // data_len = 8 (double-align padding) + 8 = 16.
     assert_eq!(formed.data.len(), 16);
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_usize(0x7f)), false));
+    assert_eq!(cols[0], (Datum::from_usize(0x7f), false));
     assert_eq!(
         cols[1],
-        (TupleValue::ByVal(Datum::from_usize(0x1122_3344_5566_7788)), false)
+        (Datum::from_usize(0x1122_3344_5566_7788), false)
     );
     // silence unused-const import lints for the align consts.
     let _ = (TYPALIGN_CHAR, TYPALIGN_INT, TYPALIGN_DOUBLE);
@@ -316,9 +315,9 @@ fn heap_modify_tuple_overlays_replaced_columns() {
     // carried over from the old tuple to the new one, as C does.
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let old_values = vec![
-        TupleValue::ByVal(Datum::from_i32(10)),
-        TupleValue::ByVal(Datum::from_i32(20)),
-        TupleValue::ByVal(Datum::from_i32(30)),
+        Datum::from_i32(10),
+        Datum::from_i32(20),
+        Datum::from_i32(30),
     ];
     let old_isnull = vec![false, false, false];
     let mut old = heap_form_tuple(mcx, &td, &old_values, &old_isnull).expect("form old");
@@ -336,9 +335,9 @@ fn heap_modify_tuple_overlays_replaced_columns() {
 
     // Replace column 2 (index 1) with 99; leave columns 1 and 3 untouched.
     let repl_values = vec![
-        TupleValue::ByVal(Datum::from_i32(0)), // ignored (doReplace=false)
-        TupleValue::ByVal(Datum::from_i32(99)),
-        TupleValue::ByVal(Datum::from_i32(0)), // ignored
+        Datum::from_i32(0), // ignored (doReplace=false)
+        Datum::from_i32(99),
+        Datum::from_i32(0), // ignored
     ];
     let repl_isnull = vec![false, false, false];
     let do_replace = vec![false, true, false];
@@ -347,9 +346,9 @@ fn heap_modify_tuple_overlays_replaced_columns() {
         .expect("modify");
 
     let cols = heap_deform_tuple(mcx, &new.tuple, &td, &new.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(10)), false)); // from old
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(99)), false)); // replaced
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(30)), false)); // from old
+    assert_eq!(cols[0], (Datum::from_i32(10), false)); // from old
+    assert_eq!(cols[1], (Datum::from_i32(99), false)); // replaced
+    assert_eq!(cols[2], (Datum::from_i32(30), false)); // from old
 
     // Identity carried over from the old tuple (heaptuple.c:1258-1260).
     assert_eq!(new.tuple.t_self, stamped_ctid);
@@ -369,8 +368,8 @@ fn heap_modify_tuple_can_set_column_null() {
         mcx,
         &td,
         &[
-            TupleValue::ByVal(Datum::from_i32(1)),
-            TupleValue::ByVal(Datum::from_i32(2)),
+            Datum::from_i32(1),
+            Datum::from_i32(2),
         ],
         &[false, false],
     )
@@ -387,8 +386,8 @@ fn heap_modify_tuple_can_set_column_null() {
         &old,
         &td,
         &[
-            TupleValue::ByVal(Datum::null()),
-            TupleValue::ByVal(Datum::from_i32(0)),
+            Datum::null(),
+            Datum::from_i32(0),
         ],
         &[true, false],
         &[true, false],
@@ -399,7 +398,7 @@ fn heap_modify_tuple_can_set_column_null() {
     assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
     let cols = heap_deform_tuple(mcx, &new.tuple, &td, &new.data).expect("deform");
     assert_eq!(cols[0].1, true); // now null
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(2)), false)); // from old
+    assert_eq!(cols[1], (Datum::from_i32(2), false)); // from old
 }
 
 // ===========================================================================
@@ -413,9 +412,9 @@ fn heap_modify_tuple_can_set_column_null() {
 fn formed_three_ints<'mcx>(mcx: Mcx<'mcx>, a: i32, b: i32, c: i32) -> crate::FormedTuple<'mcx> {
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(a)),
-        TupleValue::ByVal(Datum::from_i32(b)),
-        TupleValue::ByVal(Datum::from_i32(c)),
+        Datum::from_i32(a),
+        Datum::from_i32(b),
+        Datum::from_i32(c),
     ];
     let isnull = vec![false, false, false];
     crate::heap_form_tuple(mcx, &td, &values, &isnull).expect("form")
@@ -506,9 +505,9 @@ fn modify_tuple_replaces_selected_columns_and_keeps_identity() {
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     // Replace only column 1 (0-based) with 222.
     let repl_values = vec![
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(222)),
-        TupleValue::ByVal(Datum::null()),
+        Datum::null(),
+        Datum::from_i32(222),
+        Datum::null(),
     ];
     let repl_isnull = vec![false, false, false];
     let do_replace = vec![false, true, false];
@@ -517,9 +516,9 @@ fn modify_tuple_replaces_selected_columns_and_keeps_identity() {
         .expect("modify");
 
     let cols = crate::heap_deform_tuple(mcx, &new_t.tuple, &td, &new_t.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(10)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(222)), false));
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(30)), false));
+    assert_eq!(cols[0], (Datum::from_i32(10), false));
+    assert_eq!(cols[1], (Datum::from_i32(222), false));
+    assert_eq!(cols[2], (Datum::from_i32(30), false));
 
     // identity copied from the old tuple.
     assert_eq!(new_t.tuple.t_self, orig.tuple.t_self);
@@ -537,9 +536,9 @@ fn modify_tuple_can_set_a_column_null() {
     let orig = formed_three_ints(mcx, 10, 20, 30);
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let repl_values = vec![
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::null()),
+        Datum::null(),
+        Datum::null(),
+        Datum::null(),
     ];
     let repl_isnull = vec![false, true, false];
     let do_replace = vec![false, true, false];
@@ -547,9 +546,9 @@ fn modify_tuple_can_set_a_column_null() {
     let new_t = crate::heap_modify_tuple(mcx, &orig, &td, &repl_values, &repl_isnull, &do_replace)
         .expect("modify");
     let cols = crate::heap_deform_tuple(mcx, &new_t.tuple, &td, &new_t.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(10)), false));
+    assert_eq!(cols[0], (Datum::from_i32(10), false));
     assert_eq!(cols[1].1, true); // now null
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(30)), false));
+    assert_eq!(cols[2], (Datum::from_i32(30), false));
     // HEAP_HASNULL now set on the new tuple.
     assert_ne!(
         new_t.tuple.t_data.as_ref().unwrap().t_infomask & types_tuple::heaptuple::HEAP_HASNULL,
@@ -568,8 +567,8 @@ fn modify_tuple_by_cols_replaces_by_attnum() {
     // Replace columns 1 and 3 (1-based) with 111 and 333.
     let repl_cols = vec![1, 3];
     let repl_values = vec![
-        TupleValue::ByVal(Datum::from_i32(111)),
-        TupleValue::ByVal(Datum::from_i32(333)),
+        Datum::from_i32(111),
+        Datum::from_i32(333),
     ];
     let repl_isnull = vec![false, false];
 
@@ -579,9 +578,9 @@ fn modify_tuple_by_cols_replaces_by_attnum() {
     .expect("modify_by_cols");
 
     let cols = crate::heap_deform_tuple(mcx, &new_t.tuple, &td, &new_t.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(111)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(20)), false));
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(333)), false));
+    assert_eq!(cols[0], (Datum::from_i32(111), false));
+    assert_eq!(cols[1], (Datum::from_i32(20), false));
+    assert_eq!(cols[2], (Datum::from_i32(333), false));
     assert_eq!(new_t.tuple.t_tableOid, 42);
 }
 
@@ -599,7 +598,7 @@ fn modify_tuple_by_cols_rejects_out_of_range_column() {
         &td,
         1,
         &[0],
-        &[TupleValue::ByVal(Datum::from_i32(9))],
+        &[Datum::from_i32(9)],
         &[false],
     )
     .unwrap_err();
@@ -612,7 +611,7 @@ fn modify_tuple_by_cols_rejects_out_of_range_column() {
         &td,
         1,
         &[4],
-        &[TupleValue::ByVal(Datum::from_i32(9))],
+        &[Datum::from_i32(9)],
         &[false],
     )
     .unwrap_err();
@@ -627,8 +626,8 @@ fn form_minimal_tuple_no_nulls_layout() {
     // hoff = MAXALIGN(15) == 16; t_hoff = 16 + MINIMAL_TUPLE_OFFSET(8) == 24.
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(100)),
-        TupleValue::ByVal(Datum::from_i32(200)),
+        Datum::from_i32(100),
+        Datum::from_i32(200),
     ];
     let isnull = vec![false, false];
 
@@ -651,9 +650,9 @@ fn form_minimal_tuple_with_nulls_sets_bitmap() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(1)),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(3)),
+        Datum::from_i32(1),
+        Datum::null(),
+        Datum::from_i32(3),
     ];
     let isnull = vec![false, true, false];
 
@@ -699,9 +698,9 @@ fn attisnull_reports_null_and_present() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(1)),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(3)),
+        Datum::from_i32(1),
+        Datum::null(),
+        Datum::from_i32(3),
     ];
     let isnull = vec![false, true, false];
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
@@ -726,7 +725,7 @@ fn attisnull_beyond_natts_is_null_without_missing() {
     let one = heap_form_tuple(
         mcx,
         &tupdesc(mcx, &[byval(4, 4)]),
-        &[TupleValue::ByVal(Datum::from_i32(7))],
+        &[Datum::from_i32(7)],
         &[false],
     )
     .expect("form one");
@@ -748,7 +747,7 @@ fn getsysattr_tableoid_and_ctid() {
     )
     .expect("getsysattr");
     assert!(!isnull);
-    assert_eq!(val, TupleValue::ByVal(Datum::from_oid(1259)));
+    assert_eq!(val, Datum::from_oid(1259));
 
     let (ctid, isnull2) = crate::heap_getsysattr(
         mcx,
@@ -758,7 +757,7 @@ fn getsysattr_tableoid_and_ctid() {
     .expect("getsysattr");
     assert!(!isnull2);
     match ctid {
-        TupleValue::ByRef(b) => assert_eq!(b.len(), 6),
+        Datum::ByRef(b) => assert_eq!(b.len(), 6),
         other => panic!("expected ByRef ctid, got {other:?}"),
     }
 }
@@ -769,15 +768,15 @@ fn nocachegetattr_matches_deform() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(8, 8), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(11)),
-        TupleValue::ByVal(Datum::from_usize(22)),
-        TupleValue::ByVal(Datum::from_i32(33)),
+        Datum::from_i32(11),
+        Datum::from_usize(22),
+        Datum::from_i32(33),
     ];
     let isnull = vec![false, false, false];
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
 
     let v = crate::nocachegetattr(mcx, &formed.tuple, 3, &td, &formed.data).expect("getattr");
-    assert_eq!(v, TupleValue::ByVal(Datum::from_i32(33)));
+    assert_eq!(v, Datum::from_i32(33));
 }
 
 #[test]
@@ -787,7 +786,7 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
     let src = heap_form_tuple(
         mcx,
         &tupdesc(mcx, &[byval(4, 4)]),
-        &[TupleValue::ByVal(Datum::from_i32(42))],
+        &[Datum::from_i32(42)],
         &[false],
     )
     .expect("form src");
@@ -800,7 +799,7 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
     assert_eq!(types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr), 3);
 
     let cols = heap_deform_tuple(mcx, &expanded.tuple, &td, &expanded.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(42)), false));
+    assert_eq!(cols[0], (Datum::from_i32(42), false));
     assert!(cols[1].1);
     assert!(cols[2].1);
 }
@@ -851,7 +850,7 @@ fn deform_returns_byref_missing_value() {
     let src = heap_form_tuple(
         mcx,
         &tupdesc(mcx, &[byval(4, 4)]),
-        &[TupleValue::ByVal(Datum::from_i32(5))],
+        &[Datum::from_i32(5)],
         &[false],
     )
     .expect("form src");
@@ -860,7 +859,7 @@ fn deform_returns_byref_missing_value() {
     let missing = [
         types_tuple::heaptuple::AttrMissing {
             am_present: false,
-            am_value: TupleValue::ByVal(Datum::null()),
+            am_value: Datum::null(),
         },
         types_tuple::heaptuple::AttrMissing {
             am_present: true,
@@ -870,12 +869,12 @@ fn deform_returns_byref_missing_value() {
     let td = tupdesc_with_missing(mcx, &[byval(4, 4), varlena()], &missing);
 
     let cols = heap_deform_tuple(mcx, &src.tuple, &td, &src.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(5)), false));
+    assert_eq!(cols[0], (Datum::from_i32(5), false));
     // The by-ref missing value comes back as its bytes (C: the cached
     // TopMemoryContext datumCopy; here an owned copy in mcx), not NULL.
     assert!(!cols[1].1);
     match &cols[1].0 {
-        TupleValue::ByRef(b) => assert_eq!(&b[..], &default_vl[..]),
+        Datum::ByRef(b) => assert_eq!(&b[..], &default_vl[..]),
         other => panic!("expected ByRef missing value, got {other:?}"),
     }
 
@@ -892,7 +891,7 @@ fn expand_tuple_fills_byref_missing_value() {
     let src = heap_form_tuple(
         mcx,
         &tupdesc(mcx, &[byval(4, 4)]),
-        &[TupleValue::ByVal(Datum::from_i32(7))],
+        &[Datum::from_i32(7)],
         &[false],
     )
     .expect("form src");
@@ -901,7 +900,7 @@ fn expand_tuple_fills_byref_missing_value() {
     let missing = [
         types_tuple::heaptuple::AttrMissing {
             am_present: false,
-            am_value: TupleValue::ByVal(Datum::null()),
+            am_value: Datum::null(),
         },
         types_tuple::heaptuple::AttrMissing {
             am_present: true,
@@ -912,7 +911,7 @@ fn expand_tuple_fills_byref_missing_value() {
 
     let expanded = crate::heap_expand_tuple(mcx, &src, &td).expect("expand");
     let cols = heap_deform_tuple(mcx, &expanded.tuple, &td, &expanded.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(7)), false));
+    assert_eq!(cols[0], (Datum::from_i32(7), false));
     assert!(!cols[1].1);
     assert_eq!(cols[1].0.as_ref_bytes(), &default_vl[..]);
 }
@@ -924,7 +923,7 @@ fn minimal_expand_tuple_appends_nulls() {
     let src = heap_form_tuple(
         mcx,
         &tupdesc(mcx, &[byval(4, 4)]),
-        &[TupleValue::ByVal(Datum::from_i32(9))],
+        &[Datum::from_i32(9)],
         &[false],
     )
     .expect("form src");
@@ -943,8 +942,8 @@ fn minimal_heap_roundtrip() {
         mcx,
         &td,
         &[
-            TupleValue::ByVal(Datum::from_i32(100)),
-            TupleValue::ByVal(Datum::from_i32(200)),
+            Datum::from_i32(100),
+            Datum::from_i32(200),
         ],
         &[false, false],
     )
@@ -961,8 +960,8 @@ fn minimal_heap_roundtrip() {
     assert_eq!(back.tuple.t_len, h.tuple.t_len);
     assert_eq!(back.data, h.data);
     let cols = heap_deform_tuple(mcx, &back.tuple, &td, &back.data).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(100)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(200)), false));
+    assert_eq!(cols[0], (Datum::from_i32(100), false));
+    assert_eq!(cols[1], (Datum::from_i32(200), false));
 }
 
 #[test]
@@ -970,7 +969,7 @@ fn copy_minimal_tuple_is_deep() {
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4)]);
-    let h = heap_form_tuple(mcx, &td, &[TupleValue::ByVal(Datum::from_i32(5))], &[false])
+    let h = heap_form_tuple(mcx, &td, &[Datum::from_i32(5)], &[false])
         .expect("form");
     let mt = crate::minimal_tuple_from_heap_tuple(mcx, &h, 0).expect("to minimal");
     let copy = crate::heap_copy_minimal_tuple(mcx, &mt, 0).expect("copy");
@@ -988,8 +987,8 @@ fn copy_tuple_as_datum_sets_composite_header() {
         mcx,
         &td,
         &[
-            TupleValue::ByVal(Datum::from_i32(1)),
-            TupleValue::ByVal(Datum::from_i32(2)),
+            Datum::from_i32(1),
+            Datum::from_i32(2),
         ],
         &[false, false],
     )
@@ -1018,9 +1017,9 @@ fn form_tuple_accounting_is_exact() {
     let desc_ctx = MemoryContext::new("descriptor");
     let td = tupdesc(desc_ctx.mcx(), &[byval(4, 4), byval(8, 8), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(1)),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(3)),
+        Datum::from_i32(1),
+        Datum::null(),
+        Datum::from_i32(3),
     ];
     let isnull = vec![false, true, false];
 
@@ -1055,7 +1054,7 @@ fn all_bytes_return_on_drop() {
     let ctx = MemoryContext::new("per-query");
     {
         let mcx = ctx.mcx();
-        let values = vec![TupleValue::ByVal(Datum::from_i32(7)), byref(mcx, &input_vl)];
+        let values = vec![Datum::from_i32(7), byref(mcx, &input_vl)];
         let isnull = vec![false, false];
         let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
         let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
@@ -1080,10 +1079,9 @@ mod flat_codec {
         heap_deform_minimal_tuple_flat, heap_form_minimal_tuple_flat, minimal_tuple_from_flat,
         minimal_tuple_from_heap_tuple_flat, minimal_tuple_to_flat, MinimalTupleFlatError,
     };
-    use crate::TupleValue;
+    use crate::Datum;
     use alloc::vec;
     use mcx::MemoryContext;
-    use types_datum::Datum;
 
     /// form -> flat -> deform identity over byval + varlena + NULL columns.
     #[test]
@@ -1092,9 +1090,9 @@ mod flat_codec {
         let mcx = ctx.mcx();
         let td = tupdesc(mcx, &[byval(4, 4), varlena(), byval(8, 8)]);
         let values = vec![
-            TupleValue::ByVal(Datum::from_i32(7)),
+            Datum::from_i32(7),
             byref(mcx, &varlena_4b(b"hello world")),
-            TupleValue::ByVal(Datum::from_i64(-42)),
+            Datum::from_i64(-42),
         ];
         let isnull = vec![false, false, false];
 
@@ -1108,17 +1106,17 @@ mod flat_codec {
         let cols = heap_deform_minimal_tuple_flat(mcx, &blob, &td).expect("deform flat");
         assert_eq!(cols.len(), 3);
         assert!(!cols[0].1 && !cols[1].1 && !cols[2].1);
-        assert_eq!(cols[0].0, TupleValue::ByVal(Datum::from_i32(7)));
+        assert_eq!(cols[0].0, Datum::from_i32(7));
         // The varlena was short-packed by fill_val; compare its payload.
         match &cols[1].0 {
-            TupleValue::ByRef(bytes) => {
+            Datum::ByRef(bytes) => {
                 // Short-packed varlena: 1-byte header, then the payload.
                 assert_eq!(bytes.len(), 1 + b"hello world".len());
                 assert_eq!(&bytes[1..], b"hello world");
             }
             other => panic!("expected ByRef varlena, got {other:?}"),
         }
-        assert_eq!(cols[2].0, TupleValue::ByVal(Datum::from_i64(-42)));
+        assert_eq!(cols[2].0, Datum::from_i64(-42));
     }
 
     /// form -> flat -> from_flat -> to_flat byte identity, with NULLs (bitmap).
@@ -1128,8 +1126,8 @@ mod flat_codec {
         let mcx = ctx.mcx();
         let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), varlena()]);
         let values = vec![
-            TupleValue::ByVal(Datum::from_i32(1)),
-            TupleValue::ByVal(Datum::null()),
+            Datum::from_i32(1),
+            Datum::null(),
             byref(mcx, &varlena_4b(b"x")),
         ];
         let isnull = vec![false, true, false];
@@ -1159,8 +1157,8 @@ mod flat_codec {
         let mcx = ctx.mcx();
         let td = tupdesc(mcx, &[byval(4, 4), byval(2, 2)]);
         let values = vec![
-            TupleValue::ByVal(Datum::from_i32(0x0A0B0C0D)),
-            TupleValue::ByVal(Datum::from_i16(99)),
+            Datum::from_i32(0x0A0B0C0D),
+            Datum::from_i16(99),
         ];
         let isnull = vec![false, false];
 
@@ -1189,7 +1187,7 @@ mod flat_codec {
         let blob = heap_form_minimal_tuple_flat(
             mcx,
             &td,
-            &[TupleValue::ByVal(Datum::from_i32(1))],
+            &[Datum::from_i32(1)],
             &[false],
         )
         .expect("form");
@@ -1212,7 +1210,7 @@ mod flat_codec {
         let mut formed = crate::heap_form_tuple(
             mcx,
             &td,
-            &[TupleValue::ByVal(Datum::from_i32(1))],
+            &[Datum::from_i32(1)],
             &[false],
         )
         .expect("form");

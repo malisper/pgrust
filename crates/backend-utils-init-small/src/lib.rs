@@ -95,6 +95,15 @@ pub fn init_seams() {
         globals::my_proc_port_guc_options,
     );
     backend_utils_init_small_seams::data_dir::set(globals::DataDir);
+    // GUC-backed integer globals whose C definitions live in their owning units
+    // (`max_prepared_xacts` in twophase.c, `autovacuum_worker_slots` in
+    // autovacuum.c); the single store is the GUC-table slot, read here.
+    backend_utils_init_small_seams::max_prepared_xacts::set(globals::max_prepared_xacts);
+    backend_utils_init_small_seams::autovacuum_worker_slots::set(
+        globals::autovacuum_worker_slots,
+    );
+    // `DatabasePath` read, reconciled to the seam's `PgResult<String>` contract.
+    backend_utils_init_small_seams::database_path::set(globals::database_path_seam);
 }
 
 #[cfg(test)]

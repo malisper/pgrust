@@ -27,7 +27,7 @@ use types_core::primitive::{AttrNumber, Index, Oid};
 use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 use types_tuple::tupconvert::TupleConversionMap;
 
@@ -159,7 +159,7 @@ impl core::fmt::Debug for Opaque {
 /// `ecxt_per_tuple_memory`; the Rust shape carries both halves of that
 /// surface — the per-tuple context handle is passed in, and failure is
 /// `Err(PgError)`.
-pub type ExprContextCallbackFunction = fn(Mcx<'_>, Datum) -> PgResult<()>;
+pub type ExprContextCallbackFunction = for<'mcx> fn(Mcx<'mcx>, Datum<'mcx>) -> PgResult<()>;
 
 /// `ExprContext_CB` (execnodes.h) — one registered shutdown callback. The
 /// chain nodes are allocated in the context's per-query memory
@@ -169,7 +169,7 @@ pub type ExprContextCallbackFunction = fn(Mcx<'_>, Datum) -> PgResult<()>;
 pub struct ExprContext_CB<'mcx> {
     pub next: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
     pub function: ExprContextCallbackFunction,
-    pub arg: Datum,
+    pub arg: Datum<'mcx>,
 }
 
 /// `ExprContext` (execnodes.h) — per-node expression-evaluation context,
@@ -204,14 +204,14 @@ pub struct ExprContext<'mcx> {
     /// `ecxt_per_query_memory`.
     pub ecxt_per_tuple_memory: MemoryContext,
     /// `Datum *ecxt_aggvalues` — precomputed aggregate values.
-    pub ecxt_aggvalues: PgVec<'mcx, Datum>,
+    pub ecxt_aggvalues: PgVec<'mcx, Datum<'mcx>>,
     /// `bool *ecxt_aggnulls` — their is-null flags.
     pub ecxt_aggnulls: PgVec<'mcx, bool>,
     /// `Datum caseValue_datum` / `bool caseValue_isNull` — CASE expr value.
-    pub caseValue_datum: Datum,
+    pub caseValue_datum: Datum<'mcx>,
     pub caseValue_isNull: bool,
     /// `Datum domainValue_datum` / `bool domainValue_isNull` — domain check.
-    pub domainValue_datum: Datum,
+    pub domainValue_datum: Datum<'mcx>,
     pub domainValue_isNull: bool,
     /// `ExprContext_CB *ecxt_callbacks` — registered shutdown callbacks.
     pub ecxt_callbacks: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
@@ -219,10 +219,20 @@ pub struct ExprContext<'mcx> {
 
 /// `ParamExecData` (execnodes.h), trimmed: the `execPlan` link to a
 /// not-yet-evaluated subplan arrives with the subplan unit.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ParamExecData {
-    pub value: Datum,
+#[derive(Clone, Debug)]
+pub struct ParamExecData<'mcx> {
+    pub value: Datum<'mcx>,
     pub isnull: bool,
+}
+
+impl Default for ParamExecData<'_> {
+    fn default() -> Self {
+        // C `palloc0` zero-init: NULL value, isnull cleared.
+        ParamExecData {
+            value: Datum::null(),
+            isnull: false,
+        }
+    }
 }
 
 /// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
@@ -440,6 +450,14 @@ pub type ExecProcNodeMtd<'mcx> = Option<
 /// `PlanState` head (execnodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlanStateData<'mcx> {
+    /// `EState *state` — the executor state for this query (the *single* `EState`
+    /// that owns the whole `PlanState` tree). Carried as a lifetime-free raw
+    /// back-pointer ([`EStateLink`]); `None` is the un-linked default (the C
+    /// zero-init before `ExecInitNode` sets `planstate->state = estate`). See
+    /// [`EStateLink`] for the liveness invariant. `Option` is `Default` (→
+    /// `None`), so `#[derive(Default)]` keeps working even though `EStateLink`
+    /// (a `NonNull`) is not `Default`.
+    pub state: Option<EStateLink>,
     /// `Plan *plan` — associated plan node. C aliases the shared, read-only
     /// plan tree (`planstate->plan = (Plan *) node`); the borrow does the
     /// same — node init never copies the plan.
@@ -455,6 +473,10 @@ pub struct PlanStateData<'mcx> {
     pub ExecProcNodeReal: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
+    /// `bool async_capable` — true if node is async-capable. Set by the planner
+    /// / async-aware parent (`ExecInitAppend`); the default `false` is the C
+    /// zero-initialized value for nodes that are not async-capable.
+    pub async_capable: bool,
     /// `ExprState *qual` — boolean qual condition (compiled `plan.qual`).
     /// `None` = the C `NULL` (always-true).
     pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState<'mcx>>>,
@@ -731,7 +753,7 @@ pub struct EStateData<'mcx> {
     pub es_param_list_info: crate::parsestmt::ParamListInfoHandle,
     /// `ParamExecData *es_param_exec_vals` — values of internal params.
     /// Empty = the C `NULL`.
-    pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
+    pub es_param_exec_vals: PgVec<'mcx, ParamExecData<'mcx>>,
     /// `MemoryContext es_query_cxt` — the per-query context the executor
     /// allocates in (C: the context `CreateExecutorState` made the `EState`
     /// in, current while nodes init and run).
@@ -783,6 +805,16 @@ pub struct EStateData<'mcx> {
     /// the C `NULL` (no parallel workers). Consumed first by
     /// `nodeBitmapHeapscan`'s parallel-scan DSM setup.
     pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
+    /// `JunkFilter *es_junkFilter` — top-level junk filter, if any
+    /// (execMain.c sets it in `InitPlan` for the top plan's junk attributes;
+    /// `ExecFilterJunk` projects through it). `None` = the C `NULL`. Carries
+    /// the real owned [`JunkFilter`].
+    pub es_junkFilter: Option<PgBox<'mcx, JunkFilter<'mcx>>>,
+    /// `QueryEnvironment *es_queryEnv` — context for `ENR` (ephemeral named
+    /// relations, e.g. trigger transition tables). The `QueryEnvironment` lives
+    /// above this layer; the executor only stores and threads it, so it rides
+    /// opaquely. `None` = the C `NULL`.
+    pub es_queryEnv: Opaque,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -861,6 +893,9 @@ impl<'mcx> EStateData<'mcx> {
             es_result_rel_pool: PgVec::new_in(mcx),
             // es_query_dsa = NULL;
             es_query_dsa: None,
+            // es_junkFilter = NULL; es_queryEnv = NULL;
+            es_junkFilter: None,
+            es_queryEnv: Opaque(None),
         }
     }
 
@@ -953,5 +988,108 @@ impl<'mcx> EStateData<'mcx> {
     /// Resolve a ResultRelInfo id mutably.
     pub fn result_rel_mut(&mut self, id: RriId) -> &mut ResultRelInfo<'mcx> {
         &mut self.es_result_rel_pool[id.0 as usize]
+    }
+}
+
+/// `EState *` back-link (the executor-state uplink stored in `PlanState.state`).
+///
+/// A `PlanState` points back at the *single* `EState` that owns its whole node
+/// tree. Modelled as a **lifetime-free raw back-pointer** to the owned `EState`,
+/// exactly the [`backend-utils-mctx`](mcx) child→parent uplink idiom (and the
+/// `#225` `RelationRef` / `RelAlias` mechanism): no lifetime to infect
+/// `PlanState`/`EState`, `Copy`, re-derive `&` per access, validity underwritten
+/// by the invariant that the owned `EState` OUTLIVES — and, because it OWNS the
+/// tree, never moves while linked — the `PlanState` tree it owns.
+///
+/// The wrapped pointer erases the EState's `'mcx` to `'static` (the link carries
+/// only a raw address; it is never dereferenced as a stored tagged reference —
+/// `get`/`get_mut` re-derive a fresh `&` at a caller-chosen lifetime per
+/// access). This mirrors the `mcx` parent uplink and the `RelAlias` raw
+/// back-pointer.
+#[derive(Clone, Copy, Debug)]
+pub struct EStateLink(core::ptr::NonNull<EStateData<'static>>);
+
+impl EStateLink {
+    /// Wrap the stable address of the owned `EState` as a back-link. The caller
+    /// must guarantee the `EState` outlives every `PlanState` carrying the link
+    /// (it does: the `EState` owns the whole `PlanState` tree); see the type
+    /// docs.
+    #[inline]
+    pub fn new(p: core::ptr::NonNull<EStateData<'static>>) -> Self {
+        EStateLink(p)
+    }
+
+    /// Wrap an owned `EState` borrow as a back-link (the usual construction:
+    /// `EStateLink::from_ref(&estate)` while filling a `PlanState`). The `'mcx`
+    /// is erased into the raw address; see the type docs.
+    #[inline]
+    pub fn from_ref<'mcx>(estate: &EStateData<'mcx>) -> Self {
+        EStateLink(core::ptr::NonNull::from(estate).cast())
+    }
+
+    /// Momentary shared read of the owned `EState` through the back-link — the
+    /// single audited deref of the raw uplink (mirrors the `mcx` parent and
+    /// `RelAlias::get`). Re-derives the `&` per access at the caller-chosen
+    /// lifetime; never stores a stale reference.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get<'a>(&self) -> &'a EStateData<'a> {
+        // Re-derive a fresh, untagged `NonNull` from the raw address so this
+        // deref's provenance is current (a once-captured `&`-tag would be
+        // revoked by an intervening `&mut` to the owned `EState`); never deref
+        // the stored `self.0` directly. Mirrors `RelAlias::get` exactly.
+        // SAFETY: `self.0` is non-null (newtype invariant), so `new_unchecked`
+        // is valid.
+        let fresh =
+            unsafe { core::ptr::NonNull::new_unchecked(self.0.as_ptr() as *mut EStateData<'a>) };
+        debug_assert_eq!(
+            fresh.as_ptr() as *mut (),
+            self.0.as_ptr() as *mut (),
+            "owned EState moved under EStateLink"
+        );
+        // SAFETY: the uplink is set only to the single owned `EState` (created in
+        // the executor start and held by the executor guard / `QueryDesc`) that,
+        // by construction, OWNS — and therefore outlives + never moves while
+        // linked — the `PlanState` tree carrying this link. The cross-struct
+        // reference points from the shorter-lived `PlanState` to the
+        // longer-lived owning `EState`, exactly the verified `backend-utils-mctx`
+        // parent-outlives-child invariant and the `#225` `RelationRef`
+        // mechanism. `fresh` is re-derived this call from the raw address (not a
+        // stored stale-tag pointer), so its provenance is current and the deref
+        // is momentary.
+        unsafe { fresh.as_ref() }
+    }
+
+    /// Momentary mutable read of the owned `EState` through the back-link.
+    /// Same audited-deref obligations as [`get`](Self::get); the caller must hold
+    /// no other live borrow of the `EState` for the duration (it is the sole
+    /// owned executor state, so the executor threads `&mut EState` explicitly and
+    /// uses this only where it does not already hold one).
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn get_mut<'a>(&mut self) -> &'a mut EStateData<'a> {
+        // Re-derive a fresh, untagged `NonNull` from the raw address per access
+        // (mirrors `get` / `RelAlias::get`); never deref the stored `self.0`.
+        // SAFETY: `self.0` is non-null (newtype invariant), so `new_unchecked`
+        // is valid.
+        let mut fresh =
+            unsafe { core::ptr::NonNull::new_unchecked(self.0.as_ptr() as *mut EStateData<'a>) };
+        debug_assert_eq!(
+            fresh.as_ptr() as *mut (),
+            self.0.as_ptr() as *mut (),
+            "owned EState moved under EStateLink"
+        );
+        // SAFETY: see `get`. The uplink targets the single owned `EState` that
+        // outlives + never moves while linked; `fresh` is re-derived this call
+        // from the raw address (not a stored stale-tag pointer).
+        unsafe { fresh.as_mut() }
+    }
+
+    /// Raw escape hatch (the bare `EState *` the C executor holds), for the rare
+    /// spot where tying the borrow to `&self` is too restrictive. The caller
+    /// takes on the liveness obligation [`get`](Self::get) discharges.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut EStateData<'static> {
+        self.0.as_ptr()
     }
 }

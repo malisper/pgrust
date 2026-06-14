@@ -17,7 +17,6 @@ types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 types-tuple = { path = "../types-tuple" }
 types-guc = { path = "../types-guc" }
-types-datum = { path = "../types-datum" }
 types-pgstat = { path = "../types-pgstat" }
 types-replication-slot = { path = "../types-replication-slot" }
 types-logical = { path = "../types-logical" }

@@ -5,8 +5,9 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::portalcmds::ParamListInfo;
-use types_portal::{DestReceiver, FetchDirection, Portal};
+use types_portal::{FetchDirection, Portal};
 use types_snapshot::SnapshotData;
 
 seam_core::seam!(
@@ -25,11 +26,12 @@ seam_core::seam!(
 seam_core::seam!(
     /// `PortalRunFetch(portal, fdirection, count, dest)` (pquery.c) — run a
     /// `FETCH`/`MOVE` against the portal, returning the number of rows
-    /// processed. Runs the executor; can `ereport(ERROR)`.
+    /// processed. `dest` is the router-keyed [`DestReceiverHandle`]. Runs the
+    /// executor; can `ereport(ERROR)`.
     pub fn portal_run_fetch(
         portal: &Portal,
         fdirection: FetchDirection,
         count: i64,
-        dest: DestReceiver,
+        dest: DestReceiverHandle,
     ) -> PgResult<u64>
 );

@@ -35,7 +35,13 @@
 //! so the table stays free of any direct fmgr dependency. They are fallible
 //! because the dispatched function can `ereport(ERROR)`.
 
+// The bare-word newtype: the transitional key form the owner (`eval_scalar`)
+// and the hash/equal callbacks operate on (a scalar array-element word).
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ScalarArrayOpExprHashEntry.key` carries. Stored keys are
+// scalar words, so they cross into its by-value arm.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 // The table data structs live in the keystone (types-nodes) so the step payload
 // can carry the real typed table; this crate owns the simplehash algorithms.
 pub use types_nodes::saophash::{
@@ -99,7 +105,7 @@ trait SaophashOps {
     fn distance(&self, optimal: u32, bucket: u32) -> u32;
 }
 
-impl SaophashOps for SaophashHash {
+impl SaophashOps for SaophashHash<'_> {
     /// `saophash_update_parameters` — recompute `size`/`sizemask`/`grow_threshold`.
     fn update_parameters(&mut self, newsize: u64) {
         let size = saophash_compute_size(newsize);
@@ -149,7 +155,7 @@ impl SaophashOps for SaophashHash {
 /// `nelements` distinct keys (rounded up via the fillfactor to the next power of
 /// two). The C `ctx`/`private_data` are folded into the owning
 /// [`ScalarArrayOpExprHashTable`].
-pub fn saophash_create(nelements: u32) -> SaophashHash {
+pub fn saophash_create<'mcx>(nelements: u32) -> SaophashHash<'mcx> {
     let mut tb = SaophashHash::default();
     // size = min(SH_MAX_SIZE, nelements / fillfactor), computed in f64 exactly
     // as the macro does, then rounded up to a power of two.
@@ -170,7 +176,7 @@ pub fn saophash_create(nelements: u32) -> SaophashHash {
 /// `startelem` (the first empty slot, or the first entry already sitting at its
 /// optimal bucket); phase 2 walks circularly from there and linear-probes each
 /// live entry into the first empty slot of the new table.
-fn saophash_grow(tb: &mut SaophashHash, newsize: u64) {
+fn saophash_grow<'mcx>(tb: &mut SaophashHash<'mcx>, newsize: u64) {
     let oldsize = tb.size;
     let olddata = core::mem::take(&mut tb.data);
 
@@ -202,7 +208,7 @@ fn saophash_grow(tb: &mut SaophashHash, newsize: u64) {
     let mut copyelem = startelem;
     let mut i: u64 = 0;
     while i < oldsize {
-        let oldentry = olddata[copyelem as usize];
+        let oldentry = olddata[copyelem as usize].clone();
         if oldentry.status == SH_STATUS_IN_USE {
             let startelem2 = tb.initial_bucket(oldentry.hash);
             let mut curelem = startelem2;
@@ -234,8 +240,8 @@ type EqualFn<'a> = dyn FnMut(Datum, Datum) -> types_error::PgResult<bool> + 'a;
 /// already present. Robin-Hood placement with the macro's anti-clustering
 /// forced-grow guards. `hash_key` / `equal` are the `SH_HASH_KEY` / `SH_EQUAL`
 /// callbacks (operator hash / equality, dispatched via fmgr by the owner).
-pub fn saophash_insert(
-    tb: &mut SaophashHash,
+pub fn saophash_insert<'mcx>(
+    tb: &mut SaophashHash<'mcx>,
     key: Datum,
     hash_key: &mut HashFn<'_>,
     equal: &mut EqualFn<'_>,
@@ -245,8 +251,8 @@ pub fn saophash_insert(
 }
 
 /// `saophash_insert_hash_internal(tb, key, hash, &found)` — the Robin-Hood core.
-fn saophash_insert_hash_internal(
-    tb: &mut SaophashHash,
+fn saophash_insert_hash_internal<'mcx>(
+    tb: &mut SaophashHash<'mcx>,
     key: Datum,
     hash: u32,
     equal: &mut EqualFn<'_>,
@@ -270,14 +276,17 @@ fn saophash_insert_hash_internal(
                 if entry.status == SH_STATUS_EMPTY {
                     tb.members += 1;
                     let e = &mut tb.data[curelem as usize];
-                    e.key = key;
+                    // Stored key crosses into the canonical by-value arm.
+                    e.key = DatumV::ByVal(key.as_usize());
                     e.hash = hash;
                     e.status = SH_STATUS_IN_USE;
                     return Ok(false);
                 }
             }
             let entry_hash = tb.data[curelem as usize].hash;
-            let entry_key = tb.data[curelem as usize].key;
+            // The callbacks operate on the bare scalar word; recover it from the
+            // stored canonical by-value arm.
+            let entry_key = Datum::from_usize(tb.data[curelem as usize].key.as_usize());
             if hash == entry_hash && equal(entry_key, key)? {
                 return Ok(true); // key already present
             }
@@ -327,12 +336,13 @@ fn saophash_insert_hash_internal(
         let mut moveelem = emptyelem;
         while moveelem != curelem {
             let src = tb.prev(moveelem);
-            tb.data[moveelem as usize] = tb.data[src as usize];
+            tb.data[moveelem as usize] = tb.data[src as usize].clone();
             moveelem = src;
         }
         tb.members += 1;
         let e = &mut tb.data[curelem as usize];
-        e.key = key;
+        // Stored key crosses into the canonical by-value arm.
+        e.key = DatumV::ByVal(key.as_usize());
         e.hash = hash;
         e.status = SH_STATUS_IN_USE;
         return Ok(false);
@@ -344,7 +354,7 @@ fn saophash_insert_hash_internal(
 /// against NULL.) `hash_key` / `equal` are the `SH_HASH_KEY` / `SH_EQUAL`
 /// callbacks.
 pub fn saophash_lookup(
-    tb: &SaophashHash,
+    tb: &SaophashHash<'_>,
     key: Datum,
     hash_key: &mut HashFn<'_>,
     equal: &mut EqualFn<'_>,
@@ -357,7 +367,10 @@ pub fn saophash_lookup(
         if entry.status == SH_STATUS_EMPTY {
             return Ok(false);
         }
-        if hash == entry.hash && equal(entry.key, key)? {
+        // The callbacks operate on the bare scalar word; recover it from the
+        // stored canonical by-value arm.
+        let entry_key = Datum::from_usize(entry.key.as_usize());
+        if hash == entry.hash && equal(entry_key, key)? {
             return Ok(true);
         }
         curelem = tb.next(curelem);

@@ -25,7 +25,11 @@
 use std::vec::Vec;
 
 use mcx::Mcx;
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification). The tableam contracts
+// this layer forwards to — the `aminsert` vtable `values: &[Datum<'_>]`, the
+// `IndexScanDesc.xs_orderbyvals` slots, and the opclass-options word forwarded
+// verbatim to the reloptions seam — all carry it.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_WRONG_OBJECT_TYPE};
 use types_rel::Relation;
@@ -146,7 +150,7 @@ fn validate_relation_kind(r: &Relation<'_>) -> PgResult<()> {
 /// checkUnique, indexUnchanged, indexInfo)` — insert an index tuple.
 pub fn index_insert(
     index_relation: &Relation<'_>,
-    values: &[Datum],
+    values: &[DatumV<'_>],
     isnull: &[bool],
     heap_t_ctid: &ItemPointerData,
     heap_relation: &Relation<'_>,
@@ -812,23 +816,23 @@ pub fn index_store_float8_orderby_distances(
             // the owned descriptor's Datum slots hold no allocation either.
             if let Some(d) = d {
                 if !d.isnull {
-                    scan.xs_orderbyvals[idx] = Datum::from_f64(d.value);
+                    scan.xs_orderbyvals[idx] = DatumV::from_f64(d.value);
                     scan.xs_orderbynulls[idx] = false;
                     continue;
                 }
             }
-            scan.xs_orderbyvals[idx] = Datum::default();
+            scan.xs_orderbyvals[idx] = DatumV::null();
             scan.xs_orderbynulls[idx] = true;
         } else if typ == types_tuple::heaptuple::FLOAT4OID {
             // convert distance function's result to ORDER BY type
             if let Some(d) = d {
                 if !d.isnull {
-                    scan.xs_orderbyvals[idx] = Datum::from_f32(d.value as f32);
+                    scan.xs_orderbyvals[idx] = DatumV::from_f32(d.value as f32);
                     scan.xs_orderbynulls[idx] = false;
                     continue;
                 }
             }
-            scan.xs_orderbyvals[idx] = Datum::default();
+            scan.xs_orderbyvals[idx] = DatumV::null();
             scan.xs_orderbynulls[idx] = true;
         } else {
             // We don't know how to convert the float8 bound to this type. The
@@ -853,10 +857,10 @@ pub fn index_store_float8_orderby_distances(
 /// / `FunctionCall1(procinfo)` / `build_local_reloptions`) and the
 /// missing-procedure error (which reaches the syscache + ruleutils) cross to
 /// their owners.
-pub fn index_opclass_options(
+pub fn index_opclass_options<'mcx>(
     indrel: &Relation<'_>,
     attnum: AttrNumber,
-    attoptions: Datum,
+    attoptions: DatumV<'mcx>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
     let amoptsprocnum = indam(indrel).amoptsprocnum;
@@ -887,6 +891,9 @@ pub fn index_opclass_options(
     // FunctionCall1(procinfo, PointerGetDatum(&relopts));
     // return build_local_reloptions(&relopts, attoptions, validate).
     let procinfo = index_getprocinfo(indrel, attnum, amoptsprocnum)?;
+    // The reloptions seam takes the canonical unified value; `attoptions` is
+    // already that type (the `text[]` pointer word travels in its by-value arm)
+    // so it forwards verbatim.
     backend_access_common_reloptions_seams::index_build_local_reloptions::call(
         procinfo, attoptions, validate,
     )

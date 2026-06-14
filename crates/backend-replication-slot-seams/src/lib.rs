@@ -162,11 +162,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `CheckSlotRequirements()` — `ereport`s on misconfiguration.
-    pub fn CheckSlotRequirements() -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `void CheckPointReplicationSlots(bool)` (slot.c:2119).
     pub fn checkpoint_replication_slots(is_shutdown: bool) -> PgResult<()>
 );

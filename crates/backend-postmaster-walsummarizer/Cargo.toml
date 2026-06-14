@@ -59,3 +59,4 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 common-blkreftable-seams = { path = "../common-blkreftable-seams" }
 types-guc = { path = "../types-guc" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }

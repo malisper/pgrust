@@ -3,8 +3,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::PgBox;
+use mcx::{Mcx, PgBox};
 use types_core::primitive::{Index, Oid};
+use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
 
 use crate::bitmapset::Bitmapset;
@@ -57,6 +58,15 @@ pub struct RangeTblEntry {
     pub perminfoindex: Index,
 }
 
+impl RangeTblEntry {
+    /// Deep copy into `mcx` (C: `copyObject` over `RangeTblEntry`). Every
+    /// trimmed field is a plain scalar, so this is a bitwise copy; the method
+    /// exists to give the node a uniform fallible `clone_in` like its peers.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<RangeTblEntry> {
+        Ok(*self)
+    }
+}
+
 /// `RTEPermissionInfo` (nodes/parsenodes.h), trimmed.
 #[derive(Debug, Default)]
 pub struct RTEPermissionInfo<'mcx> {
@@ -68,6 +78,25 @@ pub struct RTEPermissionInfo<'mcx> {
     pub insertedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `Bitmapset *updatedCols` — columns needing UPDATE permission.
     pub updatedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+}
+
+impl RTEPermissionInfo<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `RTEPermissionInfo`). The two
+    /// `Bitmapset *` columns are copied through `Bitmapset::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RTEPermissionInfo<'b>> {
+        Ok(RTEPermissionInfo {
+            relid: self.relid,
+            checkAsUser: self.checkAsUser,
+            insertedCols: match &self.insertedCols {
+                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
+            updatedCols: match &self.updatedCols {
+                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
+        })
+    }
 }
 
 /// `ObjectType` (`nodes/parsenodes.h`). Discriminants mirror the C enum
@@ -198,6 +227,20 @@ pub struct RoleSpec<'mcx> {
     pub rolename: Option<mcx::PgString<'mcx>>,
 }
 
+impl RoleSpec<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `RoleSpec`). `rolename` is a
+    /// `char *` copied via `PgString::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RoleSpec<'b>> {
+        Ok(RoleSpec {
+            roletype: self.roletype,
+            rolename: match &self.rolename {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+        })
+    }
+}
+
 /// `T_CreateAmStmt = 180` (`nodes/nodetags.h`) — verified against PostgreSQL
 /// 18.3.
 pub const T_CreateAmStmt: u32 = 180;
@@ -224,6 +267,16 @@ pub struct CreateConversionStmt {
     pub def: bool,
 }
 
+impl CreateConversionStmt {
+    /// Deep copy (C: `copyObject` over `CreateConversionStmt`). The struct owns
+    /// `String`/`Vec<String>` (backend-lifetime parser output, not `'mcx`), so
+    /// the copy is a plain `clone`; the method gives it a uniform fallible
+    /// `clone_in` like its peers.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<CreateConversionStmt> {
+        Ok(self.clone())
+    }
+}
+
 /// `CreateAmStmt` (`nodes/parsenodes.h`) — the `CREATE ACCESS METHOD`
 /// statement. `handler_name` is a `List *` of `String` value nodes (the
 /// qualified handler-function name components); `amtype` is a single-character
@@ -236,4 +289,14 @@ pub struct CreateAmStmt {
     pub handler_name: Vec<String>,
     /// `amtype` — type of access method (`AMTYPE_INDEX` / `AMTYPE_TABLE`).
     pub amtype: u8,
+}
+
+impl CreateAmStmt {
+    /// Deep copy (C: `copyObject` over `CreateAmStmt`). The struct owns
+    /// `String`/`Vec<String>` (backend-lifetime parser output, not `'mcx`), so
+    /// the copy is a plain `clone`; the method gives it a uniform fallible
+    /// `clone_in` like its peers.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<CreateAmStmt> {
+        Ok(self.clone())
+    }
 }

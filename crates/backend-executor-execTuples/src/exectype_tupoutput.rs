@@ -17,8 +17,8 @@ use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
-use types_datum::Datum;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum};
 use types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
 
 use backend_access_common_tupdesc::{
@@ -277,7 +277,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
         .expect("BuildTupleFromCStrings: tupdesc is NULL");
     let natts = tupdesc.natts as usize;
 
-    let mut dvalues: Vec<TupleValue<'mcx>> = Vec::with_capacity(natts);
+    let mut dvalues: Vec<Datum<'mcx>> = Vec::with_capacity(natts);
     let mut nulls: Vec<bool> = Vec::with_capacity(natts);
 
     // Call the "in" function for each non-dropped attribute, even for nulls,
@@ -297,7 +297,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
             nulls.push(values[i].is_none());
         } else {
             // Handle dropped attributes by setting to NULL.
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(Datum::null());
             nulls.push(true);
         }
     }
@@ -314,7 +314,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
 pub fn HeapTupleHeaderGetDatum<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: HeapTuple<'mcx>,
-) -> PgResult<(HeapTuple<'mcx>, Datum)> {
+) -> PgResult<(HeapTuple<'mcx>, Datum<'mcx>)> {
     // No work if there are no external TOAST pointers in the tuple. The
     // composite-Datum production (`PointerGetDatum`) and the detoast/flatten
     // path are the heap/datum owner's concern; reach both through its seam.
@@ -354,9 +354,9 @@ pub fn begin_tup_output_tupdesc<'mcx>(
 /// `do_tup_output(tstate, values, isnull)` (execTuples.c): store one row into
 /// the output slot and send it to the receiver.
 pub fn do_tup_output<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     tstate: &mut TupOutputState<'mcx>,
-    values: &[Datum],
+    values: &[Datum<'mcx>],
     isnull: &[bool],
 ) -> PgResult<()> {
     // int natts = slot->tts_tupleDescriptor->natts;
@@ -374,14 +374,18 @@ pub fn do_tup_output<'mcx>(
     // insert data: memcpy(slot->tts_values, values, natts * sizeof(Datum));
     //              memcpy(slot->tts_isnull, isnull, natts * sizeof(bool));
     //
-    // `do_tup_output`'s caller passes a bare `Datum *values` (C ABI); the slot's
-    // expanded tts_values holds a `TupleValue`. These are the convenience-output
-    // path's already-formed column words, carried verbatim as `ByVal` (matching
-    // C's direct `tts_values[i] = values[i]` word copy).
+    // `do_tup_output`'s caller passes the canonical unified value; the slot's
+    // expanded tts_values holds the same `Datum` enum. Copy each column into the
+    // slot's `mcx` (a by-value column is `ByVal`, a by-reference one keeps its
+    // owned bytes), mirroring C's direct `tts_values[i] = values[i]`.
     {
+        let mut columns: Vec<Datum<'mcx>> = Vec::with_capacity(natts);
+        for value in values.iter().take(natts) {
+            columns.push(value.clone_in(mcx)?);
+        }
         let base = tstate.slot.base_mut();
-        for i in 0..natts {
-            base.tts_values[i] = TupleValue::ByVal(values[i]);
+        for (i, column) in columns.into_iter().enumerate() {
+            base.tts_values[i] = column;
             base.tts_isnull[i] = isnull[i];
         }
     }
@@ -415,8 +419,10 @@ pub fn do_text_output_multiline<'mcx>(
         };
 
         // values[0] = PointerGetDatum(cstring_to_text_with_len(txt, len)); the
-        // `line` slice already spans exactly `len` bytes.
-        let datum = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, line)?;
+        // `line` slice already spans exactly `len` bytes. `cstring_to_text_v`
+        // returns the canonical `Datum::ByRef` holding the freshly built `text`
+        // varlena bytes (text is always pass-by-reference).
+        let datum = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, line)?;
         let values = [datum];
         do_tup_output(mcx, tstate, &values, &isnull)?;
         // pfree(DatumGetPointer(values[0])) — owned drop.

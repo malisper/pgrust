@@ -21,7 +21,7 @@
 //! body-bearing [`FormedTuple`], so the one place this engine needs
 //! `(char *) tup + t_hoff` — [`heap_slot_body`] — returns the slot's owned data
 //! body directly, and the by-reference [`fetchatt`] writes a
-//! `TupleValue::ByRef` over the verbatim on-disk field bytes into the
+//! `Datum::ByRef` over the verbatim on-disk field bytes into the
 //! by-reference `tts_values` lane. Everything here is complete.
 
 extern crate alloc;
@@ -29,12 +29,12 @@ use alloc::format;
 
 use mcx::{slice_in, Mcx};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{
     HeapTupleTableSlot, SlotData, TTS_FLAG_SLOW,
 };
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum};
 use types_tuple::heaptuple::{CompactAttribute, HeapTupleHeaderGetNatts};
 
 use crate::slot_ops_vtables;
@@ -145,7 +145,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// the scalar from `data[off..]` as a Datum word, sign/zero handling matching
 /// the C `*(intN *)` reads on a little-endian 64-bit build.
 #[inline]
-fn fetch_att_byval(data: &[u8], off: usize, attlen: i16) -> Datum {
+fn fetch_att_byval<'mcx>(data: &[u8], off: usize, attlen: i16) -> Datum<'mcx> {
     match attlen {
         1 => Datum::from_usize(data[off] as usize),
         2 => Datum::from_usize(u16::from_ne_bytes([data[off], data[off + 1]]) as usize),
@@ -168,9 +168,9 @@ fn fetch_att_byval(data: &[u8], off: usize, attlen: i16) -> Datum {
 
 /// `values[attnum] = fetchatt(thisatt, tp + *offp)` (tupmacs.h `fetchatt`).
 ///
-/// For a by-value att, read the scalar word (`TupleValue::ByVal`). For a
+/// For a by-value att, read the scalar word (`Datum::ByVal`). For a
 /// by-reference att, C yields `PointerGetDatum(tp + off)` — a pointer into the
-/// tuple data; the faithful idiomatic carrier is `TupleValue::ByRef` over the
+/// tuple data; the faithful idiomatic carrier is `Datum::ByRef` over the
 /// verbatim on-disk bytes the field spans (the C contract that the pointer
 /// "points into the given tuple" is preserved by copying the exact bytes). The
 /// field's length is the same one the byte engine advances `off` by, computed
@@ -181,15 +181,15 @@ fn fetchatt<'mcx>(
     att: &CompactAttribute,
     data: &[u8],
     off: usize,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if att.attbyval {
-        Ok(TupleValue::ByVal(fetch_att_byval(data, off, att.attlen)))
+        Ok(fetch_att_byval(data, off, att.attlen))
     } else {
         // C: PointerGetDatum(tp + off). Copy out the exact byte span the field
         // occupies: end == att_addlength_pointer(off, attlen, tp, off), the very
         // advance the deform loop applies to `off` right after this fetch.
         let end = att_addlength_pointer(off, att.attlen, data, off);
-        Ok(TupleValue::ByRef(slice_in(mcx, &data[off..end])?))
+        Ok(Datum::ByRef(slice_in(mcx, &data[off..end])?))
     }
 }
 
@@ -205,7 +205,7 @@ fn fetchatt<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn slot_deform_heap_tuple_internal<'mcx>(
     mcx: Mcx<'mcx>,
-    values: &mut [TupleValue<'mcx>],
+    values: &mut [Datum<'mcx>],
     isnull: &mut [bool],
     compact_attrs: &[CompactAttribute],
     bp: &[u8],
@@ -223,7 +223,7 @@ fn slot_deform_heap_tuple_internal<'mcx>(
         let thisatt = &compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
-            values[attnum as usize] = TupleValue::ByVal(Datum::null());
+            values[attnum as usize] = Datum::null();
             isnull[attnum as usize] = true;
             if !slow {
                 *slowp = true;
@@ -468,7 +468,7 @@ pub fn slot_getmissingattrs<'mcx>(
         //   memset(tts_values + start, 0, (last - start) * sizeof(Datum));
         //   memset(tts_isnull + start, 1, (last - start) * sizeof(bool));
         for i in start_att_num..last_att_num {
-            base.tts_values[i as usize] = TupleValue::ByVal(Datum::null());
+            base.tts_values[i as usize] = Datum::null();
             base.tts_isnull[i as usize] = true;
         }
     } else {
@@ -482,9 +482,9 @@ pub fn slot_getmissingattrs<'mcx>(
         let constr = desc.constr.as_ref().unwrap();
         // Snapshot the (value, present) pairs to avoid borrowing the descriptor
         // and the tts arrays simultaneously. With the expanded tts_values
-        // (`TupleValue`), the missing value — by-value or by-reference — is
+        // (`Datum`), the missing value — by-value or by-reference — is
         // carried verbatim: C's `tts_values[missattnum] = attrmiss->am_value`.
-        let mut pairs: alloc::vec::Vec<(TupleValue<'mcx>, bool)> = alloc::vec::Vec::new();
+        let mut pairs: alloc::vec::Vec<(Datum<'mcx>, bool)> = alloc::vec::Vec::new();
         for missattnum in start_att_num..last_att_num {
             let am = &constr.missing[missattnum as usize];
             pairs.push((am.am_value.clone(), !am.am_present));
@@ -578,7 +578,7 @@ pub fn slot_getattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     if attnum > 0 {
         // if (attnum > slot->tts_nvalid)
         //     slot_getsomeattrs(slot, attnum);
@@ -588,31 +588,14 @@ pub fn slot_getattr<'mcx>(
         // *isnull = slot->tts_isnull[attnum - 1];
         // return slot->tts_values[attnum - 1];
         //
-        // Project the stored `TupleValue` back to a single `Datum`. A by-value
-        // column is the word itself (C's scalar Datum). A by-reference column is
-        // C's `PointerGetDatum(tp + off)` — a pointer into the tuple's owned
-        // bytes; the owned `Datum` (`types-datum`, a bare machine word) has NO
-        // by-reference / pointer lane, and the workspace has no pointer-bytes
-        // (datum-arena) convention to mint a stable pointer word from owned
-        // bytes (the `TupleValue` model is precisely what avoids needing one;
-        // every deform consumer in this codebase works over `TupleValue`, not a
-        // bare Datum, for exactly this reason). Projecting a by-reference column
-        // to a bare `Datum` is therefore unrepresentable in the owned model —
-        // genuinely blocked on the unported pointer-bytes Datum convention, not
-        // on own-logic. Mirror PG and panic. (This `Datum`-returning form is the
-        // pool seam's contract, still in CONTRACT_RECONCILE_PENDING; in-crate
-        // callers read the `TupleValue` directly.)
+        // The stored column is already the canonical unified value: a by-value
+        // column is `ByVal` (C's scalar Datum), a by-reference column is `ByRef`
+        // over the owned tuple bytes (the unified value type's faithful stand-in
+        // for C's `PointerGetDatum(tp + off)`). Hand the caller a copy in its
+        // own `mcx`, mirroring C's `return slot->tts_values[attnum - 1]`.
         let base = slot.base();
         let isnull = base.tts_isnull[(attnum - 1) as usize];
-        let value = match &base.tts_values[(attnum - 1) as usize] {
-            TupleValue::ByVal(d) => *d,
-            TupleValue::ByRef(_) => panic!(
-                "execTuples.c slot_getattr: a by-reference column is C's PointerGetDatum \
-                 (pointer into tuple bytes); the bare-word owned Datum has no pointer lane \
-                 and the workspace has no pointer-bytes Datum-arena convention to mint one \
-                 — genuinely unported, not own-logic"
-            ),
-        };
+        let value = base.tts_values[(attnum - 1) as usize].clone_in(mcx)?;
         Ok((value, isnull))
     } else {
         // slot_getsysattr(slot, attnum, &isnull) (tuptable.h:420):

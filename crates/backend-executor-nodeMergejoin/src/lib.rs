@@ -269,6 +269,8 @@ fn MJEvalOuterValues<'mcx>(
         let (ldatum, lisnull) =
             execExpr::exec_eval_expr_switch_context::call(lexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
+        // `ExecEvalExpr` now hands back a canonical `Datum<'mcx>`; store it
+        // directly into the clause's `ldatum`.
         clause.ldatum = ldatum;
         clause.lisnull = lisnull;
         if lisnull {
@@ -325,6 +327,8 @@ fn MJEvalInnerValues<'mcx>(
         let (rdatum, risnull) =
             execExpr::exec_eval_expr_switch_context::call(rexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
+        // `ExecEvalExpr` now hands back a canonical `Datum<'mcx>`; store it
+        // directly into the clause's `rdatum`.
         clause.rdatum = rdatum;
         clause.risnull = risnull;
         if risnull {
@@ -369,9 +373,12 @@ fn ApplySortComparator<'mcx>(
         }
     } else {
         // compare = ssup->comparator(datum1, datum2, ssup);
+        // The comparator seam now takes the canonical `Datum<'_>`; the clause's
+        // `ldatum`/`rdatum` are already canonical (set from
+        // `exec_eval_expr_switch_context`), so they flow straight through.
         let mut compare = sortsupport::apply_sort_comparator::call(
-            clause.ldatum,
-            clause.rdatum,
+            clause.ldatum.clone(),
+            clause.rdatum.clone(),
             &clause.ssup,
         )?;
         if reverse {

@@ -209,7 +209,7 @@ pub fn ProcessStartupProcInterrupts(mcx: Mcx<'_>) -> PgResult<()> {
 
 /// `StartupProcExit(int code, Datum arg)` — on_shmem_exit callback: shut
 /// down the recovery environment.
-fn StartupProcExit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn StartupProcExit(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if backend_access_transam_xlogutils_seams::standby_state::call() != types_wal::STANDBY_DISABLED
     {
         backend_storage_ipc_standby_seams::shutdown_recovery_transaction_environment::call()?;
@@ -239,7 +239,7 @@ pub fn StartupProcessMain(startup_data: &[u8]) -> PgResult<()> {
     // Arrange to clean up at startup process exit.
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         StartupProcExit,
-        types_datum::Datum::null(),
+        types_tuple::Datum::null(),
     )?;
 
     // Properly accept or ignore signals the postmaster might send us.

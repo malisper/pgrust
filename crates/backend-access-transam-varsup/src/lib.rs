@@ -820,6 +820,20 @@ pub fn init_seams() {
         TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount = 1;
     });
 
+    // `TransamVariables->{oldest,newest}CommitTsXid` (access/transam.h field
+    // accessors). commit_ts.c reads/writes these under `CommitTsLock`, which it
+    // holds across the call; varsup owns the `TransamVariables` singleton, so
+    // the seam is a plain field get/set on `TRANSAM_VARIABLES` (the backing
+    // `Mutex` provides the mutual exclusion the LWLock gives in C).
+    seams::get_oldest_commit_ts_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().oldestCommitTsXid);
+    seams::get_newest_commit_ts_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().newestCommitTsXid);
+    seams::set_oldest_commit_ts_xid::set(|xid| {
+        TRANSAM_VARIABLES.lock().unwrap().oldestCommitTsXid = xid;
+    });
+    seams::set_newest_commit_ts_xid::set(|xid| {
+        TRANSAM_VARIABLES.lock().unwrap().newestCommitTsXid = xid;
+    });
+
     // `VarsupShmemSize()` / `VarsupShmemInit()` (ipci.c shmem accumulator /
     // create-or-attach). Both are infallible in C/here; the seam contract
     // carries the generic shmem `add_size`/out-of-memory `ereport(ERROR)`

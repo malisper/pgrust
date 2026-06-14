@@ -15,6 +15,7 @@ types-wal = { path = "../types-wal" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-replication = { path = "../types-replication" }
 types-replication-slot = { path = "../types-replication-slot" }
 types-walreceiver = { path = "../types-walreceiver" }

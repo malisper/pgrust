@@ -21,7 +21,6 @@
 extern crate alloc;
 
 use types_core::AttrNumber;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_nodes::execnodes::Opaque;
@@ -289,7 +288,7 @@ pub fn proj_left_slot_getattr<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     att: AttrNumber,
-) -> PgResult<SlotAttr> {
+) -> PgResult<SlotAttr<'mcx>> {
     // C: attr1 = slot_getattr(slot1, att, &isNull1);  // slot1 == projLeft slot
     let slot_id = proj_carrier(proj_slot(node, ProjectionKind::Left), ProjectionKind::Left)
         .resultslot;
@@ -306,7 +305,7 @@ pub fn eval_testexpr_switch_context<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     // C: rowresult = ExecEvalExprSwitchContext(node->testexpr, econtext,
     //                                          &rownull);
     let carrier = testexpr_carrier_mut(&mut node.testexpr);
@@ -514,7 +513,7 @@ pub(crate) fn exec_init_func<'mcx>(
             state.result_cells.set(
                 cell,
                 ResultCell {
-                    value: con.constvalue,
+                    value: con.constvalue.clone(),
                     isnull: con.constisnull,
                 },
             );

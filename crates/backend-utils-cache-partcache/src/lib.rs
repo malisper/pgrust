@@ -29,6 +29,9 @@ use types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
 use types_hash::HASHEXTENDED_PROC;
 use types_nodes::nodes::Node;
+use types_nodes::partition::{
+    PartitionKeyData as NodesPartitionKeyData, PartitionStrategy as NodesPartitionStrategy,
+};
 use types_nodes::Expr;
 use types_partition::{
     PartKeyTypeInfo, PartitionKeyData, PartitionStrategy, BTORDER_PROC,
@@ -474,7 +477,61 @@ fn clone_node_list<'mcx>(
     Ok(out)
 }
 
-/// Install every seam this crate owns. partcache itself declares no inward
-/// seams yet (no ported caller crosses a cycle into it), so this is empty —
-/// kept for the uniform `seams-init` shape.
-pub fn init_seams() {}
+/// Adapter for the `relation_get_partition_key` seam (declared in
+/// `backend-utils-cache-partcache-seams`). The seam's contract takes the
+/// caller's `Relation` handle by value and returns the key boxed in `mcx`
+/// (`PgBox`), matching how the executor consumers cross the seam; the in-crate
+/// algorithm [`RelationGetPartitionKey`] works on a borrowed `&RelationData`
+/// and returns the key by value. This thin shim bridges the two: it borrows
+/// through the handle's `Deref` and, on a partitioned relation, moves the
+/// built key into an `mcx` box (C: the relcache's `rd_partkeycxt`-owned key).
+///
+/// The two surfaces also carry distinct `PartitionKeyData` definitions: the
+/// build algorithm uses `types_partition::PartitionKeyData` (its `strategy` is
+/// the on-disk `char`/`i8`), while the seam contract and its executor consumers
+/// use `types_nodes::partition::PartitionKeyData` (its `strategy` is the
+/// `PartitionStrategy` enum). Every other field is the same type, so the shim
+/// moves them across and decodes the strategy `char` into the enum via
+/// `PartitionStrategy::from_char` (the same `'l'`/`'r'`/`'h'` validation the
+/// build already enforced).
+fn relation_get_partition_key_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: Relation<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, NodesPartitionKeyData<'mcx>>>> {
+    match RelationGetPartitionKey(mcx, &rel)? {
+        Some(key) => {
+            let converted = NodesPartitionKeyData {
+                strategy: NodesPartitionStrategy::from_char(key.strategy),
+                partnatts: key.partnatts,
+                partattrs: key.partattrs,
+                partexprs: key.partexprs,
+                partopfamily: key.partopfamily,
+                partopcintype: key.partopcintype,
+                partsupfunc: key.partsupfunc,
+                partcollation: key.partcollation,
+                parttypid: key.parttypid,
+                parttypmod: key.parttypmod,
+                parttyplen: key.parttyplen,
+                parttypbyval: key.parttypbyval,
+                parttypalign: key.parttypalign,
+                parttypcoll: key.parttypcoll,
+            };
+            Ok(Some(mcx::alloc_in(mcx, converted)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Install every seam this crate owns. partcache owns one inward seam,
+/// `relation_get_partition_key` (`RelationGetPartitionKey`), crossed by the
+/// executor's partition-tuple-routing / partition-pruning code.
+pub fn init_seams() {
+    backend_utils_cache_partcache_seams::relation_get_partition_key::set(
+        relation_get_partition_key_seam
+            as for<'mcx> fn(
+                Mcx<'mcx>,
+                Relation<'mcx>,
+            )
+                -> PgResult<Option<PgBox<'mcx, NodesPartitionKeyData<'mcx>>>>,
+    );
+}

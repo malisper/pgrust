@@ -5,7 +5,7 @@ use types_core::{
 };
 use types_error::PgResult;
 
-use crate::backend_access_common_heaptuple::TupleValue;
+use crate::backend_access_common_heaptuple::Datum;
 
 pub type bits8 = uint8;
 // In C these are bare pointers to palloc'd structs; here the box allocates in
@@ -355,7 +355,99 @@ pub struct HeapTupleHeaderData<'mcx> {
     pub t_bits: PgVec<'mcx, bits8>,
 }
 
-impl HeapTupleHeaderData<'_> {
+/// `offsetof(HeapTupleHeaderData, t_bits)` — the fixed on-disk header prefix
+/// (`SizeofHeapTupleHeader`): `t_xmin(4) t_xmax(4) t_field3(4) t_ctid(6)
+/// t_infomask2(2) t_infomask(2) t_hoff(1)`.
+pub const ON_PAGE_HEADER_SIZE: usize = 23;
+
+impl<'mcx> HeapTupleHeaderData<'mcx> {
+    /// Read a `HeapTupleHeader`'s fixed header fields directly from an item's
+    /// on-page bytes (the C pointer-cast `(HeapTupleHeader) PageGetItem(...)`).
+    ///
+    /// Only the fixed 23-byte prefix is decoded; `t_bits` is left empty because
+    /// the page-bound heap-AM routines that use this (freeze / visibility) only
+    /// consult the header words and the null bitmap stays on the page. The
+    /// `t_choice` union is always the `THeap` arm for an on-page heap tuple;
+    /// `t_field3` is decoded as `TXvac` when `HEAP_MOVED` is set (the only case
+    /// where the `t_xvac` interpretation is meaningful) and `TCid` otherwise,
+    /// matching the C union accessors.
+    pub fn read_on_page(mcx: Mcx<'mcx>, item: &[u8]) -> PgResult<HeapTupleHeaderData<'mcx>> {
+        if item.len() < ON_PAGE_HEADER_SIZE {
+            return Err(types_error::PgError::error(
+                "heap tuple item shorter than header",
+            ));
+        }
+        let u32_at = |o: usize| uint32::from_ne_bytes([item[o], item[o + 1], item[o + 2], item[o + 3]]);
+        let u16_at = |o: usize| uint16::from_ne_bytes([item[o], item[o + 1]]);
+
+        let t_xmin = u32_at(0);
+        let t_xmax = u32_at(4);
+        let field3_raw = u32_at(8);
+        let bi_hi = u16_at(12);
+        let bi_lo = u16_at(14);
+        let ip_posid = u16_at(16);
+        let t_infomask2 = u16_at(18);
+        let t_infomask = u16_at(20);
+        let t_hoff = item[22];
+
+        let t_field3 = if (t_infomask & HEAP_MOVED) != 0 {
+            HeapTupleField3::TXvac(field3_raw)
+        } else {
+            HeapTupleField3::TCid(field3_raw)
+        };
+
+        Ok(HeapTupleHeaderData {
+            t_choice: HeapTupleHeaderChoice::THeap(HeapTupleFields {
+                t_xmin,
+                t_xmax,
+                t_field3,
+            }),
+            t_ctid: ItemPointerData {
+                ip_blkid: BlockIdData { bi_hi, bi_lo },
+                ip_posid,
+            },
+            t_infomask2,
+            t_infomask,
+            t_hoff,
+            t_bits: PgVec::new_in(mcx),
+        })
+    }
+
+    /// Write this header's fixed fields back over an item's on-page bytes (the C
+    /// in-place stores through the `HeapTupleHeader` pointer). `t_bits` and the
+    /// tuple's user-data area past byte 23 are left untouched.
+    pub fn write_on_page(&self, item: &mut [u8]) -> PgResult<()> {
+        if item.len() < ON_PAGE_HEADER_SIZE {
+            return Err(types_error::PgError::error(
+                "heap tuple item shorter than header",
+            ));
+        }
+        let (t_xmin, t_xmax, field3_raw) = match &self.t_choice {
+            HeapTupleHeaderChoice::THeap(f) => {
+                let raw = match f.t_field3 {
+                    HeapTupleField3::TCid(c) => c,
+                    HeapTupleField3::TXvac(x) => x,
+                };
+                (f.t_xmin, f.t_xmax, raw)
+            }
+            HeapTupleHeaderChoice::TDatum(d) => {
+                // An on-page heap tuple is never a TDatum; serialize its words
+                // 1:1 just in case (datum_len_, datum_typmod, datum_typeid).
+                (d.datum_len_ as uint32, d.datum_typmod as uint32, d.datum_typeid)
+            }
+        };
+        item[0..4].copy_from_slice(&t_xmin.to_ne_bytes());
+        item[4..8].copy_from_slice(&t_xmax.to_ne_bytes());
+        item[8..12].copy_from_slice(&field3_raw.to_ne_bytes());
+        item[12..14].copy_from_slice(&self.t_ctid.ip_blkid.bi_hi.to_ne_bytes());
+        item[14..16].copy_from_slice(&self.t_ctid.ip_blkid.bi_lo.to_ne_bytes());
+        item[16..18].copy_from_slice(&self.t_ctid.ip_posid.to_ne_bytes());
+        item[18..20].copy_from_slice(&self.t_infomask2.to_ne_bytes());
+        item[20..22].copy_from_slice(&self.t_infomask.to_ne_bytes());
+        item[22] = self.t_hoff;
+        Ok(())
+    }
+
     /// Deep copy into `mcx` (C: part of the tuple-`memcpy` into the caller's
     /// current context). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<HeapTupleHeaderData<'b>> {
@@ -580,13 +672,13 @@ impl TupleConstr<'_> {
 /// that Datum is a pointer whose pointee heaptuple.c keeps alive via its
 /// file-static missing-values cache (`missing_hash`/`missing_match`/
 /// `init_missing_cache` + `datumCopy` into `TopMemoryContext`). In the owned
-/// model the value *is* its payload ([`TupleValue`]: a `ByVal` word or the
+/// model the value *is* its payload ([`Datum`]: a `ByVal` word or the
 /// `ByRef` bytes), so the lifetime-extension cache dissolves
 /// (`docs/mctx-design.md`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttrMissing<'mcx> {
     pub am_present: bool,
-    pub am_value: TupleValue<'mcx>,
+    pub am_value: Datum<'mcx>,
 }
 
 impl AttrMissing<'_> {

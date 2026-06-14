@@ -35,12 +35,15 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgVec};
 use types_cache::SysCacheKey;
 use types_core::{AttrNumber, Oid, OidIsValid, InvalidOid};
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_storage::lock::{
     InplaceUpdateTupleLock, DEFAULT_LOCKMETHOD, LOCKMODE, LOCKTAG, LOCKTAG_TUPLE,
 };
-use types_tuple::backend_access_common_heaptuple::{DeformedColumn, FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{Datum, DeformedColumn, FormedTuple};
+// `types_datum::Datum` (the bare-word shim) survives only at the unmigrated
+// cross-crate contract edge `SysCacheKey::Value`'s search-key word (C:
+// `Datum key1..key4`), audited `types-cache` vocabulary not in this batch.
+use types_datum::Datum as KeyDatum;
 use types_tuple::heaptuple::{
     HeapTupleHeaderGetNatts, ItemPointerData, TupleDescData,
 };
@@ -452,9 +455,9 @@ pub fn GetSysCacheOid(
     // heap_getattr(tuple, oidcol, SysCache[cacheId]->cc_tupdesc, &isNull)
     let (value, is_null) = getattr_with_cache_tupdesc(mcx, cacheId, &tup, oidcol as i32)?;
     debug_assert!(!is_null); // columns used as oids should never be NULL
-    let result = match value {
-        TupleValue::ByVal(d) => d.as_oid(),
-        TupleValue::ByRef(_) => {
+    let result = match &value {
+        Datum::ByVal(_) => value.as_oid(),
+        Datum::ByRef(_) => {
             return Err(PgError::error("GetSysCacheOid: oid column is not by-value"))
         }
     };
@@ -473,9 +476,9 @@ const Anum_pg_attribute_attisdropped: i32 = 17;
 fn attisdropped(mcx: Mcx<'_>, cacheId: i32, tup: &FormedTuple<'_>) -> PgResult<bool> {
     let (value, is_null) = SysCacheGetAttr(mcx, cacheId, tup, Anum_pg_attribute_attisdropped)?;
     debug_assert!(!is_null);
-    match value {
-        TupleValue::ByVal(d) => Ok(d.as_bool()),
-        TupleValue::ByRef(_) => Err(PgError::error("attisdropped is not by-value")),
+    match &value {
+        Datum::ByVal(_) => Ok(value.as_bool()),
+        Datum::ByRef(_) => Err(PgError::error("attisdropped is not by-value")),
     }
 }
 
@@ -491,7 +494,7 @@ pub fn SearchSysCacheAttName<'mcx>(
     let tuple = SearchSysCache2(
         mcx,
         ATTNAME,
-        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
         SysCacheKey::Str(attname),
     )?;
     let Some(tup) = tuple else {
@@ -542,8 +545,8 @@ pub fn SearchSysCacheAttNum<'mcx>(
     let tuple = SearchSysCache2(
         mcx,
         ATTNUM,
-        SysCacheKey::Value(Datum::from_oid(relid)),
-        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
     )?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -596,7 +599,7 @@ fn heap_getattr<'mcx>(
         return getmissingattr(mcx, tupdesc, attnum);
     }
     if heap_attisnull(&tup.tuple, attnum, Some(tupdesc)) {
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((Datum::null(), true));
     }
     Ok((nocachegetattr(mcx, &tup.tuple, attnum, tupdesc, &tup.data)?, false))
 }
@@ -653,7 +656,7 @@ pub fn SysCacheGetAttrNotNull<'mcx>(
     cacheId: i32,
     tup: &FormedTuple<'_>,
     attributeNumber: i32,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     let (attr, isnull) = SysCacheGetAttr(mcx, cacheId, tup, attributeNumber)?;
 
     if isnull {

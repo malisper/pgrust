@@ -105,7 +105,8 @@ pub use stack::{
     errdetail, errdetail_internal, errdetail_log, errdetail_log_plural, errdetail_plural,
     errfinish, errhidecontext, errhidestmt, errhint, errhint_internal, errhint_plural, errmsg,
     errmsg_internal, errmsg_plural, errposition, errsave_finish, errsave_start, errstart,
-    errstart_cold, emit_error_report_for, err_generic_string, geterrcode, geterrposition,
+    errstart_cold, emit_error_report_for, ereport_msg, err_generic_string, geterrcode,
+    geterrposition,
     getinternalerrposition, in_error_recursion_trouble, internalerrposition, internalerrquery,
     pg_re_throw, reset_statement_suppressed, set_errcontext_domain, CopyErrorData, EmitErrorReport,
     FlushErrorState, FreeErrorData, GetErrorContextStack, ReThrowError, ThrowErrorData,
@@ -122,6 +123,7 @@ pub fn init_seams() {
 
     backend_utils_error_seams::ereport::set(stack::ThrowErrorData);
     backend_utils_error_seams::sqlstate_for_file_access::set(errno::sqlstate_for_file_access);
+    backend_utils_error_elog_seams::ereport_msg::set(stack::ereport_msg);
 
     vars::log_min_messages.install(GucVarAccessors {
         get: || config::log_min_messages().0,

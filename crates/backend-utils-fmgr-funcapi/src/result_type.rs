@@ -118,7 +118,7 @@ pub fn get_expr_result_type<'mcx>(
     // funnel plus all the other arms is resolved together behind the nodeFuncs
     // owner seam, which calls back into `internal_get_result_type` for the
     // function-call arms (loud panic until nodeFuncs lands).
-    backend_nodes_nodeFuncs_seams::get_expr_result_type_node::call(mcx, expr)
+    backend_nodes_core_seams::get_expr_result_type_node::call(mcx, expr)
 }
 
 /// `get_func_result_type(functionId, resultTypeId, resultTupleDesc)`

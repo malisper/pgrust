@@ -26,7 +26,14 @@ use types_acl::{
     ACLMASK_ALL, ROLERECURSE_MEMBERS, ROLERECURSE_PRIVS, ROLERECURSE_SETROLE,
 };
 use types_core::{InvalidOid, Oid, OidIsValid, ROLE_PG_DATABASE_OWNER};
-use types_datum::Datum;
+// Datum-unification: the syscache invalidation callback `arg` is a plain
+// machine word that C passes as `(Datum) 0` and hands back to the callback
+// verbatim; it carries no deformed value. It therefore stays the audited
+// bare-word `types_datum::Datum` (aliased `ScalarWord`), matching the
+// `types-cache` `SyscacheCallbackFunction` contract and the
+// `cache_register_syscache_callback` seam `arg` type — NOT the canonical
+// `types_tuple::Datum<'mcx>` enum.
+use types_datum::Datum as ScalarWord;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_RESERVED_NAME,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -96,17 +103,17 @@ pub fn initialize_acl() -> PgResult<()> {
         inval_seams::cache_register_syscache_callback::call(
             AUTHMEMROLEMEM,
             role_membership_cache_callback,
-            Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             AUTHOID,
             role_membership_cache_callback,
-            Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             DATABASEOID,
             role_membership_cache_callback,
-            Datum::null(),
+            ScalarWord::null(),
         )?;
     }
     Ok(())
@@ -114,7 +121,7 @@ pub fn initialize_acl() -> PgResult<()> {
 
 /// `RoleMembershipCacheCallback` (acl.c) — syscache invalidation callback that
 /// flushes the cached membership lists.
-pub fn role_membership_cache_callback(_arg: Datum, cacheid: i32, hashvalue: u32) {
+pub fn role_membership_cache_callback(_arg: ScalarWord, cacheid: i32, hashvalue: u32) {
     ROLE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if cacheid == DATABASEOID && hashvalue != c.cached_db_hash && hashvalue != 0 {

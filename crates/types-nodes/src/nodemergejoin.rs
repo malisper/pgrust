@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
 use types_core::primitive::Oid;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_sortsupport::SortSupportData;
 
 use crate::execexpr::ExprState;
@@ -111,9 +111,9 @@ pub struct MergeJoinClauseData<'mcx> {
     /// `ExprState *rexpr` — compiled right-hand (inner) input expression.
     pub rexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `Datum ldatum` — current left-hand value.
-    pub ldatum: Datum,
+    pub ldatum: Datum<'mcx>,
     /// `Datum rdatum` — current right-hand value.
-    pub rdatum: Datum,
+    pub rdatum: Datum<'mcx>,
     /// `bool lisnull` — left value is null.
     pub lisnull: bool,
     /// `bool risnull` — right value is null.

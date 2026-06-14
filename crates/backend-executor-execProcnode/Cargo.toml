@@ -33,6 +33,7 @@ backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFunc
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-executor-nodeNestloop = { path = "../backend-executor-nodeNestloop" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
+backend-executor-nodeGather = { path = "../backend-executor-nodeGather" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }

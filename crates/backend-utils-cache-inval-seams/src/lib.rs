@@ -7,7 +7,13 @@
 use mcx::{Mcx, PgVec};
 use types_cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 use types_core::Oid;
-use types_datum::Datum;
+// Datum-unification: the cache-invalidation callback `arg` is a plain machine
+// word that C passes as `(Datum) 0` and hands back to the callback verbatim; it
+// carries no deformed value. It therefore stays the audited bare-word
+// `types_datum::Datum` (aliased `ScalarWord`, matching the `types-cache`
+// `SyscacheCallbackFunction` / `RelcacheCallbackFunction` contract these seams
+// store), NOT the canonical `types_tuple::Datum<'mcx>` enum.
+use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 use types_storage::SharedInvalidationMessage;
 use types_syscache::SysCacheIdentifier;
@@ -19,7 +25,7 @@ seam_core::seam!(
     pub fn cache_register_syscache_callback(
         cacheid: i32,
         func: SyscacheCallbackFunction,
-        arg: Datum,
+        arg: ScalarWord,
     ) -> PgResult<()>
 );
 
@@ -29,7 +35,7 @@ seam_core::seam!(
     /// `elog(FATAL, "out of relcache_callback_list slots")`.
     pub fn cache_register_relcache_callback(
         func: RelcacheCallbackFunction,
-        arg: Datum,
+        arg: ScalarWord,
     ) -> PgResult<()>
 );
 
@@ -144,8 +150,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `CacheInvalidateRelcacheByTuple(classTuple)` (inval.c): invalidate the
     /// relcache entry described by the (reformed) pg_class row.
+    ///
+    /// C reads `classtup->oid` and `classtup->relisshared` from the
+    /// `GETSTRUCT`-deformed tuple. The trimmed `PgClassForm` value carries
+    /// `relisshared` but not the system `oid` column, so the caller (which
+    /// always knows the relation OID) passes it explicitly. The heap `tid`
+    /// (a tuple location, not consulted by the C invalidation) is dropped.
     pub fn cache_invalidate_relcache_by_pg_class(
-        tid: types_tuple::heaptuple::ItemPointerData,
+        relid: Oid,
         form: &types_cluster::PgClassForm,
     ) -> PgResult<()>
 );
@@ -157,4 +169,15 @@ seam_core::seam!(
     /// pg_class and so must trigger the relcache inval manually. `Err` carries
     /// its `ereport(ERROR)`s.
     pub fn cache_invalidate_relcache(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CacheInvalidateSmgr(rlocator)` (inval.c): broadcast an smgr-close
+    /// invalidation immediately (not transaction-deferred) so other backends
+    /// drop any cached `SMgrRelation` for the relation whose physical storage
+    /// we just changed (e.g. a fork extension). Used by `vm_extend` /
+    /// `fsm_extend`. `Err` carries its `ereport(ERROR)`s.
+    pub fn cache_invalidate_smgr(
+        rlocator: types_storage::RelFileLocatorBackend,
+    ) -> PgResult<()>
 );

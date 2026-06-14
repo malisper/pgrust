@@ -15,7 +15,7 @@ use std::path::Path;
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 
 use backend_storage_file_fd_seams::{
-    PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
+    CreateEmptyFileOutcome, PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
 };
 
 use crate::{allocated_desc, sync_cleanup, vfd_core};
@@ -95,6 +95,27 @@ pub fn allocate_file_write(path: &str, bytes: &[u8]) -> PgResult<()> {
 
     // if (FreeFile(f)) ereport(ERROR, ...)
     allocated_desc::FreeFile(index)
+}
+
+/// `create_empty_file` — `AllocateFile(path, "w")` immediately followed by
+/// `FreeFile` (xlogarchive.c's `.ready`/`.done` status-file idiom). Never
+/// throws: the open-failure and the deferred FreeFile-failure are returned as
+/// [`CreateEmptyFileOutcome`] variants carrying `errno`, so the caller can emit
+/// its own non-throwing `ereport(LOG)` and continue.
+pub fn create_empty_file(path: &str) -> CreateEmptyFileOutcome {
+    // fd = AllocateFile(archiveStatusPath, "w"); if (fd == NULL) { LOG; return }
+    let index = match allocated_desc::AllocateFile(Path::new(path), "w") {
+        Ok(index) => index,
+        Err(e) => {
+            return CreateEmptyFileOutcome::CreateFailed(e.saved_errno().unwrap_or(0));
+        }
+    };
+
+    // if (FreeFile(fd)) { LOG; return }
+    match allocated_desc::FreeFile(index) {
+        Ok(()) => CreateEmptyFileOutcome::Ok,
+        Err(e) => CreateEmptyFileOutcome::WriteFailed(e.saved_errno().unwrap_or(0)),
+    }
 }
 
 /// `allocate_file_read` — `AllocateFile(path, PG_BINARY_R)` + `fstat` + `fread`
@@ -555,6 +576,28 @@ fn transient_write_raw(fd: i32, buf: &[u8]) -> isize {
 /// (`>= 0`) or `-errno`.
 pub fn transient_read(fd: i32, buf: &mut [u8]) -> isize {
     let r = transient_read_raw(fd, buf);
+    if r < 0 {
+        -(errno_now() as isize)
+    } else {
+        r
+    }
+}
+
+/// `pg_pread(fd, buf, offset)` — positioned read against a bare kernel fd (the
+/// `BasicOpenFile` return value). Bytes read (`>= 0`) or `-errno`. Mirrors the
+/// C `pg_pread` used by `xlogreader.c`'s `WALRead`, which `pread(2)`s the WAL
+/// segment fd held in `state->seg.ws_file`.
+pub fn pg_pread(fd: i32, buf: &mut [u8], offset: i64) -> isize {
+    // SAFETY: `fd` is a live bare kernel fd owned by the caller (a WAL segment
+    // opened via BasicOpenFile); pread(2) into the caller's buffer at `offset`.
+    let r = unsafe {
+        libc::pread(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            offset as libc::off_t,
+        )
+    };
     if r < 0 {
         -(errno_now() as isize)
     } else {

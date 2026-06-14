@@ -23,7 +23,9 @@ use types_copy::{CopyFormatOptions, CopyHeaderChoice};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_NAME};
-use types_nodes::copy_query::{ParseState, QueryDesc, QuerySource, RawStmt, T_CreateTableAsStmt};
+use types_nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
+use types_nodes::querydesc::QueryDesc;
+use types_nodes::parsestmt::RawStmt;
 use types_nodes::nodes::{CmdType, CMD_SELECT};
 use types_nodes::TupleTableSlot;
 use types_pgstat::backend_progress::ProgressCommandType;
@@ -124,8 +126,10 @@ pub struct CopyToStateData<'mcx> {
 
     /// `Relation rel` — relation to copy to (`None` for COPY (query) TO).
     rel: Option<Relation<'mcx>>,
-    /// `QueryDesc *queryDesc` — executable query, or `None`.
-    query_desc: Option<QueryDesc<'mcx>>,
+    /// `QueryDesc *queryDesc` — executable query, or `None`. The single
+    /// canonical owned `QueryDesc` (lifetime-free; its `work` bundle owns the
+    /// `EState`/plan-state tree).
+    query_desc: Option<QueryDesc>,
     /// `List *attnumlist` — integer list of attnums to copy.
     attnumlist: PgVec<'mcx, AttrNumber>,
     /// `char *filename` — filename, or `None` for STDOUT.
@@ -820,8 +824,13 @@ pub fn BeginCopyTo<'mcx>(
 
         // Create a QueryDesc and ExecutorStart (computes the result tupdesc).
         let started =
-            execmain_s::create_query_desc_and_start::call(mcx, plan, source_text, receiver)?;
-        tup_desc = clone_tupdesc(mcx, deref_tupdesc(&started))?;
+            execmain_s::create_query_desc_and_start::call(mcx.context(), &plan, source_text, receiver)?;
+        // tupDesc = queryDesc->tupDesc; ExecGetResultType(planstate). Clone out
+        // of the bundle so the descriptor lives in the COPY context.
+        tup_desc = started.with_result_tupdesc(|td| {
+            let td = td.expect("ExecutorStart did not set a result tupdesc");
+            clone_tupdesc(mcx, td)
+        })?;
         cstate.query_desc = Some(started);
     }
 
@@ -937,8 +946,8 @@ pub fn BeginCopyTo<'mcx>(
 /// `EndCopyTo(cstate)` (copyto.c:1005).
 pub fn EndCopyTo(mut cstate: CopyToStateData<'_>) -> PgResult<()> {
     if let Some(query_desc) = cstate.query_desc.take() {
-        // Close down the query and free resources.
-        execmain_s::end_copy_query::call(query_desc.exec_token)?;
+        // Close down the query and free resources (consumes the owned QueryDesc).
+        execmain_s::end_copy_query::call(query_desc)?;
         backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
     }
 
@@ -961,7 +970,10 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
         Some(rel) => clone_tupdesc(cstate.mcx, rel.rd_att.as_ref())?,
         None => {
             let qd = cstate.query_desc.as_ref().expect("COPY query TO with no QueryDesc");
-            clone_tupdesc(cstate.mcx, &deref_tupdesc(qd))?
+            qd.with_result_tupdesc(|td| {
+                let td = td.expect("ExecutorStart did not set a result tupdesc");
+                clone_tupdesc(cstate.mcx, td)
+            })?
         }
     };
     let num_phys_attrs = tup_desc_natts(&tup_desc);
@@ -1026,10 +1038,16 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
     } else {
         // run the plan --- the dest receiver will send tuples
         // ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0);
-        let exec_token = cstate.query_desc.as_ref().unwrap().exec_token;
         let receiver = cstate.receiver.expect("COPY query TO with no receiver");
+        // Bind the live cstate raw pointer for `copy_dest_receive` re-entry
+        // (DR_copy.cstate). The borrow is released before the run; the executor
+        // reaches the same cstate's queryDesc as the C does (pointer aliasing).
         receiver_bind(receiver, cstate);
-        let run = execmain_s::executor_run_copy::call(exec_token);
+        let query_desc = cstate
+            .query_desc
+            .as_mut()
+            .expect("COPY query TO with no QueryDesc");
+        let run = execmain_s::executor_run_copy::call(query_desc);
         receiver_unbind(receiver);
         run?;
 
@@ -1322,15 +1340,6 @@ fn clone_tupdesc<'mcx>(
     src: &types_tuple::heaptuple::TupleDescData<'_>,
 ) -> PgResult<TupleDesc<'mcx>> {
     Ok(Some(mcx::alloc_in(mcx, src.clone_in(mcx)?)?))
-}
-
-/// Borrow the started query's result descriptor.
-fn deref_tupdesc<'a, 'mcx>(
-    qd: &'a QueryDesc<'mcx>,
-) -> &'a types_tuple::heaptuple::TupleDescData<'mcx> {
-    qd.tupDesc
-        .as_ref()
-        .expect("ExecutorStart did not set a result tupdesc")
 }
 
 /// Convert raw bytes (file-encoding) to a [`PgString`] charged to `mcx`. COPY's

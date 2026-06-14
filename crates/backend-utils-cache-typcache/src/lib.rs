@@ -46,10 +46,18 @@ use types_cache::typcache::{
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{
-    PgError, PgResult, SqlState, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, SqlState, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OUT_OF_MEMORY,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
+
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// Kept only at the cache-callback registration ABI edge: the syscache/relcache
+// callback `arg` is a plain machine word that C passes as `(Datum) 0`. The
+// value-carrying canonical enum is `types_tuple::backend_access_common_heaptuple::Datum`,
+// which typcache does not traffic in (it returns typed entries, not Datums).
+use types_datum::Datum as ScalarWord;
 
 use backend_access_common_session_seams as session_seams;
 use backend_access_common_tupdesc_seams as tupdesc_seams;
@@ -176,12 +184,11 @@ const TCFLAGS_OPERATOR_FLAGS: i32 = !(TCFLAGS_HAVE_PG_TYPE_DATA
 ///
 /// Cross-entry links (`rngelemtype`, `rngtype`, `nextDomain`) are type OIDs
 /// (re-looked-up in the cache), not handles — see the crate docs. The
-/// composite `tup_desc` is owned plain data in the cache context, shared with
-/// the record caches via `PgBox`... but `PgBox` is not clonable across the
-/// cache, so the shared descriptor lives in [`TypCacheState::tupdescs`] keyed
-/// by an id and the entry holds the id (`tup_desc_id`). `domain_data` /
-/// `enum_data` are tokens into the side tables.
-struct TypeCacheEntry {
+/// composite `tup_desc` is owned plain data held INLINE on the entry in the
+/// cache context (the C `tupDesc`); callers receive owned `clone_in` copies.
+/// `domain_data` is a token into the (shared, refcounted) `dcc_table`;
+/// `enum_data` is the 1:1-owned enum cache held inline (the C `enumData`).
+struct TypeCacheEntry<'mcx> {
     type_id: Oid,
     type_id_hash: u32,
     typlen: i16,
@@ -208,8 +215,8 @@ struct TypeCacheEntry {
     cmp_proc_finfo: FmgrInfo,
     hash_proc_finfo: FmgrInfo,
     hash_extended_proc_finfo: FmgrInfo,
-    /// Token into [`TypCacheState::tupdescs`], or `None` (the C `tupDesc`).
-    tup_desc_id: Option<u64>,
+    /// The composite type's owned descriptor (the C `tupDesc`), or `None`.
+    tup_desc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
     tup_desc_identifier: u64,
     /// Range element type OID (the C `rngelemtype->type_id`), or `None`.
     rngelemtype: Option<Oid>,
@@ -225,13 +232,15 @@ struct TypeCacheEntry {
     /// Token into [`TypCacheState::dcc_table`], or `None` (the C `domainData`).
     domain_data: Option<u64>,
     flags: i32,
-    /// Token into [`TypCacheState::enum_table`], or `None` (the C `enumData`).
-    enum_data: Option<u64>,
+    /// The entry's enum sort cache (the C `enumData` pointer, owned 1:1 by the
+    /// entry). `None` until `load_enum_cache_data` populates it; freed/replaced
+    /// in place on reload (C's `pfree(tcache->enumData); tcache->enumData = ..`).
+    enum_data: Option<TypeCacheEnumData<'mcx>>,
     /// Next domain entry's OID (the C `nextDomain`), or `None`.
     next_domain: Option<Oid>,
 }
 
-impl TypeCacheEntry {
+impl<'mcx> TypeCacheEntry<'mcx> {
     fn zeroed(type_id: Oid) -> Self {
         TypeCacheEntry {
             type_id,
@@ -260,7 +269,7 @@ impl TypeCacheEntry {
             cmp_proc_finfo: FmgrInfo::empty(),
             hash_proc_finfo: FmgrInfo::empty(),
             hash_extended_proc_finfo: FmgrInfo::empty(),
-            tup_desc_id: None,
+            tup_desc: None,
             tup_desc_identifier: 0,
             rngelemtype: None,
             rng_opfamily: INVALID_OID,
@@ -378,19 +387,15 @@ struct TypCacheState<'mcx> {
     initialized: bool,
     /// `TypeCacheHash` — keyed by type OID; entries live for the backend's
     /// life.
-    type_cache: HashMap<Oid, TypeCacheEntry>,
+    type_cache: HashMap<Oid, TypeCacheEntry<'mcx>>,
     /// `RelIdToTypeIdCacheHash` — relid → composite type OID.
     rel_id_to_type_id: HashMap<Oid, Oid>,
     /// `firstDomainTypeEntry` — head OID of the domain-entry chain threaded via
     /// `TypeCacheEntry.next_domain`.
     first_domain_type_entry: Option<Oid>,
-    /// Side table owning composite/record `TupleDesc`s shared between
-    /// `TypeCacheEntry.tup_desc_id` and `record_cache_array`.
-    tupdescs: HashMap<u64, PgBox<'mcx, TupleDescData<'mcx>>>,
-    next_tupdesc_id: u64,
-    /// Side tables owning the `DomainConstraintCache` / `TypeCacheEnumData`.
+    /// Side table owning the (shared, refcounted) `DomainConstraintCache`s.
+    /// (Enum cache data is owned 1:1 inline on each entry, no side table.)
     dcc_table: HashMap<u64, DomainConstraintCache>,
-    enum_table: HashMap<u64, TypeCacheEnumData<'mcx>>,
     next_token: u64,
     /// `RecordCacheHash` — structural row type → stored descriptor ids.
     record_cache: HashMap<u32, PgVec<'mcx, u64>>,
@@ -421,10 +426,7 @@ impl<'mcx> TypCacheState<'mcx> {
             type_cache: HashMap::new(),
             rel_id_to_type_id: HashMap::new(),
             first_domain_type_entry: None,
-            tupdescs: HashMap::new(),
-            next_tupdesc_id: 1,
             dcc_table: HashMap::new(),
-            enum_table: HashMap::new(),
             next_token: 1,
             record_cache: HashMap::new(),
             record_cache_array: PgVec::new_in(mcx),
@@ -441,18 +443,12 @@ impl<'mcx> TypCacheState<'mcx> {
         t
     }
 
-    fn fresh_tupdesc_id(&mut self) -> u64 {
-        let t = self.next_tupdesc_id;
-        self.next_tupdesc_id += 1;
-        t
-    }
-
-    fn entry(&self, type_id: Oid) -> &TypeCacheEntry {
+    fn entry(&self, type_id: Oid) -> &TypeCacheEntry<'mcx> {
         self.type_cache
             .get(&type_id)
             .expect("typcache: entry must exist for type_id")
     }
-    fn entry_mut(&mut self, type_id: Oid) -> &mut TypeCacheEntry {
+    fn entry_mut(&mut self, type_id: Oid) -> &mut TypeCacheEntry<'mcx> {
         self.type_cache
             .get_mut(&type_id)
             .expect("typcache: entry must exist for type_id")
@@ -533,22 +529,22 @@ pub fn lookup_type_cache(type_id: Oid, flags: i32) -> PgResult<()> {
     if need_init {
         inval_seams::cache_register_relcache_callback::call(
             type_cache_rel_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             TYPEOID,
             type_cache_typ_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CLAOID,
             type_cache_opc_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CONSTROID,
             type_cache_constr_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         with_state(|st| -> PgResult<()> {
             st.initialized = true;
@@ -976,7 +972,7 @@ fn build_type_cache_entry(type_id: Oid, flags: &mut i32) -> PgResult<()> {
     {
         let (want, has_tupdesc, is_composite) = with_state(|st| {
             let e = st.entry(type_id);
-            ((*flags & TYPECACHE_TUPDESC) != 0, e.tup_desc_id.is_some(), e.typtype == TYPTYPE_COMPOSITE)
+            ((*flags & TYPECACHE_TUPDESC) != 0, e.tup_desc.is_some(), e.typtype == TYPTYPE_COMPOSITE)
         });
         if want && !has_tupdesc && is_composite {
             load_typcache_tupdesc(type_id)?;
@@ -1136,12 +1132,10 @@ fn load_typcache_tupdesc(type_id: Oid) -> PgResult<()> {
         // relation_close, copied into the cache context. The C bumps
         // tdrefcount; the safe port owns the copy.
         let tupdesc = relcache_seams::relation_get_composite_tupdesc::call(st.mcx, typrelid, type_id)?;
-        let id = st.fresh_tupdesc_id();
-        st.tupdescs.insert(id, tupdesc);
         st.tupledesc_id_counter += 1;
         let next_id = st.tupledesc_id_counter;
         let e = st.entry_mut(type_id);
-        e.tup_desc_id = Some(id);
+        e.tup_desc = Some(tupdesc);
         e.tup_desc_identifier = next_id;
         Ok(())
     })
@@ -1446,7 +1440,7 @@ fn record_fields_have_extended_hashing(type_id: Oid) -> PgResult<bool> {
 
 fn cache_record_field_properties(type_id: Oid) -> PgResult<()> {
     let (typtype, has_tupdesc) =
-        with_state(|st| (st.entry(type_id).typtype, st.entry(type_id).tup_desc_id.is_some()));
+        with_state(|st| (st.entry(type_id).typtype, st.entry(type_id).tup_desc.is_some()));
 
     if type_id == RECORDOID {
         // Can't tell; assume equality + comparison work.
@@ -1462,8 +1456,7 @@ fn cache_record_field_properties(type_id: Oid) -> PgResult<()> {
         // owned `Rc`-clone of C is the cache ownership; here the descriptor is
         // pinned in the cache context for the backend's life).
         let field_types: Vec<Oid> = with_state(|st| {
-            let id = st.entry(type_id).tup_desc_id.expect("composite has tupdesc after load");
-            let td = st.tupdescs.get(&id).expect("tupdesc id present");
+            let td = st.entry(type_id).tup_desc.as_ref().expect("composite has tupdesc after load");
             let natts = td.natts;
             let mut v = Vec::new();
             for i in 0..natts {
@@ -1676,11 +1669,8 @@ fn lookup_rowtype_tupdesc_internal<'mcx>(
         // Named composite type: use the regular typcache.
         lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
         let copied = with_state(|st| -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
-            match st.entry(type_id).tup_desc_id {
-                Some(id) => {
-                    let td = st.tupdescs.get(&id).expect("tupdesc id present");
-                    Ok(Some(copy_tupdesc_out(out_mcx, td)?))
-                }
+            match st.entry(type_id).tup_desc.as_ref() {
+                Some(td) => Ok(Some(copy_tupdesc_out(out_mcx, td)?)),
                 None => Ok(None),
             }
         })?;
@@ -1796,7 +1786,7 @@ pub fn lookup_rowtype_tupdesc_domain<'mcx>(
         lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)?;
         let (is_domain, base, base_typmod, has_td) = with_state(|st| {
             let e = st.entry(type_id);
-            (e.typtype == TYPTYPE_DOMAIN, e.domain_base_type, e.domain_base_typmod, e.tup_desc_id.is_some())
+            (e.typtype == TYPTYPE_DOMAIN, e.domain_base_type, e.domain_base_typmod, e.tup_desc.is_some())
         });
         if is_domain {
             return lookup_rowtype_tupdesc_noerror(mcx, base, base_typmod, no_error);
@@ -1811,8 +1801,7 @@ pub fn lookup_rowtype_tupdesc_domain<'mcx>(
             return Ok(None);
         }
         let out = with_state(|st| -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-            let id = st.entry(type_id).tup_desc_id.expect("has td");
-            let td = st.tupdescs.get(&id).expect("tupdesc id present");
+            let td = st.entry(type_id).tup_desc.as_ref().expect("has td");
             copy_tupdesc_out(mcx, td)
         })?;
         Ok(Some(out))
@@ -1948,7 +1937,7 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
     if type_id != RECORDOID {
         lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
         let (td_null, id) =
-            with_state(|st| (st.entry(type_id).tup_desc_id.is_none(), st.entry(type_id).tup_desc_identifier));
+            with_state(|st| (st.entry(type_id).tup_desc.is_none(), st.entry(type_id).tup_desc_identifier));
         if td_null {
             return ereport_error(
                 ERRCODE_WRONG_OBJECT_TYPE,
@@ -1990,11 +1979,8 @@ fn read_tupdesc_view<'mcx>(
     with_state(|st| -> PgResult<(Option<PgBox<'mcx, TupleDescData<'mcx>>>, u64)> {
         let e = st.entry(type_id);
         let id = e.tup_desc_identifier;
-        match e.tup_desc_id {
-            Some(tid) => {
-                let td = st.tupdescs.get(&tid).expect("tupdesc id present");
-                Ok((Some(copy_tupdesc_out(mcx, td)?), id))
-            }
+        match e.tup_desc.as_ref() {
+            Some(td) => Ok((Some(copy_tupdesc_out(mcx, td)?), id)),
             None => Ok((None, id)),
         }
     })
@@ -2088,10 +2074,10 @@ pub fn shared_record_typmod_registry_attach() -> PgResult<()> {
 
 /// `InvalidateCompositeTypeCacheEntry`.
 fn invalidate_composite_type_cache_entry(type_id: Oid) {
-    let (had_tupdesc, had_opclass, tup_desc_id) = with_state(|st| {
+    let (had_tupdesc, had_opclass) = with_state(|st| {
         let e = st.entry(type_id);
         debug_assert!(e.typtype == TYPTYPE_COMPOSITE && oid_is_valid(e.typrelid));
-        (e.tup_desc_id.is_some(), (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0, e.tup_desc_id)
+        (e.tup_desc.is_some(), (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0)
     });
 
     let had_tupdesc_or_opclass = had_tupdesc || had_opclass;
@@ -2101,11 +2087,8 @@ fn invalidate_composite_type_cache_entry(type_id: Oid) {
     // callers hold are independent owned copies).
     if had_tupdesc {
         with_state(|st| {
-            if let Some(id) = tup_desc_id {
-                st.tupdescs.remove(&id);
-            }
             let e = st.entry_mut(type_id);
-            e.tup_desc_id = None;
+            e.tup_desc = None;
             e.tup_desc_identifier = 0;
         });
     }
@@ -2119,7 +2102,7 @@ fn invalidate_composite_type_cache_entry(type_id: Oid) {
 }
 
 /// `TypeCacheRelCallback` — relcache invalidation hook.
-fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
+fn type_cache_rel_callback(_arg: ScalarWord, relid: Oid) {
     if oid_is_valid(relid) {
         // Find a RelIdToTypeIdCacheHash entry.
         let composite_typid = with_state(|st| st.rel_id_to_type_id.get(&relid).copied());
@@ -2166,7 +2149,7 @@ fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
 }
 
 /// `TypeCacheTypCallback` — pg_type syscache invalidation hook.
-fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u32) {
+fn type_cache_typ_callback(_arg: ScalarWord, _cacheid: i32, hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| {
         st.type_cache
             .values()
@@ -2189,7 +2172,7 @@ fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u
 }
 
 /// `TypeCacheOpcCallback` — pg_opclass syscache invalidation hook.
-fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_opc_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| st.type_cache.keys().copied().collect());
     for oid in entries {
         let had_opclass = with_state(|st| {
@@ -2205,7 +2188,7 @@ fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: 
 }
 
 /// `TypeCacheConstrCallback` — pg_constraint syscache invalidation hook.
-fn type_cache_constr_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_constr_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let mut typentry = with_state(|st| st.first_domain_type_entry);
     while let Some(oid) = typentry {
         with_state(|st| st.entry_mut(oid).flags &= !TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
@@ -2288,8 +2271,11 @@ pub fn compare_values_of_enum(type_id: Oid, arg1: Oid, arg2: Oid) -> PgResult<i3
 /// Run `f` with a borrow of the entry's `TypeCacheEnumData`.
 fn with_enumdata<R>(type_id: Oid, f: impl FnOnce(&TypeCacheEnumData<'_>) -> R) -> R {
     with_state(|st| {
-        let token = st.entry(type_id).enum_data.expect("enum data must exist after load");
-        let ed = st.enum_table.get(&token).expect("enum data must exist after load");
+        let ed = st
+            .entry(type_id)
+            .enum_data
+            .as_ref()
+            .expect("enum data must exist after load");
         f(ed)
     })
 }
@@ -2325,9 +2311,8 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
     items.sort_by(|a, b| a.enum_oid.cmp(&b.enum_oid));
 
     // Build the bitmap and the finished, cache-context-charged enumdata, then
-    // link it in (freeing any prior enumdata).
-    let old_token = with_state(|st| st.entry(type_id).enum_data);
-    let token = with_state(|st| -> PgResult<u64> {
+    // link it in (replacing any prior enumdata in place).
+    with_state(|st| -> PgResult<()> {
         let mcx = st.mcx;
         // Build a bitmap of a subset of OIDs known to be in order.
         let mut bitmap_base = INVALID_OID;
@@ -2376,15 +2361,11 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
             enum_values,
         };
 
-        // Link the finished cache struct in, freeing the old's charged spines.
-        if let Some(old) = old_token {
-            st.enum_table.remove(&old);
-        }
-        let token = st.fresh_token();
-        st.enum_table.insert(token, enumdata);
-        Ok(token)
+        // Link the finished cache struct in, dropping the old's charged spines
+        // (C's `pfree(tcache->enumData)`; the prior `Some` is replaced/dropped).
+        st.entry_mut(type_id).enum_data = Some(enumdata);
+        Ok(())
     })?;
-    with_state(|st| st.entry_mut(type_id).enum_data = Some(token));
     Ok(())
 }
 
@@ -2414,7 +2395,7 @@ fn insert_rel_type_cache_if_needed(type_id: Oid) {
         debug_assert!(oid_is_valid(e.typrelid));
         if (e.flags & TCFLAGS_HAVE_PG_TYPE_DATA) != 0
             || (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0
-            || e.tup_desc_id.is_some()
+            || e.tup_desc.is_some()
         {
             let relid = e.typrelid;
             let typid = e.type_id;
@@ -2428,7 +2409,7 @@ fn delete_rel_type_cache_if_needed(type_id: Oid) {
     with_state(|st| {
         let (typtype, typrelid, flags, td_null) = {
             let e = st.entry(type_id);
-            (e.typtype, e.typrelid, e.flags, e.tup_desc_id.is_none())
+            (e.typtype, e.typrelid, e.flags, e.tup_desc.is_none())
         };
 
         // C computes is_in_progress (USE_ASSERT_CHECKING only) by scanning the
@@ -2606,6 +2587,45 @@ pub fn update_domain_constraint_ref(r: &mut DomainConstraintRef) -> PgResult<()>
 pub fn domain_has_constraints(type_id: Oid) -> PgResult<bool> {
     lookup_type_cache(type_id, TYPECACHE_DOMAIN_CONSTR_INFO)?;
     Ok(with_state(|st| st.entry(type_id).domain_data.is_some()))
+}
+
+/// `domain_state_setup`'s typcache half (utils/adt/domains.c). Mirrors the C:
+/// `lookup_type_cache(domainType, TYPECACHE_DOMAIN_BASE_INFO)` (which throws a
+/// clean user-facing error for a bad OID and caches the base-type info), the
+/// `typtype != TYPTYPE_DOMAIN` guard raising
+/// `errcode(ERRCODE_DATATYPE_MISMATCH), "type %s is not a domain"`, the read of
+/// `domainBaseType`/`domainBaseTypmod`, and the base type's input-function
+/// lookup (`getTypeBinaryInputInfo` when `binary`, else `getTypeInputInfo`).
+/// The caller (domain_in/domain_recv) does the residual `fmgr_info_cxt` and
+/// `InitDomainConstraintRef`.
+fn domain_get_base_input_info(
+    domain_type: Oid,
+    binary: bool,
+) -> PgResult<backend_utils_cache_typcache_seams::DomainBaseInputInfo> {
+    lookup_type_cache(domain_type, TYPECACHE_DOMAIN_BASE_INFO)?;
+
+    let (typtype, base_type, typtypmod) = with_state(|st| {
+        let e = st.entry(domain_type);
+        (e.typtype, e.domain_base_type, e.domain_base_typmod)
+    });
+    if typtype != TYPTYPE_DOMAIN {
+        return ereport_error(
+            ERRCODE_DATATYPE_MISMATCH,
+            format!("type {} is not a domain", format_type(domain_type)?),
+        );
+    }
+
+    let (typiofunc, typioparam) = if binary {
+        lsyscache_seams::get_type_binary_input_info::call(base_type)?
+    } else {
+        lsyscache_seams::get_type_input_info::call(base_type)?
+    };
+
+    Ok(backend_utils_cache_typcache_seams::DomainBaseInputInfo {
+        typiofunc,
+        typioparam,
+        typtypmod,
+    })
 }
 
 /* ==========================================================================
@@ -2795,5 +2815,11 @@ pub fn init_seams() {
     );
     backend_utils_cache_typcache_seams::assign_record_type_identifier::set(
         assign_record_type_identifier,
+    );
+    // domain_state_setup's typcache half (domains.c): lookup_type_cache +
+    // TYPTYPE_DOMAIN guard + base type I/O lookup. The domains ADT
+    // (backend-utils-adt-misc2) calls this across the dep cycle.
+    backend_utils_cache_typcache_seams::domain_get_base_input_info::set(
+        domain_get_base_input_info,
     );
 }

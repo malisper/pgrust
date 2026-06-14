@@ -46,7 +46,7 @@ use backend_utils_sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED;
 use types_error::{PgError, PgResult};
 use types_nodes::{
@@ -457,7 +457,7 @@ fn tfunc_fetch_body<'mcx>(
 fn tfuncInitialize<'mcx>(
     tstate: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
-    doc: Datum,
+    doc: Datum<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -487,7 +487,7 @@ fn tfuncInitialize<'mcx>(
             return Err(null_value_error("namespace URI must not be null", None));
         }
         //   ns_uri = TextDatumGetCString(value);
-        let ns_uri = varlena::text_to_cstring::call(mcx, value)?;
+        let ns_uri = varlena::text_to_cstring_v::call(mcx, &value)?;
 
         // DEFAULT is passed down to SetNamespace as NULL.
         //   ns_name = ns_node ? strVal(ns_node) : NULL;
@@ -518,7 +518,7 @@ fn tfuncInitialize<'mcx>(
             return Err(null_value_error("row filter expression must not be null", None));
         }
         //   routine->SetRowFilter(tstate, TextDatumGetCString(value));
-        let path = varlena::text_to_cstring::call(mcx, value)?;
+        let path = varlena::text_to_cstring_v::call(mcx, &value)?;
         routine::routine_set_row_filter::call(tstate, kind, path.as_str())?;
     }
 
@@ -534,21 +534,23 @@ fn tfuncInitialize<'mcx>(
             //   if (colexpr != NULL) { value = ExecEvalExpr(...); ... }
             //   else colfilter = NameStr(att->attname);
             let colfilter_owned;
-            // SAFETY: `colexpr_ptr` points at the node's owned colexprs slot; the
-            // eval call mutates only that ExprState (per-eval scratch) + the
-            // estate, neither of which aliases the later `scan_slot_attname`
-            // borrow of `tstate`.
-            let colexpr_ptr: Option<*mut types_nodes::execexpr::ExprState<'mcx>> = tstate.colexprs
-                [colno as usize]
-                .as_mut()
-                .map(|c| c as *mut _);
-            let colfilter: &str = match colexpr_ptr {
-                Some(colexpr) => {
-                    let (value, isnull) = execExpr::exec_eval_expr_switch_context::call(
-                        unsafe { &mut *colexpr },
-                        econtext,
-                        estate,
-                    )?;
+            //   ExprState *colexpr = lfirst(lc1);
+            //   if (colexpr != NULL) { value = ExecEvalExpr(...); ... }
+            //   else colfilter = NameStr(att->attname);
+            //
+            // The eval borrows only the single `colexprs[colno]` cell (per-eval
+            // scratch) plus `estate`; it does not touch the rest of `tstate`.
+            // Split-borrow that one cell, run the eval, and let the borrow end
+            // (the result `(Datum, bool)` is owned) before any
+            // `scan_slot_attname(tstate, ...)` re-borrow of `tstate`.
+            let eval_result = match tstate.colexprs[colno as usize].as_mut() {
+                Some(colexpr) => Some(execExpr::exec_eval_expr_switch_context::call(
+                    colexpr, econtext, estate,
+                )?),
+                None => None,
+            };
+            let colfilter: &str = match eval_result {
+                Some((value, isnull)) => {
                     if isnull {
                         let attname = scan_slot_attname(tstate, colno, estate)?;
                         return Err(null_value_error(
@@ -556,7 +558,7 @@ fn tfuncInitialize<'mcx>(
                             Some(alloc::format!("Filter for column \"{attname}\" is null.")),
                         ));
                     }
-                    colfilter_owned = varlena::text_to_cstring::call(mcx, value)?;
+                    colfilter_owned = varlena::text_to_cstring_v::call(mcx, &value)?;
                     colfilter_owned.as_str()
                 }
                 None => {
@@ -607,7 +609,12 @@ fn tfuncLoadRows<'mcx>(
     // Scratch value/null arrays standing in for the scan slot's tts_values /
     // tts_isnull (the slot payload model is not yet landed; C uses the slot's
     // own arrays here).
-    let mut values: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, natts as usize)?;
+    // The value array crosses into the `tuplestore_putvalues` edge, which now
+    // carries the canonical unified `Datum<'mcx>` (the Datum-completion Wave 7
+    // flip of the sort-storage seam). `routine_get_value` / `ExecEvalExpr` both
+    // already return canonical `Datum<'mcx>`, so column values flow straight
+    // through with no down-conversion to a bare scalar word.
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts as usize)?;
     let mut nulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts as usize)?;
     for _ in 0..natts as usize {
         values.push(Datum::from_i32(0));
@@ -688,6 +695,8 @@ fn tfuncLoadRows<'mcx>(
                 }
 
                 //   nulls[colno] = isnull;
+                // The column value is already the canonical `Datum<'mcx>`; store
+                // it directly into the tts_values array.
                 values[colno] = v;
                 nulls[colno] = isnull;
             }

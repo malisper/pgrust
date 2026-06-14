@@ -109,10 +109,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `MarkBufferDirtyHint(buffer, buffer_std = false)` (bufmgr.c): mark a
-    /// buffer dirty for a non-WAL-logged hint-bit-style change (the nbtree
-    /// cycle-id clear passes `buffer_std = false`).
-    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer)
+    /// `MarkBufferDirtyHint(buffer, buffer_std)` (bufmgr.c): mark a buffer
+    /// dirty for a non-WAL-logged hint-bit-style change. `buffer_std` is true
+    /// for standard page-layout buffers (the heap-visibility hint-bit path) and
+    /// false otherwise (e.g. the nbtree cycle-id clear, freespace map).
+    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer, buffer_std: bool)
+);
+
+seam_core::seam!(
+    /// `BufferIsPermanent(buffer)` (bufmgr.c): is the buffer's relation
+    /// WAL-logged (permanent), so hint-bit changes need LSN-interlock care?
+    pub fn buffer_is_permanent(buf: types_storage::storage::Buffer) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `BufferGetLSNAtomic(buffer)` (bufmgr.c): atomically read the page LSN of
+    /// a pinned buffer (takes the buffer header spinlock for shared buffers).
+    pub fn buffer_get_lsn_atomic(
+        buf: types_storage::storage::Buffer,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
 );
 
 seam_core::seam!(
@@ -291,4 +306,58 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         fsm_nblocks: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+// ---------------------------------------------------------------------------
+// Visibility-map fork buffer round-trip (visibilitymap.c `vm_readbuf` /
+// `vm_extend` consumer). Same shape as the FSM-fork pair above: the visibility
+// map is a separate fork (`VISIBILITYMAP_FORKNUM`) and the buffer manager owns
+// the shared page, so the VM algorithm crosses the boundary by `Buffer` id.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, VISIBILITYMAP_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
+    /// NULL)` (bufmgr.c) for the VM fork — pin (reading in, zeroing a torn page)
+    /// a block of the relation's `VISIBILITYMAP_FORKNUM`. `Err` carries the smgr
+    /// read `ereport(ERROR)`s.
+    pub fn read_buffer_extended_vm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRelTo(BMR_REL(rel), VISIBILITYMAP_FORKNUM, NULL,
+    /// EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE, vm_nblocks,
+    /// RBM_ZERO_ON_ERROR)` (bufmgr.c) — ensure the VM fork is at least
+    /// `vm_nblocks` long, extending with all-zero pages, and pin the target
+    /// block. `Err` carries the extension `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_to_vm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        vm_nblocks: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+// ---------------------------------------------------------------------------
+// Buffer-access strategy rings (freelist.c). The opaque
+// `BufferAccessStrategyData` ring lives in the buffer manager; consumers
+// (heapam bulk insert, COPY, VACUUM, ...) only thread the `BufferAccessStrategy`
+// handle. `id == 0` is the C NULL strategy.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `GetAccessStrategy(btype)` (freelist.c): allocate a ring buffer of the
+    /// kind appropriate for `btype` and return its handle. `Err` carries the
+    /// allocation `ereport(ERROR)` surface.
+    pub fn get_access_strategy(
+        btype: types_storage::buf::BufferAccessStrategyType,
+    ) -> types_error::PgResult<types_storage::buf::BufferAccessStrategy>
+);
+
+seam_core::seam!(
+    /// `FreeAccessStrategy(strategy)` (freelist.c): free a ring buffer
+    /// previously obtained from `GetAccessStrategy`. The C path `pfree`s and
+    /// only `Assert`s, so the seam is infallible. A NULL (`id == 0`) strategy
+    /// is a no-op in C; callers should not pass one.
+    pub fn free_access_strategy(strategy: types_storage::buf::BufferAccessStrategy)
 );

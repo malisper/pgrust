@@ -19,8 +19,8 @@ backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
 types-wal = { path = "../types-wal" }

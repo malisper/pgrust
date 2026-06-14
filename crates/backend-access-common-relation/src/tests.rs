@@ -89,6 +89,7 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
             relispopulated: true,
             relreplident: b'd',
             relispartition: false,
+            relfrozenxid: 0,
         },
         rd_att: mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
@@ -117,6 +118,16 @@ fn setup() {
             record(std::format!("relation_id_get_relation({relid})"));
             if REL_FOUND.load(Ordering::SeqCst) {
                 Ok(Some(build_reldata(mcx, relid)))
+            } else {
+                Ok(None)
+            }
+        });
+        backend_utils_cache_relcache_seams::relation_id_get_relation_shared::set(|relid| {
+            record(std::format!("relation_id_get_relation_shared({relid})"));
+            if REL_FOUND.load(Ordering::SeqCst) {
+                let mut entry = types_relcache_entry::RelationData::default();
+                entry.rd_id = relid;
+                Ok(Some(std::rc::Rc::new(std::cell::RefCell::new(entry))))
             } else {
                 Ok(None)
             }

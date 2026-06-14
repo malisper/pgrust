@@ -17,6 +17,7 @@ types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-replication = { path = "../types-replication" }
 types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }

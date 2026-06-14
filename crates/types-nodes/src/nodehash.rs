@@ -471,7 +471,7 @@ pub struct AttStatsSlot<'mcx> {
     /// `int nvalues` — number of MCV `values`.
     pub nvalues: i32,
     /// `Datum *values` — the MCV datums.
-    pub values: PgVec<'mcx, types_datum::Datum>,
+    pub values: PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     /// `int nnumbers` — number of `numbers`.
     pub nnumbers: i32,
     /// `float4 *numbers` — the MCV frequencies.

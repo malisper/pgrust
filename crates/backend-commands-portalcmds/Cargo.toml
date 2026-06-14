@@ -25,6 +25,7 @@ backend-executor-tstorereceiver-seams = { path = "../backend-executor-tstorerece
 backend-nodes-queryjumble-seams = { path = "../backend-nodes-queryjumble-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-tcop-pquery-seams = { path = "../backend-tcop-pquery-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

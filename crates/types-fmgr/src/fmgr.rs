@@ -7,6 +7,21 @@
 use std::any::Any;
 
 use types_core::Oid;
+// Datum-unification migration note: the two shim uses that remain here are the
+// *irreducible fmgr-ABI edge*, deliberately left on the bare-word newtype per the
+// Datum-redesign plan (Phase 2 "chief lifetime-ripple gate", deferred to the
+// fmgr-core lane):
+//   * `PGFunction`'s by-value **return** mints a bare machine word — the C
+//     `Datum function(FunctionCallInfo)` ABI return slot. Threading `'mcx`
+//     through a function-pointer type would force every builtin's signature to
+//     change and is the explicitly-deferred edge; the by-value return "still
+//     mints a bare word at PGFunction (irreducible)".
+//   * `FunctionCallInfoBaseData.args: Vec<NullableDatum>` is the uniform call
+//     frame; folding it into `{Datum<'mcx>, isnull}` ripples `'mcx` into the
+//     fmgr frame ABI and ~36 consumer crates (a later coordinated wave), so it
+//     stays on the shim `NullableDatum` here.
+// Every other (genuine-value) Datum use in this crate — the `FmgrArg`/`FmgrOut`
+// boundary value arms — has moved onto canonical `types_tuple::Datum<'mcx>`.
 use types_datum::{Datum, NullableDatum};
 
 use crate::boundary::RefPayload;

@@ -95,6 +95,10 @@ pub fn get_attstatsslot<'mcx>(
         // statarray = DatumGetArrayTypePCopy(val);
         // arrayelemtype = ARR_ELEMTYPE(statarray);
         // sslot->valuetype = arrayelemtype;
+        // The syscache projection yields the canonical unified `Datum<'mcx>`;
+        // the arrayfuncs seams still take the bare scalar word — bridge at the
+        // edge (the array Datum is a pass-by-ref pointer word).
+        let val = Datum::from_usize(val.as_usize());
         let arrayelemtype = arrayfuncs_seams::array_get_elemtype::call(mcx, val)?;
         valuetype = arrayelemtype;
 
@@ -138,6 +142,7 @@ pub fn get_attstatsslot<'mcx>(
         // arrayfuncs owner's concern). In C `numbers` points into the detoasted
         // array kept in numbers_arr; the owned model holds an mcx copy whose
         // Drop subsumes free_attstatsslot's pfree.
+        let val = Datum::from_usize(val.as_usize());
         numbers = arrayfuncs_seams::array_get_float4_values::call(mcx, val)?;
     }
 

@@ -17,4 +17,3 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-tuple = { path = "../types-tuple" }
-types-datum = { path = "../types-datum" }

@@ -33,7 +33,7 @@
 extern crate alloc;
 
 use mcx::Mcx;
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use types_numeric::var::{GenerateSeriesNumericFctx, NumericSign};
@@ -99,14 +99,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `SRF_RETURN_NEXT(funcctx, result)` (funcapi.h): bump `call_cntr` and emit
     /// one result `Datum`, returning a value-mode `Datum` for the fmgr return.
-    pub fn srf_return_next(frame: SrfCallFrame, result: Datum) -> Datum
+    pub fn srf_return_next<'mcx>(frame: SrfCallFrame, result: Datum<'mcx>) -> Datum<'mcx>
 );
 
 seam_core::seam!(
     /// `SRF_RETURN_DONE(funcctx)` (funcapi.h): `end_MultiFuncCall(fcinfo,
     /// funcctx)` then set the result-set "done" mode; returns the fmgr null
     /// `Datum`.
-    pub fn srf_return_done(frame: SrfCallFrame) -> Datum
+    pub fn srf_return_done(frame: SrfCallFrame) -> Datum<'static>
 );
 
 seam_core::seam!(
@@ -114,7 +114,7 @@ seam_core::seam!(
     /// context: turn the freshly built on-disk numeric image into a `Datum` the
     /// SRF can hand back. (The result lives in the executor's per-query context,
     /// not in this unit's `mcx`.)
-    pub fn numeric_image_to_datum(image: &[u8]) -> Datum
+    pub fn numeric_image_to_datum(image: &[u8]) -> Datum<'static>
 );
 
 /// `generate_series_numeric(PG_FUNCTION_ARGS)` (numeric.c:1701): the 2-arg
@@ -123,7 +123,7 @@ pub fn generate_series_numeric<'mcx>(
     mcx: Mcx<'mcx>,
     start: &[u8],
     stop: &[u8],
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     // C: return generate_series_step_numeric(fcinfo);
     generate_series_step_numeric(mcx, start, stop, None)
 }
@@ -139,7 +139,7 @@ pub fn generate_series_step_numeric<'mcx>(
     start: &[u8],
     stop: &[u8],
     opt_step: Option<&[u8]>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     if srf_is_firstcall::call() {
         // Reject NaN and infinities in start and stop values.
         if numeric_is_special(start) {
@@ -317,7 +317,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `((Const *) expr)->constvalue` (primnodes.h): the `Const`'s payload
     /// `Datum` (a `numeric` pointer Datum here).
-    pub fn const_value(expr: PlannerNode) -> Datum
+    pub fn const_value(expr: PlannerNode) -> Datum<'static>
 );
 
 seam_core::seam!(
@@ -478,7 +478,7 @@ pub fn generate_series_numeric_support<'mcx>(
 /// # Safety
 /// `d` must point to a 4-byte-header (`VARATT_IS_4B_U`) `numeric` varlena that
 /// outlives the returned slice. The planner const Datums are already-detoasted.
-unsafe fn numeric_bytes_from_datum<'a>(d: Datum) -> &'a [u8] {
+unsafe fn numeric_bytes_from_datum<'a>(d: Datum<'_>) -> &'a [u8] {
     use types_datum::VARHDRSZ;
     let ptr = d.as_usize() as *const u8;
     let header = core::slice::from_raw_parts(ptr, VARHDRSZ);

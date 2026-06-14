@@ -1,7 +1,11 @@
 //! Miscellaneous opcode evaluators (`execExprInterp.c`): SubPlan invocation,
 //! GROUPING() and MERGE support functions.
 
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ResultCell.value` carries. SubPlan/grouping results are scalar
+// words; the still-shim `exec_sub_plan` seam hands back a bare word that crosses
+// into the canonical by-value arm.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::execexpr::{ExprEvalStepData, ExprState, ResultCell};
 use types_nodes::execnodes::EcxtId;
@@ -215,7 +219,7 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     state.result_cells.set(
         resvalue_id,
         ResultCell {
-            value,
+            value: Datum::ByVal(value.as_usize()),
             isnull: false,
         },
     );

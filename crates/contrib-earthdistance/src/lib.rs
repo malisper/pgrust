@@ -12,7 +12,7 @@
 //! float8/point representation.
 
 use types_core::geo::Point;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `float8` is C `double`, i.e. Rust `f64`.
 pub type Float8 = f64;
@@ -65,7 +65,7 @@ pub fn geo_distance(pt1: &Point, pt2: &Point) -> Float8 {
 /// `Datum`-level entry point mirroring the C `geo_distance(PG_FUNCTION_ARGS)`
 /// wrapper: the two point operands in, the float8 result datum out
 /// (`PG_RETURN_FLOAT8`).
-pub fn geo_distance_datum(pt1: &Point, pt2: &Point) -> Datum {
+pub fn geo_distance_datum(pt1: &Point, pt2: &Point) -> Datum<'static> {
     Datum::from_f64(geo_distance_internal(pt1, pt2))
 }
 

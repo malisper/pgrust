@@ -27,7 +27,14 @@ use backend_utils_fmgr_funcapi_seams::{materialized_srf_putvalues, InitMateriali
 use backend_utils_hash_dynahash_seams as dynahash;
 use mcx::Mcx;
 use types_core::Size;
-use types_datum::Datum;
+// The SQL functions here return the canonical unified `types_tuple::Datum`
+// (ByVal/ByRef). They only ever return the by-value null (`Datum::null()`) or a
+// by-value bool (`Datum::from_bool`), neither of which borrows from `mcx`, so
+// the PGFunction return type is `types_tuple::Datum<'static>`. The `values[]`
+// row arrays handed to the `materialized_srf_putvalues` seam are likewise
+// canonical: `ByVal` ints (the by-value arm carries a plain `usize` word) and
+// `text` columns built via the by-reference `cstring_to_text_v` seam (a
+// `Datum::ByRef`). No bare-word `types_datum::Datum` survives here.
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
@@ -516,10 +523,10 @@ fn key_str(key: &[u8; SHMEM_INDEX_KEYSIZE]) -> std::borrow::Cow<'_, str> {
 /// `pg_get_shmem_allocations(PG_FUNCTION_ARGS)` — SQL SRF showing allocated
 /// shared memory. `mcx` is the per-query context the C `CStringGetTextDatum`
 /// pallocs in.
-pub fn pg_get_shmem_allocations(
-    mcx: Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<Datum> {
+pub fn pg_get_shmem_allocations<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<types_tuple::Datum<'static>> {
     const PG_GET_SHMEM_SIZES_COLS: usize = 4;
 
     InitMaterializedSRF::call(fcinfo, 0)?;
@@ -539,7 +546,8 @@ pub fn pg_get_shmem_allocations(
 
     let shmem_seg_hdr = SHMEM_SEG_HDR.get();
     let mut named_allocated: Size = 0;
-    let mut values = [Datum::null(); PG_GET_SHMEM_SIZES_COLS];
+    let mut values: [types_tuple::Datum; PG_GET_SHMEM_SIZES_COLS] =
+        core::array::from_fn(|_| types_tuple::Datum::null());
     let mut nulls = [false; PG_GET_SHMEM_SIZES_COLS];
 
     // output all allocated entries
@@ -551,10 +559,11 @@ pub fn pg_get_shmem_allocations(
         // SAFETY: `ent` is a live entry in the shared index, held stable by
         // ShmemIndexLock (entries are never freed; shmem is never returned).
         let ent = unsafe { &*ent };
-        values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[1] = Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
-        values[2] = Datum::from_i64(ent.size as i64);
-        values[3] = Datum::from_i64(ent.allocated_size as i64);
+        values[0] =
+            backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &key_str(&ent.key))?;
+        values[1] = types_tuple::Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
+        values[2] = types_tuple::Datum::from_i64(ent.size as i64);
+        values[3] = types_tuple::Datum::from_i64(ent.allocated_size as i64);
         named_allocated += ent.allocated_size;
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
@@ -565,23 +574,23 @@ pub fn pg_get_shmem_allocations(
     let (freeoffset, totalsize) = unsafe { ((*shmem_seg_hdr).freeoffset, (*shmem_seg_hdr).totalsize) };
 
     // output shared memory allocated but not counted via the shmem index
-    values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, "<anonymous>")?;
+    values[0] = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, "<anonymous>")?;
     nulls[1] = true;
-    values[2] = Datum::from_i64((freeoffset - named_allocated) as i64);
-    values[3] = values[2];
+    values[2] = types_tuple::Datum::from_i64((freeoffset - named_allocated) as i64);
+    values[3] = values[2].clone();
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     // output as-of-yet unused shared memory
     nulls[0] = true;
-    values[1] = Datum::from_i64(freeoffset as i64);
+    values[1] = types_tuple::Datum::from_i64(freeoffset as i64);
     nulls[1] = false;
-    values[2] = Datum::from_i64((totalsize - freeoffset) as i64);
-    values[3] = values[2];
+    values[2] = types_tuple::Datum::from_i64((totalsize - freeoffset) as i64);
+    values[3] = values[2].clone();
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     guard.release()?;
 
-    Ok(Datum::null())
+    Ok(types_tuple::Datum::null())
 }
 
 /// `pg_numa_touch_mem_if_required(ptr)` (`port/pg_numa.h` static inline) —
@@ -602,11 +611,11 @@ unsafe fn pg_numa_touch_mem_if_required(ptr: *const u8) {
 /// `huge_pages_status` is the C global of the same name (sysv_shmem.c GUC
 /// status), passed explicitly per the no-ambient-global rule; `mcx` is the
 /// per-query context the C `palloc`s in.
-pub fn pg_get_shmem_allocations_numa(
-    mcx: Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
+pub fn pg_get_shmem_allocations_numa<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     huge_pages_status: HugePagesStatus,
-) -> PgResult<Datum> {
+) -> PgResult<types_tuple::Datum<'static>> {
     const PG_GET_SHMEM_NUMA_SIZES_COLS: usize = 3;
 
     if port_pg_numa_seams::pg_numa_init::call() == -1 {
@@ -661,7 +670,8 @@ pub fn pg_get_shmem_allocations_numa(
     let mut hstat = HASH_SEQ_STATUS::new();
     dynahash::hash_seq_init::call(&mut hstat, SHMEM_INDEX.get());
 
-    let mut values = [Datum::null(); PG_GET_SHMEM_NUMA_SIZES_COLS];
+    let mut values: [types_tuple::Datum; PG_GET_SHMEM_NUMA_SIZES_COLS] =
+        core::array::from_fn(|_| types_tuple::Datum::null());
 
     // output all allocated entries
     loop {
@@ -748,10 +758,10 @@ pub fn pg_get_shmem_allocations_numa(
         // allocated memory for this segment.
         for i in 0..=max_nodes {
             values[0] =
-                backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
+                backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &key_str(&ent.key))?;
             // C: values[1] = i (a raw int assigned into the Datum word).
-            values[1] = Datum::from_i64(i as i64);
-            values[2] = Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
+            values[1] = types_tuple::Datum::from_i64(i as i64);
+            values[2] = types_tuple::Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
 
             materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
         }
@@ -759,8 +769,8 @@ pub fn pg_get_shmem_allocations_numa(
         // The last entry is used for pages without a NUMA node.
         nulls[1] = true;
         values[0] =
-            backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[2] = Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
+            backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &key_str(&ent.key))?;
+        values[2] = types_tuple::Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }
@@ -768,7 +778,7 @@ pub fn pg_get_shmem_allocations_numa(
     guard.release()?;
     FIRST_NUMA_TOUCH.set(false);
 
-    Ok(Datum::null())
+    Ok(types_tuple::Datum::null())
 }
 
 /// `pg_get_shmem_pagesize()` — the memory page size used for the shared
@@ -798,8 +808,8 @@ pub fn pg_get_shmem_pagesize(huge_pages_status: HugePagesStatus) -> Size {
 
 /// `pg_numa_available(PG_FUNCTION_ARGS)` — SQL function: whether NUMA
 /// inquiry is supported.
-pub fn pg_numa_available() -> Datum {
-    Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
+pub fn pg_numa_available() -> types_tuple::Datum<'static> {
+    types_tuple::Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
 }
 
 // ---------------------------------------------------------------------------

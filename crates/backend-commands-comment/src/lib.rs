@@ -44,8 +44,9 @@
 use backend_commands_comment_seams as seam;
 use backend_utils_error::ereport;
 use backend_utils_init_miscinit_seams::get_user_id;
+use mcx::Mcx;
 use types_core::{Oid, OidIsValid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
@@ -83,7 +84,8 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// object the SQL command names. Returns the resolved [`ObjectAddress`].
 ///
 /// comment.c:39-131.
-pub fn CommentObject(
+pub fn CommentObject<'mcx>(
+    mcx: Mcx<'mcx>,
     stmt: &CommentStmt,
 ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     // ObjectAddress address = InvalidObjectAddress;
@@ -174,9 +176,10 @@ pub fn CommentObject(
         || stmt.objtype == OBJECT_TABLESPACE
         || stmt.objtype == OBJECT_ROLE
     {
-        CreateSharedComments(address.objectId, address.classId, comment_str(stmt))?;
+        CreateSharedComments(mcx, address.objectId, address.classId, comment_str(stmt))?;
     } else {
         CreateComments(
+            mcx,
             address.objectId,
             address.classId,
             address.objectSubId,
@@ -204,7 +207,13 @@ pub fn CommentObject(
 /// instead delete any existing comment for the specified key.
 ///
 /// comment.c:142-226.
-pub fn CreateComments(oid: Oid, classoid: Oid, subid: i32, comment: Option<&str>) -> PgResult<()> {
+pub fn CreateComments<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    classoid: Oid,
+    subid: i32,
+    comment: Option<&str>,
+) -> PgResult<()> {
     /* Reduce empty-string to NULL case (comment.c:156). */
     let comment = reduce_empty(comment);
 
@@ -213,7 +222,8 @@ pub fn CreateComments(oid: Oid, classoid: Oid, subid: i32, comment: Option<&str>
      * When `comment` is None this stays unused — like the C, which only fills
      * the arrays in the `comment != NULL` branch.
      */
-    let mut values = [Datum::null(); NATTS_PG_DESCRIPTION];
+    let mut values: [Datum<'mcx>; NATTS_PG_DESCRIPTION] =
+        core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; NATTS_PG_DESCRIPTION];
     let mut replaces = [false; NATTS_PG_DESCRIPTION];
     if let Some(comment) = comment {
@@ -224,7 +234,8 @@ pub fn CreateComments(oid: Oid, classoid: Oid, subid: i32, comment: Option<&str>
         values[ANUM_PG_DESCRIPTION_OBJOID - 1] = Datum::from_oid(oid);
         values[ANUM_PG_DESCRIPTION_CLASSOID - 1] = Datum::from_oid(classoid);
         values[ANUM_PG_DESCRIPTION_OBJSUBID - 1] = Datum::from_i32(subid);
-        values[ANUM_PG_DESCRIPTION_DESCRIPTION - 1] = seam::cstring_get_text_datum::call(comment)?;
+        values[ANUM_PG_DESCRIPTION_DESCRIPTION - 1] =
+            seam::cstring_get_text_datum::call(mcx, comment)?;
     }
 
     /*
@@ -263,12 +274,18 @@ pub fn CreateComments(oid: Oid, classoid: Oid, subid: i32, comment: Option<&str>
 ///
 /// comment.c:237-316. Same shape as [`CreateComments`] with two scan keys and
 /// no objsubid column.
-pub fn CreateSharedComments(oid: Oid, classoid: Oid, comment: Option<&str>) -> PgResult<()> {
+pub fn CreateSharedComments<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    classoid: Oid,
+    comment: Option<&str>,
+) -> PgResult<()> {
     /* Reduce empty-string to NULL case (comment.c:251). */
     let comment = reduce_empty(comment);
 
     /* Prepare to form or update a tuple, if necessary (comment.c:254-265). */
-    let mut values = [Datum::null(); NATTS_PG_SHDESCRIPTION];
+    let mut values: [Datum<'mcx>; NATTS_PG_SHDESCRIPTION] =
+        core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; NATTS_PG_SHDESCRIPTION];
     let mut replaces = [false; NATTS_PG_SHDESCRIPTION];
     if let Some(comment) = comment {
@@ -279,7 +296,7 @@ pub fn CreateSharedComments(oid: Oid, classoid: Oid, comment: Option<&str>) -> P
         values[ANUM_PG_SHDESCRIPTION_OBJOID - 1] = Datum::from_oid(oid);
         values[ANUM_PG_SHDESCRIPTION_CLASSOID - 1] = Datum::from_oid(classoid);
         values[ANUM_PG_SHDESCRIPTION_DESCRIPTION - 1] =
-            seam::cstring_get_text_datum::call(comment)?;
+            seam::cstring_get_text_datum::call(mcx, comment)?;
     }
 
     /* Use the index to search for a matching old tuple (comment.c:267-281). */
@@ -340,7 +357,12 @@ pub fn DeleteSharedComments(oid: Oid, classoid: Oid) -> PgResult<()> {
 /// `GetComment` — get the comment for an object, or `None` if not found.
 ///
 /// comment.c:409-459.
-pub fn GetComment(oid: Oid, classoid: Oid, subid: i32) -> PgResult<Option<String>> {
+pub fn GetComment<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    classoid: Oid,
+    subid: i32,
+) -> PgResult<Option<String>> {
     let description = seam::description_open::call(AccessShareLock)?;
 
     /* comment = NULL; (comment.c:440) */
@@ -351,7 +373,9 @@ pub fn GetComment(oid: Oid, classoid: Oid, subid: i32) -> PgResult<Option<String
      * returns the description column value and its isnull flag for the one
      * match, or None when nothing matched (the C while-loop body not entered).
      */
-    if let Some(col) = seam::description_get_description::call(description, oid, classoid, subid)? {
+    if let Some(col) =
+        seam::description_get_description::call(mcx, description, oid, classoid, subid)?
+    {
         if !col.isnull {
             comment = Some(seam::text_datum_get_cstring::call(col.value)?);
         }

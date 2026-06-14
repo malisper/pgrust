@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-array = { path = "../types-array" }
+types-namespace = { path = "../types-namespace" }
 
 # ereport(ERROR) builder for the SQL-facing argument/limit checks.
 backend-utils-error = { path = "../backend-utils-error" }

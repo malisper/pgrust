@@ -240,6 +240,94 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
+    /// the metadata tuple from the already-chosen large-object OID, owner, and
+    /// optional default ACL, then insert it with index maintenance. Unlike the
+    /// pg_namespace/pg_am inserts, the OID is assigned by the caller (the C
+    /// `OidIsValid(loid) ? loid : GetNewOidWithIndex(...)` branch runs in
+    /// `LargeObjectCreate` itself), so this seam does no OID allocation; it just
+    /// builds `values[]` (`oid = loid`, `lomowner = lomowner`) and, when
+    /// `lomacl == None`, sets `nulls[Anum_pg_largeobject_metadata_lomacl - 1] =
+    /// true`. The `lomacl` varlena (`Acl *` = `ArrayType`) crosses unchanged.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_largeobject_metadata(
+        rel: &RelationData<'_>,
+        loid: Oid,
+        lomowner: Oid,
+        lomacl: Option<types_array::ArrayType>,
+    ) -> PgResult<()>
+);
+
+/// One `pg_largeobject` data-page row, deformed and detoasted by
+/// [`deform_lo_page`]. Mirrors inv_api.c's `Form_pg_largeobject` access plus the
+/// file-static `getdatafield` (detoast + `VARSIZE` length-sanity raising
+/// `ERRCODE_DATA_CORRUPTED`): the owner does the `HeapTupleHasNulls` paranoia,
+/// the `GETSTRUCT` deform of `loid`/`pageno`, and the `data` bytea detoast,
+/// surfacing the `LOBLKSIZE`-bounded page bytes plus the tuple's `t_self` TID
+/// (for `CatalogTupleUpdateWithInfo` / `CatalogTupleDelete`).
+#[derive(Debug, Clone)]
+pub struct LoPageRow {
+    /// `data->pageno` — the 0-based page number within the large object.
+    pub pageno: i32,
+    /// `getdatafield(data, ...)` — the detoasted page payload (`VARDATA`,
+    /// `VARSIZE - VARHDRSZ` bytes, `0..=LOBLKSIZE`).
+    pub data: Vec<u8>,
+    /// `tuple->t_self` — the page tuple's item pointer.
+    pub tid: ItemPointerData,
+}
+
+seam_core::seam!(
+    /// inv_api.c's per-page deform of a scanned `pg_largeobject` tuple: the
+    /// `HeapTupleHasNulls` "null field found in pg_largeobject" paranoia
+    /// (`elog(ERROR)`), the `GETSTRUCT(Form_pg_largeobject)` access of
+    /// `pageno`, and the file-static `getdatafield` (detoast of the `data`
+    /// bytea + the `VARSIZE - VARHDRSZ` length-sanity check raising
+    /// `ERRCODE_DATA_CORRUPTED` for a size outside `0..=LOBLKSIZE`). The owner
+    /// has the relation's descriptor; the tuple crosses as the scanned
+    /// [`FormedTuple`]. `Err` carries the deform/detoast/corruption error
+    /// surface.
+    pub fn deform_lo_page(
+        rel: &RelationData<'_>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+    ) -> PgResult<LoPageRow>
+);
+
+seam_core::seam!(
+    /// inv_api.c's brand-new `pg_largeobject` page insert: build
+    /// `values[]`/`nulls[]` (`loid`, `pageno`, and the `data` bytea framed
+    /// `SET_VARSIZE(len + VARHDRSZ)`), `heap_form_tuple(lo_heap_r->rd_att, ...)`,
+    /// `CatalogTupleInsertWithInfo(lo_heap_r, newtup, indstate)`, then
+    /// `heap_freetuple`. The page payload crosses as the owned `data` slice (the
+    /// `workbuf` scratch page, already trimmed to the valid length). `Err`
+    /// carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_with_info_pg_largeobject(
+        rel: &RelationData<'_>,
+        loid: Oid,
+        pageno: i32,
+        data: &[u8],
+        indstate: &types_cluster::CatalogIndexStateToken,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// inv_api.c's existing-`pg_largeobject`-page update: build
+    /// `values[]`/`replace[]` for the `data` column only (framed
+    /// `SET_VARSIZE(len + VARHDRSZ)`), `heap_modify_tuple` against the old page
+    /// tuple (addressed by `tid`), `CatalogTupleUpdateWithInfo(lo_heap_r,
+    /// &newtup->t_self, newtup, indstate)`, then `heap_freetuple`. The owner
+    /// re-reads the old tuple at `tid` to supply `heap_modify_tuple`'s base
+    /// (the caller already holds the row from the scan; only the page payload
+    /// changes). `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_with_info_pg_largeobject(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        data: &[u8],
+        indstate: &types_cluster::CatalogIndexStateToken,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid)` +
     /// `namein(amname)` + `heap_form_tuple` + `CatalogTupleInsert` for one
     /// pg_am row (amcmds.c `CreateAccessMethod`): assign the row OID, form the
@@ -255,4 +343,57 @@ seam_core::seam!(
         amhandler: Oid,
         amtype: u8,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CreateConstraintEntry`'s tuple build + insert: `GetNewOidWithIndex(rel,
+    /// ConstraintOidIndexId, Anum_pg_constraint_oid)` + `namestrcpy` +
+    /// `construct_array_builtin` of the array columns + `CStringGetTextDatum`
+    /// of `conbin` + `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +
+    /// `CatalogTupleInsert(rel, tup)` (catalog/indexing.c + heap/array). Returns
+    /// the freshly-allocated constraint OID. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_constraint(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_constraint::PgConstraintInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CatalogTupleUpdate(rel, &tup->t_self, tup)` for the in-place
+    /// `pg_constraint` mutators: the owner reads the existing tuple addressed by
+    /// `tid`, overwrites the `ConstraintFieldUpdate` columns (the ones the
+    /// AdjustNotNullInheritance / RenameConstraintById / AlterConstraintNamespaces
+    /// / ConstraintSetParentConstraint paths scribble on the copied tuple),
+    /// re-forms, and stores it (catalog/indexing.c). `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_constraint(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        fields: &types_catalog::pg_constraint::ConstraintFieldUpdate,
+    ) -> PgResult<()>
+);
+
+/* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(Relation catalog, AttrNumber oidcol, Oid
+    /// objectId)` scan primitive (objectaddress.c 2790): over the already-open
+    /// `catalog` relation, `systable_beginscan` keyed on `oidcol = objectId`
+    /// (index scan when `oidcol` is the catalog's OID column, sequential
+    /// otherwise), `systable_getnext` the single matching row, `systable_endscan`,
+    /// returning the located tuple copied into `mcx` (or `None` when absent).
+    /// Backs `get_catalog_object_by_oid[_extended]`; declared additively here
+    /// because the indexing/genam owner (a sibling decomp) has not landed yet.
+    /// The `locktuple` flag mirrors the `_extended` variant
+    /// (`get_catalog_object_by_oid_extended`): when `true` a `LockTuple` is taken
+    /// on the located row before it is returned. `Err` carries the
+    /// index/heap-fetch error surface.
+    pub fn get_catalog_object_by_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        catalog: &RelationData<'mcx>,
+        oidcol: i16,
+        object_id: Oid,
+        locktuple: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
 );

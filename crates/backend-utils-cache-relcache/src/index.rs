@@ -138,11 +138,7 @@ fn blank_hashctl() -> HASHCTL {
 /// from `pg_class.reltablespace`/`relfilenode` (or the relation map for mapped
 /// relations). **Own logic** (relation-map read + historic-decoding rewrite
 /// fixup are seamed).
-#[allow(unsafe_code)]
-pub fn RelationInitPhysicalAddr(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: callers hold a live `Relation` pointer into an owned descriptor.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationInitPhysicalAddr(rd: &mut RelationData) -> PgResult<()> {
     let oldnumber = rd.rd_locator.relNumber;
 
     // these relations kinds never have storage
@@ -240,10 +236,7 @@ pub fn RelationInitPhysicalAddr(relation: *mut RelationData) -> PgResult<()> {
 /// `InitIndexAmRoutine(relation)` (relcache.c): resolve and cache the index
 /// AM's `IndexAmRoutine` vtable into `rd_indam`. `relation->rd_amhandler` must
 /// be valid already. The handler call is the amapi owner's seam.
-#[allow(unsafe_code)]
-pub fn InitIndexAmRoutine(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
+pub fn InitIndexAmRoutine(rd: &mut RelationData) -> PgResult<()> {
     let routine = amapi_seam::get_index_am_routine::call(rd.rd_amhandler)?;
     rd.rd_indam = Some(routine);
     Ok(())
@@ -253,16 +246,12 @@ pub fn InitIndexAmRoutine(relation: *mut RelationData) -> PgResult<()> {
 /// relation's `rd_index`/`rd_amhandler`/`rd_indam`/`rd_opfamily`/`rd_opcintype`
 /// /`rd_support`/`rd_indoption`/`rd_indcollation` from `pg_index`/`pg_opclass`/
 /// `pg_am`.
-#[allow(unsafe_code)]
-pub fn RelationInitIndexAccessInfo(relation: *mut RelationData) -> PgResult<()> {
+pub fn RelationInitIndexAccessInfo(rd: &mut RelationData) -> PgResult<()> {
     // A scratch context for the seam copies; the entry stores owned mirrors,
     // so this context is dropped on return (the C `rd_indexcxt` lifetime is
     // the entry's own owned `Vec`s here).
     let scratch = MemoryContext::new("index info");
     let mcx = scratch.mcx();
-
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
 
     // Make a copy of the pg_index entry for the index (SearchSysCache1 +
     // heap_copytuple, projected with the variable-length arrays the C reads
@@ -319,10 +308,7 @@ pub fn RelationInitIndexAccessInfo(relation: *mut RelationData) -> PgResult<()> 
     let indnkeyatts = idxinfo.indnkeyatts as i32;
 
     // Now we can fetch the index AM's API struct.
-    InitIndexAmRoutine(relation)?;
-
-    // SAFETY: re-borrow after the InitIndexAmRoutine call (it borrowed `rd`).
-    let rd = unsafe { &mut *relation };
+    InitIndexAmRoutine(rd)?;
 
     // Allocate arrays to hold data. Opclasses are not used for included
     // columns, so allocate them for indnkeyatts only.
@@ -366,11 +352,9 @@ pub fn RelationInitIndexAccessInfo(relation: *mut RelationData) -> PgResult<()> 
 
     // Force population of the AM/opclass per-column options cache (own logic
     // in the derived family; the result is discarded as in C's `(void)`).
-    crate::derived::RelationGetIndexAttOptions(relation, false)?;
+    crate::derived::RelationGetIndexAttOptions(rd, false)?;
 
     // expressions, predicate, exclusion caches will be filled later
-    // SAFETY: re-borrow.
-    let rd = unsafe { &mut *relation };
     rd.rd_exclops = Vec::new();
     rd.rd_exclprocs = Vec::new();
     rd.rd_exclstrats = Vec::new();
@@ -527,21 +511,14 @@ pub fn LookupOpclassInfo(
 /// `InitTableAmRoutine(relation)` (relcache.c): resolve and cache the table
 /// AM's `TableAmRoutine` vtable into `rd_tableam`. `relation->rd_amhandler`
 /// must be valid already.
-#[allow(unsafe_code)]
-pub fn InitTableAmRoutine(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
+pub fn InitTableAmRoutine(rd: &mut RelationData) -> PgResult<()> {
     rd.rd_tableam = Some(tableam_seam::get_table_am_routine::call(rd.rd_amhandler)?);
     Ok(())
 }
 
 /// `RelationInitTableAccessMethod(relation)` (relcache.c): set the relation's
 /// `rd_amhandler`/`rd_tableam` for a table-like relation.
-#[allow(unsafe_code)]
-pub fn RelationInitTableAccessMethod(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationInitTableAccessMethod(rd: &mut RelationData) -> PgResult<()> {
     if rd.rd_rel.relkind == RELKIND_SEQUENCE {
         // Sequences are accessed like heap tables, but it's not shown in the
         // catalog; overwrite here.
@@ -568,7 +545,7 @@ pub fn RelationInitTableAccessMethod(relation: *mut RelationData) -> PgResult<()
     }
 
     // Now we can fetch the table AM's API struct.
-    InitTableAmRoutine(relation)
+    InitTableAmRoutine(rd)
 }
 
 /* ==========================================================================
@@ -577,11 +554,7 @@ pub fn RelationInitTableAccessMethod(relation: *mut RelationData) -> PgResult<()
 
 /// `RelationReloadIndexInfo(relation)` (relcache.c): refresh a non-nailed
 /// index entry's `pg_class`/`pg_index` fields in place during rebuild.
-#[allow(unsafe_code)]
-pub fn RelationReloadIndexInfo(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationReloadIndexInfo(rd: &mut RelationData) -> PgResult<()> {
     // Should be called only for invalidated, live indexes.
     debug_assert!(
         (rd.rd_rel.relkind == RELKIND_INDEX || rd.rd_rel.relkind == RELKIND_PARTITIONED_INDEX)
@@ -594,9 +567,8 @@ pub fn RelationReloadIndexInfo(relation: *mut RelationData) -> PgResult<()> {
     // updates, so just refresh the physical relfilenumber, mark valid, return.
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
     if rd.rd_rel.relisshared && !critical_built {
-        RelationInitPhysicalAddr(relation)?;
-        // SAFETY: re-borrow.
-        unsafe { (*relation).rd_isvalid = true };
+        RelationInitPhysicalAddr(rd)?;
+        rd.rd_isvalid = true;
         return Ok(());
     }
 
@@ -617,10 +589,7 @@ pub fn RelationReloadIndexInfo(relation: *mut RelationData) -> PgResult<()> {
     // family own logic).
     crate::build::RelationParseRelOptions(rd)?;
     // We must recalculate physical address in case it changed.
-    RelationInitPhysicalAddr(relation)?;
-
-    // SAFETY: re-borrow.
-    let rd = unsafe { &mut *relation };
+    RelationInitPhysicalAddr(rd)?;
 
     // For a non-system index, re-read the bool fields of pg_index.
     if !is_system_relation(rd) {
@@ -660,11 +629,7 @@ pub fn RelationReloadIndexInfo(relation: *mut RelationData) -> PgResult<()> {
 
 /// `RelationReloadNailed(relation)` (relcache.c): refresh a nailed entry's
 /// `pg_class` fields in place during rebuild.
-#[allow(unsafe_code)]
-pub fn RelationReloadNailed(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationReloadNailed(rd: &mut RelationData) -> PgResult<()> {
     // Should be called only for invalidated, nailed, non-index relations.
     debug_assert!(!rd.rd_isvalid);
     debug_assert!(rd.rd_isnailed);
@@ -672,14 +637,12 @@ pub fn RelationReloadNailed(relation: *mut RelationData) -> PgResult<()> {
 
     // Redo RelationInitPhysicalAddr in case it is a mapped relation whose
     // mapping changed.
-    RelationInitPhysicalAddr(relation)?;
+    RelationInitPhysicalAddr(rd)?;
 
     // Reload a non-index entry. We can't easily do so if relcaches aren't yet
     // built; in that case leave it invalid but usable.
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
     if critical_built {
-        // SAFETY: re-borrow.
-        let rd = unsafe { &mut *relation };
         // Mark valid before scanning, to avoid self-recursion when re-building
         // pg_class.
         rd.rd_isvalid = true;

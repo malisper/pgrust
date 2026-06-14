@@ -61,7 +61,12 @@ use backend_utils_sort_sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
+/// The one canonical value type. The binary heap's `bh_nodes` (owned by
+/// `types-nodes`) carries it, and the sort-key comparison edge
+/// (`ApplySortComparator` / `sortsupport::apply_sort_comparator`) takes it too.
+/// `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`, so every
+/// heap entry is a `ByVal` slot index here.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodegathermerge::{
     GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE,
@@ -1083,8 +1088,8 @@ fn gm_readnext_tuple<'mcx>(
 fn heap_compare_slots<'mcx>(
     slots: &[Option<SlotId>],
     sortkeys: &[SortSupportData<'mcx>],
-    a: Datum,
-    b: Datum,
+    a: Datum<'_>,
+    b: Datum<'_>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<i32> {
     // SlotNumber slot1 = DatumGetInt32(a); SlotNumber slot2 = DatumGetInt32(b);
@@ -1146,7 +1151,7 @@ fn binaryheap_empty(heap: &BinaryHeap<'_>) -> bool {
 /// `binaryheap_add_unordered(heap, d)` — add `d` at the end without restoring
 /// the heap property (paired with [`binaryheap_build_node`]). An overflow is
 /// the C `elog(ERROR, "out of binary heap slots")`.
-fn binaryheap_add_unordered(heap: &mut BinaryHeap<'_>, d: Datum) -> PgResult<()> {
+fn binaryheap_add_unordered<'mcx>(heap: &mut BinaryHeap<'mcx>, d: Datum<'mcx>) -> PgResult<()> {
     if heap.bh_size >= heap.bh_space {
         return Err(elog_error("out of binary heap slots"));
     }
@@ -1158,10 +1163,10 @@ fn binaryheap_add_unordered(heap: &mut BinaryHeap<'_>, d: Datum) -> PgResult<()>
 
 /// `binaryheap_first(heap)` — peek at the heap's top (root) entry. The caller
 /// must ensure the heap is non-empty.
-fn binaryheap_first(heap: &BinaryHeap<'_>) -> PgResult<Datum> {
+fn binaryheap_first<'mcx>(heap: &BinaryHeap<'mcx>) -> PgResult<Datum<'mcx>> {
     heap.bh_nodes
         .first()
-        .copied()
+        .cloned()
         .ok_or_else(|| elog_error("binaryheap_first on empty heap"))
 }
 
@@ -1170,7 +1175,7 @@ fn binaryheap_first(heap: &BinaryHeap<'_>) -> PgResult<Datum> {
 fn binaryheap_remove_first_node<'mcx>(
     gm_state: &mut GatherMergeStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let mut heap = gm_state
         .gm_heap
         .take()
@@ -1180,7 +1185,7 @@ fn binaryheap_remove_first_node<'mcx>(
             return Err(elog_error("binaryheap_remove_first on empty heap"));
         }
         // extract the root node, which will be the result
-        let result = heap.bh_nodes[0];
+        let result = heap.bh_nodes[0].clone();
 
         // easy if heap contains one element
         if heap.bh_size == 1 {
@@ -1235,7 +1240,7 @@ fn binaryheap_build_node<'mcx>(
 /// element and re-heapify with [`sift_down`].
 fn binaryheap_replace_first_node<'mcx>(
     gm_state: &mut GatherMergeStateData<'mcx>,
-    d: Datum,
+    d: Datum<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut heap = gm_state
@@ -1282,7 +1287,7 @@ fn sift_down<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut node_off = node_off;
-    let node_val = heap.bh_nodes[node_off as usize];
+    let node_val = heap.bh_nodes[node_off as usize].clone();
 
     loop {
         let left_off = left_offset(node_off);
@@ -1291,8 +1296,8 @@ fn sift_down<'mcx>(
 
         // Is the right child larger than the left child?
         if right_off < heap.bh_size {
-            let left_val = heap.bh_nodes[left_off as usize];
-            let right_val = heap.bh_nodes[right_off as usize];
+            let left_val = heap.bh_nodes[left_off as usize].clone();
+            let right_val = heap.bh_nodes[right_off as usize].clone();
             if heap_compare_slots(slots, sortkeys, left_val, right_val, estate)? < 0 {
                 swap_off = right_off;
             }
@@ -1303,14 +1308,14 @@ fn sift_down<'mcx>(
         if left_off >= heap.bh_size {
             break;
         }
-        let swap_val = heap.bh_nodes[swap_off as usize];
-        if heap_compare_slots(slots, sortkeys, node_val, swap_val, estate)? >= 0 {
+        let swap_val = heap.bh_nodes[swap_off as usize].clone();
+        if heap_compare_slots(slots, sortkeys, node_val.clone(), swap_val, estate)? >= 0 {
             break;
         }
 
         // Otherwise, swap the hole with the child that violates the heap
         // property; then go on to check its children.
-        heap.bh_nodes[node_off as usize] = heap.bh_nodes[swap_off as usize];
+        heap.bh_nodes[node_off as usize] = heap.bh_nodes[swap_off as usize].clone();
         node_off = swap_off;
     }
     // Re-fill the hole.
@@ -1446,10 +1451,10 @@ fn INVERT_COMPARE_RESULT(var: i32) -> i32 {
 ///     return compare;
 /// }
 /// ```
-fn ApplySortComparator(
-    datum1: Datum,
+fn ApplySortComparator<'mcx>(
+    datum1: Datum<'mcx>,
     is_null1: bool,
-    datum2: Datum,
+    datum2: Datum<'mcx>,
     is_null2: bool,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {

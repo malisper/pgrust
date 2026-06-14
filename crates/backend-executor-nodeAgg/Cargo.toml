@@ -18,6 +18,7 @@ backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams
 backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
@@ -30,7 +31,6 @@ backend-access-transam-parallel = { path = "../backend-access-transam-parallel" 
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-execparallel = { path = "../types-execparallel" }

@@ -107,7 +107,7 @@ fn portal_lifecycle() {
 
         assert_eq!(
             pg_cursor(FcinfoHandle(0)).expect("pg_cursor"),
-            types_datum::Datum::null()
+            Datum::null()
         );
 
         PortalDrop(&p2, false).expect("drop c1");

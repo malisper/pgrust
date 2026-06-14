@@ -15,7 +15,7 @@ seam_core::seam!(
     pub fn brin_serialize<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         keyno: usize,
-        mem_value: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
-        values: &mut [types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>],
+        mem_value: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+        values: &mut [types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
     ) -> types_error::PgResult<()>
 );

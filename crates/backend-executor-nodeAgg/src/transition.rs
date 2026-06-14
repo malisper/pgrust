@@ -23,7 +23,7 @@ use crate::node_lifecycle::select_current_set;
 pub fn initialize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // Start a fresh sort operation for each DISTINCT/ORDER BY aggregate.
@@ -125,7 +125,7 @@ pub fn initialize_aggregate<'mcx>(
     // Note that when the initial value is pass-by-ref, we must copy it (into
     // the aggcontext) since we will pfree the transValue later.
     if pertrans.init_value_is_null {
-        pergroupstate.trans_value = pertrans.init_value;
+        pergroupstate.trans_value = pertrans.init_value.clone();
     } else {
         // oldContext = MemoryContextSwitchTo(
         //   aggstate->curaggcontext->ecxt_per_tuple_memory);
@@ -134,7 +134,7 @@ pub fn initialize_aggregate<'mcx>(
         // MemoryContextSwitchTo(oldContext);
         curaggcontext_assert_built(aggstate);
         pergroupstate.trans_value = datum_copy_into(
-            pertrans.init_value,
+            pertrans.init_value.clone(),
             pertrans.transtype_by_val,
             pertrans.transtype_len,
         )?;
@@ -163,7 +163,7 @@ pub fn initialize_aggregate<'mcx>(
 /// number has to be specified from further up.
 pub fn initialize_aggregates<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    pergroups: &mut [Option<mcx::PgVec<'mcx, AggStatePerGroupData>>],
+    pergroups: &mut [Option<mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>>>],
     num_reset: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -219,7 +219,7 @@ pub fn initialize_aggregates<'mcx>(
 pub fn advance_transition_function<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
     let _ = pertrans.transfn_fcinfo.as_ref();
@@ -356,17 +356,22 @@ pub fn advance_aggregates<'mcx>(
 pub fn process_ordered_aggregate_single<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // Datum oldVal = (Datum) 0; bool oldIsNull = true; bool haveOldVal = false;
-    let mut old_val: types_datum::Datum = types_datum::Datum::null();
+    // Canonical value (Datum unification): `oldVal` mirrors the canonical
+    // `newVal` returned by `tuplesort_getdatum`.
+    let mut old_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
     let mut old_is_null = true;
     let mut have_old_val = false;
     // MemoryContext workcontext = aggstate->tmpcontext->ecxt_per_tuple_memory;
     // bool isDistinct = (pertrans->numDistinctCols > 0);
     let is_distinct = pertrans.num_distinct_cols > 0;
-    let mut new_abbrev_val: types_datum::Datum = types_datum::Datum::null();
-    let mut old_abbrev_val: types_datum::Datum = types_datum::Datum::null();
+    let mut new_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
+    let mut old_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
 
     // Assert(pertrans->numDistinctCols < 2);
     debug_assert!(pertrans.num_distinct_cols < 2);
@@ -401,10 +406,10 @@ pub fn process_ordered_aggregate_single<'mcx>(
         }
         // The tuplesort seam does not surface the abbreviated key, so the
         // abbreviated-equality fast path always falls through to equalfnOne.
-        new_abbrev_val = types_datum::Datum::null();
+        new_abbrev_val = types_tuple::backend_access_common_heaptuple::Datum::null();
 
         // Load the fetched datum into the transfn's argument 1.
-        fcinfo_set_arg(pertrans, 1, new_val, new_is_null);
+        fcinfo_set_arg(pertrans, 1, new_val.clone(), new_is_null);
 
         // Clear and select the working context for evaluation of the equality
         // function and transition function.
@@ -425,7 +430,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
                 || (!old_is_null
                     && !new_is_null
                     && old_abbrev_val == new_abbrev_val
-                    && equalfn_one_call(pertrans, old_val, new_val)?))
+                    && equalfn_one_call(pertrans, old_val.clone(), new_val.clone())?))
         {
             // MemoryContextSwitchTo(oldContext); continue;
             continue;
@@ -443,17 +448,17 @@ pub fn process_ordered_aggregate_single<'mcx>(
             //   } else oldVal = *newVal;
             if !pertrans.inputtype_by_val {
                 if !old_is_null {
-                    pfree_datum(old_val);
+                    pfree_datum(old_val.clone());
                 }
                 if !new_is_null {
                     old_val = datum_copy_current(
-                        new_val,
+                        new_val.clone(),
                         pertrans.inputtype_by_val,
                         pertrans.inputtype_len,
                     )?;
                 }
             } else {
-                old_val = new_val;
+                old_val = new_val.clone();
             }
             old_abbrev_val = new_abbrev_val;
             old_is_null = new_is_null;
@@ -486,7 +491,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
 pub fn process_ordered_aggregate_multi<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // ExprContext *tmpcontext = aggstate->tmpcontext;
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
@@ -498,8 +503,10 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     let mut slot2 = pertrans.uniqslot;
     let num_trans_inputs = pertrans.num_trans_inputs;
     let num_distinct_cols = pertrans.num_distinct_cols;
-    let mut new_abbrev_val: types_datum::Datum = types_datum::Datum::null();
-    let mut old_abbrev_val: types_datum::Datum = types_datum::Datum::null();
+    let mut new_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
+    let mut old_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
     let mut have_old_value = false;
     // TupleTableSlot *save = aggstate->tmpcontext->ecxt_outertuple;
     let save = tmpcontext_outertuple(aggstate);
@@ -536,7 +543,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         }
         // The tuplesort seam does not surface the abbreviated key, so the
         // abbreviated-equality fast path always falls through to equalfnMulti.
-        new_abbrev_val = types_datum::Datum::null();
+        new_abbrev_val = types_tuple::backend_access_common_heaptuple::Datum::null();
 
         // CHECK_FOR_INTERRUPTS();
         backend_tcop_postgres_seams::check_for_interrupts::call()?;
@@ -614,16 +621,12 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 /// `TUPLESORT_NONE` (tuplesort.h) — no extra sort options.
 const TUPLESORT_NONE: i32 = 0;
 
-/// `work_mem` (guc) — sort working-memory limit, in kilobytes. The GUC is
-/// owned by the not-yet-ported guc unit; it is a per-backend knob, so this
-/// reads it from that owner once it lands. Until then the value is needed
-/// only when an aggregate actually requires a sort (ORDER BY / DISTINCT), so
-/// it panics on that path.
+/// `work_mem` (guc) — sort working-memory limit, in kilobytes. The GUC is a
+/// per-backend global owned by `backend-utils-init-small` (`globals.c`); read
+/// it through that unit's installed seam (mirrors `spill.rs`'s
+/// `get_hash_memory_limit`).
 fn work_mem() -> i32 {
-    panic!(
-        "backend-executor-nodeAgg::work_mem: the work_mem GUC is owned by the \
-         not-yet-ported guc unit; no seam for it yet"
-    );
+    backend_utils_init_small_seams::work_mem::call()
 }
 
 /// `aggstate->curaggcontext->ecxt_per_tuple_memory` — assert the currently
@@ -669,11 +672,11 @@ fn current_phase_numsets(aggstate: &AggStateData<'_>) -> i32 {
 /// `datumCopy(value, typByVal, typLen)` into the given memory context. Datum
 /// copy is the datum.c surface; for pass-by-value datums it is a plain copy
 /// (no allocation). Pass-by-ref copy is owned by the not-yet-ported datum unit.
-fn datum_copy_into(
-    value: types_datum::Datum,
+fn datum_copy_into<'mcx>(
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     typ_by_val: bool,
     typ_len: i16,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if typ_by_val {
         // datumCopy of a pass-by-value datum is the value itself.
         return Ok(value);
@@ -687,11 +690,11 @@ fn datum_copy_into(
 
 /// `datumCopy(value, typByVal, typLen)` into CurrentMemoryContext (the
 /// process_ordered_* working context).
-fn datum_copy_current(
-    value: types_datum::Datum,
+fn datum_copy_current<'mcx>(
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     typ_by_val: bool,
     typ_len: i16,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if typ_by_val {
         return Ok(value);
     }
@@ -705,7 +708,7 @@ fn datum_copy_current(
 /// `pfree(DatumGetPointer(d))` — free a pass-by-ref datum. The chunk allocator
 /// (`pfree`) is owned by the not-yet-ported mmgr surface; reached only for
 /// pass-by-ref inputs in the DISTINCT path.
-fn pfree_datum(_d: types_datum::Datum) {
+fn pfree_datum(_d: types_tuple::backend_access_common_heaptuple::Datum<'_>) {
     panic!(
         "backend-executor-nodeAgg::pfree: freeing a pass-by-reference sort datum is \
          owned by the not-yet-ported mmgr (pfree) surface; no seam yet"
@@ -738,7 +741,10 @@ fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, _i: i32) -> bool {
 }
 
 /// `fcinfo->args[i].value` — the transfn call frame's argument value.
-fn fcinfo_arg_value(pertrans: &AggStatePerTransData<'_>, _i: i32) -> types_datum::Datum {
+fn fcinfo_arg_value<'mcx>(
+    pertrans: &AggStatePerTransData<'mcx>,
+    _i: i32,
+) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
     let _ = pertrans.transfn_fcinfo.as_ref();
     panic!(
         "backend-executor-nodeAgg::advance_transition_function: fcinfo->args[].value is part \
@@ -752,7 +758,7 @@ fn fcinfo_arg_value(pertrans: &AggStatePerTransData<'_>, _i: i32) -> types_datum
 fn fcinfo_set_arg(
     pertrans: &mut AggStatePerTransData<'_>,
     _i: i32,
-    _value: types_datum::Datum,
+    _value: types_tuple::backend_access_common_heaptuple::Datum<'_>,
     _isnull: bool,
 ) {
     let _ = pertrans.transfn_fcinfo.as_mut();
@@ -768,8 +774,8 @@ fn fcinfo_set_arg(
 /// `FunctionCall2Coll` is the fmgr direct-call surface owned by the fmgr unit.
 fn equalfn_one_call(
     pertrans: &AggStatePerTransData<'_>,
-    _old_val: types_datum::Datum,
-    _new_val: types_datum::Datum,
+    _old_val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    _new_val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<bool> {
     let _ = (&pertrans.equalfn_one, pertrans.agg_collation);
     panic!(

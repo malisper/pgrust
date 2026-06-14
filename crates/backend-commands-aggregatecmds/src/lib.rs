@@ -514,7 +514,7 @@ pub fn DefineAggregate(
     if let Some(initval) = initval.as_deref() {
         if transTypeType != TYPTYPE_PSEUDO {
             let (typinput, typioparam) = get_type_input_info::call(transTypeId)?;
-            let _ = oid_input_function_call::call(typinput, initval, typioparam, -1)?;
+            let _ = oid_input_function_call::call(mcx, typinput, initval, typioparam, -1)?;
         }
     }
 
@@ -524,7 +524,7 @@ pub fn DefineAggregate(
     if let Some(minitval) = minitval.as_deref() {
         if mtransTypeType != TYPTYPE_PSEUDO {
             let (typinput, typioparam) = get_type_input_info::call(mtransTypeId)?;
-            let _ = oid_input_function_call::call(typinput, minitval, typioparam, -1)?;
+            let _ = oid_input_function_call::call(mcx, typinput, minitval, typioparam, -1)?;
         }
     }
 

@@ -26,6 +26,17 @@ pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 /// The analyzed query is otherwise an opaque pass-through value threaded
 /// through the jumble/rewrite/plan seams; only `commandType` is inspected
 /// here (after rewriting).
+///
+/// K1 phase 2 decision: this stays a *distinct, documented* `Rc`-token rather
+/// than re-exporting the canonical [`crate::copy_query::Query`]. They are two
+/// trimmed views of the same C `Query`, but with incompatible models: the
+/// canonical one is arena-lifetimed (`Query<'mcx>`) and field-bearing, whereas
+/// this token is a refcounted by-value pass-through (no `'mcx`) consumed by
+/// `postgres-seams` / `queryjumble-seams` / `rewritehandler-seams` by value.
+/// Unifying onto one definition would force a `'mcx` (and a different field
+/// set) onto those by-value consumers — a behavior/signature change out of
+/// scope for this re-export pass. Both collapse into the central node model in
+/// a later K1 keystone.
 pub struct Query {
     /// `CmdType commandType` — select|insert|update|delete|merge|utility.
     pub commandType: CmdType,

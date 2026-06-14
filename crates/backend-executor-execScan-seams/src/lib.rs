@@ -79,6 +79,14 @@ pub type IndexOnlyScanAccessMtd =
 pub type IndexOnlyScanRecheckMtd =
     for<'mcx> fn(&mut IndexOnlyScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
 
+/// `ExecScanAccessMtd`, specialized to a plain index scan node.
+pub type IndexScanAccessMtd =
+    for<'mcx> fn(&mut types_nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd`, specialized to a plain index scan node.
+pub type IndexScanRecheckMtd =
+    for<'mcx> fn(&mut types_nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
 seam_core::seam!(
     /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
     /// generic scan loop — `ExecScanFetch` (interrupts + the EvalPlanQual
@@ -92,6 +100,19 @@ seam_core::seam!(
         estate: &mut EStateData<'mcx>,
         access: IndexOnlyScanAccessMtd,
         recheck: IndexOnlyScanRecheckMtd,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): the same
+    /// generic scan driver, specialized to a plain index scan node. This node
+    /// passes its `IndexNext`/`IndexNextWithReorder` access method and
+    /// `IndexRecheck`.
+    pub fn exec_scan_index<'mcx>(
+        node: &mut types_nodes::IndexScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        access: IndexScanAccessMtd,
+        recheck: IndexScanRecheckMtd,
     ) -> PgResult<bool>
 );
 
@@ -133,9 +154,9 @@ seam_core::seam!(
     /// handling — for a subquery scan node. Returns the result slot id, or
     /// `None` at end of scan. `Err` carries qual/projection `ereport(ERROR)`s
     /// and OOM. The node passes its own `SubqueryNext`/`SubqueryRecheck`.
-    pub fn exec_scan_subquery(
-        node: &mut SubqueryScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_subquery<'mcx>(
+        node: &mut SubqueryScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: SubqueryScanAccessMtd,
         recheck: SubqueryScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>
@@ -164,9 +185,9 @@ seam_core::seam!(
     /// scan node. Returns the result slot id, or `None` at end of scan. `Err`
     /// carries qual/projection `ereport(ERROR)`s and OOM. This node passes its
     /// `CteScanNext`/`CteScanRecheck`.
-    pub fn exec_scan_cte(
-        node: &mut CteScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_cte<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: CteScanAccessMtd,
         recheck: CteScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>
@@ -175,18 +196,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
     /// (rescan EPQ, clear the result slot) at the start of a CTE-scan rescan.
-    pub fn exec_scan_rescan_cte(
-        node: &mut CteScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_rescan_cte<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `ExecAssignScanProjectionInfo(&node->ss)` (execScan.c): set up the CTE
     /// scan node's projection, comparing the scan tuple type to the result type.
-    pub fn exec_assign_scan_projection_info_cte(
-        node: &mut CteScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_assign_scan_projection_info_cte<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 // --- NamedTuplestoreScan-specialized entry point ---------------------------
@@ -215,9 +236,9 @@ seam_core::seam!(
     /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
     /// execScan.c; this node passes its `NamedTuplestoreScanNext` /
     /// `NamedTuplestoreScanRecheck`.
-    pub fn exec_scan_namedtuplestore(
-        node: &mut NamedTuplestoreScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_namedtuplestore<'mcx>(
+        node: &mut NamedTuplestoreScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: NamedTuplestoreScanAccessMtd,
         recheck: NamedTuplestoreScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>

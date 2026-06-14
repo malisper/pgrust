@@ -13,7 +13,9 @@ use types_core::catalog::PROCEDURE_RELATION_ID;
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
 use types_datum::datum::NullableDatum;
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what
+// `ExprEvalStepData::HashDatumInitValue { init_value }` carries.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,

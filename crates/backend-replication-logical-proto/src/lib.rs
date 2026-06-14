@@ -34,12 +34,18 @@ use types_core::{
     GIDSIZE, InvalidTransactionId, InvalidXLogRecPtr, Oid, OidIsValid, TimestampTz, TransactionId,
     TransactionIdIsValid, XLogRecPtr,
 };
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`
+// to disambiguate from the canonical per-attribute value enum below. Used only
+// at the `SearchSysCache*` key edge, where the cache-key currency
+// (`SysCacheKey::Value`) is an audited bare word (C: `Datum key1..key4`).
+use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
 use types_nodes::{Bitmapset, TupleTableSlot};
 use types_rel::RelationData;
 use types_stringinfo::StringInfo;
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+// The canonical per-attribute value model (C's per-column `Datum`): a by-value
+// scalar word (`ByVal`) or the verbatim by-reference bytes (`ByRef`).
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, FormData_pg_attribute};
 use types_tuple::{ATTRIBUTE_GENERATED_STORED, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL,
     REPLICA_IDENTITY_INDEX};
@@ -335,8 +341,8 @@ const Anum_pg_type_typsend: i32 = 19;
 /// `GETSTRUCT(tup)->...` for a by-value pg_type field (Oid columns).
 fn pg_type_attr_oid(mcx: Mcx<'_>, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<Oid> {
     match SysCacheGetAttrNotNull(mcx, TYPEOID, tup, attnum)? {
-        TupleValue::ByVal(d) => Ok(d.as_oid()),
-        TupleValue::ByRef(_) => Err(elog_error(
+        Datum::ByVal(d) => Ok(Datum::from_usize(d).as_oid()),
+        Datum::ByRef(_) => Err(elog_error(
             "proto: expected a by-value pg_type attribute".into(),
         )),
     }
@@ -349,11 +355,11 @@ fn pg_type_attr_name<'mcx>(
     attnum: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
     match SysCacheGetAttrNotNull(mcx, TYPEOID, tup, attnum)? {
-        TupleValue::ByRef(b) => {
+        Datum::ByRef(b) => {
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             slice_in(mcx, &b[..len])
         }
-        TupleValue::ByVal(_) => Err(elog_error(
+        Datum::ByVal(_) => Err(elog_error(
             "proto: pg_type name attribute is by-value".into(),
         )),
     }
@@ -366,10 +372,10 @@ const VARTAG_ONDISK: u8 = 18;
 /// `VARATT_IS_1B_E` (header byte `0x01`) with `va_tag == VARTAG_ONDISK`. Only
 /// a by-reference value can be a toast pointer; the C call site has already
 /// checked `att->attlen == -1`.
-fn varatt_is_external_ondisk(value: &TupleValue<'_>) -> bool {
+fn varatt_is_external_ondisk(value: &Datum<'_>) -> bool {
     match value {
-        TupleValue::ByRef(b) => b.len() >= 2 && b[0] == 0x01 && b[1] == VARTAG_ONDISK,
-        TupleValue::ByVal(_) => false,
+        Datum::ByRef(b) => b.len() >= 2 && b[0] == 0x01 && b[1] == VARTAG_ONDISK,
+        Datum::ByVal(_) => false,
     }
 }
 
@@ -1131,7 +1137,7 @@ pub fn logicalrep_write_typ(
     }
 
     let mcx = out.allocator();
-    let tup = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(Datum::from_oid(basetypoid)))?;
+    let tup = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(ScalarWord::from_oid(basetypoid)))?;
     let Some(tup) = tup else {
         return Err(elog_error(format!(
             "cache lookup failed for type {basetypoid}"
@@ -1220,7 +1226,7 @@ fn logicalrep_write_tuple(
         }
 
         let typtup =
-            SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(Datum::from_oid(att.atttypid)))?;
+            SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(ScalarWord::from_oid(att.atttypid)))?;
         let Some(typtup) = typtup else {
             return Err(elog_error(format!(
                 "cache lookup failed for type {}",

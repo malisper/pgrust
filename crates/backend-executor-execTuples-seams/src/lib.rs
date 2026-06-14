@@ -79,11 +79,17 @@ seam_core::seam!(
     /// slot->tts_isnull[attnum-1])` (tuptable.h, via execTuples.c): ensure the
     /// first `attnum` columns are extracted and return the `(value, isnull)` of
     /// the 1-based `attnum`th. nodeSort's Datum sort reads attribute 1.
-    /// Deforming can detoast/allocate, so the call is fallible.
-    pub fn slot_getsomeattr(
+    /// Deforming can detoast/allocate, so the call is fallible. The returned
+    /// value is the canonical [`types_tuple::backend_access_common_heaptuple::Datum`];
+    /// a by-reference image is copied into `mcx` (in C it points into the slot).
+    pub fn slot_getsomeattr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         slot: &mut types_nodes::TupleTableSlot,
         attnum: i32,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        bool,
+    )>
 );
 
 seam_core::seam!(
@@ -94,7 +100,7 @@ seam_core::seam!(
     pub fn exec_store_first_datum<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
         slot: types_nodes::SlotId,
-        val: types_datum::Datum,
+        val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
         is_null: bool,
     ) -> types_error::PgResult<()>
 );
@@ -235,7 +241,7 @@ seam_core::seam!(
     pub fn store_virtual_values<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
         slot: types_nodes::SlotId,
-        values: &[types_datum::Datum],
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
         isnull: &[bool],
     ) -> types_error::PgResult<()>
 );
@@ -258,11 +264,17 @@ seam_core::seam!(
     /// fetch a system attribute of the slot's current tuple as
     /// `(datum, isnull)` (`slot->tts_ops->getsysattr` dispatch). A slot class
     /// without system attributes (e.g. virtual) is the C `elog(ERROR)`,
-    /// carried on `Err`.
-    pub fn slot_getsysattr(
+    /// carried on `Err`. The returned value is the canonical
+    /// [`types_tuple::backend_access_common_heaptuple::Datum`]; a by-reference
+    /// image is copied into `mcx`.
+    pub fn slot_getsysattr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         slot: &types_nodes::TupleTableSlot,
         attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        bool,
+    )>
 );
 
 seam_core::seam!(
@@ -273,11 +285,18 @@ seam_core::seam!(
     /// dispatch). The slot is borrowed mutably because deforming populates the
     /// slot's `tts_values`/`tts_isnull`/`tts_nvalid`; deforming can
     /// detoast/allocate, so the call is fallible. System (non-positive) attnums
-    /// take the `slot_getsysattr` path instead and are never passed here.
-    pub fn slot_getattr(
+    /// take the `slot_getsysattr` path instead and are never passed here. The
+    /// returned value is the canonical
+    /// [`types_tuple::backend_access_common_heaptuple::Datum`]; a by-reference
+    /// image is copied into `mcx`.
+    pub fn slot_getattr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         slot: &mut types_nodes::TupleTableSlot,
         attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        bool,
+    )>
 );
 
 seam_core::seam!(
@@ -295,9 +314,12 @@ seam_core::seam!(
 );
 
 /// One read of a slot/tuple attribute: its `Datum` plus is-null.
-#[derive(Clone, Copy, Debug)]
-pub struct SlotAttr {
-    pub value: types_datum::Datum,
+///
+/// Carries the canonical [`types_tuple::backend_access_common_heaptuple::Datum`]
+/// value (no longer `Copy`: the by-reference arm owns a `PgVec`).
+#[derive(Clone, Debug)]
+pub struct SlotAttr<'mcx> {
+    pub value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     pub isnull: bool,
 }
 
@@ -312,7 +334,7 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
         slot: types_nodes::SlotId,
         attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<SlotAttr>
+    ) -> types_error::PgResult<SlotAttr<'mcx>>
 );
 
 seam_core::seam!(
@@ -345,7 +367,7 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
         slot: types_nodes::SlotId,
         attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<SlotAttr>
+    ) -> types_error::PgResult<SlotAttr<'mcx>>
 );
 
 seam_core::seam!(
@@ -389,6 +411,18 @@ seam_core::seam!(
         desc: types_tuple::heaptuple::TupleDesc<'mcx>,
         tts_ops: types_nodes::TupleSlotKind,
     ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecCopySlotHeapTuple(slot)` (execTuples.c): make a palloc'd heap-tuple
+    /// copy of the slot's current contents (in the EState per-query context).
+    /// Targets the slot by pool id. The owned model returns the
+    /// [`FormedTuple`](types_tuple::backend_access_common_heaptuple::FormedTuple)
+    /// carrier (header + user-data area). Fallible on OOM.
+    pub fn exec_copy_slot_heap_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
 );
 
 seam_core::seam!(

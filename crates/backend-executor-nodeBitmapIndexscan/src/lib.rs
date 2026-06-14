@@ -77,6 +77,56 @@ pub fn MultiExecBitmapIndexScan<'mcx>(
     node: &mut BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, TIDBitmap>> {
+    // Prepare the result bitmap. Normally we create a new one; however our
+    // parent node is allowed to store a pre-made one into node->biss_result, in
+    // which case we just OR our tuple IDs into the existing bitmap.
+    //   if (node->biss_result) { tbm = node->biss_result; node->biss_result = NULL; }
+    //   else tbm = tbm_create(work_mem * (Size) 1024,
+    //       ((BitmapIndexScan *) node->ss.ps.plan)->isshared ?
+    //       node->ss.ps.state->es_query_dsa : NULL);
+    //
+    // Note the C prepares `tbm` only after instrumentation start + the runtime
+    // key rescan; the bitmap create has no dependency on either, so hoisting it
+    // ahead of `multi_exec_scan_into` (which holds `&mut tbm` for the scan loop)
+    // is behaviour-preserving and lets the owned `PgBox` ownership flow cleanly.
+    let mut tbm = match node.biss_result.take() {
+        Some(tbm) => tbm,
+        None => {
+            // XXX should we use less than work_mem for this?
+            let maxbytes = (globals::work_mem::call() as usize).wrapping_mul(1024);
+            let isshared = plan_isshared(node)?;
+            let dsa = if isshared {
+                estate.es_query_dsa.clone()
+            } else {
+                None
+            };
+            // The C `tbm_create` palloc's the bitmap in CurrentMemoryContext,
+            // which during MultiExec is the per-query context; the landed seam
+            // boxes it into the supplied `mcx` and returns the `PgBox`.
+            tidbitmap::tbm_create::call(estate.es_query_cxt, maxbytes, dsa)?
+        }
+    };
+
+    // Run the actual scan, ORing matching TIDs into `tbm` in place.
+    multi_exec_scan_into(node, &mut tbm, estate)?;
+
+    // return (Node *) tbm;
+    Ok(tbm)
+}
+
+/// Shared body of `MultiExecBitmapIndexScan`: do instrumentation start, the
+/// runtime-key rescan, the index scan loop ORing matching TIDs into the
+/// caller-supplied `tbm`, and instrumentation stop.
+///
+/// In the C this is inlined in `MultiExecBitmapIndexScan`; it is factored out so
+/// the `BitmapOr`/`BitmapAnd` child path (which hands a *borrowed* running
+/// bitmap to OR into via `biss_result`) can drive the same scan without taking
+/// ownership of the bitmap.
+fn multi_exec_scan_into<'mcx>(
+    node: &mut BitmapIndexScanState<'mcx>,
+    tbm: &mut TIDBitmap,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // double nTuples = 0;
     let mut n_tuples: f64 = 0.0;
 
@@ -108,31 +158,6 @@ pub fn MultiExecBitmapIndexScan<'mcx>(
         doscan = true;
     }
 
-    // Prepare the result bitmap. Normally we create a new one; however our
-    // parent node is allowed to store a pre-made one into node->biss_result, in
-    // which case we just OR our tuple IDs into the existing bitmap.
-    //   if (node->biss_result) { tbm = node->biss_result; node->biss_result = NULL; }
-    //   else tbm = tbm_create(work_mem * (Size) 1024,
-    //       ((BitmapIndexScan *) node->ss.ps.plan)->isshared ?
-    //       node->ss.ps.state->es_query_dsa : NULL);
-    let mut tbm = match node.biss_result.take() {
-        Some(tbm) => tbm,
-        None => {
-            // XXX should we use less than work_mem for this?
-            let maxbytes = (globals::work_mem::call() as usize).wrapping_mul(1024);
-            let isshared = plan_isshared(node)?;
-            let dsa = if isshared {
-                estate.es_query_dsa.clone()
-            } else {
-                None
-            };
-            // The C `tbm_create` palloc's the bitmap in CurrentMemoryContext,
-            // which during MultiExec is the per-query context; the landed seam
-            // boxes it into the supplied `mcx` and returns the `PgBox`.
-            tidbitmap::tbm_create::call(estate.es_query_cxt, maxbytes, dsa)?
-        }
-    };
-
     // Get TIDs from index and insert into bitmap.
     //   while (doscan)
     //   {
@@ -148,7 +173,7 @@ pub fn MultiExecBitmapIndexScan<'mcx>(
                 .biss_ScanDesc
                 .as_mut()
                 .ok_or_else(|| elog("bitmap index scan has no scan descriptor"))?;
-            n_tuples += indexam::index_getbitmap::call(scandesc, &mut tbm)? as f64;
+            n_tuples += indexam::index_getbitmap::call(scandesc, tbm)? as f64;
         }
 
         tcop_postgres::check_for_interrupts::call()?;
@@ -166,8 +191,7 @@ pub fn MultiExecBitmapIndexScan<'mcx>(
         instrument::instr_stop_node::call(instr, n_tuples)?;
     }
 
-    // return (Node *) tbm;
-    Ok(tbm)
+    Ok(())
 }
 
 // ===========================================================================
@@ -667,7 +691,45 @@ extern crate alloc;
 /// through a different path (it takes only the node, not a handle pair) and is
 /// not one of the four handle-pair seams; it is exposed as a public function
 /// and called directly by its consumer.
+/// Adapter installed into the `multi_exec_bitmap_index_child` seam.
+///
+/// The seam is declared over the generic `PlanStateNode` (the C
+/// `(BitmapIndexScanState *) subnode` downcast lives in nodeBitmapOr.c /
+/// nodeBitmapAnd.c) and a *borrowed* running `result` bitmap. It mirrors the C:
+///
+/// ```c
+/// ((BitmapIndexScanState *) subnode)->biss_result = result;
+/// subresult = (TIDBitmap *) MultiExecProcNode(subnode);
+/// if (subresult != result) elog(ERROR, "unrecognized result from subplan");
+/// ```
+///
+/// We downcast `subnode` to its `BitmapIndexScanState` and drive the scan body
+/// directly into the caller's `result` bitmap (`multi_exec_scan_into`), which is
+/// exactly the in-place OR the C achieves by stashing `result` in `biss_result`
+/// and relying on `MultiExecBitmapIndexScan` returning that same bitmap (the
+/// `subresult == result` identity check is therefore structurally guaranteed).
+fn bridge_multi_exec_bitmap_index_child<'mcx>(
+    subnode: &mut types_nodes::PlanStateNode<'mcx>,
+    result: &mut TIDBitmap,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // ((BitmapIndexScanState *) subnode) — the C unconditionally downcasts
+    // because the caller already gated on `IsA(subnode, BitmapIndexScanState)`.
+    let node = match subnode {
+        types_nodes::PlanStateNode::BitmapIndexScan(node) => &mut **node,
+        _ => {
+            return Err(elog(
+                "multi_exec_bitmap_index_child: subnode is not a BitmapIndexScanState",
+            ))
+        }
+    };
+    multi_exec_scan_into(node, result, estate)
+}
+
 pub fn init_seams() {
+    backend_executor_nodeBitmapIndexscan_seams::multi_exec_bitmap_index_child::set(
+        bridge_multi_exec_bitmap_index_child,
+    );
     backend_executor_nodeBitmapIndexscan_seams::exec_bitmapindexscan_estimate::set(bridge_estimate);
     backend_executor_nodeBitmapIndexscan_seams::exec_bitmapindexscan_initialize_dsm::set(
         bridge_initialize_dsm,

@@ -1,0 +1,33 @@
+[package]
+name = "types-relcache-entry"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types_relcache_entry"
+path = "src/lib.rs"
+
+[dependencies]
+# The vocabulary embedded in the owned RelationData entry. These are exactly
+# the crates entry.rs imports — none of which depend on relcache, so relocating
+# the owned entry here is acyclic. In particular this crate does NOT depend on
+# types-rel (the trimmed cross-unit value-slice), so types-rel can later name
+# this entry via the seam crate without a cycle.
+types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+types-tableam = { path = "../types-tableam" }
+types-reloptions = { path = "../types-reloptions" }
+
+# F0'' additive: the entry now serves consumers the projected/borrowed forms
+# directly (the build family's owned->borrowed projection moved onto the entry
+# type). The materialized cross-unit `TupleDescData` is built with the same
+# `CreateTupleDesc` tupdesc utility the build family used (no logic
+# duplication), so the entry crate pulls in mcx / types-error / types-tuple
+# (the borrowed vocabulary) and backend-access-common-tupdesc (the descriptor
+# materializer). This stays acyclic: none of those reach back to
+# types-relcache-entry.
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }

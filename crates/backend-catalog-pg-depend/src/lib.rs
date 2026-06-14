@@ -38,7 +38,6 @@ use types_catalog::catalog_dependency::{
 };
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-use types_datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,
@@ -46,7 +45,7 @@ use types_error::{
 use types_rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
 
 use backend_access_common_heaptuple::heap_deform_tuple;
@@ -77,7 +76,7 @@ fn open_depend(mcx: Mcx<'_>, lockmode: LOCKMODE) -> PgResult<Relation<'_>> {
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_OIDEQ,
 /// ObjectIdGetDatum(value))`. The eager fmgr resolution crosses the fmgr
 /// seam (panics until fmgr lands, exactly where C does the lookup).
-fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
+fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
@@ -91,7 +90,7 @@ fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_INT4EQ,
 /// Int32GetDatum(value))`.
-fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
+fn int4_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx>> {
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
@@ -105,9 +104,9 @@ fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
 
 /// One scanned pg_depend row: the heap TID (`tup->t_self`, for delete/update
 /// legs) plus the `heap_deform_tuple` projection of the whole row.
-struct SysScanRow<'a> {
+struct SysScanRow<'a, 'mcx> {
     tid: ItemPointerData,
-    values: &'a [Datum],
+    values: &'a [Datum<'mcx>],
     isnull: &'a [bool],
 }
 
@@ -122,7 +121,7 @@ fn systable_scan_foreach(
     rel: &RelationData<'_>,
     index_id: Oid,
     keys: &[ScanKeyData],
-    mut body: impl FnMut(&SysScanRow<'_>) -> PgResult<bool>,
+    mut body: impl FnMut(&SysScanRow<'_, '_>) -> PgResult<bool>,
 ) -> PgResult<()> {
     let mut scan = genam_seams::systable_beginscan::call(rel, index_id, true, None, keys)?;
     loop {
@@ -134,15 +133,15 @@ fn systable_scan_foreach(
         // GETSTRUCT(tup): the whole row, deformed (every pg_depend column is
         // fixed-width and NOT NULL, so by-value).
         let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
-        let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: PgVec<'_, Datum<'_>> = vec_with_capacity_in(smcx, cols.len())?;
         let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
         for (value, null) in cols.iter() {
-            values.push(match value {
-                TupleValue::ByVal(d) => *d,
-                TupleValue::ByRef(_) => {
-                    return Err(PgError::error("pg_depend column is not by-value"))
-                }
-            });
+            // Every pg_depend column is fixed-width by-value; reject any
+            // by-reference image (the C GETSTRUCT read would equally be a bug).
+            if matches!(value, Datum::ByRef(_)) {
+                return Err(PgError::error("pg_depend column is not by-value"));
+            }
+            values.push(value.clone());
             isnull.push(*null);
         }
         let row = SysScanRow {
@@ -162,10 +161,10 @@ fn systable_scan_foreach(
 
 /// `(Form_pg_depend) GETSTRUCT(tup)` — interpret one deformed pg_depend row.
 /// Every pg_depend column is fixed-width and NOT NULL.
-fn form_pg_depend(row: &SysScanRow<'_>) -> FormData_pg_depend {
+fn form_pg_depend(row: &SysScanRow<'_, '_>) -> FormData_pg_depend {
     debug_assert_eq!(row.values.len(), Natts_pg_depend);
     debug_assert!(row.isnull.iter().all(|&null| !null));
-    let col = |attno: AttrNumber| row.values[attno as usize - 1];
+    let col = |attno: AttrNumber| &row.values[attno as usize - 1];
     FormData_pg_depend {
         classid: col(Anum_pg_depend_classid).as_oid(),
         objid: col(Anum_pg_depend_objid).as_oid(),

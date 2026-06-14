@@ -19,8 +19,13 @@ use std::cell::RefCell;
 use mcx::Mcx;
 use types_core::primitive::AttrNumber;
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
+// Canonical value type (`types_tuple::Datum<'mcx>`, the ByVal/ByRef enum) —
+// this crate's comparator API (`apply_sort_comparator` / `comparison_shim`)
+// threads canonical `Datum<'mcx>` end-to-end. It drops to the bare-word
+// `types_datum::Datum` ONLY at the still-bare-word fmgr-ABI scalar edge
+// (`function_call2_coll` / `oid_function_call1_coll` argument/return slots).
+use types_tuple::Datum;
 use types_rel::Relation;
 use types_sortsupport::{
     SortComparatorId, SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
@@ -92,7 +97,7 @@ fn register_shim(state: ShimState) -> SortComparatorId {
 /// `FunctionCallInvoke`, and `elog(ERROR, "function %u returned NULL")` if the
 /// result came back null. [`function_call2_coll`] performs the invoke and that
 /// exact NULL check.
-fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum, y: Datum) -> PgResult<i32> {
+fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_>) -> PgResult<i32> {
     // Snapshot the resolved lookup and release the registry borrow before the
     // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
     // not trip a RefCell double-borrow.
@@ -105,6 +110,13 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum, y: Datum) -> Pg
             shim.collation,
         )
     });
+    // Bridge the canonical by-value words across the fmgr layer, which still
+    // speaks the transitional bare-word `types_datum::Datum` (fmgr-core is not
+    // in this migration batch — established sibling pattern is
+    // `types_datum::Datum::from_usize(canonical.as_usize())`). The comparator
+    // args are scalar Datum words exactly as C passes them.
+    let x = types_datum::Datum::from_usize(x.as_usize());
+    let y = types_datum::Datum::from_usize(y.as_usize());
     let result = function_call2_coll(mcx, &resolution, finfo, collation, x, y)?;
     // C: `comparison_shim` returns the `Datum` result as an `int`
     // (`DatumGetInt32`).
@@ -189,7 +201,7 @@ fn FinishSortSupportFunction(
 fn oid_function_call1_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>) -> PgResult<()> {
     // C: OidFunctionCall1(sortfunc, PointerGetDatum(ssup)). The collation is
     // the function's default (InvalidOid), as in OidFunctionCall1.
-    oid_function_call1_coll(ssup.ssup_cxt, sortfunc, 0, Datum::null())?;
+    oid_function_call1_coll(ssup.ssup_cxt, sortfunc, 0, types_datum::Datum::null())?;
     Ok(())
 }
 
@@ -304,7 +316,11 @@ pub fn PrepareSortSupportFromGistIndexRel(
 /// Invoke the comparator carried by `ssup.comparator` on two non-null datums.
 /// The caller has already verified `ssup.comparator.is_some()` and handled the
 /// null / reverse arithmetic (`ApplySortComparator` in sortsupport.h).
-fn apply_sort_comparator(datum1: Datum, datum2: Datum, ssup: &SortSupportData<'_>) -> PgResult<i32> {
+fn apply_sort_comparator(
+    datum1: Datum<'_>,
+    datum2: Datum<'_>,
+    ssup: &SortSupportData<'_>,
+) -> PgResult<i32> {
     let id = ssup
         .comparator
         .expect("apply_sort_comparator: ssup.comparator must be set");

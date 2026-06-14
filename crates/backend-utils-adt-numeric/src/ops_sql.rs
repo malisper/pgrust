@@ -19,7 +19,7 @@ extern crate alloc;
 use core::cmp::Ordering;
 
 use mcx::{Mcx, PgVec};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{PgError, PgResult};
 
 use types_numeric::var::{NumericSign, NumericVar};
@@ -1466,7 +1466,7 @@ pub fn seam_numeric_maximum_size(typmod: i32) -> i32 {
 /// `Numeric` pointer). We read each image's VARSIZE from its 4-byte header to
 /// recover the `&[u8]`, run `numeric_sub` in a transient context, and convert
 /// the result to `f64`.
-pub fn seam_numeric_subdiff(v1: Datum, v2: Datum) -> PgResult<f64> {
+pub fn seam_numeric_subdiff(v1: Datum<'_>, v2: Datum<'_>) -> PgResult<f64> {
     let ctx = mcx::MemoryContext::new("numrange_subdiff scratch");
     let mcx = ctx.mcx();
 
@@ -1487,7 +1487,7 @@ pub fn seam_numeric_subdiff(v1: Datum, v2: Datum) -> PgResult<f64> {
 /// # Safety
 /// The Datum must be a valid pointer to a 4-byte-header (`VARATT_IS_4B_U`)
 /// `numeric` varlena that lives at least as long as the returned slice.
-unsafe fn numeric_bytes_from_datum<'a>(d: Datum) -> &'a [u8] {
+unsafe fn numeric_bytes_from_datum<'a>(d: Datum<'_>) -> &'a [u8] {
     let ptr = d.as_usize() as *const u8;
     // VARSIZE_4B: native header word >> 2, low 30 bits (little-endian build).
     let header = core::slice::from_raw_parts(ptr, VARHDRSZ_U);

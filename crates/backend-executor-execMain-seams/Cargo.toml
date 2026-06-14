@@ -15,7 +15,6 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
-types-portal = { path = "../types-portal" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-tableam = { path = "../types-tableam" }

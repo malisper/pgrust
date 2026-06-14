@@ -1,7 +1,7 @@
 //! Tests for nodeMergejoin pure (non-seam) logic: the const-qual classifier
 //! and the `INVERT_COMPARE_RESULT` arithmetic.
 
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_nodes::primnodes::{Const, Expr, Var};
 
 use super::{check_constant_qual, invert_compare_result};

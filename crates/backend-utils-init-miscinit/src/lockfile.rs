@@ -78,7 +78,7 @@ const ENOENT: i32 = 2;
 
 /// `on_proc_exit` callback shape (`fn(int status, Datum arg)`) for
 /// `UnlinkLockFiles`. Delegates to [`unlink_lock_files`]; cannot fail.
-fn unlink_lock_files_hook(_status: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn unlink_lock_files_hook(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     unlink_lock_files();
     Ok(())
 }
@@ -115,7 +115,7 @@ fn register_lock_file(filename: &str) -> PgResult<()> {
         if !reg.get() {
             backend_storage_ipc_dsm_core_seams::on_proc_exit::call(
                 unlink_lock_files_hook,
-                types_datum::Datum::null(),
+                types_tuple::Datum::null(),
             )?;
             reg.set(true);
         }

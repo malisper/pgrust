@@ -6,13 +6,19 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use types_portal::{DestReceiver, Portal};
+use types_nodes::parsestmt::DestReceiverHandle;
+use types_portal::Portal;
 
 seam_core::seam!(
     /// `CreateDestReceiver(DestTuplestore)` (dest.c) — allocate a tuplestore
     /// destination receiver. Specialized to the `DestTuplestore` case
     /// portalcmds uses. Can `ereport(ERROR)`.
-    pub fn create_dest_receiver_tuplestore() -> PgResult<DestReceiver>
+    ///
+    /// The receiver is named by a router-keyed [`DestReceiverHandle`]
+    /// (`tcop/dest.c`'s `CreateDestReceiver` mints it through the unified
+    /// receiver-value router); the old by-value `types_portal::DestReceiver`
+    /// return is retired here (QueryDesc de-handle F1b).
+    pub fn create_dest_receiver_tuplestore() -> PgResult<DestReceiverHandle>
 );
 
 seam_core::seam!(
@@ -20,9 +26,10 @@ seam_core::seam!(
     /// (tstoreReceiver.c), specialized to portalcmds' call: `tStore` is
     /// `portal->holdStore` and `tContext` is `portal->holdContext` (read off
     /// the portal here), the slot/format args are NULL. `detoast` is the
-    /// "detoast all data passed through" flag.
+    /// "detoast all data passed through" flag. `receiver` names the receiver
+    /// through the router-keyed [`DestReceiverHandle`].
     pub fn set_tuplestore_dest_receiver_params(
-        receiver: DestReceiver,
+        receiver: DestReceiverHandle,
         portal: &Portal,
         detoast: bool,
     ) -> PgResult<()>
@@ -30,6 +37,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `dest->rDestroy(dest)` (dest.c dispatch) — destroy a destination
-    /// receiver (consumes it).
-    pub fn dest_destroy(receiver: DestReceiver) -> PgResult<()>
+    /// receiver, named by its router-keyed [`DestReceiverHandle`]. The handle is
+    /// retired from the router by this call.
+    pub fn dest_destroy(receiver: DestReceiverHandle) -> PgResult<()>
 );
