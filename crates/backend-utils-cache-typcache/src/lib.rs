@@ -46,8 +46,9 @@ use types_cache::typcache::{
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{
-    PgError, PgResult, SqlState, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, SqlState, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OUT_OF_MEMORY,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
 
@@ -2581,6 +2582,45 @@ pub fn domain_has_constraints(type_id: Oid) -> PgResult<bool> {
     Ok(with_state(|st| st.entry(type_id).domain_data.is_some()))
 }
 
+/// `domain_state_setup`'s typcache half (utils/adt/domains.c). Mirrors the C:
+/// `lookup_type_cache(domainType, TYPECACHE_DOMAIN_BASE_INFO)` (which throws a
+/// clean user-facing error for a bad OID and caches the base-type info), the
+/// `typtype != TYPTYPE_DOMAIN` guard raising
+/// `errcode(ERRCODE_DATATYPE_MISMATCH), "type %s is not a domain"`, the read of
+/// `domainBaseType`/`domainBaseTypmod`, and the base type's input-function
+/// lookup (`getTypeBinaryInputInfo` when `binary`, else `getTypeInputInfo`).
+/// The caller (domain_in/domain_recv) does the residual `fmgr_info_cxt` and
+/// `InitDomainConstraintRef`.
+fn domain_get_base_input_info(
+    domain_type: Oid,
+    binary: bool,
+) -> PgResult<backend_utils_cache_typcache_seams::DomainBaseInputInfo> {
+    lookup_type_cache(domain_type, TYPECACHE_DOMAIN_BASE_INFO)?;
+
+    let (typtype, base_type, typtypmod) = with_state(|st| {
+        let e = st.entry(domain_type);
+        (e.typtype, e.domain_base_type, e.domain_base_typmod)
+    });
+    if typtype != TYPTYPE_DOMAIN {
+        return ereport_error(
+            ERRCODE_DATATYPE_MISMATCH,
+            format!("type {} is not a domain", format_type(domain_type)?),
+        );
+    }
+
+    let (typiofunc, typioparam) = if binary {
+        lsyscache_seams::get_type_binary_input_info::call(base_type)?
+    } else {
+        lsyscache_seams::get_type_input_info::call(base_type)?
+    };
+
+    Ok(backend_utils_cache_typcache_seams::DomainBaseInputInfo {
+        typiofunc,
+        typioparam,
+        typtypmod,
+    })
+}
+
 /* ==========================================================================
  * Typed public accessors — read fields off a cache entry the caller has
  * already populated via lookup_type_cache (the C reads `typentry->field`).
@@ -2768,5 +2808,11 @@ pub fn init_seams() {
     );
     backend_utils_cache_typcache_seams::assign_record_type_identifier::set(
         assign_record_type_identifier,
+    );
+    // domain_state_setup's typcache half (domains.c): lookup_type_cache +
+    // TYPTYPE_DOMAIN guard + base type I/O lookup. The domains ADT
+    // (backend-utils-adt-misc2) calls this across the dep cycle.
+    backend_utils_cache_typcache_seams::domain_get_base_input_info::set(
+        domain_get_base_input_info,
     );
 }
