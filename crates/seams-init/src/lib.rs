@@ -880,6 +880,22 @@ mod recurrence_guard {
         ("backend_storage_ipc_latch", "set_latch_for_proc_pid"),
         ("backend_storage_ipc_latch", "set_latch_for_procno"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
+        // DESIGN_DEBT: the `backend-storage-ipc-shm-toc-seams` facade declares
+        // `shm_toc_estimate_{chunk,keys}` keyed on `&mut types_nodes::ParallelContext`,
+        // but that owned `ParallelContext` is the TRIMMED model — it carries only an
+        // opaque `toc: Opaque` and has NO real `estimator: shm_toc_estimator` field
+        // (it is "storage-owned, opaque here"). The real estimator lives in
+        // `backend-access-transam-parallel`'s own context store, addressed by
+        // `ShmTocEstimatorHandle`, and the genuine estimate logic IS installed there
+        // via the handle-keyed `backend_access_transam_parallel_seams` facade
+        // (delegating to `backend_storage_ipc_shm_toc::shm_toc_estimate_{chunk,keys}`).
+        // The shm-toc owner cannot install this `&mut ParallelContext` facade with real
+        // logic: there is no in-struct estimator to operate on, and synthesizing one
+        // would diverge from the handle-store model. Pay down with the ParallelContext
+        // de-handle keystone (give the owned ParallelContext a real `estimator` field),
+        // after which the owner installs these directly. Provider-unported / K-gated.
+        ("backend_storage_ipc_shm_toc", "shm_toc_estimate_chunk"),
+        ("backend_storage_ipc_shm_toc", "shm_toc_estimate_keys"),
         // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
         // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
         // cross-unit PGPROC/ProcGlobal-arena wiring (procarray add/remove + clog.c
