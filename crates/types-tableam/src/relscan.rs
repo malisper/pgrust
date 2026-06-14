@@ -180,9 +180,9 @@ pub struct IndexScanDescData<'mcx> {
     /// `int numberOfOrderBys` — number of ordering operators.
     pub number_of_order_bys: i32,
     /// `struct ScanKeyData *keyData` — array of index qualifier descriptors.
-    pub key_data: StdVec<types_scan::scankey::ScanKeyData>,
+    pub key_data: StdVec<types_scan::scankey::ScanKeyData<'mcx>>,
     /// `struct ScanKeyData *orderByData` — array of ordering op descriptors.
-    pub order_by_data: StdVec<types_scan::scankey::ScanKeyData>,
+    pub order_by_data: StdVec<types_scan::scankey::ScanKeyData<'mcx>>,
     /// `bool xs_want_itup` — caller requests index tuples.
     pub xs_want_itup: bool,
     /// `bool xs_temp_snap` — unregister snapshot at scan end?

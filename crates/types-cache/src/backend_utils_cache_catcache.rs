@@ -266,7 +266,7 @@ pub struct ArenaCatCache {
     /// `cc_skey[CATCACHE_MAXKEYS]` — the scankey template (the genam scan owner
     /// re-resolves the comparison procedure with `fmgr_info`); `None` per slot
     /// until phase 2 builds it.
-    pub cc_skey: [Option<ScanKeyData>; CATCACHE_MAXKEYS],
+    pub cc_skey: [Option<ScanKeyData<'static>>; CATCACHE_MAXKEYS],
     /// Whether `CatalogCacheInitializeCache` has run (the C `cc_tupdesc !=
     /// NULL` guard of `ConditionalCatalogCacheInitializeCache`). The descriptor
     /// itself is reached via the `with_cache_tupdesc` seam, not stored here.
