@@ -6,9 +6,10 @@
 
 seam_core::seam!(
     /// `XLogPrefetchShmemSize()` — shared-memory bytes for prefetch stats;
-    /// summed by ipci.c `CalculateShmemSize`. `Err` carries the
-    /// `add_size`/`mul_size` overflow `ereport`. Scaffolded slot.
-    pub fn xlog_prefetch_shmem_size() -> types_error::PgResult<types_core::Size>
+    /// summed by ipci.c `CalculateShmemSize`. Infallible (mirrors C `size_t`
+    /// `sizeof(XLogPrefetchStats)`); the overflow `ereport` lives on the
+    /// caller's `add_size`, not here.
+    pub fn xlog_prefetch_shmem_size() -> types_core::Size
 );
 
 seam_core::seam!(

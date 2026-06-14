@@ -129,7 +129,7 @@ pub fn calculate_shmem_size() -> PgResult<(Size, i32)> {
     size = shmem::add_size::call(size, sa::lock_manager_shmem_size()?)?;
     size = shmem::add_size::call(size, sa::predicate_lock_shmem_size()?)?;
     size = shmem::add_size::call(size, proc::proc_global_shmem_size::call()?)?;
-    size = shmem::add_size::call(size, xc::xlog_prefetch_shmem_size()?)?;
+    size = shmem::add_size::call(size, xc::xlog_prefetch_shmem_size())?;
     size = shmem::add_size::call(size, xc::varsup_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::xlog_shmem_size()?)?;
     size = shmem::add_size::call(size, xc::xlog_recovery_shmem_size()?)?;
