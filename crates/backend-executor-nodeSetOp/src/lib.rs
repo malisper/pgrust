@@ -50,7 +50,6 @@ use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_sort_sortsupport_seams as sortsupport;
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use types_nodes::nodeagg::TupleHashEntryData;
@@ -60,7 +59,7 @@ use types_nodes::nodesetop::{
 };
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 use types_sortsupport::SortSupportData;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// Install this crate's seam implementations. nodeSetOp owns no inbound seams:
 /// it is reached through the executor dispatch (execProcnode), which can depend
@@ -1073,14 +1072,15 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 }
 
 /// The `Datum` and isnull of a deformed column (`tts_values[i]`/`tts_isnull[i]`).
-/// A by-value column yields its scalar `Datum`; a by-reference column's
-/// pointer-as-`Datum` is materialized by the slot layer, which is not yet
-/// modeled, so it routes through the (still-provisional) slot payload owner.
-fn deformed_datum(col: &(TupleValue<'_>, bool)) -> (Datum, bool) {
+/// The column's value is the canonical [`Datum`] enum; a by-value column yields
+/// its scalar `Datum`, a by-reference column's pointer-as-`Datum` is
+/// materialized by the slot layer, which is not yet modeled, so it routes
+/// through the (still-provisional) slot payload owner.
+fn deformed_datum<'a, 'mcx>(col: &'a (Datum<'mcx>, bool)) -> (&'a Datum<'mcx>, bool) {
     let (value, isnull) = col;
     match value {
-        TupleValue::ByVal(d) => (*d, *isnull),
-        TupleValue::ByRef(_) => panic!(
+        Datum::ByVal(_) => (value, *isnull),
+        Datum::ByRef(_) => panic!(
             "backend-executor-execTuples: tts_values[] Datum for a by-reference column needs \
              the slot payload model (slot_getallattrs is provisional)"
         ),
@@ -1092,9 +1092,9 @@ fn deformed_datum(col: &(TupleValue<'_>, bool)) -> (Datum, bool) {
 /// C macro; the comparator-function invocation goes through the sortsupport
 /// seam.
 fn apply_sort_comparator(
-    datum1: Datum,
+    datum1: &Datum<'_>,
     is_null1: bool,
-    datum2: Datum,
+    datum2: &Datum<'_>,
     is_null2: bool,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {
@@ -1117,7 +1117,14 @@ fn apply_sort_comparator(
         }
     } else {
         // compare = ssup->comparator(datum1, datum2, ssup);
-        let mut compare = sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
+        //
+        // The comparator seam is the audited ABI edge into the type's btree
+        // comparison function (fmgr): it consumes the bare machine word. A
+        // by-value column's canonical `Datum::ByVal` carries exactly that word,
+        // recovered here as the plain `types_datum::Datum` the seam expects.
+        let word1 = types_datum::Datum::from_usize(datum1.as_usize());
+        let word2 = types_datum::Datum::from_usize(datum2.as_usize());
+        let mut compare = sortsupport::apply_sort_comparator::call(word1, word2, ssup)?;
         if reverse {
             // INVERT_COMPARE_RESULT(compare)
             compare = if compare < 0 { 1 } else { compare.wrapping_neg() };
