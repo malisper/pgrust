@@ -26,6 +26,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RecentXmin` (snapmgr.c) — the xmin of the most recently taken snapshot.
+    /// Read by procarray.c's `GlobalVisTestShouldUpdate` / `GlobalVisUpdateApply`
+    /// to decide whether a horizon recompute is worthwhile and to record the
+    /// last-update xmin. Pure backend-global read; cannot `ereport`.
+    pub fn recent_xmin() -> u32
+);
+
+seam_core::seam!(
     /// `TransactionXmin = xmin;` — store the backend-global oldest-snapshot xmin
     /// (snapmgr.c owns it). Written by procarray.c's
     /// `ProcArrayInstall{Imported,Restored}Xmin` atomically with `MyProc->xmin`.

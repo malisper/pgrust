@@ -1605,6 +1605,8 @@ pub fn init_seams() {
     // `TransactionXmin = xmin;` — procarray.c's ProcArrayInstall*Xmin set it
     // atomically with MyProc->xmin; snapmgr owns the backend-global.
     pc_seams::set_transaction_xmin::set(|xmin| with_state(|s| s.transaction_xmin = xmin));
+    // `RecentXmin` — read by procarray.c's GlobalVis horizon machinery.
+    pc_seams::recent_xmin::set(RecentXmin);
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket
