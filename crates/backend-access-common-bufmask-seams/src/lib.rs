@@ -36,3 +36,12 @@ seam_core::seam!(
     /// `MASK_MARKER`. Infallible (fixed-offset writes).
     pub fn mask_lp_flags(page: &mut [u8])
 );
+
+seam_core::seam!(
+    /// `mask_page_content(page)` (bufmask.c) — mask the whole page content
+    /// (everything past `SizeOfPageHeaderData`, plus `pd_lower`/`pd_upper`) to
+    /// `MASK_MARKER`. Used by index AMs (e.g. hash `LH_UNUSED_PAGE`) where the
+    /// contents of deleted/unused pages must be almost completely ignored for
+    /// consistency checking. Infallible (fixed-offset writes).
+    pub fn mask_page_content(page: &mut [u8])
+);
