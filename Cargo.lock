@@ -8446,6 +8446,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-char"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-adt-varlena-seams",
+ "mcx",
+ "types-datum",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-utils-adt-datetime-seams"
 version = "0.0.0"
 dependencies = [
@@ -8646,6 +8658,7 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-stack-depth-seams",
+ "common-hashfn",
  "mcx",
  "port-pgstrcasecmp",
  "types-core",
@@ -11095,6 +11108,7 @@ dependencies = [
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
+ "backend-utils-adt-char",
  "backend-utils-adt-format-type",
  "backend-utils-adt-json",
  "backend-utils-adt-misc2",
