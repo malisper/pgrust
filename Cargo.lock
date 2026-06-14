@@ -5940,6 +5940,7 @@ dependencies = [
  "port-pgsleep-seams",
  "types-bgworker",
  "types-core",
+ "types-datum",
  "types-error",
  "types-pgstat",
  "types-startup",
@@ -9214,6 +9215,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
