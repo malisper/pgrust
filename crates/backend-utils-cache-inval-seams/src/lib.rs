@@ -170,3 +170,14 @@ seam_core::seam!(
     /// its `ereport(ERROR)`s.
     pub fn cache_invalidate_relcache(relid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CacheInvalidateSmgr(rlocator)` (inval.c): broadcast an smgr-close
+    /// invalidation immediately (not transaction-deferred) so other backends
+    /// drop any cached `SMgrRelation` for the relation whose physical storage
+    /// we just changed (e.g. a fork extension). Used by `vm_extend` /
+    /// `fsm_extend`. `Err` carries its `ereport(ERROR)`s.
+    pub fn cache_invalidate_smgr(
+        rlocator: types_storage::RelFileLocatorBackend,
+    ) -> PgResult<()>
+);

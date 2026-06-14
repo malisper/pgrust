@@ -171,6 +171,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GlobalVisTestIsRemovableXid(state, xid)` (procarray.c) — is `xid` old
+    /// enough (below the `GlobalVisState` horizon) that a tuple deleted by it can
+    /// be removed? Used by the VACUUM / NonVacuumable visibility predicates.
+    pub fn global_vis_test_is_removable_xid(
+        state: types_snapshot::snapshot::GlobalVisStateHandle,
+        xid: TransactionId,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `ProcArrayEndTransaction(MyProc, latestXid)` — advertise no transaction
     /// in progress (the proc argument is always `MyProc` from xact.c).
     pub fn proc_array_end_transaction(latest_xid: TransactionId) -> PgResult<()>

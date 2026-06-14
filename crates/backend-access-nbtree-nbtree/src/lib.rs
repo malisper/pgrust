@@ -1501,7 +1501,7 @@ fn btvacuumpage_leaf<'mcx>(
         debug_assert!(nhtidsdead == 0);
         if vstate.cycleid != 0 && btpo_cycleid == vstate.cycleid {
             core::page_clear_cycleid::call(buf);
-            bufmgr::mark_buffer_dirty_hint::call(buf);
+            bufmgr::mark_buffer_dirty_hint::call(buf, false);
         }
     }
 

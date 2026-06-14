@@ -346,7 +346,7 @@ pub fn fsm_search_avail(
                 }
                 fsm_rebuild_page(&mut fsmpage);
                 bufmgr::fsm_buffer_set_page::call(buf, fsmpage)?;
-                bufmgr::mark_buffer_dirty_hint::call(buf);
+                bufmgr::mark_buffer_dirty_hint::call(buf, false);
                 fsmpage = bufmgr::fsm_buffer_get_page::call(buf)?;
                 continue 'restart;
             }
@@ -664,7 +664,7 @@ fn fsm_set_and_search(
     // from the buffer).
     bufmgr::fsm_buffer_set_page::call(buf, page)?;
     if modified {
-        bufmgr::mark_buffer_dirty_hint::call(buf);
+        bufmgr::mark_buffer_dirty_hint::call(buf, false);
     }
 
     if minValue != 0 {
@@ -726,7 +726,7 @@ fn fsm_search(rel: &Relation<'_>, min_cat: u8) -> PgResult<BlockNumber> {
                 let mut page = bufmgr::fsm_buffer_get_page::call(buf)?;
                 fsm_set_avail(&mut page, slot, 0);
                 bufmgr::fsm_buffer_set_page::call(buf, page)?;
-                bufmgr::mark_buffer_dirty_hint::call(buf);
+                bufmgr::mark_buffer_dirty_hint::call(buf, false);
                 bufmgr::unlock_release_buffer::call(buf);
                 // C uses post-increment `if (restarts++ > 10000)` — compare before
                 // bump.
@@ -850,7 +850,7 @@ fn fsm_vacuum_page(
                 bufmgr::lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
                 fsm_set_avail(&mut page, slot, child_avail);
                 bufmgr::fsm_buffer_set_page::call(buf, page.clone())?;
-                bufmgr::mark_buffer_dirty_hint::call(buf);
+                bufmgr::mark_buffer_dirty_hint::call(buf, false);
                 bufmgr::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
             }
 
@@ -992,7 +992,7 @@ pub fn XLogRecordPageWithFreeSpace(
     let modified = fsm_set_avail(&mut page, slot as i32, new_cat);
     bufmgr::fsm_buffer_set_page::call(buf, page)?;
     if modified {
-        bufmgr::mark_buffer_dirty_hint::call(buf);
+        bufmgr::mark_buffer_dirty_hint::call(buf, false);
     }
     bufmgr::unlock_release_buffer::call(buf);
     Ok(())

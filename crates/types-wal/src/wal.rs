@@ -653,6 +653,12 @@ pub struct RedoRecord<'a> {
 /// `RM_STANDBY_ID` — the Standby resource manager (rmgrlist.h entry 8).
 pub const RM_STANDBY_ID: RmgrId = 8;
 
+/// `RM_HEAP2_ID` — the Heap2 resource manager (rmgrlist.h entry 9).
+pub const RM_HEAP2_ID: RmgrId = 9;
+
+/// `RM_HEAP_ID` — the Heap resource manager (rmgrlist.h entry 10).
+pub const RM_HEAP_ID: RmgrId = 10;
+
 /// `RM_GENERIC_ID` — the Generic-WAL resource manager (rmgrlist.h entry 20).
 pub const RM_GENERIC_ID: RmgrId = 20;
 

@@ -78,6 +78,45 @@ pub struct VacuumCutoffs {
     pub MultiXactCutoff: MultiXactId,
 }
 
+/// `HeapTupleFreeze` (`access/heapam.h`) — a single tuple's freeze plan,
+/// produced by `heap_prepare_freeze_tuple` and executed by
+/// `heap_execute_freeze_tuple` / `heap_freeze_prepared_tuples`. Lives here (the
+/// `access/heapam.h` vocabulary) so both the heap AM owner and the prune/freeze
+/// + vacuum seams can carry it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeapTupleFreeze {
+    /* Fields describing how to process tuple */
+    pub xmax: TransactionId,
+    pub t_infomask2: u16,
+    pub t_infomask: u16,
+    pub frzflags: u8,
+
+    /* xmin/xmax check flags */
+    pub checkflags: u8,
+    /* Page offset number for tuple */
+    pub offset: OffsetNumber,
+}
+
+/// `HeapPageFreeze` (`access/heapam.h`) — VACUUM's per-page freeze state,
+/// updated across each `heap_prepare_freeze_tuple` call. It tracks whether
+/// freezing the page is required and the oldest extant XID/MXID under both the
+/// "freeze" and "no freeze" plans (for advancing relfrozenxid/relminmxid).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeapPageFreeze {
+    /// Is `heap_prepare_freeze_tuple` caller required to freeze the page?
+    pub freeze_required: bool,
+
+    /// "Freeze" `NewRelfrozenXid` tracker.
+    pub FreezePageRelfrozenXid: TransactionId,
+    /// "Freeze" `NewRelminMxid` tracker.
+    pub FreezePageRelminMxid: MultiXactId,
+
+    /// "No freeze" `NewRelfrozenXid` tracker.
+    pub NoFreezePageRelfrozenXid: TransactionId,
+    /// "No freeze" `NewRelminMxid` tracker.
+    pub NoFreezePageRelminMxid: MultiXactId,
+}
+
 /// `reason` codes for `heap_page_prune_and_freeze()` (`access/heapam.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]

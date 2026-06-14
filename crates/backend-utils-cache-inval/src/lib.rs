@@ -304,6 +304,9 @@ pub fn init_seams() {
     // class seam carries `(relid, &PgClassForm)`; the impl mirrors
     // CacheInvalidateRelcacheByTuple.
     seams::cache_invalidate_relcache::set(cache_invalidate::CacheInvalidateRelcacheByRelid);
+    // Immediate smgr-close invalidation broadcast (consumed by visibilitymap.c
+    // `vm_extend` / freespace.c `fsm_extend` after a fork extension).
+    seams::cache_invalidate_smgr::set(cache_invalidate::CacheInvalidateSmgr);
     seams::cache_invalidate_relcache_by_pg_class::set(
         cache_invalidate::CacheInvalidateRelcacheByPgClass,
     );

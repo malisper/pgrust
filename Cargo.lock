@@ -485,6 +485,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-heapam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-heap-heapam-seams",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-heaptoast",
+ "backend-access-heap-hio",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-transam",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-nodes-core-seams",
+ "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-page",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-scalar-datum-core",
+ "backend-utils-cache-inval",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-spccache",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-combocid-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nbtree",
+ "types-nodes",
+ "types-rel",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-vacuum",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-heap-heapam-seams"
 version = "0.0.0"
 dependencies = [
@@ -493,7 +550,36 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nbtree",
  "types-rel",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-xlog-records",
+]
+
+[[package]]
+name = "backend-access-heap-heapam-visibility"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-utils-time-combocid-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -564,6 +650,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-pruneheap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-pruneheap-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-page",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
+name = "backend-access-heap-pruneheap-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-heap-vacuumlazy"
 version = "0.0.0"
 dependencies = [
@@ -583,6 +712,28 @@ dependencies = [
  "types-core",
  "types-error",
  "types-vacuum",
+]
+
+[[package]]
+name = "backend-access-heap-visibilitymap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-heap-visibilitymap-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -1292,11 +1443,13 @@ dependencies = [
 name = "backend-access-transam-multixact-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-storage",
  "types-wal",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -1722,6 +1875,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-logical",
+ "types-storage",
  "types-wal",
 ]
 
@@ -3974,6 +4128,7 @@ dependencies = [
  "backend-executor-instrument-seams",
  "backend-executor-nodeAppend",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGather",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
@@ -4448,6 +4603,33 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeGather"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execParallel-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-tqueue-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6881,7 +7063,12 @@ name = "backend-replication-logical-reorderbuffer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
  "types-logical",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11114,6 +11301,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-time-combocid-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-time-snapmgr"
 version = "0.0.0"
 dependencies = [
@@ -11673,8 +11870,12 @@ dependencies = [
  "backend-access-gin-core-probe",
  "backend-access-hash-xlog",
  "backend-access-hashvalidate",
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
+ "backend-access-heap-pruneheap",
  "backend-access-heap-vacuumlazy",
+ "backend-access-heap-visibilitymap",
  "backend-access-index-indexam",
  "backend-access-nbt-dedup",
  "backend-access-nbt-xlog",
@@ -11746,6 +11947,7 @@ dependencies = [
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGather",
  "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",

@@ -200,7 +200,11 @@ pub fn exec_init_node<'mcx>(
 
         // case T_Unique: ExecInitUnique(...) (nodeUnique.c)
 
-        // case T_Gather: ExecInitGather(...) (nodeGather.c)
+        // case T_Gather: ExecInitGather((Gather *) node, estate, eflags)
+        Node::Gather(_) => {
+            let s = backend_executor_nodeGather::ExecInitGather(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Gather(s))?
+        }
 
         // case T_GatherMerge: ExecInitGatherMerge(...) (nodeGatherMerge.c)
 

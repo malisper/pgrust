@@ -16,8 +16,12 @@ pub fn init_all() {
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
     backend_access_hashvalidate::init_seams();
+    backend_access_heap_heapam::init_seams();
+    backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heaptoast::init_seams();
+    backend_access_heap_pruneheap::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
+    backend_access_heap_visibilitymap::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_nbt_dedup::init_seams();
     backend_access_nbt_xlog::init_seams();
@@ -91,6 +95,7 @@ pub fn init_all() {
     backend_executor_nodeCustom::init_seams();
     backend_executor_nodeForeignscan::init_seams();
     backend_foreign_foreign::init_seams();
+    backend_executor_nodeGather::init_seams();
     backend_executor_nodeGatherMerge::init_seams();
     backend_executor_nodeGroup::init_seams();
     backend_executor_nodeHash::init_seams();
@@ -1119,6 +1124,25 @@ mod recurrence_guard {
         ("backend_utils_misc_guc_file", "guc_check_errhint"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
+        // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
+        // seams (backend-utils-time-combocid-seams) consumed by the heap
+        // visibility predicates resolve a combo CID against the *file-scope*
+        // combo-CID state. In this repo combocid.c was ported with that state as
+        // an owned `ComboCidState<'mcx>` threaded from the transaction owner
+        // (xact.c), so the merged/audited combocid owner has no ambient global to
+        // install a parameterless `(&HeapTupleHeaderData) -> CommandId` seam
+        // against — its real bodies take `&ComboCidState`. Wiring these needs the
+        // live per-transaction `ComboCidState` reachable from a static seam (an
+        // ambient-global stash, forbidden) or the visibility callers to thread the
+        // state explicitly (a contract redesign across the scan/executor seam
+        // boundary). Until then they stay seam-and-panic. See DESIGN_DEBT.md.
+        ("backend_utils_time_combocid", "heap_tuple_header_get_cmax"),
+        ("backend_utils_time_combocid", "heap_tuple_header_get_cmin"),
+        // Same TD-COMBOCID-STATE: `HeapTupleHeaderAdjustCmax` (consumed by
+        // heap_delete/heap_update) resolves a combo CID against the file-scope
+        // combo-CID state; its real body takes `&mut ComboCidState`, which the
+        // owner can't reach from a static seam until the xact-owner threads it.
+        ("backend_utils_time_combocid", "heap_tuple_header_adjust_cmax"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
