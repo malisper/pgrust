@@ -7,6 +7,16 @@
 //! plain field reads need no seam; only `rd_tableam` — whose vtable type
 //! lives above `types-rel` — is resolved through the owner.
 
+/// The owned relcache entry-store type family, relocated to the standalone
+/// `types-relcache-entry` crate in F0'. Re-exported here so this seam crate can
+/// name `RelationData` (+ companions) for the forthcoming cross-crate
+/// shared-`Rc<RefCell<RelationData>>` seam (`relation_id_get_relation_shared`,
+/// promoted in a later wave). No seam consumes it yet — this is the naming
+/// enabler only.
+pub use types_relcache_entry::{
+    FormPgClass, FormPgIndex, LockInfoData, OwnedAttr, OwnedAttrDefault, OwnedConstrCheck,
+    OwnedTupleConstr, OwnedTupleDesc, RelationData,
+};
 
 seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
@@ -141,6 +151,33 @@ seam_core::seam!(
         my_subid: types_core::SubTransactionId,
         parent_subid: types_core::SubTransactionId,
     ) -> types_error::PgResult<()>
+);
+
+/// `IndexAttrBitmapKind` (relcache.h) — which attribute bitmap
+/// `RelationGetIndexAttrBitmap` should return. Mirrors the owner's enum (kept
+/// here so cross-crate callers can name the kind without depending on the
+/// relcache crate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexAttrBitmapKind {
+    Keys,
+    PrimaryKey,
+    Identity,
+    HotBlocking,
+    Summarized,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexAttrBitmap(relation, attrKind)` (relcache.c): the set of
+    /// table column numbers (offset by `FirstLowInvalidHeapAttributeNumber`)
+    /// indexed under the requested `attrKind`, or `None` when the relation has
+    /// no indexes contributing to that bitmap (the C NULL). Built once and
+    /// cached on the entry; the returned set is `bms_copy`d into `mcx`. Opens
+    /// the relation's indexes, so it can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_get_index_attr_bitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::RelationData<'_>,
+        attr_kind: IndexAttrBitmapKind,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
 
 seam_core::seam!(

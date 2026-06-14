@@ -30,6 +30,9 @@ types-core = { path = "../types-core" }
 # two-phase rebuild ordering.
 types-catalog = { path = "../types-catalog" }
 types-rel = { path = "../types-rel" }
+# The owned relcache entry-store type family (`RelationData` + companions),
+# relocated to its own crate in F0' so the relcache seams crate can name it.
+types-relcache-entry = { path = "../types-relcache-entry" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
