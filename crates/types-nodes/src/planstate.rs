@@ -37,6 +37,8 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeAppendState`.
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
+    /// `T_BitmapAndState`.
+    BitmapAnd(PgBox<'mcx, crate::nodebitmapand::BitmapAndState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
     /// `T_GroupState`.
@@ -84,6 +86,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
+            PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
             PlanStateNode::ProjectSet(_) => T_ProjectSetState,
@@ -113,6 +116,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
+            PlanStateNode::BitmapAnd(b) => &b.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::Group(g) => &g.ss.ps,
             PlanStateNode::ProjectSet(p) => &p.ps,
@@ -141,6 +145,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
+            PlanStateNode::BitmapAnd(b) => &mut b.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::Group(g) => &mut g.ss.ps,
             PlanStateNode::ProjectSet(p) => &mut p.ps,
