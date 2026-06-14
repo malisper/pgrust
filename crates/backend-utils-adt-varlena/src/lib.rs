@@ -70,8 +70,17 @@ pub mod split_format;
 pub mod wire_io;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_datum::{Datum, Varlena};
+// The bare-word newtype `types_datum::Datum` (aliased `BareDatum`) survives only
+// at the externally pinned, still-bare-word seam ABI edges (the `cstring_to_text`
+// / `bytes_to_varlena` / `text_to_cstring` shims — the `CStringGetTextDatum` /
+// `TextDatumGetCString` macro shape that ~22 unmigrated consumers + this owner's
+// `::set` still speak). `Varlena` is the layered varlena-header-framing helper,
+// not the Datum shim. All other internal value handling builds/reads the
+// canonical unified value `types_tuple::...::Datum<'mcx>` (aliased `DatumV`),
+// which the migrated `_v` seam variants take/return.
+use types_datum::{Datum as BareDatum, Varlena};
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
 // Varlena header helpers (varatt.h), little-endian (the build target). These
@@ -164,88 +173,159 @@ unsafe fn vardata_1b(ptr: *const u8) -> *const u8 {
 // ---------------------------------------------------------------------------
 // Owner-seam adapters. Each `backend-utils-adt-varlena-seams` declaration is
 // installed from `init_seams()` and routed to its family body. The carrier
-// (payload-bytes) families are reached directly; the two Datum-framed seams
-// (`cstring_to_text` / `text_to_cstring`) wrap the keystone carrier converters
-// at the fmgr/Datum boundary, framing/unframing through the layered
-// `types_datum::Varlena` header model: `cstring_to_text` builds a full-header
-// `text` image and returns its pointer word (`PointerGetDatum`);
-// `text_to_cstring` reads the varatt header off the `DatumGetPointer` pointer
-// (detoasting external/compressed forms via the detoast seam) and copies the
-// payload out.
+// (payload-bytes) families are reached directly; the value-carrying seams
+// (`cstring_to_text` / `bytes_to_varlena` / `text_to_cstring`) come in two
+// shapes:
+//
+// * The migrated `_v` variants take/return the canonical unified value
+//   `DatumV<'mcx>` and hold the REAL conversion logic. A `text`/`bytea` varlena
+//   is always pass-by-reference, so the value is a `Datum::ByRef` whose bytes
+//   are the verbatim varlena image (4-byte header + payload). These are the
+//   migration target the migrated consumers (execTuples / nodeTableFuncscan)
+//   call.
+//
+// * The bare-word `types_datum::Datum` (`BareDatum`) variants are the
+//   transitional shims still pinned by ~22 unmigrated consumers (the
+//   `CStringGetTextDatum` / `TextDatumGetCString` macro shape). They are the
+//   genuinely still-bare-word seam ABI edge: the result/argument is a raw
+//   `struct varlena *` pointer word (`PointerGetDatum` / `DatumGetPointer`).
+//   They forge the one bare word at that edge and otherwise reuse the `_v`
+//   logic / the shared header-parsing helper, so no bare-word `Datum` flows
+//   anywhere internal.
 // ---------------------------------------------------------------------------
 
-fn seam_cstring_to_text<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {
-    // C: CStringGetTextDatum(s) = PointerGetDatum(cstring_to_text(s)). The
-    // keystone builds the payload bytes; framing them as a full-header `text`
-    // varlena image is the layered Datum boundary. We reserve VARHDRSZ and
-    // hand the image to `Varlena::from_image`, which stamps SET_VARSIZE, then
-    // `PointerGetDatum` is the raw image pointer word (`Datum::from_usize`).
-    // The image is `leak`ed into `mcx`, so it stays valid for `'mcx` exactly
-    // as C's palloc'd `text *` lives in the current memory context until the
-    // context is reset (the caller's `pfree(DatumGetPointer(...))` is a no-op
-    // under context-scoped ownership).
-    let payload = keystone::cstring_to_text(mcx, s.as_bytes())?;
+/// C: `cstring_to_text(s)` framed as a full-header `text` varlena image. The
+/// keystone builds the header-less payload; `Varlena::from_image` stamps
+/// `SET_VARSIZE` over the reserved 4-byte header. Returns the verbatim image
+/// bytes (header + payload), charged to `mcx`.
+fn build_text_varlena_image<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let payload = keystone::cstring_to_text(mcx, s)?;
     let mut image = mcx::vec_with_capacity_in(mcx, VARHDRSZ + payload.len())?;
     image.extend_from_slice(&[0u8; VARHDRSZ]); // reserved header (SET_VARSIZE).
     image.extend_from_slice(&payload);
-    let varlena = Varlena::from_image(image);
-    let leaked = varlena.into_image().leak();
-    Ok(Datum::from_usize(leaked.as_ptr() as usize))
+    Ok(Varlena::from_image(image).into_image())
 }
 
-fn seam_text_to_cstring<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgString<'mcx>> {
-    // C: text_to_cstring((text *) DatumGetPointer(d)). `text_to_cstring`
-    // first does `pg_detoast_datum_packed(DatumGetPointer(t))`, then copies
-    // `VARSIZE_ANY_EXHDR` payload bytes out as a NUL-terminated cstring. Here
-    // the Datum carries the raw `struct varlena *` pointer word
-    // (`DatumGetPointer` == `Datum::as_usize`); we read the varatt header to
-    // slice the payload, detoasting external/compressed forms through the
-    // detoast seam exactly as the range ADT does on its by-ref args.
-    let ptr = d.as_usize() as *const u8;
-    // SAFETY: a by-reference `text` Datum points at a live `struct varlena`
-    // image (full-, short-, or external-header) owned by the caller for at
-    // least this call; the header byte(s) are always present.
-    let payload: PgVec<'mcx, u8> = unsafe {
-        if varatt_is_1b_e(ptr) {
-            // External (TOAST) pointer: fetch+decompress into `mcx`, then the
-            // detoasted copy is a plain 4B varlena.
-            let span = varsize_external_span(ptr);
-            let bytes = core::slice::from_raw_parts(ptr, span);
-            let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
-            // detoast_attr returns the whole detoasted image (header + data);
-            // copy out just the payload past its 4B header.
-            mcx::slice_in(mcx, &copy[VARHDRSZ..])?
-        } else if varatt_is_1b(ptr) {
-            // Short 1-byte-header inline datum (never compressed/external).
-            let total = varsize_1b(ptr);
-            let data = vardata_1b(ptr);
-            let len = total - 1;
-            mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))?
-        } else if varatt_is_4b_u(ptr) {
-            // Plain uncompressed 4-byte-header datum.
-            let total = varsize_4b(ptr);
-            let data = vardata_4b(ptr);
-            let len = total - VARHDRSZ;
-            mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))?
-        } else {
-            // 4B compressed (the only remaining extended inline form): detoast.
-            let total = varsize_4b(ptr);
-            let bytes = core::slice::from_raw_parts(ptr, total);
-            let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
-            mcx::slice_in(mcx, &copy[VARHDRSZ..])?
-        }
-    };
-    // C: text_to_cstring appends a trailing NUL; the seam's contract is a
-    // NUL-free `PgString`, so hand the keystone the detoasted payload and copy
-    // it into a `PgString` (the keystone's vector carries the C trailing NUL,
-    // which `PgString` does not store).
-    let cstr = keystone::text_to_cstring(mcx, &payload)?;
-    // Drop the keystone's trailing NUL (last byte) for the String view.
+/// C: `palloc(len + VARHDRSZ)` + memcpy + `SET_VARSIZE(buf, len + VARHDRSZ)` —
+/// the genfile.c `read_binary_file` idiom for wrapping raw bytes into a
+/// `bytea`/`text` varlena. Returns the verbatim image bytes, charged to `mcx`.
+fn build_bytea_varlena_image<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    // The carrier shape is identical to `cstring_to_text` (header + verbatim
+    // payload); the keystone copies the payload, `from_image` stamps the header.
+    build_text_varlena_image(mcx, bytes)
+}
+
+/// Shared detoast + payload-slice of a live `struct varlena *` image. Used by
+/// both `text_to_cstring` shapes: the `_v` form passes the pointer to the
+/// canonical `ByRef` bytes; the bare-word shim passes the raw `DatumGetPointer`
+/// word. Mirrors C `text_to_cstring`'s `pg_detoast_datum_packed` + copy of
+/// `VARSIZE_ANY_EXHDR` payload bytes; external/compressed forms route through
+/// the detoast seam exactly as the range ADT does on its by-ref args.
+///
+/// SAFETY: `ptr` must point at a live varlena image (full-, short-, or
+/// external-header) valid for at least this call; the header byte(s) are always
+/// present.
+unsafe fn text_payload_from_ptr<'mcx>(mcx: Mcx<'mcx>, ptr: *const u8) -> PgResult<PgVec<'mcx, u8>> {
+    if varatt_is_1b_e(ptr) {
+        // External (TOAST) pointer: fetch+decompress into `mcx`, then the
+        // detoasted copy is a plain 4B varlena.
+        let span = varsize_external_span(ptr);
+        let bytes = core::slice::from_raw_parts(ptr, span);
+        let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
+        // detoast_attr returns the whole detoasted image (header + data);
+        // copy out just the payload past its 4B header.
+        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+    } else if varatt_is_1b(ptr) {
+        // Short 1-byte-header inline datum (never compressed/external).
+        let total = varsize_1b(ptr);
+        let data = vardata_1b(ptr);
+        let len = total - 1;
+        mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
+    } else if varatt_is_4b_u(ptr) {
+        // Plain uncompressed 4-byte-header datum.
+        let total = varsize_4b(ptr);
+        let data = vardata_4b(ptr);
+        let len = total - VARHDRSZ;
+        mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
+    } else {
+        // 4B compressed (the only remaining extended inline form): detoast.
+        let total = varsize_4b(ptr);
+        let bytes = core::slice::from_raw_parts(ptr, total);
+        let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
+        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+    }
+}
+
+/// C: `text_to_cstring` post-detoast tail — copy the detoasted payload out as a
+/// NUL-free `PgString` in `mcx`. The seam's contract is a NUL-free `PgString`,
+/// so the keystone's trailing C NUL is dropped.
+fn text_payload_to_pgstring<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<PgString<'mcx>> {
+    let cstr = keystone::text_to_cstring(mcx, payload)?;
     let body = &cstr[..cstr.len().saturating_sub(1)];
     PgString::from_str_in(
         core::str::from_utf8(body).expect("text payload is database-encoding bytes"),
         mcx,
     )
+}
+
+// --- Canonical (`_v`) value seams — the migration target, holding the logic. ---
+
+fn seam_cstring_to_text_v<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {
+    // C: cstring_to_text(s). A `text` varlena is pass-by-reference, so the
+    // canonical value is a `Datum::ByRef` holding the freshly built image.
+    Ok(DatumV::ByRef(build_text_varlena_image(mcx, s.as_bytes())?))
+}
+
+fn seam_bytes_to_varlena_v<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<DatumV<'mcx>> {
+    // C: genfile.c read_binary_file varlena idiom. Pass-by-reference => `ByRef`.
+    Ok(DatumV::ByRef(build_bytea_varlena_image(mcx, bytes)?))
+}
+
+fn seam_text_to_cstring_v<'mcx>(mcx: Mcx<'mcx>, d: &DatumV<'_>) -> PgResult<PgString<'mcx>> {
+    // C: text_to_cstring((text *) DatumGetPointer(d)). The canonical `text`
+    // value is a `Datum::ByRef` whose bytes are the verbatim varlena image; we
+    // parse its header (detoasting external/compressed forms) off a pointer into
+    // those bytes — no bare-word `Datum` involved.
+    let image = d.as_ref_bytes();
+    // SAFETY: `image` is a live, fully-owned varlena byte image (header
+    // present); the pointer is valid for the duration of this borrow.
+    let payload = unsafe { text_payload_from_ptr(mcx, image.as_ptr())? };
+    text_payload_to_pgstring(mcx, &payload)
+}
+
+// --- Bare-word shims — the still-pinned ABI edge; forge one word, reuse logic. ---
+
+fn seam_cstring_to_text<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<BareDatum> {
+    // C: CStringGetTextDatum(s) = PointerGetDatum(cstring_to_text(s)). Build the
+    // image via the shared helper, then `PointerGetDatum` is the raw image
+    // pointer word (`BareDatum::from_usize`) — the one genuinely-bare-word ABI
+    // edge this transitional shim exists for. The image is `leak`ed into `mcx`,
+    // so it stays valid for `'mcx` exactly as C's palloc'd `text *` lives in the
+    // current memory context until reset (the caller's `pfree` is a no-op under
+    // context-scoped ownership).
+    let image = build_text_varlena_image(mcx, s.as_bytes())?;
+    let leaked = image.leak();
+    Ok(BareDatum::from_usize(leaked.as_ptr() as usize))
+}
+
+fn seam_bytes_to_varlena<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<BareDatum> {
+    // C: PointerGetDatum of the built `bytea`/`text` varlena (genfile.c). Same
+    // bare-word ABI edge as `cstring_to_text`.
+    let image = build_bytea_varlena_image(mcx, bytes)?;
+    let leaked = image.leak();
+    Ok(BareDatum::from_usize(leaked.as_ptr() as usize))
+}
+
+fn seam_text_to_cstring<'mcx>(mcx: Mcx<'mcx>, d: BareDatum) -> PgResult<PgString<'mcx>> {
+    // C: text_to_cstring((text *) DatumGetPointer(d)). The bare-word Datum
+    // carries the raw `struct varlena *` pointer word (`DatumGetPointer` ==
+    // `BareDatum::as_usize`) — the genuinely still-bare-word ABI edge. Read the
+    // varatt header off that pointer via the shared helper, then copy out.
+    let ptr = d.as_usize() as *const u8;
+    // SAFETY: a by-reference `text` Datum points at a live `struct varlena`
+    // image owned by the caller for at least this call.
+    let payload = unsafe { text_payload_from_ptr(mcx, ptr)? };
+    text_payload_to_pgstring(mcx, &payload)
 }
 
 fn seam_varstr_cmp(arg1: &[u8], arg2: &[u8], collid: types_core::Oid) -> PgResult<i32> {
@@ -312,8 +392,14 @@ fn seam_replace_text_regexp<'mcx>(
 /// seams so the declared-seams-are-set recurrence guard passes.
 pub fn init_seams() {
     use backend_utils_adt_varlena_seams as s;
+    // Canonical value seams (migration target) + their bare-word transitional
+    // shims (still pinned by unmigrated consumers + the genfile.c bytea path).
     s::cstring_to_text::set(seam_cstring_to_text);
+    s::cstring_to_text_v::set(seam_cstring_to_text_v);
+    s::bytes_to_varlena::set(seam_bytes_to_varlena);
+    s::bytes_to_varlena_v::set(seam_bytes_to_varlena_v);
     s::text_to_cstring::set(seam_text_to_cstring);
+    s::text_to_cstring_v::set(seam_text_to_cstring_v);
     s::varstr_cmp::set(seam_varstr_cmp);
     s::split_identifier_string::set(seam_split_identifier_string);
     s::split_directories_string::set(seam_split_directories_string);
