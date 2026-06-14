@@ -5653,6 +5653,7 @@ dependencies = [
 name = "backend-nodes-node-support"
 version = "0.0.0"
 dependencies = [
+ "common-ryu",
  "mcx",
  "types-error",
 ]
@@ -11134,6 +11135,10 @@ dependencies = [
  "types-core",
  "types-storage",
 ]
+
+[[package]]
+name = "common-ryu"
+version = "0.0.0"
 
 [[package]]
 name = "common-string"
