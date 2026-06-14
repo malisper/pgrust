@@ -4926,6 +4926,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-bipartite-match"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-bloomfilter"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-bloomfilter-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-bloomfilter-seams"
 version = "0.0.0"
 dependencies = [
@@ -4959,11 +4979,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-hyperloglog"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-hyperloglog-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-lib-ilist"
+version = "0.0.0"
+dependencies = [
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-integerset"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-knapsack"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-lib-pairingheap"
+version = "0.0.0"
+dependencies = [
+ "types-error",
 ]
 
 [[package]]
@@ -4976,6 +5038,15 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-vacuum",
+]
+
+[[package]]
+name = "backend-lib-rbtree"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -10527,7 +10598,9 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
+ "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-lib-hyperloglog",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
