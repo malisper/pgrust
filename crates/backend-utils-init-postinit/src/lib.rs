@@ -714,11 +714,11 @@ pub fn InitPostgres(
         backend_utils_resowner_resowner_seams::reset_current_resource_owner::call();
 
         // Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM segments.
-        backend_storage_ipc_seams::before_shmem_exit::call(
+        backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             pgstat_before_server_shutdown_cb,
             types_datum::Datum::null(),
         )?;
-        backend_storage_ipc_seams::before_shmem_exit::call(
+        backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             shutdown_xlog_cb,
             types_datum::Datum::null(),
         )?;
@@ -737,7 +737,7 @@ pub fn InitPostgres(
     backend_utils_cache_relcache_seams::relation_cache_initialize_phase2::call()?;
 
     // Set up process-exit callback to do pre-shutdown cleanup.
-    backend_storage_ipc_seams::before_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         shutdown_postgres_cb,
         types_datum::Datum::null(),
     )?;

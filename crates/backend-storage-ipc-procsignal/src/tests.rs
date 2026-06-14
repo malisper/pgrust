@@ -50,7 +50,7 @@ fn install_seams_once() {
         backend_storage_ipc_shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).unwrap()));
         backend_storage_ipc_shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
 
-        backend_storage_ipc_seams::on_shmem_exit::set(|f, arg| {
+        backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(|f, arg| {
             ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))));
             Ok(())
         });

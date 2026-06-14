@@ -352,7 +352,7 @@ pub fn pq_init(client_sock: &ClientSocket, my_latch: LatchHandle) -> PgResult<Po
     });
 
     // set up process-exit hook to close the socket
-    backend_storage_ipc_seams::on_proc_exit::call(socket_close, Datum::from_usize(0))?;
+    backend_storage_ipc_dsm_core_seams::on_proc_exit::call(socket_close, Datum::from_usize(0))?;
 
     // In backends (as soon as forked) we operate the underlying socket in
     // nonblocking mode and use latches to implement blocking semantics if

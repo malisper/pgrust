@@ -396,7 +396,7 @@ pub fn RegisterPostmasterChildActive() -> PgResult<()> {
     state().pm_child_flags[idx].store(PM_CHILD_ACTIVE, SeqCst);
 
     // Arrange to clean up at exit.
-    backend_storage_ipc_seams::on_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         |_code, _arg| MarkPostmasterChildInactive(),
         Datum::from_usize(0),
     )

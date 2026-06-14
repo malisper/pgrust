@@ -118,9 +118,9 @@ fn install_mocks() -> MutexGuard<'static, ()> {
             record(Call::ProcessConfigFile);
             Ok(())
         });
-        backend_storage_ipc_seams::proc_exit::set(mock_proc_exit);
+        backend_storage_ipc_dsm_core_seams::proc_exit::set(mock_proc_exit);
         backend_utils_init_small_seams::my_proc_pid::set(|| 12345);
-        backend_storage_ipc_seams::on_shmem_exit::set(|_f, _arg| {
+        backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(|_f, _arg| {
             record(Call::OnShmemExit);
             Ok(())
         });

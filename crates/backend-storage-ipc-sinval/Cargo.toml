@@ -26,7 +26,7 @@ backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams
 
 # outward owner seams
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }

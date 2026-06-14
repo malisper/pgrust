@@ -195,7 +195,7 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: types_net::ClientSocket, cac: C
         // and never returns.
         let _ = backend_utils_error::ThrowErrorData(e);
         let my_pid = backend_utils_init_small_seams::my_proc_pid::call();
-        backend_storage_ipc_seams::proc_exit::call(1, my_pid);
+        backend_storage_ipc_dsm_core_seams::proc_exit::call(1, my_pid);
     }
 }
 
@@ -342,12 +342,12 @@ fn backend_initialize_inner(
     set_signal_mask(masks.block_sig());
 
     // check_on_shmem_exit_lists_are_empty();
-    backend_storage_ipc_seams::check_on_shmem_exit_lists_are_empty::call();
+    backend_storage_ipc_dsm_core_seams::check_on_shmem_exit_lists_are_empty::call()?;
 
     // if (status != STATUS_OK) proc_exit(0);
     if status != STATUS_OK {
         let my_pid = backend_utils_init_small_seams::my_proc_pid::call();
-        backend_storage_ipc_seams::proc_exit::call(0, my_pid);
+        backend_storage_ipc_dsm_core_seams::proc_exit::call(0, my_pid);
     }
 
     // Build the ps title now that we have user/database names.

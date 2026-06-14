@@ -17,7 +17,7 @@ backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess
 backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

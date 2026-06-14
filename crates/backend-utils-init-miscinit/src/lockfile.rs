@@ -113,7 +113,7 @@ pub fn unlink_lock_files() {
 fn register_lock_file(filename: &str) -> PgResult<()> {
     UNLINK_HOOK_REGISTERED.with(|reg| -> PgResult<()> {
         if !reg.get() {
-            backend_storage_ipc_seams::on_proc_exit::call(
+            backend_storage_ipc_dsm_core_seams::on_proc_exit::call(
                 unlink_lock_files_hook,
                 types_datum::Datum::null(),
             )?;

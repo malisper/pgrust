@@ -256,7 +256,7 @@ fn cstring(s: &str) -> CString {
 /// `void SysLoggerMain(const void *startup_data, size_t startup_data_len)`.
 ///
 /// `pg_noreturn` in C: normal exit is `proc_exit(0)` on pipe EOF (through the
-/// `backend-storage-ipc-seams` seam, which never returns); an
+/// `backend-storage-ipc-dsm-core-seams` seam, which never returns); an
 /// `ereport(ERROR)` from a callee — impossible to catch here in C without a
 /// handler, hence promoted — surfaces as the `Err` return.
 ///
@@ -554,7 +554,7 @@ pub fn SysLoggerMain(
             // allow for the possibility of elog messages being generated
             // inside proc_exit. Regular exit() will take care of flushing and
             // closing stdio channels.
-            backend_storage_ipc_seams::proc_exit::call(
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(
                 0,
                 backend_utils_init_small_seams::my_proc_pid::call(),
             );
@@ -1417,7 +1417,7 @@ fn sys_logger_main_entry(startup_data: &types_startup::StartupData) -> ! {
         Ok(()) => unreachable!("SysLoggerMain returned Ok; it only exits via proc_exit"),
         Err(err) => {
             backend_utils_error::emit_error_report_for(&err);
-            backend_storage_ipc_seams::proc_exit::call(
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(
                 1,
                 backend_utils_init_small_seams::my_proc_pid::call(),
             )

@@ -71,7 +71,7 @@ fn install_mock(barrier_pending: bool, log_memctx_pending: bool) {
             Ok(())
         });
         backend_utils_init_small_seams::my_proc_pid::set(|| std::process::id() as i32);
-        backend_storage_ipc_seams::proc_exit::set(|code, _my_pid| -> ! {
+        backend_storage_ipc_dsm_core_seams::proc_exit::set(|code, _my_pid| -> ! {
             record(Call::ProcExit { code });
             panic!("test-proc-exit");
         });

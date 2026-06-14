@@ -30,7 +30,7 @@ backend-postmaster-walsummarizer-seams = { path = "../backend-postmaster-walsumm
 
 # Outward owner seam crates.
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }

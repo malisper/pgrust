@@ -65,7 +65,7 @@ use backend_access_transam_xlog_seams as xlog;
 use backend_access_transam_xlogrecovery_seams as xlogrecovery;
 use backend_access_transam_xact_seams as xact;
 use backend_storage_ipc_procarray_seams as procarray;
-use backend_storage_ipc_seams as ipc;
+use backend_storage_ipc_dsm_core_seams as ipc;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_lmgr_lmgr_seams as lmgr;
 use backend_storage_lmgr_lwlock_seams as lwlock;

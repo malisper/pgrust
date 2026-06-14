@@ -402,7 +402,7 @@ pub fn ReplicationSlotsShmemInit() {
 
 /// `void ReplicationSlotInitialize(void)` (slot.c:239).
 pub fn ReplicationSlotInitialize() -> PgResult<()> {
-    backend_storage_ipc_seams::before_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
         types_datum::Datum::from_u32(0),
     )
