@@ -8,6 +8,7 @@
 pub fn init_seams() {
     backend_utils_adt_format_type_seams::format_type_be::set(crate::format_type_be);
     backend_utils_adt_format_type_seams::format_type_be_str::set(crate::format_type_be_str);
+    backend_utils_adt_format_type_seams::format_type_be_owned::set(crate::format_type_be_owned);
     backend_utils_adt_format_type_seams::format_type_be_qualified::set(
         crate::format_type_be_qualified,
     );

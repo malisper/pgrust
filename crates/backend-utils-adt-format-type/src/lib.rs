@@ -378,6 +378,19 @@ pub fn format_type_be_str(type_oid: Oid) -> PgResult<alloc::string::String> {
     Ok(alloc::string::String::from(name.as_str()))
 }
 
+/// [`format_type_be`] for callers that need the printable name only to
+/// interpolate into an owned `errmsg(...)` string with no `Mcx` in scope (the
+/// funcapi polymorphic resolvers' `"... but type %s"` messages). The C result
+/// is a transient palloc'd cstring that the caller copies into the error text;
+/// here we format into a throwaway scratch context and return the copy as an
+/// owned `String`. Identical to [`format_type_be_str`] — a thin owned-result
+/// wrapper over [`format_type_be`] with no formatting logic of its own.
+pub fn format_type_be_owned(type_oid: Oid) -> PgResult<alloc::string::String> {
+    let scratch = mcx::MemoryContext::new("format_type_be_owned");
+    let name = format_type_be(scratch.mcx(), type_oid)?;
+    Ok(alloc::string::String::from(name.as_str()))
+}
+
 /// This version returns a name that is always qualified (unless it's one of the
 /// SQL-keyword type names, such as TIMESTAMP WITH TIME ZONE).
 pub fn format_type_be_qualified<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid) -> PgResult<PgString<'mcx>> {
