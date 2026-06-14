@@ -169,41 +169,11 @@ fn estimate_serialize_v_varlena() {
 
 // ---- Residual bare-word ABI edge (ScalarWord) -----------------------------
 
-#[test]
-fn word_transfer_byval_is_verbatim() {
-    // !typByVal is false -> else leg -> datumCopy returns value verbatim.
-    let d = ScalarWord::from_i64(42);
-    assert_eq!(datum_transfer(d, true, 8), d);
-}
-
-#[test]
-fn word_transfer_varlena_non_expanded_deep_copies() {
-    // typLen == -1 but not an external-expanded-RW pointer -> else leg ->
-    // datumCopy deep-copies the varlena verbatim.
-    let vl = varlena_4b(b"transfer");
-    let src = ScalarWord::from_usize(vl.as_ptr() as usize);
-    let out = datum_transfer(src, false, -1);
-    assert_ne!(out.as_usize(), src.as_usize());
-    let copied = unsafe { core::slice::from_raw_parts(out.as_usize() as *const u8, vl.len()) };
-    assert_eq!(copied, &vl[..]);
-}
-
-#[test]
-fn word_copy_byval() {
-    let d = ScalarWord::from_i64(99);
-    assert_eq!(datum_copy_word(d, true, 8), d);
-}
-
-#[test]
-fn word_copy_varlena_deep() {
-    let vl = varlena_4b(b"deepcopy");
-    let src = ScalarWord::from_usize(vl.as_ptr() as usize);
-    let out = datum_copy_word(src, false, -1);
-    // The copy is a distinct allocation with identical bytes.
-    assert_ne!(out.as_usize(), src.as_usize());
-    let copied = unsafe { core::slice::from_raw_parts(out.as_usize() as *const u8, vl.len()) };
-    assert_eq!(copied, &vl[..]);
-}
+// The bare-word `datum_copy_word` / `datum_transfer` deep-copy tests were
+// removed with those functions: their by-reference deep copy forged a pointer
+// word (`leak_bytes_as_datum`). The canonical by-reference copy is covered by
+// `copy_varlena_verbatim` / `copy_fixed_byref` above, which exercise the
+// byte-model `datum_copy` returning `Datum::ByRef`.
 
 #[test]
 fn word_image_eq_varlena() {

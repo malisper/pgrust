@@ -120,7 +120,22 @@ fn catalog_cache_compute_tuple_hash_value(
                 }
             };
             debug_assert!(!is_null, "catcache key column unexpectedly NULL");
-            v[i] = tuple_value_as_datum(&value);
+            // The scalar key word fed to `CatalogCacheComputeHashValue` is the
+            // by-value word. A by-reference key (`name`/`text`/`oidvector`)
+            // never inhabits this scalar slot: `fast_hash`/`fast_eq` dispatch
+            // those kinds to the byte/slice fast functions and panic if reached
+            // through the scalar word, and the by-reference payload is resolved
+            // from its bytes — so we keep the canonical `Datum<'mcx>` value
+            // un-collapsed (no `PointerGetDatum` pointer forge) and only lift the
+            // `ByVal` word here.
+            v[i] = match &value {
+                Datum::ByVal(d) => *d,
+                Datum::ByRef(_) => panic!(
+                    "catcache::inval_support: a by-reference key value \
+                     (name/text/oidvector) is hashed from its resolved payload \
+                     bytes, never lifted into the scalar key word"
+                ),
+            };
         }
     });
     deform?;
@@ -144,18 +159,6 @@ fn tuple_data_area<'a>(_tuple: &'a HeapTupleData<'_>) -> &'a [u8] {
          user-data area (`(char *) t_data + t_hoff`), owned by the \
          heaptuple/syscache tuple-carrier substrate that has not landed yet"
     )
-}
-
-/// Convert a deformed column value into the machine-word `Datum` the hash
-/// computation consumes. A by-value scalar is its word; a by-reference value is
-/// `PointerGetDatum(bytes)` — the pointer to the detoasted bytes, exactly as C's
-/// `fastgetattr` hands `CatalogCacheComputeHashValue` a `char *` Datum for the
-/// `name`/`text`/`oidvector` key types.
-fn tuple_value_as_datum(value: &Datum<'_>) -> ScalarWord {
-    match value {
-        Datum::ByVal(d) => *d,
-        Datum::ByRef(b) => ScalarWord::from_usize(b.as_ptr() as usize),
-    }
 }
 
 /// `PrepareToInvalidateCacheTuple(relation, tuple, newtuple, function, context)`.
