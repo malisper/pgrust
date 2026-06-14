@@ -389,8 +389,9 @@ pub fn build_query_completion_string<'mcx>(
         // bufp += pg_ulltoa_n(qc->nprocessed, bufp);
         let mut digits = [0u8; MAX_UINT64_DIGITS];
         let n = pg_ulltoa_n(qc.nprocessed, &mut digits);
-        // SAFETY: pg_ulltoa_n writes only ASCII decimal digits.
-        let s = unsafe { core::str::from_utf8_unchecked(&digits[..n]) };
+        // pg_ulltoa_n writes only ASCII decimal digits, so the checked decode
+        // never fails.
+        let s = core::str::from_utf8(&digits[..n]).expect("pg_ulltoa_n writes ASCII digits only");
         buff.try_push_str(s)?;
     }
 

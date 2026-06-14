@@ -443,13 +443,15 @@ impl<'a> ReadCursor<'a> {
             len = 0;
         }
 
-        // SAFETY: the byte slice came from a `&str`, and our token boundaries
-        // never split a UTF-8 sequence: the separators we cut on (whitespace,
-        // the four brace chars, '\\') are all single-byte ASCII, and a '\\'
-        // escape advances past a whole following byte. So `start..start+len`
-        // (and the sentinel's ASCII "<>" range) is a valid UTF-8 boundary.
+        // The byte slice came from a `&str`, and our token boundaries never
+        // split a UTF-8 sequence: the separators we cut on (whitespace, the four
+        // brace chars, '\\') are all single-byte ASCII, and a '\\' escape
+        // advances past a whole following byte. So `start..start+len` (and the
+        // sentinel's ASCII "<>" range) is always a valid UTF-8 boundary; the
+        // checked decode never fails on these trusted serialized-node bytes.
         let text_bytes = &b[start..start + len];
-        let text = unsafe { ::core::str::from_utf8_unchecked(text_bytes) };
+        let text = ::core::str::from_utf8(text_bytes)
+            .expect("node token is a valid UTF-8 substring of the input &str");
         Some(Token {
             text,
             is_empty_sentinel,

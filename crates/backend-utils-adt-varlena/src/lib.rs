@@ -256,6 +256,49 @@ unsafe fn text_payload_from_ptr<'mcx>(mcx: Mcx<'mcx>, ptr: *const u8) -> PgResul
     }
 }
 
+/// Safe-slice twin of `text_payload_from_ptr` for an owned, fully-bounded
+/// varlena byte image (the canonical `ByRef` bytes). Same header dispatch as the
+/// pointer form, but reads the header and slices the payload through bounds-
+/// checked slice operations instead of forging a raw pointer. Used by the `_v`
+/// (canonical-value) `text_to_cstring`, where the image is already a `&[u8]`.
+fn text_payload_from_bytes<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let header = image[0];
+    if header == 0x01 {
+        // VARATT_IS_1B_E: external (TOAST) pointer — fetch+decompress, then copy
+        // the detoasted payload past its 4B header.
+        // VARSIZE_EXTERNAL: VARHDRSZ_EXTERNAL(2) + VARTAG_SIZE(tag), tag = image[1].
+        const VARTAG_INDIRECT: u8 = 1;
+        const VARTAG_EXPANDED_RO: u8 = 2;
+        const VARTAG_EXPANDED_RW: u8 = 3;
+        const VARTAG_ONDISK: u8 = 18;
+        let tag = image[1];
+        let tag_size = match tag {
+            VARTAG_INDIRECT => 8,
+            VARTAG_EXPANDED_RO | VARTAG_EXPANDED_RW => 8,
+            VARTAG_ONDISK => 16,
+            other => other as usize,
+        };
+        let span = 2 + tag_size;
+        let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, &image[..span])?;
+        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+    } else if header & 0x01 == 0x01 {
+        // VARATT_IS_1B: short 1-byte-header inline datum.
+        let total = ((header >> 1) & 0x7F) as usize;
+        mcx::slice_in(mcx, &image[1..total])
+    } else if header & 0x03 == 0x00 {
+        // VARATT_IS_4B_U: plain uncompressed 4-byte-header datum.
+        let word = u32::from_le_bytes([image[0], image[1], image[2], image[3]]);
+        let total = ((word >> 2) & 0x3FFF_FFFF) as usize;
+        mcx::slice_in(mcx, &image[VARHDRSZ..total])
+    } else {
+        // 4B compressed: detoast the whole image, copy payload past 4B header.
+        let word = u32::from_le_bytes([image[0], image[1], image[2], image[3]]);
+        let total = ((word >> 2) & 0x3FFF_FFFF) as usize;
+        let copy = backend_access_common_detoast_seams::detoast_attr::call(mcx, &image[..total])?;
+        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+    }
+}
+
 /// C: `text_to_cstring` post-detoast tail — copy the detoasted payload out as a
 /// NUL-free `PgString` in `mcx`. The seam's contract is a NUL-free `PgString`,
 /// so the keystone's trailing C NUL is dropped.
@@ -287,9 +330,9 @@ fn seam_text_to_cstring_v<'mcx>(mcx: Mcx<'mcx>, d: &DatumV<'_>) -> PgResult<PgSt
     // parse its header (detoasting external/compressed forms) off a pointer into
     // those bytes — no bare-word `Datum` involved.
     let image = d.as_ref_bytes();
-    // SAFETY: `image` is a live, fully-owned varlena byte image (header
-    // present); the pointer is valid for the duration of this borrow.
-    let payload = unsafe { text_payload_from_ptr(mcx, image.as_ptr())? };
+    // `image` is a fully-owned, bounded varlena byte image (header present);
+    // parse it through bounds-checked slice ops — no raw pointer needed.
+    let payload = text_payload_from_bytes(mcx, image)?;
     text_payload_to_pgstring(mcx, &payload)
 }
 
