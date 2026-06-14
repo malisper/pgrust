@@ -19,7 +19,7 @@
 //! wired up; the `HeapTupleSatisfies*` bodies themselves are ported 1:1 here.
 //! There is no silent fallback.
 
-mod htup;
+pub mod htup;
 
 #[cfg(test)]
 mod tests;

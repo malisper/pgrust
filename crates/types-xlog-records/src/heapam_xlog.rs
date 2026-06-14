@@ -341,6 +341,11 @@ pub struct xl_heap_new_cid {
     pub target_tid: ItemPointerData,
 }
 
+/// `SizeOfHeapNewCid` (`access/heapam_xlog.h`): `offsetof(xl_heap_new_cid,
+/// target_tid) + sizeof(ItemPointerData)` — 28 + 6 = 34 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapNewCid: usize = 34;
+
 impl xl_heap_new_cid {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self {
@@ -351,5 +356,22 @@ impl xl_heap_new_cid {
             target_locator: locator_at(rec, 16),
             target_tid: item_pointer_at(rec, 28),
         }
+    }
+
+    /// Serialize into the `SizeOfHeapNewCid`-byte on-disk layout that
+    /// `from_bytes` reads back, matching the C struct field order.
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapNewCid] {
+        let mut out = [0u8; SizeOfHeapNewCid];
+        out[0..4].copy_from_slice(&self.top_xid.to_ne_bytes());
+        out[4..8].copy_from_slice(&self.cmin.to_ne_bytes());
+        out[8..12].copy_from_slice(&self.cmax.to_ne_bytes());
+        out[12..16].copy_from_slice(&self.combocid.to_ne_bytes());
+        out[16..20].copy_from_slice(&self.target_locator.spcOid.to_ne_bytes());
+        out[20..24].copy_from_slice(&self.target_locator.dbOid.to_ne_bytes());
+        out[24..28].copy_from_slice(&self.target_locator.relNumber.to_ne_bytes());
+        out[28..30].copy_from_slice(&self.target_tid.ip_blkid.bi_hi.to_ne_bytes());
+        out[30..32].copy_from_slice(&self.target_tid.ip_blkid.bi_lo.to_ne_bytes());
+        out[32..34].copy_from_slice(&self.target_tid.ip_posid.to_ne_bytes());
+        out
     }
 }

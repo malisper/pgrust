@@ -337,3 +337,27 @@ seam_core::seam!(
         vm_nblocks: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::Buffer>
 );
+
+// ---------------------------------------------------------------------------
+// Buffer-access strategy rings (freelist.c). The opaque
+// `BufferAccessStrategyData` ring lives in the buffer manager; consumers
+// (heapam bulk insert, COPY, VACUUM, ...) only thread the `BufferAccessStrategy`
+// handle. `id == 0` is the C NULL strategy.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `GetAccessStrategy(btype)` (freelist.c): allocate a ring buffer of the
+    /// kind appropriate for `btype` and return its handle. `Err` carries the
+    /// allocation `ereport(ERROR)` surface.
+    pub fn get_access_strategy(
+        btype: types_storage::buf::BufferAccessStrategyType,
+    ) -> types_error::PgResult<types_storage::buf::BufferAccessStrategy>
+);
+
+seam_core::seam!(
+    /// `FreeAccessStrategy(strategy)` (freelist.c): free a ring buffer
+    /// previously obtained from `GetAccessStrategy`. The C path `pfree`s and
+    /// only `Assert`s, so the seam is infallible. A NULL (`id == 0`) strategy
+    /// is a no-op in C; callers should not pass one.
+    pub fn free_access_strategy(strategy: types_storage::buf::BufferAccessStrategy)
+);

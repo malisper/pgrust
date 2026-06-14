@@ -14,6 +14,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetMultiXactIdMembers(multi, &members, allow_old, only_lockers)`
+    /// (multixact.c) — the live members of a multixact, returned as an owned
+    /// vector (C returns a `palloc`'d `MultiXactMember[]` plus `nmembers`; an
+    /// empty vector is the `nmembers <= 0` case). Used by
+    /// `GetMultiXactIdHintBits` (always `allow_old=false`, `only_lockers=false`
+    /// for the just-created multis it inspects). `Err` carries the SLRU-read
+    /// `ereport(ERROR)` surface.
+    pub fn get_multi_xact_id_members<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        multi: types_core::primitive::MultiXactId,
+        allow_old: bool,
+        only_lockers: bool,
+    ) -> types_error::PgResult<
+        mcx::PgVec<'mcx, types_xlog_records::multixact::MultiXactMember>,
+    >
+);
+
+seam_core::seam!(
     /// `multixact_twophase_recover(xid, info, recdata, len)` — restore the
     /// OldestMemberMXactId entry for a prepared transaction at recovery (slot
     /// `TWOPHASE_RM_MULTIXACT_ID` of `twophase_recover_callbacks`).
