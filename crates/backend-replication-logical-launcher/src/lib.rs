@@ -34,17 +34,19 @@ use types_error::{DEBUG1, WARNING};
 
 use types_core::primitive::{InvalidOid, Oid, OidIsValid, Size, TimestampTz, XLogRecPtr};
 use types_core::xact::InvalidXLogRecPtr;
-// `Datum` here is the transitional bare-word shim type
-// (`types_datum::Datum`), kept ONLY at the audited external ABI/seam edges this
-// crate does not own: the `types_bgworker` `bgw_main_arg` struct field + the
-// `register_dynamic_background_worker` / bgworker-entrypoint path, the
+// Datum-unification: this crate's OWN value construction is on the canonical
+// `types_tuple::Datum` (the `bgw_main_arg` writes use
+// `types_tuple::Datum::{from_i32,null}().as_usize()` to fill the raw-word
+// `usize` ABI/storage field on `types_bgworker`'s `BackgroundWorker`). The
+// transitional bare-word shim `types_datum::Datum` is kept ONLY at the audited
+// external ABI/seam edges whose contracts have NOT migrated yet: the
 // `backend-storage-ipc-seams` `before_shmem_exit` callback registration (whose
-// `PgOnExitCallback` signature is `fn(i32, types_datum::Datum)`), and the
+// `PgOnExitCallback` signature is still `fn(i32, types_datum::Datum)`), and the
 // `backend-utils-fmgr-funcapi-seams` set-returning-function plumbing
 // (`materialized_srf_putvalues` / `cstring_get_text_datum` and the fmgr return
-// value). Every such site is qualified `types_datum::Datum` at the edge; no
-// canonical `Datum<'mcx>` value is constructed or consumed in this crate
-// because no value crosses into crate-owned logic. Mirrors the convention in
+// value, all still `types_datum::Datum`). Every such site is qualified
+// `types_datum::Datum` at the edge; those move to the canonical type once their
+// owning seam contracts migrate. Mirrors the convention in
 // `backend-replication-slot` (shmem-exit callback edge).
 use types_storage::storage::{
     dsa_handle as DsaHandle, dshash_table_handle as DshashTableHandle, DsaArea, DshashKeyKind,
@@ -625,7 +627,10 @@ pub fn logicalrep_worker_launch(
 
     bgw.bgw_restart_time = BGW_NEVER_RESTART;
     bgw.bgw_notify_pid = globals::my_proc_pid::call();
-    bgw.bgw_main_arg = types_datum::Datum::from_i32(slot); // Int32GetDatum(slot)
+    // Int32GetDatum(slot): `bgw_main_arg` is the raw Datum word (audited
+    // ABI/storage edge, typed `usize`). Construct the value on the canonical
+    // `types_tuple::Datum` and store its word.
+    bgw.bgw_main_arg = types_tuple::Datum::from_i32(slot).as_usize();
 
     let bgw_handle = match bgworker::register_dynamic_background_worker::call(&bgw)? {
         Some(h) => h,
@@ -1027,7 +1032,8 @@ pub fn ApplyLauncherRegister() -> PgResult<()> {
     types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication launcher");
     bgw.bgw_restart_time = 5;
     bgw.bgw_notify_pid = 0;
-    bgw.bgw_main_arg = types_datum::Datum::null(); // (Datum) 0
+    // (Datum) 0: store the null Datum's raw word into the `usize` ABI field.
+    bgw.bgw_main_arg = types_tuple::Datum::null().as_usize();
 
     bgworker::register_background_worker::call(&bgw)
 }

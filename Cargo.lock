@@ -6430,6 +6430,7 @@ dependencies = [
  "types-replication-launcher",
  "types-signal",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
