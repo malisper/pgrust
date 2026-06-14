@@ -1,29 +1,70 @@
 //! `backend-access-transam-xlogrecovery` — `access/transam/xlogrecovery.c`
 //! (PostgreSQL 18.3).
 //!
-//! This is the **F0 recovery-shmem keystone**: it stands up the
-//! `XLogRecoveryCtl` shared-memory region ([`shmem::XLogRecoveryState`]) and
-//! the spinlock-protected state accessors that read/write it, following the
-//! proven `XLogCtl` pattern from `xlog.c` (task #111). No recovery *driver*
-//! (`InitWalRecovery` / `PerformWalRecovery` / `StartupXLOG`) is ported yet;
-//! later families fill the replay machinery on top of this region.
+//! # Two state models
+//!
+//! This crate carries two distinct recovery-state structures, mirroring the C
+//! file 1:1:
+//!
+//! * [`shmem::XLogRecoveryShared`] — the `XLogRecoveryCtlData` *shared-memory*
+//!   region (the F0 recovery-shmem keystone): `SharedHotStandbyActive`,
+//!   `recoveryWakeupLatch`, the `lastReplayed*` LSNs, `recoveryPauseState`,
+//!   guarded by `info_lck`. Stood up by [`shmem::XLogRecoveryShmemInit`] and
+//!   read/written under the spinlock by the shmem accessors. The single shared
+//!   region every backend attaches to.
+//!
+//! * [`core::XLogRecoveryState`] — the *backend-local* recovery state: the C
+//!   file-scope statics (`StandbyMode`, `ArchiveRecoveryRequested`,
+//!   `InArchiveRecovery`, `readSource`/`currentSource`, `minRecoveryPoint`,
+//!   `abortedRecPtr`, `current_record`, the recovery-target options, …) that
+//!   only the startup process touches. Threaded as `&mut XLogRecoveryState`
+//!   through every recovery entry point.
+//!
+//! # Family status
+//!
+//! F0 (recovery-shmem keystone, [`shmem`]) has landed: the shared region and
+//! its spinlock accessors are real and installed. This re-scaffold adds the
+//! backend-local model ([`core`]), the carrier types ([`core::XLogSource`],
+//! [`core::RecordRef`], [`core::ReadRecordResult`], [`core::XLogPageReadResult`])
+//! and the empty module skeletons ([`readrecord`], [`replay`], [`promote`],
+//! [`stop`], [`guc`], [`desc`], [`startupxlog`]) whose function bodies are honest
+//! `panic!("decomp: … not yet filled")` stubs. Later family-fill lanes
+//! (readrecord / replay / promote / startupxlog) fill those bodies against this
+//! model. The crate stays CATALOG `needs-decomp` until they land.
 //!
 //! Ported from `src/backend/access/transam/xlogrecovery.c`.
 
 #![no_std]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+#![allow(clippy::too_many_arguments)]
+// Scaffold: the backend-local recovery model + module skeletons exist so the
+// readrecord / replay / promote / startupxlog family-fills can proceed; their
+// `pub(crate)` panic-stubs are intentionally not wired together yet.
+#![allow(dead_code)]
 
 extern crate alloc;
 
+pub mod core;
+pub mod desc;
+pub mod guc;
+pub mod promote;
+pub mod readrecord;
+pub mod replay;
 pub mod shmem;
+pub mod startupxlog;
+pub mod stop;
 
 #[cfg(test)]
 mod shmem_tests;
 
 pub use shmem::{
     get_current_chunk_replay_start_time, get_latest_xtime, get_recovery_pause_state,
-    get_xlog_replay_rec_ptr, recovery_wakeup_latch_handle, set_recovery_pause, XLogRecoveryShmemInit,
-    XLogRecoveryShmemSize, XLogRecoveryState,
+    get_xlog_replay_rec_ptr, recovery_wakeup_latch_handle, set_recovery_pause, XLogRecoveryShared,
+    XLogRecoveryShmemInit, XLogRecoveryShmemSize,
 };
+
+pub use core::{RecordRef, XLogPageReadResult, XLogRecoveryState, XLogSource};
 
 use backend_access_transam_xlogrecovery_seams as seams;
 

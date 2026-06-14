@@ -20,6 +20,7 @@ pub mod xact;
 pub mod xact_records;
 pub mod xloginsert;
 pub mod xlog_consts;
+pub mod xlogrecovery_carriers;
 pub mod xlogutils;
 
 pub use rmgrdesc::*;

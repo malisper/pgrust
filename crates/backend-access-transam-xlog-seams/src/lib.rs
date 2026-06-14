@@ -470,3 +470,23 @@ seam_core::seam!(
     /// (`sessionBackupState`). Pure read of backend-local state.
     pub fn get_backup_status() -> types_wal::SessionBackupState
 );
+
+// ===========================================================================
+// Consumed by `access/transam/xlogrecovery.c` to flip the running server into
+// archive recovery (`SwitchIntoArchiveRecovery`). Declared here (xlog.c owns
+// `InArchiveRecovery` / `ControlFile->state` and the control-file update) but
+// NOT installed: the recovery crate stays `needs-decomp` and the xlog driver
+// leg that performs the control-file write is not yet ported, so a call panics
+// loudly until the owner lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `SwitchIntoArchiveRecovery(EndRecPtr, replayTLI)` (xlog.c) — transition
+    /// the cluster into archive recovery: set `InArchiveRecovery`, update the
+    /// control file's state, and (re)enable WAL archiving accounting. `Err`
+    /// carries the control-file-update `ereport(ERROR)`.
+    pub fn switch_into_archive_recovery(
+        end_rec_ptr: XLogRecPtr,
+        replay_tli: TimeLineID,
+    ) -> PgResult<()>
+);
