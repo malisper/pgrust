@@ -3707,7 +3707,20 @@ dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-instrument-seams",
+ "backend-executor-nodeAppend",
+ "backend-executor-nodeForeignscan",
+ "backend-executor-nodeHash",
+ "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeLimit",
+ "backend-executor-nodeMaterial",
+ "backend-executor-nodeMemoize",
+ "backend-executor-nodeMergeAppend",
+ "backend-executor-nodeMergejoin",
+ "backend-executor-nodeNestloop",
+ "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSort",
+ "backend-executor-nodeTableFuncscan",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-misc-stack-depth-seams",
@@ -3906,6 +3919,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeAgg-pq-seams",
+ "backend-executor-nodeHash-seams",
  "backend-lib-hyperloglog-seams",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
@@ -6900,6 +6914,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-copydir"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-fd"
 version = "0.0.0"
 dependencies = [
@@ -6951,12 +6980,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-fileset"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-tablespace-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fileset-seams",
+ "backend-utils-init-small-seams",
+ "common-hashfn",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-fileset-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-file-reinit"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-copydir",
+ "backend-storage-file-fd",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -8359,6 +8415,14 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-datetime-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-misc-more2",
 ]
 
 [[package]]
@@ -10083,15 +10147,22 @@ dependencies = [
 name = "backend-utils-misc-timeout"
 version = "0.0.0"
 dependencies = [
+ "backend-storage-ipc-injection-point-seams",
  "backend-storage-ipc-latch-seams",
+ "backend-utils-adt-datetime-seams",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-conffiles-seams",
  "backend-utils-misc-more2-seams",
  "backend-utils-misc-timeout-seams",
+ "common-config-info-seams",
  "libc",
+ "port-path-seams",
  "port-pqsignal-seams",
  "types-core",
  "types-error",
+ "types-misc-more2",
  "types-signal",
  "types-timeout",
 ]
@@ -10425,6 +10496,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-config-info-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-misc-more2",
+]
+
+[[package]]
 name = "common-controldata-utils-seams"
 version = "0.0.0"
 dependencies = [
@@ -10708,6 +10787,7 @@ name = "port-path-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-misc-more2",
 ]
 
 [[package]]
@@ -10944,6 +11024,7 @@ dependencies = [
  "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
+ "backend-storage-file-fileset",
  "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
@@ -11356,6 +11437,10 @@ dependencies = [
  "types-core",
  "types-tuple",
 ]
+
+[[package]]
+name = "types-misc-more2"
+version = "0.0.0"
 
 [[package]]
 name = "types-namespace"

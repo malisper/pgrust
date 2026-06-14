@@ -136,6 +136,7 @@ pub fn init_all() {
     backend_rmgrdesc_next::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
+    backend_storage_file_fileset::init_seams();
     backend_storage_freespace::init_seams();
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();

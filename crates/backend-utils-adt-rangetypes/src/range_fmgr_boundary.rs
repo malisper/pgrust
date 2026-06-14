@@ -553,7 +553,7 @@ pub fn range_intersect_agg_transfn<'mcx>(
     }
 
     let rngtypoid = get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
-    if !type_is_range(rngtypoid) {
+    if !type_is_range(rngtypoid)? {
         return Err(PgError::error("range_intersect_agg must be called with a range"));
     }
 
@@ -583,10 +583,10 @@ fn agg_check_call_context(_fcinfo: &FunctionCallInfoBaseData) -> bool {
     );
 }
 
-/// `type_is_range(typid)` — owned by utils/cache/lsyscache.c. No seam exists
-/// yet; route to the owner with a loud panic until it lands.
-fn type_is_range(_typid: types_core::primitive::Oid) -> bool {
-    panic!("backend_utils_cache_lsyscache::type_is_range: unported neighbor");
+/// `type_is_range(typid)` — owned by utils/cache/lsyscache.c. Routes through
+/// the owner's installed seam.
+fn type_is_range(typid: types_core::primitive::Oid) -> PgResult<bool> {
+    backend_utils_cache_lsyscache_seams::type_is_range::call(typid)
 }
 
 // ---------------------------------------------------------------------------
