@@ -53,7 +53,7 @@ use backend_access_nbtree_core_seams as core;
 use backend_storage_lmgr_condition_variable_seams as condvar;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_utils_adt_datum_seams as datumser;
-use backend_nodes_core_seams::{tbm_add_tuple, TbmHandle};
+use backend_nodes_core_seams::tbm_add_tuple;
 use backend_storage_aio_seams as readstream;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_storage_freespace_seams as indexfsm;
@@ -279,7 +279,10 @@ pub fn btgettuple<'mcx>(mcx: Mcx<'mcx>, scan: &mut NbtScan<'mcx>, dir: ScanDirec
 
 /// `btgetbitmap()` — gather all matching tuples into a bitmap; returns the
 /// number of TIDs added.
-pub fn btgetbitmap<'mcx>(scan: &mut NbtScan<'mcx>, tbm: TbmHandle) -> PgResult<i64> {
+pub fn btgetbitmap<'mcx>(
+    scan: &mut NbtScan<'mcx>,
+    tbm: &mut types_tidbitmap::TIDBitmap,
+) -> PgResult<i64> {
     debug_assert!(!scan.heapRelation);
 
     let rel = scan.indexRelation.alias();
@@ -291,7 +294,7 @@ pub fn btgetbitmap<'mcx>(scan: &mut NbtScan<'mcx>, tbm: TbmHandle) -> PgResult<i
         if core::bt_first::call(&rel, &mut scan.opaque, ScanDirection::ForwardScanDirection)? {
             // Save tuple ID, and continue scanning
             let mut heap_tid = core::current_heaptid::call(&scan.opaque);
-            tbm_add_tuple::call(tbm, heap_tid)?;
+            tbm_add_tuple::call(&mut *tbm, heap_tid)?;
             ntids += 1;
 
             loop {
@@ -312,7 +315,7 @@ pub fn btgetbitmap<'mcx>(scan: &mut NbtScan<'mcx>, tbm: TbmHandle) -> PgResult<i
                 // Save tuple ID, and continue scanning
                 let idx = scan.opaque.currPos.itemIndex as usize;
                 heap_tid = scan.opaque.currPos.items[idx].heapTid;
-                tbm_add_tuple::call(tbm, heap_tid)?;
+                tbm_add_tuple::call(&mut *tbm, heap_tid)?;
                 ntids += 1;
             }
         }

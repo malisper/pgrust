@@ -16,3 +16,4 @@ types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 types-tuple = { path = "../types-tuple" }
+types-tidbitmap = { path = "../types-tidbitmap" }

@@ -19,6 +19,7 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
+types-tidbitmap = { path = "../types-tidbitmap" }
 
 # Own seam crate (inward parallel seams installed from init_seams()).
 backend-access-nbtree-nbtree-seams = { path = "../backend-access-nbtree-nbtree-seams" }

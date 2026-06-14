@@ -19,12 +19,13 @@
 //!  * [`TidBitmapInner`] — `struct TIDBitmap`, owned.
 //!
 //! The opaque carriers in `types_tidbitmap` (`TIDBitmap`,
-//! `TBMPrivateIterator`, `TBMSharedIterator`) carry a registry key into a
-//! per-backend slab of [`TidBitmapInner`]; the consumers (executor, table-AM)
-//! only store and hand the carrier back. `TbmHandle(u64)` (the
-//! `backend-nodes-core-seams` newtype the index AMs thread through
-//! `amgetbitmap`) is the same key, so `tbm_add_tuple` resolves to the live
-//! bitmap.
+//! `TBMPrivateIterator`, `TBMSharedIterator`) hold the real owned interior by
+//! value (boxed as `dyn Any`, the only way a below-it vocabulary crate can name
+//! a struct private to this module), exactly as C palloc's the real `struct
+//! TIDBitmap`. There is no side table and no integer key: the carrier *is* the
+//! owning `TIDBitmap *`. The consumers (executor, table-AM, index AMs through
+//! `amgetbitmap`) hold and pass that real carrier; `tbm_add_tuple` /
+//! `tbm_add_tuples` take `&mut TIDBitmap` and mutate the live bitmap directly.
 //!
 //! # Owned seams
 //!
@@ -40,9 +41,6 @@
 //! seam-and-panic until that owner lands (`mirror-pg-and-panic`).
 
 #![allow(clippy::identity_op)]
-
-use std::cell::RefCell;
-use std::collections::HashMap;
 
 use common_hashfn::murmurhash32;
 use types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
@@ -1437,133 +1435,98 @@ pub fn tbm_extract_page_tuple(iteritem: &TBMIterateResult, offsets: &mut [Offset
 }
 
 // ===========================================================================
-// Per-backend bitmap registry.
+// Opaque carrier bridge.
 //
-// C threads `TIDBitmap *` / `TbmHandle` pointers directly. The opaque carriers
-// in types_tidbitmap / the `TbmHandle(u64)` newtype the index AMs thread carry a
-// registry key into this per-backend slab. Registering the inner here lets BOTH
-// the `&mut TIDBitmap` seams and the `tbm_add_tuple(TbmHandle)` seam reach the
-// same live bitmap.
+// In C `tidbitmap.c` palloc's a `struct TIDBitmap` and threads the real
+// `TIDBitmap *` everywhere (executor `node->tbm`, the index-AM `amgetbitmap`
+// argument). The header keeps the struct private, so consumers only ever store
+// and hand back the pointer (opacity inherited, not introduced).
+//
+// `types_tidbitmap::TIDBitmap` is the opaque carrier those consumers hold. It
+// can't name `TidBitmapInner` (that would make the below-it vocabulary crate
+// depend on this one), so it stays a type-erased `Box<dyn Any>` — but the box
+// now holds the *real* [`TidBitmapInner`] by value, exactly as C palloc's the
+// real struct. There is no side table and no integer key: the carrier IS the
+// owning pointer.
 // ===========================================================================
 
-thread_local! {
-    static REGISTRY: RefCell<TbmRegistry> = RefCell::new(TbmRegistry::default());
-}
-
-#[derive(Default)]
-struct TbmRegistry {
-    next: u64,
-    map: HashMap<u64, TidBitmapInner>,
-}
-
-/// Register `inner`, returning its fresh non-zero key.
-fn registry_insert(inner: TidBitmapInner) -> u64 {
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        r.next += 1;
-        let key = r.next;
-        r.map.insert(key, inner);
-        key
-    })
-}
-
-/// Run `f` against the registered bitmap for `key`.
-fn registry_with<T>(key: u64, f: impl FnOnce(&mut TidBitmapInner) -> T) -> PgResult<T> {
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        match r.map.get_mut(&key) {
-            Some(inner) => Ok(f(inner)),
-            None => Err(PgError::error("tidbitmap: unknown TIDBitmap handle")),
-        }
-    })
-}
-
-/// Read the registry key from a [`types_tidbitmap::TIDBitmap`] carrier.
-fn carrier_key(tbm: &types_tidbitmap::TIDBitmap) -> PgResult<u64> {
+/// Shared (immutable) access to a [`TidBitmapInner`] held inside a
+/// [`types_tidbitmap::TIDBitmap`] carrier.
+fn carrier_inner(tbm: &types_tidbitmap::TIDBitmap) -> PgResult<&TidBitmapInner> {
     tbm.0
         .as_ref()
-        .and_then(|p| p.downcast_ref::<u64>())
-        .copied()
+        .and_then(|p| p.downcast_ref::<TidBitmapInner>())
+        .ok_or_else(|| PgError::error("tidbitmap: TIDBitmap carrier is NULL or foreign"))
+}
+
+/// Mutable access to a [`TidBitmapInner`] held inside a
+/// [`types_tidbitmap::TIDBitmap`] carrier.
+fn carrier_inner_mut(tbm: &mut types_tidbitmap::TIDBitmap) -> PgResult<&mut TidBitmapInner> {
+    tbm.0
+        .as_mut()
+        .and_then(|p| p.downcast_mut::<TidBitmapInner>())
         .ok_or_else(|| PgError::error("tidbitmap: TIDBitmap carrier is NULL or foreign"))
 }
 
 // ===========================================================================
 // Public (in-crate) constructors / accessors — for the bitmap-scan executor
-// and table-AM scan once they are ported. Wrap the registry + carrier bridge.
+// and table-AM scan once they are ported. Wrap the opaque carrier bridge.
 // ===========================================================================
 
 /// `tbm_create(maxbytes, dsa)` (`tidbitmap.c`): create an initially-empty bitmap
-/// and return its opaque carrier (payload = registry key). A non-`None` `dsa`
-/// makes the bitmap shareable.
+/// and return its opaque carrier (which owns the real `TIDBitmap` by value, the
+/// C palloc'd struct). A non-`None` `dsa` makes the bitmap shareable.
 pub fn tbm_create(maxbytes: usize, dsa: Option<DsaAreaHandle>) -> types_tidbitmap::TIDBitmap {
-    let key = registry_insert(TidBitmapInner::create(maxbytes, dsa));
-    types_tidbitmap::TIDBitmap(Some(Box::new(key)))
+    let inner = TidBitmapInner::create(maxbytes, dsa);
+    types_tidbitmap::TIDBitmap(Some(Box::new(inner)))
 }
 
 /// `tbm_is_empty(tbm)` (`tidbitmap.c`).
 pub fn tbm_is_empty(tbm: &types_tidbitmap::TIDBitmap) -> PgResult<bool> {
-    let key = carrier_key(tbm)?;
-    registry_with(key, |inner| inner.is_empty())
+    Ok(carrier_inner(tbm)?.is_empty())
 }
 
 /// `tbm_add_tuples(tbm, tids, recheck)` (`tidbitmap.c`).
 pub fn tbm_add_tuples(
-    tbm: &types_tidbitmap::TIDBitmap,
+    tbm: &mut types_tidbitmap::TIDBitmap,
     tids: &[ItemPointerData],
     recheck: bool,
 ) -> PgResult<()> {
-    let key = carrier_key(tbm)?;
-    registry_with(key, |inner| inner.add_tuples(tids, recheck))?
+    carrier_inner_mut(tbm)?.add_tuples(tids, recheck)
 }
 
 /// `tbm_add_page(tbm, pageno)` (`tidbitmap.c`).
-pub fn tbm_add_page(tbm: &types_tidbitmap::TIDBitmap, pageno: BlockNumber) -> PgResult<()> {
-    let key = carrier_key(tbm)?;
-    registry_with(key, |inner| inner.add_page(pageno))?
+pub fn tbm_add_page(tbm: &mut types_tidbitmap::TIDBitmap, pageno: BlockNumber) -> PgResult<()> {
+    carrier_inner_mut(tbm)?.add_page(pageno)
 }
 
-/// `tbm_union(a, b)` (`tidbitmap.c`): `a = a ∪ b` (a modified in place).
-pub fn tbm_union(a: &types_tidbitmap::TIDBitmap, b: &types_tidbitmap::TIDBitmap) -> PgResult<()> {
-    let akey = carrier_key(a)?;
-    let bkey = carrier_key(b)?;
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        // Take b out to break the aliasing borrow, then restore it.
-        let bmap = r
-            .map
-            .remove(&bkey)
-            .ok_or_else(|| PgError::error("tidbitmap: unknown TIDBitmap handle (union b)"))?;
-        let res = match r.map.get_mut(&akey) {
-            Some(amap) => amap.union(&bmap),
-            None => Err(PgError::error("tidbitmap: unknown TIDBitmap handle (union a)")),
-        };
-        r.map.insert(bkey, bmap);
-        res
-    })
+/// `tbm_union(a, b)` (`tidbitmap.c`): `a = a ∪ b` (a modified in place). `a` and
+/// `b` are distinct carriers owning distinct boxes, so the borrows don't alias.
+pub fn tbm_union(
+    a: &mut types_tidbitmap::TIDBitmap,
+    b: &types_tidbitmap::TIDBitmap,
+) -> PgResult<()> {
+    let bmap = carrier_inner(b)?;
+    // Read b's interior, then mutate a's interior. Clone b out first so the
+    // shared borrow of `b` ends before the mutable borrow of `a` (they are
+    // separate allocations; this only sidesteps the two simultaneous downcasts).
+    let bmap = bmap as *const TidBitmapInner;
+    // SAFETY: `bmap` points at b's owned box, which is not mutated here (a != b
+    // are distinct carriers; union reads b and writes a).
+    let bmap = unsafe { &*bmap };
+    carrier_inner_mut(a)?.union(bmap)
 }
 
 /// `tbm_intersect(a, b)` (`tidbitmap.c`): `a = a ∩ b` (a modified in place).
 pub fn tbm_intersect(
-    a: &types_tidbitmap::TIDBitmap,
+    a: &mut types_tidbitmap::TIDBitmap,
     b: &types_tidbitmap::TIDBitmap,
 ) -> PgResult<()> {
-    let akey = carrier_key(a)?;
-    let bkey = carrier_key(b)?;
-    REGISTRY.with(|r| {
-        let mut r = r.borrow_mut();
-        let bmap = r
-            .map
-            .remove(&bkey)
-            .ok_or_else(|| PgError::error("tidbitmap: unknown TIDBitmap handle (intersect b)"))?;
-        let res = match r.map.get_mut(&akey) {
-            Some(amap) => amap.intersect(&bmap),
-            None => Err(PgError::error(
-                "tidbitmap: unknown TIDBitmap handle (intersect a)",
-            )),
-        };
-        r.map.insert(bkey, bmap);
-        res
-    })
+    let bmap = carrier_inner(b)? as *const TidBitmapInner;
+    // SAFETY: `bmap` points at b's owned box, which is not mutated here (a != b
+    // are distinct carriers; intersect reads b and writes a).
+    let bmap = unsafe { &*bmap };
+    carrier_inner_mut(a)?.intersect(bmap)
 }
 
 // ===========================================================================
@@ -1571,35 +1534,28 @@ pub fn tbm_intersect(
 // ===========================================================================
 
 /// Provider for `backend_nodes_core_seams::tbm_add_tuple`: add one heap TID to
-/// the bitmap referenced by `tbm` (`tbm_add_tuples(tbm, &tid, 1, false)`).
+/// the bitmap `tbm` (`tbm_add_tuples(tbm, &tid, 1, false)`).
 fn provide_tbm_add_tuple(
-    tbm: backend_nodes_core_seams::TbmHandle,
+    tbm: &mut types_tidbitmap::TIDBitmap,
     tid: ItemPointerData,
 ) -> PgResult<()> {
-    registry_with(tbm.0, |inner| inner.add_tuples(&[tid], false))?
+    carrier_inner_mut(tbm)?.add_tuples(&[tid], false)
 }
 
 /// Provider for `backend_nodes_core_seams::tbm_add_tuples`: add an array of heap
-/// TIDs to the bitmap referenced by `tbm` (`tbm_add_tuples(tbm, tids, ntids,
-/// recheck)`). Bridges the opaque `TbmHandle` seam contract onto the real
-/// registry-keyed bitmap mutation, mirroring `provide_tbm_add_tuple`.
+/// TIDs to the bitmap `tbm` (`tbm_add_tuples(tbm, tids, ntids, recheck)`).
 fn provide_tbm_add_tuples(
-    tbm: backend_nodes_core_seams::TbmHandle,
+    tbm: &mut types_tidbitmap::TIDBitmap,
     tids: &[ItemPointerData],
     recheck: bool,
 ) -> PgResult<()> {
-    registry_with(tbm.0, |inner| inner.add_tuples(tids, recheck))?
+    carrier_inner_mut(tbm)?.add_tuples(tids, recheck)
 }
 
 /// Provider for `tbm_free(tbm)` (`tidbitmap.c`): free the bitmap and any buffers
-/// it holds. Drops the registered inner (the C `pfree(pagetable)` /
-/// `pfree(spages/schunks)` / `pfree(tbm)`) and clears the carrier.
+/// it holds. Dropping the carrier's boxed [`TidBitmapInner`] is the C
+/// `pfree(pagetable)` / `pfree(spages/schunks)` / `pfree(tbm)`.
 fn provide_tbm_free(tbm: &mut types_tidbitmap::TIDBitmap) {
-    if let Ok(key) = carrier_key(tbm) {
-        REGISTRY.with(|r| {
-            r.borrow_mut().map.remove(&key);
-        });
-    }
     tbm.0 = None;
 }
 
@@ -1623,13 +1579,15 @@ fn provide_tbm_begin_iterate(
         })
     } else {
         // Private: build the backend-local iterator.
-        let key = carrier_key(tbm)?;
-        let inner_it = registry_with(key, |inner| begin_private_iterate(inner))??;
-        // Carry the private iterator's progress state plus the bitmap key so
-        // tbm_iterate can reach the (read-only) bitmap.
+        let inner = carrier_inner_mut(tbm)?;
+        // C: `iterator->tbm = tbm` — the iterator keeps a back-pointer to the
+        // (heap-stable) bitmap, which the executor owns for the whole scan
+        // (`node->tbm`). Capture the boxed inner's stable address now.
+        let inner_ptr = inner as *const TidBitmapInner;
+        let inner_it = begin_private_iterate(inner)?;
         let carrier =
             types_tidbitmap::TBMPrivateIterator(Some(Box::new(PrivateIterCarrier {
-                key,
+                tbm: inner_ptr,
                 iter: inner_it,
             })));
         Ok(types_tidbitmap::TBMIterator {
@@ -1641,9 +1599,12 @@ fn provide_tbm_begin_iterate(
 }
 
 /// The payload stored in a private [`types_tidbitmap::TBMPrivateIterator`]
-/// carrier: the iteration progress plus the registry key of the bitmap it scans.
+/// carrier: the iteration progress plus the back-pointer to the bitmap it scans
+/// (C `TBMPrivateIterator.tbm`, a `TIDBitmap *`). The pointed-at bitmap is owned
+/// by the executor's `node->tbm` for the whole scan and is read-only during
+/// iteration, mirroring the C raw back-pointer.
 struct PrivateIterCarrier {
-    key: u64,
+    tbm: *const TidBitmapInner,
     iter: TbmPrivateIterator,
 }
 
@@ -1667,8 +1628,8 @@ fn provide_tbm_end_iterate(iterator: &mut types_tidbitmap::TBMIterator) {
 fn provide_tbm_prepare_shared_iterate(
     tbm: &mut types_tidbitmap::TIDBitmap,
 ) -> PgResult<types_tidbitmap::dsa_pointer> {
-    let key = carrier_key(tbm)?;
-    let (dsa, layout) = registry_with(key, |inner| {
+    let (dsa, layout) = {
+        let inner = carrier_inner(tbm)?;
         debug_assert!(inner.dsa.is_some());
         debug_assert!(inner.iterating != TBMIteratingState::IteratingPrivate);
 
@@ -1720,17 +1681,16 @@ fn provide_tbm_prepare_shared_iterate(
         }
 
         (inner.dsa, layout)
-    })?;
+    };
 
     let dsa =
         dsa.ok_or_else(|| PgError::error("tbm_prepare_shared_iterate: tbm->dsa is NULL"))?;
     let dp = dsa_shared_tbm_prepare(dsa, layout)?;
 
     // Record the DSA head pointer; mark the bitmap as shared-iterating.
-    registry_with(key, |inner| {
-        inner.dsapagetable = dp;
-        inner.iterating = TBMIteratingState::IteratingShared;
-    })?;
+    let inner = carrier_inner_mut(tbm)?;
+    inner.dsapagetable = dp;
+    inner.iterating = TBMIteratingState::IteratingShared;
     Ok(dp)
 }
 
@@ -1860,23 +1820,14 @@ pub fn tbm_iterate(
             .as_mut()
             .and_then(|p| p.downcast_mut::<PrivateIterCarrier>())
             .ok_or_else(|| PgError::error("tbm_iterate: private iterator carrier is foreign"))?;
-        let key = payload.key;
-        // The bitmap is read-only during iteration; borrow it from the registry.
-        REGISTRY.with(|r| {
-            let r = r.borrow();
-            // The bitmap is read-only during iteration; private_iterate takes
-            // &self. The iterator progress lives in the carrier (already
-            // borrowed mutably), not in the registry.
-            let inner = r
-                .map
-                .get(&key)
-                .ok_or_else(|| PgError::error("tbm_iterate: unknown TIDBitmap handle"))?
-                as *const TidBitmapInner;
-            // SAFETY: `inner` points at a value owned by the registry map that
-            // we do not mutate during this call (private_iterate takes &self).
-            let inner = unsafe { &*inner };
-            Ok(private_iterate(inner, &mut payload.iter, tbmres))
-        })
+        // C: `tbm = iterator->tbm`. The bitmap is owned by the executor's
+        // `node->tbm` for the whole scan and is read-only during iteration
+        // (private_iterate takes &self).
+        // SAFETY: `payload.tbm` is the back-pointer captured at
+        // tbm_begin_iterate; the pointed-at bitmap outlives the iterator (it is
+        // the executor's node->tbm) and is not mutated during iteration.
+        let inner = unsafe { &*payload.tbm };
+        Ok(private_iterate(inner, &mut payload.iter, tbmres))
     }
 }
 
@@ -1927,22 +1878,13 @@ mod tests {
         ItemPointerData::new(block, off)
     }
 
-    /// Drive a private iteration of the registered bitmap to completion.
-    fn drain(key: u64) -> Vec<(BlockNumber, bool, bool, Vec<OffsetNumber>)> {
+    /// Drive a private iteration of `tbm` to completion. Operates directly on
+    /// the owned [`TidBitmapInner`] (the private struct), no carrier needed.
+    fn drain(tbm: &mut TidBitmapInner) -> Vec<(BlockNumber, bool, bool, Vec<OffsetNumber>)> {
         let mut out = Vec::new();
-        let mut it = registry_with(key, |inner| begin_private_iterate(inner))
-            .unwrap()
-            .unwrap();
+        let mut it = begin_private_iterate(tbm).unwrap();
         let mut res = TBMIterateResult::default();
-        loop {
-            let more = REGISTRY.with(|r| {
-                let r = r.borrow();
-                let inner = r.map.get(&key).unwrap();
-                private_iterate(inner, &mut it, &mut res)
-            });
-            if !more {
-                break;
-            }
+        while private_iterate(tbm, &mut it, &mut res) {
             let mut offsets = Vec::new();
             if !res.lossy {
                 let mut buf = [0u16; TBM_MAX_TUPLES_PER_PAGE];
@@ -1955,24 +1897,22 @@ mod tests {
         out
     }
 
-    fn make(maxbytes: usize) -> u64 {
-        registry_insert(TidBitmapInner::create(maxbytes, None))
+    fn make(maxbytes: usize) -> TidBitmapInner {
+        TidBitmapInner::create(maxbytes, None)
     }
 
     #[test]
     fn create_is_empty() {
-        let key = make(1024 * 1024);
-        assert!(registry_with(key, |i| i.is_empty()).unwrap());
+        let bm = make(1024 * 1024);
+        assert!(bm.is_empty());
     }
 
     #[test]
     fn single_page_exact_iterate() {
-        let key = make(1024 * 1024);
+        let mut bm = make(1024 * 1024);
         let tids = [tid(5, 1), tid(5, 3), tid(5, 7)];
-        registry_with(key, |i| i.add_tuples(&tids, false))
-            .unwrap()
-            .unwrap();
-        let pages = drain(key);
+        bm.add_tuples(&tids, false).unwrap();
+        let pages = drain(&mut bm);
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].0, 5);
         assert!(!pages[0].1);
@@ -1982,12 +1922,10 @@ mod tests {
 
     #[test]
     fn multi_page_sorted_and_recheck() {
-        let key = make(1024 * 1024);
+        let mut bm = make(1024 * 1024);
         let tids = [tid(9, 2), tid(2, 1), tid(2, 4), tid(7, 6)];
-        registry_with(key, |i| i.add_tuples(&tids, true))
-            .unwrap()
-            .unwrap();
-        let pages = drain(key);
+        bm.add_tuples(&tids, true).unwrap();
+        let pages = drain(&mut bm);
         let blocks: Vec<_> = pages.iter().map(|p| p.0).collect();
         assert_eq!(blocks, vec![2, 7, 9]);
         for p in &pages {
@@ -2001,19 +1939,17 @@ mod tests {
 
     #[test]
     fn offset_out_of_range_errors() {
-        let key = make(1024 * 1024);
+        let mut bm = make(1024 * 1024);
         let bad = [tid(1, 0)];
-        let err = registry_with(key, |i| i.add_tuples(&bad, false))
-            .unwrap()
-            .unwrap_err();
+        let err = bm.add_tuples(&bad, false).unwrap_err();
         assert!(err.message().contains("tuple offset out of range: 0"));
     }
 
     #[test]
     fn add_page_is_lossy() {
-        let key = make(1024 * 1024);
-        registry_with(key, |i| i.add_page(42)).unwrap().unwrap();
-        let pages = drain(key);
+        let mut bm = make(1024 * 1024);
+        bm.add_page(42).unwrap();
+        let pages = drain(&mut bm);
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].0, 42);
         assert!(pages[0].1);
@@ -2023,13 +1959,11 @@ mod tests {
 
     #[test]
     fn lossify_under_memory_pressure() {
-        let key = make(1);
+        let mut bm = make(1);
         for blk in 1..400u32 {
-            registry_with(key, |i| i.add_tuples(&[tid(blk, 1)], false))
-                .unwrap()
-                .unwrap();
+            bm.add_tuples(&[tid(blk, 1)], false).unwrap();
         }
-        let pages = drain(key);
+        let pages = drain(&mut bm);
         let mut seen = std::collections::BTreeSet::new();
         for (blk, _l, _r, _o) in &pages {
             seen.insert(*blk);
@@ -2042,19 +1976,12 @@ mod tests {
 
     #[test]
     fn union_merges_pages() {
-        let a = make(1024 * 1024);
-        let b = make(1024 * 1024);
-        registry_with(a, |i| i.add_tuples(&[tid(1, 1), tid(3, 2)], false))
-            .unwrap()
-            .unwrap();
-        registry_with(b, |i| i.add_tuples(&[tid(3, 5), tid(8, 1)], false))
-            .unwrap()
-            .unwrap();
-        // Use the carrier-level union via removing b from registry then re-add.
-        let bmap = REGISTRY.with(|r| r.borrow_mut().map.remove(&b).unwrap());
-        registry_with(a, |i| i.union(&bmap)).unwrap().unwrap();
-        REGISTRY.with(|r| r.borrow_mut().map.insert(b, bmap));
-        let pages = drain(a);
+        let mut a = make(1024 * 1024);
+        let mut b = make(1024 * 1024);
+        a.add_tuples(&[tid(1, 1), tid(3, 2)], false).unwrap();
+        b.add_tuples(&[tid(3, 5), tid(8, 1)], false).unwrap();
+        a.union(&b).unwrap();
+        let pages = drain(&mut a);
         let blocks: Vec<_> = pages.iter().map(|p| p.0).collect();
         assert_eq!(blocks, vec![1, 3, 8]);
         let p3 = pages.iter().find(|p| p.0 == 3).unwrap();
@@ -2063,20 +1990,13 @@ mod tests {
 
     #[test]
     fn intersect_keeps_common_and_drops_rest() {
-        let a = make(1024 * 1024);
-        let b = make(1024 * 1024);
-        registry_with(a, |i| {
-            i.add_tuples(&[tid(1, 1), tid(3, 2), tid(3, 5), tid(8, 1)], false)
-        })
-        .unwrap()
-        .unwrap();
-        registry_with(b, |i| i.add_tuples(&[tid(3, 5), tid(8, 1)], false))
-            .unwrap()
+        let mut a = make(1024 * 1024);
+        let mut b = make(1024 * 1024);
+        a.add_tuples(&[tid(1, 1), tid(3, 2), tid(3, 5), tid(8, 1)], false)
             .unwrap();
-        let bmap = REGISTRY.with(|r| r.borrow_mut().map.remove(&b).unwrap());
-        registry_with(a, |i| i.intersect(&bmap)).unwrap().unwrap();
-        REGISTRY.with(|r| r.borrow_mut().map.insert(b, bmap));
-        let pages = drain(a);
+        b.add_tuples(&[tid(3, 5), tid(8, 1)], false).unwrap();
+        a.intersect(&b).unwrap();
+        let pages = drain(&mut a);
         let blocks: Vec<_> = pages.iter().map(|p| p.0).collect();
         assert_eq!(blocks, vec![3, 8]);
         let p3 = pages.iter().find(|p| p.0 == 3).unwrap();
@@ -2085,16 +2005,12 @@ mod tests {
 
     #[test]
     fn intersect_with_lossy_b_sets_recheck() {
-        let a = make(1024 * 1024);
-        let b = make(1024 * 1024);
-        registry_with(a, |i| i.add_tuples(&[tid(10, 2), tid(10, 4)], false))
-            .unwrap()
-            .unwrap();
-        registry_with(b, |i| i.add_page(10)).unwrap().unwrap();
-        let bmap = REGISTRY.with(|r| r.borrow_mut().map.remove(&b).unwrap());
-        registry_with(a, |i| i.intersect(&bmap)).unwrap().unwrap();
-        REGISTRY.with(|r| r.borrow_mut().map.insert(b, bmap));
-        let pages = drain(a);
+        let mut a = make(1024 * 1024);
+        let mut b = make(1024 * 1024);
+        a.add_tuples(&[tid(10, 2), tid(10, 4)], false).unwrap();
+        b.add_page(10).unwrap();
+        a.intersect(&b).unwrap();
+        let pages = drain(&mut a);
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].0, 10);
         assert!(!pages[0].1);
@@ -2112,22 +2028,30 @@ mod tests {
 
     #[test]
     fn extract_page_tuple_truncates_and_reports_total() {
-        let key = make(1024 * 1024);
-        registry_with(key, |i| i.add_tuples(&[tid(1, 1), tid(1, 2), tid(1, 3)], false))
-            .unwrap()
+        let mut bm = make(1024 * 1024);
+        bm.add_tuples(&[tid(1, 1), tid(1, 2), tid(1, 3)], false)
             .unwrap();
-        let mut it = registry_with(key, |i| begin_private_iterate(i))
-            .unwrap()
-            .unwrap();
+        let mut it = begin_private_iterate(&mut bm).unwrap();
         let mut res = TBMIterateResult::default();
-        let more = REGISTRY.with(|r| {
-            let r = r.borrow();
-            private_iterate(r.map.get(&key).unwrap(), &mut it, &mut res)
-        });
+        let more = private_iterate(&bm, &mut it, &mut res);
         assert!(more);
         let mut buf = [0u16; 2];
         let n = tbm_extract_page_tuple(&res, &mut buf[..]);
         assert_eq!(n, 3);
         assert_eq!(buf, [1, 2]);
+    }
+
+    /// The opaque carrier owns the real inner by value (no side table / no
+    /// integer key); round-tripping through the public seam-level entry points
+    /// reaches the same live bitmap.
+    #[test]
+    fn carrier_holds_real_inner_by_value() {
+        let mut tbm = tbm_create(1024 * 1024, None);
+        assert!(tbm_is_empty(&tbm).unwrap());
+        tbm_add_tuples(&mut tbm, &[tid(5, 1), tid(5, 3)], false).unwrap();
+        assert!(!tbm_is_empty(&tbm).unwrap());
+        // tbm_free drops the boxed inner (C pfree).
+        provide_tbm_free(&mut tbm);
+        assert!(tbm.0.is_none());
     }
 }

@@ -25,12 +25,12 @@
 //! whole codec is pure byte math — the single genuine external is the
 //! `tbm_add_tuples` inside [`ginPostingListDecodeAllSegmentsToTbm`]: the
 //! `TIDBitmap` is owned by the `tidbitmap` subsystem, reached through the
-//! `tbm_add_tuples` seam (the bitmap is an opaque [`TbmHandle`]).
+//! `tbm_add_tuples` seam (the bitmap is the real `TIDBitmap` carrier).
 
 use types_error::PgResult;
 use types_tuple::heaptuple::ItemPointerData;
 
-use backend_nodes_core_seams::{tbm_add_tuples, TbmHandle};
+use backend_nodes_core_seams::tbm_add_tuples;
 
 /// `MaxHeapTuplesPerPageBits` (ginpostinglist.c:81) — bits used to encode the
 /// offset-number portion of an item pointer.
@@ -377,12 +377,12 @@ pub fn ginPostingListDecodeAllSegments(
 ///
 /// Add all item pointers from a bunch of posting lists to a `TIDBitmap`,
 /// returning the number of items added. The `tbm_add_tuples` call is routed
-/// through the `tbm_add_tuples` seam; `tbm` is the opaque [`TbmHandle`] into the
-/// `tidbitmap` subsystem.
+/// through the `tbm_add_tuples` seam; `tbm` is the real `TIDBitmap` carrier
+/// (C: `TIDBitmap *`) the caller owns.
 pub fn ginPostingListDecodeAllSegmentsToTbm(
     ptr: &[u8],
     len: i32,
-    tbm: TbmHandle,
+    tbm: &mut types_tidbitmap::TIDBitmap,
 ) -> PgResult<i32> {
     let mut ndecoded: i32 = 0;
     let items = ginPostingListDecodeAllSegments(ptr, len, Some(&mut ndecoded));
