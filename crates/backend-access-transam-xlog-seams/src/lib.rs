@@ -11,6 +11,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
+use types_core::uint8;
 use types_error::PgResult;
 use types_wal::{ArchiveMode, WalLevel, WalSyncMethod};
 
@@ -373,4 +374,26 @@ seam_core::seam!(
     /// preallocated OID range. Called by `GetNewObjectId` while holding
     /// `OidGenLock`. The WAL insert can `ereport(ERROR)`, carried on `Err`.
     pub fn xlog_put_next_oid(next_oid: types_core::Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogInsertRecord(rdata, fpw_lsn, flags, num_fpi, topxid_included)`
+    /// (xlog.c:772) — the low-level WAL-record insertion entry that xloginsert.c's
+    /// `XLogInsert` calls once it has assembled the `XLogRecData` chain.
+    ///
+    /// The boundary between `xloginsert.c` and `xlog.c` is the assembled record:
+    /// `rdata` carries the chain in order as a slice of byte fragments, where
+    /// `rdata[0]` is the fixed `XLogRecord` header whose `xl_crc` field holds the
+    /// caller's running CRC accumulated over the data (xloginsert.c side), and
+    /// `xl_prev`/`xl_crc` are filled in by `XLogInsertRecord` once it holds the
+    /// insertion lock. Returns the record's end LSN, or `InvalidXLogRecPtr`
+    /// (`= 0`) when the caller must recompute and retry (RedoRecPtr / doPageWrites
+    /// raced); `Err` carries the `ereport(ERROR)`/`PANIC` surface.
+    pub fn xlog_insert_record(
+        rdata: &[&[u8]],
+        fpw_lsn: XLogRecPtr,
+        flags: uint8,
+        num_fpi: i32,
+        topxid_included: bool,
+    ) -> PgResult<XLogRecPtr>
 );

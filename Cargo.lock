@@ -1863,9 +1863,14 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
  "backend-storage-lmgr-s-lock",
+ "backend-utils-activity-waitevent-seams",
  "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-init-small-seams",
  "mcx",
  "port-crc32c",
  "types-control",
@@ -7955,6 +7960,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-procarray"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-storage-ipc-procarray-seams"
 version = "0.0.0"
 dependencies = [
@@ -7964,6 +7988,7 @@ dependencies = [
  "types-error",
  "types-snapshot",
  "types-storage",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -12094,6 +12119,7 @@ dependencies = [
  "backend-storage-ipc-dsm-registry",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
+ "backend-storage-ipc-procarray",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
