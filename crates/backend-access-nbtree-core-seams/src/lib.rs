@@ -242,6 +242,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BTPageGetOpaque(page)->btpo_level` (nbtree.h): the tree level recorded
+    /// in the page's special area (zero for leaf pages). Read separately from
+    /// [`page_opaque`] because amcheck needs the level for downlink-chain
+    /// verification while the common callers do not.
+    pub fn page_btpo_level(page: &[u8]) -> u32
+);
+
+seam_core::seam!(
     /// `opaque->btpo_cycleid = 0` written into the page in the shared buffer.
     pub fn page_clear_cycleid(buf: Buffer)
 );
