@@ -57,6 +57,12 @@ use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_core::fmgr::F_OIDEQ;
 use backend_access_common_scankey::ScanKeyInit;
+// The bare-word `types_datum::Datum` survives only as the
+// `ScanKeyData.sk_argument` ABI/storage edge: `ScanKeyInit` stamps the raw
+// comparison word into the scan key (the genam/fmgr edge still consumes a
+// machine word, as `ObjectIdGetDatum` does in C). All in-crate Datum traffic
+// uses the canonical `backend_access_common_heaptuple::Datum<'mcx>` enum.
+use types_datum::datum::Datum as ScanKeyWord;
 use backend_access_common_heaptuple::heap_deform_tuple;
 use types_tuple::heaptuple::ItemPointerData;
 use types_catalog::catalog::{
@@ -78,7 +84,6 @@ use types_core::primitive::InvalidOid;
 use types_core::catalog::{
     BOOLOID, BTREE_AM_OID, INT4OID, INT8OID, INTERNALOID, VOIDOID,
 };
-use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::parsenodes::OBJECT_SCHEMA;
 use types_opclass::{
@@ -86,7 +91,7 @@ use types_opclass::{
     ObjectWithArgs, OpFamilyMember, StringNode, TypeName, AMOP_ORDER, AMOP_SEARCH,
     OPCLASS_ITEM_FUNCTION, OPCLASS_ITEM_OPERATOR, OPCLASS_ITEM_STORAGETYPE,
 };
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
@@ -582,7 +587,7 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
             Anum_pg_opclass_opcmethod,
             BTEqualStrategyNumber,
             F_OIDEQ,
-            Datum::from_oid(amoid),
+            ScanKeyWord::from_oid(amoid),
         )?;
         let keys = [key];
 
@@ -1955,7 +1960,7 @@ fn namespace_name_for_error(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>
 struct SysScanRow<'a> {
     #[allow(dead_code)]
     tid: ItemPointerData,
-    cols: &'a [(TupleValue<'a>, bool)],
+    cols: &'a [(Datum<'a>, bool)],
 }
 
 /// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` +
@@ -1994,16 +1999,16 @@ fn systable_scan_foreach(
 /// Read a by-value `Oid` column from a deformed row (`GETSTRUCT(tup)->col`).
 fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
     match &row.cols[(attno - 1) as usize].0 {
-        TupleValue::ByVal(d) => d.as_oid(),
-        TupleValue::ByRef(_) => InvalidOid,
+        Datum::ByVal(d) => d.as_oid(),
+        Datum::ByRef(_) => InvalidOid,
     }
 }
 
 /// Read a by-value `bool` column from a deformed row.
 fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
     match &row.cols[(attno - 1) as usize].0 {
-        TupleValue::ByVal(d) => d.as_bool(),
-        TupleValue::ByRef(_) => false,
+        Datum::ByVal(d) => d.as_bool(),
+        Datum::ByRef(_) => false,
     }
 }
 
@@ -2011,10 +2016,10 @@ fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
 /// row as a `String`, mirroring C's `NameStr(...)`.
 fn column_name(row: &SysScanRow<'_>, attno: i16) -> String {
     match &row.cols[(attno - 1) as usize].0 {
-        TupleValue::ByRef(bytes) => {
+        Datum::ByRef(bytes) => {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             String::from_utf8_lossy(&bytes[..end]).into_owned()
         }
-        TupleValue::ByVal(_) => String::new(),
+        Datum::ByVal(_) => String::new(),
     }
 }
