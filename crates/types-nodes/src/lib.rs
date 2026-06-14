@@ -28,6 +28,7 @@ pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodectescan;
+pub mod nodebitmapand;
 pub mod nodeforeigncustom;
 pub mod nodegroup;
 pub mod nodehash;
@@ -107,6 +108,7 @@ pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
 };
+pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,

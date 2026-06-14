@@ -3668,6 +3668,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeBitmapAnd"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
+ "backend-executor-nodeBitmapAnd-seams",
+ "backend-nodes-core-tidbitmap-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tidbitmap",
+]
+
+[[package]]
+name = "backend-executor-nodeBitmapAnd-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tidbitmap",
+]
+
+[[package]]
 name = "backend-executor-nodeBitmapHeapscan"
 version = "0.0.0"
 dependencies = [
@@ -10024,6 +10052,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
+ "backend-executor-nodeBitmapAnd",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeHash",

@@ -44,6 +44,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tbm_intersect(a, b)` (tidbitmap.c): set `a = a ∩ b` (a modified in
+    /// place). Used by `MultiExecBitmapAnd` to AND child subplan bitmaps.
+    pub fn tbm_intersect(a: &TIDBitmap, b: &TIDBitmap) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tbm_is_empty(tbm)` (tidbitmap.c): report whether the bitmap is empty
+    /// (the `MultiExecBitmapAnd` early-out check).
+    pub fn tbm_is_empty(tbm: &TIDBitmap) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `tbm_free_shared_area(dsa, dp)` (tidbitmap.c): free a shared iterator
     /// state DSA allocation made by `tbm_prepare_shared_iterate`.
     pub fn tbm_free_shared_area(dsa: DsaAreaHandle, dp: dsa_pointer)
