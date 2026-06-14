@@ -1728,6 +1728,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-logical",
  "types-storage",
  "types-wal",
 ]

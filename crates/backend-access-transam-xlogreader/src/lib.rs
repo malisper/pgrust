@@ -50,6 +50,11 @@
 #![allow(clippy::collapsible_else_if)]
 
 extern crate alloc;
+// The handle-based logical-decoding subset keeps a backend-local registry of
+// live readers (`std::thread_local!`), mirroring the C per-backend reader. std
+// is already in the dependency graph (the seam runtime uses it); pull it in
+// explicitly for that one registry.
+extern crate std;
 
 use alloc::format;
 use alloc::string::String;
@@ -70,12 +75,15 @@ use types_wal::rmgr::{XLogReaderState, RmgrIdIsValid, XLREAD_FAIL, XLREAD_SUCCES
 use types_wal::wal::{DecodedBkpBlock, DecodedXLogRecord, RelFileLocator, XLogRecord};
 use types_wal::xlog_consts::{SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ};
 
+pub mod handle;
 pub mod seams;
 
 /// Install every inward seam this unit owns (the crate-root entry point
-/// `seams-init`'s `init_all()` calls).
+/// `seams-init`'s `init_all()` calls): the value-typed `XLogReaderState` seams
+/// (`seams`) and the handle-based logical-decoding seams (`handle`).
 pub fn init_seams() {
     seams::init_seams();
+    handle::init_seams();
 }
 
 #[cfg(test)]

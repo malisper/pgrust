@@ -86,6 +86,58 @@ fn validate_page_header_rejects_bad_magic() {
     assert!(!XLogReaderValidatePageHeader(&mut state, 0, &page));
 }
 
+// --- Handle-based logical-decoding registry (handle.rs) ---
+
+use std::sync::Once;
+use types_logical::XLogReaderRoutineHandle;
+use types_wal::rmgr::XLogReaderRoutine;
+
+/// Install a routine resolver for the handle tests (stands in for xlogutils'
+/// routine, which is the downstream contract keystone). All-None is fine: the
+/// allocate/begin_read/end_rec_ptr/free paths don't drive the page-read
+/// callback.
+fn install_test_routine_resolver() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        backend_access_transam_xlogreader_seams::xlog_reader_routine_for_handle::set(
+            |_h: XLogReaderRoutineHandle| XLogReaderRoutine::default(),
+        );
+    });
+}
+
+#[test]
+fn handle_allocate_begin_read_end_rec_ptr_free() {
+    install_test_routine_resolver();
+
+    let h = handle::XLogReaderAllocate(16 * 1024 * 1024, XLogReaderRoutineHandle::default())
+        .expect("allocate");
+    assert_ne!(h.0, 0, "handle is never NULL");
+
+    // EndRecPtr starts at zero (the C all-zero reader).
+    assert_eq!(handle::reader_EndRecPtr(h), 0);
+
+    // XLogBeginRead positions EndRecPtr at the requested LSN.
+    handle::XLogBeginRead(h, 0x4000);
+    assert_eq!(handle::reader_EndRecPtr(h), 0x4000);
+
+    // Free reclaims the slot; a fresh allocation reuses the freed index.
+    handle::XLogReaderFree(h);
+    let h2 = handle::XLogReaderAllocate(16 * 1024 * 1024, XLogReaderRoutineHandle::default())
+        .expect("re-allocate");
+    assert_eq!(h2.0, h.0, "freed slot is reused");
+    handle::XLogReaderFree(h2);
+}
+
+#[test]
+fn handle_double_free_is_noop() {
+    install_test_routine_resolver();
+    let h = handle::XLogReaderAllocate(16 * 1024 * 1024, XLogReaderRoutineHandle::default())
+        .expect("allocate");
+    handle::XLogReaderFree(h);
+    // Second free of the same (now-empty) slot must not panic.
+    handle::XLogReaderFree(h);
+}
+
 #[test]
 fn arena_copy_borrows_arena_not_caller() {
     let cx = MemoryContext::new("xlogreader-test");
