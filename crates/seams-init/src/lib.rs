@@ -508,7 +508,6 @@ mod recurrence_guard {
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
-        ("backend_access_transam_xlogprefetcher", "xlog_prefetch_shmem_size"),
         ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
         ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
