@@ -11,9 +11,10 @@
 //!   `backend-regex-core`.
 
 use super::*;
+use std::any::Any;
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Once;
-use types_regex::RegexHandle;
 
 const C_COLL: Oid = 950;
 
@@ -28,10 +29,28 @@ struct TestRe {
     capture: Option<(usize, usize)>,
 }
 
+/// The owned engine value carried (type-erased) inside `RegexCompiled.engine`,
+/// mirroring how `backend-regex-core` carries its real `RegexT`. Its `Drop`
+/// stands in for `pg_regfree` freeing the engine state — exactly what the real
+/// engine does when the last `Rc` reference goes away.
+impl Drop for TestRe {
+    fn drop(&mut self) {
+        FREES.with(|c| c.set(c.get() + 1));
+    }
+}
+
 thread_local! {
-    static TEST_ENGINE: RefCell<Vec<Option<TestRe>>> = const { RefCell::new(Vec::new()) };
     static COMPILES: Cell<usize> = const { Cell::new(0) };
     static FREES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Recover the carried `TestRe` from the public carrier (the test mirror of
+/// `backend-regex-core`'s `regex_of` downcast).
+fn regex_of(re: &RegexCompiled) -> Rc<TestRe> {
+    re.engine
+        .clone()
+        .downcast::<TestRe>()
+        .expect("RegexCompiled.engine is not a TestRe")
 }
 
 fn test_regcomp(pattern: &[PgWChar], cflags: i32, _collation: Oid) -> PgResult<RegcompResult> {
@@ -48,21 +67,9 @@ fn test_regcomp(pattern: &[PgWChar], cflags: i32, _collation: Oid) -> PgResult<R
     }
     let nsub = usize::from(capture.is_some());
     let re = TestRe { needle: bytes, icase: cflags & REG_ICASE != 0, capture };
-    let handle = TEST_ENGINE.with(|cell| {
-        let mut v = cell.borrow_mut();
-        v.push(Some(re.clone()));
-        RegexHandle(v.len() as u64)
-    });
+    let engine: Rc<dyn Any> = Rc::new(re);
     COMPILES.with(|c| c.set(c.get() + 1));
-    Ok(RegcompResult::Compiled(RegexCompiled { handle, re_nsub: nsub }))
-}
-
-fn lookup(handle: RegexHandle) -> TestRe {
-    TEST_ENGINE.with(|cell| {
-        cell.borrow()[handle.0 as usize - 1]
-            .clone()
-            .expect("use after pg_regfree")
-    })
+    Ok(RegcompResult::Compiled(RegexCompiled { engine, re_nsub: nsub }))
 }
 
 fn fold(b: u8, icase: bool) -> u8 {
@@ -74,12 +81,12 @@ fn fold(b: u8, icase: bool) -> u8 {
 }
 
 fn test_regexec(
-    handle: RegexHandle,
+    re: &RegexCompiled,
     data: &[PgWChar],
     search_start: i32,
     pmatch: &mut [RegMatch],
 ) -> PgResult<RegexecResult> {
-    let re = lookup(handle);
+    let re = regex_of(re);
     let hay: Vec<u8> = data.iter().map(|&c| c as u8).collect();
     let start = search_start as usize;
     if start > hay.len() {
@@ -114,8 +121,8 @@ fn test_regexec(
     Ok(RegexecResult::Matched)
 }
 
-fn test_regprefix<'mcx>(mcx: Mcx<'mcx>, handle: RegexHandle) -> PgResult<RegprefixResult<'mcx>> {
-    let re = lookup(handle);
+fn test_regprefix<'mcx>(mcx: Mcx<'mcx>, re: &RegexCompiled) -> PgResult<RegprefixResult<'mcx>> {
+    let re = regex_of(re);
     if re.needle.is_empty() {
         return Ok(RegprefixResult::NoMatch);
     }
@@ -124,9 +131,11 @@ fn test_regprefix<'mcx>(mcx: Mcx<'mcx>, handle: RegexHandle) -> PgResult<Regpref
     Ok(RegprefixResult::Exact(v))
 }
 
-fn test_regfree(handle: RegexHandle) {
-    TEST_ENGINE.with(|cell| cell.borrow_mut()[handle.0 as usize - 1] = None);
-    FREES.with(|c| c.set(c.get() + 1));
+fn test_regfree(re: RegexCompiled) {
+    // Take the carrier by value and drop it; the last `Rc` drop runs
+    // `TestRe::drop`, which bumps `FREES` (the test mirror of the engine
+    // releasing its state).
+    drop(re);
 }
 
 // ---- test encoding providers (SQL_ASCII) ----------------------------------

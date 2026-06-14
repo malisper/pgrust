@@ -190,11 +190,11 @@ impl<'mcx> IspellDict<'mcx> {
                     Ok((false, new_baselen))
                 }
             }
-            AffixReg::Regex(handle) => {
+            AffixReg::Regex(re) => {
                 // Convert the candidate to wide characters, then execute.
                 let data =
                     backend_utils_mb_mbutils_seams::pg_mb2wchar_with_len::call(self.mcx, out)?;
-                let res = backend_regex_core_seams::pg_regexec::call(*handle, &data, 0, &mut [])?;
+                let res = backend_regex_core_seams::pg_regexec::call(re, &data, 0, &mut [])?;
                 match res {
                     RegexecResult::Matched => Ok((true, new_baselen)),
                     RegexecResult::NoMatch => Ok((false, new_baselen)),

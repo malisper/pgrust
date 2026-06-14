@@ -20,9 +20,10 @@
 //! compile front-end that turns a pattern (already `pg_mb2wchar`'d to
 //! `pg_wchar`/`chr` code points) into a colormap + NFA + compacted NFA + a
 //! subexpression tree, and a lazy-DFA matcher that executes it. The engine is
-//! reached from SQL through the [`types_regex::RegexHandle`] opaque token: the
-//! ADT layer (`backend-utils-adt-regexp`) compiles, caches, executes, and
-//! frees compiled regexes via the four inward seams this unit owns
+//! reached from SQL through [`types_regex::RegexCompiled`], which carries the
+//! real compiled `regex_t` value type-erased; the ADT layer
+//! (`backend-utils-adt-regexp`) compiles, caches, executes, and frees compiled
+//! regexes via the four inward seams this unit owns
 //! ([`backend_regex_core_seams`]).
 //!
 //! # Decomposition (this scaffold)
@@ -55,9 +56,9 @@
 //!    `regprefix.c` (`pg_regprefix`/`findprefix`).
 //!  * [`regex_export_free_error`] — `regexport.c` (the 11 `pg_reg_get*`
 //!    NFA/color exporters), `regfree.c` (`pg_regfree`), `regerror.c`
-//!    (`pg_regerror` message table), and the opaque-[`RegexHandle`]
-//!    seam-adapter + the per-backend `thread_local!` handle registry that the
-//!    four inward seams marshal through.
+//!    (`pg_regerror` message table), and the seam adapters that carry the
+//!    compiled `regex_t` across the public seam (boxed type-erased into
+//!    [`types_regex::RegexCompiled`], downcast back here).
 //!
 //! The C ground truth lives in `src/include/regex/{regex.h,regguts.h,
 //! regcustom.h,regexport.h,regerrs.h}` and `src/backend/regex/*.c`.
@@ -82,10 +83,10 @@ pub mod regex_nfa;
 /// The unit owns `backend-regex-core-seams` (by C-source coverage of
 /// `regcomp.c`/`regexec.c`/`regprefix.c`/`regfree.c`). Every declaration in it
 /// is installed here, exactly once; the adapters live in
-/// [`regex_export_free_error`] (they marshal the public [`RegexHandle`] to/from
-/// the owned `RegexT` in the handle registry).
+/// [`regex_export_free_error`] (they box the owned `RegexT` into the public
+/// [`RegexCompiled`] carrier and downcast it back).
 ///
-/// [`RegexHandle`]: types_regex::RegexHandle
+/// [`RegexCompiled`]: types_regex::RegexCompiled
 pub fn init_seams() {
     use backend_regex_core_seams as seams;
 
