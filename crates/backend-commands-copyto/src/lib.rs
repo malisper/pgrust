@@ -1113,11 +1113,70 @@ fn copy_dest_receive(receiver: u64, slot: &mut TupleTableSlot) -> PgResult<bool>
     Ok(true)
 }
 
+/// `copy_dest_startup(self, operation, typeinfo)` (copyto.c:1389) — `/* no-op */`.
+///
+/// The dest-router vtable's `rStartup` slot; the leading `state` token is the
+/// copyto `RECEIVERS` index (the `DR_copy` stand-in), unused here as in C.
+fn copy_dest_startup(
+    _state: u64,
+    _operation: CmdType,
+    _typeinfo: &types_tuple::heaptuple::TupleDescData<'_>,
+) -> PgResult<()> {
+    Ok(())
+}
+
+/// `copy_dest_shutdown(self)` (copyto.c:1417) — `/* no-op */`.
+fn copy_dest_shutdown(_state: u64) -> PgResult<()> {
+    Ok(())
+}
+
+/// The dest-router `receiveSlot` slot for `DR_copy`.
+///
+/// C's `copy_dest_receive` does `CopyOneRowTo(cstate, slot)` over the received
+/// `TupleTableSlot *`. The router hands this callback a
+/// [`types_nodes::tuptable::SlotData`] (the live slot enum), but copyto's
+/// row-output path (`CopyOneRowTo` → `slot_getallattrs`) consumes the *trimmed*
+/// header [`TupleTableSlot`], and there is no `SlotData` → header bridge yet:
+/// the execTuples slot-payload model (the `slot_getallattrs` seam is flagged
+/// PROVISIONAL for exactly this) has not landed. Until it does, a dispatch
+/// through this slot path panics honestly rather than silently dropping the row.
+///
+/// The live COPY-(query)-TO receive path is unaffected: the executor re-enters
+/// copyto through the [`copy_dest_receive`] seam (keyed by the copyto receiver
+/// index), which does the real `CopyOneRowTo`. This router slot is the unified
+/// `DestReceiver` identity for `DestCopyOut`.
+fn copy_dest_receive_slot(_state: u64, _slot: &types_nodes::tuptable::SlotData<'_>) -> PgResult<bool> {
+    panic!(
+        "backend-commands-copyto: copy_dest_receive via the tcop-dest router needs \
+         the execTuples slot-payload model (SlotData -> header TupleTableSlot \
+         deform bridge; the slot_getallattrs seam is PROVISIONAL for this), which \
+         has not landed yet — the live COPY-(query)-TO path uses the \
+         copy_dest_receive seam keyed by the receiver index instead"
+    )
+}
+
 /// `CreateCopyDestReceiver()` (copyto.c:1435) — build the COPY-TO
-/// `DestReceiver` (used by `COPY (query) TO`). Returns a receiver handle the
-/// executor's COPY-OUT dispatch drives through [`copy_dest_receive`].
-pub fn CreateCopyDestReceiver() -> u64 {
-    receiver_register()
+/// `DestReceiver` for `DestCopyOut` and register it into the tcop-dest router,
+/// returning its [`DestReceiverHandle`].
+///
+/// Mirrors C's `DR_copy` constructor: allocate the per-receiver state (the
+/// `RECEIVERS` slot holding `cstate`/`processed`, via [`receiver_register`]) and
+/// install the `copy_dest_startup`/`copy_dest_receive`/`copy_dest_shutdown`
+/// callbacks. The `RECEIVERS` index is the router's `state` token — the
+/// owned-model stand-in for C's `(DR_copy *) self`. dest.c's `CreateDestReceiver`
+/// switch reaches this through the `create_copy_dest_receiver` seam.
+pub fn CreateCopyDestReceiver() -> types_nodes::parsestmt::DestReceiverHandle {
+    // self->cstate = NULL (set later); self->processed = 0.
+    let state = receiver_register();
+    backend_tcop_dest::register_dest_receiver(
+        CommandDest::CopyOut,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: copy_dest_startup,
+            receiveSlot: copy_dest_receive_slot,
+            rShutdown: copy_dest_shutdown,
+        },
+        state,
+    )
 }
 
 /* ===================================================================== */
@@ -1385,4 +1444,5 @@ fn make_unresolved_finfo_vec(mcx: Mcx<'_>, n: usize) -> PgResult<PgVec<'_, FmgrI
 /// Install every seam this crate owns.
 pub fn init_seams() {
     backend_commands_copyto_seams::copy_dest_receive::set(copy_dest_receive);
+    backend_commands_copyto_seams::create_copy_dest_receiver::set(CreateCopyDestReceiver);
 }
