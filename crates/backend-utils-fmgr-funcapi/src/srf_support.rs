@@ -129,14 +129,13 @@ pub fn materialized_srf_putvalues<'mcx>(
         .setDesc
         .as_deref()
         .expect("materialized_srf_putvalues: rsinfo->setDesc is NULL (InitMaterializedSRF not run)");
-    // Lower the canonical values to the still-bare-word `tuplestore_putvalues`
-    // seam at this audited ABI edge (the tuplestore owner has not migrated).
-    let words: std::vec::Vec<ScalarWord> =
-        values.iter().map(|d| ScalarWord::from_usize(d.as_usize())).collect();
+    // The `tuplestore_putvalues` seam now carries the canonical unified
+    // `Datum<'mcx>` (Datum-completion Wave 7), so the by-attribute values flow
+    // straight through with no lowering to a bare scalar word.
     backend_utils_sort_storage_seams::tuplestore_putvalues::call(
         &mut rsinfo.setResult,
         setDesc,
-        &words,
+        values,
         nulls,
     )
 }

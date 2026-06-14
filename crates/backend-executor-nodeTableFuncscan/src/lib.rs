@@ -607,14 +607,15 @@ fn tfuncLoadRows<'mcx>(
     // Scratch value/null arrays standing in for the scan slot's tts_values /
     // tts_isnull (the slot payload model is not yet landed; C uses the slot's
     // own arrays here).
-    // The value array crosses into the tuplestore_putvalues ABI edge, which
-    // carries bare scalar words (`types_datum::Datum`) — the per-column
-    // tts_values store. Column values arriving as the canonical unified type
-    // project onto this scalar-word array (each is a C `tts_values[i]` word).
-    let mut values: PgVec<'mcx, types_datum::Datum> = vec_with_capacity_in(mcx, natts as usize)?;
+    // The value array crosses into the `tuplestore_putvalues` edge, which now
+    // carries the canonical unified `Datum<'mcx>` (the Datum-completion Wave 7
+    // flip of the sort-storage seam). `routine_get_value` / `ExecEvalExpr` both
+    // already return canonical `Datum<'mcx>`, so column values flow straight
+    // through with no down-conversion to a bare scalar word.
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts as usize)?;
     let mut nulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts as usize)?;
     for _ in 0..natts as usize {
-        values.push(types_datum::Datum::from_i32(0));
+        values.push(Datum::from_i32(0));
         nulls.push(false);
     }
 
@@ -649,7 +650,7 @@ fn tfuncLoadRows<'mcx>(
                 //   nulls[colno] = false;
                 let ord = tstate.ordinal;
                 tstate.ordinal += 1;
-                values[colno] = types_datum::Datum::from_i32(ord as i32);
+                values[colno] = Datum::from_i32(ord as i32);
                 nulls[colno] = false;
             } else {
                 //   values[colno] = routine->GetValue(tstate, colno,
@@ -692,9 +693,9 @@ fn tfuncLoadRows<'mcx>(
                 }
 
                 //   nulls[colno] = isnull;
-                // Project the canonical column value onto the bare scalar-word
-                // tts_values array (a C `tts_values[colno]` machine word).
-                values[colno] = types_datum::Datum::from_usize(v.as_usize());
+                // The column value is already the canonical `Datum<'mcx>`; store
+                // it directly into the tts_values array.
+                values[colno] = v;
                 nulls[colno] = isnull;
             }
 
