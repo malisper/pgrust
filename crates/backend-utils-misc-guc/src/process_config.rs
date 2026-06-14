@@ -27,6 +27,122 @@ use crate::live::{self, set_config_option_global};
 use crate::model::{GUC_IS_IN_FILE, GUC_PENDING_RESTART};
 use crate::GUC_ACTION_SET;
 
+/// `PG_AUTOCONF_FILENAME` (`utils/guc.h`): the `ALTER SYSTEM` overlay file,
+/// parsed after the main config file so it overrides it.
+pub const PG_AUTOCONF_FILENAME: &str = "postgresql.auto.conf";
+
+/// `CONF_FILE_START_DEPTH` (`utils/conffiles.h`).
+const CONF_FILE_START_DEPTH: i32 = 0;
+
+/// `ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)`
+/// (guc.c) — the parse-then-apply core of `ProcessConfigFile`.
+///
+/// Faithful port: parse the active `config_file` GUC (and, once `DataDir` is
+/// set, `postgresql.auto.conf`) into a `ConfigVariable` list via the
+/// `backend-utils-misc-guc-file` parser, apply the DataDir-not-yet-set
+/// `data_directory`-only pruning, then run the apply phase
+/// ([`apply_config_variables`]) over the parsed list.
+///
+/// Returns `Ok(true)` when no error was detected, `Ok(false)` on a recorded
+/// (sub-`ERROR`) error, and `Err` when `elevel >= ERROR` (or `PGC_POSTMASTER`)
+/// and an error fired.
+pub fn process_config_file_internal(
+    context: GucContext,
+    apply_settings: bool,
+    elevel: ErrorLevel,
+) -> PgResult<bool> {
+    use backend_utils_misc_guc_file::{ConfigVariable, ParseConfigFile};
+
+    // ConfigFileName (the `config_file` GUC string).
+    let config_file_name = live::get_string("config_file").flatten().unwrap_or_default();
+
+    // ConfFileWithError starts at the main config file.
+    let mut conf_file_with_error = config_file_name.clone();
+    let mut head: Vec<ConfigVariable> = Vec::new();
+
+    // Parse the main config file into a list of option names and values.
+    if !ParseConfigFile(
+        &config_file_name,
+        true,
+        None,
+        0,
+        CONF_FILE_START_DEPTH,
+        elevel,
+        &mut head,
+    )? {
+        // Syntax error(s) detected in the file, so bail out.
+        return bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error);
+    }
+
+    // Parse PG_AUTOCONF_FILENAME after the main file to replace any parameters
+    // set by ALTER SYSTEM. Because it is in the data directory, it can't be read
+    // until DataDir has been set.
+    if backend_utils_init_small_seams::data_dir::call().is_some() {
+        if !ParseConfigFile(
+            PG_AUTOCONF_FILENAME,
+            false,
+            None,
+            0,
+            CONF_FILE_START_DEPTH,
+            elevel,
+            &mut head,
+        )? {
+            conf_file_with_error = PG_AUTOCONF_FILENAME.to_string();
+            return bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error);
+        }
+    } else {
+        // If DataDir is not set, the PG_AUTOCONF_FILENAME file cannot be read.
+        // In this case, accept only data_directory from postgresql.conf, because
+        // anything else might be overwritten by settings in the auto.conf file
+        // read later. Prune all items except the last "data_directory".
+        let last_dd = head
+            .iter()
+            .rposition(|item| !item.ignore && item.name.as_deref() == Some("data_directory"));
+        match last_dd {
+            Some(idx) => {
+                let keep = head.swap_remove(idx);
+                head.clear();
+                head.push(keep);
+            }
+            None => {
+                // Quick exit if data_directory is not present in the file. We
+                // need not do any further processing; PgReloadTime will be set
+                // soon by subsequent full loading of the config file.
+                return bail_out(context, elevel, false, false, apply_settings, &conf_file_with_error);
+            }
+        }
+    }
+
+    // Convert the parser's `ConfigVariable` list into the apply phase's
+    // `ConfigItem` view, then apply.
+    let mut items: Vec<ConfigItem> = head
+        .into_iter()
+        .map(|cv| ConfigItem {
+            name: cv.name.unwrap_or_default(),
+            value: cv.value.unwrap_or_default(),
+            filename: cv
+                .filename
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            sourceline: cv.sourceline,
+            ignore: cv.ignore,
+            applied: cv.applied,
+            errmsg: cv.errmsg,
+        })
+        .collect();
+
+    let reload_time = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
+
+    apply_config_variables(
+        &mut items,
+        context,
+        apply_settings,
+        elevel,
+        &mut conf_file_with_error,
+        reload_time,
+    )
+}
+
 /// The GUC core's minimal view of one parsed config-file entry (the relevant
 /// fields of the parser's `struct ConfigVariable`).
 #[derive(Clone, Debug)]
