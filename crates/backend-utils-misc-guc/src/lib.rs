@@ -223,13 +223,37 @@ pub fn finish_guc_check_error(fallback_message: impl Into<String>) -> PgResult<(
 }
 
 // ---------------------------------------------------------------------------
+// GUC nesting level (guc.c: `static int GUCNestLevel`). The integer half of the
+// transactional GUC stack (guc_stack.c): `NewGUCNestLevel` opens a new nesting
+// level and returns it, `AtEOXact_GUC(isCommit, nestLevel)` pops back to it. The
+// nest-level counter itself is owned here (it is a guc.c file static, not a
+// guc_stack.c entity); only the stack-entry rollback (`AtEOXact_GUC`) still
+// belongs to the unported guc_stack.c. The backend is single-threaded, so a
+// `static mut` matches the C global exactly.
+// ---------------------------------------------------------------------------
+
+/// `static int GUCNestLevel = 0;` (guc.c:231) — 1 when in the main transaction,
+/// bumped for each open subtransaction / function SET scope.
+static mut GUC_NEST_LEVEL: i32 = 0;
+
+/// `NewGUCNestLevel(void)` (guc.c:2235) — `return ++GUCNestLevel;`. Begin a new
+/// GUC nesting level, returning the save-nestlevel to later pass to
+/// `AtEOXact_GUC`.
+pub fn NewGUCNestLevel() -> i32 {
+    unsafe {
+        GUC_NEST_LEVEL += 1;
+        GUC_NEST_LEVEL
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tier-A seam install (this crate is guc.c's home).
 // ---------------------------------------------------------------------------
 
 use types_core::BOOTSTRAP_SUPERUSERID;
 use types_guc::{
-    GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_SUSET, PGC_S_DYNAMIC_DEFAULT,
-    PGC_S_OVERRIDE,
+    GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_SIGHUP, PGC_SUSET,
+    PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE,
 };
 
 /// `SetConfigOption(name, value, context, source)` over the global store, with
@@ -309,13 +333,9 @@ pub fn init_seams() {
     //     (guc.c is their home) but each loud-panics into the unported sub-unit
     //     rather than silently stubbing (mirror-and-panic). ---
 
-    // GUC stack (guc_stack.c): NewGUCNestLevel / AtEOXact_GUC.
-    s::new_guc_nest_level::set(|| {
-        panic!(
-            "NewGUCNestLevel: the transactional GUC stack (guc_stack.c) is a separate unit not \
-             yet ported"
-        )
-    });
+    // GUC nesting level (guc.c): NewGUCNestLevel is `++GUCNestLevel`, owned
+    // here. AtEOXact_GUC's stack rollback still belongs to guc_stack.c.
+    s::new_guc_nest_level::set(NewGUCNestLevel);
     s::at_eoxact_guc::set(|_is_commit, _nest_level| {
         panic!(
             "AtEOXact_GUC: the transactional GUC stack (guc_stack.c) is a separate unit not yet \
@@ -336,17 +356,17 @@ pub fn init_seams() {
              not yet ported"
         )
     });
+    // ProcessConfigFile(PGC_SIGHUP) (guc-file.l) — the SIGHUP reload. The
+    // memory-context wrapper lives in guc-file.l (its own unit); drive it
+    // through its seam so a SIGHUP reload re-reads and applies the file.
     s::process_config_file_sighup::set(|| {
-        panic!(
-            "ProcessConfigFile(PGC_SIGHUP): the config-file parse orchestration (guc-file.l) is a \
-             separate unit not yet ported; the apply core is `apply_config_variables`"
-        )
+        backend_utils_misc_guc_file_seams::process_config_file::call(PGC_SIGHUP)
     });
-    s::process_config_file_internal::set(|_context, _apply_settings, _elevel| {
-        panic!(
-            "ProcessConfigFileInternal: the config-file parse orchestration (guc-file.l) is a \
-             separate unit not yet ported; the apply core is `apply_config_variables`"
-        )
+    // ProcessConfigFileInternal (guc.c) — the parse-then-apply core. Parsing
+    // lives in guc-file.l (called directly here, mirroring guc.c → guc-file.l);
+    // the apply phase is `apply_config_variables` in this crate.
+    s::process_config_file_internal::set(|context, apply_settings, elevel| {
+        process_config::process_config_file_internal(context, apply_settings, elevel).map(|_| ())
     });
 
     // SetPGVariable's List *A_Const marshaling (the DISCARD ALL session_auth

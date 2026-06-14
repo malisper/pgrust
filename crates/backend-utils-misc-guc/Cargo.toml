@@ -19,7 +19,10 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
+backend-utils-misc-guc-file = { path = "../backend-utils-misc-guc-file" }
+backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
 backend-utils-adt-scalar-seams = { path = "../backend-utils-adt-scalar-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 # Outward seam crates (call out, do not install):
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
