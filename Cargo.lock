@@ -4519,6 +4519,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
