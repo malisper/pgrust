@@ -100,6 +100,8 @@ pub enum PlanStateNode<'mcx> {
     CustomScan(PgBox<'mcx, crate::nodeforeigncustom::CustomScanState<'mcx>>),
     /// `T_HashState` — the inner Hash node of a hash join.
     Hash(PgBox<'mcx, HashState<'mcx>>),
+    /// `T_ModifyTableState`.
+    ModifyTable(PgBox<'mcx, crate::modifytable::ModifyTableState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -141,6 +143,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
             PlanStateNode::CustomScan(_) => crate::nodes::T_CustomScanState,
             PlanStateNode::Hash(_) => T_HashState,
+            PlanStateNode::ModifyTable(_) => crate::nodes::T_ModifyTableState,
         }
     }
 
@@ -181,6 +184,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ForeignScan(f) => &f.ss.ps,
             PlanStateNode::CustomScan(c) => &c.ss.ps,
             PlanStateNode::Hash(h) => &h.ps,
+            PlanStateNode::ModifyTable(m) => &m.ps,
         }
     }
 
@@ -220,6 +224,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
             PlanStateNode::CustomScan(c) => &mut c.ss.ps,
             PlanStateNode::Hash(h) => &mut h.ps,
+            PlanStateNode::ModifyTable(m) => &mut m.ps,
         }
     }
 
@@ -293,8 +298,9 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// nodeModifyTable threads its `ModifyTableState` into this enum.
     pub fn as_modify_table_state(&self) -> Option<&crate::modifytable::ModifyTableState<'mcx>> {
         match self {
-            // nodeModifyTable's `T_ModifyTableState` variant lands here when it
-            // threads into this enum.
+            // nodeModifyTable's `T_ModifyTableState` variant carries a
+            // `ModifyTableState`.
+            PlanStateNode::ModifyTable(m) => Some(&**m),
             _ => None,
         }
     }

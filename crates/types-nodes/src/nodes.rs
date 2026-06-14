@@ -61,6 +61,7 @@ pub const T_Limit: NodeTag = NodeTag(373);
 // (`T_MaterialState`/`T_MergeJoinState` live with their state structs). The
 // values are PostgreSQL 18.3's generated enumeration order.
 pub const T_ResultState: NodeTag = NodeTag(394);
+pub const T_ModifyTableState: NodeTag = NodeTag(396);
 pub const T_AppendState: NodeTag = NodeTag(397);
 pub const T_SeqScanState: NodeTag = NodeTag(403);
 pub const T_SampleScanState: NodeTag = NodeTag(404);

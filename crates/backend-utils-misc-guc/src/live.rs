@@ -43,11 +43,13 @@
 //!
 //! GUC state is process-local (not shared memory), exactly as `guc.c`'s file
 //! statics are. The backend reaches `initialize_guc_options` single-threaded at
-//! startup; a `static mut` written once at boot and thereafter mutated only by
-//! the (single-threaded) `SET` path is the faithful analog of the C file-static
-//! `guc_hashtab`.
+//! startup. The store is held in a process-global [`Mutex`] (the safe analog of
+//! the C file-static `guc_hashtab`): one store per process, written once at boot
+//! and thereafter mutated only by the `SET` path, but read/written safely even
+//! when the broad test harness drives it from several threads.
 
-#![allow(static_mut_refs)]
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Mutex;
 
 use backend_utils_misc_guc_tables::{all_settings, GucDefaultValue, GucSetting};
 use types_core::{Oid, TimestampTz};
@@ -57,24 +59,25 @@ use types_guc::{config_type, GucContext, GucSource};
 use crate::model::{config_bool, config_enum, config_generic, config_int, config_real, config_string};
 use crate::registry::{GucRegistry, GucVariable};
 
-/// The process-global GUC store: the idiomatic `guc_hashtab`.
-static mut GUC_STORE: Option<GucRegistry> = None;
+/// The process-global GUC store: the idiomatic `guc_hashtab`. A `Mutex<Option>`
+/// — `None` until boot's `initialize_guc_options` builds it — gives the safe
+/// process-global single store the C file static is, with interior mutability
+/// for the `SET` write path.
+static GUC_STORE: Mutex<Option<GucRegistry>> = Mutex::new(None);
 
 /// `TimestampTz PgReloadTime` (guc.c file static): the time of the most recent
 /// successful config-file load, surfaced by `pg_conf_load_time()`.
-static mut PG_RELOAD_TIME: TimestampTz = 0;
+static PG_RELOAD_TIME: AtomicI64 = AtomicI64::new(0);
 
 /// `PgReloadTime = GetCurrentTimestamp()` — record when the config file was last
 /// successfully (re)loaded. The caller supplies the timestamp.
 pub fn set_pg_reload_time(t: TimestampTz) {
-    unsafe {
-        PG_RELOAD_TIME = t;
-    }
+    PG_RELOAD_TIME.store(t, Ordering::Relaxed);
 }
 
 /// Read `PgReloadTime` (the `pg_conf_load_time()` source value).
 pub fn pg_reload_time() -> TimestampTz {
-    unsafe { PG_RELOAD_TIME }
+    PG_RELOAD_TIME.load(Ordering::Relaxed)
 }
 
 /// One resolved boot value (the result of evaluating a `guc_tables` `boot_val`).
@@ -207,31 +210,27 @@ pub fn try_initialize_guc_options() -> PgResult<()> {
             reg.define(var)?;
         }
     }
-    unsafe {
-        GUC_STORE = Some(reg);
-    }
+    *GUC_STORE.lock().unwrap() = Some(reg);
     Ok(())
 }
 
 /// True once [`initialize_guc_options`] has built the store.
 pub fn is_initialized() -> bool {
-    unsafe { GUC_STORE.is_some() }
+    GUC_STORE.lock().unwrap().is_some()
 }
 
 /// Borrow the global GUC store, if initialized.
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
-    unsafe {
-        let store = GUC_STORE.as_ref()?;
-        Some(f(store))
-    }
+    let guard = GUC_STORE.lock().unwrap();
+    let store = guard.as_ref()?;
+    Some(f(store))
 }
 
 /// Mutably borrow the global GUC store (the SET write path), if initialized.
 pub fn with_store_mut<R>(f: impl FnOnce(&mut GucRegistry) -> R) -> Option<R> {
-    unsafe {
-        let store = GUC_STORE.as_mut()?;
-        Some(f(store))
-    }
+    let mut guard = GUC_STORE.lock().unwrap();
+    let store = guard.as_mut()?;
+    Some(f(store))
 }
 
 /// `ResetAllOptions()` over the process-global GUC store. Panics (loud) if the

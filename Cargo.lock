@@ -1949,6 +1949,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogbackup",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-replication-walreceiverfuncs",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-latch",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-lsn-trigfuncs",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-varlena",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xloginsert"
 version = "0.0.0"
 dependencies = [
@@ -4209,20 +4236,35 @@ dependencies = [
  "backend-executor-execProcnode-seams",
  "backend-executor-instrument-seams",
  "backend-executor-nodeAppend",
+ "backend-executor-nodeBitmapAnd",
+ "backend-executor-nodeBitmapIndexscan",
+ "backend-executor-nodeCtescan",
+ "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeGather",
+ "backend-executor-nodeGatherMerge",
+ "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
+ "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergeAppend",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeModifyTable",
  "backend-executor-nodeNestloop",
+ "backend-executor-nodeProjectSet",
+ "backend-executor-nodeRecursiveunion",
+ "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
+ "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeTableFuncscan",
+ "backend-executor-nodeUnique",
+ "backend-executor-nodeValuesscan",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-misc-stack-depth-seams",

@@ -143,3 +143,38 @@ seam_core::seam!(
     /// spinlock.
     pub fn get_recovery_state() -> types_error::PgResult<types_wal::RecoveryState>
 );
+
+// ---------------------------------------------------------------------------
+// Recovery pause / promotion controls (xlogrecovery.c) consumed by xlogfuncs.c
+// (pg_wal_replay_pause/resume, pg_is_wal_replay_paused,
+// pg_get_wal_replay_pause_state, pg_last_xact_replay_timestamp). Owned by
+// xlogrecovery.c; declared here so xlogfuncs.c can call them and panic loudly
+// until xlogrecovery.c installs them.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `SetRecoveryPause(recoveryPause)` (xlogrecovery.c) — request/clear a
+    /// recovery pause. Writes `XLogRecoveryCtl->recoveryPauseState` under a
+    /// spinlock.
+    pub fn set_recovery_pause(recovery_pause: bool)
+);
+
+seam_core::seam!(
+    /// `GetRecoveryPauseState()` (xlogrecovery.c) — the current recovery pause
+    /// state (`NotPaused`/`PauseRequested`/`Paused`). Reads
+    /// `XLogRecoveryCtl->recoveryPauseState` under a spinlock.
+    pub fn get_recovery_pause_state() -> types_wal::RecoveryPauseState
+);
+
+seam_core::seam!(
+    /// `PromoteIsTriggered()` (xlogrecovery.c) — whether standby promotion has
+    /// been triggered. Reads `LocalPromoteIsTriggered` (refreshed from shmem).
+    pub fn promote_is_triggered() -> bool
+);
+
+seam_core::seam!(
+    /// `GetLatestXTime()` (xlogrecovery.c) — the timestamp of the latest
+    /// processed commit/abort record during recovery, or 0 when not in/after
+    /// recovery. Reads `XLogRecoveryCtl->recoveryLastXTime` under a spinlock.
+    pub fn get_latest_x_time() -> TimestampTz
+);
