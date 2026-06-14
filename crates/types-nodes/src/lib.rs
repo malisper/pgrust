@@ -30,6 +30,7 @@ pub mod nodeappend;
 pub mod nodebitmapindexscan;
 pub mod nodectescan;
 pub mod nodebitmapand;
+pub mod nodebitmapor;
 pub mod nodeforeigncustom;
 pub mod nodegathermerge;
 pub mod nodegroup;
@@ -124,6 +125,7 @@ pub use nodeappend::{
     T_Append, T_AppendState,
 };
 pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
+pub use nodebitmapor::{BitmapOr, BitmapOrState, T_BitmapOrState};
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,

@@ -42,6 +42,8 @@ pub enum PlanStateNode<'mcx> {
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_BitmapAndState`.
     BitmapAnd(PgBox<'mcx, crate::nodebitmapand::BitmapAndState<'mcx>>),
+    /// `T_BitmapOrState`.
+    BitmapOr(PgBox<'mcx, crate::nodebitmapor::BitmapOrState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
     /// `T_RecursiveUnionState`.
@@ -103,6 +105,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::GatherMerge(_) => crate::nodegathermerge::T_GatherMergeState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
+            PlanStateNode::BitmapOr(_) => crate::nodebitmapor::T_BitmapOrState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::RecursiveUnion(_) => T_RecursiveUnionState,
             PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
@@ -141,6 +144,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::GatherMerge(g) => &g.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::BitmapAnd(b) => &b.ps,
+            PlanStateNode::BitmapOr(b) => &b.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::RecursiveUnion(r) => &r.ps,
             PlanStateNode::Group(g) => &g.ss.ps,
@@ -176,6 +180,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::GatherMerge(g) => &mut g.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::BitmapAnd(b) => &mut b.ps,
+            PlanStateNode::BitmapOr(b) => &mut b.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::RecursiveUnion(r) => &mut r.ps,
             PlanStateNode::Group(g) => &mut g.ss.ps,
