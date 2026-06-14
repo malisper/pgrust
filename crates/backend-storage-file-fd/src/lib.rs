@@ -85,6 +85,7 @@ pub fn init_seams() {
     fd_seams::fsync_fname::set(seams::seam_fsync_fname);
     fd_seams::pg_file_exists::set(seams::seam_pg_file_exists);
     fd_seams::basic_open_file::set(seams::basic_open_file);
+    fd_seams::basic_open_file_flags::set(seams::basic_open_file_flags);
 
     // Transient-fd API (i32 contract).
     fd_seams::open_transient_file::set(seams::open_transient_file_i32);
@@ -92,6 +93,8 @@ pub fn init_seams() {
     fd_seams::transient_read::set(seams::transient_read);
     fd_seams::transient_write::set(seams::transient_write);
     fd_seams::pg_pread::set(seams::pg_pread);
+    fd_seams::pg_pwrite::set(seams::pg_pwrite);
+    fd_seams::pg_pwrite_zeros::set(seams::pg_pwrite_zeros);
 
     // Directory / tree helpers (decls owned here; logic in `seams`).
     fd_seams::rmtree::set(seams::rmtree);

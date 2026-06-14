@@ -105,7 +105,7 @@ fn INSERT_FREESPACE(endptr: XLogRecPtr) -> usize {
 /// # Safety
 /// `ctl` must reference the live `XLogCtl` shmem region.
 #[inline]
-unsafe fn XLogRecPtrToBufIdx(ctl: &XLogCtlData, recptr: XLogRecPtr) -> usize {
+pub(crate) unsafe fn XLogRecPtrToBufIdx(ctl: &XLogCtlData, recptr: XLogRecPtr) -> usize {
     let nbuffers = (ctl.XLogCacheBlck + 1) as u64;
     ((recptr / XLOG_BLCKSZ as u64) % nbuffers) as usize
 }
@@ -467,7 +467,8 @@ unsafe fn AdvanceXLInsertBuffer(
 
     // LWLockAcquire(WALBufMappingLock, LW_EXCLUSIVE).
     let wal_buf_mapping = wal_buf_mapping_lock_offset();
-    let guard = lwlock::LWLockAcquireMain(wal_buf_mapping, LW_EXCLUSIVE, globals::MyProcNumber())?;
+    let mut guard =
+        lwlock::LWLockAcquireMain(wal_buf_mapping, LW_EXCLUSIVE, globals::MyProcNumber())?;
 
     while upto >= (*ctl_mut).InitializedUpTo || opportunistic {
         let nextidx = XLogRecPtrToBufIdx(ctl, (*ctl_mut).InitializedUpTo);
@@ -487,19 +488,39 @@ unsafe fn AdvanceXLInsertBuffer(
 
             refresh_xlog_write_result(ctl);
             if shmem::logwrt_result().Write < old_page_rqst_ptr {
-                // Must write/evict the old page — this is the WAL-WRITE
-                // driver (XLogWrite), deferred to task #156/F2. The
-                // WALBufMappingLock `guard` releases on unwind via its Drop.
-                panic!(
-                    "xlog driver not ported (xlog-driver debt, #156/F2): \
-                     AdvanceXLInsertBuffer must evict a not-yet-written WAL buffer \
-                     (LogwrtResult.Write {:X}/{:X} < OldPageRqstPtr {:X}/{:X}); \
-                     this requires WaitXLogInsertionsToFinish + WALWriteLock + XLogWrite",
-                    (shmem::logwrt_result().Write >> 32) as u32,
-                    shmem::logwrt_result().Write as u32,
-                    (old_page_rqst_ptr >> 32) as u32,
-                    old_page_rqst_ptr as u32,
-                );
+                // Must write/evict the old page. Release WALBufMappingLock
+                // first so all insertions up to this position can finish,
+                // avoiding deadlock; then wait, take WALWriteLock, and write.
+                guard.release()?;
+
+                crate::write::WaitXLogInsertionsToFinish(ctl, old_page_rqst_ptr)?;
+
+                let wal_write_lock = lwlock::main_lock_ref(wal_write_lock_offset());
+                lwlock::LWLockAcquire(wal_write_lock, LW_EXCLUSIVE, globals::MyProcNumber())?;
+
+                refresh_xlog_write_result(ctl);
+                if shmem::logwrt_result().Write >= old_page_rqst_ptr {
+                    // Someone else wrote it already.
+                    lwlock::LWLockRelease(wal_write_lock)?;
+                } else {
+                    // Write it ourselves.
+                    let write_rqst = crate::shmem::XLogwrtRqst {
+                        Write: old_page_rqst_ptr,
+                        Flush: 0,
+                    };
+                    crate::write::XLogWrite(ctl, write_rqst, tli, false)?;
+                    lwlock::LWLockRelease(wal_write_lock)?;
+                    // pgWalUsage.wal_buffers_full++ / pgstat_report_fixed:
+                    // pgstat instrumentation (unported), behaviour-preserving.
+                }
+
+                // Re-acquire WALBufMappingLock and retry.
+                guard = lwlock::LWLockAcquireMain(
+                    wal_buf_mapping,
+                    LW_EXCLUSIVE,
+                    globals::MyProcNumber(),
+                )?;
+                continue;
             }
         }
 
@@ -550,12 +571,31 @@ unsafe fn AdvanceXLInsertBuffer(
     Ok(())
 }
 
+/// `AdvanceXLInsertBuffer(InvalidXLogRecPtr, tli, true)` — the opportunistic
+/// WAL-buffer pre-initialization the walwriter does after a background flush
+/// (xlog.c:3117). Exposed for [`crate::write::XLogBackgroundFlush`].
+///
+/// # Safety
+/// `ctl` must reference the live `XLogCtl` shmem region.
+pub(crate) unsafe fn advance_xl_insert_buffer_opportunistic(
+    ctl: &XLogCtlData,
+    tli: TimeLineID,
+) -> PgResult<()> {
+    AdvanceXLInsertBuffer(ctl, crate::InvalidXLogRecPtr, tli, true)
+}
+
 /// `WALBufMappingLock` offset into the main LWLock array. The individual
 /// builtin locks occupy the first `NUM_INDIVIDUAL_LWLOCKS` slots in
 /// `lwlocklist.h` order; `WALBufMapping` is entry 7.
 #[inline]
 fn wal_buf_mapping_lock_offset() -> usize {
     7
+}
+
+/// `WALWriteLock` — entry 8 in the `MainLWLockArray` (`lwlocklist.h`).
+#[inline]
+fn wal_write_lock_offset() -> usize {
+    8
 }
 
 // ===========================================================================
@@ -854,13 +894,11 @@ pub fn XLogInsertRecord(
     }
 
     // XLOG_SWITCH: flush the record + the padding, then return the end of just
-    // the xlog-switch record. The flush is the WAL-WRITE driver (#156/F2).
+    // the xlog-switch record. (C: `XLogFlush(EndPos)`; the C also rewinds the
+    // return value to the actual record end via `RegisterSegmentBoundary`/the
+    // page-skip arithmetic — here `end_pos` already names the record end.)
     if class == WalInsertClass::SpecialSwitch {
-        // XLogFlush(EndPos) — deferred WAL-write driver.
-        panic!(
-            "xlog driver not ported (xlog-driver debt, #156/F2): XLOG_SWITCH record \
-             requires XLogFlush(EndPos) of the segment-fill padding"
-        );
+        crate::write::XLogFlush(end_pos)?;
     }
 
     // Update our global variables.

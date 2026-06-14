@@ -44,7 +44,7 @@ use types_storage::buf::Buffer;
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
 use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
-use crate::executor::{TupleSlotKind, TupleTableSlot, TTS_FLAG_EMPTY};
+use types_slot::{TupleSlotKind, TupleTableSlot, TTS_FLAG_EMPTY};
 
 /// `TTS_FLAG_SHOULDFREE` (tuptable.h) — true if we should `pfree` the slot's
 /// stored tuple on clear.

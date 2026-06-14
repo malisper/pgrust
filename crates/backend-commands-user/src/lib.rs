@@ -471,7 +471,7 @@ pub fn CreateRole<'mcx>(
      * Check that the user is not trying to create a role in the reserved
      * "pg_" namespace.
      */
-    if seam::is_reserved_name::call(role.clone())? {
+    if backend_catalog_catalog_seams::is_reserved_name::call(role.clone())? {
         return ereport(ERROR)
             .errcode(ERRCODE_RESERVED_NAME)
             .errmsg(format!("role name \"{role}\" is reserved"))
@@ -1475,7 +1475,7 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
      * Check that the user is not trying to rename a system role and not trying
      * to rename a role into the reserved "pg_" namespace.
      */
-    if seam::is_reserved_name::call(authform.rolname.clone())? {
+    if backend_catalog_catalog_seams::is_reserved_name::call(authform.rolname.clone())? {
         return ereport(ERROR)
             .errcode(ERRCODE_RESERVED_NAME)
             .errmsg(format!("role name \"{}\" is reserved", authform.rolname))
@@ -1484,7 +1484,7 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
             .map(|()| InvalidObjectAddress);
     }
 
-    if seam::is_reserved_name::call(newname.to_string())? {
+    if backend_catalog_catalog_seams::is_reserved_name::call(newname.to_string())? {
         return ereport(ERROR)
             .errcode(ERRCODE_RESERVED_NAME)
             .errmsg(format!("role name \"{newname}\" is reserved"))

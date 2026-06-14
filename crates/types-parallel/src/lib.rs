@@ -87,6 +87,15 @@ opaque_handle!(
 /// crates do NOT get to implement it for arbitrary types.
 pub unsafe trait SharedDsmObject {}
 
+/// The typed-shared-DSM-object primitive (`SharedRef` / `SharedSlice` /
+/// `SharedView` + the `estimate`/`place_*`/`attach*`/`with_mut` helpers). It
+/// lives here — below `types-nodes` — so the per-node `repr(C)` node structs
+/// that carry a `SharedRef` field can name it without an upward dependency on
+/// `backend-access-transam-parallel`. It is re-exported from
+/// `backend_access_transam_parallel::shared_dsm_object` so every historical
+/// call site keeps compiling unchanged.
+pub mod shared_dsm_object;
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — the integer name of a DSM segment.
 pub type dsm_handle = u32;
 
