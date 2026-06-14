@@ -2,15 +2,17 @@
 //! `ApplySetting` / `process_db_role_settings`.
 //!
 //! Each test installs bare-`fn` seam fakes (the `seam!` slots take a `fn`
-//! pointer, not a closure) backed by module-level `static mut` recorders,
+//! pointer, not a closure) backed by a process-global `Mutex<TestState>`,
 //! configures the inputs the C reads (the `ExtractSetVariableArgs` result, the
 //! found tuple + its decoded `setconfig`, and what `GUCArray{Reset,Add,Delete}`
 //! return), drives the function, and asserts the recorded operation sequence
-//! matches the C three-way branch. Tests run single-threaded
-//! (`--test-threads=1`), so the shared recorders and set-once seam slots are
-//! safe.
+//! matches the C three-way branch. A single `TEST_LOCK` serializes the whole
+//! shared-state body of each test so the set-once seam slots and the shared
+//! recorders are race-free.
 
 use super::*;
+
+use std::sync::{Mutex, MutexGuard};
 
 use mcx::MemoryContext;
 use types_core::primitive::INVALID_OID;
@@ -35,44 +37,61 @@ enum Op {
     Finish(Oid, Oid),
 }
 
-static mut VALUESTR: Option<String> = None;
-static mut FOUND: Option<Option<Vec<String>>> = None;
-static mut RESET_RESULT: Option<Vec<String>> = None;
-static mut ADD_RESULT: Vec<String> = Vec::new();
-static mut DELETE_RESULT: Option<Vec<String>> = None;
-static mut OPS: Vec<Op> = Vec::new();
+/// Shared, mutex-guarded recorder + configured fake-return state. Replaces the
+/// earlier `static mut` recorders, which tripped the Rust 2024 strict
+/// `static_mut_refs` UB check when `Vec::push` reallocated through a
+/// `&mut` to the static.
+#[derive(Default)]
+struct TestState {
+    valuestr: Option<String>,
+    found: Option<Option<Vec<String>>>,
+    reset_result: Option<Vec<String>>,
+    add_result: Vec<String>,
+    delete_result: Option<Vec<String>>,
+    ops: Vec<Op>,
+}
+
+static STATE: Mutex<TestState> = Mutex::new(TestState {
+    valuestr: None,
+    found: None,
+    reset_result: None,
+    add_result: Vec::new(),
+    delete_result: None,
+    ops: Vec::new(),
+});
+
+/// Serializes each test's shared-state body so the single global recorder and
+/// the set-once seam slots are race-free under the default multi-threaded test
+/// runner.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn st() -> MutexGuard<'static, TestState> {
+    STATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn reset() {
-    unsafe {
-        VALUESTR = None;
-        FOUND = None;
-        RESET_RESULT = None;
-        ADD_RESULT = Vec::new();
-        DELETE_RESULT = None;
-        OPS = Vec::new();
-    }
+    *st() = TestState::default();
 }
 
 fn ops() -> Vec<Op> {
-    unsafe { OPS.clone() }
+    st().ops.clone()
 }
 
 fn fake_extract(_setstmt: VariableSetStmt) -> PgResult<Option<String>> {
-    Ok(unsafe { VALUESTR.clone() })
+    Ok(st().valuestr.clone())
 }
 
 fn fake_alter_find(_databaseid: Oid, _roleid: Oid) -> PgResult<AlterLookup> {
     Ok(AlterLookup {
         scan: SCAN,
-        tuple: unsafe { FOUND.clone() },
+        tuple: st().found.clone(),
     })
 }
 
 fn fake_guc_array_reset(array: Vec<String>) -> PgResult<Option<Vec<String>>> {
-    unsafe {
-        OPS.push(Op::Reset(array));
-        Ok(RESET_RESULT.clone())
-    }
+    let mut s = st();
+    s.ops.push(Op::Reset(array));
+    Ok(s.reset_result.clone())
 }
 
 fn fake_guc_array_add(
@@ -80,31 +99,29 @@ fn fake_guc_array_add(
     name: String,
     value: String,
 ) -> PgResult<Vec<String>> {
-    unsafe {
-        OPS.push(Op::Add(array, name, value));
-        Ok(ADD_RESULT.clone())
-    }
+    let mut s = st();
+    s.ops.push(Op::Add(array, name, value));
+    Ok(s.add_result.clone())
 }
 
 fn fake_guc_array_delete(
     array: Option<Vec<String>>,
     name: String,
 ) -> PgResult<Option<Vec<String>>> {
-    unsafe {
-        OPS.push(Op::Delete(array, name));
-        Ok(DELETE_RESULT.clone())
-    }
+    let mut s = st();
+    s.ops.push(Op::Delete(array, name));
+    Ok(s.delete_result.clone())
 }
 
 fn fake_update_setconfig(scan: SettingScan, new_array: Vec<String>) -> PgResult<()> {
     assert_eq!(scan, SCAN, "update must run against the open scan handle");
-    unsafe { OPS.push(Op::Update(new_array)) };
+    st().ops.push(Op::Update(new_array));
     Ok(())
 }
 
 fn fake_delete_found_tuple(scan: SettingScan) -> PgResult<()> {
     assert_eq!(scan, SCAN);
-    unsafe { OPS.push(Op::DeleteTuple) };
+    st().ops.push(Op::DeleteTuple);
     Ok(())
 }
 
@@ -115,7 +132,7 @@ fn fake_insert_setting(
     array: Vec<String>,
 ) -> PgResult<()> {
     assert_eq!(scan, SCAN);
-    unsafe { OPS.push(Op::Insert(databaseid, roleid, array)) };
+    st().ops.push(Op::Insert(databaseid, roleid, array));
     Ok(())
 }
 
@@ -126,7 +143,7 @@ fn fake_alter_finish(
     roleid: Oid,
 ) -> PgResult<()> {
     assert_eq!(scan, SCAN);
-    unsafe { OPS.push(Op::Finish(databaseid, roleid)) };
+    st().ops.push(Op::Finish(databaseid, roleid));
     Ok(())
 }
 
@@ -185,15 +202,30 @@ fn run<F: FnOnce(Mcx<'_>)>(f: F) {
     f(ctx.mcx());
 }
 
+/// Acquire the per-test serialization lock and reset shared state. The returned
+/// guard MUST be held for the test body's duration; it is released on drop.
+/// Note: we never hold the `STATE` guard across a call into the code under test
+/// (the fakes re-lock `STATE`), so `cfg(|s| ...)` scopes its lock tightly.
+fn begin() -> MutexGuard<'static, ()> {
+    install_seams();
+    let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset();
+    g
+}
+
+/// Mutate the shared `TestState` under a tightly-scoped `STATE` lock.
+fn cfg<F: FnOnce(&mut TestState)>(f: F) {
+    f(&mut st());
+}
+
 #[test]
 fn set_value_no_existing_tuple_inserts() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = Some("on".to_string());
-        FOUND = None;
-        ADD_RESULT = arr(&["work_mem=on"]);
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = Some("on".to_string());
+        s.found = None;
+        s.add_result = arr(&["work_mem=on"]);
+    });
     let stmt = make_stmt(VariableSetKind::SetValue, "work_mem");
     run(|mcx| AlterSetting(mcx, 100, 200, &stmt).unwrap());
 
@@ -209,13 +241,12 @@ fn set_value_no_existing_tuple_inserts() {
 
 #[test]
 fn set_value_existing_tuple_updates() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = Some("4MB".to_string());
-        FOUND = Some(Some(arr(&["x=1"])));
-        ADD_RESULT = arr(&["x=1", "work_mem=4MB"]);
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = Some("4MB".to_string());
+        s.found = Some(Some(arr(&["x=1"])));
+        s.add_result = arr(&["x=1", "work_mem=4MB"]);
+    });
     let stmt = make_stmt(VariableSetKind::SetValue, "work_mem");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -231,13 +262,12 @@ fn set_value_existing_tuple_updates() {
 
 #[test]
 fn set_value_existing_tuple_null_setconfig_adds_from_none() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = Some("x".to_string());
-        FOUND = Some(None); // tuple found, setconfig column NULL
-        ADD_RESULT = arr(&["v=x"]);
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = Some("x".to_string());
+        s.found = Some(None); // tuple found, setconfig column NULL
+        s.add_result = arr(&["v=x"]);
+    });
     let stmt = make_stmt(VariableSetKind::SetValue, "v");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -248,13 +278,12 @@ fn set_value_existing_tuple_null_setconfig_adds_from_none() {
 
 #[test]
 fn reset_var_existing_tuple_deletes_entry_then_deletes_tuple_when_empty() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None; // RESET => valuestr NULL
-        FOUND = Some(Some(arr(&["work_mem=4MB"])));
-        DELETE_RESULT = None; // GUCArrayDelete empties the array
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None; // RESET => valuestr NULL
+        s.found = Some(Some(arr(&["work_mem=4MB"])));
+        s.delete_result = None; // GUCArrayDelete empties the array
+    });
     let stmt = make_stmt(VariableSetKind::Reset, "work_mem");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -270,13 +299,12 @@ fn reset_var_existing_tuple_deletes_entry_then_deletes_tuple_when_empty() {
 
 #[test]
 fn reset_var_existing_tuple_deletes_entry_then_updates_when_nonempty() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = Some(Some(arr(&["a=1", "work_mem=4MB"])));
-        DELETE_RESULT = Some(arr(&["a=1"]));
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = Some(Some(arr(&["a=1", "work_mem=4MB"])));
+        s.delete_result = Some(arr(&["a=1"]));
+    });
     let stmt = make_stmt(VariableSetKind::Reset, "work_mem");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -292,12 +320,11 @@ fn reset_var_existing_tuple_deletes_entry_then_updates_when_nonempty() {
 
 #[test]
 fn reset_var_no_tuple_is_noop_except_finish() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = None;
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = None;
+    });
     let stmt = make_stmt(VariableSetKind::Reset, "work_mem");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -306,13 +333,12 @@ fn reset_var_no_tuple_is_noop_except_finish() {
 
 #[test]
 fn reset_all_existing_tuple_resets_then_updates() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = Some(Some(arr(&["a=1", "b=2"])));
-        RESET_RESULT = Some(arr(&["a=1"]));
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = Some(Some(arr(&["a=1", "b=2"])));
+        s.reset_result = Some(arr(&["a=1"]));
+    });
     let stmt = make_stmt(VariableSetKind::ResetAll, "ignored");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -328,13 +354,12 @@ fn reset_all_existing_tuple_resets_then_updates() {
 
 #[test]
 fn reset_all_existing_tuple_resets_to_empty_deletes_tuple() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = Some(Some(arr(&["a=1"])));
-        RESET_RESULT = None;
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = Some(Some(arr(&["a=1"])));
+        s.reset_result = None;
+    });
     let stmt = make_stmt(VariableSetKind::ResetAll, "ignored");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -346,12 +371,11 @@ fn reset_all_existing_tuple_resets_to_empty_deletes_tuple() {
 
 #[test]
 fn reset_all_null_setconfig_skips_reset_but_deletes_tuple() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = Some(None); // tuple found but setconfig NULL
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = Some(None); // tuple found but setconfig NULL
+    });
     let stmt = make_stmt(VariableSetKind::ResetAll, "ignored");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -362,12 +386,11 @@ fn reset_all_null_setconfig_skips_reset_but_deletes_tuple() {
 
 #[test]
 fn reset_all_no_tuple_is_noop_except_finish() {
-    install_seams();
-    reset();
-    unsafe {
-        VALUESTR = None;
-        FOUND = None;
-    }
+    let _g = begin();
+    cfg(|s| {
+        s.valuestr = None;
+        s.found = None;
+    });
     let stmt = make_stmt(VariableSetKind::ResetAll, "ignored");
     run(|mcx| AlterSetting(mcx, 1, 2, &stmt).unwrap());
 
@@ -376,8 +399,7 @@ fn reset_all_no_tuple_is_noop_except_finish() {
 
 #[test]
 fn drop_setting_passes_oids_through() {
-    install_seams();
-    reset();
+    let _g = begin();
     DropSetting(100, INVALID_OID).unwrap();
     DropSetting(INVALID_OID, 200).unwrap();
     DropSetting(100, 200).unwrap();
@@ -385,7 +407,6 @@ fn drop_setting_passes_oids_through() {
 
 #[test]
 fn apply_setting_runs_scan() {
-    install_seams();
-    reset();
+    let _g = begin();
     ApplySetting(SCAN, 100, 200, GucSource::PGC_S_DATABASE).unwrap();
 }
