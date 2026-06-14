@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModifyTable-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }

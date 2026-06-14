@@ -227,7 +227,7 @@ seam_core::seam!(
     /// the C empty/NULL set. Reads the range table, so fallible.
     pub fn exec_get_updated_cols<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        estate: &types_nodes::EStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
@@ -244,14 +244,3 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_nodes::SlotId>
 );
 
-seam_core::seam!(
-    /// `ExecFindJunkAttributeInTlist(targetlist, attrName)` (execJunk.c): scan
-    /// `target_list` for the junk `TargetEntry` whose `resname` equals
-    /// `attr_name`, returning its `resno` (an `AttrNumber`), or
-    /// `InvalidAttrNumber` (0) when none is found. A pure lookup over the
-    /// (shared, read-only) target list; infallible.
-    pub fn exec_find_junk_attribute_in_tlist<'mcx>(
-        target_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
-        attr_name: &str,
-    ) -> types_core::primitive::AttrNumber
-);
