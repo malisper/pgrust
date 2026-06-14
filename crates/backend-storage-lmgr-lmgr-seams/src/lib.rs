@@ -307,3 +307,44 @@ seam_core::seam!(
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ConditionalLockTuple(relation, tid, lockmode, logLockFailure)` (lmgr.c)
+    /// — try to acquire the heavyweight tuple-tag lock without blocking;
+    /// returns whether it was obtained. Used by `heap_lock_tuple`'s
+    /// `heap_acquire_tuplock` under the Skip / Error wait policies. `Err`
+    /// carries the lock-manager `ereport(ERROR)` surface.
+    pub fn conditional_lock_tuple(
+        relid: Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        lockmode: LOCKMODE,
+        log_lock_failure: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ConditionalXactLockTableWait(xid, logLockFailure)` (lmgr.c) — never
+    /// blocks; returns `true` when `xid` has finished (lock obtained then
+    /// released), `false` if it would have to wait. Used by the heap-AM
+    /// non-blocking lock-wait paths. `Err` carries the lock-manager
+    /// `ereport(ERROR)` surface.
+    pub fn conditional_xact_lock_table_wait(
+        xid: TransactionId,
+        log_lock_failure: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `XactLockTableWait(xid, rel, ctid, oper)` (lmgr.c) — block until `xid`
+    /// commits or aborts, attaching the operation's error context. The seam
+    /// crosses the address (relation name + ctid block/offset) and `oper` the
+    /// owner needs to build `XactLockTableWaitInfo` for the error-context
+    /// callback. Used by the heap-AM lock-wait paths. `Err` carries the wait
+    /// `ereport(ERROR)` surface.
+    pub fn xact_lock_table_wait(
+        xid: TransactionId,
+        rel_name: alloc::string::String,
+        ctid: types_tuple::heaptuple::ItemPointerData,
+        oper: types_storage::lock::XLTW_Oper,
+    ) -> PgResult<()>
+);

@@ -1070,7 +1070,7 @@ fn HeapTupleHasExternal(tp: &FormedTuple<'_>) -> bool {
 }
 
 /// `HeapTupleHeaderGetCmax(tup)` via the combo-cid owner seam.
-fn HeapTupleHeaderGetCmax(hdr: &HeapTupleHeaderData<'_>) -> CommandId {
+pub(crate) fn HeapTupleHeaderGetCmax(hdr: &HeapTupleHeaderData<'_>) -> CommandId {
     combocid_seam::heap_tuple_header_get_cmax::call(hdr)
 }
 

@@ -159,6 +159,40 @@ pub struct HotSearchResult<'mcx> {
     pub all_dead: Option<bool>,
 }
 
+/// The result of [`heap_fetch`] — C's `bool` return plus the by-pointer
+/// outputs (`*userbuf` pinned buffer, `*tuple` filled in place).
+#[derive(Clone, Debug)]
+pub struct HeapFetchResult<'mcx> {
+    /// C's `bool` return: the tuple at `tid` exists and satisfies `snapshot`.
+    pub found: bool,
+    /// C's `*userbuf` — the buffer pinned (and, on success, holding the tuple).
+    /// `InvalidBuffer` when the page could not be read.
+    pub userbuf: Buffer,
+    /// C's `*tuple` — the filled `HeapTupleData` (t_self / t_data / t_len /
+    /// t_tableOid). Only meaningful when `found`.
+    pub tuple: HeapTupleData<'mcx>,
+}
+
+seam_core::seam!(
+    /// `heap_fetch(relation, snapshot, tuple, userbuf, keep_buf)` (heapam.c) —
+    /// look up the tuple at `tuple.t_self`, pin its page, and test it against
+    /// `snapshot`. On a found+visible tuple the result carries the pinned
+    /// `userbuf` (caller must release) and the filled `HeapTupleData`. With
+    /// `keep_buf`, the buffer is kept pinned even when the tuple is not visible
+    /// (so the caller can inspect it); otherwise it is released on a miss.
+    /// Used by `heap_lock_updated_tuple_rec` to walk the update chain under
+    /// `SnapshotAny`. `Err` carries the clog/multixact/buffer `ereport(ERROR)`
+    /// surface. **Owned by the heapam scan family (heapam.c); uninstalled — and
+    /// panics — until that family lands.**
+    pub fn heap_fetch<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        snapshot: &SnapshotData,
+        tid: ItemPointerData,
+        keep_buf: bool,
+    ) -> PgResult<HeapFetchResult<'mcx>>
+);
+
 seam_core::seam!(
     /// `heap_hot_search_buffer(tid, rel, buf, snapshot, heapTuple, all_dead,
     /// first_call)` (heapam.c) — search the HOT chain rooted at `tid` (on the

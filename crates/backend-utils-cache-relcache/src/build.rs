@@ -178,6 +178,7 @@ fn project_form_pg_class<'mcx>(
         relispopulated: f.relispopulated,
         relreplident: f.relreplident as u8,
         relispartition: f.relispartition,
+        relfrozenxid: f.relfrozenxid,
     })
 }
 

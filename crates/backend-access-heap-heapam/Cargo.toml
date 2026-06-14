@@ -57,3 +57,12 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 types-nodes = { path = "../types-nodes" }
 types-datum = { path = "../types-datum" }
+# F4 LOCK + SPECULATIVE + INPLACE: lmgr tuple/xact-wait seams, the lock-method
+# conflict table, the log_lock_failures GUC, snapshot invalidation, the
+# bootstrap-mode probe, and the snapmgr-pc TransactionXmin accessor.
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }

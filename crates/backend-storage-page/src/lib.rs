@@ -371,11 +371,15 @@ impl<'a> PageRef<'a> {
         self.read_u16(OFF_PD_FLAGS)
     }
 
-    fn pd_lower(&self) -> LocationIndex {
+    /// `((PageHeader) page)->pd_lower` — public read accessor (the heap-AM
+    /// in-place update builds a post-mutation FPI image and must read the page's
+    /// free-space boundaries directly, mirroring C's `PageHeader` field reads).
+    pub fn pd_lower(&self) -> LocationIndex {
         self.read_u16(OFF_PD_LOWER)
     }
 
-    fn pd_upper(&self) -> LocationIndex {
+    /// `((PageHeader) page)->pd_upper` — public read accessor (see `pd_lower`).
+    pub fn pd_upper(&self) -> LocationIndex {
         self.read_u16(OFF_PD_UPPER)
     }
 

@@ -31,7 +31,9 @@
 pub mod delete;
 pub mod freeze;
 pub mod index_delete;
+pub mod inplace;
 pub mod insert;
+pub mod lock;
 
 use mcx::Mcx;
 use types_core::primitive::{
@@ -464,6 +466,38 @@ pub fn init_seams() {
     });
     heapam_seam::simple_heap_insert::set(|mcx, rel, tup| {
         insert::simple_heap_insert(mcx, rel, tup)
+    });
+
+    // F4 LOCK — the lock-wait primitives F0 declared as owned by this family.
+    heapam_seam::heap_acquire_tuplock::set(|relation, tid, mode, wait_policy, have_tuple_lock| {
+        // The seam returns C's `*have_tuple_lock`; the `acquired` bool is only
+        // false under the Skip wait policy (which the blocking delete callers
+        // never use), so collapse the pair to `have_tuple_lock`.
+        let (_acquired, htl) =
+            lock::heap_acquire_tuplock(relation, tid, mode, wait_policy, have_tuple_lock)?;
+        Ok(htl)
+    });
+    heapam_seam::unlock_tuple_tuplock::set(|relation, tid, mode| {
+        lock::unlock_tuple_tuplock(relation, tid, mode)
+    });
+    heapam_seam::does_multi_xact_id_conflict::set(|multi, infomask, lockmode| {
+        let ctx = mcx::MemoryContext::new("does_multi_xact_id_conflict");
+        let mcx = ctx.mcx();
+        let c = lock::DoesMultiXactIdConflict(mcx, multi, infomask, lockmode)?;
+        Ok(heapam_seam::MultiXactConflict {
+            conflict: c.conflict,
+            current_is_member: c.current_is_member,
+        })
+    });
+    heapam_seam::multi_xact_id_wait::set(|multi, status, infomask, rel, tid, oper| {
+        let ctx = mcx::MemoryContext::new("multi_xact_id_wait");
+        let mcx = ctx.mcx();
+        lock::multi_xact_id_wait(mcx, multi, status, infomask, rel, tid, oper)
+    });
+    // `xact_lock_table_wait` is lmgr's XactLockTableWait; the heap-AM lock
+    // family owns the seam declaration and routes it to the lmgr seam.
+    heapam_seam::xact_lock_table_wait::set(|xwait, rel, tid, oper| {
+        lock::xact_lock_table_wait(xwait, rel, tid, oper)
     });
 
     // F3 DELETE — the cross-family heap-delete entry points.

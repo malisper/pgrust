@@ -258,13 +258,16 @@ seam_core::seam!(
     pub fn visibilitymap_set(args: VmSetArgs) -> PgResult<u8>
 );
 seam_core::seam!(
-    /// `visibilitymap_clear(rel, heap_blk, vmbuf, flags)`.
+    /// `visibilitymap_clear(rel, heap_blk, vmbuf, flags)` — clear the given VM
+    /// bits for `heap_blk`. Returns C's `bool`: whether any bit was actually
+    /// cleared (heap_lock_tuple / heap_lock_updated_tuple_rec use it to decide
+    /// whether to set `XLH_LOCK_ALL_FROZEN_CLEARED`).
     pub fn visibilitymap_clear(
         rel: Oid,
         heap_blk: BlockNumber,
         vmbuf: Buffer,
         flags: u8,
-    ) -> PgResult<()>
+    ) -> PgResult<bool>
 );
 
 // =======================================================================

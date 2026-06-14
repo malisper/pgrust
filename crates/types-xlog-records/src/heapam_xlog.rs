@@ -198,7 +198,20 @@ impl xl_heap_confirm {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self { offnum: u16_at(rec, 0) }
     }
+
+    /// Serialize into the `SizeOfHeapConfirm`-byte on-disk layout
+    /// (`offnum`@0).
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapConfirm] {
+        let mut out = [0u8; SizeOfHeapConfirm];
+        out[0..2].copy_from_slice(&self.offnum.to_ne_bytes());
+        out
+    }
 }
+
+/// `SizeOfHeapConfirm` (`access/heapam_xlog.h`): `offsetof(xl_heap_confirm,
+/// offnum) + sizeof(OffsetNumber)` == 2.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapConfirm: usize = 2;
 
 /// `xl_heap_lock`: same layout as [`xl_heap_delete`].
 #[derive(Clone, Copy, Debug)]
@@ -218,7 +231,28 @@ impl xl_heap_lock {
             flags: u8_at(rec, 7),
         }
     }
+
+    /// Serialize into the `SizeOfHeapLock`-byte on-disk layout (same field
+    /// order as `xl_heap_delete`).
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapLock] {
+        let mut out = [0u8; SizeOfHeapLock];
+        out[0..4].copy_from_slice(&self.xmax.to_ne_bytes());
+        out[4..6].copy_from_slice(&self.offnum.to_ne_bytes());
+        out[6] = self.infobits_set;
+        out[7] = self.flags;
+        out
+    }
 }
+
+/// `SizeOfHeapLock` (`access/heapam_xlog.h`): `offsetof(xl_heap_lock, flags) +
+/// sizeof(uint8)` == 8.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapLock: usize = 8;
+
+/// `XLH_LOCK_ALL_FROZEN_CLEARED` (`access/heapam_xlog.h`) — the `flags` bit of
+/// `xl_heap_lock` / `xl_heap_lock_updated` saying the all-frozen VM bit was
+/// cleared.
+pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 0x01;
 
 /// `xl_heap_lock_updated`: same layout as [`xl_heap_lock`].
 #[derive(Clone, Copy, Debug)]
@@ -238,7 +272,23 @@ impl xl_heap_lock_updated {
             flags: u8_at(rec, 7),
         }
     }
+
+    /// Serialize into the `SizeOfHeapLockUpdated`-byte on-disk layout (same
+    /// field order as `xl_heap_lock`).
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapLockUpdated] {
+        let mut out = [0u8; SizeOfHeapLockUpdated];
+        out[0..4].copy_from_slice(&self.xmax.to_ne_bytes());
+        out[4..6].copy_from_slice(&self.offnum.to_ne_bytes());
+        out[6] = self.infobits_set;
+        out[7] = self.flags;
+        out
+    }
 }
+
+/// `SizeOfHeapLockUpdated` (`access/heapam_xlog.h`):
+/// `offsetof(xl_heap_lock_updated, flags) + sizeof(uint8)` == 8.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapLockUpdated: usize = 8;
 
 /// `xl_heap_inplace`: `{OffsetNumber offnum; Oid dbId; Oid tsId;
 /// bool relcacheInitFileInval; int nmsgs;
@@ -267,7 +317,25 @@ impl xl_heap_inplace {
     pub fn msgs(rec: &[u8]) -> SharedInvalMessages<'_> {
         SharedInvalMessages::from_bytes(&rec[20..])
     }
+
+    /// Serialize the fixed `MinSizeOfHeapInplace`-byte struct part (the
+    /// trailing `msgs` array is registered separately). C field order:
+    /// `offnum`@0, `dbId`@4, `tsId`@8, `relcacheInitFileInval`@12, `nmsgs`@16.
+    pub fn to_bytes(&self) -> [u8; MinSizeOfHeapInplace] {
+        let mut out = [0u8; MinSizeOfHeapInplace];
+        out[0..2].copy_from_slice(&self.offnum.to_ne_bytes());
+        out[4..8].copy_from_slice(&self.dbId.to_ne_bytes());
+        out[8..12].copy_from_slice(&self.tsId.to_ne_bytes());
+        out[12] = self.relcacheInitFileInval as u8;
+        out[16..20].copy_from_slice(&self.nmsgs.to_ne_bytes());
+        out
+    }
 }
+
+/// `MinSizeOfHeapInplace` (`access/heapam_xlog.h`): `offsetof(xl_heap_inplace,
+/// msgs)` == 20 (the fixed struct part before the flexible `msgs` array).
+#[allow(non_upper_case_globals)]
+pub const MinSizeOfHeapInplace: usize = 20;
 
 /// `xl_heap_prune`: `{uint8 reason; uint8 flags;}`. If
 /// `XLHP_HAS_CONFLICT_HORIZON` is set, the conflict horizon XID follows,
