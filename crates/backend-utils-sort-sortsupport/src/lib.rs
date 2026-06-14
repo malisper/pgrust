@@ -20,7 +20,12 @@ use mcx::Mcx;
 use types_core::primitive::AttrNumber;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_tuple::backend_access_common_heaptuple::Datum;
+// Canonical value type (`types_tuple::Datum<'mcx>`, the ByVal/ByRef enum) —
+// this crate's comparator API (`apply_sort_comparator` / `comparison_shim`)
+// threads canonical `Datum<'mcx>` end-to-end. It drops to the bare-word
+// `types_datum::Datum` ONLY at the still-bare-word fmgr-ABI scalar edge
+// (`function_call2_coll` / `oid_function_call1_coll` argument/return slots).
+use types_tuple::Datum;
 use types_rel::Relation;
 use types_sortsupport::{
     SortComparatorId, SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
