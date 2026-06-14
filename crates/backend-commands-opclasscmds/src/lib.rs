@@ -57,12 +57,9 @@ use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_core::fmgr::F_OIDEQ;
 use backend_access_common_scankey::ScanKeyInit;
-// The bare-word `types_datum::Datum` survives only as the
-// `ScanKeyData.sk_argument` ABI/storage edge: `ScanKeyInit` stamps the raw
-// comparison word into the scan key (the genam/fmgr edge still consumes a
-// machine word, as `ObjectIdGetDatum` does in C). All in-crate Datum traffic
-// uses the canonical `backend_access_common_heaptuple::Datum<'mcx>` enum.
-use types_datum::datum::Datum as ScanKeyWord;
+// All in-crate Datum traffic — including the `ScanKeyData.sk_argument`
+// scan-key edge stamped by `ScanKeyInit` — uses the canonical unified
+// `types_tuple::Datum<'mcx>` enum (`backend_access_common_heaptuple::Datum`).
 use backend_access_common_heaptuple::heap_deform_tuple;
 use types_tuple::heaptuple::ItemPointerData;
 use types_catalog::catalog::{

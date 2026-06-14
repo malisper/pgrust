@@ -3112,7 +3112,6 @@ dependencies = [
  "types-cache",
  "types-catalog",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-opclass",
