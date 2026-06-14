@@ -8683,8 +8683,8 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8703,6 +8703,7 @@ dependencies = [
  "types-error",
  "types-jsonb",
  "types-numeric",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8843,7 +8844,6 @@ name = "backend-utils-adt-numeric-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-datum",
  "types-error",
  "types-tuple",
 ]
@@ -8957,6 +8957,7 @@ dependencies = [
  "types-fmgr",
  "types-rangetypes",
  "types-scan",
+ "types-tuple",
 ]
 
 [[package]]

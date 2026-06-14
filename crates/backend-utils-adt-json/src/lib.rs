@@ -78,6 +78,20 @@ pub use types_json::{
     JsonTokenType as JsonToken, JsonTypeCategory as JsonType,
 };
 
+/// Bridge a bare-word `ScalarWord` (`types_datum::Datum`, a by-value machine
+/// word) into the canonical unified `types_tuple::Datum<'mcx>` value the
+/// `jsonfuncs`/`json` seams now take by reference. `json.c` is a pure value
+/// relay: every `ScalarWord` it forwards across an output-function /
+/// type-classification / datetime-encode seam is a by-value scalar word (the
+/// caller already detoasted at the executor/fmgr boundary), so it rides the
+/// `ByVal` arm exactly as the C `Datum` did. This is a behaviour-preserving
+/// word forward at the (still bare-word internally) seam ABI edge until the
+/// internal relay model itself migrates.
+#[inline]
+fn canon(val: ScalarWord) -> types_tuple::Datum<'static> {
+    types_tuple::Datum::from_usize(val.as_usize())
+}
+
 /// C: `PROVOLATILE_IMMUTABLE` (`'i'`) from `catalog/pg_proc.h`.
 pub const PROVOLATILE_IMMUTABLE: u8 = b'i';
 
@@ -233,7 +247,7 @@ pub fn datum_to_json_internal(
             }
         }
         JSONTYPE_NUMERIC => {
-            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, &canon(val))?;
 
             // Don't quote a non-key if it's a valid JSON number (i.e., not
             // "Infinity", "-Infinity", or "NaN"). We open-code the validation:
@@ -252,31 +266,31 @@ pub fn datum_to_json_internal(
             }
         }
         JSONTYPE_DATE => {
-            let buf = JsonEncodeDateTime(val, DATEOID, None)?;
+            let buf = JsonEncodeDateTime(&canon(val), DATEOID, None)?;
             buf_push(result, b'"')?;
             buf_extend(result, buf.as_bytes())?;
             buf_push(result, b'"')?;
         }
         JSONTYPE_TIMESTAMP => {
-            let buf = JsonEncodeDateTime(val, TIMESTAMPOID, None)?;
+            let buf = JsonEncodeDateTime(&canon(val), TIMESTAMPOID, None)?;
             buf_push(result, b'"')?;
             buf_extend(result, buf.as_bytes())?;
             buf_push(result, b'"')?;
         }
         JSONTYPE_TIMESTAMPTZ => {
-            let buf = JsonEncodeDateTime(val, TIMESTAMPTZOID, None)?;
+            let buf = JsonEncodeDateTime(&canon(val), TIMESTAMPTZOID, None)?;
             buf_push(result, b'"')?;
             buf_extend(result, buf.as_bytes())?;
             buf_push(result, b'"')?;
         }
         JSONTYPE_JSON => {
             // JSON and JSONB output will already be escaped.
-            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+            let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, &canon(val))?;
             buf_extend(result, &outputstr)?;
         }
         JSONTYPE_CAST => {
             // outfuncoid refers to a cast function, not an output function.
-            let jsontext = catalog_fmgr::cast_function_call::call(outfuncoid, val)?;
+            let jsontext = catalog_fmgr::cast_function_call::call(outfuncoid, &canon(val))?;
             buf_extend(result, &jsontext)?;
         }
         // C's `switch` has explicit cases above and a `default:` covering
@@ -286,10 +300,10 @@ pub fn datum_to_json_internal(
         JSONTYPE_NULL | JSONTYPE_JSONB | JSONTYPE_OTHER => {
             // special-case text types to save useless palloc/memcpy cycles
             if catalog_fmgr::is_text_output_func::call(outfuncoid) {
-                let txt = catalog_fmgr::text_datum_bytes::call(val)?;
+                let txt = catalog_fmgr::text_datum_bytes::call(&canon(val))?;
                 escape_json_with_len(result, &txt)?;
             } else {
-                let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, val)?;
+                let outputstr = catalog_fmgr::output_function_call::call(outfuncoid, &canon(val))?;
                 escape_json(result, &outputstr)?;
             }
         }
@@ -305,8 +319,20 @@ pub fn datum_to_json_internal(
 /// the formatted string. `tzp`, if `Some`, is the time-zone offset in seconds
 /// for `timestamptz`. The body is entirely the datetime subsystem's field
 /// conversions + `Encode*` routines, reached through the seam.
-pub fn JsonEncodeDateTime(value: ScalarWord, typid: Oid, tzp: Option<i32>) -> PgResult<String> {
-    backend_utils_adt_timestamp_seams::json_encode_datetime::call(value, typid, tzp)
+pub fn JsonEncodeDateTime<'mcx>(
+    value: &types_tuple::Datum<'mcx>,
+    typid: Oid,
+    tzp: Option<i32>,
+) -> PgResult<String> {
+    // The actual datetime field-conversion owner (`timestamp.c`) is unported and
+    // its `json_encode_datetime` seam still carries the bare-word
+    // `types_datum::Datum` ABI. A datetime is a by-value word (`ByVal`), so we
+    // forward the canonical value's machine word unchanged.
+    backend_utils_adt_timestamp_seams::json_encode_datetime::call(
+        ScalarWord::from_usize(value.as_usize()),
+        typid,
+        tzp,
+    )
 }
 
 /// C: `array_dim_to_json(StringInfo result, int dim, int ndims, int *dims,
@@ -380,7 +406,7 @@ pub fn array_to_json_internal(
     result: &mut PgVec<'_, u8>,
     use_line_feeds: bool,
 ) -> PgResult<()> {
-    let arr = catalog_fmgr::deconstruct_array::call(array)?;
+    let arr = catalog_fmgr::deconstruct_array::call(&canon(array))?;
     // `deconstruct_array` now yields the canonical `Datum<'mcx>` element model
     // (types-json migration); `array_dim_to_json` / `datum_to_json_internal`
     // drive the per-element `OutputFunctionCall`, which consumes the scalar
@@ -438,7 +464,7 @@ pub fn composite_to_json(
     // precalculate the separator (avoids strlen in C).
     let sep: &[u8] = if use_line_feeds { b",\n " } else { b"," };
 
-    let fields = catalog_fmgr::walk_composite::call(composite)?;
+    let fields = catalog_fmgr::walk_composite::call(&canon(composite))?;
 
     buf_push(result, b'{')?;
 

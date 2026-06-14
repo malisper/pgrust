@@ -1193,7 +1193,7 @@ fn convertJsonbScalar<'mcx>(
             // ABI edge. The shim falls away when the owner's seam contract
             // migrates; nothing in this crate stores `types_datum::Datum`.
             let s = backend_utils_adt_json_seams::json_encode_datetime::call(
-                types_datum::Datum::from_usize(dt.value),
+                &types_tuple::Datum::from_usize(dt.value),
                 dt.typid,
                 Some(dt.tz),
             )?;

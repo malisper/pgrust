@@ -247,7 +247,16 @@ pub fn range_subdiff(typcache: &TypeCacheEntry, v1: Datum, v2: Datum) -> PgResul
 pub fn numrange_subdiff(v1: Datum, v2: Datum) -> PgResult<f64> {
     // numresult = DirectFunctionCall2(numeric_sub, v1, v2);
     // floatresult = DatumGetFloat8(DirectFunctionCall1(numeric_float8, numresult));
-    numeric_subdiff::call(v1, v2)
+    //
+    // `numeric_subdiff` now takes the canonical unified `types_tuple::Datum<'mcx>`
+    // by value. `v1`/`v2` are pointer-bearing `numeric` Datums (detoasted at the
+    // caller's fmgr boundary), so the machine word forwards unchanged onto the
+    // canonical `ByVal` arm, exactly as C's `DirectFunctionCall2` treats the
+    // `Datum` as a `Numeric` pointer.
+    numeric_subdiff::call(
+        types_tuple::Datum::from_usize(v1.as_usize()),
+        types_tuple::Datum::from_usize(v2.as_usize()),
+    )
 }
 
 /// `daterange_subdiff(v1, v2)` (rangetypes.c:1719).
