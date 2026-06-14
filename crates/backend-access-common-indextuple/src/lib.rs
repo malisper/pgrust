@@ -69,7 +69,11 @@ use backend_access_common_heaptuple::{heap_compute_data_size, heap_fill_tuple};
 use backend_utils_error::ereport;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Size, INDEX_MAX_KEYS};
-use types_datum::Datum;
+// ABI-edge bare scalar word: the `index_form_tuple` seam's `values: &[ScalarWord]`
+// is the C/nbtree call contract (`Datum *values`), an audited external types-nodes
+// ABI edge that stays a plain machine word.  The crate's own model is the
+// canonical `TupleValue` enum (`types_tuple::backend_access_common_heaptuple`).
+use types_datum::Datum as ScalarWord;
 use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
@@ -403,7 +407,7 @@ pub fn nocache_index_getattr<'mcx>(
     // nulls scan still walks the bitmap; mirror that by returning NULL for the
     // target if it is null.
     if bp.is_some_and(|bits| att_isnull(index, bits)) {
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((TupleValue::null(), true));
     }
 
     // tp = (char *) tup + IndexInfoFindDataOffset(tup->t_info);
@@ -447,7 +451,7 @@ pub fn nocache_index_getattr<'mcx>(
     }
 
     // Unreachable: the `cur == index` arm always returns for a non-null target.
-    Ok((TupleValue::ByVal(Datum::null()), true))
+    Ok((TupleValue::null(), true))
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +498,7 @@ pub fn index_deform_tuple_internal<'mcx>(
 
         if hasnulls && bp.is_some_and(|bits| att_isnull(attnum, bits)) {
             // values[attnum] = (Datum) 0; isnull[attnum] = true;
-            out.push((TupleValue::ByVal(Datum::null()), true));
+            out.push((TupleValue::null(), true));
             slow = true; // can't use attcacheoff anymore
             continue;
         }
@@ -607,7 +611,7 @@ pub fn index_truncate_tuple<'mcx>(
 pub fn index_form_tuple_seam<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-    values: &[Datum],
+    values: &[ScalarWord],
     isnull: &[bool],
     ht_ctid: ItemPointerData,
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -671,7 +675,7 @@ pub fn init_seams() {
 /// copy the on-disk varlena/cstring bytes — which the safe byte model cannot do
 /// from a bare word. That is the unresolved slot-payload frontier (mirrors
 /// `execTuples`), so it panics loudly here.
-fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: Datum, isnull: bool) -> TupleValue<'mcx> {
+fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: ScalarWord, isnull: bool) -> TupleValue<'mcx> {
     if isnull || att.attbyval {
         TupleValue::ByVal(datum)
     } else {
@@ -755,7 +759,7 @@ fn fetchatt<'mcx>(
     off: usize,
 ) -> PgResult<TupleValue<'mcx>> {
     if att.attbyval {
-        Ok(TupleValue::ByVal(fetch_att_byval(tp, off, att.attlen)))
+        Ok(fetch_att_byval(tp, off, att.attlen))
     } else {
         let end = att_addlength_pointer(off, att.attlen, tp, off);
         Ok(TupleValue::ByRef(slice_in(mcx, &tp[off..end])?))
@@ -764,14 +768,14 @@ fn fetchatt<'mcx>(
 
 /// `fetch_att(T, attbyval=true, attlen)` (tupmacs.h) for a by-value field.
 #[inline]
-fn fetch_att_byval(tp: &[u8], off: usize, attlen: i16) -> Datum {
+fn fetch_att_byval<'mcx>(tp: &[u8], off: usize, attlen: i16) -> TupleValue<'mcx> {
     match attlen {
-        1 => Datum::from_usize(tp[off] as i8 as i64 as usize),
-        2 => Datum::from_usize(i16::from_ne_bytes([tp[off], tp[off + 1]]) as i64 as usize),
-        4 => Datum::from_usize(
+        1 => TupleValue::from_usize(tp[off] as i8 as i64 as usize),
+        2 => TupleValue::from_usize(i16::from_ne_bytes([tp[off], tp[off + 1]]) as i64 as usize),
+        4 => TupleValue::from_usize(
             i32::from_ne_bytes([tp[off], tp[off + 1], tp[off + 2], tp[off + 3]]) as i64 as usize,
         ),
-        8 => Datum::from_usize(usize::from_ne_bytes([
+        8 => TupleValue::from_usize(usize::from_ne_bytes([
             tp[off],
             tp[off + 1],
             tp[off + 2],
