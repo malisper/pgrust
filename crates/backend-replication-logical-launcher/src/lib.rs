@@ -38,16 +38,19 @@ use types_core::xact::InvalidXLogRecPtr;
 // `types_tuple::Datum` (the `bgw_main_arg` writes use
 // `types_tuple::Datum::{from_i32,null}().as_usize()` to fill the raw-word
 // `usize` ABI/storage field on `types_bgworker`'s `BackgroundWorker`). The
-// transitional bare-word shim `types_datum::Datum` is kept ONLY at the audited
-// external ABI/seam edges whose contracts have NOT migrated yet: the
-// `backend-storage-ipc-seams` `before_shmem_exit` callback registration (whose
-// `PgOnExitCallback` signature is still `fn(i32, types_datum::Datum)`), and the
+// transitional bare-word shim `types_datum::Datum` is kept ONLY at the one
+// audited external ABI/seam edge whose contract has NOT migrated: the
+// `bgworker_main_type` entry point [`ApplyLauncherMain`], whose `main_arg` is
+// the raw `bgw_main_arg (Datum)` machine word the postmaster's DSM worker slot
+// carries. The `backend-utils-fmgr-fmgr-seams` `call_bgworker_entrypoint` seam
+// that resolves and calls this entry still passes the bare-word
+// `types_datum::Datum` at that storage/ABI edge (the `types-bgworker` model
+// owns the `bgw_main_arg` field and is not part of this migration), so the
+// parameter stays `types_datum::Datum` until that owner migrates. The
+// `before_shmem_exit` callback registration and the
 // `backend-utils-fmgr-funcapi-seams` set-returning-function plumbing
-// (`materialized_srf_putvalues` / `cstring_get_text_datum` and the fmgr return
-// value, all still `types_datum::Datum`). Every such site is qualified
-// `types_datum::Datum` at the edge; those move to the canonical type once their
-// owning seam contracts migrate. Mirrors the convention in
-// `backend-replication-slot` (shmem-exit callback edge).
+// (`materialized_srf_putvalues` / `cstring_get_text_datum` and this function's
+// fmgr return value) are all on the canonical `types_tuple::Datum` now.
 use types_storage::storage::{
     dsa_handle as DsaHandle, dshash_table_handle as DshashTableHandle, DsaArea, DshashKeyKind,
     DshashParameters, DshashTable, DSM_HANDLE_INVALID as DSA_HANDLE_INVALID,
@@ -870,7 +873,7 @@ pub fn logicalrep_worker_attach(slot: i32) -> PgResult<()> {
     my_logical_rep_worker_slot().set(Some(slot));
     let my_pid = globals::my_proc_pid::call();
     with_workers(|ws| ws[slot as usize].proc_pid = Some(my_pid));
-    ipc::before_shmem_exit::call(logicalrep_worker_onexit, types_datum::Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_worker_onexit, types_tuple::Datum::from_usize(0))?;
 
     worker_lock_release()?;
     Ok(())
@@ -932,14 +935,14 @@ fn my_worker_subid() -> PgResult<Oid> {
 // ===========================================================================
 
 /// `logicalrep_launcher_onexit(code, arg)` (launcher.c).
-fn logicalrep_launcher_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn logicalrep_launcher_onexit(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // LogicalRepCtx->launcher_pid = 0;
     with_ctx(|c| c.launcher_pid = 0);
     Ok(())
 }
 
 /// `logicalrep_worker_onexit(code, arg)` (launcher.c).
-fn logicalrep_worker_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn logicalrep_worker_onexit(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // Disconnect gracefully from the remote side.
     if worker::have_walrcv_conn::call() {
         worker::walrcv_disconnect::call()?;
@@ -1225,7 +1228,7 @@ pub fn ApplyLauncherMain(_main_arg: types_datum::Datum) -> PgResult<()> {
         .errmsg_internal("logical replication launcher started")
         .finish(error_location())?;
 
-    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, types_datum::Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, types_tuple::Datum::from_usize(0))?;
 
     debug_assert!(with_ctx(|c| c.launcher_pid) == 0);
     with_ctx(|c| c.launcher_pid = globals::my_proc_pid::call());
@@ -1373,10 +1376,10 @@ pub fn GetLeaderApplyWorkerPid(pid: i32) -> PgResult<i32> {
 /// `pg_stat_get_subscription(PG_FUNCTION_ARGS)` (launcher.c). Returns the state
 /// of the subscriptions. `mcx` is the call's memory context (for the text
 /// column and the materialized tuplestore the funcapi seam fills).
-pub fn pg_stat_get_subscription(
-    mcx: mcx::Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<types_datum::Datum> {
+pub fn pg_stat_get_subscription<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<types_tuple::Datum<'mcx>> {
     // Oid subid = PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
     let subid: Oid = funcapi::srf_arg0_oid::call(fcinfo).unwrap_or(InvalidOid);
 
@@ -1405,24 +1408,27 @@ pub fn pg_stat_get_subscription(
             continue;
         }
 
-        let mut values: [types_datum::Datum; PG_STAT_GET_SUBSCRIPTION_COLS] =
-            [types_datum::Datum::from_usize(0); PG_STAT_GET_SUBSCRIPTION_COLS];
+        // `materialized_srf_putvalues` takes the canonical unified value; build
+        // the row as `types_tuple::Datum` (the scalar columns are by-value words,
+        // the text column is wrapped from the varlena owner's bare word below).
+        let mut values: [types_tuple::Datum<'mcx>; PG_STAT_GET_SUBSCRIPTION_COLS] =
+            core::array::from_fn(|_| types_tuple::Datum::from_usize(0));
         let mut nulls: [bool; PG_STAT_GET_SUBSCRIPTION_COLS] =
             [false; PG_STAT_GET_SUBSCRIPTION_COLS];
 
         // Column 0: subid.
-        values[0] = types_datum::Datum::from_oid(w.subid);
+        values[0] = types_tuple::Datum::from_oid(w.subid);
         // Column 1: relid (only for tablesync workers, else null).
         if w.is_tablesync_worker() {
-            values[1] = types_datum::Datum::from_oid(w.relid);
+            values[1] = types_tuple::Datum::from_oid(w.relid);
         } else {
             nulls[1] = true;
         }
         // Column 2: worker pid (always present).
-        values[2] = types_datum::Datum::from_i32(worker_pid);
+        values[2] = types_tuple::Datum::from_i32(worker_pid);
         // Column 3: leader_pid (only for parallel apply workers, else null).
         if w.is_parallel_apply_worker() {
-            values[3] = types_datum::Datum::from_i32(w.leader_pid);
+            values[3] = types_tuple::Datum::from_i32(w.leader_pid);
         } else {
             nulls[3] = true;
         }
@@ -1430,31 +1436,31 @@ pub fn pg_stat_get_subscription(
         if XLogRecPtrIsInvalid(w.last_lsn) {
             nulls[4] = true;
         } else {
-            values[4] = types_datum::Datum::from_u64(w.last_lsn);
+            values[4] = types_tuple::Datum::from_u64(w.last_lsn);
         }
         // Column 5: last_send_time (null if 0).
         if w.last_send_time == 0 {
             nulls[5] = true;
         } else {
-            values[5] = types_datum::Datum::from_i64(w.last_send_time);
+            values[5] = types_tuple::Datum::from_i64(w.last_send_time);
         }
         // Column 6: last_recv_time (null if 0).
         if w.last_recv_time == 0 {
             nulls[6] = true;
         } else {
-            values[6] = types_datum::Datum::from_i64(w.last_recv_time);
+            values[6] = types_tuple::Datum::from_i64(w.last_recv_time);
         }
         // Column 7: reply_lsn (null if invalid).
         if XLogRecPtrIsInvalid(w.reply_lsn) {
             nulls[7] = true;
         } else {
-            values[7] = types_datum::Datum::from_u64(w.reply_lsn);
+            values[7] = types_tuple::Datum::from_u64(w.reply_lsn);
         }
         // Column 8: reply_time (null if 0).
         if w.reply_time == 0 {
             nulls[8] = true;
         } else {
-            values[8] = types_datum::Datum::from_i64(w.reply_time);
+            values[8] = types_tuple::Datum::from_i64(w.reply_time);
         }
         // Column 9: worker type text.
         let worker_type = match w.wtype {
@@ -1483,7 +1489,7 @@ pub fn pg_stat_get_subscription(
 
     worker_lock_release()?;
 
-    Ok(types_datum::Datum::from_usize(0)) // (Datum) 0
+    Ok(types_tuple::Datum::null()) // (Datum) 0
 }
 
 // ===========================================================================

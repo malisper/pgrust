@@ -14,10 +14,9 @@ use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use types_core::catalog::C_COLLATION_OID;
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
-use types_datum::Datum;
 use types_error::PgResult;
 use types_scan::scankey::{ScanKeyData, StrategyNumber, SK_SEARCHNOTNULL, SK_SEARCHNULL};
-use types_tuple::backend_access_common_heaptuple::Datum as ScanKeyArg;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `ScanKeyEntryInitialize(entry, flags, attributeNumber, strategy, subtype,
 /// collation, procedure, argument)` (`access/common/scankey.c`) — initialize a
@@ -32,22 +31,22 @@ use types_tuple::backend_access_common_heaptuple::Datum as ScanKeyArg;
 /// resolved function's OID. When the procedure is invalid, C asserts the
 /// caller set a NULL-search flag and `MemSet`s `sk_func` to zero; here that is
 /// the empty [`FmgrInfo`].
-pub fn ScanKeyEntryInitialize(
-    entry: &mut ScanKeyData,
+pub fn ScanKeyEntryInitialize<'mcx>(
+    entry: &mut ScanKeyData<'mcx>,
     flags: i32,
     attribute_number: AttrNumber,
     strategy: StrategyNumber,
     subtype: Oid,
     collation: Oid,
     procedure: RegProcedure,
-    argument: Datum,
+    argument: Datum<'mcx>,
 ) -> PgResult<()> {
     entry.sk_flags = flags;
     entry.sk_attno = attribute_number;
     entry.sk_strategy = strategy;
     entry.sk_subtype = subtype;
     entry.sk_collation = collation;
-    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
+    entry.sk_argument = argument;
     // C: if (RegProcedureIsValid(procedure)) fmgr_info(...); else { Assert(...);
     // MemSet(&entry->sk_func, 0, ...) }. RegProcedureIsValid is `!= InvalidOid`.
     if procedure != InvalidOid {
@@ -69,22 +68,22 @@ pub fn ScanKeyEntryInitialize(
 /// CurrentMemoryContext)`. In the owned [`FmgrInfo`] model the carrier holds no
 /// per-context subsidiary state (no `fn_extra`/`fn_mcxt`), so the copy that C
 /// performs is a plain value copy of the resolved metadata.
-pub fn ScanKeyEntryInitializeWithInfo(
-    entry: &mut ScanKeyData,
+pub fn ScanKeyEntryInitializeWithInfo<'mcx>(
+    entry: &mut ScanKeyData<'mcx>,
     flags: i32,
     attribute_number: AttrNumber,
     strategy: StrategyNumber,
     subtype: Oid,
     collation: Oid,
     finfo: &FmgrInfo,
-    argument: Datum,
+    argument: Datum<'mcx>,
 ) {
     entry.sk_flags = flags;
     entry.sk_attno = attribute_number;
     entry.sk_strategy = strategy;
     entry.sk_subtype = subtype;
     entry.sk_collation = collation;
-    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
+    entry.sk_argument = argument;
     // C: fmgr_info_copy(&entry->sk_func, finfo, CurrentMemoryContext).
     entry.sk_func = *finfo;
 }
@@ -100,19 +99,19 @@ pub fn ScanKeyEntryInitializeWithInfo(
 /// fmgr seam ([`fmgr_seams::fmgr_info_check`]), preserving C's eager
 /// lookup-failure surface. Until the fmgr unit lands that seam panics — which
 /// is correct, this is exactly where C does the work.
-pub fn ScanKeyInit(
-    entry: &mut ScanKeyData,
+pub fn ScanKeyInit<'mcx>(
+    entry: &mut ScanKeyData<'mcx>,
     attribute_number: AttrNumber,
     strategy: StrategyNumber,
     procedure: RegProcedure,
-    argument: Datum,
+    argument: Datum<'mcx>,
 ) -> PgResult<()> {
     entry.sk_flags = 0;
     entry.sk_attno = attribute_number;
     entry.sk_strategy = strategy;
     entry.sk_subtype = InvalidOid;
     entry.sk_collation = C_COLLATION_OID;
-    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
+    entry.sk_argument = argument;
     // C: fmgr_info(procedure, &entry->sk_func). The resolved FmgrInfo cannot
     // cross the seam (it embeds the C function pointer); the lookup half runs
     // behind the seam and the carrier records the resolved function's OID.

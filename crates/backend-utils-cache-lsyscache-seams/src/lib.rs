@@ -6,7 +6,23 @@
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{AttrNumber, Oid};
+// `types_datum::Datum` (the bare machine word) is retained ONLY at this unit's
+// two genuine bare-word edges, each flagged `BARE-WORD EDGE` at its decl below:
+//   * `get_attstatsslot_mcv` — its MCV value array mirrors `AttStatsSlot.values`
+//     (`types_selfuncs`, still `PgVec<types_datum::Datum>`) and each element is
+//     fed straight into the `function_call1_coll` fmgr edge (arg still the
+//     bare-word `Datum`); migrating it alone would diverge from those two
+//     still-bare-word contracts (the execTuples canonical-carrier follow-on,
+//     #113).
+//   * `get_subscripting_routines` — carries an opaque `const SubscriptRoutines *`
+//     (the `OidFunctionCall0` result kept opaque, per fmgr `oid_function_call0`),
+//     a pointer, NOT a SQL value: it has no by-value/by-reference shape to move
+//     onto the canonical enum without inventing opacity.
 use types_datum::Datum;
+// Canonical unified value (the Datum-unification keystone). Used for the
+// by-reference `attoptions` (`text[]`) value, which cannot ride the bare scalar
+// word; the owner already returns this canonical type.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
 use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
@@ -131,6 +147,13 @@ seam_core::seam!(
     /// (`get_attstatsslot` returns false). The owner does the matching
     /// `free_attstatsslot` / `ReleaseSysCache`. `Err` carries the catcache /
     /// detoast `ereport(ERROR)`s plus OOM from the copy.
+    ///
+    /// BARE-WORD EDGE (Datum unification): the MCV `values` array is the
+    /// bare-word `types_datum::Datum` because it mirrors `AttStatsSlot.values`
+    /// (still bare-word) and each element flows straight into the bare-word
+    /// `function_call1_coll` fmgr edge in `ExecHashBuildSkewHash`. Threading the
+    /// canonical carrier here is the execTuples canonical-carrier follow-on
+    /// (#113) — it must move with `AttStatsSlot` + the fmgr arg, not alone.
     pub fn get_attstatsslot_mcv<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
@@ -672,7 +695,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         relid: Oid,
         attnum: i16,
-    ) -> PgResult<Option<Datum>>
+    ) -> PgResult<Option<DatumV<'mcx>>>
 );
 
 // ---- function (pg_proc) ---------------------------------------------------
@@ -889,6 +912,11 @@ seam_core::seam!(
     /// — see the fmgr `oid_function_call0` seam) and its `typelem`. `None` means
     /// the type is not subscriptable (the C NULL). `Datum` carries the
     /// `const SubscriptRoutines *`.
+    ///
+    /// BARE-WORD EDGE (Datum unification): this `Datum` is an opaque
+    /// `const SubscriptRoutines *` pointer, NOT a SQL value, so it stays the
+    /// bare machine word — it has no by-value/by-reference shape to carry on the
+    /// canonical `Datum<'mcx>` enum and forging one would invent opacity.
     pub fn get_subscripting_routines(typid: Oid) -> PgResult<Option<(Datum, Oid)>>
 );
 

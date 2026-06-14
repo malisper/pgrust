@@ -53,7 +53,7 @@ use backend_storage_ipc_shm_toc::{shm_toc_estimate, ShmToc};
 use backend_utils_error::{elog, ereport, PgResult};
 use mcx::{Allocator, Mcx};
 use types_core::{pid_t, Size, SubTransactionId, XLogRecPtr};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{
     ERRCODE_ADMIN_SHUTDOWN, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
@@ -733,6 +733,9 @@ fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32 {
 fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32 {
     with_globals(|g| g.get(pcxt).nworkers_launched)
 }
+fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32 {
+    with_globals(|g| g.get(pcxt).nworkers_to_launch)
+}
 fn pcxt_estimator(pcxt: ParallelContextHandle) -> ShmTocEstimatorHandle {
     // The estimator is part of the context; address it by the same slot.
     ShmTocEstimatorHandle(pcxt.0)
@@ -776,6 +779,20 @@ fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
 }
 fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)
+}
+
+/// Accumulate a finishing parallel worker's local index-scan search count into
+/// its slot of the shared `SharedIndexScanInstrumentation`. Mirrors the
+/// `ExecEndIndex(Only)Scan` parallel-worker path:
+/// `winstrument[ParallelWorkerNumber].nsearches += nsearches`. The slot is
+/// picked here because `ParallelWorkerNumber` is parallel.c's per-backend
+/// global (owned by this crate).
+fn accumulate_shared_index_searches(
+    shared_info: &mut types_nodes::SharedIndexScanInstrumentation,
+    nsearches: u64,
+) {
+    let worker = with_globals(|g| g.parallel_worker_number);
+    shared_info.winstrument[worker as usize].nsearches += nsearches;
 }
 
 // ===========================================================================
@@ -1808,7 +1825,7 @@ pub fn at_eoxact_parallel(is_commit: bool) -> PgResult<()> {
 
 /// Main entrypoint for parallel workers. `main_arg` is the `Datum` carrying the
 /// DSM segment handle (`UInt32GetDatum(dsm_segment_handle(seg))`).
-pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
+pub fn parallel_worker_main(main_arg: Datum<'static>) -> PgResult<()> {
     // Set flag to indicate we're initializing a parallel worker.
     rt::set_initializing_parallel_worker::call(true)?;
     with_globals(|g| g.initializing_parallel_worker = true);
@@ -2069,7 +2086,7 @@ fn worker_lookup_opt(toc: ExecShmToc, key: u64) -> usize {
 }
 
 // Convert a `Datum` carrying a `uint32` back to that u32 (UInt32GetDatum inverse).
-fn datum_as_u32(d: Datum) -> u32 {
+fn datum_as_u32(d: Datum<'_>) -> u32 {
     d.as_u32()
 }
 
@@ -2095,7 +2112,7 @@ pub fn parallel_worker_report_last_rec_end(last_rec_end: XLogRecPtr) -> PgResult
 /// `on_dsm_detach`-registered callback: make the leader read once more from our
 /// error queue, then detach from the dsm segment. `arg` is the `Datum` carrying
 /// the segment.
-pub fn parallel_worker_shutdown(_code: i32, arg: Datum) -> PgResult<()> {
+pub fn parallel_worker_shutdown(_code: i32, arg: Datum<'static>) -> PgResult<()> {
     rt::send_parallel_message_signal::call(
         with_globals(|g| g.parallel_leader_pid),
         rt::parallel_leader_proc_number::call(),
@@ -2138,6 +2155,7 @@ pub fn init_seams() {
     use backend_access_transam_parallel_seams as seams;
 
     seams::is_parallel_worker::set(is_parallel_worker);
+    seams::accumulate_shared_index_searches::set(accumulate_shared_index_searches);
     seams::initializing_parallel_worker::set(initializing_parallel_worker);
     seams::handle_parallel_message_interrupt::set(handle_parallel_message_interrupt);
     seams::at_eoxact_parallel::set(at_eoxact_parallel);
@@ -2152,6 +2170,7 @@ pub fn init_seams() {
     seams::destroy_parallel_context::set(destroy_parallel_context);
     seams::pcxt_nworkers::set(pcxt_nworkers);
     seams::pcxt_nworkers_launched::set(pcxt_nworkers_launched);
+    seams::pcxt_nworkers_to_launch::set(pcxt_nworkers_to_launch);
     seams::pcxt_estimator::set(pcxt_estimator);
     seams::pcxt_toc::set(pcxt_toc);
     seams::pwcxt_toc::set(pwcxt_toc);

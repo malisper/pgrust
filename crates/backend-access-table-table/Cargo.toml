@@ -17,4 +17,6 @@ mcx = { path = "../mcx" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 types-storage = { path = "../types-storage" }

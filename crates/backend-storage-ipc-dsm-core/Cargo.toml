@@ -32,6 +32,7 @@ mcx = { path = "../mcx" }
 pg-prng = { path = "../pg-prng" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-freepage = { path = "../types-freepage" }
 types-guc = { path = "../types-guc" }

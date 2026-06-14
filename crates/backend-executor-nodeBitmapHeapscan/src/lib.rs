@@ -603,7 +603,16 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
     // ExecInitResultTypeTL(&scanstate->ss.ps);
     execTuples::exec_init_result_type_tl::call(&mut scanstate.ss.ps, estate)?;
     // ExecAssignScanProjectionInfo(&scanstate->ss);
-    execUtils_seams::exec_assign_scan_projection_info::call(&mut scanstate.ss, estate)?;
+    //   == ExecConditionalAssignProjectionInfo(&node->ps, tupdesc, scan->scanrelid)
+    // The BitmapHeapScan plan node is not a `types_nodes::Node` variant (its plan
+    // type lives in this crate's `nodes` module), so we cannot route through the
+    // varno-deriving `exec_assign_scan_projection_info` provider. Pass the scan's
+    // `scanrelid` directly — exactly what the C plain wrapper forwards.
+    execUtils_seams::exec_assign_scan_projection_info_with_varno::call(
+        &mut scanstate.ss,
+        estate,
+        plan.scan.scanrelid as i32,
+    )?;
 
     // initialize child expressions
     // scanstate->ss.ps.qual = ExecInitQual(node->scan.plan.qual, scanstate);

@@ -5,7 +5,7 @@ use types_core::{
 };
 use types_error::PgResult;
 
-use crate::backend_access_common_heaptuple::TupleValue;
+use crate::backend_access_common_heaptuple::Datum;
 
 pub type bits8 = uint8;
 // In C these are bare pointers to palloc'd structs; here the box allocates in
@@ -580,13 +580,13 @@ impl TupleConstr<'_> {
 /// that Datum is a pointer whose pointee heaptuple.c keeps alive via its
 /// file-static missing-values cache (`missing_hash`/`missing_match`/
 /// `init_missing_cache` + `datumCopy` into `TopMemoryContext`). In the owned
-/// model the value *is* its payload ([`TupleValue`]: a `ByVal` word or the
+/// model the value *is* its payload ([`Datum`]: a `ByVal` word or the
 /// `ByRef` bytes), so the lifetime-extension cache dissolves
 /// (`docs/mctx-design.md`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttrMissing<'mcx> {
     pub am_present: bool,
-    pub am_value: TupleValue<'mcx>,
+    pub am_value: Datum<'mcx>,
 }
 
 impl AttrMissing<'_> {

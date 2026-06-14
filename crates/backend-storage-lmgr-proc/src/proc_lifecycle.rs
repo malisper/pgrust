@@ -31,7 +31,7 @@ use types_core::{
     InvalidLocalTransactionId, InvalidOid, InvalidTransactionId, ProcNumber, XidStatus,
     INVALID_PROC_NUMBER,
 };
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::PgResult;
 use types_storage::lock::LOCKMASK;
 use types_storage::storage::{
@@ -313,7 +313,7 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
 
 /// `RemoveProcFromArray(int code, Datum arg)` — shmem-exit callback that
 /// removes `MyProc` from the procarray.
-pub fn RemoveProcFromArray(_code: i32, _arg: Datum) -> PgResult<()> {
+pub fn RemoveProcFromArray(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
     debug_assert!(seam::my_proc_is_set());
     seam::proc_array_remove(seam::my_proc_number(), InvalidTransactionId);
     Ok(())
@@ -322,7 +322,7 @@ pub fn RemoveProcFromArray(_code: i32, _arg: Datum) -> PgResult<()> {
 /// `ProcKill(int code, Datum arg)` — shmem-exit callback that releases this
 /// backend's `PGPROC`: drop held LWLocks, leave any lock group, push the slot
 /// back onto its freelist.
-pub fn ProcKill(_code: i32, _arg: Datum) -> PgResult<()> {
+pub fn ProcKill(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
     debug_assert!(seam::my_proc_is_set());
     let my_procno = seam::my_proc_number();
 
@@ -415,7 +415,7 @@ pub fn ProcKill(_code: i32, _arg: Datum) -> PgResult<()> {
 
 /// `AuxiliaryProcKill(int code, Datum arg)` — shmem-exit callback releasing an
 /// auxiliary-process `PGPROC` slot.
-pub fn AuxiliaryProcKill(_code: i32, arg: Datum) -> PgResult<()> {
+pub fn AuxiliaryProcKill(_code: i32, arg: Datum<'static>) -> PgResult<()> {
     let proctype = arg.as_i32();
     debug_assert!(proctype >= 0 && proctype < types_storage::storage::NUM_AUXILIARY_PROCS);
 

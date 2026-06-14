@@ -90,10 +90,15 @@ seam_core::seam!(
     /// and append it to the store. The tuple is built/copied into the store's
     /// own context (fallible on OOM). `values` and `nulls` are parallel to
     /// `tdesc`'s attributes.
-    pub fn tuplestore_putvalues(
+    ///
+    /// `values` carries the canonical
+    /// [`types_tuple::backend_access_common_heaptuple::Datum`] (the ByVal/ByRef
+    /// enum), matching the by-value/by-reference column values the owner forms a
+    /// `MinimalTuple` from.
+    pub fn tuplestore_putvalues<'mcx>(
         state: &mut types_nodes::Tuplestorestate<'_>,
         tdesc: &types_tuple::heaptuple::TupleDescData<'_>,
-        values: &[types_datum::Datum],
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
         nulls: &[bool],
     ) -> types_error::PgResult<()>
 );

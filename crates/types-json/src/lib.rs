@@ -16,7 +16,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_core::Oid;
-use types_datum::Datum;
+use types_tuple::Datum;
 
 /// C: `JsonTokenType` (`src/common/jsonapi.h`). The discriminant order matches
 /// the C enum (the integer is observable only in `json_typeof`'s otherwise-
@@ -91,13 +91,13 @@ pub enum JsonTypeCategory {
 /// half (`get_typlenbyvalalign` + `json_categorize_type(element_type, ...)` +
 /// `deconstruct_array`); the structural `[ ... ]` assembly stays in the crate.
 #[derive(Clone, Debug)]
-pub struct ArrayForJson {
+pub struct ArrayForJson<'mcx> {
     /// C: `ARR_NDIM(v)`.
     pub ndim: i32,
     /// C: `ARR_DIMS(v)` — one entry per dimension.
     pub dims: Vec<i32>,
     /// C: `deconstruct_array` output Datums (row-major).
-    pub elements: Vec<Datum>,
+    pub elements: Vec<Datum<'mcx>>,
     /// C: `deconstruct_array` null flags (row-major).
     pub nulls: Vec<bool>,
     /// C: `json_categorize_type(element_type, false, &tcategory, ...)`.
@@ -112,11 +112,11 @@ pub struct ArrayForJson {
 /// Dropped attributes are already filtered out (matching the C
 /// `if (att->attisdropped) continue;`).
 #[derive(Clone, Debug)]
-pub struct CompositeFieldForJson {
+pub struct CompositeFieldForJson<'mcx> {
     /// C: `NameStr(att->attname)` — the attribute name bytes (no trailing NUL).
     pub attname: Vec<u8>,
     /// C: `heap_getattr(...)` value Datum (meaningless if `is_null`).
-    pub val: Datum,
+    pub val: Datum<'mcx>,
     /// C: the `heap_getattr` `isnull` out-flag.
     pub is_null: bool,
     /// C: `json_categorize_type(att->atttypid, ...)` (or `JSONTYPE_NULL` if the

@@ -1,0 +1,118 @@
+//! GUC_REPORT transmission to the client (guc.c lines 2546-2670):
+//! `BeginReportingGUCOptions`, `ReportChangedGUCOptions`, `ReportGUCOption`.
+//!
+//! These walk the **unified** process-global GUC store ([`crate::live`]) — the
+//! same store the value seams read through and the `SET` write path mutates —
+//! and transmit changed `GUC_REPORT` variables to the frontend as
+//! `ParameterStatus` ('S') frames via the libpq byte-sink seam
+//! ([`crate::seam::pq_putmessage`]).
+//!
+//! # Scope (honest boundary)
+//!
+//! `guc.c` tracks the to-report set with the `guc_report_list` slist threaded
+//! through each `config_generic.report_link`. The idiomatic store does not
+//! thread an intrusive list; instead `ReportChangedGUCOptions` scans the store
+//! for variables with both `GUC_REPORT` (transmit at all) and `GUC_NEEDS_REPORT`
+//! (changed since last report) set — exactly the predicate the C slist
+//! membership encodes — and clears `GUC_NEEDS_REPORT` after transmitting. The
+//! result on the wire is identical: at most one `ParameterStatus` per changed
+//! reportable GUC.
+//!
+//! The two `in_hot_standby` self-`SetConfigOption` hacks in the C originals
+//! (which flip a GUC based on `RecoveryInProgress()`) are **not** reproduced
+//! here: that path reaches the recovery machinery, an out-of-crate dependency,
+//! and `in_hot_standby` is among the boot-resolved variables this store seeds
+//! through the normal path. Reproducing the recovery-driven self-set is
+//! documented as deferred rather than stubbed behind a pretend-success.
+
+use types_guc::GUC_REPORT;
+
+use crate::live::{with_store, with_store_mut};
+use crate::model::GUC_NEEDS_REPORT;
+use crate::registry::show_guc_option;
+
+/// `PqMsg_ParameterStatus` (`libpq/protocol.h`) — the 'S' frame type.
+const PQMSG_PARAMETER_STATUS: u8 = b'S';
+
+/// `void BeginReportingGUCOptions(void)` (guc.c:2546).
+///
+/// Start automatic reporting of changes to `GUC_REPORT` variables; executed at
+/// completion of backend startup. The `whereToSendOutput == DestRemote` gate is
+/// the caller's (the seam is only installed on the remote-dest path), so this
+/// transmits the initial values of every `GUC_REPORT` variable in the store.
+///
+/// Returns the number of variables transmitted (0 if the store is not yet
+/// initialized — a no-op, never a panic).
+pub fn begin_reporting_guc_options() -> usize {
+    // Collect under an immutable borrow, transmit after dropping it (the sink
+    // seam may re-enter the store via other paths).
+    let pending: Vec<(String, String)> = with_store(|reg| {
+        let mut out = Vec::new();
+        for var in reg.iter() {
+            if var.gen().flags & GUC_REPORT != 0 {
+                out.push((var.name_pub().into(), show_guc_option(var, false)));
+            }
+        }
+        out
+    })
+    .unwrap_or_default();
+
+    let sent = pending.len();
+    for (name, val) in &pending {
+        report_guc_option(name, val);
+    }
+    sent
+}
+
+/// `void ReportChangedGUCOptions(void)` (guc.c:2596).
+///
+/// Called just before waiting for a new client query: transmit the
+/// recently-changed `GUC_REPORT` variables (those also carrying
+/// `GUC_NEEDS_REPORT`) and clear their `GUC_NEEDS_REPORT` bit, so a
+/// `ParameterStatus` is sent at most once per variable per query.
+pub fn report_changed_guc_options() -> usize {
+    let pending: Vec<(String, String)> = with_store(|reg| {
+        let mut out = Vec::new();
+        for var in reg.iter() {
+            let flags = var.gen().flags;
+            let status = var.gen().status;
+            if flags & GUC_REPORT != 0 && status & GUC_NEEDS_REPORT != 0 {
+                out.push((var.name_pub().into(), show_guc_option(var, false)));
+            }
+        }
+        out
+    })
+    .unwrap_or_default();
+
+    let sent = pending.len();
+    for (name, val) in &pending {
+        report_guc_option(name, val);
+    }
+
+    if sent > 0 {
+        with_store_mut(|reg| {
+            for (name, _) in &pending {
+                if let Some(var) = reg.find_option_mut(name) {
+                    var.gen_mut().status &= !GUC_NEEDS_REPORT;
+                }
+            }
+        });
+    }
+    sent
+}
+
+/// `static void ReportGUCOption(struct config_generic *record)` (guc.c:2634).
+///
+/// Transmit the option value to the frontend as a `ParameterStatus` ('S') frame
+/// whose body is the two NUL-terminated strings `name\0val\0` (C:
+/// `pq_beginmessage(PqMsg_ParameterStatus); pq_sendstring(name);
+/// pq_sendstring(val); pq_endmessage()`). The de-dup against `last_reported` is
+/// already covered by the `GUC_NEEDS_REPORT` gate the callers apply.
+fn report_guc_option(name: &str, val: &str) {
+    let mut body = Vec::with_capacity(name.len() + val.len() + 2);
+    body.extend_from_slice(name.as_bytes());
+    body.push(0);
+    body.extend_from_slice(val.as_bytes());
+    body.push(0);
+    let _ = crate::seam::pq_putmessage::call(PQMSG_PARAMETER_STATUS, &body);
+}

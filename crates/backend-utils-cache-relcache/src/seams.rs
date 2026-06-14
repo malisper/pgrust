@@ -86,11 +86,12 @@ pub fn init_seams() {
 /* ==========================================================================
  * core-entry-store adapters.
  *
- * `RelationIdGetRelation`/`RelationClose` work on the owned store via the C
- * `Relation` pointer; the seam projects an open relation into the cross-unit
- * `types_rel::RelationData<'mcx>` value-slice (the build family owns the full
- * projection — `todo!()` until it lands). The pure scalar reads off a passed
- * `types_rel::RelationData`/`Relation` value-slice read its inline fields.
+ * `RelationIdGetRelation`/`RelationClose` work on the owned store via the
+ * `Oid` handle ([`crate::Relation`]); the seam projects an open relation into
+ * the cross-unit `types_rel::RelationData<'mcx>` value-slice (the build family
+ * owns the full projection). The pure scalar reads off a passed
+ * `types_rel::RelationData`/`Relation` value-slice read its inline fields via
+ * the scoped accessors over the owned entry.
  * ======================================================================== */
 
 fn relation_id_get_relation<'mcx>(
@@ -98,12 +99,13 @@ fn relation_id_get_relation<'mcx>(
     relation_id: Oid,
 ) -> PgResult<Option<types_rel::RelationData<'mcx>>> {
     let rd = crate::core_entry_store::RelationIdGetRelation(relation_id)?;
-    if rd.is_null() {
+    if rd == types_core::InvalidOid {
         return Ok(None);
     }
     // Project the owned entry into the cross-unit value-slice in `mcx`. The
     // full projection is build-family logic.
-    crate::build::project_relation_data(mcx, rd).map(Some)
+    crate::core_entry_store::with_relation(rd, |r| crate::build::project_relation_data(mcx, r))?
+        .map(Some)
 }
 
 fn relation_close(relation_id: Oid) -> PgResult<()> {
@@ -116,15 +118,9 @@ fn relation_close(relation_id: Oid) -> PgResult<()> {
 fn relation_rd_tableam(
     rel: &types_rel::RelationData<'_>,
 ) -> Option<types_tableam::TableAmRoutine> {
-    let rd = crate::core_entry_store::cache_lookup(rel.rd_id)?;
-    // SAFETY: live cache-owned descriptor.
-    #[allow(unsafe_code)]
-    unsafe {
-        (*rd).rd_tableam
-    }
+    crate::core_entry_store::try_with_relation(rel.rd_id, |rd| rd.rd_tableam).flatten()
 }
 
-#[allow(unsafe_code)]
 fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {
     // RelationNeedsWAL(relation) (utils/rel.h): permanent && (XLogIsNeeded() ||
     // (rd_createSubid == Invalid && rd_firstRelfilelocatorSubid == Invalid)).
@@ -134,38 +130,32 @@ fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {
     use types_core::xact::InvalidSubTransactionId;
     use types_wal::xlog_consts::WAL_LEVEL_REPLICA;
     const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
-    let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
-        Some(rd) => unsafe { &*rd },
-        None => return false,
-    };
     let wal = backend_access_transam_xlog_seams::wal_level::call();
-    rd.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
-        && (wal >= WAL_LEVEL_REPLICA
-            || (rd.rd_createSubid == InvalidSubTransactionId
-                && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId))
+    crate::core_entry_store::try_with_relation(rel.rd_id, |rd| {
+        rd.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+            && (wal >= WAL_LEVEL_REPLICA
+                || (rd.rd_createSubid == InvalidSubTransactionId
+                    && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId))
+    })
+    .unwrap_or(false)
 }
 
-#[allow(unsafe_code)]
 fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool {
     // RELATION_IS_LOCAL(relation) (utils/rel.h): rd_islocaltemp ||
     // rd_createSubid != InvalidSubTransactionId. Both are owned-store fields.
     use types_core::xact::InvalidSubTransactionId;
-    let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
-        Some(rd) => unsafe { &*rd },
-        None => return false,
-    };
-    rd.rd_islocaltemp || rd.rd_createSubid != InvalidSubTransactionId
+    crate::core_entry_store::try_with_relation(rel.rd_id, |rd| {
+        rd.rd_islocaltemp || rd.rd_createSubid != InvalidSubTransactionId
+    })
+    .unwrap_or(false)
 }
 
-#[allow(unsafe_code)]
 fn relation_rd_indam(index_oid: Oid) -> Option<types_tableam::amapi::IndexAmRoutine> {
     // The `IndexAmRoutine` vtable is not copyable out of the cache; re-resolve
     // it from the cached entry's `rd_amhandler` (the C cache holds a `memcpy`
     // of exactly the routine the handler returns). Returns the freshly
     // resolved routine, matching `relation->rd_indam`.
-    let rd = crate::core_entry_store::cache_lookup(index_oid)?;
-    // SAFETY: live cache-owned descriptor.
-    let amhandler = unsafe { (*rd).rd_amhandler };
+    let amhandler = crate::core_entry_store::try_with_relation(index_oid, |rd| rd.rd_amhandler)?;
     backend_access_index_amapi_seams::get_index_am_routine::call(amhandler).ok()
 }
 
@@ -183,28 +173,13 @@ fn relation_decrement_reference_count(index_oid: Oid) -> PgResult<()> {
     }
 }
 
-#[allow(unsafe_code)]
 fn rd_support_at(index_oid: Oid, procindex: i32) -> PgResult<RegProcedure> {
     // `relation->rd_support[procindex]` off the cached index entry (the
     // support-proc OID array filled by `RelationInitIndexAccessInfo`).
-    let rd = crate::core_entry_store::cache_lookup(index_oid)
-        .ok_or_else(|| missing_entry(index_oid))?;
-    // SAFETY: live cache-owned descriptor.
-    let rd = unsafe { &*rd };
-    Ok(rd.rd_support[procindex as usize])
+    crate::core_entry_store::with_relation(index_oid, |rd| rd.rd_support[procindex as usize])
 }
 
-/// Shared `elog(ERROR)` for a seam called on an OID that has no live relcache
-/// entry (the caller should hold the relation open).
-fn missing_entry(relid: Oid) -> PgError {
-    use backend_utils_error::ereport;
-    use types_error::ERROR;
-    ereport(ERROR)
-        .errmsg_internal(format!("relation {relid} is not open in the relcache"))
-        .into_error()
-}
 
-#[allow(unsafe_code)]
 fn index_getprocinfo(
     index_oid: Oid,
     attnum: AttrNumber,
@@ -216,24 +191,29 @@ fn index_getprocinfo(
     // `rd_supportinfo[procindex]` `FmgrInfo` array. The caller computed
     // `procindex = nproc*(attnum-1) + (procnum-1)` and passed `optsproc =
     // rd_indam->amoptsprocnum`.
-    let rd = crate::core_entry_store::cache_lookup(index_oid)
-        .ok_or_else(|| missing_entry(index_oid))?;
-    // SAFETY: live cache-owned descriptor.
-    let rd = unsafe { &mut *rd };
     let pi = procindex as usize;
-    // Assert(locinfo != NULL) — the array was sized in RelationInitIndexAccessInfo.
-    debug_assert!(pi < rd.rd_supportinfo.len());
 
-    // Initialize the lookup info if first time through.
-    if rd.rd_supportinfo[pi].fn_oid == 0 {
-        // RegProcedure procId = irel->rd_support[procindex];
-        let proc_id = rd.rd_support[pi];
+    // Initialize the lookup info if first time through. The `fmgr_info` seam
+    // re-enters the relcache (it may open dependent rels), so resolve the proc
+    // id / build the FmgrInfo OUTSIDE a live store borrow (copy the scalars out
+    // first), then store it back.
+    let (needs_init, proc_id, relname) = crate::core_entry_store::with_relation(index_oid, |rd| {
+        // Assert(locinfo != NULL) — the array was sized in
+        // RelationInitIndexAccessInfo.
+        debug_assert!(pi < rd.rd_supportinfo.len());
+        (
+            rd.rd_supportinfo[pi].fn_oid == 0,
+            rd.rd_support[pi],
+            rd.rd_rel.relname.clone(),
+        )
+    })?;
+
+    if needs_init {
         // Complain if the function was not found during IndexSupportInitialize.
         if proc_id == 0 {
             return Err(backend_utils_error::ereport(types_error::ERROR)
                 .errmsg_internal(format!(
-                    "missing support function {procnum} for attribute {attnum} of index \"{}\"",
-                    rd.rd_rel.relname
+                    "missing support function {procnum} for attribute {attnum} of index \"{relname}\""
                 ))
                 .into_error());
         }
@@ -244,7 +224,7 @@ fn index_getprocinfo(
         // context dropped here (the entry stores the owned `FmgrInfo` by value).
         let scratch = mcx::MemoryContext::new("index_getprocinfo");
         let finfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(scratch.mcx(), proc_id)?;
-        rd.rd_supportinfo[pi] = finfo;
+        crate::core_entry_store::with_relation_mut(index_oid, |rd| rd.rd_supportinfo[pi] = finfo)?;
 
         // if (procnum != optsproc) set_fn_opclass_options(locinfo,
         // attoptions[attnum-1]): this only writes `locinfo->fn_expr` with the
@@ -256,7 +236,7 @@ fn index_getprocinfo(
         let _ = (procnum, optsproc);
     }
 
-    Ok(rd.rd_supportinfo[pi])
+    crate::core_entry_store::with_relation(index_oid, |rd| rd.rd_supportinfo[pi])
 }
 
 fn index_opclass_missing_options_error(
@@ -451,11 +431,8 @@ fn relation_cache_initialize_phase3() -> PgResult<()> {
  * ======================================================================== */
 
 /// Read off the cached entry, applying `f` to the live `RelationData`.
-#[allow(unsafe_code)]
 fn with_entry<R>(relid: Oid, f: impl FnOnce(&crate::RelationData) -> R) -> PgResult<R> {
-    let rd = crate::core_entry_store::cache_lookup(relid).ok_or_else(|| missing_entry(relid))?;
-    // SAFETY: live cache-owned descriptor.
-    Ok(f(unsafe { &*rd }))
+    crate::core_entry_store::with_relation(relid, f)
 }
 
 fn rd_rel_relam(rel: &types_rel::Relation<'_>) -> PgResult<Oid> {
@@ -526,49 +503,39 @@ fn relation_has_storage(relkind: i8) -> bool {
         || relkind == b't' as i8
         || relkind == b'm' as i8
 }
-#[allow(unsafe_code)]
 fn relation_get_number_of_blocks(rel: &types_rel::Relation<'_>) -> PgResult<u32> {
     // `RelationGetNumberOfBlocks(rel)` = `RelationGetNumberOfBlocksInFork(rel,
     // MAIN_FORKNUM)` = `smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM)`. The
     // smgr owner opens the relation's smgr by its locator + backend; it panics
     // until smgr lands (mirror-pg-and-panic). The locator/backend come off the
     // owned entry.
-    let rd = crate::core_entry_store::cache_lookup(rel.rd_id)
-        .ok_or_else(|| missing_entry(rel.rd_id))?;
-    // SAFETY: live cache-owned descriptor.
-    let (locator, backend) = unsafe { ((*rd).rd_locator, (*rd).rd_backend) };
+    let (locator, backend) =
+        crate::core_entry_store::with_relation(rel.rd_id, |rd| (rd.rd_locator, rd.rd_backend))?;
     backend_storage_smgr_seams::smgrnblocks::call(
         locator,
         backend,
         types_core::primitive::MAIN_FORKNUM,
     )
 }
-#[allow(unsafe_code)]
 fn set_rd_toastoid(new_heap: &types_rel::Relation<'_>, value: Oid) -> PgResult<()> {
     // `NewHeap->rd_toastoid = value` — a transient set honored on the owned
     // entry while NewHeap stays open during the cluster copy.
-    let rd = crate::core_entry_store::cache_lookup(new_heap.rd_id)
-        .ok_or_else(|| missing_entry(new_heap.rd_id))?;
-    // SAFETY: live cache-owned descriptor; mutating an inline scalar.
-    unsafe { (*rd).rd_toastoid = value };
-    Ok(())
+    crate::core_entry_store::with_relation_mut(new_heap.rd_id, |rd| rd.rd_toastoid = value)
 }
 
 /// `RelationAssumeNewRelfilelocator(relation)` (relcache.c): record that the
 /// relation took a new relfilenumber this (sub)transaction, and flag it for
 /// eoxact cleanup. Own logic over the entry; the current subxid is the xact
 /// owner seam.
-#[allow(unsafe_code)]
 fn assume_new_relfilelocator(relid: Oid) -> PgResult<()> {
     use types_core::xact::InvalidSubTransactionId;
-    let rd = crate::core_entry_store::cache_lookup(relid).ok_or_else(|| missing_entry(relid))?;
     let subid = backend_access_transam_xact_seams::get_current_sub_transaction_id::call();
-    // SAFETY: live cache-owned descriptor.
-    let r = unsafe { &mut *rd };
-    r.rd_newRelfilelocatorSubid = subid;
-    if r.rd_firstRelfilelocatorSubid == InvalidSubTransactionId {
-        r.rd_firstRelfilelocatorSubid = subid;
-    }
+    crate::core_entry_store::with_relation_mut(relid, |r| {
+        r.rd_newRelfilelocatorSubid = subid;
+        if r.rd_firstRelfilelocatorSubid == InvalidSubTransactionId {
+            r.rd_firstRelfilelocatorSubid = subid;
+        }
+    })?;
     // EOXactListAdd(relation): flag for end-of-xact cleanup.
     crate::core_entry_store::with_state(|st| crate::core_entry_store::eoxact_list_add(st, relid));
     Ok(())

@@ -28,5 +28,6 @@ libc = "0.2"
 types-condvar = { path = "../types-condvar" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }

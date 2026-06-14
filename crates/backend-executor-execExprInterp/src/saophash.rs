@@ -277,7 +277,7 @@ fn saophash_insert_hash_internal<'mcx>(
                     tb.members += 1;
                     let e = &mut tb.data[curelem as usize];
                     // Stored key crosses into the canonical by-value arm.
-                    e.key = DatumV::ByVal(key);
+                    e.key = DatumV::ByVal(key.as_usize());
                     e.hash = hash;
                     e.status = SH_STATUS_IN_USE;
                     return Ok(false);
@@ -342,7 +342,7 @@ fn saophash_insert_hash_internal<'mcx>(
         tb.members += 1;
         let e = &mut tb.data[curelem as usize];
         // Stored key crosses into the canonical by-value arm.
-        e.key = DatumV::ByVal(key);
+        e.key = DatumV::ByVal(key.as_usize());
         e.hash = hash;
         e.status = SH_STATUS_IN_USE;
         return Ok(false);

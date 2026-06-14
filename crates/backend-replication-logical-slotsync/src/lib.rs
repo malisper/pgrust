@@ -50,7 +50,7 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 use types_pgstat::wait_event::{
     WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN, WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN,
 };
-use types_datum::Datum;
+use types_tuple::Datum;
 
 use backend_storage_lmgr_s_lock::Spinlock;
 
@@ -1130,14 +1130,14 @@ fn ProcessSlotSyncInterrupts(_wrconn: WalReceiverConn) -> PgResult<()> {
 // ===========================================================================
 
 /// `slotsync_worker_disconnect(code, arg)` (slotsync.c). `arg` is the wrconn.
-pub fn slotsync_worker_disconnect(_code: i32, arg: Datum) -> PgResult<()> {
+pub fn slotsync_worker_disconnect(_code: i32, arg: Datum<'static>) -> PgResult<()> {
     let wrconn = WalReceiverConn(arg.as_usize());
     libpqwalrcv::walrcv_disconnect::call(wrconn);
     Ok(())
 }
 
 /// `slotsync_worker_onexit(code, arg)` (slotsync.c).
-pub fn slotsync_worker_onexit(_code: i32, _arg: Datum) -> PgResult<()> {
+pub fn slotsync_worker_onexit(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
     if slot::my_replication_slot_is_set::call() {
         slot::replication_slot_release::call()?;
     }

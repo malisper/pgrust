@@ -9,5 +9,6 @@ name = "backend_utils_misc_guc_tables"
 path = "src/lib.rs"
 
 [dependencies]
+backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables-seams" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }

@@ -9,7 +9,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use mcx::Mcx;
-use types_datum::Datum;
+// Canonical value type (Datum unification). The fmgr `function_call*` seams
+// still carry the bare-word shim (`types_datum::Datum`), so a by-value scalar
+// crosses that ABI edge via `byval_word()` / `Datum::ByVal`.
+use types_tuple::backend_access_common_heaptuple::Datum;
+use types_datum::Datum as DatumWord;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
@@ -136,11 +140,12 @@ pub fn ri_plan_check(
 
 /// `ri_ExtractValues` --- extract key fields from a tuple slot into the
 /// `vals`/`nulls` arrays. `nulls[i]` is `true` for a NULL (C `'n'`).
-pub fn ri_extract_values(
+pub fn ri_extract_values<'mcx>(
+    mcx: Mcx<'mcx>,
     slot: TupleTableSlotRef,
     riinfo: &RiConstraintInfo,
     rel_is_pk: bool,
-    vals: &mut [Datum],
+    vals: &mut [Datum<'mcx>],
     nulls: &mut [bool],
 ) -> PgResult<()> {
     let attnums = if rel_is_pk {
@@ -149,7 +154,8 @@ pub fn ri_extract_values(
         &riinfo.fk_attnums
     };
     for i in 0..riinfo.nkeys as usize {
-        let (datum, isnull) = backend_commands_trigger_seams::slot_getattr::call(slot, attnums[i])?;
+        let (datum, isnull) =
+            backend_commands_trigger_seams::slot_getattr::call(mcx, slot, attnums[i])?;
         vals[i] = datum;
         nulls[i] = isnull;
     }
@@ -180,21 +186,26 @@ pub fn ri_perform_check(
     let source_is_pk = qkey.constr_queryno != RI_PLAN_CHECK_LOOKUPPK;
 
     let nkeys = riinfo.nkeys as usize;
-    let mut vals = [Datum::null(); RI_MAX_NUMKEYS * 2];
+    // The canonical `Datum` is not `Copy` (the `ByRef` arm owns bytes), so the
+    // value arrays are built with `from_fn` rather than array-repeat init.
+    let mut vals: [Datum; RI_MAX_NUMKEYS * 2] = core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; RI_MAX_NUMKEYS * 2];
 
     if let Some(newslot) = newslot {
-        ri_extract_values(newslot, riinfo, source_is_pk, &mut vals, &mut nulls)?;
+        ri_extract_values(mcx, newslot, riinfo, source_is_pk, &mut vals, &mut nulls)?;
         if let Some(oldslot) = oldslot {
-            let mut tail_vals = [Datum::null(); RI_MAX_NUMKEYS * 2];
+            let mut tail_vals: [Datum; RI_MAX_NUMKEYS * 2] =
+                core::array::from_fn(|_| Datum::null());
             let mut tail_nulls = [false; RI_MAX_NUMKEYS * 2];
-            ri_extract_values(oldslot, riinfo, source_is_pk, &mut tail_vals, &mut tail_nulls)?;
-            vals[nkeys..nkeys * 2].copy_from_slice(&tail_vals[..nkeys]);
+            ri_extract_values(mcx, oldslot, riinfo, source_is_pk, &mut tail_vals, &mut tail_nulls)?;
+            for (dst, src) in vals[nkeys..nkeys * 2].iter_mut().zip(&tail_vals[..nkeys]) {
+                *dst = src.clone();
+            }
             nulls[nkeys..nkeys * 2].copy_from_slice(&tail_nulls[..nkeys]);
         }
     } else {
         let oldslot = oldslot.expect("ri_PerformCheck: oldslot required when newslot is NULL");
-        ri_extract_values(oldslot, riinfo, source_is_pk, &mut vals, &mut nulls)?;
+        ri_extract_values(mcx, oldslot, riinfo, source_is_pk, &mut vals, &mut nulls)?;
     }
 
     let (test_snapshot, crosscheck_snapshot) =
@@ -510,19 +521,19 @@ pub fn ri_keys_equal(
 
     for i in 0..riinfo.nkeys as usize {
         let (oldvalue, isnull) =
-            backend_commands_trigger_seams::slot_getattr::call(oldslot, attnums[i])?;
+            backend_commands_trigger_seams::slot_getattr::call(mcx, oldslot, attnums[i])?;
         if isnull {
             return Ok(false);
         }
         let (newvalue, isnull) =
-            backend_commands_trigger_seams::slot_getattr::call(newslot, attnums[i])?;
+            backend_commands_trigger_seams::slot_getattr::call(mcx, newslot, attnums[i])?;
         if isnull {
             return Ok(false);
         }
 
         if rel_is_pk {
             if !backend_commands_trigger_seams::pk_datum_image_eq::call(
-                oldslot, attnums[i], oldvalue, newvalue,
+                oldslot, attnums[i], &oldvalue, &newvalue,
             ) {
                 return Ok(false);
             }
@@ -534,7 +545,16 @@ pub fn ri_keys_equal(
             };
             let typeid = rel.att_type(attnums[i]);
             let collid = rel.att_collation(attnums[i]);
-            if !ri_compare_with_cast(mcx, eq_opr, typeid, collid, newvalue, oldvalue)? {
+            // The fmgr comparison edge takes bare-word `DatumWord`; the canonical
+            // values are non-null scalars here, so their by-value word crosses out.
+            if !ri_compare_with_cast(
+                mcx,
+                eq_opr,
+                typeid,
+                collid,
+                DatumWord::from_usize(newvalue.as_usize()),
+                DatumWord::from_usize(oldvalue.as_usize()),
+            )? {
                 return Ok(false);
             }
         }
@@ -553,8 +573,8 @@ fn ri_compare_with_cast(
     eq_opr: Oid,
     typeid: Oid,
     collid: Oid,
-    mut lhs: Datum,
-    mut rhs: Datum,
+    mut lhs: DatumWord,
+    mut rhs: DatumWord,
 ) -> PgResult<bool> {
     let entry = ri_hash_compare_op(mcx, eq_opr, typeid)?;
 
@@ -563,14 +583,14 @@ fn ri_compare_with_cast(
         lhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
             entry.cast_func,
             lhs,
-            Datum::from_i32(-1),     // typmod
-            Datum::from_bool(false), // implicit coercion
+            DatumWord::from_i32(-1),     // typmod
+            DatumWord::from_bool(false), // implicit coercion
         )?;
         rhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
             entry.cast_func,
             rhs,
-            Datum::from_i32(-1),
-            Datum::from_bool(false),
+            DatumWord::from_i32(-1),
+            DatumWord::from_bool(false),
         )?;
     }
 

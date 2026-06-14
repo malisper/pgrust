@@ -275,15 +275,20 @@ pub fn exec_init_node<'mcx>(
     //       result->instrument = InstrAlloc(1, estate->es_instrument,
     //                                       result->async_capable);
     //
-    // `InstrAlloc` (instrument.c) is unported and has no seam declared in this
-    // scaffold (the `backend-executor-instrument-seams` crate declares only
-    // InstrEndLoop / InstrUpdateTupleCount). Attaching instrumentation routes
-    // through that owner — a loud panic when instrumentation is requested.
+    // `InstrAlloc(1, ...)` allocates a one-element array of `Instrumentation`;
+    // C stores the array pointer in `result->instrument`, the single [0]
+    // element being this node's stats block. Here we take the one allocated
+    // `Instrumentation` and box it into the node's `instrument` slot.
     if estate.es_instrument != 0 {
-        panic!(
-            "backend-executor-instrument::InstrAlloc: ExecInitNode instrumentation attach \
-             (estate->es_instrument set); not ported / no seam declared"
-        );
+        let async_capable = result.ps_head().async_capable;
+        let mut instr = backend_executor_instrument_seams::instr_alloc::call(
+            mcx,
+            1,
+            estate.es_instrument,
+            async_capable,
+        )?;
+        let one = instr.swap_remove(0);
+        result.ps_head_mut().instrument = Some(alloc_in(mcx, one)?);
     }
 
     // return result;

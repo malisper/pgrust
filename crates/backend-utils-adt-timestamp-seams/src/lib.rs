@@ -66,8 +66,13 @@ seam_core::seam!(
     /// (`j2date`/`time2tm`/`timetz2tm`/`timestamp2tm`) plus the `Encode*`
     /// routines, so the whole operation is owned by the datetime subsystem.
     /// `Err` carries the C `DTERR_*` → `ereport(ERROR, "... out of range")`.
-    pub fn json_encode_datetime(
-        value: types_datum::Datum,
+    ///
+    /// Datum-unification: `value` is the canonical unified value
+    /// (`types_tuple::Datum<'mcx>`), passed by reference. A datetime is a
+    /// by-value word (`ByVal`), so the owner reads it via the `Datum`
+    /// conversion methods.
+    pub fn json_encode_datetime<'mcx>(
+        value: &types_tuple::Datum<'mcx>,
         typid: types_core::Oid,
         tzp: Option<i32>,
     ) -> types_error::PgResult<String>

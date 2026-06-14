@@ -11,8 +11,8 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 
 seam_core::seam!(
@@ -159,18 +159,24 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `slot_getattr(slot, attnum, &isnull)` returning `(datum, isnull)`. Can
-    /// `ereport(ERROR)` deforming a tuple, carried on `Err`.
-    pub fn slot_getattr(slot: TupleTableSlotRef, attnum: i16) -> PgResult<(Datum, bool)>
+    /// `ereport(ERROR)` deforming a tuple, carried on `Err`. The returned value
+    /// is the canonical [`Datum`]; a by-reference image is copied into `mcx`
+    /// (in C it points into the slot).
+    pub fn slot_getattr<'mcx>(
+        mcx: Mcx<'mcx>,
+        slot: TupleTableSlotRef,
+        attnum: i16,
+    ) -> PgResult<(Datum<'mcx>, bool)>
 );
 seam_core::seam!(
     /// The `datum_image_eq(oldvalue, newvalue, attbyval, attlen)` test
     /// `ri_KeysEqual` uses for the PK side (consults the slot's
     /// `CompactAttribute` for `attbyval`/`attlen`).
-    pub fn pk_datum_image_eq(
+    pub fn pk_datum_image_eq<'mcx>(
         slot: TupleTableSlotRef,
         attnum: i16,
-        oldvalue: Datum,
-        newvalue: Datum,
+        oldvalue: &Datum<'mcx>,
+        newvalue: &Datum<'mcx>,
     ) -> bool
 );
 

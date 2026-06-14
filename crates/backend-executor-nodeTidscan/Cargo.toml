@@ -17,6 +17,7 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-tableam = { path = "../types-tableam" }
 types-tuple = { path = "../types-tuple" }
+types-datum = { path = "../types-datum" }
 
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 

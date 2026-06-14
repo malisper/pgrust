@@ -907,7 +907,7 @@ pub fn pg_stat_get_recovery_prefetch<'mcx>(
 
     let s = shared_stats();
     // Build each column via the unified `Datum<'mcx>` enum's scalar codec.
-    let values: [Datum; PG_STAT_GET_RECOVERY_PREFETCH_COLS] = [
+    let values: [Datum<'mcx>; PG_STAT_GET_RECOVERY_PREFETCH_COLS] = [
         // TimestampTzGetDatum(pg_atomic_read_u64(&SharedStats->reset_time))
         Datum::from_i64(s.reset_time.load(Relaxed) as i64),
         Datum::from_i64(s.prefetch.load(Relaxed) as i64),
@@ -922,13 +922,9 @@ pub fn pg_stat_get_recovery_prefetch<'mcx>(
     ];
     let nulls = [false; PG_STAT_GET_RECOVERY_PREFETCH_COLS];
 
-    // ABI edge: `materialized_srf_putvalues` (funcapi-owned seam) still takes
-    // the bare machine word `&[types_datum::Datum]`; all ten columns are
-    // pass-by-value scalars, so narrow each enum to its `ByVal` word here.
-    let words: [types_datum::Datum; PG_STAT_GET_RECOVERY_PREFETCH_COLS] =
-        core::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
-
-    funcapi::materialized_srf_putvalues::call(rsinfo, &words, &nulls)?;
+    // `materialized_srf_putvalues` now takes the canonical unified value
+    // directly (the Datum-unification keystone flipped this edge).
+    funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     // return (Datum) 0;
     Ok(Datum::null())

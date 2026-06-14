@@ -480,7 +480,7 @@ fn pg_archiver_main_inner(startup_data: &types_startup::StartupData) -> PgResult
     // Assert(XLogArchivingActive()); — debug-only GUC assertion owned by xlog.c.
 
     // Arrange to clean up at archiver exit: on_shmem_exit(pgarch_die, 0).
-    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(pgarch_die, types_datum::Datum::from_i32(0))?;
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(pgarch_die, types_tuple::Datum::from_i32(0))?;
 
     // Advertise our proc number so backends can use our latch to wake us:
     // PgArch->pgprocno = MyProcNumber;
@@ -1017,7 +1017,7 @@ fn pgarch_archiveDone(xlog: &str) -> PgResult<()> {
 }
 
 /// `pgarch_die(code, arg)` — exit-time cleanup handler.
-fn pgarch_die(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn pgarch_die(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     pg_arch().pgprocno.store(INVALID_PROC_NUMBER, Ordering::Relaxed);
     Ok(())
 }
@@ -1131,14 +1131,14 @@ fn LoadArchiveLibrary() -> PgResult<()> {
     // before_shmem_exit(pgarch_call_module_shutdown_cb, 0).
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         pgarch_call_module_shutdown_cb,
-        types_datum::Datum::from_i32(0),
+        types_tuple::Datum::from_i32(0),
     )?;
     Ok(())
 }
 
 /// `pgarch_call_module_shutdown_cb(code, arg)` — call the shutdown callback of
 /// the loaded archive module, if defined. Registered with `before_shmem_exit`.
-fn pgarch_call_module_shutdown_cb(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn pgarch_call_module_shutdown_cb(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if let Some(callbacks) = archive_callbacks.with(|c| c.get()) {
         if let Some(shutdown_cb) = callbacks.shutdown_cb {
             with_module_state(|state| shutdown_cb(state));

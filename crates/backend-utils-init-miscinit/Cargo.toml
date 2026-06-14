@@ -13,6 +13,7 @@ libc = "0.2"
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 
@@ -32,6 +33,15 @@ backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-s
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+# Delegation installs for the mis-homed slot-sync worker bootstrap group
+# (declared on miscinit's seam crate by the slotsync consumer, but bodied in
+# these owners; miscinit installs them by ::calling the real owner's seam,
+# mirroring the WAL-summarizer/my_proc_pid delegation pattern below).
+backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }

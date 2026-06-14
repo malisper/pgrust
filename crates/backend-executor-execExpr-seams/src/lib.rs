@@ -21,9 +21,9 @@ pub enum ProjectionKind {
 }
 
 /// One read of a projection-result-slot attribute: its `Datum` plus is-null.
-#[derive(Clone, Copy, Debug)]
-pub struct SlotAttr {
-    pub value: types_datum::Datum,
+#[derive(Clone, Debug)]
+pub struct SlotAttr<'mcx> {
+    pub value: types_tuple::Datum<'mcx>,
     pub isnull: bool,
 }
 
@@ -137,7 +137,7 @@ seam_core::seam!(
         node: &mut SubPlanState<'mcx>,
         estate: &mut EStateData<'mcx>,
         att: types_core::AttrNumber,
-    ) -> types_error::PgResult<SlotAttr>
+    ) -> types_error::PgResult<SlotAttr<'mcx>>
 );
 
 seam_core::seam!(
@@ -148,7 +148,7 @@ seam_core::seam!(
         node: &mut SubPlanState<'mcx>,
         estate: &mut EStateData<'mcx>,
         econtext: types_nodes::EcxtId,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
@@ -323,7 +323,7 @@ seam_core::seam!(
         state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
@@ -363,7 +363,7 @@ seam_core::seam!(
         state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(

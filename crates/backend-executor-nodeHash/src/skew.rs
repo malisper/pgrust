@@ -3,7 +3,24 @@
 
 use mcx::Mcx;
 use types_core::{uint32, Size};
-use types_datum::Datum;
+// Datum-unification status (Wave 7): this crate's only canonical-Datum work is
+// already done — the `MultiExecPrivateHash` / `ExecHashTableInsert` hash path in
+// `exec_hash.rs` consumes the canonical `types_tuple::...heaptuple::Datum<'mcx>`
+// returned by the `exec_eval_expr_switch_context` interpreter seam and reads it
+// through `Datum::as_u32()`. There are NO internal shim construction/read sites
+// to migrate.
+//
+// The skew-MCV probe below flows through two seam ABI edges that are still bare
+// machine words (`types_datum::Datum`): lsyscache's `get_attstatsslot_mcv` hands
+// back `PgVec<Datum>` MCV values (mirroring the still-bare-word
+// `AttStatsSlot.values`), and fmgr's `function_call1_coll` consumes/returns a
+// bare scalar word. These are the genuinely-sanctioned bare-word edges per the
+// datum-redesign plan: the unified `types_tuple::Datum<'mcx>` value type cannot
+// cross them until those owners (lsyscache `AttStatsSlot` + the fmgr arg)
+// migrate together — the execTuples canonical-carrier follow-on (#113). The MCV
+// word is read out of one bare-word seam and fed straight into the other, so it
+// stays a bare word; it is never forged into / out of the canonical type here.
+use types_datum::Datum as DatumWord;
 use types_error::PgResult;
 use types_nodes::nodehash::{
     Hash, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashSkewBucket, HashState,
@@ -149,7 +166,7 @@ pub fn ExecHashBuildSkewHash<'mcx>(
             .skew_hashfunction
             .as_ref()
             .expect("skew_hashfunction must be set when building skew hashtable");
-        let result: Datum = backend_utils_fmgr_fmgr_seams::function_call1_coll::call(
+        let result: DatumWord = backend_utils_fmgr_fmgr_seams::function_call1_coll::call(
             skew_hashfunction.fn_oid,
             hashstate.skew_collation,
             values[i],

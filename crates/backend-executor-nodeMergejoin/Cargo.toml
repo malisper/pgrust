@@ -20,7 +20,6 @@ backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams
 backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-sortsupport = { path = "../types-sortsupport" }
 types-nodes = { path = "../types-nodes" }

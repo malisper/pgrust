@@ -29,10 +29,11 @@ pub(crate) struct Env {
     smgr_release_calls: Cell<u32>,
     cv_broadcasts: Cell<u32>,
     #[allow(clippy::type_complexity)]
-    shmem_exit_callback: Cell<
+    #[allow(clippy::type_complexity)]
+    shmem_exit_callback: RefCell<
         Option<(
-            fn(i32, types_datum::Datum) -> types_error::PgResult<()>,
-            types_datum::Datum,
+            fn(i32, types_tuple::backend_access_common_heaptuple::Datum<'static>) -> types_error::PgResult<()>,
+            types_tuple::backend_access_common_heaptuple::Datum<'static>,
         )>,
     >,
 }
@@ -51,7 +52,7 @@ fn install_seams_once() {
         backend_storage_ipc_shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
 
         backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(|f, arg| {
-            ENV.with(|e| e.shmem_exit_callback.set(Some((f, arg))));
+            ENV.with(|e| *e.shmem_exit_callback.borrow_mut() = Some((f, arg)));
             Ok(())
         });
 
@@ -119,7 +120,7 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
         e.smgr_release_result.set(Some(true));
         e.smgr_release_calls.set(0);
         e.cv_broadcasts.set(0);
-        e.shmem_exit_callback.set(None);
+        *e.shmem_exit_callback.borrow_mut() = None;
         e.recovery_conflicts.borrow_mut().clear();
     });
     SetProcSignalBarrierPending(false);
@@ -132,7 +133,7 @@ fn setup(slot: i32, pid: i32, cancel_key: &[u8]) -> MutexGuard<'static, ()> {
 /// Run the registered on_shmem_exit callback (CleanupProcSignalState), as
 /// shmem_exit would.
 fn teardown() {
-    let (f, arg) = ENV.with(|e| e.shmem_exit_callback.get()).unwrap();
+    let (f, arg) = ENV.with(|e| e.shmem_exit_callback.borrow().clone()).unwrap();
     f(0, arg).unwrap();
 }
 

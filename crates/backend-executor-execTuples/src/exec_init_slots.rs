@@ -255,10 +255,11 @@ fn seam_exec_drop_single_tuple_table_slot(slot: TupleTableSlot) -> PgResult<()> 
 /// PAYLOAD MODEL: fetching a system attribute dispatches `tts_ops->getsysattr`
 /// against the slot's stored tuple. Stays seam-and-panic until the slot payload
 /// model lands.
-fn seam_slot_getsysattr(
+fn seam_slot_getsysattr<'mcx>(
+    _mcx: Mcx<'mcx>,
     _slot: &TupleTableSlot,
     _attnum: AttrNumber,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     panic!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
 }
 
@@ -334,9 +335,39 @@ fn seam_exec_init_result_type_tl<'mcx>(
     Ok(())
 }
 
+/// Seam `exec_alloc_table_slot` — `ExecAllocTableSlot` (execTuples.c):
+///
+/// ```c
+/// TupleTableSlot *
+/// ExecAllocTableSlot(List **tupleTable, TupleDesc desc, const TupleTableSlotOps *tts_ops)
+/// {
+///     TupleTableSlot *slot = MakeTupleTableSlot(desc, tts_ops);
+///     *tupleTable = lappend(*tupleTable, slot);
+///     return slot;
+/// }
+/// ```
+///
+/// Adapter onto the in-crate [`exec_alloc_table_slot`] header builder. The seam
+/// carries the descriptor (C shares the pointer into the slot); the trimmed
+/// `es_tupleTable` pool header records only whether a fixed descriptor was
+/// supplied (`TTS_FLAG_FIXED`), exactly as the already-installed
+/// `exec_init_scan_tuple_slot` / `exec_init_extra_tuple_slot` seams do — the
+/// descriptor itself moves into the slot's payload at the payload-model
+/// convergence. So the shim forwards `desc.is_some()` and drops the body.
+fn seam_exec_alloc_table_slot<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    desc: TupleDesc<'mcx>,
+    tts_ops: TupleSlotKind,
+) -> PgResult<SlotId> {
+    // TupleTableSlot *slot = MakeTupleTableSlot(desc, tts_ops);
+    // *tupleTable = lappend(*tupleTable, slot); return slot;
+    exec_alloc_table_slot(estate, desc.is_some(), tts_ops)
+}
+
 /// Install every seam this unit owns.
 pub fn init_seams() {
     use backend_executor_execTuples_seams as seams;
+    seams::exec_alloc_table_slot::set(seam_exec_alloc_table_slot);
     seams::slot_getallattrs::set(seam_slot_getallattrs);
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
     seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);

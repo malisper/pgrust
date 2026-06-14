@@ -48,6 +48,9 @@ pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
 pub mod nodes;
+/// Central generated leaf-node tree (`Node<'mcx>` + `node_tag`/`copy_node_in`/
+/// `equal_node`), built by `build.rs` from `nodetags.h` + `nodes.list`.
+pub mod node_tree;
 pub mod nodesamplescan;
 pub mod nodeseqscan;
 pub mod nodesort;
@@ -67,6 +70,9 @@ pub mod primnodes;
 pub mod queryenvironment;
 pub mod saophash;
 pub mod tuptable;
+/// Value nodes (`nodes/value.h`): the leaf literal nodes Integer/Float/Boolean/
+/// String/BitString, `#[derive(PgNode)]`-enabled and re-homed onto `mcx`.
+pub mod value;
 
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;

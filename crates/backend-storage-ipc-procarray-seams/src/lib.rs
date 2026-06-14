@@ -80,6 +80,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RecordKnownAssignedTransactionIds(xid)` (procarray.c) — hot-standby
+    /// KnownAssignedXids bookkeeping for as-yet-unobserved XIDs in a completion
+    /// record. (Defined in procarray.c, not standby.c — the KnownAssignedXids
+    /// shared array is procarray-owned.)
+    pub fn record_known_assigned_transaction_ids(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExpireTreeKnownAssignedTransactionIds(xid, nsubxids, subxids,
+    /// max_xid)` (procarray.c) — remove a finished transaction tree from the
+    /// KnownAssignedXids array. (Defined in procarray.c, not standby.c.)
+    pub fn expire_tree_known_assigned_transaction_ids(
+        xid: TransactionId,
+        subxids: &[TransactionId],
+        max_xid: TransactionId,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetRunningTransactionData()` — C returns with `ProcArrayLock` and
     /// `XidGenLock` held and the caller releases them by hand. Here the
     /// owner acquires the locks, builds the snapshot, and runs `f` with both

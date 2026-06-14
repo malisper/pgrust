@@ -270,8 +270,8 @@ fn elog_error<T>(message: String) -> PgResult<T> {
 }
 
 fn byval_oid(value: Datum<'_>) -> PgResult<Oid> {
-    match value {
-        Datum::ByVal(d) => Ok(d.as_oid()),
+    match &value {
+        Datum::ByVal(_) => Ok(value.as_oid()),
         Datum::ByRef(_) => elog_error("ts_cache: expected a by-value oid".into()),
     }
 }
@@ -689,7 +689,9 @@ pub fn lookup_ts_config_cache<'mcx>(
             Anum_pg_ts_config_map_mapcfg as i16,
             BTEqualStrategyNumber,
             F_OIDEQ,
-            ScalarWord::from_oid(cfgId),
+            // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+            // (the Datum-unification keystone flipped this edge).
+            Datum::from_oid(cfgId),
         )?;
         let maprel = table_open(smcx, TSConfigMapRelationId, AccessShareLock)?;
         let mapidx =
@@ -706,14 +708,16 @@ pub fn lookup_ts_config_cache<'mcx>(
             genam_seams::systable_getnext_ordered::call(smcx, mapscan.desc_mut(), ForwardScanDirection)?
         {
             let row = heap_deform_tuple(smcx, &maptup.tuple, &maprel.rd_att, &maptup.data)?;
-            let toktype = match &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0 {
-                Datum::ByVal(d) => d.as_i32(),
+            let toktype_d = &row[(Anum_pg_ts_config_map_maptokentype - 1) as usize].0;
+            let toktype = match toktype_d {
+                Datum::ByVal(_) => toktype_d.as_i32(),
                 Datum::ByRef(_) => {
                     return elog_error("maptokentype is not by-value".into())
                 }
             };
-            let mapdict = match &row[(Anum_pg_ts_config_map_mapdict - 1) as usize].0 {
-                Datum::ByVal(d) => d.as_oid(),
+            let mapdict_d = &row[(Anum_pg_ts_config_map_mapdict - 1) as usize].0;
+            let mapdict = match mapdict_d {
+                Datum::ByVal(_) => mapdict_d.as_oid(),
                 Datum::ByRef(_) => return elog_error("mapdict is not by-value".into()),
             };
 

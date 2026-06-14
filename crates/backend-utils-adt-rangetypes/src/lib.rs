@@ -29,6 +29,40 @@
 //!   marshalling `Datum` <-> typed args.
 //! - [`range_planner_support`] — `find_simplified_clause`/`build_bound_expr`
 //!   support functions.
+//!
+//! ## Datum-completion (Wave 8 — funcapi/rangetypes/sortsupport + top consumers)
+//!
+//! This crate has NO in-scope *internal* shim site to migrate onto the canonical
+//! `types_tuple::Datum<'mcx>`: every surviving use of the bare-word shim newtype
+//! `types_datum::Datum` is a genuinely-sanctioned ABI edge (per the
+//! datum-redesign plan), a value pinned by an *external* type-carrier, or a value
+//! that must cross a still-bare-word seam to an unported/unmigrated owner —
+//! never a free-standing internal value:
+//!
+//! * `range_fmgr_boundary` is wholly the `PGFunction` bare-word arg/return ABI
+//!   edge: `PG_GETARG_DATUM` reads `fcinfo.arg(n).value` (bare word) and every
+//!   `PG_RETURN_*` produces the bare-word result word.
+//! * `range_repr_serialize` is the on-disk codec edge: `store_att_byval` /
+//!   `fetch_att` (the two sanctioned by-value codec sites) plus the varlena
+//!   *pointer* codec (`val.as_usize() as *const u8` over a serialized image and
+//!   `Datum::from_usize(ptr)`), which is a raw pointer into the ADT's private
+//!   image — NOT an owned `ByRef(PgVec)` byte image.
+//! * Every bound value flows through `types_rangetypes::RangeBound.val`, whose
+//!   type is the bare-word `types_datum::Datum` *in the out-of-scope*
+//!   `types-rangetypes` crate; this crate cannot widen that carrier here.
+//! * Bound/element values that cross a seam (`function_call{1,2}_coll`,
+//!   `text_to_cstring`, `datum_get_range_type_p`, `const_value`, `make_const`,
+//!   the planner-neighbor seams) ride those seams' still-bare-word contracts,
+//!   which are pinned by unmigrated consumers (multirangetypes, range-selfuncs)
+//!   and unported owners (the optimizer).
+//!
+//! The single canonical reference already present — `numrange_subdiff` forwarding
+//! to the migrated `numeric_subdiff` seam (which takes `types_tuple::Datum`) — is
+//! the only spot the canonical type is reachable, and it is already correct.
+//! Migrating any other edge here would diverge from a contract not owned by this
+//! crate (the `RangeBound.val` carrier in `types-rangetypes` and the bare-word
+//! seam contracts), so it is deferred to those owners (cf. the execExpr / nodeHash
+//! Wave-6/7 "contract-blocked, no internal shim" status).
 
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]

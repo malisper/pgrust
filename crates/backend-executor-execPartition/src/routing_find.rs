@@ -294,30 +294,17 @@ pub fn ExecFindPartition<'mcx>(
     Ok(rri.expect("ExecFindPartition produced no ResultRelInfo"))
 }
 
-/// Extract the bare machine word from a partition-key value at a seam ABI edge.
+/// Copy a partition-key value for a seam ABI edge.
 ///
-/// The partition-bound comparison / hashing / type-output seams
-/// (`partition_*_datum_cmp`, `compute_partition_hash_value`,
-/// `oid_output_function_call_datum`) and the `PartitionBoundInfoData.datums`
-/// store all still trade in the bare-word `types_datum::Datum` (the `ByVal`
-/// payload). C threads the raw `Datum` machine word straight through these
-/// boundaries — for a pass-by-reference key column the word is the pointer.
-/// At this audited edge we hand the bare word across; a `ByRef` value (a
-/// detoasted image we never materialize on this path, since `slot_getattr`
-/// hands back the stored word) would be a caller bug, matching the C contract.
+/// The partition-bound comparison / hashing seams (`partition_*_datum_cmp`,
+/// `compute_partition_hash_value`, `partition_*_bsearch`) and the
+/// `PartitionBoundInfoData.datums` store all now trade in the canonical
+/// `Datum<'mcx>`. C threads the raw `Datum` machine word straight through these
+/// boundaries; the canonical carrier forwards the same value (by-value scalar
+/// or detoasted by-reference image) verbatim.
 #[inline]
-fn key_word(d: &Datum<'_>) -> types_datum::Datum {
-    match d {
-        Datum::ByVal(w) => *w,
-        Datum::ByRef(_) => {
-            panic!("partition key value crossed a bare-word seam edge as a by-reference image")
-        }
-    }
-}
-
-/// Borrow a `values[]` slice as bare machine words for a seam ABI edge.
-fn key_words(values: &[Datum<'_>]) -> alloc_vec::Vec<types_datum::Datum> {
-    values.iter().map(key_word).collect()
+fn key_word<'mcx>(d: &Datum<'mcx>) -> Datum<'mcx> {
+    d.clone()
 }
 
 /// `rootResultRelInfo->ri_RelationDesc->rd_rel->relispartition`.
@@ -377,7 +364,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
     slot: SlotId,
     estate: &mut EStateData<'mcx>,
     proute: &mut PartitionTupleRouting<'mcx>,
-    values: &mut [Datum],
+    values: &mut [Datum<'mcx>],
     isnull: &mut [bool],
 ) -> PgResult<()> {
     let _ = (mcx, slot);
@@ -423,12 +410,12 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
         if keycol != 0 {
             // Plain column; get the value directly from the heap tuple.
             let (d, n) = backend_executor_execTuples_seams::slot_getattr::call(
+                mcx,
                 estate.slot_mut(slot),
                 keycol,
             )?;
-            // slot_getattr still returns the bare-word scalar at this seam's
-            // ABI edge; wrap it as the canonical by-value Datum.
-            datum = Datum::ByVal(d);
+            // slot_getattr now yields the canonical Datum directly.
+            datum = d;
             is_null = n;
         } else {
             // Expression; need to evaluate it.
@@ -449,9 +436,8 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
                     exprstate, ecxt, estate,
                 )?
             };
-            // ExecEvalExprSwitchContext returns the bare-word scalar at this
-            // seam's ABI edge; wrap it as the canonical by-value Datum.
-            datum = Datum::ByVal(d);
+            // ExecEvalExprSwitchContext now returns the canonical Datum directly.
+            datum = d;
             is_null = n;
             // partexpr_item = lnext(pd->keystate, partexpr_item);
             partexpr_item += 1;
@@ -493,10 +479,9 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
     match strategy {
         PartitionStrategy::Hash => {
             // hash partitioning is too cheap to bother caching
-            let value_words = key_words(values);
             let row_hash =
                 backend_partitioning_partbounds_seams::compute_partition_hash_value::call(
-                    key, &value_words, isnull,
+                    key, values, isnull,
                 )?;
             let boundinfo = dispatch
                 .partdesc
@@ -577,8 +562,6 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
 
             // NULLs belong in the DEFAULT partition.
             if !range_partkey_has_null {
-                // Bare-word view of the key tuple for the range-bound seams.
-                let value_words = key_words(values);
                 let last_found_count = dispatch.partdesc.as_ref().unwrap().last_found_count;
                 if last_found_count >= PARTITION_CACHED_FIND_THRESHOLD {
                     let last_datum_offset =
@@ -594,7 +577,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                             key.partcollation.as_slice(),
                             &last_datums,
                             &kind,
-                            &value_words,
+                            values,
                             partnatts as i32,
                         )?;
 
@@ -614,7 +597,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                                 key.partcollation.as_slice(),
                                 &up_datums,
                                 &up_kind,
-                                &value_words,
+                                values,
                                 partnatts as i32,
                             )?;
                         if cmpval2 > 0 {
@@ -637,7 +620,7 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                         key,
                         boundinfo,
                         partnatts as i32,
-                        &value_words,
+                        values,
                     )?;
                 bound_offset = off;
                 // The bound at bound_offset is <= the tuple value, so the bound
@@ -680,11 +663,11 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
 /// `boundinfo->datums[off]` / `boundinfo->kind[off]` for a RANGE bound — copy
 /// the per-bound datum and kind rows out so the partbounds seam can borrow them
 /// independently of the dispatch.
-fn range_bound_at(
-    dispatch: &crate::PartitionDispatchData<'_>,
+fn range_bound_at<'mcx>(
+    dispatch: &crate::PartitionDispatchData<'mcx>,
     off: usize,
 ) -> (
-    alloc_vec::Vec<types_datum::Datum>,
+    alloc_vec::Vec<Datum<'mcx>>,
     alloc_vec::Vec<types_nodes::partition::PartitionRangeDatumKind>,
 ) {
     let boundinfo = dispatch
@@ -694,7 +677,7 @@ fn range_bound_at(
         .boundinfo
         .as_ref()
         .unwrap();
-    let datums: alloc_vec::Vec<types_datum::Datum> =
+    let datums: alloc_vec::Vec<Datum<'mcx>> =
         boundinfo.datums[off].iter().map(key_word).collect();
     let kind: alloc_vec::Vec<types_nodes::partition::PartitionRangeDatumKind> = boundinfo
         .kind
@@ -780,7 +763,7 @@ pub(crate) fn ExecBuildSlotPartitionKeyDescription<'mcx>(
             // val = OidOutputFunctionCall(foutoid, values[i]);
             let out =
                 backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
-                    mcx, foutoid, key_word(&values[i]),
+                    mcx, foutoid, values[i].clone(),
                 )?;
             val_bytes = out.as_bytes().to_vec();
             val = &val_bytes;

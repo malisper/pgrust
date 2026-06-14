@@ -166,7 +166,7 @@ fn set_bounds<'mcx>(
 
 /// A minimal `ExprContext` charged to `mcx` (mirrors `ExecAssignExprContext`).
 fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> types_nodes::execnodes::ExprContext<'mcx> {
-    use types_datum::Datum;
+    use types_tuple::backend_access_common_heaptuple::Datum;
     types_nodes::execnodes::ExprContext {
         ecxt_scantuple: None,
         ecxt_innertuple: None,

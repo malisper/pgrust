@@ -23,7 +23,7 @@ use mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_evtcache::{EventTriggerCacheItem, EventTriggerEvent};
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_index_genam_seams as genam_seams;
@@ -257,8 +257,8 @@ fn build_cache() -> PgResult<McxOwned<CacheTy>> {
             let (evttags, evttags_isnull) = &row[Anum_pg_event_trigger_evttags - 1];
             if !*evttags_isnull {
                 let bytes = match evttags {
-                    TupleValue::ByRef(b) => &b[..],
-                    TupleValue::ByVal(_) => {
+                    Datum::ByRef(b) => &b[..],
+                    Datum::ByVal(_) => {
                         return Err(PgError::error("evttags datum is not by-reference"));
                     }
                 };
@@ -362,30 +362,30 @@ fn InvalidateEventCacheCallback(_arg: types_datum::datum::Datum, _cacheid: i32, 
 }
 
 /// Read a by-value `char` attribute (`evtenabled`).
-fn byval_char(col: &(TupleValue<'_>, bool)) -> PgResult<i8> {
+fn byval_char(col: &(Datum<'_>, bool)) -> PgResult<i8> {
     match &col.0 {
-        TupleValue::ByVal(d) => Ok(d.as_i32() as i8),
-        TupleValue::ByRef(_) => Err(PgError::error("pg_event_trigger char attr is by-reference")),
+        Datum::ByVal(_) => Ok(col.0.as_i32() as i8),
+        Datum::ByRef(_) => Err(PgError::error("pg_event_trigger char attr is by-reference")),
     }
 }
 
 /// Read a by-value `Oid` attribute (`evtfoid`).
-fn byval_oid(col: &(TupleValue<'_>, bool)) -> PgResult<Oid> {
+fn byval_oid(col: &(Datum<'_>, bool)) -> PgResult<Oid> {
     match &col.0 {
-        TupleValue::ByVal(d) => Ok(d.as_oid()),
-        TupleValue::ByRef(_) => Err(PgError::error("pg_event_trigger oid attr is by-reference")),
+        Datum::ByVal(_) => Ok(col.0.as_oid()),
+        Datum::ByRef(_) => Err(PgError::error("pg_event_trigger oid attr is by-reference")),
     }
 }
 
 /// `NameStr` of a `NameData` (`name`) attribute, as an owned string (read up to
 /// the first NUL of the fixed-width field).
-fn name_str(col: &(TupleValue<'_>, bool)) -> PgResult<String> {
+fn name_str(col: &(Datum<'_>, bool)) -> PgResult<String> {
     match &col.0 {
-        TupleValue::ByRef(b) => {
+        Datum::ByRef(b) => {
             let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             Ok(String::from_utf8_lossy(&b[..len]).into_owned())
         }
-        TupleValue::ByVal(_) => Err(PgError::error("pg_event_trigger name attr is by-value")),
+        Datum::ByVal(_) => Err(PgError::error("pg_event_trigger name attr is by-value")),
     }
 }
 

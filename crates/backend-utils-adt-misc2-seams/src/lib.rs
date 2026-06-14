@@ -7,6 +7,17 @@
 //! a call panics loudly. The expanded object crosses as the typed
 //! [`types_datum::ExpandedObjectRef`] handle (C's `ExpandedObjectHeader *`
 //! via `DatumGetEOHP`), not raw bytes.
+//!
+//! Datum-unification: the value-carrying `make_expanded_object_read_only_internal`
+//! seam carries the unified [`types_tuple::…::Datum`] enum (aliased [`Datum`]).
+//! The transitional bare-word `types_datum::Datum` variant has been retired (its
+//! sole consumer migrated to the unified carrier); `types_datum` survives here
+//! only for the opaque [`types_datum::ExpandedObjectRef`] handle, which is a
+//! typed pointer, not the bare-word shim newtype.
+
+// The canonical unified value type (Datum-unification keystone). The
+// `make_expanded_object_read_only_internal` seam below takes/returns it.
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 seam_core::seam!(
     /// `EOH_get_flat_size(DatumGetEOHP(datum))` (utils/adt/expandeddatum.c):
@@ -31,19 +42,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `MakeExpandedObjectReadOnlyInternal(d)` (utils/adt/expandeddatum.c): if
-    /// `d` is a read-write expanded-object pointer, return the object's
-    /// built-in read-only pointer (`EOHPGetRODatum`, same `eohptr` payload with
-    /// the R/O `va_tag`); any other datum is returned verbatim. Reached only on
-    /// the non-null, `typlen == -1` branch of the `MakeExpandedObjectReadOnly`
-    /// macro (the null / non-varlena short-circuit is the caller's). The
-    /// dereference of the `Datum` pointer word is the expandeddatum owner's, so
-    /// the transform crosses here rather than in the node. Allocates the R/O
-    /// pointer copy in `mcx`; fallible on OOM.
-    pub fn make_expanded_object_read_only_internal<'mcx>(
+    /// `MakeExpandedObjectReadOnlyInternal(d)` (utils/adt/expandeddatum.c) over
+    /// the unified value type. If `d` is a read-write expanded-object pointer,
+    /// return the object's built-in read-only pointer (`EOHPGetRODatum`, same
+    /// `eohptr` payload with the R/O `va_tag`); any other datum is returned
+    /// verbatim (a by-value arm passes through unchanged, a non-expanded
+    /// by-reference arm is returned as is). Reached only on the non-null,
+    /// `typlen == -1` branch of the `MakeExpandedObjectReadOnly` macro (the null
+    /// / non-varlena short-circuit is the caller's). The dereference of the
+    /// `Datum` pointer word is the expandeddatum owner's, so the transform
+    /// crosses here rather than in the node. Allocates the R/O pointer copy in
+    /// `mcx`; fallible on OOM.
+    pub fn make_expanded_object_read_only_internal_v<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        d: types_datum::Datum,
-    ) -> types_error::PgResult<types_datum::Datum>
+        d: &Datum<'_>,
+    ) -> types_error::PgResult<Datum<'mcx>>
 );
 
 /* ---------------------------------------------------------------------------

@@ -57,12 +57,9 @@ use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_core::fmgr::F_OIDEQ;
 use backend_access_common_scankey::ScanKeyInit;
-// The bare-word `types_datum::Datum` survives only as the
-// `ScanKeyData.sk_argument` ABI/storage edge: `ScanKeyInit` stamps the raw
-// comparison word into the scan key (the genam/fmgr edge still consumes a
-// machine word, as `ObjectIdGetDatum` does in C). All in-crate Datum traffic
-// uses the canonical `backend_access_common_heaptuple::Datum<'mcx>` enum.
-use types_datum::datum::Datum as ScanKeyWord;
+// All in-crate Datum traffic — including the `ScanKeyData.sk_argument`
+// scan-key edge stamped by `ScanKeyInit` — uses the canonical unified
+// `types_tuple::Datum<'mcx>` enum (`backend_access_common_heaptuple::Datum`).
 use backend_access_common_heaptuple::heap_deform_tuple;
 use types_tuple::heaptuple::ItemPointerData;
 use types_catalog::catalog::{
@@ -587,7 +584,9 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
             Anum_pg_opclass_opcmethod,
             BTEqualStrategyNumber,
             F_OIDEQ,
-            ScanKeyWord::from_oid(amoid),
+            // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+            // (the Datum-unification keystone flipped this edge).
+            Datum::from_oid(amoid),
         )?;
         let keys = [key];
 
@@ -1999,7 +1998,7 @@ fn systable_scan_foreach(
 /// Read a by-value `Oid` column from a deformed row (`GETSTRUCT(tup)->col`).
 fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
     match &row.cols[(attno - 1) as usize].0 {
-        Datum::ByVal(d) => d.as_oid(),
+        Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
         Datum::ByRef(_) => InvalidOid,
     }
 }
@@ -2007,7 +2006,7 @@ fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
 /// Read a by-value `bool` column from a deformed row.
 fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
     match &row.cols[(attno - 1) as usize].0 {
-        Datum::ByVal(d) => d.as_bool(),
+        Datum::ByVal(d) => Datum::from_usize(*d).as_bool(),
         Datum::ByRef(_) => false,
     }
 }

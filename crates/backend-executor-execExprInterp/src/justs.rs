@@ -21,23 +21,32 @@
 use backend_executor_execTuples_seams::slot_getallattrs;
 use backend_utils_fmgr_fmgr_seams::function_call1_coll;
 use types_core::primitive::InvalidOid;
-// The bare-word newtype: the eval entry-point return word.
-use types_datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what the
-// keystone-owned const/init step-payload values carry.
-use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+// interpreter eval entry points return, and what the keystone-owned
+// const/init step-payload values carry.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 
-/// Recover the bare scalar word from a stored canonical by-value datum.
+/// Lower a canonical by-value datum to the bare scalar word the still-bare-word
+/// fmgr `function_call1_coll` seam takes for a hash-key argument.
+///
+/// This is the *one* sanctioned bare-word edge left in the hash fast paths: the
+/// fmgr seam's `arg1: DatumWord` ABI (fmgr is not migrated in this wave) takes a
+/// machine word, not the canonical value. A by-reference hash key (e.g. hashing
+/// `text`) cannot cross this still-bare-word seam — it panics here, exactly like
+/// the by-reference array-element edge in `eval_scalar`'s saophash callbacks.
+/// Threading the canonical carrier through the fmgr call frame is the fmgr-wave
+/// follow-on (the `function_call1_coll` seam would need a canonical-`Datum`
+/// argument); recorded, not forged.
 #[inline]
-fn word_of(v: &DatumV<'_>) -> Datum {
-    Datum::from_usize(v.as_usize())
+fn hash_arg_word(v: &Datum<'_>) -> types_datum::Datum {
+    types_datum::Datum::from_usize(v.as_usize())
 }
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::executor::TupleTableSlot;
 use types_nodes::EStateData;
-use types_tuple::backend_access_common_heaptuple::{DeformedColumn, TupleValue};
+use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 
 use crate::dispatch::CheckOpSlotCompatibility;
 
@@ -65,7 +74,7 @@ fn read_hash_var<'mcx>(
     slot: &TupleTableSlot,
     attnum: i32,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // fcinfo->args[0].value  = slot->tts_values[attnum];
     // fcinfo->args[0].isnull = slot->tts_isnull[attnum];
     //
@@ -73,31 +82,16 @@ fn read_hash_var<'mcx>(
     slot_getattr(slot, attnum + 1, estate)
 }
 
-/// Convert one deformed column into the `(Datum, bool)` the interpreter
-/// returns. For a by-value attribute the column is the scalar word itself
-/// (C: `tts_values[attnum]`). A by-reference attribute is a pointer `Datum`
-/// in C; the owned model carries the bytes instead and the trimmed
-/// `TupleTableSlot` cannot yet round-trip that to a bare `Datum`. The
-/// `slot_getallattrs` seam panics before any column is produced (its owner is
-/// unported), so this conversion is never reached at runtime today; it is kept
-/// faithful for when the slot-payload model lands.
+/// Convert one deformed column into the canonical `(Datum, bool)` the
+/// interpreter returns. For a by-value attribute the column is the scalar word
+/// itself (C: `tts_values[attnum]`); for a by-reference attribute it is the
+/// column's on-disk bytes (C: a pointer `Datum` into the tuple). The canonical
+/// value type carries both arms directly, so this is now a faithful clone of
+/// the deformed column — no by-reference round-trip is lost.
 #[inline]
-fn deformed_column_to_datum(col: &DeformedColumn<'_>) -> (Datum, bool) {
+fn deformed_column_to_datum<'mcx>(col: &DeformedColumn<'mcx>) -> (Datum<'mcx>, bool) {
     let (value, isnull) = col;
-    let datum = match value {
-        TupleValue::ByVal(d) => *d,
-        TupleValue::ByRef(_) => {
-            // A by-reference Var fast path needs the slot's pointer Datum,
-            // which the trimmed slot model (execTuples-owned) does not yet
-            // expose. Unreachable until the slot payload model lands, because
-            // slot_getallattrs panics first.
-            panic!(
-                "ExecJust* by-reference slot value not representable until the \
-                 execTuples slot payload model lands"
-            )
-        }
-    };
-    (datum, *isnull)
+    (value.clone(), *isnull)
 }
 
 /// Read attribute `attnum` (1-based, as C `slot_getattr`) out of `slot` by
@@ -106,7 +100,7 @@ fn slot_getattr<'mcx>(
     slot: &TupleTableSlot,
     attnum: i32,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     let cols = slot_getallattrs::call(estate.es_query_cxt, slot)?;
     let col = &cols[(attnum - 1) as usize];
     Ok(deformed_column_to_datum(col))
@@ -118,7 +112,7 @@ pub fn ExecJustVarImpl<'mcx>(
     state: &ExprState<'mcx>,
     slot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[1];
     // int attnum = op->d.var.attnum + 1;
     let steps = state.steps.as_ref().expect("ExecJustVarImpl: steps not ready");
@@ -143,7 +137,7 @@ pub fn ExecJustAssignVarImpl<'mcx>(
     state: &mut ExprState<'mcx>,
     inslot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[1];
     // int attnum = op->d.assign_var.attnum + 1;
     // int resultnum = op->d.assign_var.resultnum;
@@ -190,7 +184,7 @@ pub fn ExecJustVarVirtImpl<'mcx>(
     state: &ExprState<'mcx>,
     slot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[0];
     // int attnum = op->d.var.attnum;
     let steps = state.steps.as_ref().expect("ExecJustVarVirtImpl: steps not ready");
@@ -222,7 +216,7 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
     state: &mut ExprState<'mcx>,
     inslot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *op = &state->steps[0];
     // int attnum = op->d.assign_var.attnum;
     // int resultnum = op->d.assign_var.resultnum;
@@ -258,7 +252,7 @@ pub fn ExecJustHashVarImpl<'mcx>(
     state: &ExprState<'mcx>,
     slot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *fetchop = &state->steps[0];
     // ExprEvalStep *var = &state->steps[1];
     // ExprEvalStep *hashop = &state->steps[2];
@@ -298,7 +292,7 @@ pub fn ExecJustHashVarImpl<'mcx>(
     // The owned FmgrInfo carries only fn_oid; the fmgr seam re-resolves and
     // dispatches (the typed PGFunction is never produced — see the F0 contract).
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, value)?;
+        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
         // DatumGetUInt32 then UInt32GetDatum is identity on the word.
         Ok((Datum::from_u32(result.as_u32()), false))
     } else {
@@ -311,7 +305,7 @@ pub fn ExecJustHashVarVirtImpl<'mcx>(
     state: &ExprState<'mcx>,
     slot: &TupleTableSlot,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *var = &state->steps[0];
     // ExprEvalStep *hashop = &state->steps[1];
     // FunctionCallInfo fcinfo = hashop->d.hashdatum.fcinfo_data;
@@ -344,7 +338,7 @@ pub fn ExecJustHashVarVirtImpl<'mcx>(
     //     return DatumGetUInt32(hashop->d.hashdatum.fn_addr(fcinfo));
     // else return (Datum) 0;
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, value)?;
+        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
         Ok((Datum::from_u32(result.as_u32()), false))
     } else {
         Ok((Datum::null(), false))
@@ -371,7 +365,7 @@ pub fn ExecJustInnerVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -383,7 +377,7 @@ pub fn ExecJustOuterVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -395,7 +389,7 @@ pub fn ExecJustScanVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
     let slot = estate.slot(slot_id).clone();
@@ -407,7 +401,7 @@ pub fn ExecJustAssignInnerVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -419,7 +413,7 @@ pub fn ExecJustAssignOuterVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -431,7 +425,7 @@ pub fn ExecJustAssignScanVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
     let slot = estate.slot(slot_id).clone();
@@ -443,7 +437,7 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     let _ = econtext;
     // ExprEvalStep *op = &state->steps[0];
     //
@@ -541,16 +535,16 @@ pub fn ExecJustConst<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     let _ = (econtext, estate);
     // ExprEvalStep *op = &state->steps[0];
     // *isnull = op->d.constval.isnull;
     // return op->d.constval.value;
     let steps = state.steps.as_ref().expect("ExecJustConst: steps not ready");
     match &steps[0].d {
-        // The canonical const value crosses back to the bare word the eval
-        // entry-point contract returns.
-        ExprEvalStepData::ConstVal { value, isnull } => Ok((word_of(value), *isnull)),
+        // The canonical const value is returned directly (by-value scalar word
+        // or by-reference image) through the now-canonical eval entry point.
+        ExprEvalStepData::ConstVal { value, isnull } => Ok((value.clone(), *isnull)),
         _ => unreachable!("ExecJustConst: step[0] is not an EEOP_CONST"),
     }
 }
@@ -560,7 +554,7 @@ pub fn ExecJustInnerVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -572,7 +566,7 @@ pub fn ExecJustOuterVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -584,7 +578,7 @@ pub fn ExecJustScanVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustVarVirtImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
     let slot = estate.slot(slot_id).clone();
@@ -596,7 +590,7 @@ pub fn ExecJustAssignInnerVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -608,7 +602,7 @@ pub fn ExecJustAssignOuterVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -620,7 +614,7 @@ pub fn ExecJustAssignScanVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustAssignVarVirtImpl(state, econtext->ecxt_scantuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_scantuple);
     let slot = estate.slot(slot_id).clone();
@@ -632,7 +626,7 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *fetchop = &state->steps[0];
     // ExprEvalStep *setivop = &state->steps[1];
     // ExprEvalStep *innervar = &state->steps[2];
@@ -643,9 +637,11 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
         .steps
         .as_ref()
         .expect("ExecJustHashInnerVarWithIV: steps not ready");
-    let init_value = match &steps[1].d {
-        // The canonical init value crosses back to the bare word.
-        ExprEvalStepData::HashDatumInitValue { init_value } => word_of(init_value),
+    // hashkey = DatumGetUInt32(setivop->d.hashdatum_initvalue.init_value);
+    // The init value is a by-value uint32 seed read directly off the canonical
+    // const payload via the `DatumGetUInt32` accessor — no shim word needed.
+    let init_hashkey = match &steps[1].d {
+        ExprEvalStepData::HashDatumInitValue { init_value } => init_value.as_u32(),
         _ => unreachable!("ExecJustHashInnerVarWithIV: step[1] is not EEOP_HASHDATUM_SET_INITVAL"),
     };
     let attnum = match &steps[2].d {
@@ -670,9 +666,8 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
     // fcinfo->args[0].isnull = econtext->ecxt_innertuple->tts_isnull[attnum];
     let (value, isnull) = read_hash_var(&slot, attnum, estate)?;
 
-    // hashkey = DatumGetUInt32(setivop->d.hashdatum_initvalue.init_value);
     // hashkey = pg_rotate_left32(hashkey, 1);
-    let mut hashkey = init_value.as_u32();
+    let mut hashkey = init_hashkey;
     hashkey = pg_rotate_left32(hashkey, 1);
 
     // if (!fcinfo->args[0].isnull) {
@@ -680,7 +675,7 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
     //     hashkey = hashkey ^ hashvalue;
     // }
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, value)?;
+        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
         let hashvalue = result.as_u32();
         hashkey ^= hashvalue;
     }
@@ -695,7 +690,7 @@ pub fn ExecJustHashOuterVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -707,7 +702,7 @@ pub fn ExecJustHashInnerVar<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -719,7 +714,7 @@ pub fn ExecJustHashOuterVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarVirtImpl(state, econtext->ecxt_outertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_outertuple);
     let slot = estate.slot(slot_id).clone();
@@ -731,7 +726,7 @@ pub fn ExecJustHashInnerVarVirt<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // return ExecJustHashVarVirtImpl(state, econtext->ecxt_innertuple, isnull);
     let slot_id = resolve_slot!(estate, econtext, ecxt_innertuple);
     let slot = estate.slot(slot_id).clone();
@@ -743,7 +738,7 @@ pub fn ExecJustHashOuterVarStrict<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // ExprEvalStep *fetchop = &state->steps[0];
     // ExprEvalStep *var = &state->steps[1];
     // ExprEvalStep *hashop = &state->steps[2];
@@ -783,9 +778,10 @@ pub fn ExecJustHashOuterVarStrict<'mcx>(
     //     return (Datum) 0;
     // }
     if !isnull {
-        let result = function_call1_coll::call(fn_oid, InvalidOid, value)?;
+        let result = function_call1_coll::call(fn_oid, InvalidOid, hash_arg_word(&value))?;
         Ok((Datum::from_u32(result.as_u32()), false))
     } else {
         Ok((Datum::null(), true))
     }
 }
+

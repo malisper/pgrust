@@ -17,7 +17,7 @@ use mcx::Mcx;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
-use types_selfuncs::{StatsTuple, VariableStatData};
+use types_selfuncs::{ConstNodeInfo, StatsTuple, VariableStatData};
 
 seam_core::seam!(
     /// `get_restriction_variable(root, args, varRelid, &vardata, &other,
@@ -34,6 +34,36 @@ seam_core::seam!(
         args: Datum,
         var_relid: i32,
     ) -> PgResult<Option<(VariableStatData, Expr, bool)>>
+);
+
+seam_core::seam!(
+    /// `IsA(node, Const)` decode (nodes/primnodes.h), as
+    /// `scalararraysel_containment` applies it to `leftop`: returns `None` when
+    /// `node` is not a `Const` (C: the `!IsA` punt), else its
+    /// `(constisnull, constvalue, consttype)`. `node` is the raw planner
+    /// `Node *` word, passed as [`Datum`] (planner-owned model; the provider
+    /// retypes it). `Err` carries any node-walk `ereport(ERROR)`.
+    pub fn const_node_info(node: Datum) -> PgResult<Option<ConstNodeInfo>>
+);
+
+seam_core::seam!(
+    /// `examine_variable(root, node, varRelid, &vardata)` (selfuncs.c): locate
+    /// the statistical data for an arbitrary expression `node` (used by
+    /// `scalararraysel_containment` on its right operand). Fills the
+    /// [`VariableStatData`]; its `rel` is `None` (C: `vardata->rel == NULL`)
+    /// when the expression could not be identified to a relation. `root` /
+    /// `node` are the raw fmgr/planner words (`PlannerInfo *` / `Node *`),
+    /// passed as [`Datum`] because the planner-node model is owned by the
+    /// not-yet-ported planner; the provider retypes them. Outputs that allocate
+    /// (the detoasted stats) live in `mcx`. The caller releases the result via
+    /// [`release_variable_stats`]. `Err` carries the recognition path's
+    /// `ereport(ERROR)`s and OOM.
+    pub fn examine_variable<'mcx>(
+        mcx: Mcx<'mcx>,
+        root: Datum,
+        node: Datum,
+        var_relid: i32,
+    ) -> PgResult<VariableStatData>
 );
 
 seam_core::seam!(

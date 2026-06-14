@@ -10,18 +10,15 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::Mcx;
+use types_cluster::RelOptionsToken;
 use types_core::primitive::{AttrNumber, Oid};
 use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_ID};
-// `reloptions` travels as the canonical unified `Datum<'mcx>` enum: a real
-// reloptions value is a `bytea` varlena (`Datum::ByRef`), absence is
-// `Datum::null()`. This crate only forwards it opaquely into the
-// `heap_create_with_catalog` / `index_create` seams.
+// The toast-table `reloptions` parameter travels as the opaque
+// [`RelOptionsToken`] forwarded into the `heap_create_with_catalog` seam.
+// The separate `index_create` seam still takes the canonical unified
+// `Datum<'mcx>` for its own `reloptions` field, so this crate constructs
+// `Datum::null()` for the toast index.
 use types_tuple::backend_access_common_heaptuple::Datum;
-// The two consuming seams (`heap.c` / `index.c` owners unported) still take the
-// bare-word shim `types_datum::Datum` for their `reloptions` field — an
-// external/ABI seam edge. We bridge the canonical enum to that word at the call
-// site (see `reloptions_word`), imported here under an unambiguous alias.
-use types_datum::Datum as RelOptionsWord;
 use types_error::{PgError, PgResult};
 use types_nodes::execnodes::IndexInfo;
 use types_nodes::primnodes::OnCommitAction;
@@ -77,7 +74,7 @@ const InvalidCompressionMethod: i8 = b'\0' as i8;
 pub fn AlterTableCreateToastTable<'mcx>(
     mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum<'mcx>,
+    reloptions: RelOptionsToken,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
     CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, true, InvalidOid)
@@ -87,7 +84,7 @@ pub fn AlterTableCreateToastTable<'mcx>(
 pub fn NewHeapCreateToastTable<'mcx>(
     mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum<'mcx>,
+    reloptions: RelOptionsToken,
     lockmode: LOCKMODE,
     OIDOldToast: Oid,
 ) -> PgResult<()> {
@@ -95,10 +92,10 @@ pub fn NewHeapCreateToastTable<'mcx>(
 }
 
 /// (toasting.c:70)
-pub fn NewRelationCreateToastTable<'mcx>(
-    mcx: Mcx<'mcx>,
+pub fn NewRelationCreateToastTable(
+    mcx: Mcx<'_>,
     relOid: Oid,
-    reloptions: Datum<'mcx>,
+    reloptions: RelOptionsToken,
 ) -> PgResult<()> {
     CheckAndCreateToastTable(mcx, relOid, reloptions, AccessExclusiveLock, false, InvalidOid)
 }
@@ -107,7 +104,7 @@ pub fn NewRelationCreateToastTable<'mcx>(
 fn CheckAndCreateToastTable<'mcx>(
     mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum<'mcx>,
+    reloptions: RelOptionsToken,
     lockmode: LOCKMODE,
     check: bool,
     OIDOldToast: Oid,
@@ -156,7 +153,11 @@ pub fn BootstrapToastTable(
         &rel,
         toastOid,
         toastIndexOid,
-        Datum::null(), // (Datum) 0
+        // (Datum) 0 — NULL reloptions
+        RelOptionsToken {
+            is_null: true,
+            bytes: Vec::new(),
+        },
         AccessExclusiveLock,
         false,
         InvalidOid,
@@ -181,7 +182,7 @@ fn create_toast_table<'mcx>(
     rel: &Relation<'_>,
     toastOid: Oid,
     toastIndexOid: Oid,
-    reloptions: Datum<'mcx>,
+    reloptions: RelOptionsToken,
     lockmode: LOCKMODE,
     check: bool,
     OIDOldToast: Oid,
@@ -290,7 +291,7 @@ fn create_toast_table<'mcx>(
         shared_relation,
         mapped_relation,
         oncommit: OnCommitAction::ONCOMMIT_NOOP,
-        reloptions: reloptions_word(&reloptions),
+        reloptions,
         use_user_acl: false,
         allow_system_table_mods: true,
         is_internal: true,
@@ -348,7 +349,7 @@ fn create_toast_table<'mcx>(
             collation_ids: collationIds.to_vec(),
             opclass_ids: opclassIds.to_vec(),
             coloptions: coloptions.to_vec(),
-            reloptions: reloptions_word(&Datum::null()), // (Datum) 0
+            reloptions: Datum::null(), // (Datum) 0
             flags: INDEX_CREATE_IS_PRIMARY,
             constr_flags: 0,
             allow_system_table_mods: true,
@@ -485,27 +486,11 @@ fn snprintf_name(mut s: String) -> String {
     s
 }
 
-/// Bridge the canonical `reloptions` `Datum<'mcx>` down to the bare-word shim
-/// `types_datum::Datum` consumed by the still-unported `heap_create_with_catalog`
-/// / `index_create` seams (their `reloptions` field is `types_datum::Datum`, an
-/// external/ABI seam edge into `catalog/heap.c` / `catalog/index.c`).
-///
-/// `reloptions` is forwarded opaquely; this unit never reads it. In C the value
-/// is a single `Datum` word: `(Datum) 0` when default/unset, otherwise a pointer
-/// to a `bytea` (`text[]`) varlena. We mirror that exactly:
-///
-///   * `Datum::null()` / any by-value word -> that same scalar word (`(Datum) 0`
-///     for the default case);
-///   * a `ByRef` varlena image -> the pointer word into its bytes, the audited
-///     by-reference→bare-word ABI edge (the seam owner re-reads it as a varlena
-///     pointer, exactly as `heap_create_with_catalog` does in C).
-fn reloptions_word(reloptions: &Datum<'_>) -> RelOptionsWord {
-    match reloptions {
-        Datum::ByVal(word) => *word,
-        Datum::ByRef(bytes) => RelOptionsWord::from_usize(bytes.as_ptr() as usize),
-    }
+/// Install this crate's inward seams. `backend-commands-cluster` calls
+/// `new_heap_create_toast_table` across the cluster/toasting cycle; wire its
+/// real implementation here. The seam decl signature
+/// (`mcx, rel_oid, reloptions: RelOptionsToken, lockmode, toast_oid`) matches
+/// [`NewHeapCreateToastTable`] exactly, so install it directly.
+pub fn init_seams() {
+    backend_catalog_toasting_seams::new_heap_create_toast_table::set(NewHeapCreateToastTable);
 }
-
-/// Install this crate's seams. This unit declares no inward seams (no ported
-/// crate calls it across a cycle yet), so there is nothing to install.
-pub fn init_seams() {}

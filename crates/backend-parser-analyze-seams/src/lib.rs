@@ -16,7 +16,7 @@
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use types_nodes::copy_query::{Query as CopyQuery, RawStmt as CopyRawStmt};
+use types_nodes::copy_query::Query as CopyQuery;
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::RawStmt;
 use types_nodes::portalcmds::{JumbleState, ParseState as PortalcmdsParseState, Query};
@@ -40,7 +40,7 @@ seam_core::seam!(
     /// any analysis/rewrite `ereport(ERROR)`.
     pub fn pg_analyze_and_rewrite_fixedparams<'mcx>(
         mcx: Mcx<'mcx>,
-        parsetree: &CopyRawStmt<'mcx>,
+        parsetree: &RawStmt<'mcx>,
         query_string: &str,
     ) -> PgResult<PgVec<'mcx, CopyQuery<'mcx>>>
 );

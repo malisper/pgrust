@@ -716,11 +716,11 @@ pub fn InitPostgres(
         // Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM segments.
         backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             pgstat_before_server_shutdown_cb,
-            types_datum::Datum::null(),
+            types_tuple::Datum::null(),
         )?;
         backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             shutdown_xlog_cb,
-            types_datum::Datum::null(),
+            types_tuple::Datum::null(),
         )?;
     }
 
@@ -739,7 +739,7 @@ pub fn InitPostgres(
     // Set up process-exit callback to do pre-shutdown cleanup.
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         shutdown_postgres_cb,
-        types_datum::Datum::null(),
+        types_tuple::Datum::null(),
     )?;
 
     // The autovacuum launcher is done here.
@@ -1165,7 +1165,7 @@ fn process_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> PgResult<()> 
 
 /// `ShutdownPostgres` — backend-shutdown callback. Cleanup that must happen
 /// before the supporting modules begin to nail their doors shut.
-pub fn ShutdownPostgres(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+pub fn ShutdownPostgres(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // Make sure we've killed any active transaction.
     backend_access_transam_xact_seams::abort_out_of_any_transaction::call()?;
 
@@ -1177,18 +1177,25 @@ pub fn ShutdownPostgres(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
 }
 
 /// `before_shmem_exit(ShutdownPostgres, 0)` callback shape.
-fn shutdown_postgres_cb(code: i32, arg: types_datum::Datum) -> PgResult<()> {
+fn shutdown_postgres_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
     ShutdownPostgres(code, arg)
 }
 
 /// `before_shmem_exit(ShutdownXLOG, 0)` — delegate to xlog.c's exit callback.
-fn shutdown_xlog_cb(code: i32, arg: types_datum::Datum) -> PgResult<()> {
+///
+/// Both the `before_shmem_exit` seam and the xlog `ShutdownXLOG` seam now carry
+/// the canonical unified `types_tuple::Datum<'static>`, so the arg forwards
+/// directly.
+fn shutdown_xlog_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
     backend_access_transam_xlog::ShutdownXLOG(code, arg);
     Ok(())
 }
 
 /// `before_shmem_exit(pgstat_before_server_shutdown, 0)` — delegate to pgstat.
-fn pgstat_before_server_shutdown_cb(code: i32, arg: types_datum::Datum) -> PgResult<()> {
+///
+/// Both the `before_shmem_exit` seam and the pgstat seam now carry the canonical
+/// unified `types_tuple::Datum<'static>`, so the arg forwards directly.
+fn pgstat_before_server_shutdown_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
     backend_utils_activity_pgstat_seams::pgstat_before_server_shutdown::call(code, arg)
 }
 

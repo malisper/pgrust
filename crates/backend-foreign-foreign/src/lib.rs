@@ -496,7 +496,7 @@ pub fn pg_options_to_table<'mcx>(
 
     // foreach(cell, options) { ... tuplestore_putvalues(...); }
     for (defname, arg) in options.iter() {
-        let mut values: [Datum; 2] = [Datum::null(), Datum::null()];
+        let mut values: [Datum<'mcx>; 2] = [Datum::null(), Datum::null()];
         let mut nulls: [bool; 2] = [false; 2];
 
         // values[0] = CStringGetTextDatum(def->defname); nulls[0] = false;
@@ -526,12 +526,9 @@ pub fn pg_options_to_table<'mcx>(
             .as_mut()
             .expect("InitMaterializedSRF set fcinfo->resultinfo");
         // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-        // Lower the canonical by-value words to the still-shim-typed seam
-        // contract at this audited tuplestore edge (funcapi/tuplestore have not
-        // advanced off the bare-word newtype).
-        let shim_values: [types_datum::Datum; 2] =
-            std::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
-        funcapi::materialized_srf_putvalues::call(rsinfo, &shim_values, &nulls)?;
+        // The funcapi seam now takes the canonical unified value directly (the
+        // Datum-unification keystone flipped this edge).
+        funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }
 
     // return (Datum) 0;

@@ -278,7 +278,7 @@ pub fn ProcSignalInit(
     // Set up to release the slot on process exit
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         CleanupProcSignalState,
-        types_datum::Datum::from_usize(0),
+        types_tuple::Datum::from_usize(0),
     )?;
 
     Ok(())
@@ -287,7 +287,7 @@ pub fn ProcSignalInit(
 /// `CleanupProcSignalState(int status, Datum arg)` — remove current process
 /// from the ProcSignal mechanism. Called via `on_shmem_exit()` during
 /// backend shutdown.
-fn CleanupProcSignalState(_status: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn CleanupProcSignalState(_status: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // Clear MyProcSignalSlot, so that a SIGUSR1 received after this point
     // won't try to access it after it's no longer ours.
     let (slot_index, my_proc_pid) = MY_PROC_SIGNAL_SLOT

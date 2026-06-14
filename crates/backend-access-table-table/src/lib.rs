@@ -20,7 +20,7 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use types_rel::Relation;
-use types_storage::lock::LOCKMODE;
+use types_storage::lock::{LOCKMODE, NoLock};
 use types_tuple::access::{
     RangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
 };
@@ -28,6 +28,7 @@ use types_tuple::access::{
 /// Install this crate's seam implementations.
 pub fn init_seams() {
     backend_access_table_table_seams::table_open::set(table_open);
+    backend_access_table_table_seams::relation_close::set(relation_close);
 }
 
 /// `table_open(relationId, lockmode)` — open a table relation by relation
@@ -108,6 +109,26 @@ pub fn table_openrv_extended<'mcx>(
 /// case, the lock is released automatically at xact end.
 pub fn table_close(relation: Relation<'_>, lockmode: LOCKMODE) -> PgResult<()> {
     relation.close(lockmode)
+}
+
+/// `relation_close(relid, lockmode)` — the by-OID close for the call sites
+/// (e.g. cluster.c's `goto out` early-exits) that still hold a borrowed
+/// `Relation` carrier they cannot consume: the C `relation_close(rel,
+/// lockmode)` releases the relcache reference and, if `lockmode` is not
+/// `NoLock`, the relation lock. This mirrors the close path
+/// (`access/common/relation.c`'s `relation_close`) armed onto every opened
+/// handle: `RelationClose` (relcache) then `UnlockRelationId`, with the lock
+/// tag re-derived from the relation OID (`SetLocktagRelationOid`), so the
+/// OID-keyed close is faithful to the handle-keyed one.
+pub fn relation_close(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
+    // The relcache does the real work...
+    backend_utils_cache_relcache_seams::relation_close::call(relid)?;
+
+    if lockmode != NoLock {
+        backend_storage_lmgr_lmgr_seams::unlock_relation_oid::call(relid, lockmode)?;
+    }
+
+    Ok(())
 }
 
 /// `validate_relation_kind(r)` (static inline) — make sure relkind is not

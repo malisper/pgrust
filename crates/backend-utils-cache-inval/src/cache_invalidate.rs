@@ -4,7 +4,11 @@
 
 use types_core::primitive::{OidIsValid, InvalidOid};
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// the opaque callback-registration cookie, stored and handed back verbatim
+// (never deformed). See the crate-root note; the canonical `Datum<'mcx>` enum
+// is for deformed tuple values, not passthrough args.
+use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, FATAL};
 use types_rel::RelationData;
 use types_storage::{
@@ -240,6 +244,29 @@ pub fn CacheInvalidateRelcacheByTuple(classTuple: &HeapTupleData<'_>) -> PgResul
     })
 }
 
+/// `CacheInvalidateRelcacheByTuple`, but with the pg_class row already
+/// deformed by the caller into `(relid, form)`. Mirrors the C body exactly:
+/// `relationId = classtup->oid`; `databaseId = relisshared ? InvalidOid :
+/// MyDatabaseId`; `RegisterRelcacheInvalidation(PrepareInvalidationState(),
+/// databaseId, relationId)`. The trimmed `PgClassForm` lacks the system `oid`
+/// column, so the caller supplies the relation OID directly.
+pub fn CacheInvalidateRelcacheByPgClass(
+    relid: Oid,
+    form: &types_cluster::PgClassForm,
+) -> PgResult<()> {
+    let database_id = if form.relisshared {
+        InvalidOid
+    } else {
+        init_small_seams::my_database_id::call()
+    };
+
+    with_state(|state| {
+        let mcx = state.mcx;
+        let info = prepare_invalidation_state(mcx, state)?;
+        register_relcache_invalidation(mcx, state, info, database_id, relid)
+    })
+}
+
 /// `CacheInvalidateRelcacheByRelid`.
 pub fn CacheInvalidateRelcacheByRelid(relid: Oid) -> PgResult<()> {
     /*
@@ -323,6 +350,26 @@ pub fn CacheInvalidateRelmap(databaseId: Oid) -> PgResult<()> {
     sinval_seams::send_shared_invalid_messages::call(&[msg])
 }
 
+/// `SendSharedInvalidMessages((SharedInvalidationMessage *) bufptr, nmsgs)`
+/// from a still-serialized `SharedInvalidationMessage[]` byte buffer.
+///
+/// `FinishPreparedTransaction` (twophase.c) replays the invalidation messages
+/// that the 2PC state file carries as a raw on-disk array; in C it casts the
+/// buffer pointer straight to `SharedInvalidationMessage *`. The byte layout
+/// may be unaligned here, so decode each 16-byte entry on the fly via
+/// `SharedInvalMessages` and forward the typed slice to sinval, exactly as the
+/// C dispatcher does.
+pub fn SendSharedInvalidMessagesRaw(msgs: &[u8], nmsgs: i32) -> PgResult<()> {
+    let view = types_storage::SharedInvalMessages::from_bytes(msgs);
+    let mut decoded: Vec<SharedInvalidationMessage> = Vec::with_capacity(nmsgs as usize);
+    for i in 0..nmsgs as usize {
+        if let Some(m) = view.get(i) {
+            decoded.push(m);
+        }
+    }
+    sinval_seams::send_shared_invalid_messages::call(&decoded)
+}
+
 /* ------------------------------------------------------------------------
  *  Callback registration / dispatch
  * ------------------------------------------------------------------------ */
@@ -331,7 +378,18 @@ pub fn CacheInvalidateRelmap(databaseId: Oid) -> PgResult<()> {
 pub fn CacheRegisterSyscacheCallback(
     cacheid: i32,
     func: SyscacheCallbackFunction,
-    arg: Datum,
+    arg: ScalarWord,
+) -> PgResult<()> {
+    register_syscache_callback_tagged(cacheid, crate::SyscacheCallback::Full(func), arg)
+}
+
+/// Shared body of `CacheRegisterSyscacheCallback` that takes an already-tagged
+/// [`crate::SyscacheCallback`] (the `Full` C path and plancache's projected
+/// path differ only in the stored callback shape).
+fn register_syscache_callback_tagged(
+    cacheid: i32,
+    function: crate::SyscacheCallback,
+    arg: ScalarWord,
 ) -> PgResult<()> {
     if cacheid < 0 || cacheid >= SYS_CACHE_SIZE as i32 {
         /* elog(FATAL, "invalid cache ID: %d", cacheid) */
@@ -340,7 +398,6 @@ pub fn CacheRegisterSyscacheCallback(
 
     with_state(|state| {
         if state.syscache_callback_list.len() >= MAX_SYSCACHE_CALLBACKS {
-            /* elog(FATAL, "out of syscache_callback_list slots") */
             return Err(PgError::new(
                 FATAL,
                 "out of syscache_callback_list slots".to_string(),
@@ -351,10 +408,8 @@ pub fn CacheRegisterSyscacheCallback(
         let cidx = cacheid as usize;
 
         if state.syscache_callback_links[cidx] == 0 {
-            /* first callback for this cache */
             state.syscache_callback_links[cidx] = count + 1;
         } else {
-            /* add to end of chain, so that older callbacks are called first */
             let mut i = (state.syscache_callback_links[cidx] - 1) as usize;
             while state.syscache_callback_list[i].link > 0 {
                 i = (state.syscache_callback_list[i].link - 1) as usize;
@@ -365,7 +420,7 @@ pub fn CacheRegisterSyscacheCallback(
         state.syscache_callback_list.push(SyscacheCallbackItem {
             id: cacheid as i16,
             link: 0,
-            function: func,
+            function,
             arg,
         });
 
@@ -373,11 +428,28 @@ pub fn CacheRegisterSyscacheCallback(
     })
 }
 
+/// Plancache's `CacheRegisterSyscacheCallback(cacheid, func, (Datum) 0)`,
+/// routed through the `*-pc-seams` boundary with the `arg` projected out.
+/// Mirrors C: plancache always passes a zero `Datum`.
+pub fn CacheRegisterSyscacheCallbackPlanCache(
+    cacheid: i32,
+    func: types_plancache::SyscacheCallbackFn,
+) -> PgResult<()> {
+    register_syscache_callback_tagged(cacheid, crate::SyscacheCallback::Plancache(func), ScalarWord::null())
+}
+
 /// `CacheRegisterRelcacheCallback`.
-pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: Datum) -> PgResult<()> {
+pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: ScalarWord) -> PgResult<()> {
+    register_relcache_callback_tagged(crate::RelcacheCallback::Full(func), arg)
+}
+
+/// Shared body of `CacheRegisterRelcacheCallback` over a tagged callback.
+fn register_relcache_callback_tagged(
+    function: crate::RelcacheCallback,
+    arg: ScalarWord,
+) -> PgResult<()> {
     with_state(|state| {
         if state.relcache_callback_list.len() >= MAX_RELCACHE_CALLBACKS {
-            /* elog(FATAL, "out of relcache_callback_list slots") */
             return Err(PgError::new(
                 FATAL,
                 "out of relcache_callback_list slots".to_string(),
@@ -386,14 +458,22 @@ pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: Datum)
 
         state
             .relcache_callback_list
-            .push(RelcacheCallbackItem { function: func, arg });
+            .push(RelcacheCallbackItem { function, arg });
 
         Ok(())
     })
 }
 
+/// Plancache's `CacheRegisterRelcacheCallback(func, (Datum) 0)`, routed through
+/// the `*-pc-seams` boundary with the `arg` projected out.
+pub fn CacheRegisterRelcacheCallbackPlanCache(
+    func: types_plancache::RelcacheCallbackFn,
+) -> PgResult<()> {
+    register_relcache_callback_tagged(crate::RelcacheCallback::Plancache(func), ScalarWord::null())
+}
+
 /// `CacheRegisterRelSyncCallback`.
-pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: Datum) -> PgResult<()> {
+pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: ScalarWord) -> PgResult<()> {
     with_state(|state| {
         if state.relsync_callback_list.len() >= MAX_RELSYNC_CALLBACKS {
             /* elog(FATAL, "out of relsync_callback_list slots") */
@@ -425,20 +505,20 @@ pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
      * the borrow of the state across the user callback, which may re-enter the
      * inval machinery; collect the (function, arg) pairs first.
      */
-    let to_call: Vec<(SyscacheCallbackFunction, Datum)> = with_state(|state| {
+    let to_call: Vec<SyscacheCallbackItem> = with_state(|state| {
         let mut out = Vec::new();
         let mut i = (state.syscache_callback_links[cacheid as usize] - 1) as i32;
         while i >= 0 {
             let ccitem = state.syscache_callback_list[i as usize];
             debug_assert!(ccitem.id == cacheid as i16);
-            out.push((ccitem.function, ccitem.arg));
+            out.push(ccitem);
             i = ccitem.link as i32 - 1;
         }
         out
     });
 
-    for (function, arg) in to_call {
-        function(arg, cacheid, hashvalue);
+    for ccitem in to_call {
+        ccitem.invoke(cacheid, hashvalue);
     }
 
     Ok(())
@@ -446,7 +526,7 @@ pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
 
 /// `CallRelSyncCallbacks`.
 pub fn CallRelSyncCallbacks(relid: Oid) -> PgResult<()> {
-    let to_call: Vec<(RelSyncCallbackFunction, Datum)> = with_state(|state| {
+    let to_call: Vec<(RelSyncCallbackFunction, ScalarWord)> = with_state(|state| {
         state
             .relsync_callback_list
             .iter()

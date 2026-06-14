@@ -16,6 +16,7 @@ backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-sea
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-guc = { path = "../types-guc" }
 types-timeout = { path = "../types-timeout" }
 types-acl = { path = "../types-acl" }

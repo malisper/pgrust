@@ -1,42 +1,33 @@
 //! core-entry-store family — the REAL relcache substrate.
 //!
 //! Owns the mutable [`entry::RelationData`] descriptor, the real
-//! `RelationIdCache` dynahash (the C `RelIdCacheEnt` store keyed by `Oid`),
-//! the per-backend `eoxact_list`/`in_progress_list` state, and the refcount
-//! lifecycle. This is the substrate the prior decomposition omitted (it built
-//! around a trimmed value-slice instead). Nothing here is `todo!()`.
+//! `RelationIdCache` store (the C `RelIdCacheEnt` table keyed by `Oid`,
+//! idiomatically a `thread_local` `RefCell<HashMap<Oid, Box<RelationData>>>` —
+//! the `id_cache`), the per-backend `eoxact_list`/`in_progress_list` state, and
+//! the refcount lifecycle. Nothing here is `todo!()`.
+//!
+//! The C `Relation` pointer becomes a copyable [`Oid`] handle ([`crate::Relation`]).
+//! The store *owns* each descriptor in a `Box<RelationData>`: the `Box` gives a
+//! stable heap address that survives `HashMap` rehash and the in-place
+//! `RelationRebuildRelation` field swap, matching the C pointer's stability
+//! invariant (`rd_refcnt > 0` pins the allocation). Callers reach a descriptor
+//! through the scoped accessors [`with_rel`]/[`with_rel_mut`] (crate-internal)
+//! and [`with_relation`]/[`with_relation_mut`]/[`try_with_relation`] (public),
+//! or hold a pin across rebuilds via the [`RelationRef`] RAII guard.
 
 pub mod entry;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use backend_utils_error::{ereport, PgResult};
-use types_error::ERROR;
-use backend_utils_hash_dynahash::{hash_create, hash_search, hash_seq_init, hash_seq_search};
+use backend_utils_error::{ereport, emit_error_report_for, PgError, PgResult};
 use types_core::primitive::{Oid, ProcNumber};
 use types_core::xact::SubTransactionId;
-use types_hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_SEQ_STATUS, HTAB};
+use types_core::InvalidOid;
+use types_error::{ERROR, WARNING};
 
-use crate::{INITRELCACHESIZE, MAX_EOXACT_LIST};
-use entry::RelationData;
-
-/* ==========================================================================
- * `RelIdCacheEnt` (relcache.c) — the dynahash element: `{ Oid reloid;
- * Relation reldesc; }`. The C key is the `Oid`; the payload is the
- * `Relation` pointer. We store a raw `*mut RelationData` into a heap-owned
- * `Box<RelationData>` that the cache keeps alive — the C `Relation` pointer.
- * ======================================================================== */
-
-/// `RelIdCacheEnt` (relcache.c). `#[repr(C)]` so dynahash's `HASH_BLOBS`
-/// byte-copy of the `Oid` key lands on `reloid` at offset 0, exactly as C.
-#[repr(C)]
-struct RelIdCacheEnt {
-    /// `Oid reloid` — the hash key (offset 0; `keysize == sizeof(Oid)`).
-    reloid: Oid,
-    /// `Relation reldesc` — the C `Relation` pointer into the owned descriptor.
-    reldesc: *mut RelationData,
-}
+use crate::MAX_EOXACT_LIST;
+pub use entry::RelationData;
 
 /* ==========================================================================
  * Owned per-entry partition-cache payloads (`rd_partkey` / `rd_partcheck`).
@@ -47,11 +38,6 @@ struct RelIdCacheEnt {
  * owned model holds a lifetime-free deep copy keyed by relation OID (the cache
  * memory is process-lived; this map is the long-lived store). Reads re-project
  * a fresh copy into the caller's `mcx` (the partcache `copyObject` contract).
- *
- * `PartitionKeyData`'s sub-arrays and `partexprs` (`Expr`) are all lifetime-free
- * (`Expr` owns its children via `Box`/`Vec`), so the whole key copies by value.
- * `rd_partcheck` is a `List*` of `Expr`-derived CHECK quals; we hold them as the
- * lifetime-free `Expr` subtrees (the `Node::Expr` cast in reverse).
  * ======================================================================== */
 
 /// Lifetime-free mirror of `PartitionKeyData` (the relcache-owned cache slot).
@@ -89,15 +75,14 @@ pub(crate) struct InProgressEnt {
  * In C these are file-statics (`RelationIdCache`, `in_progress_list`,
  * `eoxact_list`, `relcacheInvalsReceived`, `criticalRelcachesBuilt`, ...). A
  * PostgreSQL backend is single-threaded, so they map to one `thread_local`
- * cell (matching `inval.c` and the other ported cache crates). The dynahash
- * `RelationIdCache` *owns* every descriptor: a `Box<RelationData>` is leaked
- * into the cache on insert and reclaimed on delete.
+ * cell (matching `inval.c` and the other ported cache crates). The
+ * `id_cache` HashMap *owns* every descriptor in a `Box<RelationData>`.
  * ======================================================================== */
 
 pub(crate) struct RelcacheState {
-    /// `RelationIdCache` — the OID→`Relation` dynahash. `null` until
-    /// [`crate::initfile`]'s `RelationCacheInitialize` creates it.
-    pub(crate) id_cache: *mut HTAB,
+    /// `RelationIdCache` — the OID→reldesc store. Owns each `RelationData`
+    /// in a `Box` (the stable heap address the C `Relation` pointer protects).
+    pub(crate) id_cache: HashMap<Oid, Box<RelationData>>,
     /// `in_progress_list` — stack of ongoing `RelationBuildDesc` calls.
     pub(crate) in_progress_list: Vec<InProgressEnt>,
     /// `eoxact_list[]` (fixed `MAX_EOXACT_LIST` bound, not a heap allocation).
@@ -123,7 +108,7 @@ pub(crate) struct RelcacheState {
 impl RelcacheState {
     fn new() -> Self {
         Self {
-            id_cache: std::ptr::null_mut(),
+            id_cache: HashMap::new(),
             in_progress_list: Vec::new(),
             eoxact_list: Vec::new(),
             eoxact_list_overflowed: false,
@@ -147,128 +132,303 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
 
 /* ==========================================================================
  * `RelationIdCache` creation (the dynahash half of `RelationCacheInitialize`).
+ *
+ * In the owned model the store is a `HashMap` that always exists (the C
+ * file-static is zero-initialized); `RelationCacheInitialize` no longer has to
+ * create it, so this is a documented no-op kept for the C call-site fidelity.
  * ======================================================================== */
 
-/// Build the empty `RelationIdCache` dynahash, mirroring
-/// `RelationCacheInitialize`: `keysize = sizeof(Oid)`, `entrysize =
-/// sizeof(RelIdCacheEnt)`, `HASH_ELEM | HASH_BLOBS`. Stored on the per-backend
-/// state. Called from [`crate::initfile`]'s `RelationCacheInitialize`.
+/// `RelationCacheInitialize`'s `RelationIdCache = hash_create(...)` half: the
+/// owned `HashMap` is constructed with the thread-local and always present, so
+/// there is nothing to allocate here (the C dynahash create is subsumed by the
+/// `HashMap` being eagerly live). Kept for the call-site in [`crate::initfile`].
 pub(crate) fn create_id_cache() -> PgResult<()> {
-    let mut ctl = blank_hashctl();
-    ctl.keysize = std::mem::size_of::<Oid>();
-    ctl.entrysize = std::mem::size_of::<RelIdCacheEnt>();
-    let htab = hash_create(
-        "Relcache by OID",
-        INITRELCACHESIZE,
-        &ctl,
-        HASH_ELEM | HASH_BLOBS,
-    )?;
-    with_state(|st| st.id_cache = htab);
     Ok(())
 }
 
-fn blank_hashctl() -> HASHCTL {
-    HASHCTL {
-        num_partitions: 0,
-        ssize: 0,
-        dsize: 0,
-        max_dsize: 0,
-        keysize: 0,
-        entrysize: 0,
-        hash: None,
-        match_: None,
-        keycopy: None,
-        alloc: None,
-        hcxt: std::ptr::null_mut(),
-        hctl: std::ptr::null_mut(),
+/* ==========================================================================
+ * Small typed scoped accessors over the store + the owned `RelationData`.
+ *
+ * A live [`Oid`] handle names a descriptor; the store owns it. These helpers
+ * borrow it from the store for the duration of `f` (no aliasing: the backend is
+ * single-threaded and the cache mutators never re-enter the store while a borrow
+ * is live — exactly as the C never frees a relcache entry out from under an
+ * active accessor). The re-entrancy contract is caller-enforced: `f` must not
+ * re-enter the relcache while the borrow is live.
+ * ======================================================================== */
+
+/// Borrow the descriptor named by `rel` immutably for the duration of `f`
+/// (replaces the prior `&*ptr` reads). Panics if the handle is stale, matching a
+/// C NULL-deref bug (the cache invariant is a live handle names a present desc).
+pub(crate) fn with_rel<R>(rel: Oid, f: impl FnOnce(&RelationData) -> R) -> R {
+    with_state(|st| {
+        let d = st
+            .id_cache
+            .get(&rel)
+            .expect("relcache: handle names no descriptor");
+        f(d)
+    })
+}
+
+/// Borrow the descriptor named by `rel` mutably for the duration of `f`
+/// (replaces the prior `&mut *ptr` writes).
+pub(crate) fn with_rel_mut<R>(rel: Oid, f: impl FnOnce(&mut RelationData) -> R) -> R {
+    with_state(|st| {
+        let d = st
+            .id_cache
+            .get_mut(&rel)
+            .expect("relcache: handle names no descriptor");
+        f(d)
+    })
+}
+
+/* ==========================================================================
+ * Public Oid-keyed scoped accessors (for the pub entry points).
+ * ======================================================================== */
+
+/// Run `f` with the descriptor identified by `oid` borrowed immutably. Errors
+/// (loud) if `oid` names no live relcache entry — a caller-contract violation
+/// (the relation must already be open/pinned).
+pub fn with_relation<R>(oid: Oid, f: impl FnOnce(&RelationData) -> R) -> PgResult<R> {
+    with_state(|st| match st.id_cache.get(&oid) {
+        Some(d) => Ok(f(d)),
+        None => Err(relcache_missing(oid)),
+    })
+}
+
+/// Run `f` with the descriptor identified by `oid` borrowed mutably (the
+/// in-place field-mutation arm).
+pub fn with_relation_mut<R>(oid: Oid, f: impl FnOnce(&mut RelationData) -> R) -> PgResult<R> {
+    with_state(|st| match st.id_cache.get_mut(&oid) {
+        Some(d) => Ok(f(d)),
+        None => Err(relcache_missing(oid)),
+    })
+}
+
+/// Like [`with_relation`] but yields the C-NULL semantics for a dropped/absent
+/// entry (`None`) instead of erroring — for the fetch sites whose C returns NULL
+/// when the relation is gone.
+pub fn try_with_relation<R>(oid: Oid, f: impl FnOnce(&RelationData) -> R) -> Option<R> {
+    with_state(|st| st.id_cache.get(&oid).map(|d| f(d)))
+}
+
+/// Loud error for an Oid that names no present descriptor.
+fn relcache_missing(oid: Oid) -> PgError {
+    ereport(ERROR)
+        .errmsg_internal(format!("relcache: no open relation for oid {oid}"))
+        .into_error()
+}
+
+/* ==========================================================================
+ * RelationRef — the RAII pin guard (the held-pointer analog).
+ *
+ * The C `Relation` is a `RelationData *` a caller pins (`rd_refcnt++`), holds
+ * across re-dereferences, and unpins on close. The pointer stays valid across an
+ * in-place `RelationRebuildRelation` (the fields are swapped behind the pointer;
+ * the struct's address never moves) because the rebuild never frees/moves a
+ * pinned (`rd_refcnt > 0`) entry.
+ *
+ * `RelationRef` is the analog: it owns a +1 on `rd_refcnt` and a raw
+ * `NonNull<RelationData>` into the `id_cache` `Box`. The `Box` gives a stable
+ * heap address: HashMap rehash moves only the table slot, and the in-place
+ * rebuild (`std::mem::swap` behind the `Box`'s `&mut RelationData`) leaves the
+ * allocation in place — so the `NonNull` stays valid exactly as the C pointer
+ * does (`rd_refcnt > 0` pins the allocation). The three `NonNull::as_ref`/
+ * `as_mut` sites below are the crate's ONLY sanctioned `unsafe`.
+ * ======================================================================== */
+
+/// Capture the stable [`NonNull<RelationData>`](core::ptr::NonNull) for the
+/// descriptor named by `oid`, which MUST be present in the `id_cache`. Creating
+/// the `NonNull` takes no `unsafe`: `&**boxed` is the `Box`'s heap-allocation
+/// address (the stable identity the pin protects), and `NonNull::from` only
+/// records it. Re-derived (a fresh borrow) on EVERY access so the deref's
+/// provenance is current even after the cache mutated the same allocation
+/// through a `&mut` on its own path (the in-place rebuild swap).
+fn current_relptr(oid: Oid) -> core::ptr::NonNull<RelationData> {
+    with_state(|st| {
+        let boxed = st
+            .id_cache
+            .get(&oid)
+            .expect("relcache: RelationRef pins an absent descriptor");
+        core::ptr::NonNull::from(&**boxed)
+    })
+}
+
+/// A RAII pin on an open relation: the [`crate::Relation`] (`RelationData *`)
+/// analog for callers that hold a relation across rebuilds. Holds a +1 on the
+/// descriptor's `rd_refcnt` and the stable heap address of the `id_cache`
+/// `Box`'s `RelationData`. Construct it with [`RelationRef::open`]; drop it (or
+/// let it fall out of scope, including on a `?`/panic unwind) to unpin.
+pub struct RelationRef {
+    /// The relation OID — the cache key, what each access re-derives from, and
+    /// what `Drop` unpins.
+    oid: Oid,
+    /// The stable address of the `id_cache` `Box`'s `RelationData`, recorded at
+    /// `open`. The stability *witness*: each access asserts the freshly
+    /// re-derived pointer still equals it. Never itself dereferenced.
+    ptr: core::ptr::NonNull<RelationData>,
+}
+
+impl RelationRef {
+    /// `RelationIdGetRelation(oid)` + pin: get-or-build the relcache entry, pin
+    /// it (`rd_refcnt += 1` via `RelationIncrementReferenceCount`, done by
+    /// `RelationIdGetRelation`), and return the guard. Errors when the relation
+    /// has no `pg_class` row (the C `relation_open` "could not open" error).
+    pub fn open(oid: Oid) -> PgResult<RelationRef> {
+        let handle = RelationIdGetRelation(oid)?;
+        if handle == InvalidOid {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("could not open relation with OID {oid}"))
+                .into_error());
+        }
+        debug_assert_eq!(handle, oid);
+        let ptr = current_relptr(oid);
+        Ok(RelationRef { oid, ptr })
+    }
+
+    /// The pinned relation's OID (`RelationGetRelid`).
+    #[inline]
+    pub fn oid(&self) -> Oid {
+        self.oid
+    }
+
+    /// Run `f` with the descriptor borrowed immutably (the PREFERRED, momentary
+    /// access form: the borrow cannot escape `f`).
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn with<R>(&self, f: impl FnOnce(&RelationData) -> R) -> R {
+        STATE.with(|s| {
+            let st = s.borrow();
+            let boxed = st
+                .id_cache
+                .get(&self.oid)
+                .expect("relcache: RelationRef pins an absent descriptor");
+            let fresh = core::ptr::NonNull::from(&**boxed);
+            debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
+            // SAFETY: this guard holds `rd_refcnt > 0` on `self.oid` (incremented
+            // in `open`, decremented only in `Drop`), so the cache neither frees
+            // nor moves the `Box<RelationData>` (the in-place rebuild swaps fields
+            // behind the same allocation; HashMap rehash moves only the table
+            // slot). `fresh` is re-derived from the live store borrow `st` held
+            // for this block (current provenance); the `&RelationData` lives only
+            // for `f` (momentary read), held under `st`.
+            let d: &RelationData = unsafe { fresh.as_ref() };
+            f(d)
+        })
+    }
+
+    /// Run `f` with the descriptor borrowed mutably (the in-place field-mutation
+    /// arm). Like [`with`](Self::with), the borrow is scoped to `f`.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn with_mut<R>(&mut self, f: impl FnOnce(&mut RelationData) -> R) -> R {
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            let boxed = st
+                .id_cache
+                .get_mut(&self.oid)
+                .expect("relcache: RelationRef pins an absent descriptor");
+            let mut fresh = core::ptr::NonNull::from(&mut **boxed);
+            debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
+            // SAFETY: as `with` — `rd_refcnt > 0` keeps the allocation live and
+            // unmoved. `&mut self` proves no other `RelationRef`-derived borrow is
+            // live; `fresh` is re-derived from the unique store borrow `st` held
+            // for this block (current provenance); the `&mut RelationData` lives
+            // only for `f`.
+            let d: &mut RelationData = unsafe { fresh.as_mut() };
+            f(d)
+        })
+    }
+}
+
+impl core::ops::Deref for RelationRef {
+    type Target = RelationData;
+
+    /// Momentary read of the pinned descriptor. The result MUST NOT be held
+    /// across any call that can rebuild this rel (the pin keeps the allocation
+    /// alive but does NOT serialize against the in-place rebuild swap); prefer
+    /// [`with`](RelationRef::with) when a rebuild might intervene.
+    #[allow(unsafe_code)]
+    #[inline]
+    fn deref(&self) -> &RelationData {
+        let fresh = current_relptr(self.oid);
+        debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
+        // SAFETY: `rd_refcnt > 0` (held by this guard) => the cache neither frees
+        // nor moves the `Box<RelationData>`, so `fresh` (== `self.ptr`) names a
+        // live allocation. The returned borrow is momentary; the caller must not
+        // hold it across a rebuild of this rel.
+        unsafe { fresh.as_ref() }
+    }
+}
+
+impl Drop for RelationRef {
+    /// `RelationClose`-style unpin: `RelationDecrementReferenceCount` only. A
+    /// failing decrement cannot be propagated from `Drop`; it is reported.
+    fn drop(&mut self) {
+        if let Err(e) = RelationDecrementReferenceCount(self.oid) {
+            emit_error_report_for(&e);
+        }
     }
 }
 
 /* ==========================================================================
  * `RelationCacheInsert` / `RelationIdCacheLookup` / `RelationCacheDelete`
- * (relcache.c macros) — the dynahash element operations over the leaked
- * `Box<RelationData>` descriptors.
+ * (relcache.c macros) — the store element operations over the owned `Box`es.
  * ======================================================================== */
 
 /// `RelationCacheInsert(RELATION, replace_allowed)` (relcache.c macro): enter
-/// `reldesc` into `RelationIdCache` under its `rd_id`. Returns the C
-/// `oldrel` (the descriptor a collision found already present) when one
-/// exists, else `None`. The C asserts `replace_allowed || !found`. Takes
-/// ownership of the `Box`, leaking it into the cache as the stable `Relation`
-/// pointer.
-#[allow(unsafe_code)]
-pub(crate) fn cache_insert(
-    reldesc: Box<RelationData>,
-    replace_allowed: bool,
-) -> PgResult<Option<*mut RelationData>> {
-    let reloid = reldesc.rd_id;
-    let ptr = Box::into_raw(reldesc);
+/// `reldesc` into the store under its `rd_id`. The C asserts `replace_allowed ||
+/// !found`; if a collision finds a still-referenced entry it warns (the leak
+/// path). Takes ownership of the `Box`.
+pub(crate) fn cache_insert(reldesc: Box<RelationData>, replace_allowed: bool) -> PgResult<()> {
+    let id = reldesc.rd_id;
     with_state(|st| {
-        debug_assert!(!st.id_cache.is_null(), "RelationIdCache not initialized");
-        let key = reloid.to_ne_bytes();
-        let (entry_ptr, found) = hash_search(st.id_cache, key.as_ptr(), HASHACTION::HASH_ENTER)?;
-        // SAFETY: `entry_ptr` is the dynahash element buffer sized
-        // `sizeof(RelIdCacheEnt)` (set at create); we read/write the
-        // `RelIdCacheEnt` payload in place, exactly as the C macro casts it.
-        let hentry = unsafe { &mut *(entry_ptr as *mut RelIdCacheEnt) };
-        let old = if found {
-            // C: `Assert(replace_allowed)`; surface the prior `Relation`.
+        if let Some(old) = st.id_cache.get(&id) {
+            // C: `Assert(replace_allowed)`.
             debug_assert!(replace_allowed);
-            Some(hentry.reldesc)
+            if old.rd_refcnt != 0 {
+                // Still-referenced: C ereport(WARNING) about a leak (the displaced
+                // pointer is simply overwritten in C; here the old `Box` is
+                // dropped when we `insert` the replacement).
+                let name = old.rd_rel.relname.clone();
+                emit_error_report_for(
+                    &ereport(WARNING)
+                        .errmsg_internal(format!(
+                            "leaking still-referenced relcache entry for \"{name}\""
+                        ))
+                        .into_error(),
+                );
+            }
+        }
+        // The previous `Box` (if any) is dropped here — freeing the whole owned
+        // subsidiary tree, the C `RelationDestroyRelation`/`pfree` cascade.
+        st.id_cache.insert(id, reldesc);
+    });
+    Ok(())
+}
+
+/// `RelationIdCacheLookup(ID, RELATION)` (relcache.c macro): is the OID present?
+/// Returns the [`Oid`] handle (`None` == the C `NULL`).
+pub(crate) fn cache_lookup(id: Oid) -> Option<Oid> {
+    with_state(|st| {
+        if st.id_cache.contains_key(&id) {
+            Some(id)
         } else {
             None
-        };
-        hentry.reloid = reloid;
-        hentry.reldesc = ptr;
-        Ok(old)
+        }
     })
 }
 
-/// `RelationIdCacheLookup(ID, RELATION)` (relcache.c macro): the `HASH_FIND`
-/// lookup, returning the cached `Relation` pointer (`None` == the C `NULL`).
-#[allow(unsafe_code)]
-pub(crate) fn cache_lookup(id: Oid) -> Option<*mut RelationData> {
-    with_state(|st| {
-        if st.id_cache.is_null() {
-            return None;
-        }
-        let key = id.to_ne_bytes();
-        let (entry_ptr, found) =
-            hash_search(st.id_cache, key.as_ptr(), HASHACTION::HASH_FIND).ok()?;
-        if !found {
-            return None;
-        }
-        // SAFETY: found element buffer is a live `RelIdCacheEnt`.
-        let hentry = unsafe { &*(entry_ptr as *const RelIdCacheEnt) };
-        Some(hentry.reldesc)
-    })
-}
-
-/// `RelationCacheDelete(RELATION)` (relcache.c macro): `HASH_REMOVE` the entry
-/// for `rd_id` and reclaim the owned `Box<RelationData>` (the C
+/// `RelationCacheDelete(RELATION)` (relcache.c macro): remove the entry for
+/// `rd_id` and reclaim the owned `Box<RelationData>` (the C
 /// `RelationDestroyRelation` `pfree` tree; here a single `Box` drop frees the
 /// whole owned descriptor). The C `elog(ERROR)` if the entry is missing.
-#[allow(unsafe_code)]
 pub(crate) fn cache_delete(id: Oid) -> PgResult<()> {
-    let removed = with_state(|st| -> PgResult<Option<*mut RelationData>> {
-        if st.id_cache.is_null() {
-            return Ok(None);
-        }
-        let key = id.to_ne_bytes();
-        let (entry_ptr, found) = hash_search(st.id_cache, key.as_ptr(), HASHACTION::HASH_REMOVE)?;
-        if !found {
-            return Ok(None);
-        }
-        // SAFETY: removed element buffer is still readable (on freelist).
-        let hentry = unsafe { &*(entry_ptr as *const RelIdCacheEnt) };
-        Ok(Some(hentry.reldesc))
-    })?;
+    let removed = with_state(|st| st.id_cache.remove(&id));
     match removed {
-        Some(ptr) => {
-            // SAFETY: the cache held the only `Relation` pointer to this
-            // descriptor; with the entry removed, reclaiming the `Box` frees
-            // the whole owned tree exactly once.
-            unsafe { drop(Box::from_raw(ptr)) };
+        Some(d) => {
+            // `d` (Box<RelationData>) dropped here: frees all subsidiary data.
+            drop(d);
             Ok(())
         }
         None => Err(ereport(ERROR)
@@ -277,80 +437,30 @@ pub(crate) fn cache_delete(id: Oid) -> PgResult<()> {
     }
 }
 
-/// Collect the `Relation` pointer of every live `RelIdCacheEnt` in
-/// `RelationIdCache` via a `hash_seq_init`/`hash_seq_search` scan (relcache.c's
+/// Collect the [`Oid`] of every live entry in the store (relcache.c's
 /// `HASH_SEQ_STATUS` walk). Returned as an owned snapshot so callers that need
-/// to delete/rebuild entries (the `RelationCacheInvalidate` / `AtEOXact` whole-
-/// cache passes) don't mutate the table while a `hash_seq_search` is live —
-/// matching the C requirement that `hash_seq_search` only copes with deletion
-/// of the element it is currently visiting.
-#[allow(unsafe_code)]
-pub(crate) fn cache_seq_reldescs() -> Vec<*mut RelationData> {
-    with_state(|st| {
-        let mut out = Vec::new();
-        if st.id_cache.is_null() {
-            return out;
-        }
-        let mut status = HASH_SEQ_STATUS::new();
-        hash_seq_init(&mut status, st.id_cache);
-        loop {
-            // SAFETY: scan over the live `RelationIdCache`; the returned key
-            // pointer is the element buffer (a `RelIdCacheEnt`, `reloid` at
-            // offset 0). Null terminates and deregisters the scan.
-            let key = match hash_seq_search(&mut status) {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            if key.is_null() {
-                break;
-            }
-            // SAFETY: live element buffer is a `RelIdCacheEnt`.
-            let hentry = unsafe { &*(key as *const RelIdCacheEnt) };
-            out.push(hentry.reldesc);
-        }
-        out
-    })
+/// to delete/rebuild entries (the `RelationCacheInvalidate` / `AtEOXact`
+/// whole-cache passes) don't mutate the table while iterating.
+pub(crate) fn cache_seq_reldescs() -> Vec<Oid> {
+    with_state(|st| st.id_cache.keys().copied().collect())
 }
 
 /// `hash_search(RelationIdCache, &relid, HASH_FIND)` returning the entry's
-/// `Relation` (the `AtEOXact`/`AtEOSubXact` non-overflow path). `None` is the
-/// C `NULL` (entry not present — nothing to do, per the C comment).
-pub(crate) fn cache_find_reldesc(relid: Oid) -> Option<*mut RelationData> {
+/// handle (the `AtEOXact`/`AtEOSubXact` non-overflow path). `None` is the C NULL.
+pub(crate) fn cache_find_reldesc(relid: Oid) -> Option<Oid> {
     cache_lookup(relid)
 }
 
-/// `eoxact_list` reset half of `AtEOXact_RelationCache` tail (clear the list and
-/// overflow flag once we're out of the transaction).
+/// `eoxact_list` reset half of `AtEOXact_RelationCache` tail.
 pub(crate) fn eoxact_list_reset(st: &mut RelcacheState) {
     st.eoxact_list.clear();
     st.eoxact_list_overflowed = false;
 }
 
-/// Collect every `Oid` currently keyed in `RelationIdCache` (the C
-/// `hash_seq_init`/`hash_seq_search` walk over `RelIdCacheEnt`). Used by the
-/// init-file write and the Phase3 finish loop, which snapshot the keys before
-/// mutating/restarting (mirroring the C `restart` reseed).
-#[allow(unsafe_code)]
+/// Collect every `Oid` currently keyed in the store (the C `hash_seq` walk over
+/// `RelIdCacheEnt`). Used by the init-file write and the Phase3 finish loop.
 pub(crate) fn id_cache_oids(st: &mut RelcacheState) -> Vec<Oid> {
-    let mut out = Vec::new();
-    if st.id_cache.is_null() {
-        return out;
-    }
-    let mut status = HASH_SEQ_STATUS::new();
-    hash_seq_init(&mut status, st.id_cache);
-    loop {
-        let ptr = match hash_seq_search(&mut status) {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        if ptr.is_null() {
-            break;
-        }
-        // SAFETY: the scan yields live `RelIdCacheEnt` element buffers.
-        let hentry = unsafe { &*(ptr as *const RelIdCacheEnt) };
-        out.push(hentry.reloid);
-    }
-    out
+    st.id_cache.keys().copied().collect()
 }
 
 /* ==========================================================================
@@ -369,8 +479,8 @@ pub(crate) fn eoxact_list_add(st: &mut RelcacheState, relid: Oid) {
 
 /* ==========================================================================
  * Reference-count lifecycle (RelationIncrement/DecrementReferenceCount,
- * RelationClose, RelationIdGetRelation). These operate on the `Relation`
- * pointer and mutate the owned descriptor in place — REAL logic.
+ * RelationClose, RelationIdGetRelation). These operate on the `Oid` handle and
+ * mutate the owned descriptor in place — REAL logic.
  * ======================================================================== */
 
 /// `RelationIncrementReferenceCount(rel)` (relcache.c): pin the entry
@@ -378,58 +488,44 @@ pub(crate) fn eoxact_list_add(st: &mut RelcacheState, relid: Oid) {
 /// owner (unless in bootstrap mode). The resource-owner remember half is the
 /// per-query-lifecycle RAII glue; until that owner lands it is the documented
 /// no-op pin (the refcount itself is authoritative here).
-#[allow(unsafe_code)]
-pub fn RelationIncrementReferenceCount(rel: *mut RelationData) -> PgResult<()> {
-    // SAFETY: callers hold a live `Relation` pointer into a cache-owned (or
-    // in-build) descriptor; pinning keeps it live.
-    let rd = unsafe { &mut *rel };
-    rd.rd_refcnt += 1;
+pub fn RelationIncrementReferenceCount(rel: Oid) -> PgResult<()> {
+    with_relation_mut(rel, |rd| rd.rd_refcnt += 1)?;
     // ResourceOwnerEnlarge + ResourceOwnerRememberRelationRef: resowner glue
-    // (per-query-lifecycle RAII). The owner installs the remember/forget pair
-    // when it lands; the refcount above is the authoritative pin.
+    // (per-query-lifecycle RAII). The refcount above is the authoritative pin.
     Ok(())
 }
 
 /// `RelationDecrementReferenceCount(rel)` (relcache.c): drop the pin
 /// (`rd_refcnt -= 1`), asserting it was positive, and forget the relation ref
 /// with the resource owner (resowner glue, as above).
-#[allow(unsafe_code)]
-pub fn RelationDecrementReferenceCount(rel: *mut RelationData) -> PgResult<()> {
-    // SAFETY: as `RelationIncrementReferenceCount`.
-    let rd = unsafe { &mut *rel };
-    debug_assert!(rd.rd_refcnt > 0);
-    rd.rd_refcnt -= 1;
-    Ok(())
+pub fn RelationDecrementReferenceCount(rel: Oid) -> PgResult<()> {
+    with_relation_mut(rel, |rd| {
+        debug_assert!(rd.rd_refcnt > 0);
+        rd.rd_refcnt -= 1;
+    })
 }
 
-/// `RelationClose(relation)` (relcache.c): drop the relcache reference, then
-/// run [`RelationCloseCleanup`] (the immediate-flush-of-dropped-or-invalidated
-/// path). No lock manipulation here (locks release at xact end).
-pub fn RelationClose(relation: *mut RelationData) -> PgResult<()> {
+/// `RelationClose(relation)` (relcache.c): drop the relcache reference, then run
+/// [`RelationCloseCleanup`] (the immediate-flush-of-dropped-or-invalidated path).
+pub fn RelationClose(relation: Oid) -> PgResult<()> {
     RelationDecrementReferenceCount(relation)?;
     RelationCloseCleanup(relation)
 }
 
-/// `RelationCloseCleanup(relation)` (relcache.c). When the relation is no
-/// longer open in this session (`RelationHasReferenceCountZero`), the C cleans
-/// up any stale partition descriptors it has by deleting the child contexts of
-/// `rd_pdcxt`/`rd_pddcxt`. Those partition-descriptor MemoryContexts are
-/// partition-descriptor vocabulary owned by the partcache/derived family and
-/// are not represented on this entry, so the cleanup is a no-op over the
-/// fields this family owns (mirror PG and panic: the contexts are simply not
-/// present rather than restructured around).
+/// `RelationCloseCleanup(relation)` (relcache.c). When the relation is no longer
+/// open in this session (`RelationHasReferenceCountZero`), the C cleans up stale
+/// partition descriptors by deleting the child contexts of `rd_pdcxt`/`rd_pddcxt`.
+/// Those partition-descriptor MemoryContexts are not represented on this entry,
+/// so the cleanup is a no-op over the fields this family owns.
 ///
 /// The further `RelationClearRelation` call the C makes is guarded by
-/// `#ifdef RELCACHE_FORCE_RELEASE`, a debug-only define that is compiled out of
-/// normal builds; so it is intentionally absent here, exactly as in a default
-/// PostgreSQL build.
-#[allow(unsafe_code)]
-pub(crate) fn RelationCloseCleanup(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &*relation };
-    // C: MemoryContextDeleteChildren(rd_pdcxt/rd_pddcxt) when those
-    // partition-descriptor contexts have children. Not represented here.
-    if rd.rd_refcnt == 0 && (!rd.rd_isvalid || rd.rd_droppedSubid != 0) {
+/// `#ifdef RELCACHE_FORCE_RELEASE`, a debug-only define compiled out of normal
+/// builds, so it is intentionally absent here.
+pub(crate) fn RelationCloseCleanup(relation: Oid) -> PgResult<()> {
+    let do_clear = with_rel(relation, |rd| {
+        rd.rd_refcnt == 0 && (!rd.rd_isvalid || rd.rd_droppedSubid != 0)
+    });
+    if do_clear {
         return crate::invalidate::RelationClearRelation(relation);
     }
     Ok(())
@@ -438,20 +534,18 @@ pub(crate) fn RelationCloseCleanup(relation: *mut RelationData) -> PgResult<()> 
 /// `RelationIdGetRelation(relationId)` (relcache.c): the cache lookup + lazy
 /// build entry point. Looks up the entry; if valid (and not dropped) pins and
 /// revalidates it, else builds a fresh descriptor via
-/// [`crate::build::RelationBuildDesc`] and pins it. `null` is the C `NULL`
-/// (no `pg_class` row).
-#[allow(unsafe_code)]
-pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<*mut RelationData> {
+/// [`crate::build::RelationBuildDesc`] and pins it. Returns the [`Oid`] handle,
+/// or [`InvalidOid`] (the C `NULL` — no `pg_class` row).
+pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<Oid> {
     if let Some(rd) = cache_lookup(relationId) {
-        // SAFETY: cache-owned descriptor, live while in the cache.
-        let r = unsafe { &*rd };
         // Return NULL for dropped relations.
-        if r.rd_droppedSubid != 0 {
-            debug_assert!(!r.rd_isvalid);
-            return Ok(std::ptr::null_mut());
+        let (dropped, valid) = with_rel(rd, |r| (r.rd_droppedSubid != 0, r.rd_isvalid));
+        if dropped {
+            debug_assert!(!valid);
+            return Ok(InvalidOid);
         }
         RelationIncrementReferenceCount(rd)?;
-        if !r.rd_isvalid {
+        if !valid {
             crate::invalidate::RelationRebuildRelation(rd)?;
         }
         return Ok(rd);
@@ -459,7 +553,7 @@ pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<*mut RelationData> {
 
     // Not cached: build one and add it.
     let rd = crate::build::RelationBuildDesc(relationId, true)?;
-    if !rd.is_null() {
+    if rd != InvalidOid {
         RelationIncrementReferenceCount(rd)?;
     }
     Ok(rd)
@@ -470,17 +564,13 @@ pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<*mut RelationData> {
  * ======================================================================== */
 
 /// Owning-backend proc number for a temp relation (`rd_backend`).
-#[allow(unsafe_code)]
-pub(crate) fn rd_backend_of(rel: *mut RelationData) -> ProcNumber {
-    // SAFETY: live `Relation` pointer.
-    unsafe { (*rel).rd_backend }
+pub(crate) fn rd_backend_of(rel: Oid) -> ProcNumber {
+    with_rel(rel, |rd| rd.rd_backend)
 }
 
 /// `rd_createSubid` read (used by `RelationNeedsWAL`/`RELATION_IS_LOCAL`).
-#[allow(unsafe_code)]
-pub(crate) fn rd_create_subid_of(rel: *mut RelationData) -> SubTransactionId {
-    // SAFETY: live `Relation` pointer.
-    unsafe { (*rel).rd_createSubid }
+pub(crate) fn rd_create_subid_of(rel: Oid) -> SubTransactionId {
+    with_rel(rel, |rd| rd.rd_createSubid)
 }
 
 /* ==========================================================================
@@ -507,7 +597,6 @@ fn project_vec<'mcx, T: Copy>(mcx: mcx::Mcx<'mcx>, src: &[T]) -> mcx::PgVec<'mcx
 
 /// `relation->rd_partkey = key` (the relcache copy into `rd_partkeycxt`). Stores
 /// a lifetime-free deep copy keyed by `relid` and sets the entry's presence flag.
-#[allow(unsafe_code)]
 pub(crate) fn set_partkey(
     relid: Oid,
     key: &types_partition::PartitionKeyData<'_>,
@@ -532,10 +621,7 @@ pub(crate) fn set_partkey(
         st.partkey.insert(relid, owned);
     });
     // `relation->rd_partkeyvalid`/presence flag on the entry.
-    if let Some(rd) = cache_lookup(relid) {
-        // SAFETY: live cache-owned descriptor.
-        unsafe { (*rd).rd_has_partkey = true };
-    }
+    let _ = with_relation_mut(relid, |rd| rd.rd_has_partkey = true);
     Ok(())
 }
 
@@ -597,13 +683,7 @@ pub(crate) fn set_partcheck(
     with_state(|st| {
         st.partcheck.insert(relid, (true, owned));
     });
-    if let Some(rd) = cache_lookup(relid) {
-        // SAFETY: live cache-owned descriptor.
-        #[allow(unsafe_code)]
-        unsafe {
-            (*rd).rd_partcheckvalid = true
-        };
-    }
+    let _ = with_relation_mut(relid, |rd| rd.rd_partcheckvalid = true);
     Ok(())
 }
 

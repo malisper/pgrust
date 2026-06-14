@@ -146,9 +146,9 @@ fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
         attno,
         BTEqualStrategyNumber,
         F_OIDEQ,
-        // `ScanKeyData.sk_argument` is the unmigrated bare-word ABI edge
-        // (types-scan), so the argument stays a `types_datum::Datum`.
-        types_datum::Datum::from_oid(value),
+        // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+        // (the Datum-unification keystone flipped this edge).
+        Datum::from_oid(value),
     )?;
     Ok(key)
 }
@@ -162,9 +162,9 @@ fn int4_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx>> 
         attno,
         BTEqualStrategyNumber,
         F_INT4EQ,
-        // `ScanKeyData.sk_argument` is the unmigrated bare-word ABI edge
-        // (types-scan), so the argument stays a `types_datum::Datum`.
-        types_datum::Datum::from_i32(value),
+        // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+        // (the Datum-unification keystone flipped this edge).
+        Datum::from_i32(value),
     )?;
     Ok(key)
 }

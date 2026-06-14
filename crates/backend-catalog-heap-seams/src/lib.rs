@@ -8,7 +8,6 @@
 use mcx::Mcx;
 use types_cluster::RelOptionsToken;
 use types_core::primitive::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::OnCommitAction;
 use types_rel::Relation;
@@ -50,8 +49,10 @@ pub struct HeapCreateWithCatalogArgs<'mcx> {
     pub mapped_relation: bool,
     /// `OnCommitAction oncommit`.
     pub oncommit: OnCommitAction,
-    /// `Datum reloptions`.
-    pub reloptions: Datum,
+    /// `Datum reloptions` — the opaque `bytea`/varlena reloptions token round-
+    /// tripped from the parent's pg_class row; the catalog owner forwards it
+    /// into the toast-table catalog entry. (See [`RelOptionsToken`].)
+    pub reloptions: RelOptionsToken,
     /// `bool use_user_acl`.
     pub use_user_acl: bool,
     /// `bool allow_system_table_mods`.
