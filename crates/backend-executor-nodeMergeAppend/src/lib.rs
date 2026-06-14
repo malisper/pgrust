@@ -470,11 +470,16 @@ fn heap_compare_slots<'mcx>(
         let attno: AttrNumber = sort_key.ssup_attno;
 
         // datum1 = slot_getattr(s1, attno, &isNull1);
-        let (datum1, is_null1) = execTuples::slot_getattr::call(estate.slot_mut(id1), attno)?;
+        let mcx = estate.es_query_cxt;
+        let (datum1, is_null1) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id1), attno)?;
         // datum2 = slot_getattr(s2, attno, &isNull2);
-        let (datum2, is_null2) = execTuples::slot_getattr::call(estate.slot_mut(id2), attno)?;
+        let (datum2, is_null2) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id2), attno)?;
 
         // compare = ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
+        // The sort columns are slot tts_values scalar words; project the
+        // canonical values onto the bare-word ApplySortComparator ABI edge.
+        let datum1 = StoredSlotWord::from_usize(datum1.as_usize());
+        let datum2 = StoredSlotWord::from_usize(datum2.as_usize());
         let mut compare = ApplySortComparator(datum1, is_null1, datum2, is_null2, sort_key)?;
         if compare != 0 {
             // INVERT_COMPARE_RESULT(compare); return compare;

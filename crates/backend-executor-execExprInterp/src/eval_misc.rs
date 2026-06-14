@@ -67,7 +67,7 @@ pub fn ExecEvalSubPlan<'mcx>(
 
     state
         .result_cells
-        .set(resvalue_id, ResultCell { value: Datum::ByVal(value), isnull });
+        .set(resvalue_id, ResultCell { value, isnull });
     Ok(())
 }
 

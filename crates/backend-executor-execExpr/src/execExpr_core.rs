@@ -1907,7 +1907,7 @@ pub fn exec_eval_expr_switch_context<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(DatumV<'mcx>, bool)> {
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::call(
         state, econtext, estate,
     )
@@ -1931,7 +1931,7 @@ pub fn exec_eval_array_expr_switch_context<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(DatumV<'mcx>, bool)> {
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::call(
         state, econtext, estate,
     )

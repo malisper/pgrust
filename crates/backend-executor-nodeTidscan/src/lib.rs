@@ -359,6 +359,9 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             if is_null {
                 continue;
             }
+            // The array Datum is a pointer word at the deconstruct_tid_array
+            // ABI edge; project the canonical value onto the bare-word seam arg.
+            let arraydatum = types_datum::Datum::from_usize(arraydatum.as_usize());
             let items = arrayfuncs::deconstruct_tid_array::call(mcx, arraydatum)?;
 
             // for (i = 0; i < ndatums; i++)

@@ -46,7 +46,7 @@ use backend_utils_sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED;
 use types_error::{PgError, PgResult};
 use types_nodes::{
@@ -457,7 +457,7 @@ fn tfunc_fetch_body<'mcx>(
 fn tfuncInitialize<'mcx>(
     tstate: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
-    doc: Datum,
+    doc: Datum<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -487,7 +487,7 @@ fn tfuncInitialize<'mcx>(
             return Err(null_value_error("namespace URI must not be null", None));
         }
         //   ns_uri = TextDatumGetCString(value);
-        let ns_uri = varlena::text_to_cstring::call(mcx, value)?;
+        let ns_uri = varlena::text_to_cstring_v::call(mcx, &value)?;
 
         // DEFAULT is passed down to SetNamespace as NULL.
         //   ns_name = ns_node ? strVal(ns_node) : NULL;
@@ -518,7 +518,7 @@ fn tfuncInitialize<'mcx>(
             return Err(null_value_error("row filter expression must not be null", None));
         }
         //   routine->SetRowFilter(tstate, TextDatumGetCString(value));
-        let path = varlena::text_to_cstring::call(mcx, value)?;
+        let path = varlena::text_to_cstring_v::call(mcx, &value)?;
         routine::routine_set_row_filter::call(tstate, kind, path.as_str())?;
     }
 
@@ -556,7 +556,7 @@ fn tfuncInitialize<'mcx>(
                             Some(alloc::format!("Filter for column \"{attname}\" is null.")),
                         ));
                     }
-                    colfilter_owned = varlena::text_to_cstring::call(mcx, value)?;
+                    colfilter_owned = varlena::text_to_cstring_v::call(mcx, &value)?;
                     colfilter_owned.as_str()
                 }
                 None => {
@@ -607,10 +607,14 @@ fn tfuncLoadRows<'mcx>(
     // Scratch value/null arrays standing in for the scan slot's tts_values /
     // tts_isnull (the slot payload model is not yet landed; C uses the slot's
     // own arrays here).
-    let mut values: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, natts as usize)?;
+    // The value array crosses into the tuplestore_putvalues ABI edge, which
+    // carries bare scalar words (`types_datum::Datum`) — the per-column
+    // tts_values store. Column values arriving as the canonical unified type
+    // project onto this scalar-word array (each is a C `tts_values[i]` word).
+    let mut values: PgVec<'mcx, types_datum::Datum> = vec_with_capacity_in(mcx, natts as usize)?;
     let mut nulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts as usize)?;
     for _ in 0..natts as usize {
-        values.push(Datum::from_i32(0));
+        values.push(types_datum::Datum::from_i32(0));
         nulls.push(false);
     }
 
@@ -645,7 +649,7 @@ fn tfuncLoadRows<'mcx>(
                 //   nulls[colno] = false;
                 let ord = tstate.ordinal;
                 tstate.ordinal += 1;
-                values[colno] = Datum::from_i32(ord as i32);
+                values[colno] = types_datum::Datum::from_i32(ord as i32);
                 nulls[colno] = false;
             } else {
                 //   values[colno] = routine->GetValue(tstate, colno,
@@ -688,7 +692,9 @@ fn tfuncLoadRows<'mcx>(
                 }
 
                 //   nulls[colno] = isnull;
-                values[colno] = v;
+                // Project the canonical column value onto the bare scalar-word
+                // tts_values array (a C `tts_values[colno]` machine word).
+                values[colno] = types_datum::Datum::from_usize(v.as_usize());
                 nulls[colno] = isnull;
             }
 

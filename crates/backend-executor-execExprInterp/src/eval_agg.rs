@@ -401,7 +401,10 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
     // the first numTransInputs columns; nvalid is numInputs (== numTransInputs
     // for the multi-DISTINCT case, since there are no ORDER BY-only columns).
     debug_assert_eq!(num_inputs, num_trans_inputs);
-    store_virtual_values::call(estate, sortslot, &values, &isnull)?;
+    // The transfn-arg cells are bare scalar words; project each onto the
+    // canonical store_virtual_values ABI edge (a C `tts_values[i]` word).
+    let values_v: Vec<DatumV> = values.iter().map(|d| DatumV::from_usize(d.as_usize())).collect();
+    store_virtual_values::call(estate, sortslot, &values_v, &isnull)?;
 
     // save_outer = tmpcontext->ecxt_outertuple;
     // save_inner = tmpcontext->ecxt_innertuple;

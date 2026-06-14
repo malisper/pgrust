@@ -270,10 +270,9 @@ fn MJEvalOuterValues<'mcx>(
         let (ldatum, lisnull) =
             execExpr::exec_eval_expr_switch_context::call(lexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
-        // `ExecEvalExpr` hands back a bare-word `Datum` (`types_datum::Datum`);
-        // the clause's `ldatum` carries the canonical unified value, into whose
-        // by-value arm the scalar word crosses.
-        clause.ldatum = Datum::ByVal(ldatum);
+        // `ExecEvalExpr` now hands back a canonical `Datum<'mcx>`; store it
+        // directly into the clause's `ldatum`.
+        clause.ldatum = ldatum;
         clause.lisnull = lisnull;
         if lisnull {
             // match is impossible; can we end the join early?
@@ -329,10 +328,9 @@ fn MJEvalInnerValues<'mcx>(
         let (rdatum, risnull) =
             execExpr::exec_eval_expr_switch_context::call(rexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
-        // `ExecEvalExpr` hands back a bare-word `Datum` (`types_datum::Datum`);
-        // the clause's `rdatum` carries the canonical unified value, into whose
-        // by-value arm the scalar word crosses.
-        clause.rdatum = Datum::ByVal(rdatum);
+        // `ExecEvalExpr` now hands back a canonical `Datum<'mcx>`; store it
+        // directly into the clause's `rdatum`.
+        clause.rdatum = rdatum;
         clause.risnull = risnull;
         if risnull {
             // match is impossible; can we end the join early?

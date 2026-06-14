@@ -377,7 +377,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
     slot: SlotId,
     estate: &mut EStateData<'mcx>,
     proute: &mut PartitionTupleRouting<'mcx>,
-    values: &mut [Datum],
+    values: &mut [Datum<'mcx>],
     isnull: &mut [bool],
 ) -> PgResult<()> {
     let _ = (mcx, slot);
@@ -423,12 +423,12 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
         if keycol != 0 {
             // Plain column; get the value directly from the heap tuple.
             let (d, n) = backend_executor_execTuples_seams::slot_getattr::call(
+                mcx,
                 estate.slot_mut(slot),
                 keycol,
             )?;
-            // slot_getattr still returns the bare-word scalar at this seam's
-            // ABI edge; wrap it as the canonical by-value Datum.
-            datum = Datum::ByVal(d);
+            // slot_getattr now yields the canonical Datum directly.
+            datum = d;
             is_null = n;
         } else {
             // Expression; need to evaluate it.
@@ -449,9 +449,8 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
                     exprstate, ecxt, estate,
                 )?
             };
-            // ExecEvalExprSwitchContext returns the bare-word scalar at this
-            // seam's ABI edge; wrap it as the canonical by-value Datum.
-            datum = Datum::ByVal(d);
+            // ExecEvalExprSwitchContext now returns the canonical Datum directly.
+            datum = d;
             is_null = n;
             // partexpr_item = lnext(pd->keystate, partexpr_item);
             partexpr_item += 1;

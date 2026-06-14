@@ -1119,8 +1119,11 @@ fn heap_compare_slots<'mcx>(
         let a2 = execTuples::slot_getattr_by_id::call(estate, id2, attno)?;
 
         // compare = ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
-        let mut compare =
-            ApplySortComparator(a1.value, a1.isnull, a2.value, a2.isnull, sort_key)?;
+        // The sort columns are slot tts_values scalar words; project the
+        // canonical values onto the bare-word ApplySortComparator ABI edge.
+        let d1 = Datum::from_usize(a1.value.as_usize());
+        let d2 = Datum::from_usize(a2.value.as_usize());
+        let mut compare = ApplySortComparator(d1, a1.isnull, d2, a2.isnull, sort_key)?;
         if compare != 0 {
             // INVERT_COMPARE_RESULT(compare); return compare;
             compare = INVERT_COMPARE_RESULT(compare);

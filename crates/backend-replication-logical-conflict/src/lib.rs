@@ -94,7 +94,8 @@ pub fn init_seams() {}
 /// Return true if the commit timestamp data was found, false otherwise.
 ///
 /// `track_commit_timestamp` is the commit_ts.c GUC global, passed explicitly.
-pub fn GetTupleTransactionInfo(
+pub fn GetTupleTransactionInfo<'mcx>(
+    mcx: Mcx<'mcx>,
     localslot: &types_nodes::TupleTableSlot,
     track_commit_timestamp: bool,
     xmin: &mut TransactionId,
@@ -102,7 +103,7 @@ pub fn GetTupleTransactionInfo(
     localts: &mut TimestampTz,
 ) -> PgResult<bool> {
     let (xmin_datum, isnull) =
-        execTuples_seams::slot_getsysattr::call(localslot, MinTransactionIdAttributeNumber)?;
+        execTuples_seams::slot_getsysattr::call(mcx, localslot, MinTransactionIdAttributeNumber)?;
     *xmin = xmin_datum.as_transaction_id();
     debug_assert!(!isnull);
     let _ = isnull;

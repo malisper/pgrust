@@ -255,10 +255,11 @@ fn seam_exec_drop_single_tuple_table_slot(slot: TupleTableSlot) -> PgResult<()> 
 /// PAYLOAD MODEL: fetching a system attribute dispatches `tts_ops->getsysattr`
 /// against the slot's stored tuple. Stays seam-and-panic until the slot payload
 /// model lands.
-fn seam_slot_getsysattr(
+fn seam_slot_getsysattr<'mcx>(
+    _mcx: Mcx<'mcx>,
     _slot: &TupleTableSlot,
     _attnum: AttrNumber,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     panic!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
 }
 

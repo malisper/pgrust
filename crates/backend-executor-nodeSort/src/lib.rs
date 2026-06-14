@@ -185,7 +185,11 @@ pub fn ExecSort<'mcx>(
                 //   tuplesort_putdatum(tuplesortstate, slot->tts_values[0],
                 //                      slot->tts_isnull[0]);
                 let (val, is_null) =
-                    execTuples::slot_getsomeattr::call(estate.slot_mut(slot_id), 1)?;
+                    execTuples::slot_getsomeattr::call(mcx, estate.slot_mut(slot_id), 1)?;
+                // The datum-sort column is `slot->tts_values[0]`, a scalar
+                // machine word; project the canonical value's by-value arm
+                // onto the bare-word `types_datum::Datum` tuplesort ABI edge.
+                let val = types_datum::Datum::from_usize(val.as_usize());
                 tuplesort::tuplesort_putdatum::call(&mut tuplesortstate, val, is_null)?;
             }
         } else {
@@ -255,6 +259,11 @@ pub fn ExecSort<'mcx>(
         let (found, val, is_null) =
             tuplesort::tuplesort_getdatum::call(ts, forward, false)?;
         if found {
+            // The sorted datum is a scalar machine word (`slot->tts_values[0]`);
+            // carry it into the canonical value's by-value arm for the store.
+            let val = types_tuple::backend_access_common_heaptuple::Datum::from_usize(
+                val.as_usize(),
+            );
             execTuples::exec_store_first_datum::call(estate, slot, val, is_null)?;
             Ok(true)
         } else {

@@ -199,7 +199,8 @@ fn ExecProjectSRF<'mcx>(
     // values` call only when a row is produced; otherwise the slot stays cleared
     // (`ExecClearTuple` above), exactly as in C.
     let nelems = node.nelems as usize;
-    let mut result: PgVec<'mcx, Datum> = vec_with_capacity_in(estate.es_query_cxt, nelems)?;
+    let mut result: PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>> =
+        vec_with_capacity_in(estate.es_query_cxt, nelems)?;
     let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(estate.es_query_cxt, nelems)?;
 
     // Disjoint borrows of the node's distinct fields so the SRF argument
@@ -230,7 +231,7 @@ fn ExecProjectSRF<'mcx>(
             // If we're continuing to project output rows from a source tuple,
             // return NULLs once the SRF has been exhausted.
             //   *result = (Datum) 0; *isnull = true; hassrf = true;
-            result.push(Datum::null());
+            result.push(types_tuple::backend_access_common_heaptuple::Datum::null());
             isnull.push(true);
             hassrf = true;
         } else {
@@ -247,16 +248,10 @@ fn ExecProjectSRF<'mcx>(
                         execSRF::exec_make_function_result_set::call(
                             fcache, econtext, argcontext, estate,
                         )?;
-                    // execSRF migrated its result to the canonical
-                    // `Datum<'mcx>` (`TupleValue`) value model, but this crate's
-                    // result vector + the downstream `store_virtual_values` seam
-                    // still carry the bare-word `types_datum::Datum` (the
-                    // execTuples canonical-carrier widening is a separate,
-                    // pending migration). Collapse the scalar word at the
-                    // boundary; a by-reference SRF result would need the slot's
-                    // canonical value array (`as_usize` panics on `ByRef`,
-                    // matching the C path that stores a pointer word there).
-                    result.push(Datum::from_usize(value.as_usize()));
+                    // execSRF and store_virtual_values now share the canonical
+                    // `Datum<'mcx>` value model; carry the result straight
+                    // through into the result vector.
+                    result.push(value);
                     isnull.push(this_isnull);
                     elemdone[argno] = this_isdone;
 

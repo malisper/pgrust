@@ -87,6 +87,16 @@ fn DatumGetBool(x: Datum) -> bool {
     x.as_usize() != 0
 }
 
+/// Project a canonical unified value onto the bare scalar word
+/// (`types_datum::Datum`) this crate uses internally for the C `Datum result`
+/// register and the per-param `tts_values[i]` store. The SubLink/SubPlan result
+/// columns and the testexpr result are always scalar-word datums (a by-reference
+/// value carries its pointer in the same word, matching the C path).
+#[inline]
+fn word(d: DatumV<'_>) -> Datum {
+    Datum::from_usize(d.as_usize())
+}
+
 // ===========================================================================
 // ExecSubPlan — main entry point for a regular SubPlan.
 // ===========================================================================
@@ -98,7 +108,7 @@ pub fn ExecSubPlan<'mcx>(
     node: &mut SubPlanState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(DatumV<'mcx>, bool)> {
     let subplan = subplan_ref(node)?;
     let subLinkType = subplan.subLinkType;
     let has_setparam = !subplan.setParam.is_empty();
@@ -135,7 +145,9 @@ pub fn ExecSubPlan<'mcx>(
     estate.es_direction = dir;
 
     let result = retval?;
-    Ok((result, isNull))
+    // The internal `Datum result` register is a scalar word; carry it into the
+    // canonical unified value's by-value arm for the seam return.
+    Ok((DatumV::ByVal(result), isNull))
 }
 
 /// `ExecHashSubPlan` — store subselect result in an in-memory hash table.
@@ -292,7 +304,7 @@ fn ExecScanSubPlan<'mcx>(
 
             // result = heap_getattr(node->curTuple, 1, tdesc, isNull);
             let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, 1)?;
-            result = attr.value;
+            result = word(attr.value);
             *isNull = attr.isnull;
             // keep scanning subplan to make sure there's only one tuple
             continue;
@@ -311,7 +323,7 @@ fn ExecScanSubPlan<'mcx>(
             let mut col: AttrNumber = 1;
             for &paramid in setParam.iter() {
                 let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, col)?;
-                set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+                set_exec_param(estate, paramid, word(attr.value), attr.isnull)?;
                 col += 1;
             }
             // keep scanning subplan to make sure there's only one tuple
@@ -330,7 +342,7 @@ fn ExecScanSubPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerTuple,
                 astate,
-                attr.value,
+                word(attr.value),
                 attr.isnull,
                 firstColType,
             )?;
@@ -350,12 +362,15 @@ fn ExecScanSubPlan<'mcx>(
         let mut col: AttrNumber = 1;
         for &paramid in paramIds.iter() {
             let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, col)?;
-            set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+            set_exec_param(estate, paramid, word(attr.value), attr.isnull)?;
             col += 1;
         }
 
-        let (rowresult, rownull) =
+        let (rowresult_v, rownull) =
             exec_expr::eval_testexpr_switch_context::call(node, estate, econtext)?;
+        // The testexpr result is a scalar boolean/row word; project onto the
+        // bare-word `Datum result` register.
+        let rowresult = word(rowresult_v);
 
         if subLinkType == SubLinkType::Any {
             // combine across rows per OR semantics
@@ -484,7 +499,7 @@ fn buildSubPlanHash<'mcx>(
         let mut col: AttrNumber = 1;
         for &paramid in paramIds.iter() {
             let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, col)?;
-            set_exec_param(estate, paramid, attr.value, attr.isnull)?;
+            set_exec_param(estate, paramid, word(attr.value), attr.isnull)?;
             col += 1;
         }
         // slot = ExecProject(node->projRight);
@@ -654,8 +669,8 @@ fn execTuplesUnequal<'mcx>(
         if !DatumGetBool(fmgr::function_call2_coll::call(
             fn_oid,
             collation,
-            attr1.value,
-            attr2.value,
+            word(attr1.value),
+            word(attr2.value),
         )?) {
             result = true; // they are unequal
             break;
@@ -1030,7 +1045,7 @@ pub fn ExecSetParamPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerQuery,
                 astate,
-                attr.value,
+                word(attr.value),
                 attr.isnull,
                 firstColType,
             )?;
@@ -1055,7 +1070,7 @@ pub fn ExecSetParamPlan<'mcx>(
         // Now set all the setParam params from the columns of the tuple.
         for &paramid in setParam.iter() {
             let attr = exec_tuples::cur_tuple_getattr::call(node, estate, slot, i)?;
-            set_exec_param_clear_execplan(estate, paramid, attr.value, attr.isnull)?;
+            set_exec_param_clear_execplan(estate, paramid, word(attr.value), attr.isnull)?;
             i += 1;
         }
     }

@@ -147,10 +147,9 @@ fn prepare_probe_slot<'mcx>(
                 let state = mstate.param_exprs[i].as_mut();
                 let (value, isnull) =
                     execExpr::exec_eval_expr_switch_context::call(state, econtext, estate)?;
-                // The eval leaf hands back a bare scalar word at the
-                // `types_datum::Datum` ABI edge; it crosses into the canonical
-                // value type's by-value arm (`pslot->tts_values[i] = ...`).
-                mstate.probe_values.push(DatumV::ByVal(value));
+                // The eval leaf hands back a canonical `Datum<'mcx>`
+                // (`pslot->tts_values[i] = ...`); store it directly.
+                mstate.probe_values.push(value);
                 mstate.probe_isnull.push(isnull);
             }
         }
@@ -164,11 +163,11 @@ fn prepare_probe_slot<'mcx>(
             mstate.table_values.clear();
             mstate.table_isnull.clear();
             for i in 0..num_keys {
-                // The deformed slot words cross into the canonical value type's
-                // by-value arm (`memcpy(pslot->tts_values, tslot->tts_values)`).
-                mstate.table_values.push(DatumV::ByVal(values[i]));
+                // The deformed slot values are already canonical `Datum<'mcx>`
+                // (`memcpy(pslot->tts_values, tslot->tts_values)`).
+                mstate.table_values.push(values[i].clone());
                 mstate.table_isnull.push(isnull[i]);
-                mstate.probe_values.push(DatumV::ByVal(values[i]));
+                mstate.probe_values.push(values[i].clone());
                 mstate.probe_isnull.push(isnull[i]);
             }
         }
@@ -255,9 +254,8 @@ fn memoize_hash_equal<'mcx>(
         mstate.table_values.clear();
         mstate.table_isnull.clear();
         for i in 0..numkeys {
-            // The deformed slot word crosses into the canonical value type's
-            // by-value arm.
-            mstate.table_values.push(DatumV::ByVal(values[i]));
+            // The deformed slot values are already canonical `Datum<'mcx>`.
+            mstate.table_values.push(values[i].clone());
             mstate.table_isnull.push(isnull[i]);
         }
     }
@@ -1753,7 +1751,7 @@ fn deform_key_params<'mcx>(
     params: &MinimalTupleData<'mcx>,
     numkeys: usize,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Vec<types_datum::Datum>, Vec<bool>)> {
+) -> PgResult<(Vec<DatumV<'mcx>>, Vec<bool>)> {
     let tableslot = mstate
         .tableslot
         .ok_or_else(|| elog_internal("Memoize tableslot not initialized"))?;
@@ -1789,11 +1787,8 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
 
     // The probe slot's tts_values/tts_isnull were filled by prepare_probe_slot;
     // mirror them into the real slot and ExecStoreVirtualTuple. The store seam
-    // takes bare scalar words (the still-bare-word execTuples ABI edge), so
-    // unwrap each canonical value's by-value arm (a virtual-tuple key column is
-    // a C `tts_values[i]` scalar word).
-    let values: Vec<types_datum::Datum> =
-        mstate.probe_values.iter().map(byval_word).collect();
+    // takes canonical `Datum<'mcx>` values directly.
+    let values: Vec<DatumV<'_>> = mstate.probe_values.iter().cloned().collect();
     let isnull: Vec<bool> = mstate.probe_isnull.iter().copied().collect();
     execTuples::store_virtual_values::call(estate, probeslot, &values, &isnull)?;
 

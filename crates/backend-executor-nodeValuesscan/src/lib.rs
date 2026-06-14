@@ -187,7 +187,8 @@ fn ValuesNext<'mcx>(
         //
         //   resind = 0; foreach(lc, exprstatelist) { ...; resind++; }
         let mcx = estate.es_query_cxt;
-        let mut values: mcx::PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, ncols)?;
+        let mut values: mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, ncols)?;
         let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, ncols)?;
         for resind in 0..ncols {
             // values[resind] = ExecEvalExpr(estate, econtext, &isnull[resind]);
@@ -265,15 +266,15 @@ fn ValuesRecheck<'mcx>(
 /// expandeddatum owner's seam (the `Datum` pointer dereference is its job).
 fn MakeExpandedObjectReadOnly<'mcx>(
     estate: &mut EStateData<'mcx>,
-    d: Datum,
+    d: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
     typlen: i16,
-) -> PgResult<Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if isnull || typlen != -1 {
         Ok(d)
     } else {
         let mcx = estate.es_query_cxt;
-        expandeddatum::make_expanded_object_read_only_internal::call(mcx, d)
+        expandeddatum::make_expanded_object_read_only_internal_v::call(mcx, &d)
     }
 }
 

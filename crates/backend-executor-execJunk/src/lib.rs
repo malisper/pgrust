@@ -301,12 +301,14 @@ pub fn ExecFilterJunk<'mcx>(
     // edge carries the bare scalar word (`types_datum::Datum`) — the
     // per-column `tts_values` store. No scalar is constructed or inspected
     // here, so this is the store-edge bare word, not the migrated enum.
-    let mut values = vec_with_capacity_in::<types_datum::Datum>(mcx, cleanLength)?;
+    let mut values = vec_with_capacity_in::<
+        types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    >(mcx, cleanLength)?;
     let mut isnull = vec_with_capacity_in::<bool>(mcx, cleanLength)?;
     for i in 0..cleanLength {
         let j = junkfilter.jf_cleanMap[i];
         if j == 0 {
-            values.push(types_datum::Datum::null());
+            values.push(types_tuple::backend_access_common_heaptuple::Datum::null());
             isnull.push(true);
         } else {
             // old_values[j - 1] / old_isnull[j - 1]: read source attribute j

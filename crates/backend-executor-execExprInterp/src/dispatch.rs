@@ -383,7 +383,7 @@ pub fn ExecInterpExprStillValid<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     // First time through, check whether attribute matches Var.  Might not be ok
     // anymore, due to schema changes.
     // CheckExprStillValid(state, econtext);
@@ -405,7 +405,13 @@ pub fn ExecInterpExprStillValid<'mcx>(
 
     // and actually execute
     // return state->evalfunc(state, econtext, isNull);
-    evalfunc.call(state, econtext, estate)
+    // The interpreter yields a bare scalar word at this seam ABI edge; carry it
+    // into the canonical value's by-value arm (`*isNull`/Datum result word).
+    let (value, isnull) = evalfunc.call(state, econtext, estate)?;
+    Ok((
+        types_tuple::backend_access_common_heaptuple::Datum::from_usize(value.as_usize()),
+        isnull,
+    ))
 }
 
 /// `CheckExprStillValid(ExprState *state, ExprContext *econtext)` — verify the
