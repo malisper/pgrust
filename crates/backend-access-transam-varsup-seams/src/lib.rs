@@ -109,3 +109,26 @@ seam_core::seam!(
     /// procarray reaches it through this owner seam.
     pub fn init_xact_completion_count()
 );
+
+seam_core::seam!(
+    /// `TransamVariables->latestCompletedXid` (`access/transam.h`) — the newest
+    /// `FullTransactionId` of any transaction that has completed. Read under
+    /// `ProcArrayLock` by procarray.c's `MaintainLatestCompletedXid*` and the
+    /// snapshot/horizon scans. Owned in varsup (the `TransamVariables`
+    /// singleton); plain shared-memory read.
+    pub fn get_latest_completed_xid() -> FullTransactionId
+);
+
+seam_core::seam!(
+    /// `TransamVariables->latestCompletedXid = fxid` — store the newest
+    /// completed `FullTransactionId` (procarray.c's `MaintainLatestCompletedXid*`,
+    /// under `ProcArrayLock`). Owned in varsup; plain shared-memory store.
+    pub fn set_latest_completed_xid(fxid: FullTransactionId)
+);
+
+seam_core::seam!(
+    /// `TransamVariables->xactCompletionCount++` — bump the completed-transaction
+    /// generation counter (procarray.c's end-of-xact / clear-transaction paths,
+    /// under `ProcArrayLock`). Owned in varsup; plain shared-memory increment.
+    pub fn increment_xact_completion_count()
+);

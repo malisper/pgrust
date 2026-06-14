@@ -373,6 +373,136 @@ fn proc_pid(procno: ProcNumber) -> i32 {
     with_proc_by_number(procno, |p| p.pid)
 }
 
+// --- dense ProcGlobal array + PGPROC xact-field accessors (procarray.c) ------
+
+fn proc_array_xid(idx: i32) -> TransactionId {
+    crate::proc_shmem::proc_array_xid(idx)
+}
+
+fn set_proc_array_xid(idx: i32, xid: TransactionId) {
+    crate::proc_shmem::set_proc_array_xid(idx, xid);
+}
+
+fn proc_array_subxid_state(idx: i32) -> (i32, bool) {
+    crate::proc_shmem::proc_array_subxid_state(idx)
+}
+
+fn set_proc_array_subxid_state(idx: i32, count: i32, overflowed: bool) {
+    crate::proc_shmem::set_proc_array_subxid_state(idx, count, overflowed);
+}
+
+fn set_proc_array_status_flags(idx: i32, flags: u8) {
+    crate::proc_shmem::set_proc_array_status_flags(idx, flags);
+}
+
+fn proc_array_xids_memmove(dst: i32, src: i32, count: i32) {
+    crate::proc_shmem::proc_array_xids_memmove(dst, src, count);
+}
+
+fn proc_array_subxid_states_memmove(dst: i32, src: i32, count: i32) {
+    crate::proc_shmem::proc_array_subxid_states_memmove(dst, src, count);
+}
+
+fn proc_array_status_flags_memmove(dst: i32, src: i32, count: i32) {
+    crate::proc_shmem::proc_array_status_flags_memmove(dst, src, count);
+}
+
+fn proc_subxid_status(procno: ProcNumber) -> (i32, bool) {
+    with_proc_by_number(procno, |p| (p.subxidStatus.count as i32, p.subxidStatus.overflowed))
+}
+
+fn set_proc_subxid_status(procno: ProcNumber, count: i32, overflowed: bool) {
+    with_proc_by_number(procno, |p| {
+        p.subxidStatus.count = count as u8;
+        p.subxidStatus.overflowed = overflowed;
+    });
+}
+
+fn proc_status_flags(procno: ProcNumber) -> u8 {
+    with_proc_by_number(procno, |p| p.statusFlags)
+}
+
+fn set_proc_status_flags(procno: ProcNumber, flags: u8) {
+    with_proc_by_number(procno, |p| p.statusFlags = flags);
+}
+
+fn set_proc_xid(procno: ProcNumber, xid: TransactionId) {
+    with_proc_by_number(procno, |p| p.xid = xid);
+}
+
+fn set_proc_xmin(procno: ProcNumber, xmin: TransactionId) {
+    with_proc_by_number(procno, |p| p.xmin = xmin);
+}
+
+fn set_proc_lxid(procno: ProcNumber, lxid: LocalTransactionId) {
+    with_proc_by_number(procno, |p| p.vxid.lxid = lxid);
+}
+
+fn proc_delay_chkpt_flags(procno: ProcNumber) -> i32 {
+    with_proc_by_number(procno, |p| p.delayChkptFlags)
+}
+
+fn set_proc_delay_chkpt_flags(procno: ProcNumber, flags: i32) {
+    with_proc_by_number(procno, |p| p.delayChkptFlags = flags);
+}
+
+fn set_proc_recovery_conflict_pending(procno: ProcNumber, value: bool) {
+    with_proc_by_number(procno, |p| p.recoveryConflictPending = value);
+}
+
+fn set_proc_pgxactoff(procno: ProcNumber, off: i32) {
+    with_proc_by_number(procno, |p| p.pgxactoff = off);
+}
+
+// --- ProcArray group-clear atomics + per-PGPROC group fields ----------------
+
+fn set_proc_array_group_member_data(procno: ProcNumber, member: bool, xid: TransactionId) {
+    with_proc_by_number(procno, |p| {
+        p.procArrayGroupMember = member;
+        p.procArrayGroupMemberXid = xid;
+    });
+}
+
+fn proc_array_group_member(procno: ProcNumber) -> bool {
+    with_proc_by_number(procno, |p| p.procArrayGroupMember)
+}
+
+fn set_proc_array_group_member(procno: ProcNumber, value: bool) {
+    with_proc_by_number(procno, |p| p.procArrayGroupMember = value);
+}
+
+fn proc_array_group_member_xid(procno: ProcNumber) -> TransactionId {
+    with_proc_by_number(procno, |p| p.procArrayGroupMemberXid)
+}
+
+fn proc_array_group_next(procno: ProcNumber) -> u32 {
+    with_proc_by_number(procno, |p| p.procArrayGroupNext.read())
+}
+
+fn set_proc_array_group_next(procno: ProcNumber, value: u32) {
+    with_proc_by_number(procno, |p| {
+        p.procArrayGroupNext
+            .value
+            .store(value, core::sync::atomic::Ordering::SeqCst)
+    });
+}
+
+fn proc_array_group_first_read() -> u32 {
+    crate::proc_shmem::proc_array_group_first_read()
+}
+
+fn proc_array_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32) {
+    crate::proc_shmem::proc_array_group_first_compare_exchange(expected, newval)
+}
+
+fn proc_array_group_first_exchange(newval: u32) -> u32 {
+    crate::proc_shmem::proc_array_group_first_exchange(newval)
+}
+
+fn proc_is_my_proc(procno: ProcNumber) -> bool {
+    crate::proc_shmem::my_proc_is_set() && crate::proc_shmem::my_proc_number() == procno
+}
+
 // ---- lifecycle / wakeup inward seams (called by other units) ----
 
 fn init_process() -> PgResult<()> {
@@ -478,6 +608,40 @@ pub(crate) fn install() {
     seams::proc_pgxactoff::set(proc_pgxactoff);
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
+
+    // dense ProcGlobal array + PGPROC xact-field accessors (procarray.c
+    // membership family)
+    seams::proc_array_xid::set(proc_array_xid);
+    seams::set_proc_array_xid::set(set_proc_array_xid);
+    seams::proc_array_subxid_state::set(proc_array_subxid_state);
+    seams::set_proc_array_subxid_state::set(set_proc_array_subxid_state);
+    seams::set_proc_array_status_flags::set(set_proc_array_status_flags);
+    seams::proc_array_xids_memmove::set(proc_array_xids_memmove);
+    seams::proc_array_subxid_states_memmove::set(proc_array_subxid_states_memmove);
+    seams::proc_array_status_flags_memmove::set(proc_array_status_flags_memmove);
+    seams::proc_subxid_status::set(proc_subxid_status);
+    seams::set_proc_subxid_status::set(set_proc_subxid_status);
+    seams::proc_status_flags::set(proc_status_flags);
+    seams::set_proc_status_flags::set(set_proc_status_flags);
+    seams::set_proc_xid::set(set_proc_xid);
+    seams::set_proc_xmin::set(set_proc_xmin);
+    seams::set_proc_lxid::set(set_proc_lxid);
+    seams::proc_delay_chkpt_flags::set(proc_delay_chkpt_flags);
+    seams::set_proc_delay_chkpt_flags::set(set_proc_delay_chkpt_flags);
+    seams::set_proc_recovery_conflict_pending::set(set_proc_recovery_conflict_pending);
+    seams::set_proc_pgxactoff::set(set_proc_pgxactoff);
+
+    // ProcArray group-clear atomics + per-PGPROC group fields
+    seams::set_proc_array_group_member_data::set(set_proc_array_group_member_data);
+    seams::proc_array_group_member::set(proc_array_group_member);
+    seams::set_proc_array_group_member::set(set_proc_array_group_member);
+    seams::proc_array_group_member_xid::set(proc_array_group_member_xid);
+    seams::proc_array_group_next::set(proc_array_group_next);
+    seams::set_proc_array_group_next::set(set_proc_array_group_next);
+    seams::proc_array_group_first_read::set(proc_array_group_first_read);
+    seams::proc_array_group_first_compare_exchange::set(proc_array_group_first_compare_exchange);
+    seams::proc_array_group_first_exchange::set(proc_array_group_first_exchange);
+    seams::proc_is_my_proc::set(proc_is_my_proc);
 
     // Pure-wiring install (assemble/seam-wiring-guard): the deadlock-timeout
     // signal handler is an exact match for its declared seam and is installed

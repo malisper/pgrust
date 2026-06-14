@@ -126,6 +126,11 @@ pub const WAIT_EVENT_RELATION_MAP_READ: u32 = PG_WAIT_IO + 40;
 /// `WaitEventIPC` section of `wait_event_names.txt` (APPEND_READY is index 0).
 pub const WAIT_EVENT_XACT_GROUP_UPDATE: u32 = PG_WAIT_IPC + 56;
 
+/// `WAIT_EVENT_PROCARRAY_GROUP_UPDATE` — "Waiting for the group leader to clear
+/// the transaction ID at transaction end." 42nd entry (0-based 41) of the
+/// `WaitEventIPC` section of `wait_event_names.txt` (APPEND_READY is index 0).
+pub const WAIT_EVENT_PROCARRAY_GROUP_UPDATE: u32 = PG_WAIT_IPC + 41;
+
 /// `WAIT_EVENT_RELATION_MAP_REPLACE` — 42nd entry (0-based 41) of the
 /// `WaitEventIO` section. (= 167772201, matching c2rust.)
 pub const WAIT_EVENT_RELATION_MAP_REPLACE: u32 = PG_WAIT_IO + 41;

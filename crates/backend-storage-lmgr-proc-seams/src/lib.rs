@@ -543,6 +543,173 @@ seam_core::seam!(
     pub fn store_top_xid_in_proc(xid: TransactionId)
 );
 
+// --- dense ProcGlobal array + PGPROC field accessors (procarray.c membership) -
+//
+// The ProcArray membership family (`ProcArrayAdd`/`Remove`/`EndTransaction*`/
+// `ClearTransaction`/`GroupClearXid`) reads and writes the dense
+// `ProcGlobal->{xids,subxidStates,statusFlags}` mirror arrays (indexed by
+// `pgxactoff`) and the per-`PGPROC` xact fields, all owned by proc.c. These
+// accessors expose exactly those reads/writes; the membership algorithm (the
+// sorted insert, the `pgxactoff` fixups, the lock bracketing) lives in
+// procarray. Until `InitProcGlobal` lands the bodies panic.
+
+seam_core::seam!(
+    /// `ProcGlobal->xids[idx]` (under `ProcArrayLock`).
+    pub fn proc_array_xid(idx: i32) -> TransactionId
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->xids[idx] = xid` (under `ProcArrayLock`).
+    pub fn set_proc_array_xid(idx: i32, xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `(ProcGlobal->subxidStates[idx].count, .overflowed)` (under `ProcArrayLock`).
+    pub fn proc_array_subxid_state(idx: i32) -> (i32, bool)
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->subxidStates[idx] = { count, overflowed }` (under `ProcArrayLock`).
+    pub fn set_proc_array_subxid_state(idx: i32, count: i32, overflowed: bool)
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->statusFlags[idx] = flags` (under `ProcArrayLock`). The read
+    /// is [`proc_global_status_flags`].
+    pub fn set_proc_array_status_flags(idx: i32, flags: u8)
+);
+
+seam_core::seam!(
+    /// `memmove(&ProcGlobal->xids[dst], &ProcGlobal->xids[src], count * sizeof)`
+    /// — slide a run of dense-array entries to keep them sorted by `pgxactoff`
+    /// during `ProcArrayAdd`/`Remove` (under `ProcArrayLock`+`XidGenLock`).
+    pub fn proc_array_xids_memmove(dst: i32, src: i32, count: i32)
+);
+
+seam_core::seam!(
+    /// `memmove(&ProcGlobal->subxidStates[dst], ..[src], count * sizeof)`.
+    pub fn proc_array_subxid_states_memmove(dst: i32, src: i32, count: i32)
+);
+
+seam_core::seam!(
+    /// `memmove(&ProcGlobal->statusFlags[dst], ..[src], count * sizeof)`.
+    pub fn proc_array_status_flags_memmove(dst: i32, src: i32, count: i32)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->subxidStatus` projected to `(count, overflowed)`.
+    pub fn proc_subxid_status(procno: ProcNumber) -> (i32, bool)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->subxidStatus = { count, overflowed }`.
+    pub fn set_proc_subxid_status(procno: ProcNumber, count: i32, overflowed: bool)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->statusFlags`.
+    pub fn proc_status_flags(procno: ProcNumber) -> u8
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->statusFlags = flags`.
+    pub fn set_proc_status_flags(procno: ProcNumber, flags: u8)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->xid = xid`.
+    pub fn set_proc_xid(procno: ProcNumber, xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->xmin = xmin`.
+    pub fn set_proc_xmin(procno: ProcNumber, xmin: TransactionId)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->vxid.lxid = lxid`.
+    pub fn set_proc_lxid(procno: ProcNumber, lxid: LocalTransactionId)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->delayChkptFlags`.
+    pub fn proc_delay_chkpt_flags(procno: ProcNumber) -> i32
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->delayChkptFlags = flags`.
+    pub fn set_proc_delay_chkpt_flags(procno: ProcNumber, flags: i32)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->recoveryConflictPending = value`.
+    pub fn set_proc_recovery_conflict_pending(procno: ProcNumber, value: bool)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->pgxactoff = off`.
+    pub fn set_proc_pgxactoff(procno: ProcNumber, off: i32)
+);
+
+// --- ProcArray group-clear CAS over ProcGlobal->procArrayGroupFirst + the
+// per-PGPROC procArrayGroup{Next,Member,MemberXid} fields (procarray.c
+// `ProcArrayGroupClearXid`). The atomic ops mirror the clog group-update set
+// (`clog_group_first_*` / `*_clog_group_next`). ---
+
+seam_core::seam!(
+    /// `proc->procArrayGroupMember = member; proc->procArrayGroupMemberXid = xid`.
+    pub fn set_proc_array_group_member_data(procno: ProcNumber, member: bool, xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->procArrayGroupMember`.
+    pub fn proc_array_group_member(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->procArrayGroupMember = value`.
+    pub fn set_proc_array_group_member(procno: ProcNumber, value: bool)
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->procArrayGroupMemberXid`.
+    pub fn proc_array_group_member_xid(procno: ProcNumber) -> TransactionId
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u32(&GetPGProcByNumber(procno)->procArrayGroupNext)`.
+    pub fn proc_array_group_next(procno: ProcNumber) -> u32
+);
+
+seam_core::seam!(
+    /// `pg_atomic_write_u32(&GetPGProcByNumber(procno)->procArrayGroupNext, value)`.
+    pub fn set_proc_array_group_next(procno: ProcNumber, value: u32)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_read_u32(&ProcGlobal->procArrayGroupFirst)`.
+    pub fn proc_array_group_first_read() -> u32
+);
+
+seam_core::seam!(
+    /// `pg_atomic_compare_exchange_u32(&ProcGlobal->procArrayGroupFirst,
+    /// expected, newval)` — returns `(succeeded, value_seen)` (the C updates
+    /// `*expected` in place to the value seen).
+    pub fn proc_array_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32)
+);
+
+seam_core::seam!(
+    /// `pg_atomic_exchange_u32(&ProcGlobal->procArrayGroupFirst, newval)` —
+    /// store `newval`, returning the previous value.
+    pub fn proc_array_group_first_exchange(newval: u32) -> u32
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(procno) == MyProc` — whether `procno` is this
+    /// backend's own slot (the group leader skips waking itself).
+    pub fn proc_is_my_proc(procno: ProcNumber) -> bool
+);
+
 seam_core::seam!(
     /// `GetNewTransactionId` subxid publication (varsup.c): push a freshly
     /// allocated subtransaction `xid` into `MyProc->subxids.xids[]` and bump
