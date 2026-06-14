@@ -12613,6 +12613,7 @@ dependencies = [
  "types-snapshot",
  "types-sortsupport",
  "types-storage",
+ "types-tableam",
  "types-tidbitmap",
  "types-tuple",
 ]
@@ -12637,6 +12638,7 @@ name = "types-parallel"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-execparallel",
 ]
 
 [[package]]
