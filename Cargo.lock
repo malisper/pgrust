@@ -4992,6 +4992,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-knapsack"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-lib-radixtree-seams"
 version = "0.0.0"
 dependencies = [
