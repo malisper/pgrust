@@ -753,6 +753,15 @@ pub fn init_seams() {
     // recovery predicate + the per-backend record-position globals it updates.
     s::xlog_insert_record::set(insert::XLogInsertRecord);
     s::recovery_in_progress::set(shmem::RecoveryInProgress);
+
+    // The decision inputs xloginsert.c's XLogInsert / XLogBeginInsert read
+    // before they hold an insertion lock (XLogInsertAllowed / full-page-write
+    // info), plus the WAL-compression / consistency-checking GUC reads its
+    // XLogRecordAssemble consults.
+    s::xlog_insert_allowed::set(insert::XLogInsertAllowed);
+    s::get_full_page_write_info::set(GetFullPageWriteInfo);
+    s::wal_compression::set(write::wal_compression);
+    s::wal_consistency_checking::set(write::wal_consistency_checking);
     s::proc_last_rec_ptr::set(insert::proc_last_rec_ptr);
     s::xact_last_rec_end::set(insert::xact_last_rec_end);
     s::set_xact_last_rec_end::set(insert::set_xact_last_rec_end);

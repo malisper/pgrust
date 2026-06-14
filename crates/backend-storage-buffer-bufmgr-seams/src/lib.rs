@@ -140,6 +140,18 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_storage::storage::Buffer>
 );
 
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL)` (bufmgr.c):
+    /// pin (reading in if needed) a block of an explicit fork with no
+    /// buffer-access strategy. Used by `log_newpage_range`, which logs an
+    /// arbitrary fork. `Err` carries the smgr read ereports.
+    pub fn read_buffer_extended_fork<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        forknum: types_core::primitive::ForkNumber,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
+
 // --- backend-utils-init-postinit consumer (bufmgr.c) ---
 
 seam_core::seam!(
