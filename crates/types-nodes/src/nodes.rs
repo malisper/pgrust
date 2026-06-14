@@ -70,6 +70,8 @@ pub const T_SubqueryScanState: NodeTag = NodeTag(411);
 pub const T_ForeignScanState: NodeTag = NodeTag(418);
 pub const T_CustomScanState: NodeTag = NodeTag(419);
 pub const T_LimitState: NodeTag = NodeTag(437);
+/// `T_JunkFilter` (nodes/nodetags.h, PostgreSQL 18.3).
+pub const T_JunkFilter: NodeTag = NodeTag(385);
 /// `T_OnConflictSetState` (nodes/nodetags.h, PostgreSQL 18.3).
 pub const T_OnConflictSetState: NodeTag = NodeTag(386);
 /// `T_MergeActionState` (nodes/nodetags.h, PostgreSQL 18.3).

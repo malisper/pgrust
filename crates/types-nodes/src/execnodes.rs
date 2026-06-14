@@ -28,7 +28,7 @@ use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 use types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
@@ -65,6 +65,29 @@ pub struct EcxtId(pub u32);
 /// [`EStateData::es_result_rel_pool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
+
+/// `JunkFilter` (nodes/execnodes.h) — junk-attribute filter state built by
+/// `ExecInitJunkFilter`/`ExecInitJunkFilterConversion` (execJunk.c).
+///
+/// `jf_resultSlot` (C: `TupleTableSlot *`) is an id into the owning EState slot
+/// pool ([`EStateData::es_tupleTable`]); the rest mirror the C struct
+/// field-for-field. `jf_cleanMap` (C: `AttrNumber *`) is the per-clean-attribute
+/// map onto the source tuple's 1-based attribute numbers (0 = NULL output).
+#[derive(Debug)]
+pub struct JunkFilter<'mcx> {
+    /// `NodeTag type`.
+    pub type_: NodeTag,
+    /// `List *jf_targetList` — the original target list (including junk
+    /// attributes).
+    pub jf_targetList: PgVec<'mcx, crate::primnodes::TargetEntry<'mcx>>,
+    /// `TupleDesc jf_cleanTupType` — the "clean" tuple's descriptor.
+    pub jf_cleanTupType: TupleDesc<'mcx>,
+    /// `AttrNumber *jf_cleanMap` — clean->original attribute-number map.
+    pub jf_cleanMap: PgVec<'mcx, AttrNumber>,
+    /// `TupleTableSlot *jf_resultSlot` — the slot holding the cleaned tuple
+    /// (id into [`EStateData::es_tupleTable`]).
+    pub jf_resultSlot: SlotId,
+}
 
 /// `EPQState` (`nodes/execnodes.h`) — state for executing an EvalPlanQual
 /// recheck on a candidate tuple, owned by the EvalPlanQual machinery

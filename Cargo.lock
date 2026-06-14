@@ -3286,6 +3286,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execJunk"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execTuples",
+ "backend-executor-execTuples-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -9952,6 +9966,7 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
+ "backend-executor-execJunk",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
