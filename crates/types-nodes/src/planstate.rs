@@ -56,6 +56,8 @@ pub enum PlanStateNode<'mcx> {
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
+    /// `T_ValuesScanState`.
+    ValuesScan(PgBox<'mcx, crate::nodevaluesscan::ValuesScanState<'mcx>>),
     /// `T_NestLoopState`.
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
@@ -87,6 +89,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Unique(_) => T_UniqueState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
+            PlanStateNode::ValuesScan(_) => crate::nodevaluesscan::T_ValuesScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
@@ -113,6 +116,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Unique(u) => &u.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
+            PlanStateNode::ValuesScan(v) => &v.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
@@ -138,6 +142,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Unique(u) => &mut u.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
+            PlanStateNode::ValuesScan(v) => &mut v.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
@@ -162,6 +167,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
             // `SubqueryScanState` begins with a `ScanState`.
             PlanStateNode::SubqueryScan(s) => Some(&s.ss),
+            // `ValuesScanState` begins with a `ScanState`.
+            PlanStateNode::ValuesScan(v) => Some(&v.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.

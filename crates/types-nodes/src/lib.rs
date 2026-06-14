@@ -46,6 +46,7 @@ pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
 pub mod nodeunique;
+pub mod nodevaluesscan;
 pub mod params;
 pub mod parsenodes;
 pub mod parsestmt;
