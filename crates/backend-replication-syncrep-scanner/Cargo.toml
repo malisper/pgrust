@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+backend-replication-syncrep-scanner-seams = { path = "../backend-replication-syncrep-scanner-seams" }

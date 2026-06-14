@@ -487,6 +487,59 @@ fn wait_latch_register_sync_request_seam() -> PgResult<()> {
     .map(|_| ())
 }
 
+/// `WaitLatch(NULL, wake_events, timeout, wait_event_info)` for the seam's
+/// no-latch shape (the summarizer's post-error back-off — it waits only on the
+/// timeout and `WL_EXIT_ON_PM_DEATH`, never on a latch). C passes `NULL` for
+/// the latch, so there is no `LatchHandle`; returns the bitmask of occurred
+/// events.
+fn wait_latch_no_latch(
+    wake_events: u32,
+    timeout: i64,
+    wait_event_info: u32,
+) -> PgResult<u32> {
+    WaitLatch(None, wake_events, timeout, wait_event_info)
+}
+
+/// `WaitLatchOrSocket(MyLatch, wakeEvents, sock, timeout, wait_event_info)`
+/// for the seam's MyLatch-implicit, bare-`i32` shape. C call sites (e.g.
+/// walreceiver's main loop) pass `MyLatch`; the latch crate resolves it. The
+/// seam's contract drops the `PgResult` channel that the owner's
+/// [`WaitLatchOrSocket`] carries: the only error path is a kernel
+/// event-queue failure inside `WaitEventSetWait`, which in C is a
+/// `FATAL`/longjmp the caller cannot recover from, so we surface it as a panic
+/// (the codebase's `ereport(ERROR)`-at-a-non-`PgResult`-boundary translation).
+/// The seam's `wake_events: i32` widens to the owner's `u32` wake-event mask;
+/// the returned `u32` bitmask narrows to the seam's `i32`.
+fn wait_latch_or_socket_seam(
+    wake_events: i32,
+    sock: types_core::pgsocket,
+    timeout: i64,
+    wait_event_info: types_core::uint32,
+) -> i32 {
+    WaitLatchOrSocket(
+        my_latch(),
+        wake_events as u32,
+        sock,
+        timeout,
+        wait_event_info,
+    )
+    .expect("WaitLatchOrSocket: WaitEventSetWait failed") as i32
+}
+
+/// `kill(pid, SIGUSR1)` (`ShutDownSlotSync`): signal the slot-sync worker so
+/// it notices the stop request. The seam surfaces a failed `kill(2)` as `Err`
+/// (the C ignores the return; the porter chose to make the failure visible).
+fn kill_sigusr1(pid: i32) -> PgResult<()> {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        return Err(PgError::error(format!(
+            "could not send signal to process {pid}: {e}"
+        )));
+    }
+    Ok(())
+}
+
 /// Install this unit's seams (`backend-storage-ipc-latch-seams`).
 pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::set(set_latch_my_latch);
@@ -503,6 +556,9 @@ pub fn init_seams() {
     backend_storage_ipc_latch_seams::wait_latch_register_sync_request::set(
         wait_latch_register_sync_request_seam,
     );
+    backend_storage_ipc_latch_seams::wait_latch_no_latch::set(wait_latch_no_latch);
+    backend_storage_ipc_latch_seams::wait_latch_or_socket::set(wait_latch_or_socket_seam);
+    backend_storage_ipc_latch_seams::kill_sigusr1::set(kill_sigusr1);
 }
 
 #[cfg(test)]

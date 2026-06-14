@@ -1016,6 +1016,8 @@ dependencies = [
  "backend-access-common-relation-seams",
  "backend-access-table-table-seams",
  "backend-catalog-pg-class-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-relcache-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -1041,6 +1043,7 @@ name = "backend-access-table-tableam"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-syncscan-seams",
+ "backend-access-table-tableam-bm-seams",
  "backend-access-transam-xact-seams",
  "backend-executor-execTuples-seams",
  "backend-optimizer-path-costsize-seams",
@@ -1248,6 +1251,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-execparallel",
+ "types-nodes",
  "types-parallel",
  "types-storage",
  "types-tuple",
@@ -2426,10 +2430,12 @@ dependencies = [
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-catalog-toasting-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small",
  "mcx",
  "types-catalog",
+ "types-cluster",
  "types-core",
  "types-datum",
  "types-error",
@@ -3005,7 +3011,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
  "backend-executor-execMain-seams",
- "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-core-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-syscache",
  "backend-utils-error",
@@ -3449,6 +3455,7 @@ dependencies = [
 name = "backend-executor-execCurrent"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execCurrent-seams",
  "backend-executor-execMain-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -3911,6 +3918,7 @@ dependencies = [
 name = "backend-executor-instrument-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -4306,6 +4314,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeHash-seams",
+ "backend-executor-nodeHashjoin-pq-seams",
  "backend-executor-nodeHashjoin-seams",
  "backend-storage-file-buffile-seams",
  "backend-storage-file-sharedfileset-seams",
@@ -5413,6 +5422,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-copyfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-copyfuncs-seams",
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-copyfuncs-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -5420,6 +5441,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-plancache",
+]
+
+[[package]]
+name = "backend-nodes-copyfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -5464,6 +5495,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
  "types-pathnodes",
  "types-tuple",
 ]
@@ -5501,6 +5533,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "backend-nodes-makefuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -5514,17 +5555,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-nodes-nodeFuncs-seams"
+name = "backend-nodes-node-support"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-nodes-nodeFuncs-seams"
+version = "0.0.0"
+dependencies = [
  "seam-core",
  "types-core",
  "types-error",
  "types-fmgr",
  "types-nodes",
- "types-parsenodes",
- "types-tuple",
 ]
 
 [[package]]
@@ -6735,6 +6781,7 @@ dependencies = [
 name = "backend-replication-syncrep-scanner"
 version = "0.0.0"
 dependencies = [
+ "backend-replication-syncrep-scanner-seams",
  "mcx",
  "types-error",
 ]
@@ -7253,6 +7300,7 @@ version = "0.0.0"
 dependencies = [
  "backend-lib-dshash-seams",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-dsm-registry-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-error",
@@ -7306,6 +7354,7 @@ dependencies = [
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-waiteventset-seams",
  "backend-utils-init-small-seams",
+ "libc",
  "types-core",
  "types-error",
  "types-pgstat",
@@ -8430,6 +8479,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-array-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-selfuncs",
+]
+
+[[package]]
 name = "backend-utils-adt-arrayfuncs"
 version = "0.0.0"
 dependencies = [
@@ -8446,6 +8512,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-tuple",
  "types-typcache",
@@ -9340,6 +9407,7 @@ dependencies = [
  "backend-storage-ipc-sinval-seams",
  "backend-storage-smgr-seams",
  "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-pc-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-relmapper-seams",
@@ -9349,9 +9417,11 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-cache",
+ "types-cluster",
  "types-core",
  "types-datum",
  "types-error",
+ "types-plancache",
  "types-rel",
  "types-storage",
  "types-syscache",
@@ -9444,6 +9514,7 @@ dependencies = [
  "backend-partitioning-partbounds-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-fmgr-seams",
@@ -9787,6 +9858,7 @@ dependencies = [
  "backend-postmaster-syslogger-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-utils-activity-stat-seams",
+ "backend-utils-error-elog-seams",
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "backend-utils-init-small-seams",
@@ -9896,12 +9968,14 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc",
  "backend-access-common-tupdesc-seams",
  "backend-catalog-namespace-seams",
  "backend-commands-functioncmds-seams",
+ "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
@@ -9913,6 +9987,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
@@ -9978,6 +10053,7 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-common-exec-seams",
  "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqsignal-seams",
  "backend-port-path-seams",
  "backend-port-sysv-shmem-seams",
  "backend-postmaster-interrupt-seams",
@@ -9988,16 +10064,20 @@ dependencies = [
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-waiteventset-seams",
  "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
+ "backend-utils-misc-more-seams",
  "backend-utils-misc-superuser-seams",
+ "backend-utils-misc-timeout-seams",
  "libc",
  "mcx",
  "types-core",
@@ -10235,6 +10315,7 @@ dependencies = [
 name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-misc-guc-tables-seams",
  "types-error",
  "types-guc",
 ]
@@ -10648,6 +10729,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",
  "types-core",
  "types-error",
@@ -11166,6 +11248,7 @@ dependencies = [
  "backend-catalog-pg-depend",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-shdepend",
+ "backend-catalog-toasting",
  "backend-commands-amcmds",
  "backend-commands-cluster",
  "backend-commands-comment",
@@ -11177,6 +11260,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-portalcmds",
  "backend-executor-execAmi",
+ "backend-executor-execCurrent",
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execJunk",
@@ -11228,6 +11312,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-main-main",
+ "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
  "backend-port-atomics",
@@ -11258,6 +11343,7 @@ dependencies = [
  "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-dsm-registry",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
@@ -11270,6 +11356,7 @@ dependencies = [
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
  "backend-storage-page-checksum",
@@ -11285,6 +11372,7 @@ dependencies = [
  "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
+ "backend-utils-adt-array-selfuncs",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",
@@ -11308,6 +11396,7 @@ dependencies = [
  "backend-utils-cache-evtcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-partcache",
  "backend-utils-cache-plancache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
@@ -11328,6 +11417,7 @@ dependencies = [
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
@@ -11721,6 +11811,8 @@ dependencies = [
 name = "types-nodes"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
  "mcx",
  "types-condvar",
  "types-core",

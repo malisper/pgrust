@@ -150,8 +150,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `CacheInvalidateRelcacheByTuple(classTuple)` (inval.c): invalidate the
     /// relcache entry described by the (reformed) pg_class row.
+    ///
+    /// C reads `classtup->oid` and `classtup->relisshared` from the
+    /// `GETSTRUCT`-deformed tuple. The trimmed `PgClassForm` value carries
+    /// `relisshared` but not the system `oid` column, so the caller (which
+    /// always knows the relation OID) passes it explicitly. The heap `tid`
+    /// (a tuple location, not consulted by the C invalidation) is dropped.
     pub fn cache_invalidate_relcache_by_pg_class(
-        tid: types_tuple::heaptuple::ItemPointerData,
+        relid: Oid,
         form: &types_cluster::PgClassForm,
     ) -> PgResult<()>
 );

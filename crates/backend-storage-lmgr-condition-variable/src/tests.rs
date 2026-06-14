@@ -40,6 +40,10 @@ fn install_seams() {
             *s.latch_sets.entry(procno).or_insert(0) += 1;
         });
         my_proc_number::set(|| sim().lock().unwrap().my_procno);
+        // The resolution seam: reconstruct the live CV from the recorded
+        // identity. In these single-thread tests the prepared CV is alive on
+        // the stack at the recorded address, exactly the C invariant.
+        cv_seams::with_target_cv::set(with_target_cv);
         // The latch never gets set in these single-backend tests, so a wait
         // simply burns (a slice of) its timeout, like a WL_TIMEOUT return.
         latch_seams::wait_latch_my_latch::set(|_events, timeout, _wei| {
@@ -69,15 +73,24 @@ impl Fixture {
             *s = Sim::default();
             s.my_procno = my_procno;
         }
-        set_sleep_target(ptr::null());
+        set_sleep_target(None);
         Fixture { _guard: guard }
     }
+}
+
+/// Run `body` over the CV's wakeup head/tail with exclusive access (tests are
+/// single-threaded under `TEST_LOCK`, so the spinlock is not contended). Used
+/// by helpers that fabricate or inspect list state directly.
+fn with_wakeup<R>(cv: &ConditionVariable, body: impl FnOnce(&mut proclist_head) -> R) -> R {
+    // SAFETY: tests serialize on `TEST_LOCK`, so there is no concurrent access
+    // to this CV's wakeup list.
+    body(unsafe { &mut *cv.wakeup.ptr() })
 }
 
 /// Enqueue a fabricated waiter (not the running backend) onto a CV, exactly
 /// as that backend's own `ConditionVariablePrepareToSleep` would.
 fn enqueue_waiter(cv: &ConditionVariable, procno: ProcNumber) {
-    proclist_push_tail(wakeup_mut(cv), procno);
+    with_wakeup(cv, |wakeup| proclist_push_tail(wakeup, procno));
 }
 
 fn latch_count(procno: ProcNumber) -> u32 {
@@ -89,13 +102,15 @@ fn init_clears_lock_and_empties_queue() {
     let _f = Fixture::new(7);
     let cv = ConditionVariable::new();
     cv.mutex.tas();
-    wakeup_mut(&cv).head = 3;
-    wakeup_mut(&cv).tail = 3;
+    with_wakeup(&cv, |w| {
+        w.head = 3;
+        w.tail = 3;
+    });
 
     ConditionVariableInit(&cv);
     assert!(cv.mutex.is_free());
-    assert_eq!(cv.wakeup.head, INVALID_PROC_NUMBER);
-    assert_eq!(cv.wakeup.tail, INVALID_PROC_NUMBER);
+    assert_eq!(cv.wakeup.get().head, INVALID_PROC_NUMBER);
+    assert_eq!(cv.wakeup.get().tail, INVALID_PROC_NUMBER);
 }
 
 #[test]
@@ -104,10 +119,10 @@ fn prepare_enqueues_self_and_sets_target() {
     let cv = ConditionVariable::new();
 
     ConditionVariablePrepareToSleep(&cv);
-    assert!(ptr::eq(sleep_target(), &cv));
+    assert!(sleep_target() == Some(cv_identity(&cv)));
     // Backend 5 is now the sole waiter, and the spinlock was released.
-    assert_eq!(cv.wakeup.head, 5);
-    assert_eq!(cv.wakeup.tail, 5);
+    assert_eq!(cv.wakeup.get().head, 5);
+    assert_eq!(cv.wakeup.get().tail, 5);
     assert!(cv.mutex.is_free());
 }
 
@@ -119,10 +134,10 @@ fn prepare_on_second_cv_cancels_first() {
 
     ConditionVariablePrepareToSleep(&cv1);
     ConditionVariablePrepareToSleep(&cv2);
-    assert!(ptr::eq(sleep_target(), &cv2));
+    assert!(sleep_target() == Some(cv_identity(&cv2)));
     // Backend 5 was removed from cv1's list by the cancel.
-    assert_eq!(cv1.wakeup.head, INVALID_PROC_NUMBER);
-    assert_eq!(cv2.wakeup.head, 5);
+    assert_eq!(cv1.wakeup.get().head, INVALID_PROC_NUMBER);
+    assert_eq!(cv2.wakeup.get().head, 5);
 }
 
 #[test]
@@ -134,8 +149,8 @@ fn timed_sleep_first_call_only_prepares() {
     // timeout), exactly like the C "tested twice" path.
     let timed_out = ConditionVariableTimedSleep(&cv, 50, 0).unwrap();
     assert!(!timed_out);
-    assert!(ptr::eq(sleep_target(), &cv));
-    assert_eq!(cv.wakeup.head, 5);
+    assert!(sleep_target() == Some(cv_identity(&cv)));
+    assert_eq!(cv.wakeup.get().head, 5);
 }
 
 #[test]
@@ -146,12 +161,12 @@ fn timed_sleep_returns_false_when_signaled() {
     ConditionVariablePrepareToSleep(&cv);
     // Simulate a signal: pop backend 5 out of the list (it is no longer
     // "contained"), so the sleep loop sees `done` and re-queues us.
-    assert_eq!(proclist_pop_head_node(wakeup_mut(&cv)), 5);
+    assert_eq!(with_wakeup(&cv, |w| proclist_pop_head_node(w)), 5);
 
     let timed_out = ConditionVariableTimedSleep(&cv, 50, 0).unwrap();
     assert!(!timed_out, "signaled wake must report not-timed-out");
     // We were put back into the wait list while the caller re-checks.
-    assert_eq!(cv.wakeup.head, 5);
+    assert_eq!(cv.wakeup.get().head, 5);
 }
 
 #[test]
@@ -179,8 +194,8 @@ fn signal_wakes_oldest_waiter() {
     // Oldest (11) is popped and latched; 12 remains.
     assert_eq!(latch_count(11), 1);
     assert_eq!(latch_count(12), 0);
-    assert_eq!(cv.wakeup.head, 12);
-    assert_eq!(cv.wakeup.tail, 12);
+    assert_eq!(cv.wakeup.get().head, 12);
+    assert_eq!(cv.wakeup.get().tail, 12);
 }
 
 #[test]
@@ -188,7 +203,7 @@ fn signal_on_empty_queue_is_noop() {
     let _f = Fixture::new(5);
     let cv = ConditionVariable::new();
     ConditionVariableSignal(&cv);
-    assert!(proclist_is_empty(&cv.wakeup));
+    assert!(proclist_is_empty(&cv.wakeup.get()));
 }
 
 #[test]
@@ -208,7 +223,7 @@ fn broadcast_wakes_all_present_waiters() {
     assert_eq!(latch_count(12), 1);
     assert_eq!(latch_count(13), 1);
     assert_eq!(latch_count(5), 0);
-    assert!(proclist_is_empty(&cv.wakeup));
+    assert!(proclist_is_empty(&cv.wakeup.get()));
 }
 
 #[test]
@@ -219,7 +234,7 @@ fn broadcast_single_waiter_no_sentinel() {
     enqueue_waiter(&cv, 11);
     ConditionVariableBroadcast(&cv);
     assert_eq!(latch_count(11), 1);
-    assert!(proclist_is_empty(&cv.wakeup));
+    assert!(proclist_is_empty(&cv.wakeup.get()));
 }
 
 #[test]
@@ -227,7 +242,7 @@ fn broadcast_empty_queue_is_noop() {
     let _f = Fixture::new(5);
     let cv = ConditionVariable::new();
     ConditionVariableBroadcast(&cv);
-    assert!(proclist_is_empty(&cv.wakeup));
+    assert!(proclist_is_empty(&cv.wakeup.get()));
 }
 
 #[test]
@@ -241,10 +256,10 @@ fn broadcast_cancels_own_prepared_sleep_first() {
     ConditionVariableBroadcast(&cv);
     // Our own prepared sleep was cancelled (we are not latched), the other
     // waiter was wakened, and the target is cleared.
-    assert!(sleep_target().is_null());
+    assert!(sleep_target().is_none());
     assert_eq!(latch_count(5), 0);
     assert_eq!(latch_count(11), 1);
-    assert!(proclist_is_empty(&cv.wakeup));
+    assert!(proclist_is_empty(&cv.wakeup.get()));
 }
 
 #[test]
@@ -262,8 +277,8 @@ fn cancel_after_prepare_dequeues_and_reports_unsignaled() {
 
     let signaled = ConditionVariableCancelSleep();
     assert!(!signaled, "still in the list => not signaled");
-    assert!(sleep_target().is_null());
-    assert_eq!(cv.wakeup.head, INVALID_PROC_NUMBER);
+    assert!(sleep_target().is_none());
+    assert_eq!(cv.wakeup.get().head, INVALID_PROC_NUMBER);
 }
 
 #[test]
@@ -273,9 +288,9 @@ fn cancel_reports_signaled_when_already_removed() {
 
     ConditionVariablePrepareToSleep(&cv);
     // Simulate a signal having removed backend 5 from the list before cancel.
-    assert_eq!(proclist_pop_head_node(wakeup_mut(&cv)), 5);
+    assert_eq!(with_wakeup(&cv, |w| proclist_pop_head_node(w)), 5);
 
     let signaled = ConditionVariableCancelSleep();
     assert!(signaled, "removed-by-signal => CancelSleep reports signaled");
-    assert!(sleep_target().is_null());
+    assert!(sleep_target().is_none());
 }

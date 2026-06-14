@@ -292,3 +292,45 @@ seam_core::seam!(
     /// surface that exposes the live `TupleTableSlot` runtime.
     pub fn print_slot(slot: &types_nodes::tuptable::SlotBase<'_>) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CallStmtResultDesc(stmt)` (functioncmds.c:2383) — the polymorphic
+    /// output-argument tuple descriptor for a CALL. Re-homed here (from
+    /// `backend-nodes-nodeFuncs-seams`) onto the `backend-nodes-core` owner so
+    /// the seam-install guard can track it: the function is keyed entirely by
+    /// the unported planner expression node `stmt->funcexpr` (`FuncExpr.funcid`,
+    /// which functioncmds carries opaquely — the layered node tree does not yet
+    /// model the call expression), runs `build_function_result_tupdesc_t` over
+    /// the `PROCOID` tuple, and re-types each output column from
+    /// `stmt->outargs[i]` via `exprType`. Both the `funcid` read and the
+    /// `exprType` fixup are nodeFuncs/nodes-core expression-tree territory, and
+    /// the tupdesc spine is funcapi-owned, so the whole body still lands behind
+    /// the real owners — it is DESIGN_DEBT (CONTRACT_RECONCILE_PENDING). Takes
+    /// `Mcx<'mcx>`, returns the descriptor in the caller's context. Fallible on
+    /// the cache-lookup `ereport(ERROR)`.
+    pub fn call_stmt_result_desc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: types_parsenodes::CallStmt,
+    ) -> types_error::PgResult<types_tuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// The non-`FuncExpr`/`OpExpr` arms of `get_expr_result_type` (funcapi.c):
+    /// the `IsA` dispatch over `RowExpr`/`Const`/generic expression that
+    /// inspects the expression node's tag and per-variant fields (`row_typeid`,
+    /// `args`/`colnames`, the RECORD `Const` datum) and runs `exprType` /
+    /// `CreateTemplateTupleDesc` / `BlessTupleDesc` / `lookup_rowtype_tupdesc_copy`
+    /// / `get_type_func_class` over them. Re-homed here (from
+    /// `backend-nodes-nodeFuncs-seams`) onto the `backend-nodes-core` owner so
+    /// the guard can track it. The expression-node tree is owned by the
+    /// nodeFuncs/parser side and the FuncExpr/OpExpr funnel folds back into the
+    /// funcapi-owned `internal_get_result_type` (no callback seam exists yet), so
+    /// the body still lands behind the real owners — DESIGN_DEBT
+    /// (CONTRACT_RECONCILE_PENDING). `expr == None` is the C `NULL` (generic
+    /// `exprType` path on a NULL node). `Err` carries the lookup/
+    /// `assign_record_type_typmod` `ereport(ERROR)` surface.
+    pub fn get_expr_result_type_node<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<types_nodes::funcapi::ResolvedResultType<'mcx>>
+);

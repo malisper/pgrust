@@ -632,6 +632,46 @@ pub fn superuser_reserved_connections() -> i32 {
     backend_utils_misc_guc_tables::vars::SuperuserReservedConnections.read()
 }
 
+/// `int max_prepared_xacts = 0;` — the `max_prepared_xacts` GUC bounding the
+/// number of concurrently-prepared transactions (dummy `PGPROC` slots). The C
+/// global lives in `twophase.c`; its store is the `max_prepared_xacts` GUC
+/// slot, read here.
+#[inline]
+pub fn max_prepared_xacts() -> i32 {
+    backend_utils_misc_guc_tables::vars::max_prepared_xacts.read()
+}
+
+/// `int autovacuum_worker_slots;` — the `autovacuum_worker_slots` GUC bounding
+/// the number of autovacuum-worker slots. The C global lives in
+/// `autovacuum.c`; its store is the `autovacuum_worker_slots` GUC slot, read
+/// here.
+#[inline]
+pub fn autovacuum_worker_slots() -> i32 {
+    backend_utils_misc_guc_tables::vars::autovacuum_worker_slots.read()
+}
+
+/// `char *DatabasePath` (globals.c): the path to the current database's data
+/// directory. Returns an owned copy. A `NULL` `DatabasePath` would be a
+/// programming error (the path is set at backend startup before any consumer
+/// reads it, mirroring the way the C `Port`-field accessors dereference once a
+/// `Port` exists); it is reported here as an internal ERROR rather than a
+/// segfault. `Err` also carries the OOM surface of copying the global.
+pub fn database_path_seam() -> types_error::PgResult<String> {
+    match DatabasePath() {
+        Some(p) => Ok(p),
+        None => {
+            backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal("DatabasePath is NULL")
+                .finish(types_error::ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "DatabasePath",
+                ))?;
+            unreachable!("ereport(ERROR) does not return Ok")
+        }
+    }
+}
+
 // --- `MyProcPort->...` field accessors copied into an `mcx` context (the C
 // idiom of reading the per-connection `Port` string fields). Each returns the
 // OOM surface of the copy; the C `MyProcPort == NULL` surface is reported as

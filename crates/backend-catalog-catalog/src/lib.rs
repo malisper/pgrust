@@ -47,6 +47,7 @@ use types_catalog::catalog::{
     SUBSCRIPTION_OBJECT_INDEX_ID, SUBSCRIPTION_RELATION_ID, TABLESPACE_NAME_INDEX_ID,
     TABLESPACE_OID_INDEX_ID, TABLE_SPACE_RELATION_ID, TS_DICTIONARY_RELATION_ID,
 };
+use types_catalog::catalog_dependency::DEPEND_RELATION_ID;
 use types_catalog::catalog_shdepend::SHARED_DEPEND_RELATION_ID;
 use types_cluster::PgClassForm;
 use types_core::fmgr::F_OIDEQ;
@@ -764,6 +765,42 @@ pub fn pg_stop_making_pinned_objects() -> PgResult<()> {
     Ok(())
 }
 
+/// `RelationInvalidatesSnapshotsOnly(relid)` (`utils/cache/syscache.c`,
+/// declared via the catalog classification-predicate seam).
+///
+/// Certain relations that do not have system caches send snapshot
+/// invalidation messages in lieu of catcache messages. This is for the benefit
+/// of `GetCatalogSnapshot()`, which can then reuse its existing MVCC snapshot
+/// for scanning one of those catalogs, rather than taking a new one, if no
+/// invalidation has been received.
+///
+/// Relations that have syscaches need not (and must not) be listed here. The
+/// catcache invalidation messages will also flush the snapshot. If you add a
+/// syscache for one of these relations, remove it from this list.
+///
+/// The OID switch is a self-contained, infallible classification predicate
+/// over fixed catalog relation OIDs, so it lives with the catalog naming
+/// predicates here (the seam was declared on this owner). `inval.c`
+/// (`RegisterCatcacheInvalidation` / `PrepareInvalidationState`) calls it
+/// across the catalog<->cache cycle through this seam.
+fn RelationInvalidatesSnapshotsOnly(relid: Oid) -> bool {
+    /// `DescriptionRelationId` (`catalog/pg_description_d.h`).
+    const DESCRIPTION_RELATION_ID: Oid = 2609;
+    /// `SecLabelRelationId` (`catalog/pg_seclabel_d.h`).
+    const SEC_LABEL_RELATION_ID: Oid = 3596;
+
+    matches!(
+        relid,
+        DB_ROLE_SETTING_RELATION_ID
+            | DEPEND_RELATION_ID
+            | SHARED_DEPEND_RELATION_ID
+            | DESCRIPTION_RELATION_ID
+            | SHARED_DESCRIPTION_RELATION_ID
+            | SEC_LABEL_RELATION_ID
+            | SHARED_SEC_LABEL_RELATION_ID
+    )
+}
+
 /// Install this crate's seams (`backend-catalog-catalog-seams`) — the catalog.c
 /// classification predicates other catalog/storage ports call across a cycle.
 pub fn init_seams() {
@@ -776,6 +813,9 @@ pub fn init_seams() {
     backend_catalog_catalog_seams::is_system_relation::set(is_system_relation_seam);
     backend_catalog_catalog_seams::is_system_class::set(is_system_class_seam);
     backend_catalog_catalog_seams::get_new_relfilenumber::set(get_new_relfilenumber_seam);
+    backend_catalog_catalog_seams::relation_invalidates_snapshots_only::set(
+        RelationInvalidatesSnapshotsOnly,
+    );
 }
 
 /// Seam adapter for `GetNewRelFileNumber`: the relcache caller

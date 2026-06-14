@@ -39,7 +39,6 @@ use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop_postgres;
 use mcx::{alloc_in, vec_with_capacity_in, PgBox, PgVec};
-use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprDoneCond, SetExprState};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};

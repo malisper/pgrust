@@ -138,9 +138,14 @@ seam_core::seam!(
     /// each child's result slot ops, which it computes from the node — fallible
     /// because `ExecGetResultSlotOps` can run node-init work that
     /// `ereport(ERROR)`s.
+    ///
+    /// The owned model passes `estate` because the per-child result slot is a
+    /// pool id resolved through the EState (the C reaches it via the bare
+    /// `PlanState *`/`ps_ResultTupleSlot` pointer).
     pub fn exec_get_common_slot_ops<'mcx>(
         planstates: &[Option<mcx::PgBox<'mcx, types_nodes::PlanStateNode<'mcx>>>],
         nplans: i32,
+        estate: &types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<types_nodes::TupleSlotKind>>
 );
 

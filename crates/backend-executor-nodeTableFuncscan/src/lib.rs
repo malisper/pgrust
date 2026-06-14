@@ -534,21 +534,23 @@ fn tfuncInitialize<'mcx>(
             //   if (colexpr != NULL) { value = ExecEvalExpr(...); ... }
             //   else colfilter = NameStr(att->attname);
             let colfilter_owned;
-            // SAFETY: `colexpr_ptr` points at the node's owned colexprs slot; the
-            // eval call mutates only that ExprState (per-eval scratch) + the
-            // estate, neither of which aliases the later `scan_slot_attname`
-            // borrow of `tstate`.
-            let colexpr_ptr: Option<*mut types_nodes::execexpr::ExprState<'mcx>> = tstate.colexprs
-                [colno as usize]
-                .as_mut()
-                .map(|c| c as *mut _);
-            let colfilter: &str = match colexpr_ptr {
-                Some(colexpr) => {
-                    let (value, isnull) = execExpr::exec_eval_expr_switch_context::call(
-                        unsafe { &mut *colexpr },
-                        econtext,
-                        estate,
-                    )?;
+            //   ExprState *colexpr = lfirst(lc1);
+            //   if (colexpr != NULL) { value = ExecEvalExpr(...); ... }
+            //   else colfilter = NameStr(att->attname);
+            //
+            // The eval borrows only the single `colexprs[colno]` cell (per-eval
+            // scratch) plus `estate`; it does not touch the rest of `tstate`.
+            // Split-borrow that one cell, run the eval, and let the borrow end
+            // (the result `(Datum, bool)` is owned) before any
+            // `scan_slot_attname(tstate, ...)` re-borrow of `tstate`.
+            let eval_result = match tstate.colexprs[colno as usize].as_mut() {
+                Some(colexpr) => Some(execExpr::exec_eval_expr_switch_context::call(
+                    colexpr, econtext, estate,
+                )?),
+                None => None,
+            };
+            let colfilter: &str = match eval_result {
+                Some((value, isnull)) => {
                     if isnull {
                         let attname = scan_slot_attname(tstate, colno, estate)?;
                         return Err(null_value_error(

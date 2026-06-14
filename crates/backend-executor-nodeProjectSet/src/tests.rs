@@ -18,19 +18,29 @@ use types_nodes::primnodes::{Const, Expr, FuncExpr, OpExpr, TargetEntry};
 use types_nodes::TupleTableSlot;
 
 use super::*;
+// The owner's eval/SRF/store-virtual seams now carry the canonical unified
+// `types_tuple::…::Datum<'mcx>` (Datum-unification keystone); the mock
+// implementations and scripted-result queues below must match that type, so
+// shadow the bare-word `Datum` pulled in via `super::*`.
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 thread_local! {
     /// Rows the mock outer subplan still has to produce.
     static OUTER_SUPPLY: Cell<usize> = const { Cell::new(0) };
     /// child `ExecReScan` invocations.
     static CHILD_RESCANS: Cell<usize> = const { Cell::new(0) };
-    /// Scripted `ExecMakeFunctionResultSet` results, popped per call.
-    static SRF_RESULTS: RefCell<VecDeque<(Datum, bool, ExprDoneCond)>> =
+    /// Scripted `ExecMakeFunctionResultSet` results, popped per call. The
+    /// canonical `Datum<'mcx>` is lifetime-parameterized; the scripted scalars
+    /// are by-value (`from_i32`/`null`), so they are held as `Datum<'static>`
+    /// and coerce to the caller's `'mcx` on the way out.
+    static SRF_RESULTS: RefCell<VecDeque<(Datum<'static>, bool, ExprDoneCond)>> =
         const { RefCell::new(VecDeque::new()) };
     /// Scripted `ExecEvalExpr` results, popped per call.
-    static EVAL_RESULTS: RefCell<VecDeque<(Datum, bool)>> = const { RefCell::new(VecDeque::new()) };
+    static EVAL_RESULTS: RefCell<VecDeque<(Datum<'static>, bool)>> =
+        const { RefCell::new(VecDeque::new()) };
     /// What the last `store_virtual_values` committed.
-    static STORED: RefCell<Option<(Vec<Datum>, Vec<bool>)>> = const { RefCell::new(None) };
+    static STORED: RefCell<Option<(Vec<Datum<'static>>, Vec<bool>)>> =
+        const { RefCell::new(None) };
 }
 
 fn reset_state() {
@@ -42,6 +52,15 @@ fn reset_state() {
 }
 
 // --- mock seam implementations -------------------------------------------
+
+/// Re-bind a by-value canonical `Datum` to an arbitrary lifetime. The scripted
+/// test scalars are all by-value (`from_i32`/`null`), which carry no borrow, so
+/// they can cross the `thread_local!` `'static` boundary in either direction.
+/// Panics on a by-reference value (the ProjectSet mock scenarios never produce
+/// one).
+fn rebind<'a>(d: Datum<'_>) -> Datum<'a> {
+    Datum::from_usize(d.as_usize())
+}
 
 fn mock_check_for_interrupts() -> PgResult<()> {
     Ok(())
@@ -148,13 +167,14 @@ fn mock_init_expr<'mcx>(
 
 /// `ExecEvalExprSwitchContext`: pop a scripted `(datum, isnull)` result.
 fn mock_eval_expr<'mcx>(
-    _state: &mut ExprState,
+    _state: &mut ExprState<'mcx>,
     _econtext: types_nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
-    Ok(EVAL_RESULTS
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let (d, isnull) = EVAL_RESULTS
         .with(|c| c.borrow_mut().pop_front())
-        .unwrap_or((Datum::null(), false)))
+        .unwrap_or((Datum::null(), false));
+    Ok((rebind(d), isnull))
 }
 
 /// `ExecInitFunctionResultSet`: a placeholder `SetExprState`.
@@ -175,12 +195,13 @@ fn mock_make_srf<'mcx>(
     _econtext: types_nodes::EcxtId,
     _arg_context: &MemoryContext,
     _estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool, ExprDoneCond)> {
-    Ok(SRF_RESULTS.with(|c| c.borrow_mut().pop_front()).unwrap_or((
+) -> PgResult<(Datum<'mcx>, bool, ExprDoneCond)> {
+    let (d, isnull, done) = SRF_RESULTS.with(|c| c.borrow_mut().pop_front()).unwrap_or((
         Datum::null(),
         true,
         ExprDoneCond::ExprEndResult,
-    )))
+    ));
+    Ok((rebind(d), isnull, done))
 }
 
 /// `store_virtual_values`: record the committed values/nulls and mark the slot
@@ -188,10 +209,11 @@ fn mock_make_srf<'mcx>(
 fn mock_store_virtual_values<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
-    values: &[Datum],
+    values: &[Datum<'mcx>],
     isnull: &[bool],
 ) -> PgResult<()> {
-    STORED.with(|c| *c.borrow_mut() = Some((values.to_vec(), isnull.to_vec())));
+    let stored: Vec<Datum<'static>> = values.iter().map(|d| rebind(d.clone())).collect();
+    STORED.with(|c| *c.borrow_mut() = Some((stored, isnull.to_vec())));
     estate.slot_mut(slot).tts_flags &= !types_nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }

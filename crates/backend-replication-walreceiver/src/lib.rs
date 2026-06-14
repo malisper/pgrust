@@ -187,6 +187,36 @@ fn hot_standby_feedback() -> bool {
     with_state(|s| s.hot_standby_feedback)
 }
 
+/// `int wal_retrieve_retry_interval = 5000;` (`xlog.c:159`, milliseconds): time
+/// to wait before retrying WAL retrieval. The GUC variable is *defined* in
+/// `xlog.c` (a still-unported TU), but `walreceiver.h` exports it and the seam
+/// is homed here alongside the other WAL-receiver knobs. Until `guc.c`/`xlog.c`
+/// land to make it assignable, return the compiled-in boot default — the same
+/// value `guc_tables.c` installs for `wal_retrieve_retry_interval` (5000).
+fn wal_retrieve_retry_interval() -> i32 {
+    5000
+}
+
+/// `XLogRecPtr GetWalRcvFlushRecPtr(XLogRecPtr *latestChunkStart, TimeLineID
+/// *receiveTLI)` (`walreceiverfuncs.c:331-346`). The real definition lives in
+/// the sibling `walreceiverfuncs` TU, which owns the `WalRcvData` shared-memory
+/// control block; this crate cannot depend on that crate (`walreceiverfuncs`
+/// already depends on this crate's seam crate). The seam is homed here because
+/// `walreceiver.h` declares it next to the WAL-receiver surface, so we forward
+/// faithfully through the `with_walrcv` shmem accessor — reading `flushedUpto`
+/// and `receivedTLI` under the single `WalRcvData` lock, exactly as the C does.
+/// The seam's consumers (walsummarizer) need only `(flushedUpto, tli)`; callers
+/// wanting `latestChunkStart` use the funcs-crate fn directly.
+fn get_wal_rcv_flush_rec_ptr() -> (XLogRecPtr, TimeLineID) {
+    let mut recptr: XLogRecPtr = 0;
+    let mut tli: TimeLineID = 0;
+    walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
+        recptr = walrcv.flushedUpto;
+        tli = walrcv.receivedTLI;
+    });
+    (recptr, tli)
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers ported from xlog_internal.h macros / inline functions.
 // ---------------------------------------------------------------------------
@@ -1716,6 +1746,14 @@ fn wakeup_reason_from_index(i: usize) -> WalRcvWakeupReason {
 /// Install every seam declared in `backend-replication-walreceiver-seams`.
 pub fn init_seams() {
     backend_replication_walreceiver_seams::wal_receiver_main::set(wal_receiver_main);
+    backend_replication_walreceiver_seams::wal_receiver_timeout::set(wal_receiver_timeout);
+    backend_replication_walreceiver_seams::hot_standby_feedback::set(hot_standby_feedback);
+    backend_replication_walreceiver_seams::wal_retrieve_retry_interval::set(
+        wal_retrieve_retry_interval,
+    );
+    backend_replication_walreceiver_seams::get_wal_rcv_flush_rec_ptr::set(
+        get_wal_rcv_flush_rec_ptr,
+    );
 }
 
 #[cfg(test)]

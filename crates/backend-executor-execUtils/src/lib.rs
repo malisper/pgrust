@@ -200,6 +200,39 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_get_updated_cols::set(|mcx, estate, rri| {
         ExecGetUpdatedCols(estate, rri, mcx)
     });
+
+    // `ExecGetCommonSlotOps(planstates, nplans)` (execUtils.c): the seam carries
+    // the child `PlanState`s as `PlanStateNode` boxes (the C `PlanState **`),
+    // so the shim re-borrows each node's `PlanState` head before delegating.
+    backend_executor_execUtils_seams::exec_get_common_slot_ops::set(
+        |planstates, nplans, estate| {
+            // C: for (i = 0; i < nplans; i++) ExecGetResultSlotOps(planstates[i], ...)
+            let n = nplans.max(0) as usize;
+            let heads: PgVec<&PlanStateData<'_>> = {
+                let mut v = vec_with_capacity_in(estate.es_query_cxt, n)?;
+                for slot in planstates.iter().take(n) {
+                    let node = slot
+                        .as_deref()
+                        .expect("ExecGetCommonSlotOps: PlanState pointer is NULL");
+                    v.push(node.ps_head());
+                }
+                v
+            };
+            Ok(ExecGetCommonSlotOps(&heads, estate))
+        },
+    );
+
+    // `ExecAssignScanProjectionInfo(node)` (execScan.c): set up a scan node's
+    // projection info using the scan plan's `scanrelid` as the expected varno.
+    backend_executor_execUtils_seams::exec_assign_scan_projection_info::set(
+        ExecAssignScanProjectionInfo,
+    );
+
+    // `ExecAssignScanProjectionInfoWithVarno(node, varno)` (execScan.c): as
+    // above, but the caller supplies the varno.
+    backend_executor_execUtils_seams::exec_assign_scan_projection_info_with_varno::set(
+        ExecAssignScanProjectionInfoWithVarno,
+    );
 }
 
 // ===========================================================================
@@ -625,6 +658,69 @@ pub fn ExecConditionalAssignProjectionInfo<'mcx>(
         ExecAssignProjectionInfo(planstate, estate, Some(input_desc))?;
     }
     Ok(())
+}
+
+/// `ExecAssignScanProjectionInfoWithVarno(node, varno)` (execScan.c) — set up
+/// projection info for a scan node, treating its scan-slot Vars as having the
+/// given `varno`. Mirrors the C:
+///
+/// ```c
+/// TupleDesc tupdesc = node->ss_ScanTupleSlot->tts_tupleDescriptor;
+/// ExecConditionalAssignProjectionInfo(&node->ps, tupdesc, varno);
+/// ```
+///
+/// The scan slot's descriptor must have been set already. The descriptor is
+/// reached through the slot pool via the `exec_scan_slot_descriptor` seam (the
+/// slot lives in the EState, not inline in the `ScanState`).
+pub fn ExecAssignScanProjectionInfoWithVarno<'mcx>(
+    node: &mut ScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    varno: i32,
+) -> PgResult<()> {
+    let tupdesc = execTuples_seams::exec_scan_slot_descriptor::call(
+        estate.es_query_cxt,
+        node,
+        estate,
+    )?
+    .expect("ExecAssignScanProjectionInfoWithVarno: ss_ScanTupleSlot has no descriptor");
+    ExecConditionalAssignProjectionInfo(&mut node.ps, estate, &tupdesc, varno)
+}
+
+/// `ExecAssignScanProjectionInfo(node)` (execScan.c) — set up projection info
+/// for a scan node, using the scan plan node's `scanrelid` as the expected
+/// varno. Mirrors the C `ExecConditionalAssignProjectionInfo(&node->ps,
+/// tupdesc, ((Scan *) node->ps.plan)->scanrelid)`.
+pub fn ExecAssignScanProjectionInfo<'mcx>(
+    node: &mut ScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Scan *scan = (Scan *) node->ps.plan;  -> scan->scanrelid
+    let varno = scan_scanrelid(&node.ps) as i32;
+    ExecAssignScanProjectionInfoWithVarno(node, estate, varno)
+}
+
+/// `((Scan *) node->ps.plan)->scanrelid` — the range-table index of the scanned
+/// relation, read off whichever `Scan`-derived plan node the `PlanState` holds.
+/// Mirrors the C unconditional `(Scan *)` cast (a non-Scan plan is a loud
+/// panic). The `BitmapHeapScan` plan node is not a `types_nodes::Node` variant,
+/// so its callers pass the varno explicitly via
+/// [`ExecAssignScanProjectionInfoWithVarno`] instead.
+fn scan_scanrelid(ps: &PlanStateData<'_>) -> u32 {
+    use types_nodes::nodes::Node;
+    match ps.plan {
+        Some(Node::SeqScan(s)) => s.scan.scanrelid,
+        Some(Node::TidRangeScan(s)) => s.scan.scanrelid,
+        Some(Node::IndexOnlyScan(s)) => s.scan.scanrelid,
+        Some(Node::TableFuncScan(s)) => s.scan.scanrelid,
+        Some(Node::ValuesScan(s)) => s.scan.scanrelid,
+        Some(Node::CteScan(s)) => s.scan.scanrelid,
+        Some(Node::NamedTuplestoreScan(s)) => s.scan.scanrelid,
+        Some(Node::SubqueryScan(s)) => s.scan.scanrelid,
+        Some(Node::ForeignScan(s)) => s.scan.scanrelid,
+        Some(Node::CustomScan(s)) => s.scan.scanrelid,
+        Some(other) => panic!("scan_scanrelid: plan is not a Scan node: {other:?}"),
+        None => panic!("scan_scanrelid: ScanState has no plan"),
+    }
 }
 
 /// `tlist_matches_tupdesc` (static): does this plain-Var target list exactly

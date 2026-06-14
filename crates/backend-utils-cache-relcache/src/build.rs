@@ -45,31 +45,23 @@ const PERSIST_TEMP: i8 = RELPERSISTENCE_TEMP as i8;
 /// `rd_att` tuple descriptor into `mcx`, and close the relation. **Own logic**
 /// over the entry store + the `CreateTupleDesc` tupdesc utility; the caller
 /// (typcache) holds the refcount discipline.
-#[allow(unsafe_code)]
 pub fn relation_get_composite_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     typrelid: Oid,
     type_id: Oid,
 ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
-    // relation_open(typrelid, AccessShareLock) — the relcache pin.
-    let rd = crate::core_entry_store::RelationIdGetRelation(typrelid)?;
-    if rd.is_null() {
-        return Err(ereport(ERROR)
-            .errmsg_internal(format!("could not open relation with OID {typrelid}"))
-            .into_error());
-    }
-    // SAFETY: live, pinned cache-owned descriptor.
-    let r = unsafe { &*rd };
+    // relation_open(typrelid, AccessShareLock) — the relcache pin (RAII guard).
+    let rel = crate::core_entry_store::RelationRef::open(typrelid)?;
     // CreateTupleDescCopyConstr(RelationGetDescr(rel)) — materialize a standalone
     // copy of the entry's tuple descriptor, tagged with the composite type.
-    let attrs = build_form_attrs(&r.rd_att, r.rd_id);
+    let attrs = rel.with(|r| build_form_attrs(&r.rd_att, r.rd_id));
     let mut td = CreateTupleDesc(mcx, &attrs)?;
     td.tdtypeid = type_id;
     td.tdtypmod = -1;
     td.tdrefcount = 1;
     let boxed = mcx::alloc_in(mcx, td)?;
-    // relation_close(rel, AccessShareLock) — release the pin we took.
-    crate::core_entry_store::RelationClose(rd)?;
+    // relation_close(rel, AccessShareLock) — release the pin (guard Drop).
+    drop(rel);
     Ok(boxed)
 }
 
@@ -108,14 +100,12 @@ pub fn free_fake_relcache_entry(fakerel: types_rel::RelationData<'_>) {
 /// consumed slice of the entry into the caller's memory context"). This is the
 /// build family's projection half, used by the `relation_id_get_relation`
 /// seam. **Own logic.**
-#[allow(unsafe_code)]
 pub(crate) fn project_relation_data<'mcx>(
     mcx: Mcx<'mcx>,
-    rd: *mut RelationData,
+    r: &RelationData,
 ) -> PgResult<types_rel::RelationData<'mcx>> {
-    // SAFETY: `rd` is a live cache-owned (or in-build) descriptor; we only read
-    // its scalar/owned fields to materialize the cross-unit value-slice.
-    let r = unsafe { &*rd };
+    // `r` is a live cache-owned (or in-build) descriptor borrowed by the caller;
+    // we only read its scalar/owned fields to materialize the value-slice.
     project_entry(mcx, r)
 }
 
@@ -230,8 +220,7 @@ fn name_data(s: &str) -> NameData {
 /// initialize index/table access info, and (if `insertIt`) install it in the
 /// `RelationIdCache`. Returns the built `Relation` (the C pointer), or `null`
 /// when no `pg_class` row exists. **Own orchestration.**
-#[allow(unsafe_code)]
-pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut RelationData> {
+pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
     // Push our entry onto in_progress_list (the invalidation-restart protocol).
     // C grows a fixed array; the owned model is a Vec, so the offset is the
     // current length before the push.
@@ -244,7 +233,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
         off
     });
 
-    let relation: *mut RelationData = loop {
+    let mut relation: Box<RelationData> = loop {
         // Reset the invalidated flag for this attempt.
         with_state(|st| st.in_progress_list[in_progress_offset].invalidated = false);
 
@@ -256,7 +245,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
                 with_state(|st| {
                     st.in_progress_list.truncate(in_progress_offset);
                 });
-                return Ok(std::ptr::null_mut());
+                return Ok(types_core::InvalidOid);
             }
         };
 
@@ -309,17 +298,17 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
         relation.rd_partcheckvalid = false;
 
         // Index vs table access-method init (index family — own logic, separate
-        // branch). Partitioned tables get neither, exactly as C.
+        // branch). Partitioned tables get neither, exactly as C. These run on the
+        // local, not-yet-inserted descriptor via `&mut RelationData`.
         let relkind = relation.rd_rel.relkind as u8;
-        let relptr: *mut RelationData = &mut *relation;
         if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
-            crate::index::RelationInitIndexAccessInfo(relptr)?;
+            crate::index::RelationInitIndexAccessInfo(&mut relation)?;
         } else if relkind == RELKIND_RELATION
             || relkind == RELKIND_TOASTVALUE
             || relkind == RELKIND_MATVIEW
             || relkind == RELKIND_SEQUENCE
         {
-            crate::index::RelationInitTableAccessMethod(relptr)?;
+            crate::index::RelationInitTableAccessMethod(&mut relation)?;
         } else {
             // RELKIND_PARTITIONED_TABLE: no access method (C falls through).
             debug_assert!(relkind == RELKIND_PARTITIONED_TABLE || true);
@@ -331,7 +320,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
         // Rules / triggers / row-security (derived family — own logic, separate
         // branch). C builds them when the pg_class flags are set, else NULLs.
         if relation.rd_rel.relhasrules {
-            crate::derived::RelationBuildRuleLock(relptr)?;
+            crate::derived::RelationBuildRuleLock(&mut relation)?;
         } else {
             relation.rd_has_rules = false;
         }
@@ -361,7 +350,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
         // Lock info + physical address (index family — own logic, separate
         // branch). RelationInitLockInfo fills rd_lockInfo from rd_id/relisshared.
         RelationInitLockInfo(&mut relation);
-        crate::index::RelationInitPhysicalAddr(relptr)?;
+        crate::index::RelationInitPhysicalAddr(&mut relation)?;
 
         // C frees pg_class_tuple here; in the owned model `relp` was already
         // consumed by AllocateRelationDesc.
@@ -370,42 +359,54 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<*mut Rela
         let invalidated =
             with_state(|st| st.in_progress_list[in_progress_offset].invalidated);
         if !invalidated {
-            break Box::into_raw(relation);
+            break relation;
         }
-        // Invalidated: destroy this descriptor (invalidate family) and retry.
-        crate::invalidate::RelationClearRelation(Box::into_raw(relation))?;
+        // Invalidated: destroy this local descriptor (drop the Box — the C
+        // `RelationDestroyRelation(relation, false)`) and retry.
+        crate::invalidate::RelationDestroyRelation(relation, false);
     };
 
     // Pop our in_progress entry.
     with_state(|st| st.in_progress_list.truncate(in_progress_offset));
 
-    if insertIt {
-        // RelationCacheInsert(relation, true): replace any existing entry. C
-        // surfaces a leak warning if it displaces a still-referenced entry; the
-        // entry store performs the dynahash insert + reclaim.
-        // SAFETY: `relation` is the just-built leaked descriptor; reclaiming the
-        // Box hands ownership to the cache.
-        let owned = unsafe { Box::from_raw(relation) };
-        let oldrel = cache_insert(owned, true)?;
-        if let Some(old) = oldrel {
-            // SAFETY: `old` is the displaced descriptor still in the heap.
-            let old_ref = unsafe { &*old };
-            if old_ref.rd_refcnt == 0 {
-                // Free the displaced unreferenced descriptor (invalidate family).
-                crate::invalidate::RelationClearRelation(old)?;
-            } else {
-                // Still-referenced: C ereport(WARNING) about a leak (outside
-                // bootstrap). We keep the warning faithful.
-                let _ = ereport(types_error::WARNING)
-                    .errmsg_internal(&format!(
-                        "leaking still-referenced relcache entry for \"{}\"",
-                        old_ref.rd_rel.relname
-                    ));
-            }
-        }
-    }
+    // It's fully valid.
+    relation.rd_isvalid = true;
 
-    Ok(relation)
+    let relid = relation.rd_id;
+    if insertIt {
+        // RelationCacheInsert(relation, true): install into the store, replacing
+        // any existing entry. The entry store owns the `Box`; the displaced
+        // descriptor (if any) is freed/leak-warned there (the C macro's
+        // RelationDestroyRelation / still-referenced WARNING).
+        cache_insert(relation, true)?;
+        Ok(relid)
+    } else {
+        // C keeps `newrel` OUT of the hash for RelationRebuildRelation's
+        // in-place swap; park it in the scratch slot and return its OID.
+        finish_uninserted(relation)
+    }
+}
+
+thread_local! {
+    /// Holds the single not-yet-inserted descriptor produced by
+    /// `RelationBuildDesc(.., insertIt=false)` for `RelationRebuildRelation`'s
+    /// temporary `newrel`. C keeps `newrel` as a local pointer outside the hash;
+    /// the owned model parks it here between build and swap. At most one is live.
+    static SCRATCH: std::cell::RefCell<Option<Box<RelationData>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Park a not-yet-inserted descriptor and return the OID handle naming it. The
+/// rebuild path retrieves it with [`take_scratch`].
+fn finish_uninserted(relation: Box<RelationData>) -> PgResult<Oid> {
+    let id = relation.rd_id;
+    SCRATCH.with(|s| *s.borrow_mut() = Some(relation));
+    Ok(id)
+}
+
+/// Take the parked scratch descriptor (the `newrel` of a rebuild).
+pub(crate) fn take_scratch() -> Option<Box<RelationData>> {
+    SCRATCH.with(|s| s.borrow_mut().take())
 }
 
 /// `ScanPgRelation(targetRelId, indexOK, force_non_historic)` (relcache.c):
@@ -533,7 +534,7 @@ pub fn formrdesc(
     isshared: bool,
     natts: i32,
     attrs: &[OwnedAttr],
-) -> PgResult<*mut RelationData> {
+) -> PgResult<Oid> {
     // palloc0 the descriptor; nailed, pinned, valid bootstrap entry.
     let mut relation = RelationData::new_blank();
     relation.rd_refcnt = 1;

@@ -22,8 +22,9 @@
 //!     values that are NOT part of the owned CALL parse tree. The executor's
 //!     CALL runtime owns all of this; the owner threads `params`/`dest` from the
 //!     live portal.
-//!   * `CallStmtResultDesc` — re-homed to `backend-nodes-nodeFuncs-seams`
-//!     (`call_stmt_result_desc`). The function is keyed entirely by the unported
+//!   * `CallStmtResultDesc` — re-homed to `backend-nodes-core-seams`
+//!     (`call_stmt_result_desc`), the `backend-nodes-core` owner. The function is
+//!     keyed entirely by the unported
 //!     `fexpr->funcid` (`CallStmt.funcexpr` is opaque here — the layered node
 //!     tree does not model `FuncExpr`), runs `build_function_result_tupdesc_t`
 //!     over the PROCOID tuple, then per-column re-types from `stmt->outargs` via
@@ -36,7 +37,7 @@ use types_parsenodes::CallStmt;
 use types_tuple::TupleDesc;
 
 use backend_executor_execMain_seams as exec_seam;
-use backend_nodes_nodeFuncs_seams as nodefuncs_seam;
+use backend_nodes_core_seams as nodefuncs_seam;
 
 // ===========================================================================
 // ExecuteCallStmt (functioncmds.c:2206)
