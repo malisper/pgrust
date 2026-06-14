@@ -5,3 +5,4 @@ Cargo.lock.orig
 .DS_Store
 .claude/worktrees/
 .iso-target/
+target-iso
