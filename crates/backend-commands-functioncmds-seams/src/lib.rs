@@ -196,11 +196,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `format_type_be(type_oid)`.
-    pub fn format_type_be(type_oid: Oid) -> PgResult<String>
-);
-
-seam_core::seam!(
     /// `get_namespace_name(nspid)` — `None` when it no longer exists.
     pub fn get_namespace_name(nspid: Oid) -> PgResult<Option<String>>
 );

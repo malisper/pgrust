@@ -365,6 +365,19 @@ pub fn format_type_be<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid) -> PgResult<PgString<
     format_type_extended(mcx, type_oid, -1, 0)?.ok_or_else(|| cache_lookup_failed(type_oid))
 }
 
+/// [`format_type_be`] for callers that thread no `Mcx` (e.g. error-message
+/// sites whose C signature takes no memory context and render the type name
+/// only into the `ereport(ERROR)` text). The C result is a transient palloc'd
+/// cstring that the caller immediately copies into the error string; here we
+/// format into a throwaway scratch context and return that copy as an owned
+/// `String`, freeing the scratch context on return. It carries no formatting
+/// logic of its own — a thin owned-result wrapper over [`format_type_be`].
+pub fn format_type_be_str(type_oid: Oid) -> PgResult<alloc::string::String> {
+    let scratch = mcx::MemoryContext::new("format_type_be_str");
+    let name = format_type_be(scratch.mcx(), type_oid)?;
+    Ok(alloc::string::String::from(name.as_str()))
+}
+
 /// This version returns a name that is always qualified (unless it's one of the
 /// SQL-keyword type names, such as TIMESTAMP WITH TIME ZONE).
 pub fn format_type_be_qualified<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid) -> PgResult<PgString<'mcx>> {

@@ -86,8 +86,8 @@ pub fn CreateCast(stmt: &CreateCastStmt) -> PgResult<ObjectAddress> {
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "must be owner of type {} or type {}",
-                seam::format_type_be::call(sourcetypeid)?,
-                seam::format_type_be::call(targettypeid)?
+                backend_utils_adt_format_type_seams::format_type_be_str::call(sourcetypeid)?,
+                backend_utils_adt_format_type_seams::format_type_be_str::call(targettypeid)?
             ))
             .into_error());
     }
@@ -514,7 +514,7 @@ pub fn get_transform_oid(
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "transform for type {} language \"{}\" does not exist",
-                seam::format_type_be::call(type_id)?,
+                backend_utils_adt_format_type_seams::format_type_be_str::call(type_id)?,
                 seam::get_language_name::call(lang_id)?
             ))
             .into_error());

@@ -2990,6 +2990,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-executor-execMain-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "mcx",
