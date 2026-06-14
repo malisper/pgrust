@@ -6,6 +6,7 @@ fn reader() -> XLogReaderState<'static> {
         ReadRecPtr: 0,
         EndRecPtr: 0,
         record: None,
+        ..Default::default()
     }
 }
 
