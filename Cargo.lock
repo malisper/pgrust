@@ -5607,6 +5607,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-spi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-executor-spi-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-ri-triggers",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
@@ -12196,6 +12212,7 @@ dependencies = [
  "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
+ "backend-executor-spi",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-geqo-all",
