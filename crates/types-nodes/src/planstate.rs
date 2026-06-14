@@ -88,6 +88,10 @@ pub enum PlanStateNode<'mcx> {
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
     /// `T_SeqScanState`.
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
+    /// `T_TidScanState`.
+    TidScan(PgBox<'mcx, crate::nodetidscan::TidScanState<'mcx>>),
+    /// `T_BitmapHeapScanState`.
+    BitmapHeapScan(PgBox<'mcx, crate::nodebitmapheapscan::BitmapHeapScanState<'mcx>>),
     /// `T_SubqueryScanState`.
     SubqueryScan(PgBox<'mcx, crate::execnodes::SubqueryScanState<'mcx>>),
     /// `T_ForeignScanState`.
@@ -131,6 +135,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
+            PlanStateNode::TidScan(_) => crate::nodes::T_TidScanState,
+            PlanStateNode::BitmapHeapScan(_) => crate::execstate_tags::T_BitmapHeapScanState,
             PlanStateNode::SubqueryScan(_) => crate::nodes::T_SubqueryScanState,
             PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
             PlanStateNode::CustomScan(_) => crate::nodes::T_CustomScanState,
@@ -169,6 +175,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
+            PlanStateNode::TidScan(t) => &t.ss.ps,
+            PlanStateNode::BitmapHeapScan(b) => &b.ss.ps,
             PlanStateNode::SubqueryScan(s) => &s.ss.ps,
             PlanStateNode::ForeignScan(f) => &f.ss.ps,
             PlanStateNode::CustomScan(c) => &c.ss.ps,
@@ -206,6 +214,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
+            PlanStateNode::TidScan(t) => &mut t.ss.ps,
+            PlanStateNode::BitmapHeapScan(b) => &mut b.ss.ps,
             PlanStateNode::SubqueryScan(s) => &mut s.ss.ps,
             PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
             PlanStateNode::CustomScan(c) => &mut c.ss.ps,
@@ -224,6 +234,10 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Group(g) => Some(&g.ss),
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
+            // `TidScanState` begins with a `ScanState`.
+            PlanStateNode::TidScan(t) => Some(&t.ss),
+            // `BitmapHeapScanState` begins with a `ScanState`.
+            PlanStateNode::BitmapHeapScan(b) => Some(&b.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
             // `IndexScanState` begins with a `ScanState`.

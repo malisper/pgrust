@@ -4,16 +4,21 @@
 //! everything else (`re_guts`, `re_fns`, ...) is engine-internal state that
 //! C reaches through internal function tables. The compiled regex therefore
 //! crosses the engine seam as [`RegexCompiled`]: the consumed `re_nsub` plus
-//! an opaque [`RegexHandle`] naming the engine-owned compiled state (the
-//! inherited-opacity token for `re_guts`, same pattern as `types-scan`'s
-//! `SysScanHandle`). The handle is released with the `pg_regfree` seam.
+//! the real engine-owned compiled state, carried type-erased as an
+//! `Rc<dyn Any>`. The engine downcasts it back to its own `regex_t` at the
+//! seam boundary (the leaf cycle-break used for the relcache cell): the real
+//! value is carried and recovered, not an introduced handle/opacity token.
+//! The compiled state is released by dropping the `Rc` (the `pg_regfree`
+//! seam takes the carrier by value).
 //!
 //! The non-OK return codes of `pg_regcomp`/`pg_regexec`/`pg_regprefix` are
 //! mirrored as enums below; the "hard failure" arms carry the
 //! `pg_regerror`-formatted message so the *caller* can raise its own
 //! `ereport` (`regexp.c` uses different message prefixes per call site).
 
+use alloc::rc::Rc;
 use alloc::string::String;
+use core::any::Any;
 
 use mcx::PgVec;
 use types_core::PgWChar;
@@ -38,21 +43,33 @@ impl RegMatch {
     pub const UNSET: RegMatch = RegMatch { rm_so: -1, rm_eo: -1 };
 }
 
-/// An opaque identity for a compiled regex living inside the regex-engine
-/// subsystem (`backend-regex-core`). C: a `regex_t *`; the engine owns the
-/// `re_guts` behind it. Freed via the `pg_regfree` seam.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct RegexHandle(pub u64);
-
 /// The successful result of `pg_regcomp`: a live compiled RE plus the one
 /// `regex_t` field its consumers read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// The engine-owned compiled state (the C `regex_t` with its `re_guts`) is
+/// carried here type-erased as `Rc<dyn Any>`; the engine seam adapters
+/// recover the concrete `regex_t` with `downcast_ref`. This is the same
+/// real-value-carried, recovered-by-downcast cycle-break used for the
+/// relcache cell — no handle or registry stands between the consumer and the
+/// engine state. Sharing is `Rc` so a cache entry can hand out clones; the
+/// last drop frees the engine state (`pg_regfree`).
+#[derive(Clone)]
 pub struct RegexCompiled {
-    /// The engine-owned compiled-RE identity, threaded into later
-    /// execute/prefix/free calls.
-    pub handle: RegexHandle,
+    /// The engine-owned compiled-RE value (`regex_t`), type-erased; the engine
+    /// downcasts it back at the seam. Threaded into later execute/prefix/free
+    /// calls.
+    pub engine: Rc<dyn Any>,
     /// C: `regex_t.re_nsub` — the number of capturing subexpressions.
     pub re_nsub: usize,
+}
+
+impl core::fmt::Debug for RegexCompiled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The engine value is opaque (`dyn Any`); show only the read field.
+        f.debug_struct("RegexCompiled")
+            .field("re_nsub", &self.re_nsub)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A non-OK, non-NOMATCH engine return code, already formatted through
@@ -66,7 +83,10 @@ pub struct RegexFailure {
 
 /// The outcome of one `pg_regcomp` call. C: the `REG_OKAY` /
 /// everything-else return-code arms.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// No `Eq`/`PartialEq`: the `Compiled` arm carries an `Rc<dyn Any>` engine
+/// value, which is neither comparable nor hashable.
+#[derive(Clone, Debug)]
 pub enum RegcompResult {
     /// C: `REG_OKAY`.
     Compiled(RegexCompiled),

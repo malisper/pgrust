@@ -59,9 +59,9 @@ pub struct PgReFlags {
 // In C each entry carries a dedicated per-regexp memory context (child of
 // RegexpCacheMemoryContext, identifier = the pattern) holding the compiled
 // regex_t and the pattern copy; eviction is MemoryContextDelete. Here the
-// compiled state is engine-owned behind a RegexHandle (see types-regex), so
-// the pattern copy lives directly in the cache context and eviction frees
-// the engine state through the pg_regfree seam.
+// compiled state is the engine `regex_t` value carried in RegexCompiled (see
+// types-regex), so the pattern copy lives directly in the cache context and
+// eviction frees the engine state through the pg_regfree seam.
 // ===========================================================================
 
 /// C: `cached_re_str` — one cached compiled regular expression.
@@ -72,7 +72,8 @@ struct CachedRe<'mcx> {
     cre_flags: i32,
     /// `cre_collation` — collation to use.
     cre_collation: Oid,
-    /// `cre_re` — the compiled regular expression (engine handle + re_nsub).
+    /// `cre_re` — the compiled regular expression (engine `regex_t` value +
+    /// re_nsub).
     re: RegexCompiled,
 }
 
@@ -119,7 +120,7 @@ pub fn RE_compile_and_cache(
                 let entry = cache.entries.remove(i);
                 cache.entries.insert(0, entry);
             }
-            Some(cache.entries[0].re)
+            Some(cache.entries[0].re.clone())
         })
     });
     if let Some(re) = hit {
@@ -169,7 +170,7 @@ pub fn RE_compile_and_cache(
             if cache.entries.len() >= MAX_CACHED_RES {
                 // C: --num_res; MemoryContextDelete(re_array[num_res].cre_context);
                 if let Some(evicted) = cache.entries.pop() {
-                    engine::pg_regfree::call(evicted.re.handle);
+                    engine::pg_regfree::call(evicted.re);
                 }
             }
             cache.entries.insert(
@@ -178,14 +179,14 @@ pub fn RE_compile_and_cache(
                     cre_pat: pat_copy,
                     cre_flags: cflags,
                     cre_collation: collation,
-                    re: compiled,
+                    re: compiled.clone(),
                 },
             );
             Ok(())
         })
     });
     if let Err(e) = inserted {
-        engine::pg_regfree::call(compiled.handle);
+        engine::pg_regfree::call(compiled);
         return Err(e);
     }
 
@@ -197,12 +198,12 @@ pub fn RE_compile_and_cache(
 /// Returns true on match, false on no match; `pmatch` (the optional return
 /// area for match details, `nmatch == pmatch.len()`) is filled on a match.
 fn RE_wchar_execute(
-    re: RegexCompiled,
+    re: &RegexCompiled,
     data: &[PgWChar],
     start_search: i32,
     pmatch: &mut [RegMatch],
 ) -> PgResult<bool> {
-    match engine::pg_regexec::call(re.handle, data, start_search, pmatch)? {
+    match engine::pg_regexec::call(re, data, start_search, pmatch)? {
         RegexecResult::Matched => Ok(true),
         RegexecResult::NoMatch => Ok(false),
         RegexecResult::Failed(f) => {
@@ -217,7 +218,7 @@ fn RE_wchar_execute(
 ///
 /// The data is converted to `pg_wchar` (scratch in `mcx`) and matched from
 /// offset 0.
-fn RE_execute(mcx: Mcx<'_>, re: RegexCompiled, dat: &[u8], pmatch: &mut [RegMatch]) -> PgResult<bool> {
+fn RE_execute(mcx: Mcx<'_>, re: &RegexCompiled, dat: &[u8], pmatch: &mut [RegMatch]) -> PgResult<bool> {
     // Convert data string to wide characters.
     let data = mb::pg_mb2wchar_with_len::call(mcx, dat)?;
     RE_wchar_execute(re, &data, 0, pmatch)
@@ -243,7 +244,7 @@ pub fn RE_compile_and_execute(
     // Compile RE.
     let re = RE_compile_and_cache(mcx, pattern, cflags, collation)?;
 
-    RE_execute(mcx, re, dat, pmatch)
+    RE_execute(mcx, &re, dat, pmatch)
 }
 
 /// C: `parse_re_flags` — parse the options argument of `regexp_match` and
@@ -391,7 +392,7 @@ pub fn textregexsubstr<'mcx>(
     // is a parenthesized subexpression, we return what it matched; else
     // return what the whole regexp matched.
     let mut pmatch = [RegMatch::UNSET; 2];
-    if !RE_execute(mcx, re, s, &mut pmatch)? {
+    if !RE_execute(mcx, &re, s, &mut pmatch)? {
         return Ok(None); // definitely no match
     }
 
@@ -1204,7 +1205,7 @@ pub fn setup_regexp_matches<'a, 'mcx>(
     // search for the pattern, perhaps repeatedly
     let mut prev_match_end: i64 = 0;
     let mut prev_valid_match_end: i64 = 0;
-    while RE_wchar_execute(cpattern, &wide_str, start_search, &mut pmatch)? {
+    while RE_wchar_execute(&cpattern, &wide_str, start_search, &mut pmatch)? {
         // If requested, ignore degenerate matches, which are zero-length
         // matches occurring at the start or end of a string or just after a
         // previous match.
@@ -1621,7 +1622,7 @@ pub fn regexp_fixed_prefix<'mcx>(
     let re = RE_compile_and_cache(mcx, text_re, cflags | REG_NOSUB, collation)?;
 
     // Examine it to see if there's a fixed prefix
-    let (str, exact) = match engine::pg_regprefix::call(mcx, re.handle)? {
+    let (str, exact) = match engine::pg_regprefix::call(mcx, &re)? {
         RegprefixResult::NoMatch => return Ok(None),
         RegprefixResult::Prefix(str) => (str, false),
         RegprefixResult::Exact(str) => (str, true),

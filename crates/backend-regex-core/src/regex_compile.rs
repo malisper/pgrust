@@ -3215,8 +3215,9 @@ fn empty_colormap() -> ColorMap {
 /// On failure the owned working data is simply dropped (no resources remain
 /// allocated, so `pg_regfree()` need not be applied). C: `int pg_regcomp(regex_t
 /// *re, const chr *string, size_t len, int flags, Oid collation)`; here the
-/// compiled [`RegexT`] is returned (the public seam registers it and hands back a
-/// [`types_regex::RegexHandle`]); the non-`REG_OKAY` arm is the `RegResult` error.
+/// compiled [`RegexT`] is returned (the public seam boxes it type-erased into a
+/// [`types_regex::RegexCompiled`] carrier); the non-`REG_OKAY` arm is the
+/// `RegResult` error.
 ///
 /// `mcx` is the allocation context charged for all compile-time allocations.
 pub fn pg_regcomp<'mcx>(

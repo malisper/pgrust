@@ -12621,6 +12621,7 @@ dependencies = [
  "types-snapshot",
  "types-sortsupport",
  "types-storage",
+ "types-tableam",
  "types-tidbitmap",
  "types-tuple",
 ]
