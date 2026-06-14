@@ -50,7 +50,10 @@ use std::collections::HashMap;
 
 use backend_utils_error::ereport;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
-use types_acl::{AclResult, ACLCHECK_NOT_OWNER, ACL_CREATE, ACL_CREATE_TEMP, ACL_USAGE};
+use types_acl::{
+    AclResult, ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_CREATE_TEMP, ACL_MAINTAIN,
+    ACL_USAGE,
+};
 use types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, OidIsValid, ProcNumber, SubTransactionId,
     BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, FUNC_MAX_ARGS, INVALID_PROC_NUMBER,
@@ -63,11 +66,13 @@ use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERROR,
+    ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
 use types_nodes::parsenodes::OBJECT_SCHEMA;
-use types_tuple::access::RangeVar;
+use types_tuple::access::{
+    RangeVar, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
+};
 use types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEOID};
 use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
 
@@ -114,6 +119,9 @@ use backend_utils_time_snapmgr_seams as snapmgr_seams;
 pub fn init_seams() {
     backend_catalog_namespace_seams::get_namespace_oid::set(crate::get_namespace_oid);
     backend_catalog_namespace_seams::range_var_get_relid::set(crate::RangeVarGetRelid);
+    backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(
+        crate::RangeVarGetRelidMaintainsTable,
+    );
     backend_catalog_namespace_seams::lookup_explicit_namespace::set(crate::LookupExplicitNamespace);
     backend_catalog_namespace_seams::funcname_get_candidates::set(seam_funcname_get_candidates);
     backend_catalog_namespace_seams::opername_get_candidates::set(seam_opername_get_candidates);
@@ -504,6 +512,81 @@ pub fn RangeVarGetRelid(
 ) -> PgResult<Oid> {
     let flags = if missing_ok { RVR_MISSING_OK } else { 0 };
     RangeVarGetRelidExtended(mcx, relation, lockmode, flags, None)
+}
+
+/// `RangeVarCallbackMaintainsTable(relation, relId, oldRelId, arg)`
+/// (tablecmds.c): the `RangeVarGetRelidExtended` callback shared by CLUSTER,
+/// REINDEX TABLE, and REFRESH MATERIALIZED VIEW. It rejects non-table
+/// relkinds and checks `ACL_MAINTAIN` on the resolved relation. Exposed here
+/// (rather than in the unported tablecmds unit) so the
+/// `range_var_get_relid_maintains_table` seam — declared on this crate's
+/// seam crate — can be installed by its owner.
+fn RangeVarCallbackMaintainsTable(
+    relation: &RangeVar,
+    rel_id: Oid,
+    _old_rel_id: Oid,
+) -> PgResult<()> {
+    /* Nothing to do if the relation was not found. */
+    if !OidIsValid(rel_id) {
+        return Ok(());
+    }
+
+    /*
+     * If the relation does exist, check whether it's an index.  But note that
+     * the relation might have been dropped between the time we did the name
+     * lookup and now.  In that case, there's nothing to do.
+     */
+    let relkind = lsyscache_seams::get_rel_relkind::call(rel_id)?;
+    if relkind == 0 {
+        return Ok(());
+    }
+    if relkind != RELKIND_RELATION
+        && relkind != RELKIND_TOASTVALUE
+        && relkind != RELKIND_MATVIEW
+        && relkind != RELKIND_PARTITIONED_TABLE
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "\"{}\" is not a table or materialized view",
+                relation.relname.as_str()
+            ))
+            .finish(here("RangeVarCallbackMaintainsTable"));
+    }
+
+    /* Check permissions */
+    let aclresult = aclchk_seams::pg_class_aclcheck::call(
+        rel_id,
+        miscinit_seams::get_user_id::call(),
+        ACL_MAINTAIN,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            objectaddress_seams::get_relkind_objtype::call(
+                lsyscache_seams::get_rel_relkind::call(rel_id)?,
+            ),
+            Some(relation.relname.clone()),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// `RangeVarGetRelidExtended(relation, lockmode, 0,
+/// RangeVarCallbackMaintainsTable, NULL)` — resolve+lock a CLUSTER / REINDEX
+/// TABLE / REFRESH MATERIALIZED VIEW target, running the maintains-table
+/// permission callback. (cluster.c / matview.c pass `AccessExclusiveLock`.)
+pub fn RangeVarGetRelidMaintainsTable(
+    mcx: Mcx<'_>,
+    relation: &RangeVar,
+    lockmode: LOCKMODE,
+) -> PgResult<Oid> {
+    let mut callback =
+        |relation: &RangeVar, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
+            RangeVarCallbackMaintainsTable(relation, rel_id, old_rel_id)
+        };
+    RangeVarGetRelidExtended(mcx, relation, lockmode, 0, Some(&mut callback))
 }
 
 /// `RangeVarGetRelidExtended` — given a `RangeVar` describing an existing

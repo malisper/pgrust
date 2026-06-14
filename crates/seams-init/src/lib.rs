@@ -648,6 +648,28 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
         ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
+        // DESIGN_DEBT: the plancache-facing search-path matcher seams are
+        // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
+        // contract (opaque SearchPathMatcherHandle, CtxId context) because the
+        // matcher's storage lives in plancache's long-lived querytree context.
+        // The namespace owner's real impls are value-shaped
+        // (GetSearchPathMatcher<'mcx>(Mcx)->SearchPathMatcher<'mcx>, etc.).
+        // Unifying onto the value shape requires redesigning the already
+        // merged/audited plancache's CachedPlanSource storage (it stores
+        // SearchPathMatcherHandle, passes CtxId, and has no access to Mcx) —
+        // a contract redesign of a downstream consumer, out of scope here.
+        ("backend_catalog_namespace", "copy_search_path_matcher"),
+        ("backend_catalog_namespace", "get_search_path_matcher"),
+        // DESIGN_DEBT: RestrictSearchPath() is guc.c's function (mis-homed onto
+        // backend-catalog-namespace-seams). Its body is solely
+        // set_config_option("search_path", GUC_SAFE_SEARCH_PATH, PGC_USERSET,
+        // PGC_S_SESSION, GUC_ACTION_SAVE, true, 0, false). It is blocked on the
+        // unported GUC owner (backend-utils-misc-guc): set_config_option itself
+        // is declared-but-uninstalled, and the existing seam lacks the
+        // GUC_ACTION_SAVE/changeVal/elevel parameters this call needs, plus the
+        // GUC_SAFE_SEARCH_PATH constant is unported. Install once guc lands.
+        ("backend_catalog_namespace", "restrict_search_path"),
+        ("backend_catalog_namespace", "search_path_matches_current_environment"),
         // xlog reconciled out: CATALOG status corrected merged->needs-decomp
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
