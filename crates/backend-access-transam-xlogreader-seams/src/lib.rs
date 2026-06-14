@@ -29,7 +29,7 @@ use types_core::primitive::{BlockNumber, ForkNumber};
 use types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
 use types_storage::RelFileLocator;
-use types_wal::rmgr::XLogReaderState;
+use types_wal::rmgr::{XLogReaderRoutine, XLogReaderState};
 use types_wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
 use types_walsummarizer::{BlockTag, ReadRecordResult};
@@ -129,6 +129,22 @@ seam_core::seam!(
 );
 
 // --- Handle-based subset consumed by logical decoding ---
+
+seam_core::seam!(
+    /// Resolve an opaque `XLogReaderRoutine *` (`XLogReaderRoutineHandle`) into
+    /// the concrete `XLogReaderRoutine` (`page_read`/`segment_open`/
+    /// `segment_close` callbacks) the reader dispatches through.
+    ///
+    /// `logical.c` only ever forwards the default handle (the
+    /// `XL_ROUTINE(.page_read = read_local_xlog_page, .segment_open =
+    /// wal_segment_open, .segment_close = wal_segment_close)` routine that lives
+    /// in `xlogutils`), so the routine value crosses this OUTWARD seam from the
+    /// `xlogutils` owner (downstream of `xlogreader`). `XLogReaderAllocate`
+    /// stores the resolved routine into `state.routine`. Until `xlogutils`
+    /// installs it (the routine-contract keystone), driving a page read
+    /// mirror-pg-and-panics here.
+    pub fn xlog_reader_routine_for_handle(handle: XLogReaderRoutineHandle) -> XLogReaderRoutine
+);
 
 seam_core::seam!(
     /// `XLogReaderAllocate(wal_segment_size, NULL, xl_routine, ctx_private)` —

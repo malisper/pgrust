@@ -21,3 +21,9 @@ mcx = { path = "../mcx" }
 # context can OOM), matching the existing ~42 hand-written `clone_in` methods
 # that return `PgResult`. `types-error` is `#![no_std]` and a pure leaf.
 types-error = { path = "../types-error" }
+# `double_to_shortest_decimal_buf` / `float_to_shortest_decimal_buf` — the Ryū
+# shortest round-trip serializer (faithful port of src/common/{d2s,f2s}.c). This
+# is exactly what `outDouble` (WRITE_FLOAT_FIELD, outfuncs.c) emits, so the f64/
+# f32 leaf OUT impls below are byte-identical to PostgreSQL's node text stream.
+# A pure dependency-free leaf; cannot form a cycle.
+common-ryu = { path = "../common-ryu" }
