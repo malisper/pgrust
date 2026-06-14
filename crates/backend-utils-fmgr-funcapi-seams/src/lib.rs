@@ -12,6 +12,11 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_namespace::FuncArgInfo;
+// The canonical unified value type (Datum-unification keystone). The seam
+// signatures below take/return it (`ByVal`/`ByRef`) with the call frame's
+// `'mcx` lifetime; the bare-word `types_datum::Datum` shim is retained
+// elsewhere until cleanup.
+use types_tuple::Datum;
 
 seam_core::seam!(
     /// `InitMaterializedSRF(fcinfo, flags)` (funcapi.c) — set up the calling
@@ -34,7 +39,7 @@ seam_core::seam!(
     /// `Err`.
     pub fn materialized_srf_putvalues<'mcx>(
         rsinfo: &mut types_nodes::funcapi::ReturnSetInfo<'mcx>,
-        values: &[types_datum::Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
     ) -> types_error::PgResult<()>
 );
@@ -62,9 +67,9 @@ seam_core::seam!(
     pub fn record_from_values<'mcx>(
         mcx: Mcx<'mcx>,
         coltypes: &[Oid],
-        values: &[types_datum::Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
-    ) -> PgResult<types_datum::Datum>
+    ) -> PgResult<Datum<'mcx>>
 );
 
 seam_core::seam!(
@@ -99,5 +104,5 @@ seam_core::seam!(
     pub fn cstring_get_text_datum<'mcx>(
         mcx: Mcx<'mcx>,
         s: &str,
-    ) -> PgResult<types_datum::Datum>
+    ) -> PgResult<Datum<'mcx>>
 );
