@@ -6569,6 +6569,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-syncrep-scanner"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-replication-syncrep-seams"
 version = "0.0.0"
 dependencies = [
@@ -10799,6 +10807,7 @@ dependencies = [
  "backend-replication-logical-proto",
  "backend-replication-logical-slotsync",
  "backend-replication-slot",
+ "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
  "backend-rmgrdesc-next",
