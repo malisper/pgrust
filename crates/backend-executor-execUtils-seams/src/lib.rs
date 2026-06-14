@@ -104,16 +104,10 @@ seam_core::seam!(
     ) -> types_storage::lock::LOCKMODE
 );
 
-seam_core::seam!(
-    /// `ExecInitResultTypeTL(planstate)` (execUtils.c): set the node's result
-    /// tuple descriptor from its plan's targetlist
-    /// (`planstate->ps_ResultTupleDesc`). Allocates the descriptor in the
-    /// per-query context; fallible on OOM.
-    pub fn exec_init_result_type_tl<'mcx>(
-        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
-);
+// `ExecInitResultTypeTL` is homed in execTuples.c, so its seam lives in
+// `backend-executor-execTuples-seams` (and is installed by that owner). The
+// former execUtils-seams twin was a mis-home; consumers now call the
+// execTuples-seams seam directly.
 
 seam_core::seam!(
     /// `ExecAssignScanProjectionInfoWithVarno(scanstate, varno)` (execUtils.c):

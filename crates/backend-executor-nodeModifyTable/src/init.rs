@@ -921,14 +921,15 @@ fn relation_get_relid<'mcx>(
     Ok(rel.rd_id)
 }
 
-/// `ExecInitResultTypeTL(planstate)` (execTuples.c / execUtils.c): set the
-/// node's result tuple descriptor from the plan's targetlist, without creating
-/// a result slot. Routed through the execUtils owner seam.
+/// `ExecInitResultTypeTL(planstate)` (execTuples.c): set the node's result
+/// tuple descriptor from the plan's targetlist, without creating a result
+/// slot. Routed through the execTuples owner seam (C homes this in
+/// execTuples.c).
 fn exec_init_result_type_tl<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    backend_executor_execUtils_seams::exec_init_result_type_tl::call(planstate, estate)
+    backend_executor_execTuples_seams::exec_init_result_type_tl::call(planstate, estate)
 }
 
 extern crate alloc;

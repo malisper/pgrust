@@ -305,11 +305,42 @@ fn seam_exec_get_result_slot_ops<'mcx>(planstate: &PlanStateData<'mcx>) -> Tuple
     TupleSlotKind::Virtual
 }
 
+/// Seam `exec_init_result_type_tl` — `ExecInitResultTypeTL` (execTuples.c):
+/// build the node's result tuple descriptor from its plan's targetlist and
+/// store it in `planstate.ps_ResultTupleDesc`.
+///
+/// ```c
+/// void
+/// ExecInitResultTypeTL(PlanState *planstate)
+/// {
+///     TupleDesc   tupDesc = ExecTypeFromTL(planstate->plan->targetlist);
+///     planstate->ps_ResultTupleDesc = tupDesc;
+/// }
+/// ```
+fn seam_exec_init_result_type_tl<'mcx>(
+    planstate: &mut PlanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    // planstate->plan->targetlist
+    let tlist = planstate
+        .plan
+        .as_deref()
+        .map(|node| node.plan_head().targetlist.as_deref().unwrap_or(&[]))
+        .unwrap_or(&[]);
+    // TupleDesc tupDesc = ExecTypeFromTL(planstate->plan->targetlist);
+    let tup_desc = crate::exectype_tupoutput::ExecTypeFromTL(mcx, tlist)?;
+    // planstate->ps_ResultTupleDesc = tupDesc;
+    planstate.ps_ResultTupleDesc = tup_desc;
+    Ok(())
+}
+
 /// Install every seam this unit owns.
 pub fn init_seams() {
     use backend_executor_execTuples_seams as seams;
     seams::slot_getallattrs::set(seam_slot_getallattrs);
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
+    seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);
     seams::exec_clear_tuple::set(seam_exec_clear_tuple);
     seams::exec_copy_slot::set(seam_exec_copy_slot);
     seams::exec_init_result_slot::set(seam_exec_init_result_slot);
