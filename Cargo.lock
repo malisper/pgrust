@@ -4517,6 +4517,7 @@ dependencies = [
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execIndexing-seams",
+ "backend-executor-execJunk",
  "backend-executor-execMain-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
@@ -6571,10 +6572,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-syncrep-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-syncrep-scanner-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-replication-syncrep-scanner"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-replication-syncrep-scanner-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
 ]
 
@@ -10423,6 +10442,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-percentrepl"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-pgcheckdir-seams"
 version = "0.0.0"
 dependencies = [
@@ -10664,6 +10691,10 @@ dependencies = [
  "seam-core",
  "types-signal",
 ]
+
+[[package]]
+name = "port-snprintf"
+version = "0.0.0"
 
 [[package]]
 name = "portability-instr-time"
