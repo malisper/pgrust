@@ -26,7 +26,7 @@
 //! build; the scaffold keeps its signature, so its faithful opcode-ordering
 //! body is ported even though the non-threaded interpreter never calls it.
 
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::execexpr::{
@@ -163,7 +163,7 @@ impl InterpEvalFunc {
         state: &mut ExprState<'mcx>,
         econtext: EcxtId,
         estate: &mut EStateData<'mcx>,
-    ) -> PgResult<(Datum, bool)> {
+    ) -> PgResult<(Datum<'mcx>, bool)> {
         match self {
             InterpEvalFunc::Interp => ExecInterpExpr(state, econtext, estate),
             InterpEvalFunc::ExecJustInnerVar => ExecJustInnerVar(state, econtext, estate),
@@ -383,7 +383,7 @@ pub fn ExecInterpExprStillValid<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // First time through, check whether attribute matches Var.  Might not be ok
     // anymore, due to schema changes.
     // CheckExprStillValid(state, econtext);
@@ -405,13 +405,9 @@ pub fn ExecInterpExprStillValid<'mcx>(
 
     // and actually execute
     // return state->evalfunc(state, econtext, isNull);
-    // The interpreter yields a bare scalar word at this seam ABI edge; carry it
-    // into the canonical value's by-value arm (`*isNull`/Datum result word).
-    let (value, isnull) = evalfunc.call(state, econtext, estate)?;
-    Ok((
-        types_tuple::backend_access_common_heaptuple::Datum::from_usize(value.as_usize()),
-        isnull,
-    ))
+    // The interpreter yields the canonical value type directly (by-value scalar
+    // word or by-reference image); pass it straight through to the seam result.
+    evalfunc.call(state, econtext, estate)
 }
 
 /// `CheckExprStillValid(ExprState *state, ExprContext *econtext)` — verify the
