@@ -16,6 +16,7 @@ use crate::nodeunique::T_UniqueState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::noderecursiveunion::T_RecursiveUnionState;
 use crate::nodeprojectset::T_ProjectSetState;
 use crate::noderesult::T_ResultState;
 use crate::nodesetop::T_SetOpState;
@@ -41,6 +42,8 @@ pub enum PlanStateNode<'mcx> {
     BitmapAnd(PgBox<'mcx, crate::nodebitmapand::BitmapAndState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_RecursiveUnionState`.
+    RecursiveUnion(PgBox<'mcx, crate::noderecursiveunion::RecursiveUnionStateData<'mcx>>),
     /// `T_GroupState`.
     Group(PgBox<'mcx, crate::nodegroup::GroupStateData<'mcx>>),
     /// `T_ProjectSetState`.
@@ -96,6 +99,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::RecursiveUnion(_) => T_RecursiveUnionState,
             PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
             PlanStateNode::ProjectSet(_) => T_ProjectSetState,
             PlanStateNode::Result(_) => T_ResultState,
@@ -131,6 +135,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::BitmapAnd(b) => &b.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::RecursiveUnion(r) => &r.ps,
             PlanStateNode::Group(g) => &g.ss.ps,
             PlanStateNode::ProjectSet(p) => &p.ps,
             PlanStateNode::Result(r) => &r.ps,
@@ -163,6 +168,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::BitmapAnd(b) => &mut b.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::RecursiveUnion(r) => &mut r.ps,
             PlanStateNode::Group(g) => &mut g.ss.ps,
             PlanStateNode::ProjectSet(p) => &mut p.ps,
             PlanStateNode::Result(r) => &mut r.ps,

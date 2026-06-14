@@ -108,6 +108,7 @@ mod _seam_deps {
 /// and returns the declared `PgResult`. The owner installs all 34 from
 /// [`init_seams`].
 mod adapters {
+    use backend_executor_execExpr_seams as execExpr;
     use mcx::PgBox;
     use types_error::{PgError, PgResult};
     use types_nodes::execnodes::{EStateData, SlotId};
@@ -316,24 +317,56 @@ mod adapters {
     pub fn exec_build_hash32_expr<'mcx>(
         node: &mut HashJoinState<'mcx>,
         is_outer: bool,
-        _hashfuncids: &[types_core::primitive::Oid],
-        _collations: &[types_core::primitive::Oid],
-        _keep_nulls: bool,
+        hashfuncids: &[types_core::primitive::Oid],
+        collations: &[types_core::primitive::Oid],
+        hash_exprs: &[types_nodes::primnodes::Expr],
+        opstrict: &[bool],
+        keep_nulls: bool,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-        // ExecBuildHash32Expr compiles a per-side hash-value ExprState; the
-        // compiler lives in execExpr (ExecBuildHash32Expr / ExecInitExprRec),
-        // which is unported. The inner side is stored on the inner HashState's
-        // hash_expr; the outer side is returned. We allocate the (empty)
-        // ExprState shell — the actual interp program is the execExpr-owned
-        // part — and on the inner side install it on the HashState.
+        // ExecBuildHash32Expr (execExpr.c:4302), called from nodeHashjoin.c's
+        // ExecInitHashJoin to compile a per-side hash-value ExprState:
+        //   hjstate->hj_OuterHash =
+        //       ExecBuildHash32Expr(hjstate->js.ps.ps_ResultTupleDesc,
+        //                           hjstate->js.ps.resultops, outer_hashfuncid,
+        //                           node->hashcollations, node->hashkeys,
+        //                           hash_strict, &hjstate->js.ps, 0,
+        //                           HJ_FILL_OUTER(hjstate));
+        //   hashstate->hash_expr =
+        //       ExecBuildHash32Expr(hashstate->ps.ps_ResultTupleDesc,
+        //                           hashstate->ps.resultops, inner_hashfuncid,
+        //                           node->hashcollations, hash->hashkeys,
+        //                           hash_strict, &hashstate->ps, 0,
+        //                           HJ_FILL_INNER(hjstate));
+        // The compiler lives in execExpr (real, ported builder). nodeHash owns
+        // this seam only because the inner program is stored on the inner
+        // HashState's `hash_expr`; we read each side's result desc/ops off its
+        // PlanState and delegate the actual compilation to execExpr.
         let mcx = estate.es_query_cxt;
-        let expr = mcx::alloc_in(mcx, ExprState::default())?;
-        if !is_outer {
-            let inner = mcx::alloc_in(mcx, ExprState::default())?;
-            inner_hash_state(node).hash_expr = Some(inner);
-        }
-        Ok(expr)
+
+        // Per the C: `init_value` is 0 here; `keep_nulls` is the HJ_FILL_* flag.
+        let init_value: u32 = 0;
+
+        // Read the relevant side's result descriptor (`ps_ResultTupleDesc`) and
+        // slot ops (`resultops`) off its PlanState — `js.ps` for the outer side,
+        // the inner HashState's `ps` for the inner side — then delegate the
+        // actual compilation to execExpr's `ExecBuildHash32Expr`.
+        let ps = if is_outer {
+            &node.js.ps
+        } else {
+            &inner_hash_state(node).ps
+        };
+        let desc = ps
+            .ps_ResultTupleDesc
+            .as_deref()
+            .expect("exec_build_hash32_expr: ps_ResultTupleDesc is NULL");
+        let ops = ps
+            .resultops
+            .expect("exec_build_hash32_expr: resultops is unset");
+        execExpr::exec_build_hash32_expr::call(
+            mcx, desc, ops, hashfuncids, collations, hash_exprs, opstrict, init_value,
+            keep_nulls,
+        )
     }
 
     pub fn setup_skew_hashfunction<'mcx>(

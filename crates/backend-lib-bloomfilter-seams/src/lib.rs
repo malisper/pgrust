@@ -56,3 +56,10 @@ seam_core::seam!(
         len: usize,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `bloom_prop_bits_set(bloom_filter *filter)` (bloomfilter.c) — proportion
+    /// of bits currently set, expressed as a multiplier of filter size
+    /// (generally close to 0.5). Instrumentation only.
+    pub fn bloom_prop_bits_set(filter: *mut BloomFilter) -> f64
+);

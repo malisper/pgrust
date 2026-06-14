@@ -89,6 +89,7 @@ backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeRecursiveunion = { path = "../backend-executor-nodeRecursiveunion" }
 backend-executor-nodeProjectSet = { path = "../backend-executor-nodeProjectSet" }
 backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
 backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
@@ -101,7 +102,9 @@ backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
+backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }

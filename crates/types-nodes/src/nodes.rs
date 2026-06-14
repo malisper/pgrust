@@ -140,6 +140,8 @@ pub enum Node<'mcx> {
     BitmapAnd(crate::nodebitmapand::BitmapAnd<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_RecursiveUnion`.
+    RecursiveUnion(crate::noderecursiveunion::RecursiveUnion<'mcx>),
     /// `T_Group`.
     Group(crate::nodegroup::Group<'mcx>),
     /// `T_ProjectSet`.
@@ -207,6 +209,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(_) => T_MergeAppend,
             Node::BitmapAnd(_) => T_BitmapAnd,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::RecursiveUnion(_) => crate::noderecursiveunion::T_RecursiveUnion,
             Node::Group(_) => crate::nodegroup::T_Group,
             Node::ProjectSet(_) => crate::nodeprojectset::T_ProjectSet,
             Node::Result(_) => T_Result,
@@ -241,6 +244,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => &m.plan,
             Node::BitmapAnd(b) => &b.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::RecursiveUnion(r) => &r.plan,
             Node::Group(g) => &g.plan,
             Node::ProjectSet(p) => &p.plan,
             Node::Result(r) => &r.plan,
@@ -285,6 +289,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::BitmapAnd(b) => Ok(Node::BitmapAnd(b.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::RecursiveUnion(r) => Ok(Node::RecursiveUnion(r.clone_in(mcx)?)),
             Node::Group(g) => Ok(Node::Group(g.clone_in(mcx)?)),
             Node::ProjectSet(p) => Ok(Node::ProjectSet(p.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
