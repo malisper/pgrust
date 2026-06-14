@@ -387,6 +387,24 @@ pub struct VariableSetStmt {
     pub location: ParseLoc,
 }
 
+/// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — verified against
+/// PostgreSQL 18.3 (`DISCARD { ALL | PLANS | SEQUENCES | TEMP }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardMode {
+    DISCARD_ALL,
+    DISCARD_PLANS,
+    DISCARD_SEQUENCES,
+    DISCARD_TEMP,
+}
+
+/// `typedef struct DiscardStmt` (`nodes/parsenodes.h`). The C `NodeTag type`
+/// header field carries no information for the dispatcher (it switches solely
+/// on `target`) and there is no `NodeTag` enum in this tree, so it is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscardStmt {
+    pub target: DiscardMode,
+}
+
 /// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropRoleStmt {
@@ -425,6 +443,23 @@ pub struct DropOwnedStmt {
 pub struct ReassignOwnedStmt {
     pub roles: Vec<Node>,
     pub newrole: Option<Box<Node>>,
+}
+
+/// `typedef struct SecLabelStmt` (`nodes/parsenodes.h`) — the SECURITY LABEL
+/// command parse node. `object` is the opaque parser representation of the
+/// target object (a qualified-name `List *` / typename / etc.), passed through
+/// to `get_object_address`/`check_object_ownership`. `provider` and `label` are
+/// `NULL` in C when omitted (`SECURITY LABEL ... IS NULL` removes the label).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecLabelStmt {
+    /// Object's type.
+    pub objtype: types_nodes::parsenodes::ObjectType,
+    /// Qualified name of the object.
+    pub object: Option<Box<Node>>,
+    /// Label provider (or `None`).
+    pub provider: Option<String>,
+    /// New security label to be assigned (or `None` to remove).
+    pub label: Option<String>,
 }
 
 /// `typedef struct ParseState` (`parser/parse_node.h`), trimmed. user.c only

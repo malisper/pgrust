@@ -53,6 +53,7 @@ backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
 backend-commands-comment = { path = "../backend-commands-comment" }
+backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
@@ -99,7 +100,9 @@ backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
+backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }

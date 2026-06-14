@@ -49,6 +49,7 @@ pub fn init_all() {
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_comment::init_seams();
+    backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
     backend_commands_foreigncmds::init_seams();
@@ -95,7 +96,9 @@ pub fn init_all() {
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
+    backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
+    backend_lib_hyperloglog::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();

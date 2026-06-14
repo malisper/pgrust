@@ -202,6 +202,28 @@ pub struct RoleSpec<'mcx> {
 /// 18.3.
 pub const T_CreateAmStmt: u32 = 180;
 
+/// `T_CreateConversionStmt = 249` (`nodes/nodetags.h`) — verified against
+/// PostgreSQL 18.3.
+pub const T_CreateConversionStmt: u32 = 249;
+
+/// `CreateConversionStmt` (`nodes/parsenodes.h`) — the `CREATE CONVERSION`
+/// statement. `conversion_name` / `func_name` are `List *` of `String` value
+/// nodes (qualified name components); the encoding names are `char *`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CreateConversionStmt {
+    /// `conversion_name` — name of the conversion (list of String components).
+    pub conversion_name: Vec<String>,
+    /// `for_encoding_name` — source encoding name.
+    pub for_encoding_name: Option<String>,
+    /// `to_encoding_name` — destination encoding name.
+    pub to_encoding_name: Option<String>,
+    /// `func_name` — qualified conversion function name (list of String
+    /// components).
+    pub func_name: Vec<String>,
+    /// `def` — is this a default conversion?
+    pub def: bool,
+}
+
 /// `CreateAmStmt` (`nodes/parsenodes.h`) — the `CREATE ACCESS METHOD`
 /// statement. `handler_name` is a `List *` of `String` value nodes (the
 /// qualified handler-function name components); `amtype` is a single-character

@@ -79,6 +79,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The conversion-function empty-input self-test of `CreateConversionCommand`
+    /// (conversioncmds.c):
+    /// `OidFunctionCall6(funcoid, Int32GetDatum(from_encoding),
+    /// Int32GetDatum(to_encoding), CStringGetDatum(""), CStringGetDatum(result),
+    /// Int32GetDatum(0), BoolGetDatum(false))`, returning `DatumGetInt32` of the
+    /// result. The fmgr owner builds the two `cstring` `Datum`s (an empty source
+    /// string and a 1-byte destination buffer — the pointer-shaped framing only
+    /// fmgr can synthesize) and dispatches the call. `Err` carries any
+    /// `ereport(ERROR)` the conversion function raises for an unsupported
+    /// encoding pair.
+    pub fn conversion_proc_empty_input_test(
+        funcoid: Oid,
+        from_encoding: i32,
+        to_encoding: i32,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `PG_GETARG_POINTER(n)` interpreted as the `cstring` an `unknown`-typed
     /// literal arrives as (fmgr.h / funcapi.c `extract_variadic_args`): read
     /// argument `n` as a NUL-terminated C string and return its text. Only the
