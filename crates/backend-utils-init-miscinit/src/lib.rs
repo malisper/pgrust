@@ -874,6 +874,7 @@ pub fn init_seams() {
         SetMyBackendType(BackendType::WalSummarizer)
     });
     s::am_wal_summarizer_process::set(|| GetMyBackendType() == BackendType::WalSummarizer);
+    s::am_logical_slot_sync_worker_process::set(|| GetMyBackendType() == BackendType::SlotsyncWorker);
 
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match the
     // declared seam signatures exactly; the remaining miscinit seams either

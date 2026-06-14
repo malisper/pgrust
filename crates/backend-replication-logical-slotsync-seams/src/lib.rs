@@ -68,10 +68,3 @@ seam_core::seam!(
     pub fn slot_sync_shmem_init() -> PgResult<()>
 );
 
-// --- backend-utils-init-postinit consumer (slotsync.c) ---
-
-seam_core::seam!(
-    /// `AmLogicalSlotSyncWorkerProcess()` (slotsync.c / miscadmin.h): is this
-    /// the logical-slot-sync worker?
-    pub fn am_logical_slot_sync_worker_process() -> bool
-);
