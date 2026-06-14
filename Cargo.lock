@@ -4821,6 +4821,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
