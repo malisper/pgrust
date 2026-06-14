@@ -2200,6 +2200,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-db-role-setting"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-db-role-setting-seams",
+ "backend-commands-functioncmds-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-catalog-pg-db-role-setting-seams"
 version = "0.0.0"
 dependencies = [
@@ -2207,6 +2220,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-guc",
 ]
 
 [[package]]
@@ -10716,6 +10730,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-shdepend",

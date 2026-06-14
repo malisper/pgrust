@@ -305,6 +305,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GUCArrayReset(array)` (utils/misc/guc.c) — for a superuser, reset
+    /// (drop) all GUC entries, returning `None`; for a non-superuser, drop only
+    /// the entries that user may reset, returning the surviving `text[]`
+    /// (`None` if it becomes empty). `Err` carries the value-parse error
+    /// surface.
+    pub fn guc_array_reset(a: Vec<String>) -> PgResult<Option<Vec<String>>>
+);
+
+seam_core::seam!(
     /// `defGetQualifiedName(def)` (commands/define.c) — the qualified name list.
     pub fn def_get_qualified_name(defel: DefElem) -> PgResult<Vec<String>>
 );
