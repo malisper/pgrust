@@ -38,7 +38,6 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 mcx = { path = "../mcx" }
 types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
