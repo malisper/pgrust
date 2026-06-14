@@ -1297,12 +1297,17 @@ fn setup_peragg_finalfn<'mcx>(
 }
 
 /// C: `get_typlenbyval(aggref->aggtype, &resulttypeLen, &resulttypeByVal)`
-/// (lsyscache.c). No get_typlenbyval seam is declared in this scaffold.
-fn set_peragg_result_typlenbyval(_aggstate: &mut AggStateData<'_>, _aggno: i32, _aggtype: Oid) -> PgResult<()> {
-    panic!(
-        "backend-utils-cache-lsyscache::get_typlenbyval: the aggregate result \
-         type's typlen/typbyval needs a get_typlenbyval seam; not declared"
-    )
+/// (lsyscache.c). Read through the installed `backend-utils-cache-lsyscache`
+/// seam and store the result into the peragg slot.
+fn set_peragg_result_typlenbyval(aggstate: &mut AggStateData<'_>, aggno: i32, aggtype: Oid) -> PgResult<()> {
+    let (resulttype_len, resulttype_by_val) =
+        backend_utils_cache_lsyscache_seams::get_typlenbyval::call(aggtype)?;
+    if let Some(p) = aggstate.peragg.as_mut() {
+        let peragg = &mut p[aggno as usize];
+        peragg.resulttype_len = resulttype_len;
+        peragg.resulttype_by_val = resulttype_by_val;
+    }
+    Ok(())
 }
 
 /// C: `peragg->aggref = aggref;` — clone the Aggref from `aggstate->aggs[idx]`

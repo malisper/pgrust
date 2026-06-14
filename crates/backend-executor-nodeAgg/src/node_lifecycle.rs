@@ -614,12 +614,9 @@ fn clone_aggref_into<'mcx>(
 }
 
 /// `get_typlenbyval(typid, &typlen, &typbyval)` (lsyscache.c) — typcache read.
+/// Owned by `backend-utils-cache-lsyscache`; read through its installed seam.
 fn get_typlenbyval_owned(typid: Oid) -> PgResult<(i16, bool)> {
-    let _ = typid;
-    panic!(
-        "backend-utils-cache-lsyscache: get_typlenbyval (typcache read) not exposed by this \
-         unit's seams yet"
-    )
+    backend_utils_cache_lsyscache_seams::get_typlenbyval::call(typid)
 }
 
 /// `build_aggregate_serialfn_expr` + `fmgr_info`/`fmgr_info_set_expr` +
