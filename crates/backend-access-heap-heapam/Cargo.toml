@@ -19,6 +19,9 @@ types-tuple = { path = "../types-tuple" }
 types-tableam = { path = "../types-tableam" }
 types-xlog-records = { path = "../types-xlog-records" }
 types-wal = { path = "../types-wal" }
+types-nbtree = { path = "../types-nbtree" }
+types-snapshot = { path = "../types-snapshot" }
+backend-storage-page = { path = "../backend-storage-page" }
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
@@ -29,3 +32,7 @@ backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

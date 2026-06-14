@@ -28,6 +28,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod index_delete;
+
 use mcx::Mcx;
 use types_core::primitive::{
     BlockNumber, InvalidBlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId,
@@ -427,6 +429,11 @@ pub fn init_seams() {
     // `HeapTupleGetUpdateXid(htup)` reduces to the visibility crate's
     // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
     heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
+
+    // F6 — the heapam tableam `index_delete_tuples` implementation.
+    heapam_seam::heap_index_delete_tuples::set(|mcx, rel, delstate| {
+        index_delete::heap_index_delete_tuples(mcx, rel, delstate)
+    });
 }
 
 #[cfg(test)]
