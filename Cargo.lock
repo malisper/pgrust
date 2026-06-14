@@ -8449,6 +8449,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-tuple",
  "types-typcache",
