@@ -8258,6 +8258,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-cash"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-float-seams",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-pg-locale-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-cash",
+ "types-error",
+ "types-numeric",
+]
+
+[[package]]
 name = "backend-utils-adt-catalog-perm-seams"
 version = "0.0.0"
 dependencies = [
@@ -8301,6 +8315,14 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-datum",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-float-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
 ]
 
@@ -8574,6 +8596,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-cash",
  "types-core",
  "types-error",
  "types-locale",
@@ -11014,6 +11037,10 @@ dependencies = [
  "types-datum",
  "types-scan",
 ]
+
+[[package]]
+name = "types-cash"
+version = "0.0.0"
 
 [[package]]
 name = "types-catalog"
