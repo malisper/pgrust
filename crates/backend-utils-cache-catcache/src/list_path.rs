@@ -717,6 +717,7 @@ fn skey_template(
                 sk_collation: k.sk_collation,
                 sk_func: k.sk_func.clone(),
                 sk_argument: DatumV::null(),
+                sk_subkeys: None,
             },
             None => ScanKeyData::empty(),
         }

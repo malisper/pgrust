@@ -135,6 +135,81 @@ impl Scan<'_> {
     }
 }
 
+/// `IndexScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct IndexScan
+/// {
+///     Scan          scan;
+///     Oid           indexid;
+///     List         *indexqual;
+///     List         *indexqualorig;
+///     List         *indexorderby;
+///     List         *indexorderbyorig;
+///     List         *indexorderbyops;
+///     ScanDirection indexorderdir;
+/// } IndexScan;
+/// ```
+#[derive(Debug)]
+pub struct IndexScan<'mcx> {
+    /// `Scan scan` — the abstract scan base (embeds `Plan plan` first).
+    pub scan: Scan<'mcx>,
+    /// `Oid indexid` — OID of index to scan.
+    pub indexid: types_core::Oid,
+    /// `List *indexqual` — list of index quals (usually OpExprs).
+    pub indexqual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexqualorig` — the same in original form.
+    pub indexqualorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderby` — list of index ORDER BY exprs.
+    pub indexorderby: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderbyorig` — the same in original form.
+    pub indexorderbyorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderbyops` — OIDs of sort ops for ORDER BY exprs.
+    pub indexorderbyops: Option<PgVec<'mcx, types_core::Oid>>,
+    /// `ScanDirection indexorderdir` — forward or backward or don't care.
+    pub indexorderdir: types_scan::sdir::ScanDirection,
+}
+
+impl IndexScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexScan<'b>> {
+        let clone_exprs = |src: &Option<PgVec<'_, crate::primnodes::Expr>>|
+            -> PgResult<Option<PgVec<'b, crate::primnodes::Expr>>> {
+            match src {
+                Some(list) => {
+                    let mut out = vec_with_capacity_in(mcx, list.len())?;
+                    for e in list.iter() {
+                        out.push(e.clone());
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let indexorderbyops = match &self.indexorderbyops {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(IndexScan {
+            scan: self.scan.clone_in(mcx)?,
+            indexid: self.indexid,
+            indexqual: clone_exprs(&self.indexqual)?,
+            indexqualorig: clone_exprs(&self.indexqualorig)?,
+            indexorderby: clone_exprs(&self.indexorderby)?,
+            indexorderbyorig: clone_exprs(&self.indexorderbyorig)?,
+            indexorderbyops,
+            indexorderdir: self.indexorderdir,
+        })
+    }
+}
+
 /// `SubqueryScanStatus` (nodes/plannodes.h) — caches the trivial-subqueryscan
 /// property of the node; `SUBQUERY_SCAN_UNKNOWN` means not yet determined (only
 /// used during planning).

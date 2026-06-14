@@ -97,6 +97,7 @@ pub fn init_all() {
     backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeBitmapIndexscan::init_seams();
     backend_executor_nodeIndexonlyscan::init_seams();
+    backend_executor_nodeIndexscan::init_seams();
     backend_executor_nodeLimit::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMemoize::init_seams();
@@ -655,6 +656,7 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_endscan"),
         ("backend_access_index_indexam", "index_fetch_heap"),
         ("backend_access_index_indexam", "index_getbitmap"),
+        ("backend_access_index_indexam", "index_getnext_slot"),
         ("backend_access_index_indexam", "index_getnext_tid"),
         ("backend_access_index_indexam", "index_markpos"),
         ("backend_access_index_indexam", "index_parallelrescan"),
@@ -662,6 +664,7 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_parallelscan_initialize"),
         ("backend_access_index_indexam", "index_rescan"),
         ("backend_access_index_indexam", "index_rescan_bis"),
+        ("backend_access_index_indexam", "index_rescan_is"),
         ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
         // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
@@ -779,6 +782,7 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
+        ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
         ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),

@@ -9,7 +9,7 @@ use crate::nodes::NodeTag;
 
 use crate::nodememoize::T_MemoizeState;
 use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
-use crate::nodeindexonlyscan::T_IndexOnlyScanState;
+use crate::nodeindexonlyscan::{T_IndexOnlyScanState, T_IndexScanState};
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
 use crate::nodeunique::T_UniqueState;
@@ -56,6 +56,8 @@ pub enum PlanStateNode<'mcx> {
     SetOp(PgBox<'mcx, crate::nodesetop::SetOpStateData<'mcx>>),
     /// `T_MemoizeState`.
     Memoize(PgBox<'mcx, crate::nodememoize::MemoizeScanState<'mcx>>),
+    /// `T_IndexScanState`.
+    IndexScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexScanState<'mcx>>),
     /// `T_IndexOnlyScanState`.
     IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     /// `T_BitmapIndexScanState`.
@@ -108,6 +110,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
+            PlanStateNode::IndexScan(_) => T_IndexScanState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::BitmapIndexScan(_) => crate::execstate_tags::T_BitmapIndexScanState,
             PlanStateNode::Limit(_) => T_LimitState,
@@ -145,6 +148,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
+            PlanStateNode::IndexScan(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
@@ -179,6 +183,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
+            PlanStateNode::IndexScan(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
@@ -211,6 +216,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
+            // `IndexScanState` begins with a `ScanState`.
+            PlanStateNode::IndexScan(i) => Some(&i.ss),
             // `BitmapIndexScanState` begins with a `ScanState`.
             PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
             // `SubqueryScanState` begins with a `ScanState`.

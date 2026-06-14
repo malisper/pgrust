@@ -141,3 +141,12 @@ seam_core::seam!(
     /// `ereport`s.
     pub fn index_am_canorder(amoid: types_core::Oid) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)->amsearcharray` (amapi.c):
+    /// whether the AM expands `ScalarArrayOpExpr` quals itself (the
+    /// `SK_SEARCHARRAY` path). The owning amapi unit loads the AM handler and
+    /// reads the flag; the trimmed in-cache `IndexAmRoutine` vtable does not
+    /// carry it. `Err` carries the handler-load `ereport`s.
+    pub fn index_am_searcharray(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);

@@ -156,6 +156,8 @@ pub enum Node<'mcx> {
     SetOp(crate::nodesetop::SetOp<'mcx>),
     /// `T_Memoize`.
     Memoize(crate::nodememoize::Memoize<'mcx>),
+    /// `T_IndexScan`.
+    IndexScan(crate::nodeindexscan::IndexScan<'mcx>),
     /// `T_IndexOnlyScan`.
     IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_BitmapIndexScan`.
@@ -221,6 +223,7 @@ impl<'mcx> Node<'mcx> {
             Node::Result(_) => T_Result,
             Node::SetOp(_) => T_SetOp,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
+            Node::IndexScan(_) => T_IndexScan,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::BitmapIndexScan(_) => crate::nodebitmapindexscan::T_BitmapIndexScan,
             Node::Limit(_) => T_Limit,
@@ -258,6 +261,7 @@ impl<'mcx> Node<'mcx> {
             Node::Result(r) => &r.plan,
             Node::SetOp(s) => &s.plan,
             Node::Memoize(m) => &m.plan,
+            Node::IndexScan(m) => &m.scan.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::BitmapIndexScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
@@ -305,6 +309,7 @@ impl<'mcx> Node<'mcx> {
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
             Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
+            Node::IndexScan(m) => Ok(Node::IndexScan(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::BitmapIndexScan(m) => Ok(Node::BitmapIndexScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),

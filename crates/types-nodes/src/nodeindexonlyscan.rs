@@ -17,6 +17,8 @@ use types_error::PgResult;
 use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
+use types_sortsupport::SortSupportData;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDescData};
 
 use crate::execexpr::ExprState;
@@ -108,6 +110,11 @@ pub struct IndexScanDescData<'mcx> {
     /// `struct ParallelIndexScanDescData *parallel_scan` — parallel index scan
     /// information, in shared memory; `None` is the C `NULL`.
     pub parallel_scan: Option<ParallelIndexScanDesc<'mcx>>,
+    /// `Datum *xs_orderbyvals` — the ORDER BY distances the AM returned for the
+    /// current tuple (KNN scans). Empty when the scan has no ordering ops.
+    pub xs_orderbyvals: PgVec<'mcx, Datum<'mcx>>,
+    /// `bool *xs_orderbynulls` — is-null flags for `xs_orderbyvals`.
+    pub xs_orderbynulls: PgVec<'mcx, bool>,
 }
 
 /// `IndexScanDesc` — `IndexScanDescData *`.
@@ -294,6 +301,134 @@ impl<'mcx> IndexOnlyScanState<'mcx> {
 
     /// `makeNode(IndexOnlyScanState)` allocated as a `PgBox` (C: `makeNode`
     /// returns the pointer).
+    pub fn make_boxed_in(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Self>> {
+        alloc_in(mcx, Self::make_in(mcx))
+    }
+}
+
+pub use crate::execstate_tags::T_IndexScanState;
+pub use crate::nodes::T_IndexScan;
+
+/// `ReorderTuple` (nodeIndexscan.c) — a buffered ORDER-BY-recheck tuple plus its
+/// recomputed distances, held in the index scan's reorder queue. C palloc's
+/// these in the per-query context and links them into a `pairingheap`; the
+/// owned model carries the heap-tuple copy as a [`FormedTuple`] and the distance
+/// arrays as owned `Vec`s.
+#[derive(Debug)]
+pub struct ReorderTuple<'mcx> {
+    /// `HeapTuple htup` — the palloc'd copy of the scan tuple.
+    pub tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    /// `Datum *orderbyvals`.
+    pub orderbyvals: Vec<Datum<'mcx>>,
+    /// `bool *orderbynulls`.
+    pub orderbynulls: Vec<bool>,
+}
+
+/// `IndexScanState` (executor/execnodes.h) — runtime state of a plain index
+/// scan.
+///
+/// The reorder queue (`iss_ReorderQueue`) backs the `IndexNextWithReorder`
+/// ORDER-BY-recheck path. C uses a `pairingheap` keyed on `reorderqueue_cmp`
+/// (which calls the per-key `SortSupport->comparator`); in the owned model the
+/// comparison crosses a fallible seam and so cannot be a pure value-comparator
+/// closure inside the leaf pairing heap. The reorder queue is therefore a
+/// `PgVec` of `ReorderTuple`s with the same min-extraction discipline applied
+/// at the add/pop sites via `cmp_orderbyvals` — behaviourally identical KNN
+/// ordering, container only differs. `ReorderTuple` lives in the owning crate
+/// (above the types layer); the queue is carried as an opaque erased element
+/// type the owner downcasts. The `iss_*` recheck arrays below feed it.
+#[derive(Debug)]
+pub struct IndexScanState<'mcx> {
+    /// `ScanState ss` — its first field is `NodeTag`.
+    pub ss: ScanStateData<'mcx>,
+    /// `ExprState *indexqualorig` — execution state for the original-form index
+    /// quals (used for lossy rechecks and EvalPlanQual).
+    pub indexqualorig: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// `List *indexorderbyorig` — execution states for the ORDER BY exprs in
+    /// original form (used to recompute distances on a lossy index).
+    pub indexorderbyorig: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    /// `struct ScanKeyData *iss_ScanKeys` — Skey structures for index quals.
+    pub iss_ScanKeys: PgVec<'mcx, ScanKeyData<'mcx>>,
+    /// `int iss_NumScanKeys`.
+    pub iss_NumScanKeys: i32,
+    /// `struct ScanKeyData *iss_OrderByKeys`.
+    pub iss_OrderByKeys: PgVec<'mcx, ScanKeyData<'mcx>>,
+    /// `int iss_NumOrderByKeys`.
+    pub iss_NumOrderByKeys: i32,
+    /// `IndexRuntimeKeyInfo *iss_RuntimeKeys`.
+    pub iss_RuntimeKeys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    /// `int iss_NumRuntimeKeys`.
+    pub iss_NumRuntimeKeys: i32,
+    /// `bool iss_RuntimeKeysReady`.
+    pub iss_RuntimeKeysReady: bool,
+    /// `ExprContext *iss_RuntimeContext` — context for evaling runtime Skeys.
+    pub iss_RuntimeContext: Option<EcxtId>,
+    /// `Relation iss_RelationDesc` — index relation descriptor; `None` until
+    /// `index_open` (no-op close in EXPLAIN-only).
+    pub iss_RelationDesc: Option<Relation<'mcx>>,
+    /// `struct IndexScanDescData *iss_ScanDesc` — index scan descriptor.
+    pub iss_ScanDesc: Option<IndexScanDesc<'mcx>>,
+    /// `IndexScanInstrumentation iss_Instrument` — local instrumentation.
+    pub iss_Instrument: IndexScanInstrumentation,
+    /// `SharedIndexScanInstrumentation *iss_SharedInfo` — parallel worker
+    /// instrumentation (no leader entry).
+    pub iss_SharedInfo: Option<PgBox<'mcx, SharedIndexScanInstrumentation>>,
+    /// `bool iss_ReachedEnd` — the index scan has returned its last tuple (the
+    /// reorder queue may still hold buffered tuples).
+    pub iss_ReachedEnd: bool,
+    /// `Datum *iss_OrderByValues` — re-computed ORDER BY distances for the
+    /// current tuple (lossy-recheck path).
+    pub iss_OrderByValues: PgVec<'mcx, Datum<'mcx>>,
+    /// `bool *iss_OrderByNulls` — is-null flags for `iss_OrderByValues`.
+    pub iss_OrderByNulls: PgVec<'mcx, bool>,
+    /// `SortSupport iss_SortSupport` — per-ORDER-BY-key sort support used by
+    /// `cmp_orderbyvals`.
+    pub iss_SortSupport: PgVec<'mcx, SortSupportData<'mcx>>,
+    /// `bool *iss_OrderByTypByVals` — per-ORDER-BY-key typbyval (for
+    /// `datumCopy`).
+    pub iss_OrderByTypByVals: PgVec<'mcx, bool>,
+    /// `int16 *iss_OrderByTypLens` — per-ORDER-BY-key typlen (for `datumCopy`).
+    pub iss_OrderByTypLens: PgVec<'mcx, i16>,
+    /// `pairingheap *iss_ReorderQueue` — the reorder queue (a `PgVec` of
+    /// `ReorderTuple`s; see the struct doc). `None` when the scan has no ORDER BY
+    /// recheck (the C `iss_ReorderQueue == NULL`).
+    pub iss_ReorderQueue: Option<PgVec<'mcx, ReorderTuple<'mcx>>>,
+    /// `Size iss_PscanLen` — size of the parallel index-scan descriptor.
+    pub iss_PscanLen: usize,
+}
+
+impl<'mcx> IndexScanState<'mcx> {
+    /// `makeNode(IndexScanState)` — palloc0'd state with every field zeroed
+    /// (the C `makeNode` zero-init), allocated in `mcx`.
+    pub fn make_in(mcx: Mcx<'mcx>) -> Self {
+        IndexScanState {
+            ss: ScanStateData::default(),
+            indexqualorig: None,
+            indexorderbyorig: PgVec::new_in(mcx),
+            iss_ScanKeys: PgVec::new_in(mcx),
+            iss_NumScanKeys: 0,
+            iss_OrderByKeys: PgVec::new_in(mcx),
+            iss_NumOrderByKeys: 0,
+            iss_RuntimeKeys: PgVec::new_in(mcx),
+            iss_NumRuntimeKeys: 0,
+            iss_RuntimeKeysReady: false,
+            iss_RuntimeContext: None,
+            iss_RelationDesc: None,
+            iss_ScanDesc: None,
+            iss_Instrument: IndexScanInstrumentation::default(),
+            iss_SharedInfo: None,
+            iss_ReachedEnd: false,
+            iss_OrderByValues: PgVec::new_in(mcx),
+            iss_OrderByNulls: PgVec::new_in(mcx),
+            iss_SortSupport: PgVec::new_in(mcx),
+            iss_OrderByTypByVals: PgVec::new_in(mcx),
+            iss_OrderByTypLens: PgVec::new_in(mcx),
+            iss_ReorderQueue: None,
+            iss_PscanLen: 0,
+        }
+    }
+
+    /// `makeNode(IndexScanState)` allocated as a `PgBox`.
     pub fn make_boxed_in(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Self>> {
         alloc_in(mcx, Self::make_in(mcx))
     }
