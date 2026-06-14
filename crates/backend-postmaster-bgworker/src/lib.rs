@@ -850,7 +850,12 @@ fn run_worker_body(worker: BackgroundWorker) -> PgResult<()> {
     // code to call BackgroundWorkerInitializeConnection().
 
     // Invoke the user-defined worker code: entrypt(worker->bgw_main_arg).
-    backend_utils_fmgr_fmgr_seams::call_bgworker_entrypoint::call(worker, worker.bgw_main_arg)?;
+    // `bgw_main_arg` is the raw 8-byte Datum word carried through the DSM
+    // worker slot's ABI layout (stored as `usize` in the types-bgworker model);
+    // wrap it back into the bare-word `types_datum::Datum` the loader hands
+    // straight to the C-ABI `bgworker_main_type` entry point.
+    let main_arg = types_datum::Datum::from_usize(worker.bgw_main_arg);
+    backend_utils_fmgr_fmgr_seams::call_bgworker_entrypoint::call(worker, main_arg)?;
 
     Ok(())
 }
