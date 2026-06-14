@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{slice_in, Mcx, MemoryContext};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{
     CompactAttribute, FormData_pg_attribute, TupleDescData, TYPALIGN_CHAR, TYPALIGN_DOUBLE,
     TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_PLAIN,
@@ -102,9 +102,9 @@ fn form_deform_all_byval_no_nulls() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(2, 2), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(0x01020304)),
-        TupleValue::ByVal(Datum::from_i16(0x0506)),
-        TupleValue::ByVal(Datum::from_i32(-1)),
+        Datum::from_i32(0x01020304),
+        Datum::from_i16(0x0506),
+        Datum::from_i32(-1),
     ];
     let isnull = vec![false, false, false];
 
@@ -116,14 +116,14 @@ fn form_deform_all_byval_no_nulls() {
 
     let cols = index_deform_tuple(mcx, &itup, &td).expect("deform");
     assert_eq!(cols.len(), 3);
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(0x01020304)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i16(0x0506)), false));
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(-1)), false));
+    assert_eq!(cols[0], (Datum::from_i32(0x01020304), false));
+    assert_eq!(cols[1], (Datum::from_i16(0x0506), false));
+    assert_eq!(cols[2], (Datum::from_i32(-1), false));
 
     // nocache_index_getattr fetches a single (1-based) attribute.
     let (v, isn) = nocache_index_getattr(mcx, &itup, 3, &td).expect("getattr");
     assert!(!isn);
-    assert_eq!(v, TupleValue::ByVal(Datum::from_i32(-1)));
+    assert_eq!(v, Datum::from_i32(-1));
 }
 
 #[test]
@@ -132,9 +132,9 @@ fn form_deform_with_nulls_sets_bitmap() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(8, 8), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(11)),
-        TupleValue::ByVal(Datum::null()),
-        TupleValue::ByVal(Datum::from_i32(33)),
+        Datum::from_i32(11),
+        Datum::null(),
+        Datum::from_i32(33),
     ];
     let isnull = vec![false, true, false];
 
@@ -146,9 +146,9 @@ fn form_deform_with_nulls_sets_bitmap() {
 
     let cols = index_deform_tuple(mcx, &itup, &td).expect("deform");
     assert_eq!(cols.len(), 3);
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(11)), false));
+    assert_eq!(cols[0], (Datum::from_i32(11), false));
     assert_eq!(cols[1].1, true);
-    assert_eq!(cols[2], (TupleValue::ByVal(Datum::from_i32(33)), false));
+    assert_eq!(cols[2], (Datum::from_i32(33), false));
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn form_deform_varlena_roundtrip() {
     let payload = b"hello index";
     let v = varlena_4b(payload);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(7)),
+        Datum::from_i32(7),
         byref(mcx, &v),
     ];
     let isnull = vec![false, false];
@@ -168,7 +168,7 @@ fn form_deform_varlena_roundtrip() {
     assert!(itup.has_varwidths());
 
     let cols = index_deform_tuple(mcx, &itup, &td).expect("deform");
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(7)), false));
+    assert_eq!(cols[0], (Datum::from_i32(7), false));
     // The varlena column round-trips as a short varlena (the fill path converts
     // a small 4-byte-header packable varlena to a 1-byte header).
     let TupleValue::ByRef(bytes) = &cols[1].0 else {
@@ -186,8 +186,8 @@ fn copy_index_tuple_is_verbatim() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(100)),
-        TupleValue::ByVal(Datum::from_i32(200)),
+        Datum::from_i32(100),
+        Datum::from_i32(200),
     ];
     let isnull = vec![false, false];
 
@@ -204,9 +204,9 @@ fn truncate_drops_trailing_attrs_and_keeps_tid() {
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
     let values = vec![
-        TupleValue::ByVal(Datum::from_i32(1)),
-        TupleValue::ByVal(Datum::from_i32(2)),
-        TupleValue::ByVal(Datum::from_i32(3)),
+        Datum::from_i32(1),
+        Datum::from_i32(2),
+        Datum::from_i32(3),
     ];
     let isnull = vec![false, false, false];
 
@@ -223,8 +223,8 @@ fn truncate_drops_trailing_attrs_and_keeps_tid() {
     let td2 = tupdesc(mcx, &[byval(4, 4), byval(4, 4)]);
     let cols = index_deform_tuple(mcx, &trunc, &td2).expect("deform");
     assert_eq!(cols.len(), 2);
-    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(1)), false));
-    assert_eq!(cols[1], (TupleValue::ByVal(Datum::from_i32(2)), false));
+    assert_eq!(cols[0], (Datum::from_i32(1), false));
+    assert_eq!(cols[1], (Datum::from_i32(2), false));
 
     // No-truncation case returns a copy.
     let same = index_truncate_tuple(mcx, &td, &itup, 3).expect("truncate-noop");
@@ -236,7 +236,7 @@ fn on_disk_image_round_trips_header() {
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
     let td = tupdesc(mcx, &[byval(8, 8)]);
-    let values = vec![TupleValue::ByVal(Datum::from_i64(0x1122_3344_5566_7788))];
+    let values = vec![Datum::from_i64(0x1122_3344_5566_7788)];
     let isnull = vec![false];
 
     let mut itup = index_form_tuple(mcx, &td, &values, &isnull).expect("form");
