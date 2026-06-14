@@ -51,6 +51,13 @@ use types_error::{
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
 
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// Kept only at the cache-callback registration ABI edge: the syscache/relcache
+// callback `arg` is a plain machine word that C passes as `(Datum) 0`. The
+// value-carrying canonical enum is `types_tuple::backend_access_common_heaptuple::Datum`,
+// which typcache does not traffic in (it returns typed entries, not Datums).
+use types_datum::Datum as ScalarWord;
+
 use backend_access_common_session_seams as session_seams;
 use backend_access_common_tupdesc_seams as tupdesc_seams;
 use backend_catalog_pg_enum_seams as pg_enum_seams;
@@ -533,22 +540,22 @@ pub fn lookup_type_cache(type_id: Oid, flags: i32) -> PgResult<()> {
     if need_init {
         inval_seams::cache_register_relcache_callback::call(
             type_cache_rel_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             TYPEOID,
             type_cache_typ_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CLAOID,
             type_cache_opc_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CONSTROID,
             type_cache_constr_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         with_state(|st| -> PgResult<()> {
             st.initialized = true;
@@ -1979,6 +1986,78 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
     }
 }
 
+/// Read the composite-type view (`tupDesc` clone + `tupDesc_identifier`) of an
+/// already-resolved cache entry. `tup_desc` is `None` when the entry has no
+/// tupdesc (the type is not composite). Mirrors the C `typentry->tupDesc` /
+/// `typentry->tupDesc_identifier` reads (cache descriptors are refcounted).
+fn read_tupdesc_view<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_id: Oid,
+) -> PgResult<(Option<PgBox<'mcx, TupleDescData<'mcx>>>, u64)> {
+    with_state(|st| -> PgResult<(Option<PgBox<'mcx, TupleDescData<'mcx>>>, u64)> {
+        let e = st.entry(type_id);
+        let id = e.tup_desc_identifier;
+        match e.tup_desc_id {
+            Some(tid) => {
+                let td = st.tupdescs.get(&tid).expect("tupdesc id present");
+                Ok((Some(copy_tupdesc_out(mcx, td)?), id))
+            }
+            None => Ok((None, id)),
+        }
+    })
+}
+
+/// `make_expanded_record_from_typeid`'s typcache resolution (expandedrecord.c:84):
+/// `lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)`,
+/// then if the result is a domain, the chained `lookup_type_cache(domainBaseType,
+/// TYPECACHE_TUPDESC)`. Returns the typtype of the original type, the domain base
+/// OID, and the composite descriptor / identifier of whichever entry carries the
+/// tupdesc.
+fn lookup_type_cache_expanded_record<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_id: Oid,
+) -> PgResult<backend_utils_cache_typcache_seams::ExpandedRecordTypeCacheView<'mcx>> {
+    lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)?;
+    let (typtype, domain_base_type) =
+        with_state(|st| (st.entry(type_id).typtype, st.entry(type_id).domain_base_type));
+    // The entry whose tupDesc we read: for a domain over composite it's the
+    // domain's base type (re-looked-up with TYPECACHE_TUPDESC).
+    let td_type_id = if typtype == TYPTYPE_DOMAIN {
+        lookup_type_cache(domain_base_type, TYPECACHE_TUPDESC)?;
+        domain_base_type
+    } else {
+        type_id
+    };
+    let (tup_desc, tup_desc_identifier) = read_tupdesc_view(mcx, td_type_id)?;
+    Ok(backend_utils_cache_typcache_seams::ExpandedRecordTypeCacheView {
+        typtype,
+        domain_base_type,
+        // typcache composite descriptors are refcounted in C (tdrefcount >= 0).
+        tup_desc_refcounted: tup_desc.is_some(),
+        tup_desc,
+        tup_desc_identifier,
+    })
+}
+
+/// `make_expanded_record_from_tupdesc`'s named-composite typcache resolution
+/// (expandedrecord.c:226): `lookup_type_cache(type_id, TYPECACHE_TUPDESC)`, then
+/// read `tupDesc` / `tupDesc_identifier`.
+fn lookup_type_cache_tupdesc_view<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_id: Oid,
+) -> PgResult<backend_utils_cache_typcache_seams::ExpandedRecordTypeCacheView<'mcx>> {
+    lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
+    let typtype = with_state(|st| st.entry(type_id).typtype);
+    let (tup_desc, tup_desc_identifier) = read_tupdesc_view(mcx, type_id)?;
+    Ok(backend_utils_cache_typcache_seams::ExpandedRecordTypeCacheView {
+        typtype,
+        domain_base_type: INVALID_OID,
+        tup_desc_refcounted: tup_desc.is_some(),
+        tup_desc,
+        tup_desc_identifier,
+    })
+}
+
 /* ==========================================================================
  * Shared record typmod registry (DSA) — body via seam.
  * ======================================================================== */
@@ -2047,7 +2126,7 @@ fn invalidate_composite_type_cache_entry(type_id: Oid) {
 }
 
 /// `TypeCacheRelCallback` — relcache invalidation hook.
-fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
+fn type_cache_rel_callback(_arg: ScalarWord, relid: Oid) {
     if oid_is_valid(relid) {
         // Find a RelIdToTypeIdCacheHash entry.
         let composite_typid = with_state(|st| st.rel_id_to_type_id.get(&relid).copied());
@@ -2094,7 +2173,7 @@ fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
 }
 
 /// `TypeCacheTypCallback` — pg_type syscache invalidation hook.
-fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u32) {
+fn type_cache_typ_callback(_arg: ScalarWord, _cacheid: i32, hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| {
         st.type_cache
             .values()
@@ -2117,7 +2196,7 @@ fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u
 }
 
 /// `TypeCacheOpcCallback` — pg_opclass syscache invalidation hook.
-fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_opc_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| st.type_cache.keys().copied().collect());
     for oid in entries {
         let had_opclass = with_state(|st| {
@@ -2133,7 +2212,7 @@ fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: 
 }
 
 /// `TypeCacheConstrCallback` — pg_constraint syscache invalidation hook.
-fn type_cache_constr_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_constr_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let mut typentry = with_state(|st| st.first_domain_type_entry);
     while let Some(oid) = typentry {
         with_state(|st| st.entry_mut(oid).flags &= !TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
@@ -2712,4 +2791,16 @@ pub fn init_seams() {
     // row). The range/multirange ADTs call these across the dep cycle.
     backend_utils_cache_typcache_seams::lookup_type_cache::set(lookup_type_cache_copyout);
     backend_utils_cache_typcache_seams::lookup_type_cache_entry::set(lookup_type_cache_entry);
+    // expandedrecord.c builder views (composite/domain-over-composite tupdesc +
+    // identifier) and the RECORD-type identifier assignment. The expandedrecord
+    // family (backend-utils-adt-misc2) calls these across the dep cycle.
+    backend_utils_cache_typcache_seams::lookup_type_cache_expanded_record::set(
+        lookup_type_cache_expanded_record,
+    );
+    backend_utils_cache_typcache_seams::lookup_type_cache_tupdesc_view::set(
+        lookup_type_cache_tupdesc_view,
+    );
+    backend_utils_cache_typcache_seams::assign_record_type_identifier::set(
+        assign_record_type_identifier,
+    );
 }

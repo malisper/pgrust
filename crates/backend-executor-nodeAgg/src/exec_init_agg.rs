@@ -343,7 +343,7 @@ pub fn ExecInitAgg<'mcx>(
 
         // all_pergroups = palloc0(sizeof(AggStatePerGroup) *
         //                         (numGroupingSets + numHashes));
-        let mut all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData>>> =
+        let mut all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>> =
             vec_with_capacity_in(mcx, (num_grouping_sets + num_hashes) as usize)?;
         for _ in 0..(num_grouping_sets + num_hashes) {
             all_pergroups.push(None);
@@ -353,7 +353,7 @@ pub fn ExecInitAgg<'mcx>(
         if node.aggstrategy != AGG_HASHED {
             for i in 0..num_grouping_sets as usize {
                 // pergroups[i] = palloc0(sizeof(AggStatePerGroupData) * numaggs);
-                let mut pg: PgVec<'mcx, AggStatePerGroupData> =
+                let mut pg: PgVec<'mcx, AggStatePerGroupData<'mcx>> =
                     vec_with_capacity_in(mcx, numaggs as usize)?;
                 for _ in 0..numaggs {
                     pg.push(AggStatePerGroupData::default());
@@ -830,7 +830,7 @@ fn alloc_agg_result_storage<'mcx>(
 /// types-nodes ownership decision; defer it to the owner.
 fn assign_pergroup_regions<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
-    _all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData>>>,
+    _all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>,
     _node: &Agg<'mcx>,
     _num_grouping_sets: i32,
     _pergroup_offset: usize,
@@ -1002,7 +1002,7 @@ fn init_per_aggref<'mcx>(
             //   Anum_pg_aggregate_agginitval, &initValueIsNull);
             let init_value_is_null = aggform.init_value_is_null;
             let init_value = if init_value_is_null {
-                types_datum::Datum::null()
+                types_tuple::backend_access_common_heaptuple::Datum::null()
             } else {
                 // GetAggInitVal(textInitVal, aggtranstype)
                 GetAggInitVal(aggform.text_init_val, aggtranstype)?
@@ -1184,7 +1184,7 @@ fn build_phase_eval_trans<'mcx>(
 /// pg_aggregate row, projected to the fields ExecInitAgg reads. C:
 /// `aggTuple = SearchSysCache1(AGGFNOID, ...); aggform = GETSTRUCT(aggTuple)`
 /// plus `SysCacheGetAttr(.., Anum_pg_aggregate_agginitval, ..)`.
-struct AggForm {
+struct AggForm<'mcx> {
     aggfinalfn: Oid,
     aggcombinefn: Oid,
     aggtransfn: Oid,
@@ -1193,13 +1193,13 @@ struct AggForm {
     aggfinalextra: bool,
     aggkind: i8,
     init_value_is_null: bool,
-    text_init_val: types_datum::Datum,
+    text_init_val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 }
 
 /// C: `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfnoid))` +
 /// `GETSTRUCT` + the agginitval `SysCacheGetAttr`. syscache (AGGFNOID, a
 /// pg_aggregate projection) is not declared in this scaffold's syscache seam.
-fn fetch_agg_form(_aggfnoid: Oid) -> PgResult<AggForm> {
+fn fetch_agg_form<'mcx>(_aggfnoid: Oid) -> PgResult<AggForm<'mcx>> {
     panic!(
         "backend-utils-cache-syscache (AGGFNOID): reading the pg_aggregate row \
          (aggfinalfn/aggcombinefn/aggtransfn/aggserialfn/aggdeserialfn/\
@@ -1335,7 +1335,7 @@ fn build_pertrans_call<'mcx>(
     _aggtranstype: Oid,
     _serialfn_oid: Oid,
     _deserialfn_oid: Oid,
-    _init_value: types_datum::Datum,
+    _init_value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     _init_value_is_null: bool,
     _input_types: &[Oid],
     _num_arguments: i32,

@@ -209,11 +209,13 @@ pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
 
 /// `tidrecv(buf)` — `pq_getmsgint(blocknum)` + `pq_getmsgint(offnum)`.
 pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum> {
+    // Wrap the wire bytes as a real StringInfo (cursor = 0) and read through the
+    // libpq/pqformat owner, exactly mirroring tidrecv's two pq_getmsgint calls.
+    let mut msg = types_stringinfo::StringInfo::from_vec(mcx::slice_in(mcx, buf)?);
     // blockNumber = pq_getmsgint(buf, sizeof(blockNumber)); // uint32
+    let block_number = backend_libpq_pqformat::pq_getmsgint(&mut msg, 4)?;
     // offsetNumber = pq_getmsgint(buf, sizeof(offsetNumber)); // uint16
-    let mut cursor = unported::StringInfoCursor::new(buf);
-    let block_number = cursor.getmsgint32();
-    let offset_number = cursor.getmsgint16();
+    let offset_number = backend_libpq_pqformat::pq_getmsgint(&mut msg, 2)? as OffsetNumber;
     let result = ItemPointer::set(block_number, offset_number);
     unported::return_itempointer(mcx, result)
 }
@@ -221,11 +223,15 @@ pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum> {
 /// `tidsend(itemPtr)` — `pq_sendint32(block)` + `pq_sendint16(offset)`.
 pub fn tidsend<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
     let item_ptr = unported::getarg_itempointer(item_ptr);
-    let mut buf = unported::StringInfoBuilder::begintypsend();
-    buf.sendint32(item_ptr.block_number_no_check());
-    buf.sendint16(item_ptr.offset_number_no_check());
-    // PG_RETURN_BYTEA_P(pq_endtypsend(&buf))
-    unported::return_bytea(mcx, buf.endtypsend())
+    // pq_begintypsend(&buf); pq_sendint32(&buf, block); pq_sendint16(&buf, off);
+    let mut buf = backend_libpq_pqformat::pq_begintypsend(mcx)?;
+    backend_libpq_pqformat::pq_sendint32(&mut buf, item_ptr.block_number_no_check())?;
+    backend_libpq_pqformat::pq_sendint16(&mut buf, item_ptr.offset_number_no_check())?;
+    // PG_RETURN_BYTEA_P(pq_endtypsend(&buf)): endtypsend stamps the varlena
+    // header and yields the bytea result; the by-reference Datum construction is
+    // the still-unported boundary.
+    let bytea = backend_libpq_pqformat::pq_endtypsend(buf);
+    unported::return_bytea(mcx, bytea.into_image().into_iter().collect())
 }
 
 /// `tideq(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) == 0`.
@@ -876,14 +882,15 @@ mod unported {
         panic!("unported owner: tidsend PG_RETURN_BYTEA_P (bytea Datum construction)")
     }
 
-    /// `common/hashfn.c` `hash_any` — not yet a dependency owner.
-    pub fn hash_any(_image: &[u8]) -> u32 {
-        panic!("unported owner: hashtid hash_any (common/hashfn.c)")
+    /// `common/hashfn.c` `hash_any(k, keylen)` — the Bob Jenkins hash, mapped to
+    /// the merged owner's `hash_bytes` (pure, no-alloc; no seam install needed).
+    pub fn hash_any(image: &[u8]) -> u32 {
+        common_hashfn::hash_bytes(image)
     }
 
-    /// `common/hashfn.c` `hash_any_extended`.
-    pub fn hash_any_extended(_image: &[u8], _seed: u64) -> u64 {
-        panic!("unported owner: hashtidextended hash_any_extended (common/hashfn.c)")
+    /// `common/hashfn.c` `hash_any_extended(k, keylen, seed)` -> `hash_bytes_extended`.
+    pub fn hash_any_extended(image: &[u8], seed: u64) -> u64 {
+        common_hashfn::hash_bytes_extended(image, seed)
     }
 
     /// The whole `currtid_internal` / `currtid_for_view` path: `table_openrv`,
@@ -919,49 +926,6 @@ mod unported {
             "unported owner: window *_support prosupport (nodes/supportnodes.h \
              SupportRequestWFuncMonotonic / SupportRequestOptimizeWindowClause)"
         )
-    }
-
-    /// Minimal forward-reading cursor mirroring the pieces of `StringInfo` that
-    /// `tidrecv` consumes; the real `pq_getmsgint` (libpq/pqformat) owns
-    /// cursor/length-error handling, so the reads themselves panic into it.
-    pub struct StringInfoCursor<'a> {
-        _buf: &'a [u8],
-    }
-    impl<'a> StringInfoCursor<'a> {
-        pub fn new(buf: &'a [u8]) -> Self {
-            StringInfoCursor { _buf: buf }
-        }
-        /// `pq_getmsgint(buf, 4)`.
-        pub fn getmsgint32(&mut self) -> u32 {
-            panic!("unported owner: tidrecv pq_getmsgint (libpq/pqformat StringInfo)")
-        }
-        /// `pq_getmsgint(buf, 2)`.
-        pub fn getmsgint16(&mut self) -> u16 {
-            panic!("unported owner: tidrecv pq_getmsgint (libpq/pqformat StringInfo)")
-        }
-    }
-
-    /// Minimal builder mirroring the `pq_begintypsend`/`pq_sendint*`/
-    /// `pq_endtypsend` sequence `tidsend` uses; libpq/pqformat owns the actual
-    /// `StringInfoData`.
-    pub struct StringInfoBuilder;
-    impl StringInfoBuilder {
-        /// `pq_begintypsend(&buf)`.
-        pub fn begintypsend() -> Self {
-            panic!("unported owner: tidsend pq_begintypsend (libpq/pqformat StringInfo)")
-        }
-        /// `pq_sendint32(&buf, v)`.
-        pub fn sendint32(&mut self, _v: u32) {
-            panic!("unported owner: tidsend pq_sendint32 (libpq/pqformat)")
-        }
-        /// `pq_sendint16(&buf, v)`.
-        pub fn sendint16(&mut self, _v: u16) {
-            panic!("unported owner: tidsend pq_sendint16 (libpq/pqformat)")
-        }
-        /// `pq_endtypsend(&buf)`.
-        pub fn endtypsend(self) -> alloc::vec::Vec<u8> {
-            panic!("unported owner: tidsend pq_endtypsend (libpq/pqformat)")
-        }
     }
 
     /// The `WindowObject` accessor surface (`windowapi.h`), owned by the

@@ -13,7 +13,7 @@
 //! Model notes (vs. the C pointer model):
 //!
 //!   * a tuple travels as [`FormedTuple`] (owned header + user-data area); a
-//!     per-attribute `Datum` is [`TupleValue`] (`ByVal` scalar / `ByRef`
+//!     per-attribute value is the unified [`Datum`] enum (`ByVal` scalar / `ByRef`
 //!     verbatim datum bytes, varlena header included);
 //!   * relations cross as [`types_rel::Relation`] handles; `rel.h` field
 //!     reads are plain field reads on the trimmed `RelationData` (foreign
@@ -40,13 +40,20 @@ use alloc::format;
 
 use backend_access_common_heaptuple::{
     heap_compute_data_size, heap_deform_tuple, heap_form_tuple, nocachegetattr, FormedTuple,
-    HeapTupleError, TupleValue,
+    HeapTupleError,
 };
 use backend_utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_rel::Relation;
-use types_datum::Datum;
+// The one canonical per-attribute value type (the unified enum). The old
+// `TupleValue` alias / bare-word `types_datum::Datum` newtype are gone from
+// this crate's own logic; the only remaining bare word is the `ScanKeyData`
+// `sk_argument` ABI edge (`types-scan`), constructed below as `ScanArg`.
+use types_tuple::backend_access_common_heaptuple::Datum;
+// `types_datum::Datum` survives ONLY at the external `types-scan`
+// `ScanKeyData.sk_argument` ABI struct-field edge consumed by `ScanKeyInit`.
+use types_datum::Datum as ScanArg;
 use types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
@@ -453,10 +460,10 @@ pub fn toast_flatten_tuple<'mcx>(
     for i in 0..num_attrs.max(0) as usize {
         // Look at non-null varlena attributes.
         if !toast_isnull[i] && tuple_desc.compact_attrs[i].attlen == -1 {
-            if let TupleValue::ByRef(bytes) = &toast_values[i] {
+            if let Datum::ByRef(bytes) = &toast_values[i] {
                 if varatt_is_external(bytes) {
                     let detoasted = detoast_seams::detoast_external_attr::call(mcx, bytes)?;
-                    toast_values[i] = TupleValue::ByRef(detoasted);
+                    toast_values[i] = Datum::ByRef(detoasted);
                 }
             }
         }
@@ -522,10 +529,10 @@ pub fn toast_flatten_tuple_to_datum<'mcx>(
         if toast_isnull[i] {
             has_nulls = true;
         } else if tuple_desc.compact_attrs[i].attlen == -1 {
-            if let TupleValue::ByRef(bytes) = &toast_values[i] {
+            if let Datum::ByRef(bytes) = &toast_values[i] {
                 if varatt_is_external(bytes) || varatt_is_compressed(bytes) {
                     let detoasted = detoast_seams::detoast_attr::call(mcx, bytes)?;
-                    toast_values[i] = TupleValue::ByRef(detoasted);
+                    toast_values[i] = Datum::ByRef(detoasted);
                 }
             }
         }
@@ -575,7 +582,7 @@ pub fn toast_flatten_tuple_to_datum<'mcx>(
 pub fn toast_build_flattened_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_desc: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> PgResult<FormedTuple<'mcx>> {
     let num_attrs = tuple_desc.natts;
@@ -584,7 +591,7 @@ pub fn toast_build_flattened_tuple<'mcx>(
     // We can pass the caller's isnull array directly to heap_form_tuple, but
     // we potentially need to modify the values array (C memcpy's the Datum
     // array; the owned model copies the values into `mcx`).
-    let mut new_values: PgVec<'mcx, TupleValue<'mcx>> =
+    let mut new_values: PgVec<'mcx, Datum<'mcx>> =
         vec_with_capacity_in(mcx, num_attrs.max(0) as usize)?;
     for v in &values[..num_attrs.max(0) as usize] {
         new_values.push(v.clone_in(mcx)?);
@@ -593,10 +600,10 @@ pub fn toast_build_flattened_tuple<'mcx>(
     for i in 0..num_attrs.max(0) as usize {
         // Look at non-null varlena attributes.
         if !isnull[i] && tuple_desc.compact_attrs[i].attlen == -1 {
-            if let TupleValue::ByRef(bytes) = &new_values[i] {
+            if let Datum::ByRef(bytes) = &new_values[i] {
                 if varatt_is_external(bytes) {
                     let detoasted = detoast_seams::detoast_external_attr::call(mcx, bytes)?;
-                    new_values[i] = TupleValue::ByRef(detoasted);
+                    new_values[i] = Datum::ByRef(detoasted);
                 }
             }
         }
@@ -661,7 +668,8 @@ pub fn heap_fetch_toast_slice(
         1 as AttrNumber,
         BTEqualStrategyNumber,
         F_OIDEQ,
-        Datum::from_oid(valueid),
+        // ScanKeyData.sk_argument ABI edge (types-scan): bare word.
+        ScanArg::from_oid(valueid),
     )?;
 
     // No additional condition if fetching all chunks. Otherwise, use an
@@ -674,7 +682,7 @@ pub fn heap_fetch_toast_slice(
             2 as AttrNumber,
             BTEqualStrategyNumber,
             F_INT4EQ,
-            Datum::from_i32(startchunk),
+            ScanArg::from_i32(startchunk),
         )?;
         2
     } else {
@@ -683,14 +691,14 @@ pub fn heap_fetch_toast_slice(
             2 as AttrNumber,
             BTGreaterEqualStrategyNumber,
             F_INT4GE,
-            Datum::from_i32(startchunk),
+            ScanArg::from_i32(startchunk),
         )?;
         ScanKeyInit(
             &mut toastkey[2],
             2 as AttrNumber,
             BTLessEqualStrategyNumber,
             F_INT4LE,
-            Datum::from_i32(endchunk),
+            ScanArg::from_i32(endchunk),
         )?;
         3
     };
@@ -718,9 +726,9 @@ pub fn heap_fetch_toast_slice(
         let (cur_value, isnull) = fastgetattr(mcx, &ttup, 2, toasttup_desc)?;
         debug_assert!(!isnull);
         // DatumGetInt32(...): the chunk-index column is int4 (by value).
-        let curchunk: i32 = match cur_value {
-            TupleValue::ByVal(d) => d.as_i32(),
-            TupleValue::ByRef(_) => {
+        let curchunk: i32 = match &cur_value {
+            Datum::ByVal(_) => cur_value.as_i32(),
+            Datum::ByRef(_) => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATA_CORRUPTED)
                     .errmsg_internal(format!(
@@ -735,8 +743,8 @@ pub fn heap_fetch_toast_slice(
         let (chunk_value, isnull) = fastgetattr(mcx, &ttup, 3, &toasttup_desc)?;
         debug_assert!(!isnull);
         let chunk: &[u8] = match &chunk_value {
-            TupleValue::ByRef(bytes) => bytes,
-            TupleValue::ByVal(_) => {
+            Datum::ByRef(bytes) => bytes,
+            Datum::ByVal(_) => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATA_CORRUPTED)
                     .errmsg_internal(format!(
@@ -879,7 +887,7 @@ fn fastgetattr<'mcx>(
     tup: &FormedTuple<'_>,
     attnum: i32,
     tuple_desc: &TupleDescData<'_>,
-) -> PgResult<(TupleValue<'mcx>, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     debug_assert!(attnum > 0);
     let hdr = tup
         .tuple
@@ -888,7 +896,7 @@ fn fastgetattr<'mcx>(
         .expect("fastgetattr: tuple has no t_data");
     // !HeapTupleNoNulls(tup) && att_isnull(attnum - 1, t_bits)
     if (hdr.t_infomask & HEAP_HASNULL) != 0 && att_isnull((attnum - 1) as usize, &hdr.t_bits) {
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((Datum::null(), true));
     }
     Ok((
         nocachegetattr(mcx, &tup.tuple, attnum, tuple_desc, &tup.data)?,
@@ -908,7 +916,7 @@ fn deform_split<'mcx>(
     mcx: Mcx<'mcx>,
     tup: &FormedTuple<'_>,
     tuple_desc: &TupleDescData<'_>,
-) -> PgResult<(PgVec<'mcx, TupleValue<'mcx>>, PgVec<'mcx, bool>)> {
+) -> PgResult<(PgVec<'mcx, Datum<'mcx>>, PgVec<'mcx, bool>)> {
     let columns = heap_deform_tuple(mcx, &tup.tuple, tuple_desc, &tup.data)?;
     let mut values = vec_with_capacity_in(mcx, columns.len())?;
     let mut isnull = vec_with_capacity_in(mcx, columns.len())?;

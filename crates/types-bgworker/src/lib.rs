@@ -7,7 +7,6 @@
 #![no_std]
 
 use types_core::{pid_t, Oid, TimestampTz, MAXPGPATH};
-use types_datum::Datum;
 
 /// `BGWORKER_SHMEM_ACCESS` — worker wants shared-memory access. Required of all
 /// workers (a worker without it is rejected by `SanityCheckBackgroundWorker`).
@@ -69,8 +68,15 @@ pub struct BackgroundWorker {
     pub bgw_library_name: [u8; MAXPGPATH],
     /// `char bgw_function_name[BGW_MAXLEN]`.
     pub bgw_function_name: [u8; BGW_MAXLEN],
-    /// `Datum bgw_main_arg`.
-    pub bgw_main_arg: Datum,
+    /// `Datum bgw_main_arg`. Audited ABI/storage edge: this field is part of a
+    /// `MemSet`'d, fixed-layout `BackgroundWorker` record copied verbatim into
+    /// shared memory (the postmaster sizes it as an 8-byte `Datum` word), so it
+    /// must stay a plain pass-by-value machine word and the struct must remain
+    /// `Copy`/`Eq`. The canonical `Datum<'mcx>` enum (lifetime-bearing, non-`Copy`
+    /// `ByRef` arm) cannot live here; a migrated producer carries the by-value
+    /// word with `Datum::from_i32(x).as_usize()` and a consumer reconstructs it
+    /// with `Datum::from_usize(arg)`.
+    pub bgw_main_arg: usize,
     /// `char bgw_extra[BGW_EXTRALEN]`.
     pub bgw_extra: [u8; BGW_EXTRALEN],
     /// `pid_t bgw_notify_pid` — SIGUSR1 this backend on start/stop.
@@ -88,7 +94,7 @@ impl BackgroundWorker {
             bgw_restart_time: 0,
             bgw_library_name: [0; MAXPGPATH],
             bgw_function_name: [0; BGW_MAXLEN],
-            bgw_main_arg: Datum::null(),
+            bgw_main_arg: 0, // (Datum) 0
             bgw_extra: [0; BGW_EXTRALEN],
             bgw_notify_pid: 0,
         }

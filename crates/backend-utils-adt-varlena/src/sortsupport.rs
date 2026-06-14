@@ -39,7 +39,6 @@
 
 use mcx::Mcx;
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_sortsupport::SortSupportData;
 
@@ -445,7 +444,7 @@ pub fn varstr_abbrev_convert<'mcx>(
     sss: &mut VarStringSortSupport<'mcx>,
     mcx: Mcx<'mcx>,
     original_data: &[u8],
-) -> PgResult<Datum> {
+) -> PgResult<usize> {
     // C:2350 const size_t max_prefix_bytes = sizeof(Datum);
     let max_prefix_bytes = SIZEOF_DATUM;
 
@@ -555,7 +554,10 @@ pub fn varstr_abbrev_convert<'mcx>(
     res = datum_big_endian_to_native(res);
 
     // C:2537 return res;
-    Ok(Datum::from_usize(res))
+    // The abbreviated key is a packed machine word the sort machinery compares
+    // by unsigned-integer order (the audited ABI/storage edge); it stays a bare
+    // `usize`, never reframed as a value-`Datum`.
+    Ok(res)
 }
 
 /// C: `varstr_abbrev_abort(int memtupcount, SortSupport ssup)`

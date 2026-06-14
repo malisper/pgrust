@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use backend_utils_error::elog;
 use types_core::sig_atomic_t;
-use types_datum::Datum;
 use types_error::{ErrorLocation, PgResult, FATAL};
 
 use crate::{add_size, mul_size};
@@ -398,7 +397,12 @@ pub fn RegisterPostmasterChildActive() -> PgResult<()> {
     // Arrange to clean up at exit.
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         |_code, _arg| MarkPostmasterChildInactive(),
-        Datum::from_usize(0),
+        // C: `on_shmem_exit(MarkPostmasterChildInactive, 0)` — the callback
+        // takes an unused `Datum arg`. The `on_shmem_exit` seam contract is
+        // owned by `backend-storage-ipc-dsm-core` and is not yet migrated off
+        // the bare-word shim, so the null arg must cross this seam edge as a
+        // `types_datum::Datum`. Forced ABI/seam-contract residual.
+        types_datum::Datum::null(),
     )
 }
 

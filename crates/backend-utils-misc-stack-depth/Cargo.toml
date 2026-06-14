@@ -1,0 +1,18 @@
+[package]
+name = "backend-utils-misc-stack-depth"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_misc_stack_depth"
+path = "src/lib.rs"
+
+[dependencies]
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
+libc = "0.2"

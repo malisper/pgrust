@@ -17,8 +17,8 @@ use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
-use types_datum::Datum;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `TupleValue` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum, TupleValue};
 use types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
 
 use backend_access_common_tupdesc::{
@@ -297,7 +297,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
             nulls.push(values[i].is_none());
         } else {
             // Handle dropped attributes by setting to NULL.
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(Datum::null());
             nulls.push(true);
         }
     }
@@ -314,7 +314,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
 pub fn HeapTupleHeaderGetDatum<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: HeapTuple<'mcx>,
-) -> PgResult<(HeapTuple<'mcx>, Datum)> {
+) -> PgResult<(HeapTuple<'mcx>, TupleValue<'mcx>)> {
     // No work if there are no external TOAST pointers in the tuple. The
     // composite-Datum production (`PointerGetDatum`) and the detoast/flatten
     // path are the heap/datum owner's concern; reach both through its seam.
@@ -356,7 +356,7 @@ pub fn begin_tup_output_tupdesc<'mcx>(
 pub fn do_tup_output<'mcx>(
     _mcx: Mcx<'mcx>,
     tstate: &mut TupOutputState<'mcx>,
-    values: &[Datum],
+    values: &[types_datum::Datum],
     isnull: &[bool],
 ) -> PgResult<()> {
     // int natts = slot->tts_tupleDescriptor->natts;

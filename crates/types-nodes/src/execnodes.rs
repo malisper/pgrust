@@ -27,7 +27,7 @@ use types_core::primitive::{AttrNumber, Index, Oid};
 use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 use types_tuple::tupconvert::TupleConversionMap;
 
@@ -159,7 +159,7 @@ impl core::fmt::Debug for Opaque {
 /// `ecxt_per_tuple_memory`; the Rust shape carries both halves of that
 /// surface — the per-tuple context handle is passed in, and failure is
 /// `Err(PgError)`.
-pub type ExprContextCallbackFunction = fn(Mcx<'_>, Datum) -> PgResult<()>;
+pub type ExprContextCallbackFunction = for<'mcx> fn(Mcx<'mcx>, Datum<'mcx>) -> PgResult<()>;
 
 /// `ExprContext_CB` (execnodes.h) — one registered shutdown callback. The
 /// chain nodes are allocated in the context's per-query memory
@@ -169,7 +169,7 @@ pub type ExprContextCallbackFunction = fn(Mcx<'_>, Datum) -> PgResult<()>;
 pub struct ExprContext_CB<'mcx> {
     pub next: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
     pub function: ExprContextCallbackFunction,
-    pub arg: Datum,
+    pub arg: Datum<'mcx>,
 }
 
 /// `ExprContext` (execnodes.h) — per-node expression-evaluation context,
@@ -204,14 +204,14 @@ pub struct ExprContext<'mcx> {
     /// `ecxt_per_query_memory`.
     pub ecxt_per_tuple_memory: MemoryContext,
     /// `Datum *ecxt_aggvalues` — precomputed aggregate values.
-    pub ecxt_aggvalues: PgVec<'mcx, Datum>,
+    pub ecxt_aggvalues: PgVec<'mcx, Datum<'mcx>>,
     /// `bool *ecxt_aggnulls` — their is-null flags.
     pub ecxt_aggnulls: PgVec<'mcx, bool>,
     /// `Datum caseValue_datum` / `bool caseValue_isNull` — CASE expr value.
-    pub caseValue_datum: Datum,
+    pub caseValue_datum: Datum<'mcx>,
     pub caseValue_isNull: bool,
     /// `Datum domainValue_datum` / `bool domainValue_isNull` — domain check.
-    pub domainValue_datum: Datum,
+    pub domainValue_datum: Datum<'mcx>,
     pub domainValue_isNull: bool,
     /// `ExprContext_CB *ecxt_callbacks` — registered shutdown callbacks.
     pub ecxt_callbacks: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
@@ -219,10 +219,20 @@ pub struct ExprContext<'mcx> {
 
 /// `ParamExecData` (execnodes.h), trimmed: the `execPlan` link to a
 /// not-yet-evaluated subplan arrives with the subplan unit.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ParamExecData {
-    pub value: Datum,
+#[derive(Clone, Debug)]
+pub struct ParamExecData<'mcx> {
+    pub value: Datum<'mcx>,
     pub isnull: bool,
+}
+
+impl Default for ParamExecData<'_> {
+    fn default() -> Self {
+        // C `palloc0` zero-init: NULL value, isnull cleared.
+        ParamExecData {
+            value: Datum::null(),
+            isnull: false,
+        }
+    }
 }
 
 /// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
@@ -731,7 +741,7 @@ pub struct EStateData<'mcx> {
     pub es_param_list_info: crate::parsestmt::ParamListInfoHandle,
     /// `ParamExecData *es_param_exec_vals` — values of internal params.
     /// Empty = the C `NULL`.
-    pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
+    pub es_param_exec_vals: PgVec<'mcx, ParamExecData<'mcx>>,
     /// `MemoryContext es_query_cxt` — the per-query context the executor
     /// allocates in (C: the context `CreateExecutorState` made the `EState`
     /// in, current while nodes init and run).

@@ -79,9 +79,9 @@ pub struct IndexScanDescData<'mcx> {
     /// `int numberOfOrderBys` — number of ordering operators.
     pub numberOfOrderBys: i32,
     /// `struct ScanKeyData *keyData` — array of index qualifier descriptors.
-    pub keyData: PgVec<'mcx, ScanKeyData>,
+    pub keyData: PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `struct ScanKeyData *orderByData` — array of ordering-op descriptors.
-    pub orderByData: PgVec<'mcx, ScanKeyData>,
+    pub orderByData: PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `bool xs_want_itup` — caller requests index tuples.
     pub xs_want_itup: bool,
     /// `bool kill_prior_tuple` — last-returned tuple is dead.
@@ -226,11 +226,11 @@ pub struct IndexOnlyScanState<'mcx> {
     /// `ExprState *recheckqual` — execution state for recheckqual expressions.
     pub recheckqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `struct ScanKeyData *ioss_ScanKeys` — Skey structures for index quals.
-    pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `int ioss_NumScanKeys`.
     pub ioss_NumScanKeys: i32,
     /// `struct ScanKeyData *ioss_OrderByKeys`.
-    pub ioss_OrderByKeys: PgVec<'mcx, ScanKeyData>,
+    pub ioss_OrderByKeys: PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `int ioss_NumOrderByKeys`.
     pub ioss_NumOrderByKeys: i32,
     /// `IndexRuntimeKeyInfo *ioss_RuntimeKeys`.

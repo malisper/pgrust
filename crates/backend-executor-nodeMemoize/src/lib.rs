@@ -40,6 +40,12 @@ use types_nodes::nodememoize::{
 };
 use types_nodes::TupleSlotKind;
 use types_tuple::heaptuple::MinimalTupleData;
+// Datum-unification migration target: the canonical unified value enum. The
+// binary-mode hash/equality leaves consume it by reference (`datum_image_*_v`).
+// The bare slot words deformed through the still-unmigrated execTuples /
+// execExpr slot seams arrive as `types_datum::Datum`; at that ABI edge they are
+// the by-value scalar word, wrapped as `Datum::ByVal` for the `_v` contract.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 use backend_access_transam_parallel_seams as parallel;
 use backend_executor_nodeMemoize_seams as seam;
@@ -141,7 +147,10 @@ fn prepare_probe_slot<'mcx>(
                 let state = mstate.param_exprs[i].as_mut();
                 let (value, isnull) =
                     execExpr::exec_eval_expr_switch_context::call(state, econtext, estate)?;
-                mstate.probe_values.push(value);
+                // The eval leaf hands back a bare scalar word at the
+                // `types_datum::Datum` ABI edge; it crosses into the canonical
+                // value type's by-value arm (`pslot->tts_values[i] = ...`).
+                mstate.probe_values.push(DatumV::ByVal(value));
                 mstate.probe_isnull.push(isnull);
             }
         }
@@ -155,9 +164,11 @@ fn prepare_probe_slot<'mcx>(
             mstate.table_values.clear();
             mstate.table_isnull.clear();
             for i in 0..num_keys {
-                mstate.table_values.push(values[i]);
+                // The deformed slot words cross into the canonical value type's
+                // by-value arm (`memcpy(pslot->tts_values, tslot->tts_values)`).
+                mstate.table_values.push(DatumV::ByVal(values[i]));
                 mstate.table_isnull.push(isnull[i]);
-                mstate.probe_values.push(values[i]);
+                mstate.probe_values.push(DatumV::ByVal(values[i]));
                 mstate.probe_isnull.push(isnull[i]);
             }
         }
@@ -189,8 +200,10 @@ fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32>
             if !mstate.probe_isnull[i] {
                 // treat nulls as having hash key 0
                 let attr = mstate.key_attrs[i];
-                let value = mstate.probe_values[i];
-                let hkey = datum::datum_image_hash::call(value, attr.attbyval, attr.attlen)?;
+                // The probe value is the canonical unified value type; the
+                // binary-mode hash leaf consumes it by reference.
+                let value = &mstate.probe_values[i];
+                let hkey = datum::datum_image_hash_v::call(value, attr.attbyval, attr.attlen)?;
                 hashkey ^= hkey;
             }
         }
@@ -206,7 +219,11 @@ fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32>
                 // call the fmgr owner's leaf, then apply DatumGetUInt32 in-crate.
                 let fn_oid = mstate.hashfunctions[i].fn_oid;
                 let collation = mstate.collations[i];
-                let value = mstate.probe_values[i];
+                // The fmgr leaf takes a bare scalar word; the probe value is the
+                // canonical unified value type, so unwrap its by-value arm (a
+                // hash key column is always pass-by-value-or-pointer scalar — a C
+                // `tts_values[i]` word).
+                let value = byval_word(&mstate.probe_values[i]);
                 let result = fmgr::function_call1_coll::call(fn_oid, collation, value)?;
                 let hkey = result.as_u32(); // DatumGetUInt32
                 hashkey ^= hkey;
@@ -238,7 +255,9 @@ fn memoize_hash_equal<'mcx>(
         mstate.table_values.clear();
         mstate.table_isnull.clear();
         for i in 0..numkeys {
-            mstate.table_values.push(values[i]);
+            // The deformed slot word crosses into the canonical value type's
+            // by-value arm.
+            mstate.table_values.push(DatumV::ByVal(values[i]));
             mstate.table_isnull.push(isnull[i]);
         }
     }
@@ -262,9 +281,14 @@ fn memoize_hash_equal<'mcx>(
 
             // perform binary comparison on the two datums
             let attr = mstate.key_attrs[i];
-            if !datum::datum_image_eq::call(
-                mstate.table_values[i],
-                mstate.probe_values[i],
+            // Both operands are the canonical unified value type held in the
+            // table/probe slots; the binary-mode equality leaf consumes them by
+            // reference.
+            let table_value = &mstate.table_values[i];
+            let probe_value = &mstate.probe_values[i];
+            if !datum::datum_image_eq_v::call(
+                table_value,
+                probe_value,
                 attr.attbyval,
                 attr.attlen,
             )? {
@@ -1657,13 +1681,13 @@ fn init_hashkeydesc_and_slots<'mcx>(
 
     // Presize the tts_values/tts_isnull mirrors of the two slots.
     let mut tv = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    tv.resize(nkeys, types_datum::Datum::null());
+    tv.resize(nkeys, DatumV::null());
     mstate.table_values = tv;
     let mut ti = mcx::vec_with_capacity_in(mcx, nkeys)?;
     ti.resize(nkeys, false);
     mstate.table_isnull = ti;
     let mut pv = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    pv.resize(nkeys, types_datum::Datum::null());
+    pv.resize(nkeys, DatumV::null());
     mstate.probe_values = pv;
     let mut pi = mcx::vec_with_capacity_in(mcx, nkeys)?;
     pi.resize(nkeys, false);
@@ -1764,8 +1788,12 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
         .ok_or_else(|| elog_internal("Memoize probeslot not initialized"))?;
 
     // The probe slot's tts_values/tts_isnull were filled by prepare_probe_slot;
-    // mirror them into the real slot and ExecStoreVirtualTuple.
-    let values: Vec<types_datum::Datum> = mstate.probe_values.iter().copied().collect();
+    // mirror them into the real slot and ExecStoreVirtualTuple. The store seam
+    // takes bare scalar words (the still-bare-word execTuples ABI edge), so
+    // unwrap each canonical value's by-value arm (a virtual-tuple key column is
+    // a C `tts_values[i]` scalar word).
+    let values: Vec<types_datum::Datum> =
+        mstate.probe_values.iter().map(byval_word).collect();
     let isnull: Vec<bool> = mstate.probe_isnull.iter().copied().collect();
     execTuples::store_virtual_values::call(estate, probeslot, &values, &isnull)?;
 
@@ -1773,6 +1801,27 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
     let (mtup, _should_free) =
         execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate.slot_mut(probeslot))?;
     mtup.clone_in(mcx)
+}
+
+// ===========================================================================
+// Value-type ABI helpers.
+// ===========================================================================
+
+/// Unwrap a canonical unified value's by-value arm into the bare scalar word.
+///
+/// The slot key columns Memoize handles are hash-key columns — always
+/// pass-by-value scalars or by-reference *pointers*, i.e. a C `tts_values[i]`
+/// machine word. This is the projection across the still-bare-word
+/// (`types_datum::Datum`) execTuples / fmgr seam ABI edges, used until those
+/// owners migrate to the unified value type. A by-reference image here would be
+/// a caller bug (C would equally read garbage treating it as a scalar word).
+fn byval_word(value: &DatumV<'_>) -> types_datum::Datum {
+    match value {
+        DatumV::ByVal(word) => *word,
+        DatumV::ByRef(_) => {
+            panic!("Memoize: scalar slot word expected, found a by-reference value")
+        }
+    }
 }
 
 // ===========================================================================

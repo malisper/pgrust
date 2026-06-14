@@ -32,6 +32,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GUC_check_errhint(fmt, ...)` (guc.h): record errhint for the
+    /// in-progress GUC check-hook failure (`GUC_check_errhint_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errhint(hint: String)
+);
+
+seam_core::seam!(
     /// `AtStart_GUC()` (guc.c) — sanity-reset GUC nesting at transaction
     /// start.
     pub fn at_start_guc()

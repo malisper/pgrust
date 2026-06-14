@@ -9,6 +9,17 @@
 
 use types_core::{Oid, TransactionId};
 
+/// TRANSITIONAL COMPAT SHIM (Datum-unification keystone). The bare-word
+/// newtype is being unified into the canonical `types_tuple::Datum<'mcx>` enum
+/// (its by-value arm). This type and all of its `from_*`/`as_*` codec methods
+/// below are deprecated shims that exist only so unmigrated consumer crates
+/// keep compiling; migration waves move every site onto the matching
+/// `types_tuple::Datum::from_*`/`as_*` constructors/accessors, and Cleanup
+/// deletes this type (the enum's `ByVal` arm then carries a plain `usize`).
+///
+/// NOTE: the `#[deprecated]` attribute is intentionally NOT applied — it would
+/// emit ~200 warnings across the workspace and bury genuine diagnostics the
+/// migration waves rely on. The deprecation is documented here instead.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Datum(usize);
 

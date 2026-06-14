@@ -17,7 +17,12 @@ use types_cache::backend_utils_cache_catcache::{
     CL_MAGIC,
 };
 use types_cache::SysCacheKey;
+// The bare-word newtype: the per-search catalog key arguments cross in as
+// scalar words (the C `cur_skey[i].sk_argument = vN`).
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ScanKeyData.sk_argument` carries.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_scan::scankey::ScanKeyData;
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
@@ -289,7 +294,7 @@ fn build_list_body(
     cc_indexoid: types_core::Oid,
     cc_nkeys: i32,
     cc_nbuckets: i32,
-    cur_skey: &mut [ScanKeyData; CATCACHE_MAXKEYS],
+    cur_skey: &mut [ScanKeyData<'static>; CATCACHE_MAXKEYS],
     arguments: [Datum; 4],
 ) -> Result<ClIdx, (Vec<CtIdx>, types_error::PgError)> {
     // ctlist = NIL; nmembers = 0; ordered = false;
@@ -427,7 +432,7 @@ fn scan_members(
     cc_reloid: types_core::Oid,
     cc_indexoid: types_core::Oid,
     cc_nbuckets: i32,
-    cur_skey: &mut [ScanKeyData; CATCACHE_MAXKEYS],
+    cur_skey: &mut [ScanKeyData<'static>; CATCACHE_MAXKEYS],
     arguments: [Datum; 4],
     ctlist: &mut Vec<CtIdx>,
     ordered: &mut bool,
@@ -447,7 +452,8 @@ fn scan_members(
     // memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey));
     // cur_skey[0..nkeys].sk_argument = v1..vN;  (only the first nkeys are used)
     for i in 0..(nkeys as usize) {
-        cur_skey[i].sk_argument = arguments[i];
+        // The per-search scalar argument crosses into the canonical by-value arm.
+        cur_skey[i].sk_argument = DatumV::ByVal(arguments[i]);
     }
 
     // scandesc = systable_beginscan(relation, cache->cc_indexoid,
@@ -691,10 +697,24 @@ fn fastkinds(
 /// build; by then all `cc_nkeys` slots are populated.
 fn skey_template(
     cache: &types_cache::backend_utils_cache_catcache::ArenaCatCache,
-) -> [ScanKeyData; CATCACHE_MAXKEYS] {
+) -> [ScanKeyData<'static>; CATCACHE_MAXKEYS] {
     core::array::from_fn(|i| {
-        cache.cc_skey[i]
-            .clone()
-            .unwrap_or_else(ScanKeyData::empty)
+        // C memcpy's the whole template, but `sk_argument` is immediately
+        // overwritten by the per-search arguments (see the stamping loop), so
+        // the copied-out template carries a fresh NULL by-value argument. This
+        // decouples the returned key's `'mcx` from the borrowed cache (the
+        // canonical `Datum`'s by-value arm is lifetime-free).
+        match &cache.cc_skey[i] {
+            Some(k) => ScanKeyData {
+                sk_flags: k.sk_flags,
+                sk_attno: k.sk_attno,
+                sk_strategy: k.sk_strategy,
+                sk_subtype: k.sk_subtype,
+                sk_collation: k.sk_collation,
+                sk_func: k.sk_func.clone(),
+                sk_argument: DatumV::null(),
+            },
+            None => ScanKeyData::empty(),
+        }
     })
 }

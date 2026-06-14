@@ -39,8 +39,22 @@ use backend_executor_execTuples_seams::{
 use backend_utils_fmgr_fmgr_seams::function_call2_coll;
 use backend_utils_sort_tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
 
+// The bare-word newtype: the transition-value form the fmgr/tuplesort seams and
+// the nodeAgg-parked transfn frame operate on.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `AggStatePerTransData.lastdatum` / `AggStatePerGroupData
+// .trans_value` carry. Transition values are scalar/pointer words under the
+// transitional model, so they cross into its by-value arm.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
+
+/// Recover the bare scalar word from a stored canonical by-value datum (the
+/// transitional bridge: the fmgr/tuplesort seams take a word).
+#[inline]
+fn word_of(v: &DatumV<'_>) -> Datum {
+    Datum::from_usize(v.as_usize())
+}
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::nodeagg::{
     AggStateData as AggState, AggStatePerGroupData, AggStatePerTransData,
@@ -201,7 +215,7 @@ pub fn ExecAggInitGroup<'mcx>(
     //                                  pertrans->transtypeLen);
     let _ = (pt.transtype_by_val, pt.transtype_len, &estate);
     let arg1 = transfn_arg_value(pt, 1);
-    pergroup.trans_value = group_init_datum_copy(aggstate, pertrans, arg1, estate);
+    pergroup.trans_value = DatumV::ByVal(group_init_datum_copy(aggstate, pertrans, arg1, estate));
 
     // pergroup->transValueIsNull = false;
     pergroup.trans_value_is_null = false;
@@ -249,7 +263,7 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
             transfn_arg_isnull(pt, 1),
             pt.haslast,
             pt.lastisnull,
-            pt.lastdatum,
+            word_of(&pt.lastdatum),
             pt.agg_collation,
             pt.equalfn_one.fn_oid,
             pt.inputtype_by_val,
@@ -296,7 +310,7 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
             .as_mut()
             .expect("ExecEvalPreOrderedDistinctSingle: pertrans")[pertrans];
         pt.haslast = true;
-        pt.lastdatum = new_lastdatum;
+        pt.lastdatum = DatumV::ByVal(new_lastdatum);
         pt.lastisnull = isnull;
         return Ok(true);
     }
@@ -512,7 +526,7 @@ pub fn ExecEvalAggOrderedTransDatum<'mcx>(
     let cell = state.result_cells.get(steps[op].resvalue);
 
     let sortstate = ordered_sortstate(state, pertrans, setno)?;
-    tuplesort_putdatum::call(sortstate, cell.value, cell.isnull)
+    tuplesort_putdatum::call(sortstate, word_of(&cell.value), cell.isnull)
 }
 
 /// `ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,
@@ -625,10 +639,10 @@ pub fn ExecAggPlainTransByVal<'mcx>(
         .as_mut()
         .expect("ExecAggPlainTransByVal: pertrans")[pertrans];
     let (new_val, fcinfo_isnull) =
-        invoke_transfn(pt, pergroup.trans_value, pergroup.trans_value_is_null);
+        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null);
 
     // pergroup->transValue = newVal;
-    pergroup.trans_value = new_val;
+    pergroup.trans_value = DatumV::ByVal(new_val);
     // pergroup->transValueIsNull = fcinfo->isnull;
     pergroup.trans_value_is_null = fcinfo_isnull;
     // MemoryContextSwitchTo(oldContext);
@@ -660,7 +674,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
             .pertrans
             .as_mut()
             .expect("ExecAggPlainTransByRef: pertrans")[pertrans];
-        invoke_transfn(pt, pergroup.trans_value, pergroup.trans_value_is_null)
+        invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null)
     };
 
     // For pass-by-ref: must copy the new value into aggcontext and free the
@@ -669,20 +683,20 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     // if (DatumGetPointer(newVal) != DatumGetPointer(pergroup->transValue))
     //     newVal = ExecAggCopyTransValue(aggstate, pertrans, newVal, fcinfo->isnull,
     //                                    pergroup->transValue, pergroup->transValueIsNull);
-    if datum_get_pointer(new_val) != datum_get_pointer(pergroup.trans_value) {
+    if datum_get_pointer(new_val) != datum_get_pointer(word_of(&pergroup.trans_value)) {
         new_val = ExecAggCopyTransValue(
             aggstate,
             pertrans,
             new_val,
             fcinfo_isnull,
-            pergroup.trans_value,
+            word_of(&pergroup.trans_value),
             pergroup.trans_value_is_null,
             estate,
         )?;
     }
 
     // pergroup->transValue = newVal;
-    pergroup.trans_value = new_val;
+    pergroup.trans_value = DatumV::ByVal(new_val);
     // pergroup->transValueIsNull = fcinfo->isnull;
     pergroup.trans_value_is_null = fcinfo_isnull;
     // MemoryContextSwitchTo(oldContext);

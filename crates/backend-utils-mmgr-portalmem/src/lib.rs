@@ -40,6 +40,7 @@ use types_error::{
     ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
 };
 use types_nodes::nodeindexscan::PlannedStmt;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_portal::{
     CachedPlanHandle, CommandTag, FcinfoHandle, PgCursorRow, Portal, PortalCleanupHook, PortalData,
     PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_UNKNOWN,
@@ -1105,7 +1106,7 @@ pub fn AtSubCleanup_Portals(mySubid: SubTransactionId) -> PgResult<()> {
 /// (`InitMaterializedSRF` + per-row `Datum` conversions + `tuplestore_putvalues`)
 /// is the fmgr/`Datum` value layer (project-wide deferral) and routes through
 /// the portalcmds seam.
-pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<types_datum::Datum> {
+pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<Datum<'static>> {
     let portals = portal_handles()?;
     let workspace = MemoryContext::new("pg_cursor");
     let mcx = workspace.mcx();
@@ -1139,8 +1140,8 @@ pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<types_datum::Datum> {
 /// conversions + `tuplestore_putvalues` (the fmgr/`Datum` value layer, a
 /// project-wide deferral). Given the already-collected visible rows, returns the
 /// SRF result Datum. Stubbed until the fmgr/`Datum` value layer lands.
-fn pg_cursor_srf(_fcinfo: FcinfoHandle, _rows: &[PgCursorRow]) -> PgResult<types_datum::Datum> {
-    Ok(types_datum::Datum::null())
+fn pg_cursor_srf(_fcinfo: FcinfoHandle, _rows: &[PgCursorRow]) -> PgResult<Datum<'static>> {
+    Ok(Datum::null())
 }
 
 /// `ThereAreNoReadyPortals` (portalmem.c:1171).

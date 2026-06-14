@@ -22,10 +22,15 @@ use backend_utils_cache_syscache as syscache;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use types_cache::SysCacheKey;
 use types_core::{InvalidOid, Oid};
-use types_datum::Datum;
+// The canonical owned datum enum is the migration target.
+use types_tuple::backend_access_common_heaptuple::Datum;
+// `types_datum::Datum` (the bare-word shim) survives only at the two unmigrated
+// cross-crate contract edges: `SysCacheKey::Value`'s search-key word and the
+// `SyscacheCallbackFunction` `arg` carried through the inval seam. Both are
+// audited ABI edges driven by still-unmigrated `types-cache` vocabulary.
+use types_datum::Datum as KeyDatum;
 use types_error::{PgError, PgResult};
 use types_reloptions::TableSpaceOpts;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
 
 /// `Anum_pg_tablespace_spcoptions` (`catalog/pg_tablespace.h`).
 const Anum_pg_tablespace_spcoptions: i32 = 5;
@@ -52,7 +57,9 @@ thread_local! {
 /// that tablespace. Currently, we just flush them all. This is quick and
 /// easy and doesn't cost much, since there shouldn't be terribly many
 /// tablespaces, nor do we expect them to be frequently modified.
-fn InvalidateTableSpaceCacheCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
+// `arg` matches `SyscacheCallbackFunction = fn(arg: types_datum::Datum, ...)`;
+// it must stay the bare-word shim to satisfy that unmigrated fn-pointer type.
+fn InvalidateTableSpaceCacheCallback(_arg: KeyDatum, _cacheid: i32, _hashvalue: u32) {
     TABLESPACE_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         if let Some(owned) = slot.as_mut() {
@@ -79,7 +86,8 @@ fn InitializeTableSpaceCache() -> PgResult<()> {
     inval_seams::cache_register_syscache_callback::call(
         syscache::TABLESPACEOID,
         InvalidateTableSpaceCacheCallback,
-        Datum::null(),
+        // The seam's `arg: types_datum::Datum` is the unmigrated contract edge.
+        KeyDatum::null(),
     )
 }
 
@@ -116,7 +124,9 @@ fn get_tablespace(mut spcid: Oid, my_database_tablespace: Oid) -> PgResult<Optio
         let tp = syscache::SearchSysCache1(
             mcx,
             syscache::TABLESPACEOID,
-            SysCacheKey::Value(Datum::from_oid(spcid)),
+            // `SysCacheKey::Value` carries a bare-word `types_datum::Datum`
+            // search key (unmigrated `types-cache` vocabulary).
+            SysCacheKey::Value(KeyDatum::from_oid(spcid)),
         )?;
         match tp {
             None => None,
@@ -131,8 +141,8 @@ fn get_tablespace(mut spcid: Oid, my_database_tablespace: Oid) -> PgResult<Optio
                     None
                 } else {
                     let bytes = match &datum {
-                        TupleValue::ByRef(b) => &b[..],
-                        TupleValue::ByVal(_) => {
+                        Datum::ByRef(b) => &b[..],
+                        Datum::ByVal(_) => {
                             return Err(PgError::error("spcoptions datum is not by-reference"))
                         }
                     };

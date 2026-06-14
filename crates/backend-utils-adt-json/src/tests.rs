@@ -13,6 +13,13 @@ use super::*;
 use mcx::MemoryContext;
 use std::sync::Once;
 
+// The bare-word `Datum` (`types_datum::Datum`, re-aliased `ScalarWord` in the
+// crate body) is the seam-contract currency these tests feed into the
+// `output_function_call` / aggregate / build relay paths. It is still the type
+// every consumed json/jsonfuncs/timestamp seam speaks, so the test fixtures
+// construct it directly (forced seam-contract residual).
+use types_datum::Datum;
+
 use types_json::{JsonParseErrorType as PErr, JsonTokenType as Tok, JsonTypeCategory as Cat};
 
 fn ctx() -> MemoryContext {

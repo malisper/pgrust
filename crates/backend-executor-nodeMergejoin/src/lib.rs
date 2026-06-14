@@ -65,6 +65,7 @@ use types_nodes::{
     SlotId, TupleSlotKind,
 };
 use types_sortsupport::{BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_EQ};
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `MJEvalResult` — result of [`MJEvalOuterValues`] / [`MJEvalInnerValues`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -269,7 +270,10 @@ fn MJEvalOuterValues<'mcx>(
         let (ldatum, lisnull) =
             execExpr::exec_eval_expr_switch_context::call(lexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
-        clause.ldatum = ldatum;
+        // `ExecEvalExpr` hands back a bare-word `Datum` (`types_datum::Datum`);
+        // the clause's `ldatum` carries the canonical unified value, into whose
+        // by-value arm the scalar word crosses.
+        clause.ldatum = Datum::ByVal(ldatum);
         clause.lisnull = lisnull;
         if lisnull {
             // match is impossible; can we end the join early?
@@ -325,7 +329,10 @@ fn MJEvalInnerValues<'mcx>(
         let (rdatum, risnull) =
             execExpr::exec_eval_expr_switch_context::call(rexpr, econtext, estate)?;
         let clause = &mut mergestate.mj_Clauses[i];
-        clause.rdatum = rdatum;
+        // `ExecEvalExpr` hands back a bare-word `Datum` (`types_datum::Datum`);
+        // the clause's `rdatum` carries the canonical unified value, into whose
+        // by-value arm the scalar word crosses.
+        clause.rdatum = Datum::ByVal(rdatum);
         clause.risnull = risnull;
         if risnull {
             // match is impossible; can we end the join early?
@@ -369,9 +376,14 @@ fn ApplySortComparator<'mcx>(
         }
     } else {
         // compare = ssup->comparator(datum1, datum2, ssup);
+        // The comparator seam takes the bare-word `Datum` (`types_datum::Datum`);
+        // the canonical clause values are non-null scalars here (`!is_null{1,2}`),
+        // so the by-value scalar word crosses back out.
+        let datum1 = types_datum::Datum::from_usize(clause.ldatum.as_usize());
+        let datum2 = types_datum::Datum::from_usize(clause.rdatum.as_usize());
         let mut compare = sortsupport::apply_sort_comparator::call(
-            clause.ldatum,
-            clause.rdatum,
+            datum1,
+            datum2,
             &clause.ssup,
         )?;
         if reverse {

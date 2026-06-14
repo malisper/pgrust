@@ -177,7 +177,10 @@ pub fn ExecNestLoop<'mcx>(
                 let (value, isnull) =
                     execTuples::slot_getattr::call(estate.slot_mut(outer_id), varattno)?;
                 let prm = &mut estate.es_param_exec_vals[paramno as usize];
-                prm.value = value;
+                // `slot_getattr` (positive attnum) yields the deformed scalar
+                // machine word; it crosses into the canonical by-value arm of
+                // `ParamExecData.value` (`prm->value = slot_getattr(...)`).
+                prm.value = types_tuple::backend_access_common_heaptuple::Datum::ByVal(value);
                 prm.isnull = isnull;
 
                 // Flag parameter value as changed.

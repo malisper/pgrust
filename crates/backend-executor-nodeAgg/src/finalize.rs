@@ -2,7 +2,7 @@
 //! (full and partial) and projecting the group's output tuple.
 
 use types_core::primitive::OidIsValid;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::ExprState;
 use types_nodes::nodeagg::{
@@ -68,8 +68,8 @@ use crate::transition::{process_ordered_aggregate_multi, process_ordered_aggrega
 pub fn finalize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
-) -> PgResult<(Datum, bool)> {
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
     // LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
     // bool anynull = false;
     // AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
@@ -119,7 +119,7 @@ pub fn finalize_aggregate<'mcx>(
         // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
         // anynull |= pergroupstate->transValueIsNull;
         let arg0 = make_expanded_object_read_only(
-            pergroupstate.trans_value,
+            pergroupstate.trans_value.clone(),
             pergroupstate.trans_value_is_null,
             transtype_len,
         );
@@ -159,7 +159,7 @@ pub fn finalize_aggregate<'mcx>(
         //                                         pertrans->transtypeLen);
         // *resultIsNull = pergroupstate->transValueIsNull;
         result_val = make_expanded_object_read_only(
-            pergroupstate.trans_value,
+            pergroupstate.trans_value.clone(),
             pergroupstate.trans_value_is_null,
             transtype_len,
         );
@@ -204,8 +204,8 @@ pub fn finalize_aggregate<'mcx>(
 pub fn finalize_partialaggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
-) -> PgResult<(Datum, bool)> {
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
     // AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
     let pertrans = pertrans_for(aggstate, peragg.transno);
     let serialfn_oid = pertrans.serialfn_oid;
@@ -233,7 +233,7 @@ pub fn finalize_partialaggregate<'mcx>(
             // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
             // fcinfo->isnull = false;
             let arg0 = make_expanded_object_read_only(
-                pergroupstate.trans_value,
+                pergroupstate.trans_value.clone(),
                 pergroupstate.trans_value_is_null,
                 transtype_len,
             );
@@ -251,7 +251,7 @@ pub fn finalize_partialaggregate<'mcx>(
         //                                         pertrans->transtypeLen);
         // *resultIsNull = pergroupstate->transValueIsNull;
         result_val = make_expanded_object_read_only(
-            pergroupstate.trans_value,
+            pergroupstate.trans_value.clone(),
             pergroupstate.trans_value_is_null,
             transtype_len,
         );
@@ -280,7 +280,7 @@ fn pertrans_for<'a, 'mcx>(
 fn exec_eval_expr_direct_arg<'mcx>(
     _aggstate: &AggStateData<'mcx>,
     _expr: &ExprState,
-) -> (Datum, bool) {
+) -> (Datum<'mcx>, bool) {
     panic!(
         "backend-executor-nodeAgg::finalize_aggregate: ExecEvalExpr of a finalfn direct \
          argument is owned by the not-yet-ported execExpr unit; no seam yet"
@@ -290,7 +290,7 @@ fn exec_eval_expr_direct_arg<'mcx>(
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` on the
 /// `LOCAL_FCINFO` finalfn call frame. The fmgr call-frame args payload is owned
 /// by the not-yet-ported fmgr unit; the trimmed call frame carries no `args`.
-fn local_fcinfo_set_arg(_i: i32, _value: Datum, _isnull: bool) {
+fn local_fcinfo_set_arg(_i: i32, _value: Datum<'_>, _isnull: bool) {
     panic!(
         "backend-executor-nodeAgg::finalize_aggregate: writing the LOCAL_FCINFO finalfn args \
          is part of the fmgr call frame (not-yet-ported fmgr unit); the trimmed \
@@ -328,7 +328,7 @@ fn finalfn_is_strict(_peragg: &AggStatePerAggData<'_>) -> bool {
 fn invoke_finalfn<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _peragg: &AggStatePerAggData<'mcx>,
-) -> (Datum, bool) {
+) -> (Datum<'mcx>, bool) {
     panic!(
         "backend-executor-nodeAgg::finalize_aggregate: FunctionCallInvoke of the finalfn is \
          owned by the not-yet-ported fmgr unit; no seam yet"
@@ -351,7 +351,7 @@ fn serialfn_is_strict<'mcx>(_aggstate: &AggStateData<'mcx>, _transno: i32) -> bo
 fn set_serialfn_arg0<'mcx>(
     _aggstate: &mut AggStateData<'mcx>,
     _transno: i32,
-    _value: Datum,
+    _value: Datum<'_>,
     _isnull: bool,
 ) {
     panic!(
@@ -364,7 +364,7 @@ fn set_serialfn_arg0<'mcx>(
 /// `FunctionCallInvoke(pertrans->serialfn_fcinfo)`; returns `(result,
 /// fcinfo->isnull)`. The fmgr call dispatch is owned by the not-yet-ported fmgr
 /// unit.
-fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum, bool) {
+fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum<'mcx>, bool) {
     panic!(
         "backend-executor-nodeAgg::finalize_partialaggregate: FunctionCallInvoke of the serialfn \
          is owned by the not-yet-ported fmgr unit; no seam yet"
@@ -377,7 +377,7 @@ fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (
 /// same object. The expanded-datum machinery (`utils/adt/expandeddatum.c`) is
 /// not yet ported and carries no seam, so only the trivial cases are handled
 /// here and the expanded-pointer case panics until that owner lands.
-fn make_expanded_object_read_only(d: Datum, isnull: bool, typlen: i16) -> Datum {
+fn make_expanded_object_read_only<'mcx>(d: Datum<'mcx>, isnull: bool, typlen: i16) -> Datum<'mcx> {
     // if (isnull || typlen != -1 || !VARATT_IS_EXTERNAL_EXPANDED_RW(d)) return d;
     // A NULL or a fixed-length (typlen != -1) datum is never an expanded
     // object, so it passes through unchanged.
@@ -516,7 +516,7 @@ pub fn prepare_projection_slot<'mcx>(
 /// not via an explicit `pfree`.
 pub fn finalize_aggregates<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    pergroup: &mut [AggStatePerGroupData],
+    pergroup: &mut [AggStatePerGroupData<'mcx>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let numtrans = aggstate.numtrans;

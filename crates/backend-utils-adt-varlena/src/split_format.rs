@@ -79,7 +79,7 @@ pub enum ArrayElement<'mcx> {
 /// C: `accumArrayResult` loop + `makeArrayResult`/`construct_empty_array`
 /// building a `text[]` Datum from the split fields (arrayfuncs.c). Owner not
 /// yet ported.
-fn build_text_array<'mcx>(_mcx: Mcx<'mcx>, _fields: &[SplitField<'mcx>]) -> PgResult<Datum> {
+fn build_text_array<'mcx>(_mcx: Mcx<'mcx>, _fields: &[SplitField<'mcx>]) -> PgResult<Datum<'mcx>> {
     panic!(
         "unported owner: utils/adt/arrayfuncs.c accumArrayResult/makeArrayResult \
          (text_to_array's array build) — port backend-utils-adt-arrayfuncs"
@@ -100,7 +100,7 @@ fn tuplestore_put_field(_field_value: &[u8], _is_null: bool) -> PgResult<()> {
 /// dispatch). Owner not yet ported.
 fn array_to_text_elements<'mcx>(
     _mcx: Mcx<'mcx>,
-    _v: Datum,
+    _v: &Datum<'mcx>,
     _element_type: Oid,
 ) -> PgResult<PgVec<'mcx, ArrayElement<'mcx>>> {
     panic!(
@@ -143,7 +143,7 @@ fn canonicalize_path<'mcx>(_mcx: Mcx<'mcx>, _path: &[u8]) -> PgResult<PgVec<'mcx
 fn output_function_call<'mcx>(
     _mcx: Mcx<'mcx>,
     _typid: Oid,
-    _value: Datum,
+    _value: &Datum<'mcx>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     panic!(
         "unported owner: fmgr.c OutputFunctionCall + lsyscache.c \
@@ -181,7 +181,7 @@ fn pg_strtoint32(_s: &[u8]) -> PgResult<i32> {
 
 /// C: `toast_datum_size(value)` (access/common/detoast.c) for `pg_column_size`.
 /// Owner not yet ported.
-fn toast_datum_size(_value: Datum) -> PgResult<i32> {
+fn toast_datum_size(_value: &Datum<'_>) -> PgResult<i32> {
     panic!(
         "unported owner: access/common/detoast.c toast_datum_size \
          (pg_column_size varlena path) — port backend-access-common-detoast"
@@ -190,7 +190,7 @@ fn toast_datum_size(_value: Datum) -> PgResult<i32> {
 
 /// C: `strlen(DatumGetCString(value)) + 1` carrier for the cstring branch of
 /// `pg_column_size`; the Datum->cstring deref is the fmgr/Datum boundary's job.
-fn cstring_datum_len(_value: Datum) -> PgResult<i32> {
+fn cstring_datum_len(_value: &Datum<'_>) -> PgResult<i32> {
     panic!(
         "unported owner: fmgr/Datum boundary DatumGetCString \
          (pg_column_size cstring path) — completed at the varlena Datum boundary"
@@ -199,7 +199,7 @@ fn cstring_datum_len(_value: Datum) -> PgResult<i32> {
 
 /// C: `toast_get_compression_id(varlena)` (access/common/toast_compression.c).
 /// Owner not yet ported.
-fn toast_get_compression_id(_value: Datum) -> PgResult<ToastCompressionId> {
+fn toast_get_compression_id(_value: &Datum<'_>) -> PgResult<ToastCompressionId> {
     panic!(
         "unported owner: access/common/toast_compression.c \
          toast_get_compression_id (pg_column_compression) — port \
@@ -210,7 +210,7 @@ fn toast_get_compression_id(_value: Datum) -> PgResult<ToastCompressionId> {
 /// C: `VARATT_IS_EXTERNAL_ONDISK(attr)` test + `VARATT_EXTERNAL_GET_POINTER`'s
 /// `va_valueid` extraction (postgres.h / detoast) for
 /// `pg_column_toast_chunk_id`. Owner not yet ported.
-fn toast_chunk_id(_value: Datum) -> PgResult<Option<Oid>> {
+fn toast_chunk_id(_value: &Datum<'_>) -> PgResult<Option<Oid>> {
     panic!(
         "unported owner: access/common detoast VARATT_EXTERNAL_GET_POINTER \
          va_valueid (pg_column_toast_chunk_id) — port \
@@ -228,7 +228,12 @@ use crate::position_ops::{
     text_position_next, text_position_reset, text_position_setup,
 };
 
-use types_datum::Datum;
+// Migration target: the canonical value type (the unified `Datum` enum), not
+// the bare-word `types_datum::Datum` newtype. By-value scalars ride `ByVal`;
+// by-reference (varlena/array) images ride `ByRef(PgVec<'mcx, u8>)`. The `_v`
+// `&Datum<'mcx>` borrowing convention is used for the value-consuming seam
+// stand-ins so the by-ref payload is not needlessly cloned.
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 // ===========================================================================
 // Family-local carriers.
@@ -280,10 +285,13 @@ pub const TEXT_FORMAT_FLAG_MINUS: i32 = 0x0001;
 /// C: one `format()`/`concat()` argument: its value Datum, null flag, and type
 /// OID. The variadic-array expansion of the C original is the caller's job (the
 /// fmgr/Datum boundary); this carries the already-expanded per-argument view.
-#[derive(Clone, Copy)]
-pub struct FormatArg {
+// No longer `Copy`: the canonical `Datum` carries an owned `PgVec` in its
+// by-reference arm, so the per-argument view is borrowed (`&FormatArg`) at the
+// consumption sites rather than copied.
+#[derive(Clone)]
+pub struct FormatArg<'mcx> {
     /// The argument's value (the Datum the fmgr boundary passes through).
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// Whether the argument is SQL NULL (`PG_ARGISNULL`).
     pub is_null: bool,
     /// The argument's data type OID (`get_fn_expr_argtype` / `ARR_ELEMTYPE`).
@@ -1136,7 +1144,7 @@ pub fn text_to_array<'mcx>(
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
     collation: Oid,
-) -> PgResult<Option<Datum>> {
+) -> PgResult<Option<Datum<'mcx>>> {
     // C:4779-4780 if (!split_text(fcinfo, &tstate)) PG_RETURN_NULL().
     let fields = match split_text(mcx, inputstring, fldsep, null_string, collation)? {
         None => return Ok(None),
@@ -1156,7 +1164,7 @@ pub fn text_to_array_null<'mcx>(
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
     collation: Oid,
-) -> PgResult<Option<Datum>> {
+) -> PgResult<Option<Datum<'mcx>>> {
     text_to_array(mcx, inputstring, fldsep, null_string, collation)
 }
 
@@ -1200,7 +1208,7 @@ pub fn text_to_table_null<'mcx>(
 /// elements with `fldsep`, ignoring NULL elements.
 pub fn array_to_text<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Datum,
+    v: Datum<'mcx>,
     element_type: Oid,
     fldsep: &[u8],
 ) -> PgResult<PgVec<'mcx, u8>> {
@@ -1212,7 +1220,7 @@ pub fn array_to_text<'mcx>(
 /// `array_to_text` but renders NULL elements as `null_string` (when non-None).
 pub fn array_to_text_null<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Datum,
+    v: Datum<'mcx>,
     element_type: Oid,
     fldsep: &[u8],
     null_string: Option<&[u8]>,
@@ -1226,7 +1234,7 @@ pub fn array_to_text_null<'mcx>(
 /// optionally emitting `null_string` for nulls.
 pub fn array_to_text_internal<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Datum,
+    v: Datum<'mcx>,
     element_type: Oid,
     fldsep: &[u8],
     null_string: Option<&[u8]>,
@@ -1234,7 +1242,7 @@ pub fn array_to_text_internal<'mcx>(
     // C:5088-5094 nitems == 0 -> empty string. The owner returns the
     // deconstructed, output-formatted elements; an empty list maps to
     // cstring_to_text_with_len("", 0).
-    let elements = array_to_text_elements(mcx, v, element_type)?;
+    let elements = array_to_text_elements(mcx, &v, element_type)?;
     if elements.is_empty() {
         return cstring_to_text_with_len(mcx, b"", 0);
     }
@@ -1288,7 +1296,7 @@ pub fn array_to_text_internal<'mcx>(
 /// compressed size of any datum. The `fn_extra` typlen cache + `get_typlen`
 /// lookup are the fmgr/Datum boundary's job; `typlen` is supplied resolved
 /// (known non-zero per the C `elog` guard).
-pub fn pg_column_size(value: Datum, typlen: i32) -> PgResult<i32> {
+pub fn pg_column_size(value: &Datum<'_>, typlen: i32) -> PgResult<i32> {
     let result;
 
     if typlen == -1 {
@@ -1310,7 +1318,7 @@ pub fn pg_column_size(value: Datum, typlen: i32) -> PgResult<i32> {
 /// Returns the `text` payload charged to `mcx`.
 pub fn pg_column_compression<'mcx>(
     mcx: Mcx<'mcx>,
-    value: Datum,
+    value: &Datum<'_>,
     typlen: i32,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C:5345-5346 if (typlen != -1) PG_RETURN_NULL().
@@ -1345,7 +1353,7 @@ pub fn pg_column_compression<'mcx>(
 /// typlen cache is the fmgr boundary's job; the `VARATT_IS_EXTERNAL_ONDISK`
 /// check and `va_valueid` extraction live behind the `toast_chunk_id` owner
 /// seam (`None` when not on-disk).
-pub fn pg_column_toast_chunk_id(value: Datum, typlen: i32) -> PgResult<Option<Oid>> {
+pub fn pg_column_toast_chunk_id(value: &Datum<'_>, typlen: i32) -> PgResult<Option<Oid>> {
     // C:5398-5399 if (typlen != -1) PG_RETURN_NULL().
     if typlen != -1 {
         return Ok(None);
@@ -1588,7 +1596,7 @@ pub fn bytea_string_agg_finalfn<'mcx>(
 /// (`!OidIsValid(valtype) -> elog`) is mirrored by `concat_internal`'s
 /// per-argument `output_function_call`, which carries the type. (No body in the
 /// payload layer — folded into `concat_internal`'s seam dispatch.)
-pub fn build_concat_foutcache(_argidx: usize, _args: &[FormatArg]) {
+pub fn build_concat_foutcache(_argidx: usize, _args: &[FormatArg<'_>]) {
     // C builds and caches FmgrInfo per arg; in the layered surface the
     // owner-seam dispatch is keyed by typid each call, so this is a no-op
     // placeholder kept for the named-symbol map. See concat_internal.
@@ -1605,8 +1613,8 @@ pub fn concat_internal<'mcx>(
     mcx: Mcx<'mcx>,
     sepstr: &[u8],
     argidx: usize,
-    args: &[FormatArg],
-    variadic_array: Option<(Datum, Oid)>,
+    args: &[FormatArg<'mcx>],
+    variadic_array: Option<(Datum<'mcx>, Oid)>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C:5697-5725 concat(VARIADIC some-array): hand off to array_to_text with a
     // NULL null_string (ignore nulls), matching the loop below.
@@ -1633,7 +1641,7 @@ pub fn concat_internal<'mcx>(
             }
 
             // C:5748-5749 OutputFunctionCall(&foutcache[i], value); append.
-            let out = output_function_call(mcx, args[i].typid, args[i].value)?;
+            let out = output_function_call(mcx, args[i].typid, &args[i].value)?;
             append_bytes(&mut str, &out)?;
         }
         i += 1;
@@ -1647,8 +1655,8 @@ pub fn concat_internal<'mcx>(
 /// args, no separator.
 pub fn text_concat<'mcx>(
     mcx: Mcx<'mcx>,
-    args: &[FormatArg],
-    variadic_array: Option<(Datum, Oid)>,
+    args: &[FormatArg<'mcx>],
+    variadic_array: Option<(Datum<'mcx>, Oid)>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C:5767 result = concat_internal("", 0, fcinfo).
     concat_internal(mcx, b"", 0, args, variadic_array)
@@ -1659,8 +1667,8 @@ pub fn text_concat<'mcx>(
 pub fn text_concat_ws<'mcx>(
     mcx: Mcx<'mcx>,
     sep: Option<&[u8]>,
-    args: &[FormatArg],
-    variadic_array: Option<(Datum, Oid)>,
+    args: &[FormatArg<'mcx>],
+    variadic_array: Option<(Datum<'mcx>, Oid)>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C:5784-5786 return NULL when separator is NULL.
     let sep_bytes = match sep {
@@ -1833,7 +1841,7 @@ pub fn text_format_string_conversion<'mcx>(
     mcx: Mcx<'mcx>,
     buf: &mut PgVec<'mcx, u8>,
     conversion: u8,
-    arg: FormatArg,
+    arg: &FormatArg<'mcx>,
     flags: i32,
     width: i32,
 ) -> PgResult<()> {
@@ -1850,7 +1858,7 @@ pub fn text_format_string_conversion<'mcx>(
     }
 
     // C:6324 str = OutputFunctionCall(typOutputInfo, value).
-    let str = output_function_call(mcx, arg.typid, arg.value)?;
+    let str = output_function_call(mcx, arg.typid, &arg.value)?;
 
     // C:6326-6341 Escape.
     if conversion == b'I' {
@@ -1878,7 +1886,7 @@ pub fn text_format_string_conversion<'mcx>(
 pub fn text_format<'mcx>(
     mcx: Mcx<'mcx>,
     fmt: Option<&[u8]>,
-    args: &[FormatArg],
+    args: &[FormatArg<'mcx>],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C:5918-5920 When format string is null, immediately return null.
     let fmt_bytes = match fmt {
@@ -1941,7 +1949,7 @@ pub fn text_format<'mcx>(
             }
 
             // C:6040-6053 get the value/type of the selected argument.
-            let cur = args[(arg - 1) as usize];
+            let cur = &args[(arg - 1) as usize];
             if !types_core::OidIsValid(cur.typid) {
                 return Err(could_not_determine_type());
             }
@@ -1952,12 +1960,12 @@ pub fn text_format<'mcx>(
             if cur.is_null {
                 width = 0;
             } else if cur.typid == INT4OID {
-                width = datum_get_int32(cur.value);
+                width = datum_get_int32(&cur.value);
             } else if cur.typid == INT2OID {
-                width = datum_get_int16(cur.value) as i32;
+                width = datum_get_int16(&cur.value) as i32;
             } else {
                 // C:6079 str = OutputFunctionCall(&typoutputinfo_width, value).
-                let s = output_function_call(mcx, cur.typid, cur.value)?;
+                let s = output_function_call(mcx, cur.typid, &cur.value)?;
                 // C:6082 width = pg_strtoint32(str).
                 width = pg_strtoint32(&s)?;
             }
@@ -1972,7 +1980,7 @@ pub fn text_format<'mcx>(
         }
 
         // C:6097-6110 get value/type of selected argument.
-        let cur = args[(arg - 1) as usize];
+        let cur = &args[(arg - 1) as usize];
         if !types_core::OidIsValid(cur.typid) {
             return Err(could_not_determine_type());
         }
@@ -2003,7 +2011,7 @@ pub fn text_format<'mcx>(
 pub fn text_format_nv<'mcx>(
     mcx: Mcx<'mcx>,
     fmt: Option<&[u8]>,
-    args: &[FormatArg],
+    args: &[FormatArg<'mcx>],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // C: return text_format(fcinfo).
     text_format(mcx, fmt, args)
@@ -2014,11 +2022,11 @@ pub fn text_format_nv<'mcx>(
 // ---------------------------------------------------------------------------
 
 /// C: `DatumGetInt32(value)` (postgres.h) — the low 32 bits of the Datum.
-fn datum_get_int32(value: Datum) -> i32 {
+fn datum_get_int32(value: &Datum<'_>) -> i32 {
     value.as_i32()
 }
 
 /// C: `DatumGetInt16(value)` (postgres.h) — the low 16 bits of the Datum.
-fn datum_get_int16(value: Datum) -> i16 {
+fn datum_get_int16(value: &Datum<'_>) -> i16 {
     value.as_i16()
 }

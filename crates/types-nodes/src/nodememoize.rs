@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 use mcx::{PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_core::fmgr::FmgrInfo;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
@@ -364,13 +364,13 @@ pub struct MemoizeScanState<'mcx> {
     /// `tableslot->tts_values` — the deformed cache-key values read out of
     /// `tableslot` by the equality/probe code. Modeled as the owned deformed
     /// values/nulls, `nkeys` long.
-    pub table_values: PgVec<'mcx, Datum>,
+    pub table_values: PgVec<'mcx, Datum<'mcx>>,
     /// `tableslot->tts_isnull`.
     pub table_isnull: PgVec<'mcx, bool>,
     /// `TupleTableSlot *probeslot` — virtual slot holding the current lookup's
     /// key values, populated by `prepare_probe_slot`. Modeled as the owned
     /// values/nulls (`tts_values`/`tts_isnull`), `nkeys` long.
-    pub probe_values: PgVec<'mcx, Datum>,
+    pub probe_values: PgVec<'mcx, Datum<'mcx>>,
     /// `probeslot->tts_isnull`.
     pub probe_isnull: PgVec<'mcx, bool>,
     /// `ExprState *cache_eq_expr` — compiled non-binary key-equality expression

@@ -42,9 +42,17 @@ use alloc::format;
 
 use mcx::{slice_in, Mcx, PgVec};
 use types_core::primitive::Size;
-use types_datum::{Datum, ExpandedObjectRef};
+// `ExpandedObjectRef` is the `&[u8]`-over-a-varlena-image handle (NOT the Datum
+// shim); the canonical value enum is `types_tuple::…::Datum`. The bare-word
+// newtype `types_datum::Datum` is imported under the alias `ScalarWord` solely
+// for the audited DSM-cursor / fmgr-return ABI edges (`datum_restore`,
+// `datum_serialize`, `datum_copy_word`, `datum_image_eq_word`) whose seam
+// contracts still carry a bare machine word for not-yet-migrated callers
+// (params.c `copyParamList`, nbtree array (de)serialize, misc2 rowtypes); every
+// value-model operation uses the `Datum` enum and its `from_*`/`as_*` codec.
+use types_datum::{Datum as ScalarWord, ExpandedObjectRef};
 use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_adt_misc2_seams::{eoh_flatten_into, eoh_get_flat_size};
 
@@ -187,17 +195,17 @@ fn cstr_len(s: &[u8]) -> usize {
 /// `VARSIZE_ANY` bytes verbatim; other by-ref types copy `datumGetSize` bytes.
 pub fn datum_copy<'mcx>(
     mcx: Mcx<'mcx>,
-    value: &TupleValue<'_>,
+    value: &Datum<'_>,
     typ_byval: bool,
     typ_len: i16,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if typ_byval {
         // res = value
         return Ok(match value {
-            TupleValue::ByVal(d) => TupleValue::ByVal(*d),
+            Datum::ByVal(d) => Datum::ByVal(*d),
             // A by-value type must arrive as ByVal (C: the Datum word is the value).
-            TupleValue::ByRef(_) => {
-                panic!("datumCopy: by-value type arrived as a by-reference TupleValue")
+            Datum::ByRef(_) => {
+                panic!("datumCopy: by-value type arrived as a by-reference value")
             }
         });
     }
@@ -212,16 +220,16 @@ pub fn datum_copy<'mcx>(
             let resultsize = eoh_get_flat_size::call(eoh)?;
             let mut dest = zeroed_vec(mcx, resultsize)?;
             eoh_flatten_into::call(eoh, &mut dest)?;
-            Ok(TupleValue::ByRef(dest))
+            Ok(Datum::ByRef(dest))
         } else {
             // Otherwise copy the varlena datum verbatim (realSize = VARSIZE_ANY).
             let real_size = varsize_any(bytes);
-            Ok(TupleValue::ByRef(slice_in(mcx, &bytes[..real_size])?))
+            Ok(Datum::ByRef(slice_in(mcx, &bytes[..real_size])?))
         }
     } else {
         // Pass by reference, but not varlena, so not toasted.
         let real_size = datum_get_size_bytes(Some(bytes), false, typ_len as i32)?;
-        Ok(TupleValue::ByRef(slice_in(mcx, &bytes[..real_size])?))
+        Ok(Datum::ByRef(slice_in(mcx, &bytes[..real_size])?))
     }
 }
 
@@ -237,15 +245,15 @@ fn zeroed_vec<'mcx>(mcx: Mcx<'mcx>, len: usize) -> PgResult<PgVec<'mcx, u8>> {
 /// bytes with `memcmp` after a length check. (No toast handling, per the C
 /// contract: the bytes are compared as-is.)
 pub fn datum_is_equal(
-    value1: &TupleValue<'_>,
-    value2: &TupleValue<'_>,
+    value1: &Datum<'_>,
+    value2: &Datum<'_>,
     typ_byval: bool,
     typ_len: i32,
 ) -> PgResult<bool> {
     if typ_byval {
         let (w1, w2) = match (value1, value2) {
-            (TupleValue::ByVal(a), TupleValue::ByVal(b)) => (a.as_usize(), b.as_usize()),
-            _ => panic!("datumIsEqual: by-value type arrived as a by-reference TupleValue"),
+            (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
+            _ => panic!("datumIsEqual: by-value type arrived as a by-reference value"),
         };
         Ok(w1 == w2)
     } else {
@@ -265,8 +273,8 @@ pub fn datum_is_equal(
 /// reads the already-detoasted `ByRef` payload directly via `VARDATA_ANY` /
 /// `VARSIZE_ANY_EXHDR`, exactly as rowtypes does.
 pub fn datum_image_eq_bytes(
-    value1: &TupleValue<'_>,
-    value2: &TupleValue<'_>,
+    value1: &Datum<'_>,
+    value2: &Datum<'_>,
     typ_byval: bool,
     typ_len: i32,
 ) -> PgResult<bool> {
@@ -307,15 +315,15 @@ pub fn datum_image_eq_bytes(
 /// `typLen` bytes for fixed-length by-ref, the logical varlena payload for
 /// `typLen == -1`, and `strlen + 1` for a cstring.
 pub fn datum_image_hash_bytes(
-    value: &TupleValue<'_>,
+    value: &Datum<'_>,
     typ_byval: bool,
     typ_len: i32,
 ) -> PgResult<u32> {
     if typ_byval {
         let d = match value {
-            TupleValue::ByVal(d) => *d,
-            TupleValue::ByRef(_) => {
-                panic!("datum_image_hash: by-value type arrived as a by-reference TupleValue")
+            Datum::ByVal(d) => *d,
+            Datum::ByRef(_) => {
+                panic!("datum_image_hash: by-value type arrived as a by-reference value")
             }
         };
         // hash_bytes((unsigned char *) &value, sizeof(Datum))
@@ -344,21 +352,32 @@ pub fn btequalimage(_opcintype: u32) -> bool {
 
 fn byval_words(
     who: &str,
-    value1: &TupleValue<'_>,
-    value2: &TupleValue<'_>,
+    value1: &Datum<'_>,
+    value2: &Datum<'_>,
 ) -> (usize, usize) {
     match (value1, value2) {
-        (TupleValue::ByVal(a), TupleValue::ByVal(b)) => (a.as_usize(), b.as_usize()),
-        _ => panic!("{who}: by-value type arrived as a by-reference TupleValue"),
+        (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
+        _ => panic!("{who}: by-value type arrived as a by-reference value"),
     }
 }
 
 // ===========================================================================
-// The BARE-Datum lane (backend-utils-adt-datum-seams).
+// The BARE-word residual ABI edge (backend-utils-adt-datum-seams).
 //
-// A by-reference `Datum` is C's machine word == a raw pointer into bytes the
-// caller keeps alive in `mcx`. We recover the length from the pointed-at bytes
-// with `unsafe` reads mirroring C's `DatumGetPointer` + `VARSIZE_ANY`/`strlen`.
+// These functions are the audited bare-machine-word edge the prompt sanctions
+// (fmgr-return / DSM-cursor): the seam contract carries a `ScalarWord`
+// (`types_datum::Datum`, C's plain `usize` machine word) for callers that have
+// not yet migrated to the `Datum` enum — `params.c` `copyParamList`
+// (`datum_copy_word`), nbtree array (de)serialize (`datum_serialize` /
+// `datum_restore`, a `*mut u8` DSM cursor), and misc2 `rowtypes`
+// (`datum_image_eq_word`, via its `tuple_value_as_datum` pointer bridge). The
+// value-model lane above and the `*_v` enum seams below are the migration
+// target; these stay until their cross-crate consumers move over.
+//
+// A by-reference `ScalarWord` is C's machine word == a raw pointer into bytes
+// the caller keeps alive in `mcx`. We recover the length from the pointed-at
+// bytes with `unsafe` reads mirroring C's `DatumGetPointer` +
+// `VARSIZE_ANY`/`strlen`. This opacity is INHERITED from C's `Datum` contract.
 // ===========================================================================
 
 /// `DatumGetPointer(value)` over a bounded prefix: a `&[u8]` view of the bytes
@@ -366,7 +385,7 @@ fn byval_words(
 /// computed, or an upper bound). SAFETY: the caller (per datum.c's contract)
 /// holds a live by-reference Datum whose target spans at least `len` bytes.
 #[inline]
-unsafe fn datum_ptr_slice<'a>(value: Datum, len: usize) -> &'a [u8] {
+unsafe fn datum_ptr_slice<'a>(value: ScalarWord, len: usize) -> &'a [u8] {
     let p = value.as_usize() as *const u8;
     core::slice::from_raw_parts(p, len)
 }
@@ -374,7 +393,7 @@ unsafe fn datum_ptr_slice<'a>(value: Datum, len: usize) -> &'a [u8] {
 /// `VARSIZE_ANY(DatumGetPointer(value))` for a varlena Datum: read the header
 /// first to learn the total size, then return the full image view.
 /// SAFETY: `value` points at a valid varlena (caller keeps it alive in mcx).
-unsafe fn varlena_image<'a>(value: Datum) -> &'a [u8] {
+unsafe fn varlena_image<'a>(value: ScalarWord) -> &'a [u8] {
     // Read enough of the header to compute VARSIZE_ANY (4 bytes covers the
     // 1-byte short / external tag bytes and the 4-byte length word).
     let head = datum_ptr_slice(value, VARHDRSZ);
@@ -385,7 +404,7 @@ unsafe fn varlena_image<'a>(value: Datum) -> &'a [u8] {
 /// `datumGetSize(value, typByVal, typLen)` over the bare-Datum lane: dereference
 /// the pointer word for the by-ref cases.
 /// SAFETY: by-ref `value` points at a live image of the type.
-unsafe fn datum_get_size_word(value: Datum, typ_byval: bool, typ_len: i32) -> PgResult<Size> {
+unsafe fn datum_get_size_word(value: ScalarWord, typ_byval: bool, typ_len: i32) -> PgResult<Size> {
     if typ_byval || typ_len > 0 {
         datum_get_size_bytes(None, typ_byval, typ_len)
     } else if typ_len == -1 {
@@ -401,7 +420,7 @@ unsafe fn datum_get_size_word(value: Datum, typ_byval: bool, typ_len: i32) -> Pg
 
 /// `strlen((char *) DatumGetPointer(value))`.
 /// SAFETY: `value` points at a NUL-terminated C string the caller keeps alive.
-unsafe fn cstring_len_at(value: Datum) -> usize {
+unsafe fn cstring_len_at(value: ScalarWord) -> usize {
     let p = value.as_usize() as *const u8;
     let mut n = 0usize;
     while *p.add(n) != 0 {
@@ -421,7 +440,7 @@ unsafe fn cstring_len_at(value: Datum) -> usize {
 /// absent from the infallible seam, so an OOM/oversize-array error from the
 /// owner panics here (sanctioned: the serial param-copy path never produces a
 /// read-write expanded pointer, matching the misc2 mcx-ownership boundary).
-pub fn datum_copy_word(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
+pub fn datum_copy_word(value: ScalarWord, typ_byval: bool, typ_len: i32) -> ScalarWord {
     if typ_byval {
         return value;
     }
@@ -473,7 +492,7 @@ pub fn datum_copy_word(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
 /// them.
 ///
 /// SAFETY: a non-null by-ref `value` points at a live image (caller's tuple/mcx).
-pub fn datum_transfer(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
+pub fn datum_transfer(value: ScalarWord, typ_byval: bool, typ_len: i32) -> ScalarWord {
     if !typ_byval && typ_len == -1 {
         // SAFETY: by-ref varlena Datum points at a live image.
         let img = unsafe { varlena_image(value) };
@@ -498,17 +517,17 @@ pub fn datum_transfer(value: Datum, typ_byval: bool, typ_len: i32) -> Datum {
 /// `PointerGetDatum(palloc'd image)` — `Box::leak` the fresh copy so it outlives
 /// the call (owned by the caller exactly as a `palloc`'d chunk is) and return its
 /// base pointer as the `Datum` word.
-fn leak_bytes_as_datum(bytes: alloc::vec::Vec<u8>) -> Datum {
+fn leak_bytes_as_datum(bytes: alloc::vec::Vec<u8>) -> ScalarWord {
     let leaked: &'static mut [u8] = alloc::boxed::Box::leak(bytes.into_boxed_slice());
-    Datum::from_usize(leaked.as_ptr() as usize)
+    ScalarWord::from_usize(leaked.as_ptr() as usize)
 }
 
 /// `datum_image_eq(value1, value2, typByVal, typLen)` (datum.c) — bare-`Datum`
 /// form. Consumed by misc2 rowtypes' `tuple_value_as_datum` pointer bridge.
 /// SAFETY: by-ref Datums point at live, already-detoasted images.
 pub fn datum_image_eq_word(
-    value1: Datum,
-    value2: Datum,
+    value1: ScalarWord,
+    value2: ScalarWord,
     typ_byval: bool,
     typ_len: i16,
 ) -> PgResult<bool> {
@@ -544,70 +563,6 @@ pub fn datum_image_eq_word(
     }
 }
 
-/// `datum_image_hash(value, typByVal, typLen)` (datum.c) — bare-`Datum` form.
-/// Consumed by nodeMemoize's `MemoizeHash_hash`.
-/// SAFETY: by-ref Datums point at live, already-detoasted images.
-pub fn datum_image_hash_word(value: Datum, typ_byval: bool, typ_len: i16) -> PgResult<u32> {
-    let typ_len = typ_len as i32;
-    if typ_byval {
-        // hash_bytes((unsigned char *) &value, sizeof(Datum))
-        return Ok(common_hashfn::hash_bytes(&value.as_usize().to_ne_bytes()));
-    }
-    unsafe {
-        if typ_len > 0 {
-            let b = datum_ptr_slice(value, typ_len as usize);
-            Ok(common_hashfn::hash_bytes(b))
-        } else if typ_len == -1 {
-            let (data, _len) = varlena_payload(varlena_image(value));
-            Ok(common_hashfn::hash_bytes(data))
-        } else if typ_len == -2 {
-            let len = cstring_len_at(value) + 1;
-            let s = datum_ptr_slice(value, len);
-            Ok(common_hashfn::hash_bytes(s))
-        } else {
-            Err(PgError::error(format!("unexpected typLen: {typ_len}")))
-        }
-    }
-}
-
-/// `datumEstimateSpace(value, isnull, typByVal, typLen)` (datum.c): bytes needed
-/// to serialize one datum (`sizeof(int)` header plus the payload). Expanded
-/// objects are sized via their flattened size (`EOH_get_flat_size`).
-/// SAFETY: a non-null by-ref `value` points at a live image.
-pub fn datum_estimate_space(
-    value: Datum,
-    isnull: bool,
-    typ_byval: bool,
-    typ_len: i32,
-) -> Size {
-    // sz = sizeof(int)
-    let mut sz: Size = core::mem::size_of::<i32>();
-    if !isnull {
-        if typ_byval {
-            sz += core::mem::size_of::<Datum>();
-        } else {
-            // SAFETY: non-null, by-ref Datum points at a live image.
-            let is_expanded = typ_len == -1 && unsafe {
-                varatt_is_external_expanded(varlena_image(value))
-            };
-            if is_expanded {
-                // Expanded objects need to be flattened.
-                let eoh = unsafe { ExpandedObjectRef::from_expanded_datum_bytes(varlena_image(value)) };
-                // C does not handle the ereport here; EOH_get_flat_size can raise.
-                // datumEstimateSpace's C signature returns Size with no error path,
-                // mirroring that the expanded-array get_flat_size only errors on
-                // oversize; the (Size) return seam matches C. We surface the size.
-                sz += eoh_get_flat_size::call(eoh).expect("EOH_get_flat_size");
-            } else {
-                // SAFETY: as above.
-                sz += unsafe { datum_get_size_word(value, typ_byval, typ_len) }
-                    .expect("datumGetSize");
-            }
-        }
-    }
-    sz
-}
-
 /// `datumSerialize(value, isnull, typByVal, typLen, &cursor)` (datum.c): flatten
 /// one datum into `cursor` (a `*mut u8` modelling C's `char **start_address`),
 /// returning the advanced cursor.
@@ -620,7 +575,7 @@ pub fn datum_estimate_space(
 /// SAFETY: `cursor` has at least `datumEstimateSpace` bytes of writable storage;
 /// a non-null by-ref `value` points at a live image.
 pub fn datum_serialize(
-    value: Datum,
+    value: ScalarWord,
     isnull: bool,
     typ_byval: bool,
     typ_len: i32,
@@ -684,7 +639,7 @@ pub fn datum_serialize(
 /// heap allocation whose pointer is returned as the `Datum` word — the caller
 /// owns it exactly as it would a `palloc`'d chunk. SAFETY: `cursor` points at a
 /// valid datumSerialize image with at least the indicated bytes.
-pub fn datum_restore(cursor: *mut u8) -> (Datum, bool, *mut u8) {
+pub fn datum_restore(cursor: *mut u8) -> (ScalarWord, bool, *mut u8) {
     unsafe {
         // memcpy(&header, *start_address, sizeof(int)); *start_address += sizeof(int);
         let mut hbytes = [0u8; 4];
@@ -694,7 +649,7 @@ pub fn datum_restore(cursor: *mut u8) -> (Datum, bool, *mut u8) {
 
         if header == -2 {
             // NULL.
-            return (Datum::null(), true, cur);
+            return (ScalarWord::null(), true, cur);
         }
 
         if header == -1 {
@@ -702,7 +657,7 @@ pub fn datum_restore(cursor: *mut u8) -> (Datum, bool, *mut u8) {
             let mut wbytes = [0u8; core::mem::size_of::<usize>()];
             core::ptr::copy_nonoverlapping(cur as *const u8, wbytes.as_mut_ptr(), wbytes.len());
             cur = cur.add(wbytes.len());
-            return (Datum::from_usize(usize::from_ne_bytes(wbytes)), false, cur);
+            return (ScalarWord::from_usize(usize::from_ne_bytes(wbytes)), false, cur);
         }
 
         // Pass-by-reference: copy `header` bytes (Assert header > 0).
@@ -713,29 +668,177 @@ pub fn datum_restore(cursor: *mut u8) -> (Datum, bool, *mut u8) {
         cur = cur.add(n);
         // PointerGetDatum(palloc'd copy): own the bytes via a leaked boxed slice.
         let leaked: &'static mut [u8] = alloc::boxed::Box::leak(buf.into_boxed_slice());
-        (Datum::from_usize(leaked.as_ptr() as usize), false, cur)
+        (ScalarWord::from_usize(leaked.as_ptr() as usize), false, cur)
     }
+}
+
+// ===========================================================================
+// The `*_v` value-model lane (backend-utils-adt-datum-seams `*_v` variants).
+//
+// The migration-target contract: every value crosses as the canonical `Datum`
+// enum (`ByVal(word)` / `ByRef(bytes)`), never a bare machine word, so there is
+// no pointer forge and no `unsafe` raw-pointer read — a by-reference value is
+// its verbatim on-disk image in `ByRef`, exactly as the byte-model lane above.
+// These reuse the byte-model helpers (`datum_copy`, `datum_image_eq_bytes`,
+// `datum_image_hash_bytes`, `datum_get_size_bytes`). Consumed by nodeMemoize
+// (`datum_image_hash_v` / `datum_image_eq_v`) and nbtree (`datum_estimate_space_v`).
+// ===========================================================================
+
+/// `datumCopy` over the unified value enum (`datum_copy_v` seam). Identical
+/// semantics to the byte-model [`datum_copy`]; the seam's `typLen` is `i32`.
+pub fn datum_copy_v<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &Datum<'_>,
+    typ_byval: bool,
+    typ_len: i32,
+) -> PgResult<Datum<'mcx>> {
+    datum_copy(mcx, value, typ_byval, typ_len as i16)
+}
+
+/// `datumEstimateSpace` over the unified value enum (`datum_estimate_space_v`
+/// seam): `sizeof(int)` header plus the payload. By-value adds `sizeof(Datum)`;
+/// by-ref adds `datumGetSize` over the `ByRef` image; an expanded varlena adds
+/// its flattened size (`EOH_get_flat_size`). No `unsafe`/pointer read — the
+/// bytes are the `ByRef` payload.
+pub fn datum_estimate_space_v(
+    value: &Datum<'_>,
+    isnull: bool,
+    typ_byval: bool,
+    typ_len: i32,
+) -> Size {
+    // sz = sizeof(int)
+    let mut sz: Size = core::mem::size_of::<i32>();
+    if !isnull {
+        if typ_byval {
+            sz += core::mem::size_of::<usize>();
+        } else {
+            let bytes = value.as_ref_bytes();
+            if typ_len == -1 && varatt_is_external_expanded(bytes) {
+                // Expanded objects need to be flattened.
+                let eoh = ExpandedObjectRef::from_expanded_datum_bytes(bytes);
+                // datumEstimateSpace's C signature returns Size with no error path;
+                // EOH_get_flat_size only errors on oversize, mirroring C.
+                sz += eoh_get_flat_size::call(eoh).expect("EOH_get_flat_size");
+            } else {
+                sz += datum_get_size_bytes(Some(bytes), false, typ_len).expect("datumGetSize");
+            }
+        }
+    }
+    sz
+}
+
+/// `datumSerialize` over the unified value enum (`datum_serialize_v` seam):
+/// flatten one value into `cursor` (C's `char **start_address`) and return the
+/// advanced cursor. Header word: `-2` NULL, `-1` by-value, else the payload
+/// byte count (expanded objects use their flattened size). By-value writes
+/// `sizeof(Datum)` bytes of the `ByVal` word; by-ref writes the `ByRef` payload
+/// bytes (expanded objects flattened through a maxaligned scratch buffer).
+///
+/// SAFETY: `cursor` has at least `datum_estimate_space_v` bytes of writable
+/// storage.
+pub fn datum_serialize_v(
+    value: &Datum<'_>,
+    isnull: bool,
+    typ_byval: bool,
+    typ_len: i32,
+    cursor: *mut u8,
+) -> *mut u8 {
+    // Compute header word and any flattened-expanded image.
+    let mut eoh: Option<ExpandedObjectRef<'_>> = None;
+    let header: i32 = if isnull {
+        -2
+    } else if typ_byval {
+        -1
+    } else if typ_len == -1 && varatt_is_external_expanded(value.as_ref_bytes()) {
+        let e = ExpandedObjectRef::from_expanded_datum_bytes(value.as_ref_bytes());
+        let sz = eoh_get_flat_size::call(e).expect("EOH_get_flat_size") as i32;
+        eoh = Some(e);
+        sz
+    } else {
+        datum_get_size_bytes(Some(value.as_ref_bytes()), false, typ_len).expect("datumGetSize")
+            as i32
+    };
+
+    unsafe {
+        // memcpy(*start_address, &header, sizeof(int)); *start_address += sizeof(int);
+        let hbytes = header.to_ne_bytes();
+        core::ptr::copy_nonoverlapping(hbytes.as_ptr(), cursor, hbytes.len());
+        let mut cur = cursor.add(hbytes.len());
+
+        if !isnull {
+            if typ_byval {
+                // memcpy(*start_address, &value, sizeof(Datum));
+                let vbytes = value.as_usize().to_ne_bytes();
+                core::ptr::copy_nonoverlapping(vbytes.as_ptr(), cur, vbytes.len());
+                cur = cur.add(vbytes.len());
+            } else if let Some(e) = eoh {
+                // EOH_flatten_into wants a maxaligned target; flatten into scratch
+                // then memcpy. (C: palloc(header); EOH_flatten_into; memcpy; pfree.)
+                let n = header as usize;
+                let mut tmp = alloc::vec![0u8; n];
+                eoh_flatten_into::call(e, &mut tmp).expect("EOH_flatten_into");
+                core::ptr::copy_nonoverlapping(tmp.as_ptr(), cur, n);
+                cur = cur.add(n);
+            } else {
+                // memcpy(*start_address, DatumGetPointer(value), header);
+                let n = header as usize;
+                let src = value.as_ref_bytes();
+                core::ptr::copy_nonoverlapping(src.as_ptr(), cur, n);
+                cur = cur.add(n);
+            }
+        }
+        cur
+    }
+}
+
+/// `datum_image_hash` over the unified value enum (`datum_image_hash_v` seam).
+/// Identical semantics to the byte-model [`datum_image_hash_bytes`].
+pub fn datum_image_hash_v(value: &Datum<'_>, typ_byval: bool, typ_len: i16) -> PgResult<u32> {
+    datum_image_hash_bytes(value, typ_byval, typ_len as i32)
+}
+
+/// `datum_image_eq` over the unified value enum (`datum_image_eq_v` seam).
+/// Identical semantics to the byte-model [`datum_image_eq_bytes`].
+pub fn datum_image_eq_v(
+    value1: &Datum<'_>,
+    value2: &Datum<'_>,
+    typ_byval: bool,
+    typ_len: i16,
+) -> PgResult<bool> {
+    datum_image_eq_bytes(value1, value2, typ_byval, typ_len as i32)
 }
 
 // ===========================================================================
 // Seam installation.
 //
-// Both seam crates' DIVERGENT contracts are installed verbatim (NOT unified):
-//   * backend-utils-adt-scalar-seams::datum_copy   -> the TupleValue byte model
-//   * backend-utils-adt-datum-seams::{datum_copy, datum_estimate_space,
-//     datum_serialize, datum_restore, datum_image_hash, datum_image_eq}
-//       -> the bare-Datum machine-word model
+// The byte-model lane and the migration-target `*_v` value-enum lane are the
+// canonical contracts; the residual bare-word seams (`datum_copy`,
+// `datum_serialize`, `datum_restore`, `datum_image_eq`) are installed only for
+// the cross-crate consumers still on the machine-word edge (params.c, nbtree
+// DSM cursor, misc2 rowtypes) and are removed once those migrate. The
+// fully-superseded bare-word `datum_estimate_space` / `datum_image_hash` (their
+// consumers moved to the `*_v` variants) are no longer installed here.
 // ===========================================================================
 
 /// Install datum.c's inward seams. Idempotent at the seam layer.
 pub fn init_seams() {
+    // Byte-model lane (brin-tuple).
     backend_utils_adt_scalar_seams::datum_copy::set(datum_copy);
 
+    // Migration-target value-enum (`*_v`) lane.
+    backend_utils_adt_datum_seams::datum_copy_v::set(datum_copy_v);
+    backend_utils_adt_datum_seams::datum_estimate_space_v::set(datum_estimate_space_v);
+    backend_utils_adt_datum_seams::datum_serialize_v::set(datum_serialize_v);
+    backend_utils_adt_datum_seams::datum_image_hash_v::set(datum_image_hash_v);
+    backend_utils_adt_datum_seams::datum_image_eq_v::set(datum_image_eq_v);
+
+    // Residual bare-machine-word ABI edge for not-yet-migrated cross-crate
+    // consumers (params.c copyParamList; nbtree array (de)serialize over a DSM
+    // cursor; misc2 rowtypes pointer bridge). Removed when those migrate; the
+    // superseded `datum_estimate_space` / `datum_image_hash` are not installed.
     backend_utils_adt_datum_seams::datum_copy::set(datum_copy_word);
-    backend_utils_adt_datum_seams::datum_estimate_space::set(datum_estimate_space);
     backend_utils_adt_datum_seams::datum_serialize::set(datum_serialize);
     backend_utils_adt_datum_seams::datum_restore::set(datum_restore);
-    backend_utils_adt_datum_seams::datum_image_hash::set(datum_image_hash_word);
     backend_utils_adt_datum_seams::datum_image_eq::set(datum_image_eq_word);
 }
 

@@ -48,9 +48,22 @@
 //!   `EEOP_AGG_PLAIN_PERGROUP_NULLCHECK` / `EEOP_AGG_PRESORTED_DISTINCT_*` /
 //!   `EEOP_AGG_*DESERIALIZE` arms have no real state to drive.
 
+// The bare-word newtype: the scalar form the interpreter loop's cell helpers
+// pass around.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ExprState.resvalue` / `ResultCell.value` and the canonical
+// step-payload values (`ConstVal`, `HashDatumInitValue`) carry.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_nodes::execexpr::ExprEvalOp::*;
+
+/// Recover the bare scalar word from a stored canonical by-value datum (the
+/// transitional bridge: the interpreter cell helpers operate on a word).
+#[inline]
+fn word_of(v: &DatumV<'_>) -> Datum {
+    Datum::from_usize(v.as_usize())
+}
 use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell, ResultCellId};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
@@ -71,10 +84,12 @@ use crate::eval_scalar;
 #[inline]
 fn read_cell(state: &ExprState<'_>, id: ResultCellId) -> (Datum, bool) {
     if id == types_nodes::execexpr::STATE_RESULT_CELL {
-        (state.resvalue, state.resnull)
+        // The canonical result value crosses back to the bare scalar word the
+        // interpreter loop operates on.
+        (word_of(&state.resvalue), state.resnull)
     } else {
         let c = state.result_cells.get(id);
-        (c.value, c.isnull)
+        (word_of(&c.value), c.isnull)
     }
 }
 
@@ -82,10 +97,13 @@ fn read_cell(state: &ExprState<'_>, id: ResultCellId) -> (Datum, bool) {
 #[inline]
 fn write_cell(state: &mut ExprState<'_>, id: ResultCellId, value: Datum, isnull: bool) {
     if id == types_nodes::execexpr::STATE_RESULT_CELL {
-        state.resvalue = value;
+        // The bare scalar word crosses into the canonical by-value arm.
+        state.resvalue = DatumV::ByVal(value);
         state.resnull = isnull;
     } else {
-        state.result_cells.set(id, ResultCell { value, isnull });
+        state
+            .result_cells
+            .set(id, ResultCell { value: DatumV::ByVal(value), isnull });
     }
 }
 
@@ -124,7 +142,7 @@ pub fn ExecInterpExpr<'mcx>(
         match opcode {
             EEOP_DONE_RETURN => {
                 // *isnull = state->resnull; return state->resvalue;
-                return Ok((state.resvalue, state.resnull));
+                return Ok((word_of(&state.resvalue), state.resnull));
             }
 
             EEOP_DONE_NO_RETURN => {
@@ -252,7 +270,8 @@ pub fn ExecInterpExpr<'mcx>(
                 // C: *op->resnull = op->d.constval.isnull;
                 //    *op->resvalue = op->d.constval.value;
                 let (value, isnull) = match &state.steps.as_ref().unwrap()[op].d {
-                    ExprEvalStepData::ConstVal { value, isnull } => (*value, *isnull),
+                    // The canonical const value crosses back to the bare word.
+                    ExprEvalStepData::ConstVal { value, isnull } => (word_of(value), *isnull),
                     _ => unreachable!("EEOP_CONST: payload is not ConstVal"),
                 };
                 write_cell(state, resv, value, isnull);
@@ -534,7 +553,7 @@ pub fn ExecInterpExpr<'mcx>(
                 // C: *op->resvalue = econtext->caseValue_datum;
                 //    *op->resnull  = econtext->caseValue_isNull;
                 let ecxt = estate.ecxt(econtext);
-                let (value, isnull) = (ecxt.caseValue_datum, ecxt.caseValue_isNull);
+                let (value, isnull) = (word_of(&ecxt.caseValue_datum), ecxt.caseValue_isNull);
                 write_cell(state, resv, value, isnull);
                 op += 1;
             }
@@ -776,7 +795,7 @@ pub fn ExecInterpExpr<'mcx>(
                 // C: *op->resvalue = econtext->domainValue_datum;
                 //    *op->resnull  = econtext->domainValue_isNull;
                 let ecxt = estate.ecxt(econtext);
-                let (value, isnull) = (ecxt.domainValue_datum, ecxt.domainValue_isNull);
+                let (value, isnull) = (word_of(&ecxt.domainValue_datum), ecxt.domainValue_isNull);
                 write_cell(state, resv, value, isnull);
                 op += 1;
             }
@@ -797,7 +816,8 @@ pub fn ExecInterpExpr<'mcx>(
                 // C: *op->resvalue = op->d.hashdatum_initvalue.init_value;
                 //    *op->resnull = false;
                 let init_value = match &state.steps.as_ref().unwrap()[op].d {
-                    ExprEvalStepData::HashDatumInitValue { init_value } => *init_value,
+                    // The canonical init value crosses back to the bare word.
+                    ExprEvalStepData::HashDatumInitValue { init_value } => word_of(init_value),
                     _ => unreachable!(
                         "EEOP_HASHDATUM_SET_INITVAL: payload is not HashDatumInitValue"
                     ),
@@ -867,7 +887,7 @@ pub fn ExecInterpExpr<'mcx>(
                     _ => unreachable!("EEOP_AGGREF: payload is not Aggref"),
                 };
                 let ecxt = estate.ecxt(econtext);
-                let value = ecxt.ecxt_aggvalues[aggno as usize];
+                let value = word_of(&ecxt.ecxt_aggvalues[aggno as usize]);
                 let isnull = ecxt.ecxt_aggnulls[aggno as usize];
                 write_cell(state, resv, value, isnull);
                 op += 1;

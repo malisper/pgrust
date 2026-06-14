@@ -58,6 +58,13 @@ use types_core::{
     RELATION_RELATION_ID,
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
 };
+// Residual bare-word `Datum` (the `types_datum` newtype) survives ONLY at the
+// callback-registration ABI edge: `before_shmem_exit` and
+// `cache_register_syscache_callback` both take the opaque callback token by the
+// bare-word seam contract (`fn(i32, types_datum::Datum)` / `arg: types_datum::Datum`).
+// This crate's own logic constructs/reads no scalars, so there is nothing to move
+// onto the canonical `types_tuple::backend_access_common_heaptuple::Datum<'mcx>`
+// enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
 use types_datum::Datum;
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -3956,7 +3963,7 @@ pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) -> PgResult<()> {
 
     if should_handle {
         if isCommit {
-            ipc_seams::before_shmem_exit::call(RemoveTempRelationsCallback, Datum::from_usize(0))?;
+            ipc_seams::before_shmem_exit::call(RemoveTempRelationsCallback, Datum::null())?;
         } else {
             STATE.with(|s| {
                 let mut st = s.borrow_mut();
@@ -4174,28 +4181,28 @@ pub fn InitializeSearchPath() -> PgResult<()> {
         inval_seams::cache_register_syscache_callback::call(
             NAMESPACEOID,
             |_, _, _| InvalidationCallback(),
-            Datum::from_usize(0),
+            Datum::null(),
         )?;
 
         /* role name may affect the meaning of "$user" */
         inval_seams::cache_register_syscache_callback::call(
             AUTHOID,
             |_, _, _| InvalidationCallback(),
-            Datum::from_usize(0),
+            Datum::null(),
         )?;
 
         /* role membership may affect ACLs */
         inval_seams::cache_register_syscache_callback::call(
             AUTHMEMROLEMEM,
             |_, _, _| InvalidationCallback(),
-            Datum::from_usize(0),
+            Datum::null(),
         )?;
 
         /* database owner may affect ACLs */
         inval_seams::cache_register_syscache_callback::call(
             DATABASEOID,
             |_, _, _| InvalidationCallback(),
-            Datum::from_usize(0),
+            Datum::null(),
         )?;
 
         /* Force search path to be recomputed on next use */

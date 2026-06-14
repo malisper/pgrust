@@ -21,8 +21,18 @@
 use backend_executor_execTuples_seams::slot_getallattrs;
 use backend_utils_fmgr_fmgr_seams::function_call1_coll;
 use types_core::primitive::InvalidOid;
+// The bare-word newtype: the eval entry-point return word.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned const/init step-payload values carry.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
+
+/// Recover the bare scalar word from a stored canonical by-value datum.
+#[inline]
+fn word_of(v: &DatumV<'_>) -> Datum {
+    Datum::from_usize(v.as_usize())
+}
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::executor::TupleTableSlot;
@@ -538,7 +548,9 @@ pub fn ExecJustConst<'mcx>(
     // return op->d.constval.value;
     let steps = state.steps.as_ref().expect("ExecJustConst: steps not ready");
     match &steps[0].d {
-        ExprEvalStepData::ConstVal { value, isnull } => Ok((*value, *isnull)),
+        // The canonical const value crosses back to the bare word the eval
+        // entry-point contract returns.
+        ExprEvalStepData::ConstVal { value, isnull } => Ok((word_of(value), *isnull)),
         _ => unreachable!("ExecJustConst: step[0] is not an EEOP_CONST"),
     }
 }
@@ -632,7 +644,8 @@ pub fn ExecJustHashInnerVarWithIV<'mcx>(
         .as_ref()
         .expect("ExecJustHashInnerVarWithIV: steps not ready");
     let init_value = match &steps[1].d {
-        ExprEvalStepData::HashDatumInitValue { init_value } => *init_value,
+        // The canonical init value crosses back to the bare word.
+        ExprEvalStepData::HashDatumInitValue { init_value } => word_of(init_value),
         _ => unreachable!("ExecJustHashInnerVarWithIV: step[1] is not EEOP_HASHDATUM_SET_INITVAL"),
     };
     let attnum = match &steps[2].d {
