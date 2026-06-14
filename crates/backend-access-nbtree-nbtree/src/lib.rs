@@ -391,7 +391,7 @@ pub fn btbeginscan<'mcx>(
 pub fn btrescan<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut NbtScan<'mcx>,
-    scankey: Option<&[ScanKeyData]>,
+    scankey: Option<&[ScanKeyData<'mcx>]>,
     norderbys: i32,
 ) -> PgResult<()> {
     let _ = norderbys;
@@ -689,8 +689,8 @@ fn _bt_parallel_serialize_arrays(btscan: &mut BTParallelScanDescData, so: &mut B
             continue;
         }
 
-        datumshared = datumser::datum_serialize::call(
-            skey.sk_argument,
+        datumshared = datumser::datum_serialize_v::call(
+            &skey.sk_argument,
             (skey.sk_flags & SK_ISNULL) != 0,
             array.attbyval,
             array.attlen as i32,
@@ -725,7 +725,10 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
             debug_assert!((so.keyData[scan_key].sk_flags & SK_BT_SKIP) == 0);
             so.arrayKeys[i].cur_elem = cur_elem_saved;
             let ce = so.arrayKeys[i].cur_elem as usize;
-            so.keyData[scan_key].sk_argument = so.arrayKeys[i].elem_values[ce];
+            // `elem_values` is still the transitional bare-word `types_datum::Datum`
+            // (types-nbtree's struct is not yet migrated); wrap its scalar word
+            // into the canonical by-value arm of `sk_argument: Datum<'mcx>`.
+            so.keyData[scan_key].sk_argument = Datum::ByVal(so.arrayKeys[i].elem_values[ce]);
             continue;
         }
 
@@ -737,7 +740,7 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
                 // pass-by-ref datum; under mcx ownership it is released when the
                 // owning context resets. (Pointer is into another context.)
             }
-            skey.sk_argument = types_datum::Datum::null();
+            skey.sk_argument = Datum::null();
             // memcpy(&skey->sk_flags, datumshared, sizeof(int)); datumshared += 4.
             // SAFETY: datumshared in the DSM datum region.
             unsafe {
@@ -752,9 +755,11 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
             continue;
         }
 
+        // `datum_restore` is the transitional bare-word seam (no `*_v` form
+        // exists yet); wrap its scalar word into the canonical by-value arm.
         let (val, isnull, adv) = datumser::datum_restore::call(datumshared);
         datumshared = adv;
-        so.keyData[scan_key].sk_argument = val;
+        so.keyData[scan_key].sk_argument = Datum::ByVal(val);
         if isnull {
             debug_assert!(so.keyData[scan_key].sk_argument.as_usize() == 0);
             debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHNULL) != 0);
