@@ -402,9 +402,16 @@ pub fn ReplicationSlotsShmemInit() {
 
 /// `void ReplicationSlotInitialize(void)` (slot.c:239).
 pub fn ReplicationSlotInitialize() -> PgResult<()> {
+    // Residual bare-word `types_datum::Datum` survives ONLY at this
+    // callback-registration ABI edge: `before_shmem_exit` takes the opaque
+    // callback token by the bare-word seam contract
+    // (`fn(i32, types_datum::Datum)` / `arg: types_datum::Datum`). This crate's
+    // own logic constructs/reads no scalars, so there is nothing to move onto
+    // the canonical `types_tuple::backend_access_common_heaptuple::Datum<'mcx>`
+    // enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
     backend_storage_ipc_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
-        types_datum::Datum::from_u32(0),
+        types_datum::Datum::null(),
     )
 }
 
