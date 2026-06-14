@@ -490,7 +490,7 @@ pub fn range_deserialize(
     // SAFETY: `range` is a detoasted RangeType image; its trailing flags byte
     // and bound payload are read with the same offsets C uses.
     unsafe {
-        debug_assert_eq!((*range.ptr).rangetypid, typcache.type_id);
+        debug_assert_eq!(range.rangetypid(), typcache.type_id);
 
         // fetch the flag byte from datum's last byte
         let flags = *base.add(varsize(base) - 1);

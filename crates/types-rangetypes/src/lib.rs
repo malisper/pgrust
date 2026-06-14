@@ -104,6 +104,29 @@ pub struct RangeTypeP<'mcx> {
     pub _marker: PhantomData<&'mcx RangeType>,
 }
 
+impl<'mcx> RangeTypeP<'mcx> {
+    /// Borrow the fixed `RangeType` header as a safe reference.
+    ///
+    /// `ptr` always points at a valid, fully-detoasted `RangeType` header that
+    /// lives for `'mcx` (established at construction in `DatumGetRangeTypeP`),
+    /// so reborrowing it as a shared reference is sound. Encapsulating the one
+    /// unavoidable raw-pointer reborrow here lets every header-field read be a
+    /// safe field access instead of a scattered raw deref.
+    #[inline]
+    pub fn header(&self) -> &'mcx RangeType {
+        // SAFETY: see the doc comment -- `ptr` is a valid, properly-aligned,
+        // 'mcx-lived RangeType header; the value is never mutated through any
+        // other alias while this shared reference exists.
+        unsafe { &*self.ptr }
+    }
+
+    /// `RangeTypeGetOid(range)` (rangetypes.h) -- the range type's own OID.
+    #[inline]
+    pub fn rangetypid(&self) -> Oid {
+        self.header().rangetypid
+    }
+}
+
 /// A detoasted `MultirangeType *` (`DatumGetMultirangeTypeP`). Opaque handle the
 /// multirange ADT produces and consumes; `rangeCount` is read via the header.
 #[derive(Copy, Clone, Debug)]
@@ -112,4 +135,35 @@ pub struct MultirangeTypeP<'mcx> {
     pub ptr: *const MultirangeType,
     /// Ties the handle to the allocating context's lifetime.
     pub _marker: PhantomData<&'mcx MultirangeType>,
+}
+
+impl<'mcx> MultirangeTypeP<'mcx> {
+    /// Borrow the fixed `MultirangeType` header as a safe reference.
+    ///
+    /// `ptr` always points at a valid, fully-detoasted `MultirangeType` header
+    /// that lives for `'mcx` (established at construction in
+    /// `DatumGetMultirangeTypeP`), so reborrowing it as a shared reference is
+    /// sound. Encapsulating the one unavoidable raw-pointer reborrow here lets
+    /// every header-field read be a safe field access instead of a scattered raw
+    /// deref.
+    #[inline]
+    pub fn header(&self) -> &'mcx MultirangeType {
+        // SAFETY: see the doc comment -- `ptr` is a valid, properly-aligned,
+        // 'mcx-lived MultirangeType header; the value is never mutated through
+        // any other alias while this shared reference exists.
+        unsafe { &*self.ptr }
+    }
+
+    /// `MultirangeTypeGetOid(mr)` (multirangetypes.h) -- the multirange type's
+    /// own OID.
+    #[inline]
+    pub fn multirangetypid(&self) -> Oid {
+        self.header().multirangetypid
+    }
+
+    /// `(mr)->rangeCount` -- the number of member ranges.
+    #[inline]
+    pub fn range_count(&self) -> u32 {
+        self.header().rangeCount
+    }
 }

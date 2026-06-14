@@ -86,7 +86,7 @@ fn range_type_get_oid(r: RangeTypeP<'_>) -> types_core::primitive::Oid {
     // SAFETY: `r.ptr` points at a detoasted `RangeType` varlena the range ADT
     // produced and keeps alive for `'mcx`; the fixed header (and thus
     // `rangetypid`) is always present.
-    unsafe { (*r.ptr).rangetypid }
+    r.rangetypid()
 }
 
 /// `PG_RETURN_RANGE_P(range)` — the pointer word (`PointerGetDatum`).
