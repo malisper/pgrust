@@ -549,13 +549,14 @@ pub fn pg_get_wal_resource_managers<'mcx>(
             .expect("RmgrIdExists guarantees rm_name");
         // Datum values[3]; bool nulls[3] = {0};  (stack arrays in C)
         // `materialized_srf_putvalues` takes the canonical unified value (the
-        // Datum-unification keystone flipped this edge); the varlena owner
-        // still hands back the bare word, carried in the by-value arm.
+        // Datum-unification keystone flipped this edge). `text` is always
+        // pass-by-reference, so the varlena owner hands back a `Datum::ByRef`
+        // varlena via the `_v` seam variant.
         let values: [Datum<'mcx>; PG_GET_RESOURCE_MANAGERS_COLS] = [
             // values[0] = Int32GetDatum(rmid)
             Datum::from_i32(rmid as i32),
             // values[1] = CStringGetTextDatum(GetRmgr(rmid).rm_name)
-            Datum::ByVal(varlena::cstring_to_text::call(mcx, name)?),
+            varlena::cstring_to_text_v::call(mcx, name)?,
             // values[2] = BoolGetDatum(RmgrIdIsBuiltin(rmid))
             Datum::from_bool(RmgrIdIsBuiltin(rmid as i32)),
         ];

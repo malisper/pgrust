@@ -153,7 +153,7 @@ fn bytes_to_varlena_datum<'mcx>(
     bytes: Option<mcx::PgVec<'mcx, u8>>,
 ) -> PgResult<Datum<'mcx>> {
     match bytes {
-        Some(b) => Ok(Datum::ByVal(varlena::bytes_to_varlena::call(mcx, &b[..])?)),
+        Some(b) => Ok(varlena::bytes_to_varlena_v::call(mcx, &b[..])?),
         None => Ok(Datum::null()),
     }
 }
@@ -161,7 +161,9 @@ fn bytes_to_varlena_datum<'mcx>(
 /// `CStringGetTextDatum(s)` — a `text` `Datum` from a Rust string, via the
 /// varlena owner.
 fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByVal(varlena::cstring_to_text::call(mcx, s)?))
+    // `text` is pass-by-reference; the `_v` seam variant returns a
+    // `Datum::ByRef` varlena directly.
+    Ok(varlena::cstring_to_text_v::call(mcx, s)?)
 }
 
 /// `pg_read_file_off_len(filename, offset, length)` (genfile.c).
