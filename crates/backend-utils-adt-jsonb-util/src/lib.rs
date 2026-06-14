@@ -1184,14 +1184,11 @@ fn convertJsonbScalar<'mcx>(
             // json.c owns the encoder (the cycle partner); the C call site
             // always passes a non-NULL &tz, so tzp = Some(dt.tz).
             //
-            // Datum-unification edge: `json_encode_datetime` is the json/
-            // timestamp owner's seam, whose contract still carries the
-            // bare-word `types_datum::Datum` shim (not yet migrated to the
-            // canonical `&Datum<'mcx>` enum on this tip). `dt.value` is a
-            // by-value datetime word (timestamp/date int), not a by-reference
-            // payload, so it is forwarded as a plain word at this fixed seam
-            // ABI edge. The shim falls away when the owner's seam contract
-            // migrates; nothing in this crate stores `types_datum::Datum`.
+            // Datum-unification: `json_encode_datetime` (the json/timestamp
+            // owner's seam) takes the canonical `&types_tuple::Datum<'mcx>`.
+            // `dt.value` is a by-value datetime word (timestamp/date int), so it
+            // is wrapped as the `ByVal` arm via `Datum::from_usize`. This crate
+            // stores no `types_datum::Datum` shim.
             let s = backend_utils_adt_json_seams::json_encode_datetime::call(
                 &types_tuple::Datum::from_usize(dt.value),
                 dt.typid,
