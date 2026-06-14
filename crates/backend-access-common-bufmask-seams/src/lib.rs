@@ -14,12 +14,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `mask_page_hint_bits(page)` (bufmask.c) — clear the `BTP_HAS_GARBAGE` /
-    /// hint-bit flags that can differ between primary and standby without WAL
-    /// logging: each item id's `LP_DEAD` bit, `pd_flags`'
-    /// `PD_PAGE_FULL`/`PD_HAS_FREE_LINES`/`PD_ALL_VISIBLE`, and the heap-tuple
-    /// `t_infomask` `HEAP_XMIN/XMAX_*` hint bits. Mutates the page in place;
-    /// infallible (fixed-offset writes within the line-pointer / tuple area).
+    /// `mask_page_hint_bits(page)` (bufmask.c) — mask the page-level hint bits
+    /// that may differ between primary and standby without WAL logging: the
+    /// `pd_prune_xid` and the `pd_flags`
+    /// `PD_PAGE_FULL`/`PD_HAS_FREE_LINES`/`PD_ALL_VISIBLE` hint bits, all set
+    /// to `MASK_MARKER`. Infallible (fixed-offset writes).
     pub fn mask_page_hint_bits(page: &mut [u8])
 );
 
@@ -29,4 +28,11 @@ seam_core::seam!(
     /// that `elog(ERROR)`s on invalid `pd_lower`/`pd_upper`/`pd_special`
     /// (carried on `Err`).
     pub fn mask_unused_space(page: &mut [u8]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `mask_lp_flags(page)` (bufmask.c) — mask each line pointer's `lp_flags`
+    /// (which may be changed without WAL on btree/heap leaf pages) to
+    /// `MASK_MARKER`. Infallible (fixed-offset writes).
+    pub fn mask_lp_flags(page: &mut [u8])
 );
