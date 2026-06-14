@@ -629,6 +629,7 @@ dependencies = [
  "types-scan",
  "types-snapshot",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -1785,6 +1786,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-server"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-backup-sink",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "common-pgcheckdir-seams",
+ "libc",
+ "mcx",
+ "port-path-seams",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-backup-sink"
 version = "0.0.0"
 dependencies = [
@@ -2790,6 +2812,40 @@ dependencies = [
  "backend-utils-cache-plancache",
  "backend-utils-misc-guc-seams",
  "backend-utils-mmgr-portalmem",
+ "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-commands-dropcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-commands-dropcmds-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-commands-dropcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-parsenodes",
 ]
@@ -3973,6 +4029,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeBitmapIndexscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
+ "backend-executor-nodeBitmapIndexscan-seams",
+ "backend-executor-nodeIndexscan-seams",
+ "backend-nodes-core-tidbitmap-seams",
+ "backend-storage-ipc-shm_toc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tidbitmap",
+]
+
+[[package]]
 name = "backend-executor-nodeBitmapIndexscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -4074,6 +4155,33 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeGatherMerge"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execParallel-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-tqueue-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4482,6 +4590,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeRecursiveunion"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeWorktablescan-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeResult"
 version = "0.0.0"
 dependencies = [
@@ -4857,9 +4985,11 @@ dependencies = [
 name = "backend-executor-tqueue-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-execparallel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4926,6 +5056,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-bipartite-match"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-bloomfilter"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-bloomfilter-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-bloomfilter-seams"
 version = "0.0.0"
 dependencies = [
@@ -4959,11 +5109,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-hyperloglog"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-hyperloglog-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-lib-ilist"
+version = "0.0.0"
+dependencies = [
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-integerset"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-lib-knapsack"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-lib-pairingheap"
+version = "0.0.0"
+dependencies = [
+ "types-error",
 ]
 
 [[package]]
@@ -4976,6 +5168,15 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-vacuum",
+]
+
+[[package]]
+name = "backend-lib-rbtree"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -10169,6 +10370,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-pgcheckdir-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-pglz"
 version = "0.0.0"
 dependencies = [
@@ -10468,6 +10676,7 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
+ "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
  "backend-catalog-catalog",
@@ -10483,6 +10692,7 @@ dependencies = [
  "backend-commands-conversioncmds",
  "backend-commands-copyto",
  "backend-commands-define",
+ "backend-commands-dropcmds",
  "backend-commands-foreigncmds",
  "backend-commands-matview",
  "backend-commands-portalcmds",
@@ -10501,10 +10711,12 @@ dependencies = [
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapAnd",
  "backend-executor-nodeBitmapHeapscan",
+ "backend-executor-nodeBitmapIndexscan",
  "backend-executor-nodeBitmapOr",
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
@@ -10516,6 +10728,7 @@ dependencies = [
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeNamedtuplestorescan",
  "backend-executor-nodeProjectSet",
+ "backend-executor-nodeRecursiveunion",
  "backend-executor-nodeResult",
  "backend-executor-nodeSamplescan",
  "backend-executor-nodeSeqscan",
@@ -10527,7 +10740,9 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
+ "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-lib-hyperloglog",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
@@ -11011,6 +11226,7 @@ dependencies = [
  "types-snapshot",
  "types-sortsupport",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
