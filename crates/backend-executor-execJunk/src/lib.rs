@@ -297,10 +297,11 @@ pub fn ExecFilterJunk<'mcx>(
     //       else        { values[i] = old_values[j - 1]; isnull[i] = old_isnull[j - 1]; }
     //   }
     // `values` flows verbatim into `store_virtual_values` and is fed from
-    // `slot_getattr_by_id`; both are the slot-payload seam, whose audited ABI
-    // edge carries the bare scalar word (`types_datum::Datum`) — the
-    // per-column `tts_values` store. No scalar is constructed or inspected
-    // here, so this is the store-edge bare word, not the migrated enum.
+    // `slot_getattr_by_id`; both are the execTuples slot-payload seam, whose
+    // canonical carrier is `types_tuple::backend_access_common_heaptuple::Datum`
+    // (the ByVal/ByRef enum). No scalar is constructed or inspected here — the
+    // per-column `tts_values` images are carried whole through the canonical
+    // type, so by-reference values cross intact (no bare-word `as_usize` edge).
     let mut values = vec_with_capacity_in::<
         types_tuple::backend_access_common_heaptuple::Datum<'_>,
     >(mcx, cleanLength)?;
