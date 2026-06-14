@@ -394,6 +394,37 @@ pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<
     backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
 }
 
+/// The value-per-call set-returning-function protocol
+/// (`SRF_IS_FIRSTCALL`/`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/
+/// `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` over a `FuncCallContext` carrying a
+/// `multi_call_memory_ctx` and `user_fctx`). funcapi presently models only the
+/// materialize-mode tuplestore path (`InitMaterializedSRF` /
+/// `materialized_srf_putvalues`); the value-per-call path is genuinely not yet
+/// ported.
+///
+/// This is funcapi's OWN surface, so we install an EXPLICIT honest
+/// seam-and-panic here (mirror-pg-and-panic) rather than leaving the seam
+/// declared-but-uninstalled (an implicit seam-infrastructure panic at the call
+/// site). Consumers that cross here — `pg_partition_tree` /
+/// `pg_partition_ancestors` / `pg_lock_status` — then get a loud, owner-rooted
+/// failure that names the missing machinery instead of a generic "uninstalled
+/// seam" abort.
+pub fn value_srf_unported() {
+    // C funcapi.h: SRF_FIRSTCALL_INIT / per_MultiFuncCall / SRF_RETURN_NEXT /
+    // SRF_RETURN_DONE drive the per-call `FuncCallContext`. Modeling them needs
+    // the per-query / multi_call memory context + `user_fctx` carrier threaded
+    // through the fmgr call frame, which the trimmed `FunctionCallInfoBaseData`
+    // / `ReturnSetInfo` do not yet provide. Lands with the value-SRF machinery.
+    panic!(
+        "value-per-call SRF protocol (SRF_FIRSTCALL_INIT/SRF_PERCALL_SETUP/\
+         SRF_RETURN_NEXT/SRF_RETURN_DONE over FuncCallContext.multi_call_memory_ctx/\
+         user_fctx) is not yet ported in funcapi; only the materialize-mode \
+         tuplestore path is modeled. Port the value-SRF machinery here (widen the \
+         fmgr call frame with the per-call FuncCallContext) before calling a \
+         value-per-call SRF (pg_partition_tree/pg_partition_ancestors/pg_lock_status)"
+    )
+}
+
 // `SetFunctionReturnMode::Materialize` is the `rsinfo->returnMode = SFRM_Materialize`
 // store InitMaterializedSRF performs once the per-query context lands; named here
 // so the enum stays referenced from the SRF module that sets it.

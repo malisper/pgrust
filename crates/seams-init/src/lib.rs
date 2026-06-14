@@ -1076,14 +1076,12 @@ mod recurrence_guard {
         // construct the return value faithfully. K1-gated on the FormedTuple->
         // HeapTuple carrier bridge (task #161); install once that lands.
         ("backend_utils_fmgr_funcapi", "record_from_values"),
-        // DESIGN_DEBT: `value_srf_unported` is the value-per-call SRF protocol
-        // (`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/`SRF_RETURN_NEXT`/`_DONE` over a
-        // `FuncCallContext` with `multi_call_memory_ctx`/`user_fctx`). funcapi only
-        // models the materialize-mode tuplestore path; the value-SRF owner is not
-        // yet landed, so this seam is declared genuinely-unported and panics loudly
-        // (consumers wrap it in `unreachable!`). Install when the value-SRF
-        // machinery is ported.
-        ("backend_utils_fmgr_funcapi", "value_srf_unported"),
+        // NOTE: `value_srf_unported` is now INSTALLED by funcapi's init_seams() as
+        // an EXPLICIT honest seam-and-panic (mirror-pg-and-panic) — its body lives
+        // in `srf_support::value_srf_unported` and panics loudly naming the missing
+        // value-per-call SRF machinery. It is therefore no longer an uninstalled
+        // contract divergence and must NOT be allowlisted here (the guard would
+        // flag a stale entry).
         ("backend_utils_init_small", "init_process_globals"),
         // DESIGN_DEBT (TD-PORTAL-HANDLE): PREPARE/EXECUTE's `-pre-seams` slice of
         // portalmem.c is written against the parsestmt opaque handle newtypes

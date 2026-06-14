@@ -79,10 +79,12 @@ seam_core::seam!(
     /// `multi_call_memory_ctx` and `user_fctx`) is funcapi-owned and not yet
     /// modeled (only the materialize-mode tuplestore path is). The
     /// `pg_partition_tree` / `pg_partition_ancestors` / `pg_lock_status`
-    /// value-SRFs cross here until that owner lands: the seam runs the whole
-    /// function for the caller given a closure producing its full row set.
-    /// Declared genuinely-unported so the call panics loudly rather than
-    /// silently degrading the SRF protocol.
+    /// value-SRFs cross here until that machinery lands. funcapi (the owner)
+    /// INSTALLS this seam in its `init_seams()` with an EXPLICIT honest
+    /// seam-and-panic body (mirror-pg-and-panic): the call panics loudly,
+    /// owner-rooted, naming the missing value-per-call protocol instead of
+    /// silently degrading the SRF or aborting on an uninstalled seam. Replace
+    /// the body with the real per-call `FuncCallContext` machinery when ported.
     pub fn value_srf_unported() -> ()
 );
 
