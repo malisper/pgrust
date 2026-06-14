@@ -86,6 +86,7 @@ backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
+backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
