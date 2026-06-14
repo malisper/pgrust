@@ -137,6 +137,7 @@ backend-replication-walreceiverfuncs = { path = "../backend-replication-walrecei
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
+backend-storage-file-fileset = { path = "../backend-storage-file-fileset" }
 backend-storage-freespace = { path = "../backend-storage-freespace" }
 backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
