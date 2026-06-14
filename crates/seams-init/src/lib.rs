@@ -195,6 +195,7 @@ pub fn init_all() {
     backend_utils_cache_evtcache::init_seams();
     backend_utils_cache_inval::init_seams();
     backend_utils_cache_lsyscache::init_seams();
+    backend_utils_cache_partcache::init_seams();
     backend_utils_cache_plancache::init_seams();
     backend_utils_cache_relcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
