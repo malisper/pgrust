@@ -40,11 +40,13 @@ use types_nodes::nodememoize::{
 };
 use types_nodes::TupleSlotKind;
 use types_tuple::heaptuple::MinimalTupleData;
-// Datum-unification migration target: the canonical unified value enum. The
-// binary-mode hash/equality leaves consume it by reference (`datum_image_*_v`).
-// The bare slot words deformed through the still-unmigrated execTuples /
-// execExpr slot seams arrive as `types_datum::Datum`; at that ABI edge they are
-// the by-value scalar word, wrapped as `Datum::ByVal` for the `_v` contract.
+// Datum-unification: the canonical unified value enum is this crate's internal
+// currency for every slot value. The execExpr eval leaf and the execTuples
+// deform seams already hand back canonical `Datum<'mcx>`, and the binary-mode
+// hash/equality leaves consume it by reference (`datum_image_*_v`). The only
+// still-bare-word ABI edge is the fmgr `function_call1_coll` leaf, whose
+// `arg1: DatumWord` forces a by-value-word projection at the call site
+// (see `byval_word`); everywhere else stays canonical.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 use backend_access_transam_parallel_seams as parallel;
