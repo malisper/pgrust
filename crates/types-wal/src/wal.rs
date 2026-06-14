@@ -959,3 +959,26 @@ impl BackupState {
         self.stoptime
     }
 }
+
+/// `SessionBackupState` (access/xlog.h:113-119) — the session-level state of a
+/// non-exclusive base backup, as reported by `get_backup_status()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionBackupState {
+    /// `SESSION_BACKUP_NONE` — no backup in progress in this session.
+    None,
+    /// `SESSION_BACKUP_RUNNING` — `pg_backup_start()` has run, no matching
+    /// `pg_backup_stop()` yet.
+    Running,
+}
+
+/// `RecoveryPauseState` (access/xlogrecovery.h:32-37) — the recovery pause
+/// request/effect state, as reported by `GetRecoveryPauseState()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryPauseState {
+    /// `RECOVERY_NOT_PAUSED` — pause not requested.
+    NotPaused,
+    /// `RECOVERY_PAUSE_REQUESTED` — pause requested, but not yet effective.
+    PauseRequested,
+    /// `RECOVERY_PAUSED` — recovery is paused.
+    Paused,
+}

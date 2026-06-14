@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 #![allow(clippy::result_large_err)]
-#![allow(static_mut_refs)]
 
 //! `backend-utils-misc-guc` — idiomatic Rust port of the **core** of
 //! PostgreSQL 18.3 `src/backend/utils/misc/guc.c`: the GUC variable machinery.
@@ -110,8 +109,10 @@ pub const GUC_ACTION_SAVE: u32 = 2;
 // GUC check-error reporting protocol (guc.c: GUC_check_errcode/msg/detail/hint
 // + the GUC_check_error* globals consulted by call_*_check_hook). A GUC check
 // hook signals failure by returning false after setting these; the caller
-// translates them into the ereport. Backend is single-threaded, so a `static
-// mut` holds the per-call state.
+// translates them into the ereport. The per-call state lives in a process-global
+// `Mutex` — the safe analog of the C file static; the backend mutates it
+// sequentially on the SET path, and the broad test harness reads it safely from
+// any thread.
 // ---------------------------------------------------------------------------
 
 /// The portions of an error report a check hook may supply
@@ -135,23 +136,20 @@ impl Default for GucCheckError {
     }
 }
 
-static mut GUC_CHECK_ERROR: Option<GucCheckError> = None;
+static GUC_CHECK_ERROR: std::sync::Mutex<Option<GucCheckError>> = std::sync::Mutex::new(None);
 
 fn with_check_error<R>(f: impl FnOnce(&mut GucCheckError) -> R) -> R {
-    unsafe {
-        if GUC_CHECK_ERROR.is_none() {
-            GUC_CHECK_ERROR = Some(GucCheckError::default());
-        }
-        f(GUC_CHECK_ERROR.as_mut().unwrap())
+    let mut guard = GUC_CHECK_ERROR.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(GucCheckError::default());
     }
+    f(guard.as_mut().unwrap())
 }
 
 /// Reset the check-error state to defaults (C resets the globals before each
 /// `check_hook` call).
 pub fn reset_guc_check_error() {
-    unsafe {
-        GUC_CHECK_ERROR = Some(GucCheckError::default());
-    }
+    *GUC_CHECK_ERROR.lock().unwrap() = Some(GucCheckError::default());
 }
 
 /// Snapshot the current check-error state.
@@ -228,22 +226,19 @@ pub fn finish_guc_check_error(fallback_message: impl Into<String>) -> PgResult<(
 // level and returns it, `AtEOXact_GUC(isCommit, nestLevel)` pops back to it. The
 // nest-level counter itself is owned here (it is a guc.c file static, not a
 // guc_stack.c entity); only the stack-entry rollback (`AtEOXact_GUC`) still
-// belongs to the unported guc_stack.c. The backend is single-threaded, so a
-// `static mut` matches the C global exactly.
+// belongs to the unported guc_stack.c. An `AtomicI32` is the safe process-global
+// analog of the C `int` file static.
 // ---------------------------------------------------------------------------
 
 /// `static int GUCNestLevel = 0;` (guc.c:231) — 1 when in the main transaction,
 /// bumped for each open subtransaction / function SET scope.
-static mut GUC_NEST_LEVEL: i32 = 0;
+static GUC_NEST_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// `NewGUCNestLevel(void)` (guc.c:2235) — `return ++GUCNestLevel;`. Begin a new
 /// GUC nesting level, returning the save-nestlevel to later pass to
 /// `AtEOXact_GUC`.
 pub fn NewGUCNestLevel() -> i32 {
-    unsafe {
-        GUC_NEST_LEVEL += 1;
-        GUC_NEST_LEVEL
-    }
+    GUC_NEST_LEVEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 // ---------------------------------------------------------------------------

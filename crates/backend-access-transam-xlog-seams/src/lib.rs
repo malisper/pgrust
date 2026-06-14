@@ -423,3 +423,50 @@ seam_core::seam!(
         topxid_included: bool,
     ) -> PgResult<XLogRecPtr>
 );
+
+// ---------------------------------------------------------------------------
+// Online-backup workhorses (xlog.c) consumed by xlogfuncs.c's
+// pg_backup_start()/pg_backup_stop(). These are owned by xlog.c but not yet
+// exposed by the ported xlog crate; they are declared here so xlogfuncs.c can
+// call them and panic loudly (mirror-PG-and-panic) until xlog.c installs them.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `do_pg_backup_start(backupidstr, fast, tablespaces, state, tblspcmapfile)`
+    /// (xlog.c:8866) — the workhorse of `pg_backup_start()`: writes a
+    /// checkpoint, fills `state` with the backup-start metadata, and renders the
+    /// tablespace-map file contents. The `pg_backup_start()` caller passes
+    /// `tablespaces = NULL`, so that out-list is dropped at this boundary.
+    /// Returns the freshly-populated [`BackupState`] together with the
+    /// tablespace-map bytes (the C `StringInfo tblspcmapfile`). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn do_pg_backup_start(
+        backupidstr: &str,
+        fast: bool,
+    ) -> PgResult<(types_wal::BackupState, Vec<u8>)>
+);
+
+seam_core::seam!(
+    /// `do_pg_backup_stop(state, waitforarchive)` (xlog.c:9194) — finish an
+    /// online backup: write the stop WAL record, optionally wait for it to be
+    /// archived, and fill the stop fields of `state`. Returns the updated
+    /// [`BackupState`]. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn do_pg_backup_stop(
+        state: types_wal::BackupState,
+        waitforarchive: bool,
+    ) -> PgResult<types_wal::BackupState>
+);
+
+seam_core::seam!(
+    /// `register_persistent_abort_backup_handler(void)` (xlog.c:9384) — register
+    /// the `before_shmem_exit` cleanup that aborts an in-progress backup if the
+    /// session ends without `pg_backup_stop()`. Can `ereport(ERROR)` (out of
+    /// before_shmem_exit slots), carried on `Err`.
+    pub fn register_persistent_abort_backup_handler() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_backup_status(void)` (xlog.c:9175) — the session-level backup state
+    /// (`sessionBackupState`). Pure read of backend-local state.
+    pub fn get_backup_status() -> types_wal::SessionBackupState
+);

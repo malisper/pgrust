@@ -70,6 +70,12 @@ pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
 /// CHECKPOINT_START, EXECUTE_GATHER, ...), so `PG_WAIT_IPC + 13`.
 pub const WAIT_EVENT_EXECUTE_GATHER: u32 = PG_WAIT_IPC + 13;
 
+/// `WAIT_EVENT_PROMOTE` — "Waiting for standby promotion." 44th entry
+/// (0-based 43) of the IPC section of `wait_event_names.txt` (APPEND_READY=0,
+/// ..., PROC_SIGNAL_BARRIER=42, PROMOTE=43, ...), so `PG_WAIT_IPC + 43`.
+/// `pg_promote()` sleeps on `MyLatch` with this wait event.
+pub const WAIT_EVENT_PROMOTE: u32 = PG_WAIT_IPC + 43;
+
 /// `WAIT_EVENT_BACKEND_TERMINATION` — "Waiting for the termination of another
 /// backend." 4th entry (0-based 3) of the IPC section of
 /// `wait_event_names.txt` (APPEND_READY, ARCHIVE_CLEANUP_COMMAND,
