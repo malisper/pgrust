@@ -228,7 +228,8 @@ pub fn ExecInitAppend<'mcx>(
     // make a virtual slot. (The result slot is used only to return a null
     // tuple at end of execution; real tuples are returned in the children's
     // own result slots.)
-    let appendops = execUtils::exec_get_common_slot_ops::call(&appendstate.appendplans[..], j)?;
+    let appendops =
+        execUtils::exec_get_common_slot_ops::call(&appendstate.appendplans[..], j, estate)?;
     match appendops {
         Some(ops) => {
             execTuples::exec_init_result_tuple_slot_tl::call(&mut appendstate.ps, estate, ops)?;
