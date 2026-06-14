@@ -9893,6 +9893,7 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc",
@@ -9910,6 +9911,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
