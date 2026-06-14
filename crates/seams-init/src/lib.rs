@@ -745,21 +745,13 @@ mod recurrence_guard {
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
-        // DESIGN_DEBT (TD-GUC-UNPORTED): these guc.c/guc_funcs.c functions are
-        // mis-homed onto backend-commands-functioncmds-seams because functioncmds
-        // was the first consumer; their decls' dir-owner resolves to functioncmds,
-        // which does NOT install them.
-        //   * extract_set_variable_args (guc_funcs.c, ExtractSetVariableArgs) is
-        //     now genuinely INSTALLED by its real owner backend-utils-misc-guc-funcs
-        //     (task #163 W2) via that crate's init_seams() — a cross-crate re-home
-        //     install the dir-owner guard cannot see, so the allowlist entry stays
-        //     to suppress the false "functioncmds didn't install it" flag.
-        //   * GUCArrayAdd/Delete/Reset (guc.c) still have NO impl: the GUC array
-        //     helpers live in guc.c, not yet ported. Consumed by functioncmds
-        //     (ddl_core) + pg-db-role-setting.
-        ("backend_commands_functioncmds", "guc_array_add"),
-        ("backend_commands_functioncmds", "guc_array_delete"),
-        ("backend_commands_functioncmds", "guc_array_reset"),
+        // (extract_set_variable_args + GUCArrayAdd/Delete/Reset retired: all four
+        // guc.c/guc_funcs.c functions were re-homed off
+        // backend-commands-functioncmds-seams onto their real owners' -seams
+        // crates (backend-utils-misc-guc-funcs-seams /
+        // backend-utils-misc-guc-seams) and are installed by those merged owners'
+        // init_seams(). GUCArrayAdd/Delete/Reset are now genuinely ported in
+        // backend-utils-misc-guc's guc_array.rs over the Vec<String> value model.)
         // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED): aclcheck_error_type (aclchk.c) and
         // get_language_oid (proclang.c) are declared in
         // backend-commands-functioncmds-seams because functioncmds was their

@@ -28,7 +28,7 @@ use types_guc::guc::GucSource;
 use types_parsenodes::{VariableSetKind, VariableSetStmt};
 
 use backend_catalog_pg_db_role_setting_seams as seam;
-use backend_commands_functioncmds_seams as guc;
+use backend_utils_misc_guc_seams as guc;
 
 /* ===========================================================================
  * AlterSetting (pg_db_role_setting.c:23-162)

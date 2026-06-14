@@ -479,7 +479,7 @@ fn set_config_sourcefile(name: &str, filename: &str, sourceline: i32) {
 
 /// `valid_custom_variable_name` (guc.c lines 1068-1106): two or more identifiers
 /// separated by dots, with identifier rules matching scan.l.
-fn valid_custom_variable_name(name: &str) -> bool {
+pub(crate) fn valid_custom_variable_name(name: &str) -> bool {
     let mut saw_sep = false;
     let mut name_start = true;
     for &c in name.as_bytes() {

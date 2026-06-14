@@ -37,6 +37,9 @@ fn install_once() {
         backend_catalog_aclchk_seams::pg_parameter_aclcheck::set(|_name, _role, _mode| {
             Ok(types_acl::AclResult::AclcheckOk)
         });
+        // GUCArray* permission checks: single-backend superuser, fixed user id.
+        backend_utils_misc_superuser_seams::superuser::set(|| Ok(true));
+        backend_utils_init_miscinit_seams::get_user_id::set(|| BOOTSTRAP_SUPERUSERID);
         backend_utils_adt_scalar_seams::parse_bool::set(default_parse_bool);
         // `truncate_identifier` (scansup) for GUC_IS_NAME values: return the
         // bytes unchanged in the supplied context (single-backend no-clip).
@@ -255,4 +258,58 @@ fn enum_seqscan_set_reset() {
     .expect("RESET should apply");
     assert_eq!(rc, 1);
     assert_eq!(get_bool("enable_seqscan"), Some(true), "RESET returns reset_val");
+}
+
+/// GUCArrayAdd / GUCArrayDelete / GUCArrayReset over the `Vec<String>` model
+/// (guc.c:6494/6572/6642). The store must be initialized so the validation
+/// path's `set_config_option(PGC_S_TEST)` resolves a real (USERSET) variable.
+#[test]
+fn guc_array_add_delete_reset_round_trip() {
+    use crate::guc_array::{GUCArrayAdd, GUCArrayDelete, GUCArrayReset};
+
+    let _guard = GUC_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    install_once();
+    initialize_guc_options();
+
+    // Use `enable_seqscan` / `enable_indexscan` (PGC_USERSET bool) — their
+    // var/hook slots are wired by `initialize_guc_options`, so the validation
+    // path's `set_config_option(PGC_S_TEST)` resolves a real variable.
+
+    // Add into a NULL array -> one-element array.
+    let a = GUCArrayAdd(None, "enable_seqscan", "off").expect("add to null array");
+    assert_eq!(a, vec!["enable_seqscan=off".to_string()]);
+
+    // Add a second distinct setting -> appended after the end.
+    let a = GUCArrayAdd(Some(a), "enable_indexscan", "off").expect("add second");
+    assert_eq!(
+        a,
+        vec![
+            "enable_seqscan=off".to_string(),
+            "enable_indexscan=off".to_string()
+        ]
+    );
+
+    // Re-add an existing name -> replace in place (not appended).
+    let a = GUCArrayAdd(Some(a), "enable_seqscan", "on").expect("replace existing");
+    assert_eq!(
+        a,
+        vec![
+            "enable_seqscan=on".to_string(),
+            "enable_indexscan=off".to_string()
+        ]
+    );
+
+    // Delete one entry -> the other survives.
+    let a = GUCArrayDelete(Some(a), "enable_seqscan")
+        .expect("delete")
+        .expect("array not yet empty");
+    assert_eq!(a, vec!["enable_indexscan=off".to_string()]);
+
+    // Delete the last entry -> None (store SQL NULL).
+    let empty = GUCArrayDelete(Some(a.clone()), "enable_indexscan").expect("delete last");
+    assert_eq!(empty, None);
+
+    // Reset as superuser (install_once installs superuser()->true) drops all.
+    let reset = GUCArrayReset(a).expect("reset");
+    assert_eq!(reset, None);
 }
