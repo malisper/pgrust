@@ -330,4 +330,7 @@ pub fn init_seams() {
     // ExecTypeFromExprList is likewise fully owned + implemented in this crate's
     // exectype_tupoutput family, so its seam is installed here.
     seams::exec_type_from_expr_list::set(crate::exectype_tupoutput::ExecTypeFromExprList);
+    // ExecInitResultTypeTL lives in execTuples.c (sets ps_ResultTupleDesc from
+    // the plan's targetlist via ExecTypeFromTL); home its seam here.
+    seams::exec_init_result_type_tl::set(crate::exectype_tupoutput::ExecInitResultTypeTL);
 }

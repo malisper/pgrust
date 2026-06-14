@@ -185,6 +185,18 @@ pub fn init_seams() {
         let ops = ExecGetResultSlotOps(planstate, estate, Some(&mut isfixed));
         (ops, isfixed)
     });
+
+    // `ExecGetRootToChildMap(resultRelInfo, estate)` (execUtils.c): the owned
+    // model hands back a copy of the cached map's `attrMap` in `mcx`.
+    backend_executor_execUtils_seams::exec_get_root_to_child_map::set(
+        ExecGetRootToChildMapOwned,
+    );
+
+    // `ExecGetUpdatedCols(relinfo, estate)` (execUtils.c): the seam adapts arg
+    // order to the owner's `ExecGetUpdatedCols(estate, rel_info, mcx)`.
+    backend_executor_execUtils_seams::exec_get_updated_cols::set(|mcx, estate, rri| {
+        ExecGetUpdatedCols(estate, rri, mcx)
+    });
 }
 
 // ===========================================================================
@@ -1433,6 +1445,36 @@ pub fn ExecGetRootToChildMap<'a, 'mcx>(
         .result_rel(result_rel_info)
         .ri_RootToChildMap
         .as_deref())
+}
+
+/// Seam adapter for `exec_get_root_to_child_map` — the owned model needs a
+/// caller-supplied context to hand back a copy of the cached map's `attrMap`
+/// (the C returns the borrowed `TupleConversionMap *`, but a re-borrow of the
+/// estate would conflict with the borrow of its cached map). Computes the map
+/// via [`ExecGetRootToChildMap`], then clones the cached `map.attrMap` into
+/// `mcx` (the `alloc_in`/`slice_in` copy pattern used by [`copy_cols`]),
+/// returning `Ok(None)` when the C map is NULL (no conversion needed).
+fn ExecGetRootToChildMapOwned<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'_>,
+    result_rel_info: RriId,
+) -> PgResult<Option<PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>>> {
+    // Compute and cache the map on first use.
+    ExecGetRootToChildMap(estate, result_rel_info)?;
+    match estate
+        .result_rel(result_rel_info)
+        .ri_RootToChildMap
+        .as_deref()
+    {
+        Some(map) => {
+            let attnums = mcx::slice_in(mcx, &map.attrMap.attnums)?;
+            Ok(Some(alloc_in(
+                mcx,
+                types_tuple::attmap::AttrMap { attnums },
+            )?))
+        }
+        None => Ok(None),
+    }
 }
 
 /// `GetResultRTEPermissionInfo` (static) — look up the `RTEPermissionInfo`

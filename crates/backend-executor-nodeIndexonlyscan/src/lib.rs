@@ -602,7 +602,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
 
     // Initialize result type and projection info. The targetlist's Vars use
     // varno = INDEX_VAR.
-    execUtils::exec_init_result_type_tl::call(&mut indexstate.ss.ps, estate)?;
+    execTuples::exec_init_result_type_tl::call(&mut indexstate.ss.ps, estate)?;
     execUtils::exec_assign_scan_projection_info_with_varno::call(
         &mut indexstate.ss,
         estate,

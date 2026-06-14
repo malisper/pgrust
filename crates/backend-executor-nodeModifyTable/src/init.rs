@@ -875,13 +875,10 @@ fn eval_plan_qual_init<'mcx>(
 
 /// `ExecFindJunkAttributeInTlist(targetlist, attrName)` (execJunk.c): find the
 /// resno of the junk `TargetEntry` whose `resname` is `attr_name`, or
-/// `InvalidAttrNumber` (0) if none. Routed through the execUtils/execJunk owner
-/// seam (a pure, infallible lookup).
+/// `InvalidAttrNumber` (0) if none. `ExecFindJunkAttributeInTlist` is a pure,
+/// infallible lookup with no cycle, so we call its execJunk owner directly.
 fn exec_find_junk_attribute_in_tlist(target_list: &[TargetEntry<'_>], attr_name: &str) -> i16 {
-    backend_executor_execUtils_seams::exec_find_junk_attribute_in_tlist::call(
-        target_list,
-        attr_name,
-    )
+    backend_executor_execJunk::ExecFindJunkAttributeInTlist(target_list, attr_name)
 }
 
 /// `resultRelInfo->ri_RowIdAttNo = attno` — store the row-identity junk
@@ -928,7 +925,7 @@ fn exec_init_result_type_tl<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    backend_executor_execUtils_seams::exec_init_result_type_tl::call(planstate, estate)
+    backend_executor_execTuples_seams::exec_init_result_type_tl::call(planstate, estate)
 }
 
 extern crate alloc;
