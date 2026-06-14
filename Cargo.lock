@@ -1794,6 +1794,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-bootscanner"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-misc-guc-file",
+ "types-error",
+]
+
+[[package]]
 name = "backend-bootstrap-bootstrap"
 version = "0.0.0"
 dependencies = [
