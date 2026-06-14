@@ -587,6 +587,16 @@ pub const PROPARALLEL_SAFE: i8 = b's' as i8;
 pub const PROPARALLEL_RESTRICTED: i8 = b'r' as i8;
 pub const PROPARALLEL_UNSAFE: i8 = b'u' as i8;
 
+// pg_aggregate.aggkind values (`catalog/pg_aggregate.h`).
+pub const AGGKIND_NORMAL: i8 = b'n' as i8;
+pub const AGGKIND_ORDERED_SET: i8 = b'o' as i8;
+pub const AGGKIND_HYPOTHETICAL: i8 = b'h' as i8;
+
+// pg_aggregate.aggfinalmodify / aggmfinalmodify values (`catalog/pg_aggregate.h`).
+pub const AGGMODIFY_READ_ONLY: i8 = b'r' as i8;
+pub const AGGMODIFY_SHAREABLE: i8 = b's' as i8;
+pub const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
+
 // pg_cast.castmethod values (`catalog/pg_cast.h`).
 pub const COERCION_METHOD_FUNCTION: i8 = b'f' as i8;
 pub const COERCION_METHOD_BINARY: i8 = b'b' as i8;
