@@ -346,7 +346,7 @@ pub struct PlannedStmt<'mcx> {
     pub paramExecTypes: Option<PgVec<'mcx, types_core::Oid>>,
     /// `List *rtable` — list of `RangeTblEntry` nodes (`None` = the C `NIL`).
     /// `InitPlan`/`ExecInitRangeTable` install this into `es_range_table`.
-    pub rtable: Option<PgVec<'mcx, crate::parsenodes::RangeTblEntry>>,
+    pub rtable: Option<PgVec<'mcx, crate::parsenodes::RangeTblEntry<'mcx>>>,
     /// `Bitmapset *unprunableRelids` — RT indexes of relations not subject to
     /// runtime pruning (or needed to perform it). `InitPlan` passes this into
     /// `ExecInitRangeTable` as `es_unpruned_relids`. `None` = the C `NULL`.

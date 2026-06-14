@@ -980,7 +980,7 @@ pub fn ExecOpenScanRelation<'mcx>(
 /// by rangetable index.
 pub fn ExecInitRangeTable<'mcx>(
     estate: &mut EStateData<'mcx>,
-    range_table: PgVec<'mcx, RangeTblEntry>,
+    range_table: PgVec<'mcx, RangeTblEntry<'mcx>>,
     perm_infos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
     unpruned_relids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
@@ -1017,7 +1017,10 @@ pub fn ExecInitRangeTable<'mcx>(
 
 /// `exec_rt_fetch(rti, estate)` (executor.h inline):
 /// `list_nth(estate->es_range_table, rti - 1)`.
-pub fn exec_rt_fetch<'a>(rti: Index, estate: &'a EStateData<'_>) -> &'a RangeTblEntry {
+pub fn exec_rt_fetch<'a, 'mcx>(
+    rti: Index,
+    estate: &'a EStateData<'mcx>,
+) -> &'a RangeTblEntry<'mcx> {
     &estate.es_range_table[(rti - 1) as usize]
 }
 

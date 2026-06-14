@@ -268,7 +268,7 @@ fn finish(out: PgVec<'_, u8>) -> PgResult<PgString<'_>> {
 /// trimmed by its owning crate, and `eref`/`Alias` is not modeled at all). The
 /// faithful printer is owned by the (unported) `outfuncs`/parsetree surface;
 /// seam-and-panic until that owner lands.
-pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry]) -> PgResult<()> {
+pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>]) -> PgResult<()> {
     seams::print_rt::call(rtable)
 }
 
@@ -281,7 +281,7 @@ pub fn print_rt(rtable: &[types_nodes::parsenodes::RangeTblEntry]) -> PgResult<(
 /// parsetree/lsyscache surface; seam-and-panic until it lands.
 pub fn print_expr(
     expr: Option<&Node<'_>>,
-    rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
     seams::print_expr::call(expr, rtable)
 }
@@ -296,7 +296,7 @@ pub fn print_expr(
 /// until it lands.
 pub fn print_pathkeys(
     pathkeys: &[types_pathnodes::PathKey],
-    rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
     seams::print_pathkeys::call(pathkeys, rtable)
 }
@@ -309,7 +309,7 @@ pub fn print_pathkeys(
 /// outfuncs/parsetree surface; seam-and-panic until it lands.
 pub fn print_tl(
     tlist: &[types_nodes::primnodes::TargetEntry<'_>],
-    rtable: &[types_nodes::parsenodes::RangeTblEntry],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
     seams::print_tl::call(tlist, rtable)
 }

@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox};
+use mcx::{Mcx, PgBox, PgVec};
 use types_acl::AclMode;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
@@ -43,13 +43,28 @@ pub use RTEKind::{
     RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
 };
 
-/// `RangeTblEntry` (nodes/parsenodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RangeTblEntry {
+/// `RangeTblEntry` (nodes/parsenodes.h) — the full producer range-table entry.
+///
+/// K1-parsetree expansion: this was a 5-field consumer-trimmed scalar carrier
+/// (`rtekind`/`relid`/`relkind`/`rellockmode`/`perminfoindex`, all kept). It now
+/// carries the complete C `RangeTblEntry`, so it gains `<'mcx>` for the `Node`/
+/// `List`/`char *` subtrees (`subquery`/`joinaliasvars`/`functions`/…). The
+/// trimmed scalars keep their names/types; consumers reading only those are
+/// unaffected beyond naming the lifetime. Use [`RangeTblEntry::new_in`] in place
+/// of the former `Default` (a `PgVec` field can't derive `Default`).
+#[derive(Debug)]
+pub struct RangeTblEntry<'mcx> {
+    /// `Alias *alias` — user-written alias clause, if any.
+    pub alias: Option<PgBox<'mcx, crate::rawnodes::Alias<'mcx>>>,
+    /// `Alias *eref` — expanded reference names.
+    pub eref: Option<PgBox<'mcx, crate::rawnodes::Alias<'mcx>>>,
     /// `RTEKind rtekind`.
     pub rtekind: RTEKind,
+    // --- Fields valid for a plain relation RTE (else zero): ---
     /// `Oid relid` — OID of the relation (RTE_RELATION).
     pub relid: Oid,
+    /// `bool inh` — inheritance requested?
+    pub inh: bool,
     /// `char relkind` — relation kind.
     pub relkind: i8,
     /// `int rellockmode` — lock level that the query requires.
@@ -57,15 +72,201 @@ pub struct RangeTblEntry {
     /// `Index perminfoindex` — 1-based index of this RTE's
     /// `RTEPermissionInfo` in the query's `rteperminfos` list, or 0.
     pub perminfoindex: Index,
+    /// `TableSampleClause *tablesample` — sampling info, or `None`.
+    pub tablesample: Option<crate::nodes::NodePtr<'mcx>>,
+    // --- Fields valid for a subquery RTE (else NULL): ---
+    /// `Query *subquery` — the sub-query.
+    pub subquery: Option<PgBox<'mcx, crate::copy_query::Query<'mcx>>>,
+    /// `bool security_barrier` — is from a security_barrier view?
+    pub security_barrier: bool,
+    // --- Fields valid for a join RTE (else NULL/zero): ---
+    /// `JoinType jointype`.
+    pub jointype: crate::jointype::JoinType,
+    /// `int joinmergedcols` — number of merged (JOIN USING) columns.
+    pub joinmergedcols: i32,
+    /// `List *joinaliasvars` — list of alias-var expansions.
+    pub joinaliasvars: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
+    /// `List *joinleftcols` — left-side input column numbers.
+    pub joinleftcols: PgVec<'mcx, i32>,
+    /// `List *joinrightcols` — right-side input column numbers.
+    pub joinrightcols: PgVec<'mcx, i32>,
+    /// `Alias *join_using_alias` — alias attached directly to JOIN/USING.
+    pub join_using_alias: Option<PgBox<'mcx, crate::rawnodes::Alias<'mcx>>>,
+    // --- Fields valid for a function RTE (else NIL/zero): ---
+    /// `List *functions` — list of `RangeTblFunction` nodes.
+    pub functions: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
+    /// `bool funcordinality` — is this called WITH ORDINALITY?
+    pub funcordinality: bool,
+    // --- Fields valid for a TableFunc RTE (else NULL): ---
+    /// `TableFunc *tablefunc`.
+    pub tablefunc: Option<crate::nodes::NodePtr<'mcx>>,
+    // --- Fields valid for a values RTE (else NIL): ---
+    /// `List *values_lists` — list of expression lists.
+    pub values_lists: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
+    // --- Fields valid for a CTE RTE (else NULL/zero): ---
+    /// `char *ctename` — name of the WITH list item.
+    pub ctename: Option<mcx::PgString<'mcx>>,
+    /// `Index ctelevelsup` — number of query levels up.
+    pub ctelevelsup: Index,
+    /// `bool self_reference` — is this a recursive self-reference?
+    pub self_reference: bool,
+    // --- Fields valid for CTE, VALUES, ENR, and TableFunc RTEs (else NIL): ---
+    /// `List *coltypes` — OID list of column type OIDs.
+    pub coltypes: PgVec<'mcx, Oid>,
+    /// `List *coltypmods` — integer list of column typmods.
+    pub coltypmods: PgVec<'mcx, i32>,
+    /// `List *colcollations` — OID list of column collation OIDs.
+    pub colcollations: PgVec<'mcx, Oid>,
+    // --- Fields valid for ENR RTEs (else NULL/zero): ---
+    /// `char *enrname` — name of ephemeral named relation.
+    pub enrname: Option<mcx::PgString<'mcx>>,
+    /// `Cardinality enrtuples` — estimated or actual from caller.
+    pub enrtuples: f64,
+    // --- Fields valid for a GROUP RTE (else NIL): ---
+    /// `List *groupexprs` — list of grouping expressions.
+    pub groupexprs: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
+    // --- Fields valid in all RTEs: ---
+    /// `bool lateral` — was LATERAL specified?
+    pub lateral: bool,
+    /// `bool inFromCl` — present in FROM clause?
+    pub inFromCl: bool,
+    /// `List *securityQuals` — security barrier quals to apply, if any.
+    pub securityQuals: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
 }
 
-impl RangeTblEntry {
-    /// Deep copy into `mcx` (C: `copyObject` over `RangeTblEntry`). Every
-    /// trimmed field is a plain scalar, so this is a bitwise copy; the method
-    /// exists to give the node a uniform fallible `clone_in` like its peers.
-    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<RangeTblEntry> {
-        Ok(*self)
+impl<'mcx> RangeTblEntry<'mcx> {
+    /// A zero-initialized `makeNode(RangeTblEntry)` in `mcx` (replaces the
+    /// former `Default`, which a `PgVec` field cannot derive). All list fields
+    /// start empty, all `Node *`/`char *` `None`, scalars at their enum/zero
+    /// default.
+    pub fn new_in(mcx: Mcx<'mcx>) -> RangeTblEntry<'mcx> {
+        RangeTblEntry {
+            alias: None,
+            eref: None,
+            rtekind: RTEKind::default(),
+            relid: Oid::default(),
+            inh: false,
+            relkind: 0,
+            rellockmode: LOCKMODE::default(),
+            perminfoindex: Index::default(),
+            tablesample: None,
+            subquery: None,
+            security_barrier: false,
+            jointype: crate::jointype::JoinType::default(),
+            joinmergedcols: 0,
+            joinaliasvars: PgVec::new_in(mcx),
+            joinleftcols: PgVec::new_in(mcx),
+            joinrightcols: PgVec::new_in(mcx),
+            join_using_alias: None,
+            functions: PgVec::new_in(mcx),
+            funcordinality: false,
+            tablefunc: None,
+            values_lists: PgVec::new_in(mcx),
+            ctename: None,
+            ctelevelsup: Index::default(),
+            self_reference: false,
+            coltypes: PgVec::new_in(mcx),
+            coltypmods: PgVec::new_in(mcx),
+            colcollations: PgVec::new_in(mcx),
+            enrname: None,
+            enrtuples: 0.0,
+            groupexprs: PgVec::new_in(mcx),
+            lateral: false,
+            inFromCl: false,
+            securityQuals: PgVec::new_in(mcx),
+        }
     }
+
+    /// Deep copy into `mcx` (C: `copyObject` over `RangeTblEntry`). Every
+    /// `Node`/`List`/`char *` subtree is re-homed onto the target context.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RangeTblEntry<'b>> {
+        Ok(RangeTblEntry {
+            alias: clone_opt_alias(&self.alias, mcx)?,
+            eref: clone_opt_alias(&self.eref, mcx)?,
+            rtekind: self.rtekind,
+            relid: self.relid,
+            inh: self.inh,
+            relkind: self.relkind,
+            rellockmode: self.rellockmode,
+            perminfoindex: self.perminfoindex,
+            tablesample: clone_opt_node(&self.tablesample, mcx)?,
+            subquery: match &self.subquery {
+                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                None => None,
+            },
+            security_barrier: self.security_barrier,
+            jointype: self.jointype,
+            joinmergedcols: self.joinmergedcols,
+            joinaliasvars: clone_node_vec(&self.joinaliasvars, mcx)?,
+            joinleftcols: clone_scalar_vec(&self.joinleftcols, mcx)?,
+            joinrightcols: clone_scalar_vec(&self.joinrightcols, mcx)?,
+            join_using_alias: clone_opt_alias(&self.join_using_alias, mcx)?,
+            functions: clone_node_vec(&self.functions, mcx)?,
+            funcordinality: self.funcordinality,
+            tablefunc: clone_opt_node(&self.tablefunc, mcx)?,
+            values_lists: clone_node_vec(&self.values_lists, mcx)?,
+            ctename: match &self.ctename {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            ctelevelsup: self.ctelevelsup,
+            self_reference: self.self_reference,
+            coltypes: clone_scalar_vec(&self.coltypes, mcx)?,
+            coltypmods: clone_scalar_vec(&self.coltypmods, mcx)?,
+            colcollations: clone_scalar_vec(&self.colcollations, mcx)?,
+            enrname: match &self.enrname {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            enrtuples: self.enrtuples,
+            groupexprs: clone_node_vec(&self.groupexprs, mcx)?,
+            lateral: self.lateral,
+            inFromCl: self.inFromCl,
+            securityQuals: clone_node_vec(&self.securityQuals, mcx)?,
+        })
+    }
+}
+
+fn clone_opt_alias<'b>(
+    a: &Option<PgBox<'_, crate::rawnodes::Alias<'_>>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<PgBox<'b, crate::rawnodes::Alias<'b>>>> {
+    match a {
+        Some(a) => Ok(Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+fn clone_opt_node<'b>(
+    n: &Option<crate::nodes::NodePtr<'_>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<crate::nodes::NodePtr<'b>>> {
+    match n {
+        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+fn clone_node_vec<'b>(
+    v: &PgVec<'_, crate::nodes::NodePtr<'_>>,
+    mcx: Mcx<'b>,
+) -> PgResult<PgVec<'b, crate::nodes::NodePtr<'b>>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    for n in v.iter() {
+        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+    }
+    Ok(out)
+}
+
+fn clone_scalar_vec<'b, T: Copy>(
+    v: &PgVec<'_, T>,
+    mcx: Mcx<'b>,
+) -> PgResult<PgVec<'b, T>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    for x in v.iter() {
+        out.push(*x);
+    }
+    Ok(out)
 }
 
 /// `RTEPermissionInfo` (nodes/parsenodes.h).

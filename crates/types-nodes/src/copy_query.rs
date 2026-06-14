@@ -4,9 +4,15 @@
 //! these types are unported; copyto reaches their functions through seams and
 //! reads only these fields off the returned values.
 
-use mcx::PgString;
+use mcx::{Mcx, PgBox, PgString, PgVec};
+use types_core::primitive::Oid;
+use types_error::PgResult;
 
-use crate::nodes::CmdType;
+use crate::nodelimit::LimitOption;
+use crate::nodes::{CmdType, NodePtr};
+use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use crate::primnodes::TargetEntry;
+use crate::rawnodes::{FromExpr, OnConflictExpr};
 
 /// `CURSOR_OPT_PARALLEL_OK` (`nodes/parsenodes.h`) — parallel mode OK.
 pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
@@ -52,20 +58,233 @@ pub enum QuerySource {
 /// change those signatures, so the portalcmds token stays distinct and
 /// documented as such. (Both remain trimmed views of the same C `Query`; the
 /// full node model is a later K1 keystone.)
+#[derive(Debug)]
 pub struct Query<'mcx> {
     /// `CmdType commandType`.
     pub commandType: CmdType,
     /// `QuerySource querySource`.
     pub querySource: QuerySource,
-    /// `Node *utilityStmt` — the utility statement, with its node tag, when
-    /// `commandType == CMD_UTILITY` (`None` otherwise). Only the tag is read
-    /// (the SELECT-INTO `CreateTableAsStmt` check).
-    pub utilityStmt: Option<crate::nodes::NodeTag>,
-    /// `List *returningList` — `true` if non-NIL (the only thing copyto reads).
+    /// `int64 queryId` — query identifier (set by plugins).
+    pub queryId: i64,
+    /// `bool canSetTag` — do I set the command result tag?
+    pub canSetTag: bool,
+    /// `Node *utilityStmt` — non-null if `commandType == CMD_UTILITY`. Read the
+    /// node tag via [`crate::nodes::Node::tag`] (e.g. the SELECT-INTO
+    /// `CreateTableAsStmt` check copyto performs).
+    pub utilityStmt: Option<NodePtr<'mcx>>,
+    /// `int resultRelation` — rtable index of target rel for
+    /// INSERT/UPDATE/DELETE/MERGE; 0 for SELECT.
+    pub resultRelation: i32,
+    /// `bool hasAggs` — has aggregates in tlist or havingQual.
+    pub hasAggs: bool,
+    /// `bool hasWindowFuncs` — has window functions in tlist.
+    pub hasWindowFuncs: bool,
+    /// `bool hasTargetSRFs` — has set-returning functions in tlist.
+    pub hasTargetSRFs: bool,
+    /// `bool hasSubLinks` — has subquery `SubLink`.
+    pub hasSubLinks: bool,
+    /// `bool hasDistinctOn` — `distinctClause` is from DISTINCT ON.
+    pub hasDistinctOn: bool,
+    /// `bool hasRecursive` — WITH RECURSIVE was specified.
+    pub hasRecursive: bool,
+    /// `bool hasModifyingCTE` — has INSERT/UPDATE/DELETE/MERGE in WITH.
+    pub hasModifyingCTE: bool,
+    /// `bool hasForUpdate` — FOR [KEY] UPDATE/SHARE was specified.
+    pub hasForUpdate: bool,
+    /// `bool hasRowSecurity` — rewriter has applied some RLS policy.
+    pub hasRowSecurity: bool,
+    /// `bool hasGroupRTE` — parser has added an `RTE_GROUP` RTE.
+    pub hasGroupRTE: bool,
+    /// `bool isReturn` — is a RETURN statement.
+    pub isReturn: bool,
+    /// `List *cteList` — WITH list (of `CommonTableExpr`'s).
+    pub cteList: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `List *rtable` — list of range table entries.
+    pub rtable: PgVec<'mcx, RangeTblEntry<'mcx>>,
+    /// `List *rteperminfos` — list of `RTEPermissionInfo` nodes.
+    pub rteperminfos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
+    /// `FromExpr *jointree` — table join tree (FROM and WHERE clauses).
+    pub jointree: Option<PgBox<'mcx, FromExpr<'mcx>>>,
+    /// `List *mergeActionList` — list of `MergeAction`s for MERGE (only).
+    pub mergeActionList: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `int mergeTargetRelation` — rtable index of MERGE source target rel.
+    pub mergeTargetRelation: i32,
+    /// `Node *mergeJoinCondition` — join condition source/target for MERGE.
+    pub mergeJoinCondition: Option<NodePtr<'mcx>>,
+    /// `List *targetList` — target list (of `TargetEntry`).
+    pub targetList: PgVec<'mcx, TargetEntry<'mcx>>,
+    /// `OverridingKind override` — OVERRIDING clause.
+    pub r#override: crate::modifytable::OverridingKind,
+    /// `OnConflictExpr *onConflict` — ON CONFLICT DO [NOTHING | UPDATE].
+    pub onConflict: Option<PgBox<'mcx, OnConflictExpr<'mcx>>>,
+    /// `char *returningOldAlias` — alias name for OLD in RETURNING.
+    pub returningOldAlias: Option<PgString<'mcx>>,
+    /// `char *returningNewAlias` — alias name for NEW in RETURNING.
+    pub returningNewAlias: Option<PgString<'mcx>>,
+    /// `List *returningList` — return-values list (of `TargetEntry`).
+    pub returningList: PgVec<'mcx, TargetEntry<'mcx>>,
+    /// `bool has_returning_list` — convenience flag mirroring `returningList !=
+    /// NIL`, kept for the COPY-(query)-TO validation that reads it directly.
     pub has_returning_list: bool,
+    /// `List *groupClause` — a list of `SortGroupClause`'s.
+    pub groupClause: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `bool groupDistinct` — is the group by clause distinct?
+    pub groupDistinct: bool,
+    /// `List *groupingSets` — a list of `GroupingSet`'s if present.
+    pub groupingSets: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `Node *havingQual` — qualifications applied to groups.
+    pub havingQual: Option<NodePtr<'mcx>>,
+    /// `List *windowClause` — a list of `WindowClause`'s.
+    pub windowClause: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `List *distinctClause` — a list of `SortGroupClause`'s.
+    pub distinctClause: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `List *sortClause` — a list of `SortGroupClause`'s.
+    pub sortClause: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `Node *limitOffset` — # of result tuples to skip (int8 expr).
+    pub limitOffset: Option<NodePtr<'mcx>>,
+    /// `Node *limitCount` — # of result tuples to return (int8 expr).
+    pub limitCount: Option<NodePtr<'mcx>>,
+    /// `LimitOption limitOption` — limit type.
+    pub limitOption: LimitOption,
+    /// `List *rowMarks` — a list of `RowMarkClause`'s.
+    pub rowMarks: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `Node *setOperations` — set-operation tree if this is the top level of a
+    /// UNION/INTERSECT/EXCEPT query.
+    pub setOperations: Option<NodePtr<'mcx>>,
+    /// `List *constraintDeps` — `pg_constraint` OIDs the query depends on.
+    pub constraintDeps: PgVec<'mcx, Oid>,
+    /// `List *withCheckOptions` — a list of `WithCheckOption`'s.
+    pub withCheckOptions: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `ParseLoc stmt_location` — start location, or -1 if unknown.
+    pub stmt_location: i32,
+    /// `ParseLoc stmt_len` — length in bytes; 0 means "rest of string".
+    pub stmt_len: i32,
     /// Ties the `Query` to the context it (and its node tree) lives in; the
     /// rewrite output is allocated there.
     pub _marker: core::marker::PhantomData<&'mcx ()>,
+}
+
+impl Query<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `Query`). Every `Node`/`List`
+    /// subtree is re-homed onto the target context; fallible since copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Query<'b>> {
+        Ok(Query {
+            commandType: self.commandType,
+            querySource: self.querySource,
+            queryId: self.queryId,
+            canSetTag: self.canSetTag,
+            utilityStmt: copy_opt_node(&self.utilityStmt, mcx)?,
+            resultRelation: self.resultRelation,
+            hasAggs: self.hasAggs,
+            hasWindowFuncs: self.hasWindowFuncs,
+            hasTargetSRFs: self.hasTargetSRFs,
+            hasSubLinks: self.hasSubLinks,
+            hasDistinctOn: self.hasDistinctOn,
+            hasRecursive: self.hasRecursive,
+            hasModifyingCTE: self.hasModifyingCTE,
+            hasForUpdate: self.hasForUpdate,
+            hasRowSecurity: self.hasRowSecurity,
+            hasGroupRTE: self.hasGroupRTE,
+            isReturn: self.isReturn,
+            cteList: copy_node_vec(&self.cteList, mcx)?,
+            rtable: {
+                let mut out = mcx::vec_with_capacity_in(mcx, self.rtable.len())?;
+                for r in self.rtable.iter() {
+                    out.push(r.clone_in(mcx)?);
+                }
+                out
+            },
+            rteperminfos: {
+                let mut out = mcx::vec_with_capacity_in(mcx, self.rteperminfos.len())?;
+                for r in self.rteperminfos.iter() {
+                    out.push(r.clone_in(mcx)?);
+                }
+                out
+            },
+            jointree: match &self.jointree {
+                Some(j) => Some(mcx::alloc_in(mcx, j.clone_in(mcx)?)?),
+                None => None,
+            },
+            mergeActionList: copy_node_vec(&self.mergeActionList, mcx)?,
+            mergeTargetRelation: self.mergeTargetRelation,
+            mergeJoinCondition: copy_opt_node(&self.mergeJoinCondition, mcx)?,
+            targetList: copy_te_vec(&self.targetList, mcx)?,
+            r#override: self.r#override,
+            onConflict: match &self.onConflict {
+                Some(o) => Some(mcx::alloc_in(mcx, o.clone_in(mcx)?)?),
+                None => None,
+            },
+            returningOldAlias: match &self.returningOldAlias {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            returningNewAlias: match &self.returningNewAlias {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            returningList: copy_te_vec(&self.returningList, mcx)?,
+            has_returning_list: self.has_returning_list,
+            groupClause: copy_node_vec(&self.groupClause, mcx)?,
+            groupDistinct: self.groupDistinct,
+            groupingSets: copy_node_vec(&self.groupingSets, mcx)?,
+            havingQual: copy_opt_node(&self.havingQual, mcx)?,
+            windowClause: copy_node_vec(&self.windowClause, mcx)?,
+            distinctClause: copy_node_vec(&self.distinctClause, mcx)?,
+            sortClause: copy_node_vec(&self.sortClause, mcx)?,
+            limitOffset: copy_opt_node(&self.limitOffset, mcx)?,
+            limitCount: copy_opt_node(&self.limitCount, mcx)?,
+            limitOption: self.limitOption,
+            rowMarks: copy_node_vec(&self.rowMarks, mcx)?,
+            setOperations: copy_opt_node(&self.setOperations, mcx)?,
+            constraintDeps: {
+                let mut out = mcx::vec_with_capacity_in(mcx, self.constraintDeps.len())?;
+                for x in self.constraintDeps.iter() {
+                    out.push(*x);
+                }
+                out
+            },
+            withCheckOptions: copy_node_vec(&self.withCheckOptions, mcx)?,
+            stmt_location: self.stmt_location,
+            stmt_len: self.stmt_len,
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+/// Deep-copy an `Option<NodePtr>` (`Node *` field) into `mcx`.
+fn copy_opt_node<'b>(
+    n: &Option<NodePtr<'_>>,
+    mcx: Mcx<'b>,
+) -> PgResult<Option<NodePtr<'b>>> {
+    match n {
+        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// Deep-copy a `PgVec<NodePtr>` (`List *` of nodes) into `mcx`.
+fn copy_node_vec<'b>(
+    v: &PgVec<'_, NodePtr<'_>>,
+    mcx: Mcx<'b>,
+) -> PgResult<PgVec<'b, NodePtr<'b>>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    for n in v.iter() {
+        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+    }
+    Ok(out)
+}
+
+/// Deep-copy a `PgVec<TargetEntry>` into `mcx`.
+fn copy_te_vec<'b>(
+    v: &PgVec<'_, TargetEntry<'_>>,
+    mcx: Mcx<'b>,
+) -> PgResult<PgVec<'b, TargetEntry<'b>>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    for te in v.iter() {
+        out.push(te.clone_in(mcx)?);
+    }
+    Ok(out)
 }
 
 /// `RawStmt` (`nodes/parsenodes.h`) — the raw parse tree handed to analysis.
