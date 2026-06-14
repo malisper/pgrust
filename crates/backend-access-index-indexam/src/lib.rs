@@ -25,12 +25,10 @@
 use std::vec::Vec;
 
 use mcx::Mcx;
-use types_datum::Datum;
 // The canonical unified value type (Datum-unification). The tableam contracts
-// this layer forwards to — the `aminsert` vtable `values: &[Datum<'_>]` and the
-// `IndexScanDesc.xs_orderbyvals` slots — now carry it; the bare-word
-// `types_datum::Datum` remains for the opclass-options word forwarded verbatim
-// to the reloptions seam.
+// this layer forwards to — the `aminsert` vtable `values: &[Datum<'_>]`, the
+// `IndexScanDesc.xs_orderbyvals` slots, and the opclass-options word forwarded
+// verbatim to the reloptions seam — all carry it.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_WRONG_OBJECT_TYPE};
@@ -859,10 +857,10 @@ pub fn index_store_float8_orderby_distances(
 /// / `FunctionCall1(procinfo)` / `build_local_reloptions`) and the
 /// missing-procedure error (which reaches the syscache + ruleutils) cross to
 /// their owners.
-pub fn index_opclass_options(
+pub fn index_opclass_options<'mcx>(
     indrel: &Relation<'_>,
     attnum: AttrNumber,
-    attoptions: Datum,
+    attoptions: DatumV<'mcx>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
     let amoptsprocnum = indam(indrel).amoptsprocnum;
@@ -893,13 +891,11 @@ pub fn index_opclass_options(
     // FunctionCall1(procinfo, PointerGetDatum(&relopts));
     // return build_local_reloptions(&relopts, attoptions, validate).
     let procinfo = index_getprocinfo(indrel, attnum, amoptsprocnum)?;
-    // The reloptions seam now takes the canonical unified value (the
-    // Datum-unification keystone flipped its edge); carry the `text[]` pointer
-    // word in the by-value arm.
+    // The reloptions seam takes the canonical unified value; `attoptions` is
+    // already that type (the `text[]` pointer word travels in its by-value arm)
+    // so it forwards verbatim.
     backend_access_common_reloptions_seams::index_build_local_reloptions::call(
-        procinfo,
-        DatumV::ByVal(attoptions),
-        validate,
+        procinfo, attoptions, validate,
     )
 }
 
