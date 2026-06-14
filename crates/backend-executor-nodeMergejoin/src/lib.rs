@@ -65,7 +65,6 @@ use types_nodes::{
     SlotId, TupleSlotKind,
 };
 use types_sortsupport::{BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_EQ};
-use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `MJEvalResult` — result of [`MJEvalOuterValues`] / [`MJEvalInnerValues`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
