@@ -21,6 +21,11 @@ types-tidbitmap = { path = "../types-tidbitmap" }
 types-condvar = { path = "../types-condvar" }
 types-storage = { path = "../types-storage" }
 types-execparallel = { path = "../types-execparallel" }
+# The keystone `shared_dsm_object` carries its `'seg` lifetime via
+# `types_parallel::DsmSegmentHandle`; `pcxt_seg` hands us the execParallel
+# `DsmSegmentHandle` whose `.0` is the same segment id (the parallel crate's own
+# `pcxt_seg`/`seg_to_exec` bridge it identically).
+types-parallel = { path = "../types-parallel" }
 
 # Inward seam crate: the executor parallel dispatch reaches this node's
 # parallel methods through these declarations.
@@ -38,6 +43,10 @@ backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-s
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 
 # Direct deps on ported owners (acyclic).
+# The execParallel keystone's typed-shared-DSM-object primitive
+# (`shared_dsm_object`) lives in this crate's impl; the parallel subsystem sits
+# below the executor (it depends only on `types-nodes`), so this edge is acyclic.
+backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }

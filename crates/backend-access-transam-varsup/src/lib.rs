@@ -803,6 +803,10 @@ pub fn init_seams() {
     // consumer carries the SLRU-extension failure surface on `Err`.
     seams::advance_next_full_xid_past_xid::set(AdvanceNextFullTransactionIdPastXid);
 
+    // `AdvanceOldestClogXid(oldest_datfrozenxid)` (clog `TruncateCLOG` /
+    // `clog_redo` caller) carries the shared-state-mutation channel on `Err`.
+    seams::advance_oldest_clog_xid::set(AdvanceOldestClogXid);
+
     // `GetNewObjectId()` and `StopGeneratingPinnedObjectIds()` (catalog.c
     // callers) carry their `ereport(ERROR)` paths on `Err`.
     seams::get_new_object_id::set(GetNewObjectId);

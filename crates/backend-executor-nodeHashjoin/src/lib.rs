@@ -25,6 +25,8 @@
 
 extern crate alloc;
 
+use backend_access_transam_parallel::shared_dsm_object;
+use backend_access_transam_parallel_seams as parallel_sup;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
 use backend_executor_execProcnode_seams as execProcnode;
@@ -32,6 +34,9 @@ use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_executor_nodeHash_seams as nodeHash;
 use backend_storage_file_buffile_seams as buffile;
+use backend_storage_file_sharedfileset_seams as sharedfileset;
+use backend_storage_ipc_barrier_seams as barrier;
+use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_sort_storage_seams as sts;
@@ -40,10 +45,12 @@ use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult};
 use types_nodes::nodehashjoin::{
-    BufFile, HashJoin, HashJoinState, HashJoinTableData, JoinType, INVALID_SKEW_BUCKET_NO,
+    BufFile, HashJoin, HashJoinState, HashJoinTableData, JoinType, ParallelHashJoinState,
+    INVALID_SKEW_BUCKET_NO,
     PHJ_BATCH_ALLOCATE, PHJ_BATCH_ELECT, PHJ_BATCH_FREE, PHJ_BATCH_LOAD, PHJ_BATCH_PROBE,
     PHJ_BATCH_SCAN, PHJ_BUILD_FREE, PHJ_BUILD_HASH_OUTER, PHJ_BUILD_RUN,
 };
+use types_nodes::primnodes::Expr;
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 // ===========================================================================
@@ -733,6 +740,24 @@ pub fn ExecInitHashJoin<'mcx>(
 /// sets up the skew hash function (both owned by nodeHash since they write the
 /// HashState). All of this — the per-clause loop and the field plumbing — is
 /// the hash join's own init logic.
+/// Materialize a `List` of expression `Node`s (the planner's `hashkeys`) into a
+/// `Vec<Expr>` for `ExecBuildHash32Expr`. Each hash key is an expression node
+/// (`Node::Expr`); anything else is a planner invariant violation.
+fn node_list_to_exprs<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    nodes: Option<&[types_nodes::nodes::Node<'mcx>]>,
+) -> PgResult<PgVec<'mcx, Expr>> {
+    let nodes = nodes.unwrap_or(&[]);
+    let mut out: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nodes.len())?;
+    for n in nodes {
+        match n {
+            types_nodes::nodes::Node::Expr(e) => out.push(e.clone()),
+            other => panic!("hashkeys list element is not an expression node: {other:?}"),
+        }
+    }
+    Ok(out)
+}
+
 fn build_hash_exprs<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
     hj: &HashJoin<'mcx>,
@@ -744,10 +769,10 @@ fn build_hash_exprs<'mcx>(
     // outer_hashfuncid = palloc_array(Oid, nkeys); etc.
     let mut outer_hashfuncid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
     let mut inner_hashfuncid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
-    let mut hash_strict: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
+    let mut hash_strict: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, nkeys)?;
 
     // Determine the hash function for each side of the join for each operator.
-    for (i, &hashop) in hj.hashoperators.iter().enumerate() {
+    for &hashop in hj.hashoperators.iter() {
         match lsyscache::get_op_hash_functions::call(hashop)? {
             Some((lhs, rhs)) => {
                 outer_hashfuncid.push(lhs);
@@ -759,13 +784,24 @@ fn build_hash_exprs<'mcx>(
                 )));
             }
         }
-        // hash_strict[i] = op_strict(hashop); — store strictness as 0/1
-        hash_strict.push(if lsyscache::op_strict::call(hashop)? { 1 } else { 0 });
-        let _ = i;
+        // hash_strict[i] = op_strict(hashop);
+        hash_strict.push(lsyscache::op_strict::call(hashop)?);
     }
 
     // Collations for ExecBuildHash32Expr (one per clause).
     let collations: &[Oid] = &hj.hashcollations;
+
+    // The per-side hash key expression lists: `node->hashkeys` (outer) and
+    // `hash->hashkeys` (the inner Hash plan), each a `List` of expression Nodes.
+    let outer_keys: PgVec<'mcx, Expr> = node_list_to_exprs(mcx, hj.hashkeys.as_deref())?;
+    let inner_keys: PgVec<'mcx, Expr> = {
+        let inner_hash_keys = match hj.join.plan.righttree.as_deref() {
+            Some(types_nodes::nodes::Node::Hash(h)) => h.hashkeys.as_deref(),
+            Some(other) => panic!("innerPlan(HashJoin) is not a Hash node: {other:?}"),
+            None => None,
+        };
+        node_list_to_exprs(mcx, inner_hash_keys)?
+    };
 
     // Build the outer-side hash ExprState (keep_nulls = HJ_FILL_OUTER).
     let fill_outer = HJ_FILL_OUTER(hjstate);
@@ -774,22 +810,32 @@ fn build_hash_exprs<'mcx>(
         true,
         &outer_hashfuncid,
         collations,
+        &outer_keys,
+        &hash_strict,
         fill_outer,
         estate,
     )?;
     hjstate.hj_OuterHash = Some(outer_hash);
 
-    // Build the inner-side hash ExprState (keep_nulls = HJ_FILL_INNER); the
-    // owner stores it on the inner HashState's `hash_expr`.
+    // Build the inner-side hash ExprState (keep_nulls = HJ_FILL_INNER), stored
+    // below on the inner HashState's `hash_expr` (the C `hashstate->hash_expr`).
     let fill_inner = HJ_FILL_INNER(hjstate);
-    let _inner_hash = nodeHash::exec_build_hash32_expr::call(
+    let inner_hash = nodeHash::exec_build_hash32_expr::call(
         hjstate,
         false,
         &inner_hashfuncid,
         collations,
+        &inner_keys,
+        &hash_strict,
         fill_inner,
         estate,
     )?;
+    // hashstate->hash_expr = ExecBuildHash32Expr(...); store on the inner
+    // HashState (`(HashState *) innerPlanState(hjstate)`).
+    match hjstate.js.ps.righttree.as_deref_mut() {
+        Some(PlanStateNode::Hash(h)) => h.hash_expr = Some(inner_hash),
+        _ => panic!("innerPlanState(HashJoin) is not a HashState"),
+    }
 
     // Set up the skew table hash function from the first key's hash function:
     //   if (OidIsValid(hash->skewTable)) { skew_hashfunction = palloc0(FmgrInfo);
@@ -1622,81 +1668,258 @@ pub fn ExecParallelHashJoinPartitionOuter<'mcx>(
 // Parallel DSM hooks.
 // ===========================================================================
 
+/// `state->js.ps.plan->plan_node_id` — the toc key the shared
+/// `ParallelHashJoinState` is registered under.
+#[inline]
+fn hashjoin_plan_node_id(node: &HashJoinState) -> i32 {
+    node.js
+        .ps
+        .plan
+        .map(|n| n.plan_head().plan_node_id)
+        .expect("HashJoinState.js.ps.plan")
+}
+
+/// `hashNode = (HashState *) innerPlanState(state)` — the inner Hash node's
+/// executor state, whose `parallel_state` the hash join wires to the shared
+/// object it places/looks-up.
+#[inline]
+fn inner_hash_state<'a, 'mcx>(
+    node: &'a mut HashJoinState<'mcx>,
+) -> &'a mut types_nodes::nodehash::HashState<'mcx> {
+    match node.js.ps.righttree.as_deref_mut() {
+        Some(PlanStateNode::Hash(h)) => h,
+        Some(other) => panic!("innerPlanState(HashJoin) is not a Hash node: {other:?}"),
+        None => panic!("innerPlanState(HashJoin) is NULL"),
+    }
+}
+
 /// `ExecHashJoinEstimate(state, pcxt)` — estimate DSM space for the shared
-/// state (`shm_toc_estimate_chunk(sizeof(ParallelHashJoinState))` +
-/// `shm_toc_estimate_keys(1)`). The estimator lives on the ParallelContext,
-/// which the executor's parallel-setup unit owns; the reservation is recorded
-/// through that owner. Until execParallel lands, this is a loud panic via the
-/// parallel-context handle's seam.
-pub fn ExecHashJoinEstimate(_node: &mut HashJoinState<'_>, _pcxt: &mut ParallelContextHandle) {
-    panic!(
-        "ExecHashJoinEstimate: parallel-context DSM estimation requires \
-         backend-executor-execParallel (not yet ported)"
+/// `ParallelHashJoinState`. Mirrors the C exactly:
+///
+/// ```c
+/// shm_toc_estimate_chunk(&pcxt->estimator, sizeof(ParallelHashJoinState));
+/// shm_toc_estimate_keys(&pcxt->estimator, 1);
+/// ```
+///
+/// The chunk size is the typed-shared-DSM-object primitive's
+/// [`shared_dsm_object::estimate`] (`size_of::<ParallelHashJoinState>()`, with
+/// `BUFFERALIGN` left to `shm_toc_allocate`); the reservation is recorded
+/// through the `ParallelContext`'s estimator (parallel.c owner, via its seam).
+pub fn ExecHashJoinEstimate(
+    _node: &mut HashJoinState<'_>,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    let estimator = parallel_sup::pcxt_estimator::call(pcxt);
+    parallel_sup::shm_toc_estimate_chunk::call(
+        estimator,
+        shared_dsm_object::estimate::<ParallelHashJoinState>(),
     );
+    parallel_sup::shm_toc_estimate_keys::call(estimator, 1);
+    Ok(())
 }
 
 /// `ExecHashJoinInitializeDSM(state, pcxt)` — set up the shared hash-join state.
 ///
-/// The in-crate part — `ExecSetExecProcNode(&state->js.ps,
-/// ExecParallelHashJoin)` — swaps the node's execution callback to the
-/// parallel-aware variant. The DSM-specific work (`shm_toc_allocate`,
-/// `pstate` init, `LWLockInitialize`, `BarrierInit`, `SharedFileSetInit`) lives
-/// in backend-executor-execParallel and nodeHash's shared-state setup; until
-/// those land this panics loudly after the proc-node swap.
-pub fn ExecHashJoinInitializeDSM(node: &mut HashJoinState<'_>, _pcxt: &mut ParallelContextHandle) {
-    // pcxt->seg == NULL → return (handled by the caller's parallel-setup unit).
+/// ```c
+/// if (pcxt->seg == NULL) return;
+/// ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
+/// pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelHashJoinState));
+/// shm_toc_insert(pcxt->toc, plan_node_id, pstate);
+/// pstate->nbatch = 0; ...; pg_atomic_init_u32(&pstate->distributor, 0);
+/// pstate->nparticipants = pcxt->nworkers + 1; pstate->total_tuples = 0;
+/// LWLockInitialize(&pstate->lock, LWTRANCHE_PARALLEL_HASH_JOIN);
+/// BarrierInit(&pstate->build_barrier, 0); ...;
+/// SharedFileSetInit(&pstate->fileset, pcxt->seg);
+/// hashNode = (HashState *) innerPlanState(state);
+/// hashNode->parallel_state = pstate;
+/// ```
+///
+/// The `ParallelHashJoinState` is placed DIRECTLY in the DSM chunk through the
+/// typed-shared-DSM-object primitive ([`shared_dsm_object::place_and_init_mut`]),
+/// so every worker that `shm_toc_lookup`s/attaches sees the SAME cross-process
+/// object — its `lock`/`build_barrier`/`grow_*_barrier`/`distributor`/`fileset`
+/// are the real shared primitives. `BarrierInit`/`LWLockInitialize` go through
+/// their owners' seams; `SharedFileSetInit` is seam-and-panic into the
+/// not-yet-ported `sharedfileset.c`.
+pub fn ExecHashJoinInitializeDSM(
+    node: &mut HashJoinState<'_>,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    let plan_node_id = hashjoin_plan_node_id(node);
+
+    // Disable shared hash table mode if we failed to create a real DSM segment,
+    // because that means that we don't have a DSA area to work with.
+    //   if (pcxt->seg == NULL) return;
+    let seg = match parallel_sup::pcxt_seg::call(pcxt) {
+        Some(seg) => seg,
+        None => return Ok(()),
+    };
+
+    // ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
     node.js.ps.ExecProcNode = Some(exec_parallel_hash_join_node);
-    panic!(
-        "ExecHashJoinInitializeDSM: parallel-context DSM setup requires \
-         backend-executor-execParallel (not yet ported)"
+
+    // Set up the state needed to coordinate access to the shared hash table(s),
+    // using the plan node ID as the toc key.
+    //   pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelHashJoinState));
+    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
+    let toc = parallel_sup::pcxt_toc::call(pcxt);
+    let chunk = parallel_sup::shm_toc_allocate::call(
+        toc,
+        shared_dsm_object::estimate::<ParallelHashJoinState>(),
     );
+
+    // Placement-init the shared ParallelHashJoinState in the DSM chunk; the
+    // leader is the sole writer until the launch barrier releases. No `unsafe`
+    // in this crate — the keystone hands us a plain `&mut`.
+    shared_dsm_object::place_and_init_mut::<ParallelHashJoinState>(
+        seg,
+        chunk,
+        |pstate: &mut ParallelHashJoinState| {
+            // Set up the shared hash join state with no batches initially.
+            // ExecHashTableCreate() will prepare at least one later and set
+            // nbatch and space_allowed.
+            pstate.nbatch = 0;
+            pstate.space_allowed = 0;
+            pstate.batches = types_execparallel::INVALID_DSA_POINTER;
+            pstate.old_batches = types_execparallel::INVALID_DSA_POINTER;
+            pstate.nbuckets = 0;
+            pstate.growth = types_nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
+            pstate.chunk_work_queue = types_execparallel::INVALID_DSA_POINTER;
+            // pg_atomic_init_u32(&pstate->distributor, 0);
+            pstate.distributor =
+                types_storage::storage::pg_atomic_uint32::new(0);
+            // pstate->nparticipants = pcxt->nworkers + 1;
+            pstate.nparticipants = nworkers + 1;
+            pstate.total_tuples = 0;
+            // old_nbatch is not set by C here (left from the chunk); mirror C by
+            // matching its untouched-by-init scalar — but a fresh chunk is
+            // un-zeroed, so set it deterministically to 0 (C relies on it being
+            // written before use by ExecParallelHashIncreaseNumBatches).
+            pstate.old_nbatch = 0;
+            // LWLockInitialize(&pstate->lock, LWTRANCHE_PARALLEL_HASH_JOIN);
+            lwlock::lwlock_initialize::call(
+                &mut pstate.lock,
+                types_storage::storage::LWTRANCHE_PARALLEL_HASH_JOIN,
+            );
+            // BarrierInit(&pstate->build_barrier, 0);
+            barrier::BarrierInit::call(&mut pstate.build_barrier, 0);
+            // BarrierInit(&pstate->grow_batches_barrier, 0);
+            barrier::BarrierInit::call(&mut pstate.grow_batches_barrier, 0);
+            // BarrierInit(&pstate->grow_buckets_barrier, 0);
+            barrier::BarrierInit::call(&mut pstate.grow_buckets_barrier, 0);
+            // Set up the space we'll use for shared temporary files.
+            //   SharedFileSetInit(&pstate->fileset, pcxt->seg);
+            sharedfileset::SharedFileSetInit::call(&mut pstate.fileset, seg);
+        },
+    );
+
+    // shm_toc_insert(pcxt->toc, plan_node_id, pstate);
+    parallel_sup::shm_toc_insert::call(toc, plan_node_id as u64, chunk);
+
+    // Initialize the shared state in the hash node.
+    //   hashNode = (HashState *) innerPlanState(state);
+    //   hashNode->parallel_state = pstate;
+    // The hash node stores the shared object's in-segment address as its
+    // `parallel_state` token (it resolves the same bytes back in nodeHash).
+    inner_hash_state(node).parallel_state = Some(chunk.0 as types_execparallel::DsaPointer);
+    Ok(())
 }
 
 /// `ExecHashJoinReInitializeDSM(state, pcxt)` — reset shared state before a
 /// fresh scan.
 ///
-/// The in-crate part — when `hj_HashTable != NULL`, detach the batch and the
-/// hash table (both nodeHash seams) to free any remaining shared memory — runs
-/// first, exactly as C does. The trailing `shm_toc_lookup` /
-/// `SharedFileSetDeleteAll` / `BarrierInit` is execParallel-owned and panics
-/// loudly until that unit lands.
-pub fn ExecHashJoinReInitializeDSM(node: &mut HashJoinState<'_>, _pcxt: &mut ParallelContextHandle) {
-    // pcxt->seg == NULL → return (handled by the caller's parallel-setup unit).
+/// ```c
+/// if (pcxt->seg == NULL) return;
+/// pstate = shm_toc_lookup(pcxt->toc, plan_node_id, false);
+/// if (state->hj_HashTable != NULL) {
+///     ExecHashTableDetachBatch(state->hj_HashTable);
+///     ExecHashTableDetach(state->hj_HashTable);
+/// }
+/// SharedFileSetDeleteAll(&pstate->fileset);
+/// BarrierInit(&pstate->build_barrier, 0);
+/// ```
+pub fn ExecHashJoinReInitializeDSM(
+    node: &mut HashJoinState<'_>,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    let plan_node_id = hashjoin_plan_node_id(node);
+
+    // Nothing to do if we failed to create a DSM segment.
+    //   if (pcxt->seg == NULL) return;
+    let seg = match parallel_sup::pcxt_seg::call(pcxt) {
+        Some(seg) => seg,
+        None => return Ok(()),
+    };
+
+    // pstate = shm_toc_lookup(pcxt->toc, plan_node_id, false);
+    let toc = parallel_sup::pcxt_toc::call(pcxt);
+    let chunk = parallel_sup::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+        .expect("ExecHashJoinReInitializeDSM: shm_toc_lookup(plan_node_id) missing");
+
+    // It would be possible to reuse the shared hash table in single-batch cases
+    // by resetting and fast-forwarding the barriers, but currently shared hash
+    // tables are already freed by now (by the last participant to detach from
+    // the batch). For now we don't try.
 
     // Detach, freeing any remaining shared memory.
     if node.hj_HashTable.is_some() {
-        nodeHash::exec_hash_table_detach_batch::call(node)
-            .expect("ExecHashJoinReInitializeDSM: ExecHashTableDetachBatch failed");
-        nodeHash::exec_hash_table_detach::call(node)
-            .expect("ExecHashJoinReInitializeDSM: ExecHashTableDetach failed");
+        nodeHash::exec_hash_table_detach_batch::call(node)?;
+        nodeHash::exec_hash_table_detach::call(node)?;
     }
 
-    panic!(
-        "ExecHashJoinReInitializeDSM: parallel-context DSM reset requires \
-         backend-executor-execParallel (not yet ported)"
-    );
+    // Reset shared state via a unique `&mut` over the looked-up object: by now
+    // every participant has detached from the previous generation, so the
+    // leader is the sole accessor (mirrors C's plain `pstate->...` writes here).
+    shared_dsm_object::with_mut::<ParallelHashJoinState, _>(seg, chunk, |pstate| {
+        // Clear any shared batch files.
+        //   SharedFileSetDeleteAll(&pstate->fileset);
+        // Seam-and-panic into the not-yet-ported sharedfileset.c.
+        sharedfileset::SharedFileSetDeleteAll::call(&mut pstate.fileset);
+        // Reset build_barrier to PHJ_BUILD_ELECT so we can go around again.
+        //   BarrierInit(&pstate->build_barrier, 0);
+        barrier::BarrierInit::call(&mut pstate.build_barrier, 0);
+    });
+    Ok(())
 }
 
 /// `ExecHashJoinInitializeWorker(state, pwcxt)` — attach a worker to the shared
 /// state.
+///
+/// ```c
+/// pstate = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
+/// SharedFileSetAttach(&pstate->fileset, pwcxt->seg);
+/// hashNode = (HashState *) innerPlanState(state);
+/// hashNode->parallel_state = pstate;
+/// ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
+/// ```
 pub fn ExecHashJoinInitializeWorker(
     node: &mut HashJoinState<'_>,
-    _pwcxt: &mut ParallelWorkerContextHandle,
-) {
-    // The in-crate tail is `ExecSetExecProcNode(&state->js.ps,
-    // ExecParallelHashJoin)`; the SharedFileSetAttach + shared-state lookup that
-    // precede it require execParallel/nodeHash shared state (unported).
+    pwcxt: types_execparallel::ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    let plan_node_id = hashjoin_plan_node_id(node);
+
+    // pstate = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
+    let toc = parallel_sup::pwcxt_toc::call(pwcxt);
+    let chunk = parallel_sup::shm_toc_lookup::call(toc, plan_node_id as u64, false)
+        .expect("ExecHashJoinInitializeWorker: shm_toc_lookup(plan_node_id) missing");
+    let seg = parallel_sup::pwcxt_seg::call(pwcxt);
+
+    // Attach to the space for shared temporary files.
+    //   SharedFileSetAttach(&pstate->fileset, pwcxt->seg);
+    // The worker is attaching pre-launch, so a unique `&mut` over the
+    // looked-up object is sound (it is the sole accessor in this window); this
+    // is exactly the C `&pstate->fileset` pointer-arg shape. `SharedFileSetAttach`
+    // is seam-and-panic into the not-yet-ported sharedfileset.c.
+    shared_dsm_object::with_mut::<ParallelHashJoinState, _>(seg, chunk, |pstate| {
+        sharedfileset::SharedFileSetAttach::call(&mut pstate.fileset, seg);
+    });
+
+    // Attach to the shared state in the hash node.
+    //   hashNode = (HashState *) innerPlanState(state);
+    //   hashNode->parallel_state = pstate;
+    inner_hash_state(node).parallel_state = Some(chunk.0 as types_execparallel::DsaPointer);
+
+    // ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
     node.js.ps.ExecProcNode = Some(exec_parallel_hash_join_node);
-    panic!(
-        "ExecHashJoinInitializeWorker: parallel-worker DSM attach requires \
-         backend-executor-execParallel (not yet ported)"
-    );
+    Ok(())
 }
-
-/// `ParallelContext *` — owned by backend-executor-execParallel; opaque to the
-/// hash join (it only forwards it to the parallel-setup machinery). A stand-in
-/// until that unit lands and the real type can be threaded through.
-pub struct ParallelContextHandle(pub types_nodes::Opaque);
-
-/// `ParallelWorkerContext *` — likewise owned by execParallel.
-pub struct ParallelWorkerContextHandle(pub types_nodes::Opaque);

@@ -7,4 +7,8 @@
 
 pub fn init_seams() {
     backend_utils_adt_format_type_seams::format_type_be::set(crate::format_type_be);
+    backend_utils_adt_format_type_seams::format_type_be_qualified::set(
+        crate::format_type_be_qualified,
+    );
+    backend_utils_adt_format_type_seams::type_maximum_size::set(crate::type_maximum_size);
 }

@@ -1137,6 +1137,17 @@ pub fn init_seams() {
     seams::relation_map_initialize_phase2::set(RelationMapInitializePhase2);
     seams::relation_map_initialize_phase3::set(RelationMapInitializePhase3);
     seams::relation_map_update_map::set(RelationMapUpdateMap);
+    // Pure-wiring install (seam-wiring fix): the cluster catalog-swap path
+    // (backend-commands-cluster) and relcache index path `::call` this; owner
+    // body (RelationMapRemoveMapping) matches the decl exactly.
+    seams::relation_map_remove_mapping::set(RelationMapRemoveMapping);
+    // Pure-wiring install: RelationMapOidToFilenumber is infallible in C (pure
+    // in-memory map lookups), so it wires through the frozen-PgResult contract
+    // via an Ok()-wrap adapter (same idiom as varsup/catalog.c). Consumers
+    // (cluster swap, relcache index) `::call` it with `?`.
+    seams::relation_map_oid_to_filenumber::set(|relation_id, shared| {
+        Ok(RelationMapOidToFilenumber(relation_id, shared))
+    });
 }
 
 #[cfg(test)]

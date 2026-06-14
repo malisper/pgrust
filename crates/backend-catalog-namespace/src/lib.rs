@@ -137,6 +137,9 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::at_eoxact_namespace::set(seam_at_eoxact_namespace);
     backend_catalog_namespace_seams::at_eosubxact_namespace::set(seam_at_eosubxact_namespace);
     backend_catalog_namespace_seams::get_ts_config_oid::set(seam_get_ts_config_oid);
+    backend_catalog_namespace_seams::type_is_visible::set(crate::TypeIsVisible);
+    backend_catalog_namespace_seams::is_temp_namespace::set(seam_is_temp_namespace);
+    backend_catalog_namespace_seams::lookup_creation_namespace::set(seam_lookup_creation_namespace);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
@@ -231,6 +234,20 @@ fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> types_error::PgRe
     let names_owned: Vec<Option<String>> = names.iter().map(|s| Some(s.to_string())).collect();
     let scratch = MemoryContext::new("get_ts_config_oid seam");
     crate::get_ts_config_oid(scratch.mcx(), &names_owned, missing_ok)
+}
+
+/// Seam shim: the implementation is infallible (`bool`); the seam carries the
+/// per-owner error channel, so wrap in `Ok`.
+fn seam_is_temp_namespace(namespace_id: types_core::Oid) -> types_error::PgResult<bool> {
+    Ok(crate::isTempNamespace(namespace_id))
+}
+
+/// Seam shim: the seam has no `Mcx`; the implementation needs one for the
+/// transient catalog copies the ACL/lookup makes. Use a scratch context, same
+/// pattern as `seam_get_ts_config_oid`.
+fn seam_lookup_creation_namespace(nspname: &str) -> types_error::PgResult<types_core::Oid> {
+    let scratch = MemoryContext::new("LookupCreationNamespace seam");
+    crate::LookupCreationNamespace(scratch.mcx(), nspname)
 }
 
 /// `FUNC_PARAM_IN` / `FUNC_PARAM_INOUT` / `FUNC_PARAM_VARIADIC`

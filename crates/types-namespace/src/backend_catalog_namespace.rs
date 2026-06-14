@@ -155,6 +155,32 @@ pub struct ProcRow<'mcx> {
     pub proname: PgString<'mcx>,
 }
 
+/// The `pg_proc` facts `fetch_fp_info` (`tcop/fastpath.c`) reads out of the
+/// `SearchSysCache1(PROCOID, ...)` tuple via `GETSTRUCT` to load its
+/// `struct fp_info`: `prokind` and `proretset` (the fastpath-safety gate),
+/// `pronargs`, `pronamespace`, `prorettype`, the declared `proargtypes`
+/// vector, and `NameStr(proname)` (for the error/log messages). Copied out of
+/// the catcache into the caller's `Mcx`, so it carries that allocation
+/// lifetime.
+#[derive(Debug)]
+pub struct FastpathProcRow<'mcx> {
+    /// `procform->prokind` (`PROKIND_FUNCTION` is `'f'`).
+    pub prokind: i8,
+    /// `procform->proretset`.
+    pub proretset: bool,
+    /// `procform->pronargs`.
+    pub pronargs: i16,
+    /// `procform->pronamespace`.
+    pub pronamespace: Oid,
+    /// `procform->prorettype`.
+    pub prorettype: Oid,
+    /// `procform->proargtypes.values` (length `pronargs`).
+    pub proargtypes: PgVec<'mcx, Oid>,
+    /// `NameStr(procform->proname)` — the function name, for logging and the
+    /// fastpath-rejection / too-many-arguments error messages.
+    pub proname: PgString<'mcx>,
+}
+
 /// The decomposed `pg_operator` row fields `OpernameGet*` /
 /// `OperatorIsVisibleExt` read out of each catlist member.
 #[derive(Debug)]

@@ -115,9 +115,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_select_read_pointer(state, ptr)` (tuplestore.c): make read
+    /// pointer `ptr` the active one (flushing/repositioning as needed). Can
+    /// touch the temp file on the seek path, so it is fallible.
+    pub fn tuplestore_select_read_pointer(
+        state: &mut types_nodes::Tuplestorestate<'_>,
+        ptr: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `tuplestore_rescan(state)` (tuplestore.c): rewind the active read
     /// pointer to the start.
     pub fn tuplestore_rescan(state: &mut types_nodes::Tuplestorestate<'_>) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_clear(state)` (tuplestore.c): delete all the stored tuples
+    /// and reset every read pointer to the start, but keep the tuplestore
+    /// itself allocated and re-usable. Frees/truncates the backing buffer
+    /// (BufFile close paths) — infallible.
+    pub fn tuplestore_clear(state: &mut types_nodes::Tuplestorestate<'_>)
 );
 
 seam_core::seam!(

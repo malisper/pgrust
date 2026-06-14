@@ -974,6 +974,10 @@ pub fn init_seams() {
         with_commit_ts_state(|state| committssyncfiletag(state, &ftag))
     });
 
+    seams::extend_commit_ts::set(|newest_xact| {
+        with_commit_ts_state(|state| ExtendCommitTs(state, newest_xact))
+    });
+
     seams::commit_ts_redo::set(|record| {
         let decoded = record
             .record

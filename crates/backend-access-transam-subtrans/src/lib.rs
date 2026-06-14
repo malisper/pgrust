@@ -587,6 +587,7 @@ pub fn init_seams() {
     });
     seams::sub_trans_shmem_size::set(|| Ok(SUBTRANSShmemSize()));
     seams::sub_trans_shmem_init::set(SUBTRANSShmemInit);
+    seams::extend_subtrans::set(|newest_xact| with_ctl(|st| ExtendSUBTRANS(st, newest_xact)));
 
     // The C GUC `int subtransaction_buffers` lives in the thread_local here;
     // the GUC machinery reaches it through these accessors, and the check

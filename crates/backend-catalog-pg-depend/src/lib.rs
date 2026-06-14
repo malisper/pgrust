@@ -80,7 +80,7 @@ fn open_depend(mcx: Mcx<'_>, lockmode: LOCKMODE) -> PgResult<Relation<'_>> {
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_OIDEQ,
 /// ObjectIdGetDatum(value))`. The eager fmgr resolution crosses the fmgr
 /// seam (panics until fmgr lands, exactly where C does the lookup).
-fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
+fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
@@ -94,7 +94,7 @@ fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
 
 /// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_INT4EQ,
 /// Int32GetDatum(value))`.
-fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
+fn int4_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx>> {
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,

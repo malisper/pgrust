@@ -45,6 +45,7 @@ pub fn init_seams() {
     backend_utils_init_small_seams::is_postmaster_environment::set(globals::IsPostmasterEnvironment);
     backend_utils_init_small_seams::set_my_pm_child_slot::set(globals::SetMyPMChildSlot);
     backend_utils_init_small_seams::set_my_client_socket::set(|cs| globals::SetMyClientSocket(Some(cs)));
+    backend_utils_init_small_seams::my_client_socket::set(globals::MyClientSocket);
     backend_utils_init_small_seams::start_critical_section::set(globals::StartCriticalSection);
     backend_utils_init_small_seams::end_critical_section::set(globals::EndCriticalSection);
     backend_utils_init_small_seams::exit_on_any_error::set(globals::ExitOnAnyError);
