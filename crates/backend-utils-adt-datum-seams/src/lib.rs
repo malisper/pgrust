@@ -7,6 +7,34 @@
 //! `init_seams()` when it lands; until then a call panics loudly. A `*mut u8`
 //! cursor models the C `char **start_address` (advanced past the bytes
 //! written/read).
+//!
+//! # Datum-unification status (Wave 3)
+//!
+//! Every seam below intentionally speaks the bare-word [`types_datum::Datum`]
+//! shim rather than canonical `types_tuple::TupleValue<'mcx>`. These are the
+//! *sanctioned* bare-word ABI edges of the datum-redesign plan, not unmigrated
+//! shim sites:
+//!
+//! * `datum_serialize` / `datum_restore` / `datum_estimate_space` are the
+//!   audited **DSM byte-cursor primitive** (plan Phase 4): they flatten/unflatten
+//!   one `Datum` across a `*mut u8` shared-memory cursor (C's
+//!   `char **start_address`) for nbtree `_bt_parallel_(de)serialize` and
+//!   `copyParamList`/`SerializeParamList`/`RestoreParamList`. A cursor protocol
+//!   over raw bytes cannot be made safe and must mint/consume a bare word.
+//! * `datum_copy` / `datum_image_eq` / `datum_image_hash` are the bare-`Datum`
+//!   companion lane for those same DSM consumers, which hold a bare
+//!   `ParamExternData.value` word with no `&TupleValue` available. The safe
+//!   byte-model analogues already exist as
+//!   `backend-utils-adt-scalar-seams::{datum_copy, ...}` over
+//!   `&TupleValue<'mcx>`; remaining bare-word consumers (e.g. misc2 `rowtypes`
+//!   `record_image_eq`) migrate onto the byte-model seams in their own crates
+//!   (plan Phase 0/3), after which these companions are removed (Phase 5).
+//!
+//! This crate has no internal `Datum` construction/read sites (no `from_usize`,
+//! `as_usize`, `Int32GetDatum`, `DatumGet*`): it is pure seam declarations whose
+//! every `Datum` reference is one of the edges above. There is nothing to
+//! migrate onto `Datum<'mcx>` without diverging from the DSM contract and the
+//! owner's installed `*_word` impls in `backend-utils-adt-scalar-datum-core`.
 
 use types_core::primitive::Size;
 use types_datum::Datum;
