@@ -805,6 +805,16 @@ pub struct EStateData<'mcx> {
     /// the C `NULL` (no parallel workers). Consumed first by
     /// `nodeBitmapHeapscan`'s parallel-scan DSM setup.
     pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
+    /// `JunkFilter *es_junkFilter` — top-level junk filter, if any
+    /// (execMain.c sets it in `InitPlan` for the top plan's junk attributes;
+    /// `ExecFilterJunk` projects through it). `None` = the C `NULL`. Carries
+    /// the real owned [`JunkFilter`].
+    pub es_junkFilter: Option<PgBox<'mcx, JunkFilter<'mcx>>>,
+    /// `QueryEnvironment *es_queryEnv` — context for `ENR` (ephemeral named
+    /// relations, e.g. trigger transition tables). The `QueryEnvironment` lives
+    /// above this layer; the executor only stores and threads it, so it rides
+    /// opaquely. `None` = the C `NULL`.
+    pub es_queryEnv: Opaque,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -883,6 +893,9 @@ impl<'mcx> EStateData<'mcx> {
             es_result_rel_pool: PgVec::new_in(mcx),
             // es_query_dsa = NULL;
             es_query_dsa: None,
+            // es_junkFilter = NULL; es_queryEnv = NULL;
+            es_junkFilter: None,
+            es_queryEnv: Opaque(None),
         }
     }
 

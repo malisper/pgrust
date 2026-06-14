@@ -245,6 +245,30 @@ pub struct PlannedStmt<'mcx> {
     /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
     /// the first stmt with this set.
     pub canSetTag: bool,
+    /// `bool hasReturning` — is it insert|update|delete|merge RETURNING?
+    /// (execMain `ExecutorStart` reads this to decide RETURNING projection;
+    /// additive, defaults to the C `false`.)
+    pub hasReturning: bool,
+    /// `bool hasModifyingCTE` — has insert|update|delete|merge in WITH?
+    /// (`ExecCheckXactReadOnly` forces parallel-unsafe when set.)
+    pub hasModifyingCTE: bool,
+    /// `bool parallelModeNeeded` — parallel mode required to execute?
+    /// (`ExecutorStart` reads this with the parallel-mode GUC to decide
+    /// `es_use_parallel_mode`.)
+    pub parallelModeNeeded: bool,
+    /// `int jitFlags` — which forms of JIT should be performed
+    /// (`ExecutorStart` copies it into `es_jit_flags`).
+    pub jitFlags: i32,
+    /// `List *permInfos` — list of `RTEPermissionInfo` nodes for the query's
+    /// RTEs (`ExecCheckPermissions` / `ExecCheckXactReadOnly` walk it). `None`
+    /// = the C `NIL`. The trimmed `RTEPermissionInfo` (parsenodes.rs) carries
+    /// only the fields its current consumers read; the permission-bit fields
+    /// (`requiredPerms`/`selectedCols`) land with the full
+    /// `ExecCheckPermissions` consumer (docs/types.md rule 3).
+    pub permInfos: Option<PgVec<'mcx, crate::parsenodes::RTEPermissionInfo<'mcx>>>,
+    /// `List *paramExecTypes` — type OIDs for `PARAM_EXEC` Params
+    /// (`InitPlan` sizes `es_param_exec_vals` from this). `None` = the C `NIL`.
+    pub paramExecTypes: Option<PgVec<'mcx, types_core::Oid>>,
 }
 
 impl PlannedStmt<'_> {
@@ -281,6 +305,26 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let permInfos = match &self.permInfos {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(x.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let paramExecTypes = match &self.paramExecTypes {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             commandType: self.commandType,
             utilityStmt: match &self.utilityStmt {
@@ -295,6 +339,12 @@ impl PlannedStmt<'_> {
             },
             rowMarks,
             canSetTag: self.canSetTag,
+            hasReturning: self.hasReturning,
+            hasModifyingCTE: self.hasModifyingCTE,
+            parallelModeNeeded: self.parallelModeNeeded,
+            jitFlags: self.jitFlags,
+            permInfos,
+            paramExecTypes,
         })
     }
 }

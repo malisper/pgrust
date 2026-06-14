@@ -67,6 +67,7 @@ pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;
 pub mod primnodes;
+pub mod querydesc;
 pub mod queryenvironment;
 pub mod saophash;
 pub mod tuptable;
