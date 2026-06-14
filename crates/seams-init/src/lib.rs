@@ -600,6 +600,21 @@ mod recurrence_guard {
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
+        // DESIGN_DEBT (TD-TUPDESC-HANDLE): the plancache-facing tupdesc seams
+        // (`-pc-seams`: create_tuple_desc_copy / free_tuple_desc /
+        // equal_row_types) are HANDLE-based (`TupleDescHandle`, an opaque `u64`
+        // with no backing registry), while the owner's real bodies
+        // (CreateTupleDescCopy / FreeTupleDesc / equalRowTypes) and its installed
+        // value-seams (`-seams`) are VALUE-based (`&TupleDescData`). Installing
+        // the handle seams needs a TupleDescHandle->TupleDescData registry
+        // (substantial unported machinery / a forbidden token-registry hack) or
+        // migrating plancache's whole result-desc path off opaque handles onto
+        // value descriptors (a contract redesign rippling through
+        // pquery/utility/analyze seams). Only `free_tuple_desc` is flagged here;
+        // the other two pc-seam names collide with the installed value-seam names
+        // so the name-keyed guard sees them as satisfied (they are equally
+        // uninstalled at runtime — same blocker).
+        ("backend_access_common_tupdesc", "free_tuple_desc"),
         ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
         // DESIGN_DEBT: indexam scan seams diverge on the scan-descriptor model.
         // The seam decls (backend-access-index-indexam-seams) are written against
