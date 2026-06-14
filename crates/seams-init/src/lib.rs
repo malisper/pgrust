@@ -891,6 +891,16 @@ mod recurrence_guard {
         ("backend_storage_ipc_latch", "set_latch_by_proc_number"),
         ("backend_storage_ipc_latch", "set_latch_for_proc_pid"),
         ("backend_storage_ipc_latch", "set_latch_for_procno"),
+        // DESIGN_DEBT (provider-unported): `xlog_request_wal_receiver_reply` is
+        // declared on backend-replication-walreceiverfuncs-seams but its real
+        // body is `XLogRequestWalReceiverReply()` in xlogrecovery.c, NOT
+        // walreceiverfuncs.c. The walreceiverfuncs owner documents this and
+        // deliberately does not install it. The true owner crate
+        // (backend-access-transam-xlogrecovery) is unported — only its empty
+        // -seams crate exists — so there is no real impl to ::set yet. Consumed
+        // by xact redo (backend-access-transam-xact). Install from xlogrecovery's
+        // init_seams once that owner lands.
+        ("backend_replication_walreceiverfuncs", "xlog_request_wal_receiver_reply"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
         // DESIGN_DEBT: the `backend-storage-ipc-shm-toc-seams` facade declares
         // `shm_toc_estimate_{chunk,keys}` keyed on `&mut types_nodes::ParallelContext`,
