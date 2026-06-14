@@ -47,6 +47,15 @@ pub enum Datum<'mcx> {
     ByRef(PgVec<'mcx, u8>),
 }
 
+impl Default for Datum<'_> {
+    /// C's `(Datum) 0` — the zero machine word, as the by-value arm (mirrors the
+    /// bare-word `Datum`'s `Default`). Used by struct-literal `..Default::default()`
+    /// initializers of `ExprContext.caseValue_datum`/`domainValue_datum` etc.
+    fn default() -> Self {
+        Datum::ByVal(ScalarWord::null())
+    }
+}
+
 impl Datum<'_> {
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
     /// if this is a by-value scalar (a caller bug — C would have a type/length
