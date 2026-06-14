@@ -61,12 +61,12 @@ use backend_utils_sort_sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
-/// The binary heap's `bh_nodes` (owned by `types-nodes`) now carries the
-/// canonical [`Datum`](types_tuple::backend_access_common_heaptuple::Datum)
-/// enum. `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`, so
-/// every heap entry is a `ByVal` slot index here.
-use types_tuple::backend_access_common_heaptuple::Datum as HeapDatum;
+/// The one canonical value type. The binary heap's `bh_nodes` (owned by
+/// `types-nodes`) carries it, and the sort-key comparison edge
+/// (`ApplySortComparator` / `sortsupport::apply_sort_comparator`) takes it too.
+/// `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`, so every
+/// heap entry is a `ByVal` slot index here.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodegathermerge::{
     GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE,
@@ -749,7 +749,7 @@ fn gather_merge_init<'mcx>(
                     //   if (gather_merge_readnext(gm_state, i, nowait))
                     //       binaryheap_add_unordered(gm_state->gm_heap, Int32GetDatum(i));
                     if gather_merge_readnext(gm_state, i, nowait, estate)? {
-                        binaryheap_add_unordered(heap_mut(gm_state)?, HeapDatum::from_i32(i))?;
+                        binaryheap_add_unordered(heap_mut(gm_state)?, Datum::from_i32(i))?;
                     }
                 } else {
                     // We already got at least one tuple from this worker, but
@@ -853,7 +853,7 @@ fn gather_merge_getnext<'mcx>(
         //   else
         //       (void) binaryheap_remove_first(gm_state->gm_heap);
         if gather_merge_readnext(gm_state, i, false, estate)? {
-            binaryheap_replace_first_node(gm_state, HeapDatum::from_i32(i), estate)?;
+            binaryheap_replace_first_node(gm_state, Datum::from_i32(i), estate)?;
         } else {
             // reader exhausted, remove it from heap
             binaryheap_remove_first_node(gm_state, estate)?;
@@ -1088,8 +1088,8 @@ fn gm_readnext_tuple<'mcx>(
 fn heap_compare_slots<'mcx>(
     slots: &[Option<SlotId>],
     sortkeys: &[SortSupportData<'mcx>],
-    a: HeapDatum<'_>,
-    b: HeapDatum<'_>,
+    a: Datum<'_>,
+    b: Datum<'_>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<i32> {
     // SlotNumber slot1 = DatumGetInt32(a); SlotNumber slot2 = DatumGetInt32(b);
@@ -1119,11 +1119,8 @@ fn heap_compare_slots<'mcx>(
         let a2 = execTuples::slot_getattr_by_id::call(estate, id2, attno)?;
 
         // compare = ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
-        // The sort columns are slot tts_values scalar words; project the
-        // canonical values onto the bare-word ApplySortComparator ABI edge.
-        let d1 = Datum::from_usize(a1.value.as_usize());
-        let d2 = Datum::from_usize(a2.value.as_usize());
-        let mut compare = ApplySortComparator(d1, a1.isnull, d2, a2.isnull, sort_key)?;
+        let mut compare =
+            ApplySortComparator(a1.value, a1.isnull, a2.value, a2.isnull, sort_key)?;
         if compare != 0 {
             // INVERT_COMPARE_RESULT(compare); return compare;
             compare = INVERT_COMPARE_RESULT(compare);
@@ -1154,7 +1151,7 @@ fn binaryheap_empty(heap: &BinaryHeap<'_>) -> bool {
 /// `binaryheap_add_unordered(heap, d)` — add `d` at the end without restoring
 /// the heap property (paired with [`binaryheap_build_node`]). An overflow is
 /// the C `elog(ERROR, "out of binary heap slots")`.
-fn binaryheap_add_unordered<'mcx>(heap: &mut BinaryHeap<'mcx>, d: HeapDatum<'mcx>) -> PgResult<()> {
+fn binaryheap_add_unordered<'mcx>(heap: &mut BinaryHeap<'mcx>, d: Datum<'mcx>) -> PgResult<()> {
     if heap.bh_size >= heap.bh_space {
         return Err(elog_error("out of binary heap slots"));
     }
@@ -1166,7 +1163,7 @@ fn binaryheap_add_unordered<'mcx>(heap: &mut BinaryHeap<'mcx>, d: HeapDatum<'mcx
 
 /// `binaryheap_first(heap)` — peek at the heap's top (root) entry. The caller
 /// must ensure the heap is non-empty.
-fn binaryheap_first<'mcx>(heap: &BinaryHeap<'mcx>) -> PgResult<HeapDatum<'mcx>> {
+fn binaryheap_first<'mcx>(heap: &BinaryHeap<'mcx>) -> PgResult<Datum<'mcx>> {
     heap.bh_nodes
         .first()
         .cloned()
@@ -1178,7 +1175,7 @@ fn binaryheap_first<'mcx>(heap: &BinaryHeap<'mcx>) -> PgResult<HeapDatum<'mcx>> 
 fn binaryheap_remove_first_node<'mcx>(
     gm_state: &mut GatherMergeStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<HeapDatum<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     let mut heap = gm_state
         .gm_heap
         .take()
@@ -1243,7 +1240,7 @@ fn binaryheap_build_node<'mcx>(
 /// element and re-heapify with [`sift_down`].
 fn binaryheap_replace_first_node<'mcx>(
     gm_state: &mut GatherMergeStateData<'mcx>,
-    d: HeapDatum<'mcx>,
+    d: Datum<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut heap = gm_state
@@ -1454,10 +1451,10 @@ fn INVERT_COMPARE_RESULT(var: i32) -> i32 {
 ///     return compare;
 /// }
 /// ```
-fn ApplySortComparator(
-    datum1: Datum,
+fn ApplySortComparator<'mcx>(
+    datum1: Datum<'mcx>,
     is_null1: bool,
-    datum2: Datum,
+    datum2: Datum<'mcx>,
     is_null2: bool,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {

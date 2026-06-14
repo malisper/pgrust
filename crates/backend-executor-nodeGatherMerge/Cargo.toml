@@ -24,7 +24,6 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-execparallel = { path = "../types-execparallel" }
 types-nodes = { path = "../types-nodes" }
