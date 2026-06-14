@@ -131,5 +131,39 @@ pub fn all_settings() -> impl Iterator<Item = GucSetting> {
         .chain(ConfigureNamesEnum.iter().copied().map(GucSetting::Enum))
 }
 
+/// `cluster_name` (guc_tables.c) — the runtime value of the `cluster_name`
+/// string GUC. The string is stored in `conf->variable` (`vars::cluster_name`),
+/// installed by guc.c when the GUC machinery lands; until then the slot is
+/// unset and the boot value `""` (the C `boot_val`) applies.
+fn cluster_name_impl() -> String {
+    if vars::cluster_name.installed() {
+        vars::cluster_name.read().unwrap_or_default()
+    } else {
+        // boot_val for `cluster_name` (guc_tables.c) is "".
+        String::new()
+    }
+}
+
+/// `restrict_nonsystem_relation_kind` (`tcop/tcopprot.h`) — the parsed bitmask
+/// the `assign_restrict_nonsystem_relation_kind` hook stores into the C int
+/// global `restrict_nonsystem_relation_kind`. That global lives in
+/// tcop/postgres.c and is written by the assign hook through the GUC core; this
+/// crate carries only the GUC-table metadata, not the int storage. Until the
+/// GUC machinery + tcop hook land, the value is its boot state `0` (the
+/// `RESTRICT_RELKIND_*` bitmask starts empty, matching `boot_val ""`).
+fn restrict_nonsystem_relation_kind_impl() -> i32 {
+    0
+}
+
+/// Install this unit's GUC-table seams. The string/enum/etc. var accessor
+/// slots themselves are installed by their owning subsystems; these seams read
+/// those slots (falling back to the C `boot_val` while a slot is unset).
+pub fn init_seams() {
+    backend_utils_misc_guc_tables_seams::cluster_name::set(cluster_name_impl);
+    backend_utils_misc_guc_tables_seams::restrict_nonsystem_relation_kind::set(
+        restrict_nonsystem_relation_kind_impl,
+    );
+}
+
 #[cfg(test)]
 mod tests;
