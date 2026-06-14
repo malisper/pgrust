@@ -40,6 +40,12 @@ use types_nodes::nodememoize::{
 };
 use types_nodes::TupleSlotKind;
 use types_tuple::heaptuple::MinimalTupleData;
+// Datum-unification migration target: the canonical unified value enum. The
+// binary-mode hash/equality leaves consume it by reference (`datum_image_*_v`).
+// The bare slot words deformed through the still-unmigrated execTuples /
+// execExpr slot seams arrive as `types_datum::Datum`; at that ABI edge they are
+// the by-value scalar word, wrapped as `Datum::ByVal` for the `_v` contract.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 use backend_access_transam_parallel_seams as parallel;
 use backend_executor_nodeMemoize_seams as seam;
@@ -189,8 +195,11 @@ fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32>
             if !mstate.probe_isnull[i] {
                 // treat nulls as having hash key 0
                 let attr = mstate.key_attrs[i];
-                let value = mstate.probe_values[i];
-                let hkey = datum::datum_image_hash::call(value, attr.attbyval, attr.attlen)?;
+                // The probe value is the deformed scalar word from the slot
+                // (still-bare-word execTuples/execExpr ABI edge); present it to
+                // the unified-value leaf as the by-value arm.
+                let value = DatumV::ByVal(mstate.probe_values[i]);
+                let hkey = datum::datum_image_hash_v::call(&value, attr.attbyval, attr.attlen)?;
                 hashkey ^= hkey;
             }
         }
@@ -262,9 +271,14 @@ fn memoize_hash_equal<'mcx>(
 
             // perform binary comparison on the two datums
             let attr = mstate.key_attrs[i];
-            if !datum::datum_image_eq::call(
-                mstate.table_values[i],
-                mstate.probe_values[i],
+            // Both operands are deformed scalar words from the table/probe slots
+            // (still-bare-word execTuples ABI edge); present them to the
+            // unified-value leaf as by-value arms.
+            let table_value = DatumV::ByVal(mstate.table_values[i]);
+            let probe_value = DatumV::ByVal(mstate.probe_values[i]);
+            if !datum::datum_image_eq_v::call(
+                &table_value,
+                &probe_value,
                 attr.attbyval,
                 attr.attlen,
             )? {
