@@ -578,7 +578,7 @@ pub fn slot_getattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     if attnum > 0 {
         // if (attnum > slot->tts_nvalid)
         //     slot_getsomeattrs(slot, attnum);
@@ -588,31 +588,14 @@ pub fn slot_getattr<'mcx>(
         // *isnull = slot->tts_isnull[attnum - 1];
         // return slot->tts_values[attnum - 1];
         //
-        // Project the stored `TupleValue` back to a single `Datum`. A by-value
-        // column is the word itself (C's scalar Datum). A by-reference column is
-        // C's `PointerGetDatum(tp + off)` — a pointer into the tuple's owned
-        // bytes; the owned `Datum` (`types-datum`, a bare machine word) has NO
-        // by-reference / pointer lane, and the workspace has no pointer-bytes
-        // (datum-arena) convention to mint a stable pointer word from owned
-        // bytes (the `TupleValue` model is precisely what avoids needing one;
-        // every deform consumer in this codebase works over `TupleValue`, not a
-        // bare Datum, for exactly this reason). Projecting a by-reference column
-        // to a bare `Datum` is therefore unrepresentable in the owned model —
-        // genuinely blocked on the unported pointer-bytes Datum convention, not
-        // on own-logic. Mirror PG and panic. (This `Datum`-returning form is the
-        // pool seam's contract, still in CONTRACT_RECONCILE_PENDING; in-crate
-        // callers read the `TupleValue` directly.)
+        // The stored column is already the canonical unified value: a by-value
+        // column is `ByVal` (C's scalar Datum), a by-reference column is `ByRef`
+        // over the owned tuple bytes (the unified value type's faithful stand-in
+        // for C's `PointerGetDatum(tp + off)`). Hand the caller a copy in its
+        // own `mcx`, mirroring C's `return slot->tts_values[attnum - 1]`.
         let base = slot.base();
         let isnull = base.tts_isnull[(attnum - 1) as usize];
-        let value = match &base.tts_values[(attnum - 1) as usize] {
-            TupleValue::ByVal(d) => *d,
-            TupleValue::ByRef(_) => panic!(
-                "execTuples.c slot_getattr: a by-reference column is C's PointerGetDatum \
-                 (pointer into tuple bytes); the bare-word owned Datum has no pointer lane \
-                 and the workspace has no pointer-bytes Datum-arena convention to mint one \
-                 — genuinely unported, not own-logic"
-            ),
-        };
+        let value = base.tts_values[(attnum - 1) as usize].clone_in(mcx)?;
         Ok((value, isnull))
     } else {
         // slot_getsysattr(slot, attnum, &isnull) (tuptable.h:420):

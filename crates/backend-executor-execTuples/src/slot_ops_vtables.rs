@@ -168,10 +168,10 @@ pub fn tts_virtual_getsomeattrs(_slot: &mut VirtualTupleTableSlot, _natts: i32) 
 
 /// `tts_virtual_getsysattr` (execTuples.c): `ereport(ERROR,
 /// FEATURE_NOT_SUPPORTED, "cannot retrieve a system column in this context")`.
-pub fn tts_virtual_getsysattr(
+pub fn tts_virtual_getsysattr<'mcx>(
     slot: &VirtualTupleTableSlot,
     _attnum: i32,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
     Err(feature_not_supported(
@@ -610,7 +610,7 @@ pub fn tts_heap_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &HeapTupleTableSlot<'mcx>,
     attnum: i32,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
 
@@ -624,9 +624,13 @@ pub fn tts_heap_getsysattr<'mcx>(
 
     // return heap_getsysattr(hslot->tuple, attnum, slot->tts_tupleDescriptor,
     //                        isnull);
+    //
+    // `heap_getsysattr` already yields the canonical unified value (a `ByVal`
+    // word for the scalar system columns, a `ByRef` image for ctid/oid); pass
+    // it through verbatim — no lossy projection to a bare word.
     let (value, isnull) =
         backend_access_common_heaptuple::heap_getsysattr(mcx, &tuple.tuple, attnum)?;
-    Ok((tuple_value_to_datum(&value)?, isnull))
+    Ok((value, isnull))
 }
 
 /// `tts_heap_is_current_xact_tuple` (execTuples.c).
@@ -1001,10 +1005,10 @@ fn deform_minimal_through_heap_view<'mcx>(
 
 /// `tts_minimal_getsysattr` (execTuples.c): `ereport(ERROR,
 /// FEATURE_NOT_SUPPORTED, "cannot retrieve a system column in this context")`.
-pub fn tts_minimal_getsysattr(
+pub fn tts_minimal_getsysattr<'mcx>(
     slot: &MinimalTupleTableSlot,
     _attnum: i32,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
     Err(feature_not_supported(
@@ -1375,7 +1379,7 @@ pub fn tts_buffer_heap_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &BufferHeapTupleTableSlot<'mcx>,
     attnum: i32,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.base.is_empty());
 
@@ -1389,9 +1393,12 @@ pub fn tts_buffer_heap_getsysattr<'mcx>(
 
     // return heap_getsysattr(bslot->base.tuple, attnum,
     //                        slot->tts_tupleDescriptor, isnull);
+    //
+    // `heap_getsysattr` already yields the canonical unified value; pass it
+    // through verbatim (no lossy projection to a bare word).
     let (value, isnull) =
         backend_access_common_heaptuple::heap_getsysattr(mcx, &tuple.tuple, attnum)?;
-    Ok((tuple_value_to_datum(&value)?, isnull))
+    Ok((value, isnull))
 }
 
 /// `tts_buffer_is_current_xact_tuple` (execTuples.c).
@@ -1713,22 +1720,6 @@ pub fn tts_buffer_heap_copy_minimal_tuple<'mcx>(
 
 // --- helpers --------------------------------------------------------------
 
-/// Project a `DeformedColumn`'s value back to a bare `Datum` word. A by-value
-/// sys-attr (xmin/xmax/cmin/cmax/tableoid) is the word itself; a by-reference
-/// sys-attr (the `ctid`/`tableoid`-pointer cases C returns as a
-/// `PointerGetDatum`) cannot be represented as a `Datum(usize)` word in the
-/// owned model — that pointer-Datum boundary is the slot payload model's
-/// (the owned values cross as `TupleValue`, not raw words). Mirror PG (which
-/// hands a raw pointer) and panic.
-fn tuple_value_to_datum(value: &TupleValue<'_>) -> PgResult<types_datum::Datum> {
-    match value {
-        TupleValue::ByVal(d) => Ok(*d),
-        TupleValue::ByRef(_) => Err(elog_error(
-            "slot getsysattr: by-reference system column cannot cross as a bare Datum word (slot payload model)",
-        )),
-    }
-}
-
 // --- Slot-level dispatch (slot->tts_ops->op(slot)) ------------------------
 
 /// `slot->tts_ops->clear(slot)` dispatch.
@@ -1780,7 +1771,7 @@ pub fn slot_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     match slot {
         SlotData::Virtual(s) => tts_virtual_getsysattr(s, attnum as i32),
         SlotData::Heap(s) => tts_heap_getsysattr(mcx, s, attnum as i32),
