@@ -18,7 +18,14 @@ types-condvar = { path = "../types-condvar" }
 types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }
 
+backend-utils-error = { path = "../backend-utils-error" }
+
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-access-transam-xlogprefetcher-seams = { path = "../backend-access-transam-xlogprefetcher-seams" }
+backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-access-transam-timeline-seams = { path = "../backend-access-transam-timeline-seams" }
+backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
