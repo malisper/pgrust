@@ -331,32 +331,111 @@ impl<'mcx> Node<'mcx> {
 
 // `T_*` tags for the expression nodes reachable through `Node::Expr`
 // (nodes/nodetags.h, PostgreSQL 18.3 generated order). Defined here, where the
-// `Node::tag()` arm reads them.
-const T_Var: NodeTag = NodeTag(132);
-const T_Const: NodeTag = NodeTag(134);
-const T_FuncExpr: NodeTag = NodeTag(140);
-const T_OpExpr: NodeTag = NodeTag(142);
-const T_DistinctExpr: NodeTag = NodeTag(143);
-const T_NullIfExpr: NodeTag = NodeTag(144);
-const T_BoolExpr: NodeTag = NodeTag(146);
-const T_RelabelType: NodeTag = NodeTag(156);
+// `Node::tag()` arm reads them. The `Expr`-deriving node types occupy the
+// contiguous run `T_Var`(6)..`T_ReturningExpr`(61) of the generated enum;
+// values verified against `nodes/nodetags.h`.
+const T_Var: NodeTag = NodeTag(6);
+const T_Const: NodeTag = NodeTag(7);
+const T_Aggref: NodeTag = NodeTag(9);
+const T_GroupingFunc: NodeTag = NodeTag(10);
+const T_WindowFunc: NodeTag = NodeTag(11);
+const T_MergeSupportFunc: NodeTag = NodeTag(13);
+const T_SubscriptingRef: NodeTag = NodeTag(14);
+const T_FuncExpr: NodeTag = NodeTag(15);
+const T_NamedArgExpr: NodeTag = NodeTag(16);
+const T_OpExpr: NodeTag = NodeTag(17);
+const T_DistinctExpr: NodeTag = NodeTag(18);
+const T_NullIfExpr: NodeTag = NodeTag(19);
+const T_ScalarArrayOpExpr: NodeTag = NodeTag(20);
+const T_BoolExpr: NodeTag = NodeTag(21);
+const T_SubLink: NodeTag = NodeTag(22);
+const T_SubPlan: NodeTag = NodeTag(23);
+const T_AlternativeSubPlan: NodeTag = NodeTag(24);
+const T_FieldSelect: NodeTag = NodeTag(25);
+const T_FieldStore: NodeTag = NodeTag(26);
+const T_RelabelType: NodeTag = NodeTag(27);
+const T_CoerceViaIO: NodeTag = NodeTag(28);
+const T_ArrayCoerceExpr: NodeTag = NodeTag(29);
+const T_ConvertRowtypeExpr: NodeTag = NodeTag(30);
+const T_CollateExpr: NodeTag = NodeTag(31);
+const T_CaseExpr: NodeTag = NodeTag(32);
+const T_CaseTestExpr: NodeTag = NodeTag(34);
+const T_ArrayExpr: NodeTag = NodeTag(35);
+const T_RowExpr: NodeTag = NodeTag(36);
+const T_RowCompareExpr: NodeTag = NodeTag(37);
+const T_CoalesceExpr: NodeTag = NodeTag(38);
+const T_MinMaxExpr: NodeTag = NodeTag(39);
+const T_SQLValueFunction: NodeTag = NodeTag(40);
+const T_XmlExpr: NodeTag = NodeTag(41);
+const T_JsonValueExpr: NodeTag = NodeTag(44);
+const T_JsonConstructorExpr: NodeTag = NodeTag(45);
+const T_JsonIsPredicate: NodeTag = NodeTag(46);
+const T_JsonExpr: NodeTag = NodeTag(48);
+const T_NullTest: NodeTag = NodeTag(52);
+const T_BooleanTest: NodeTag = NodeTag(53);
+const T_CoerceToDomain: NodeTag = NodeTag(55);
+const T_CoerceToDomainValue: NodeTag = NodeTag(56);
+const T_SetToDefault: NodeTag = NodeTag(57);
+const T_CurrentOfExpr: NodeTag = NodeTag(58);
+const T_NextValueExpr: NodeTag = NodeTag(59);
+const T_InferenceElem: NodeTag = NodeTag(60);
+const T_ReturningExpr: NodeTag = NodeTag(61);
 
 /// `nodeTag((Node *) expr)` for an embedded expression node — the C tag of the
-/// concrete `Expr` variant. Variants whose tag no consumer reads yet fall
-/// through to `NodeTag(0)` (`T_Invalid`); they gain a real tag when a reader
-/// needs it (the enum is `#[non_exhaustive]`, so a wildcard is required).
+/// concrete `Expr` variant. Every `Expr`-deriving node type has its generated
+/// `T_*` value (`nodes/nodetags.h`); the match is exhaustive within this crate
+/// (the `#[non_exhaustive]` attribute only binds external matches), so a new
+/// variant must add its arm here.
 fn expr_tag(e: &crate::primnodes::Expr) -> NodeTag {
     use crate::primnodes::Expr;
     match e {
         Expr::Var(_) => T_Var,
         Expr::Const(_) => T_Const,
+        Expr::Param(_) => crate::params::T_Param,
+        Expr::Aggref(_) => T_Aggref,
+        Expr::GroupingFunc(_) => T_GroupingFunc,
+        Expr::WindowFunc(_) => T_WindowFunc,
+        Expr::SubscriptingRef(_) => T_SubscriptingRef,
         Expr::FuncExpr(_) => T_FuncExpr,
+        Expr::NamedArgExpr(_) => T_NamedArgExpr,
         Expr::OpExpr(_) => T_OpExpr,
         Expr::DistinctExpr(_) => T_DistinctExpr,
         Expr::NullIfExpr(_) => T_NullIfExpr,
+        Expr::ScalarArrayOpExpr(_) => T_ScalarArrayOpExpr,
         Expr::BoolExpr(_) => T_BoolExpr,
+        Expr::SubLink(_) => T_SubLink,
+        Expr::SubPlan(_) => T_SubPlan,
+        Expr::AlternativeSubPlan(_) => T_AlternativeSubPlan,
+        Expr::FieldSelect(_) => T_FieldSelect,
+        Expr::FieldStore(_) => T_FieldStore,
         Expr::RelabelType(_) => T_RelabelType,
-        _ => NodeTag(0),
+        Expr::CoerceViaIO(_) => T_CoerceViaIO,
+        Expr::ArrayCoerceExpr(_) => T_ArrayCoerceExpr,
+        Expr::ConvertRowtypeExpr(_) => T_ConvertRowtypeExpr,
+        Expr::CollateExpr(_) => T_CollateExpr,
+        Expr::CaseExpr(_) => T_CaseExpr,
+        Expr::CaseTestExpr(_) => T_CaseTestExpr,
+        Expr::ArrayExpr(_) => T_ArrayExpr,
+        Expr::RowExpr(_) => T_RowExpr,
+        Expr::RowCompareExpr(_) => T_RowCompareExpr,
+        Expr::CoalesceExpr(_) => T_CoalesceExpr,
+        Expr::MinMaxExpr(_) => T_MinMaxExpr,
+        Expr::SQLValueFunction(_) => T_SQLValueFunction,
+        Expr::XmlExpr(_) => T_XmlExpr,
+        Expr::JsonValueExpr(_) => T_JsonValueExpr,
+        Expr::JsonConstructorExpr(_) => T_JsonConstructorExpr,
+        Expr::JsonIsPredicate(_) => T_JsonIsPredicate,
+        Expr::JsonExpr(_) => T_JsonExpr,
+        Expr::NullTest(_) => T_NullTest,
+        Expr::BooleanTest(_) => T_BooleanTest,
+        Expr::MergeSupportFunc(_) => T_MergeSupportFunc,
+        Expr::CoerceToDomain(_) => T_CoerceToDomain,
+        Expr::CoerceToDomainValue(_) => T_CoerceToDomainValue,
+        Expr::SetToDefault(_) => T_SetToDefault,
+        Expr::CurrentOfExpr(_) => T_CurrentOfExpr,
+        Expr::NextValueExpr(_) => T_NextValueExpr,
+        Expr::InferenceElem(_) => T_InferenceElem,
+        Expr::ReturningExpr(_) => T_ReturningExpr,
     }
 }
 
