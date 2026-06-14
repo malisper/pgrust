@@ -218,6 +218,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LWLockConditionalAcquire(ProcArrayLock, mode)` — acquire the built-in
+    /// `ProcArrayLock` if it is immediately available, returning `true`;
+    /// otherwise leave it untaken and return `false`. `Err` carries the C
+    /// `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_conditional_acquire_proc_array(mode: LWLockMode) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMe(ProcArrayLock)` — does this backend hold the built-in
+    /// `ProcArrayLock` in any mode? Used in `Assert`s.
+    pub fn lwlock_held_by_me_proc_array() -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockAcquire(XidGenLock, mode)` — acquire the built-in `XidGenLock`
+    /// (held alongside `ProcArrayLock` while adding/removing a proc so the
+    /// dense-array slot order stays consistent with xid generation). `Err`
+    /// carries the C `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_xid_gen(mode: LWLockMode) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(XidGenLock)`.
+    pub fn lwlock_release_xid_gen() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
     /// hold the built-in lock at `lock_offset` (in any mode)? Used in
     /// `Assert`s; the lock is named by offset since `MainLWLockArray` is
