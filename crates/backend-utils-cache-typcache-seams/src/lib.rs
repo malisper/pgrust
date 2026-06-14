@@ -115,8 +115,8 @@ seam_core::seam!(
     /// (ERRCODE_CHECK_VIOLATION, "value for domain %s violates check
     /// constraint \"%s\"") with the schema/datatype/constraint diagnostic
     /// fields attached, and anything the CHECK expression itself raises.
-    pub fn domain_check_input(
-        value: types_datum::Datum,
+    pub fn domain_check_input<'mcx>(
+        value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
         isnull: bool,
         domain_type: types_core::primitive::Oid,
     ) -> types_error::PgResult<()>
@@ -136,8 +136,8 @@ seam_core::seam!(
     pub fn record_column_cmp(
         coltype: types_core::primitive::Oid,
         collation: types_core::primitive::Oid,
-        v1: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
-        v2: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        v1: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+        v2: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> types_error::PgResult<i32>
 );
 
@@ -154,8 +154,8 @@ seam_core::seam!(
     pub fn record_column_eq(
         coltype: types_core::primitive::Oid,
         collation: types_core::primitive::Oid,
-        v1: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
-        v2: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        v1: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+        v2: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> types_error::PgResult<bool>
 );
 
@@ -171,7 +171,7 @@ seam_core::seam!(
     pub fn record_column_hash(
         coltype: types_core::primitive::Oid,
         collation: types_core::primitive::Oid,
-        v: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        v: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> types_error::PgResult<u32>
 );
 
@@ -188,7 +188,7 @@ seam_core::seam!(
     pub fn record_column_hash_extended(
         coltype: types_core::primitive::Oid,
         collation: types_core::primitive::Oid,
-        v: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        v: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
         seed: u64,
     ) -> types_error::PgResult<u64>
 );
