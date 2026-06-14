@@ -4,20 +4,18 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 // This crate owns the relcache entry store. The `RelationIdCache` is a
-// `thread_local` `RefCell<HashMap<Oid, Rc<RefCell<RelationData>>>>` (the
-// `id_cache`): the C `Relation` pointer becomes a copyable `Oid` handle, and
-// each descriptor lives in an `Rc<RefCell<..>>` (the safe C-shaped rendering of
-// `RelationData *`) whose allocation survives HashMap rehash and the in-place
-// `RelationRebuildRelation` content swap (`*cell.borrow_mut() = rebuilt`) —
-// exactly the stability the C pointer's identity carries across a rebuild — and
-// `Rc::strong_count` is the safe analog of "an external holder pins the
-// allocation". Descriptors are reached through the scoped accessors
-// `with_rel`/`with_rel_mut` (replacing the `&*ptr`/`&mut *ptr` derefs) and the
-// public `with_relation`/`with_relation_mut`/`try_with_relation`; callers that
-// pin across rebuilds hold a `RelationRef` RAII guard, and a holder that wants
-// C's live shared pointer takes a clone of the cell via
-// `relation_id_get_relation_shared`. The entry store carries NO `unsafe` (every
-// access is a `RefCell` borrow). (The separate `OpClassCache` in [`index`] is a
+// `thread_local` `RefCell<HashMap<Oid, Box<RelationData>>>` (the `id_cache`):
+// the C `Relation` pointer becomes a copyable `Oid` handle, and each descriptor
+// lives in a `Box` whose stable heap address survives HashMap rehash and the
+// in-place `RelationRebuildRelation` content swap — exactly the stability the C
+// pointer's identity carries across a rebuild. Descriptors are reached through
+// the scoped accessors `with_rel`/`with_rel_mut` (replacing the `&*ptr`/`&mut
+// *ptr` derefs) and the public `with_relation`/`with_relation_mut`/
+// `try_with_relation`; callers that pin across rebuilds hold a `RelationRef`
+// RAII guard. The only sanctioned `unsafe` over the entry store is
+// `RelationRef`'s three `NonNull::as_ref`/`as_mut` sites (the held-pointer
+// analog), each carrying its `rd_refcnt > 0 => allocation-stays-live-and-
+// unmoved` invariant inline. (The separate `OpClassCache` in [`index`] is a
 // C-faithful raw-pointer dynahash — the inherited `OpClassCacheEnt` file-static
 // — with its own audited `#[allow(unsafe_code)]` byte-cast/leaked-slice sites,
 // independent of the `RelationData` store.) We use `deny` (not `forbid`) so the
@@ -35,13 +33,12 @@
 //! the relcache entry. This crate owns a **real, mutable**
 //! [`RelationData`](entry::RelationData) entry carrying the full `rd_*`
 //! surface (`rd_refcnt`/`rd_isvalid`/`rd_isnailed`/`rd_rel`/`rd_att`/
-//! `rd_indexlist`/`rd_tableam`/`rd_indam`/the derived-cache fields), owned in an
-//! `Rc<RefCell<..>>` and stored in the [`RelationIdCache`](core_entry_store) — a
-//! `thread_local` `RefCell<HashMap<Oid, Rc<RefCell<RelationData>>>>` (the
-//! `id_cache`) keyed by `Oid` (the C `RelIdCacheEnt`). The [`Relation`] handle
-//! is the `Oid`; the `Rc`'s allocation survives rehash and the in-place rebuild
-//! swap, matching the C pointer's stability invariant, and `Rc::strong_count`
-//! is the safe analog of a held `RelationData *` pinning the allocation. The per-backend
+//! `rd_indexlist`/`rd_tableam`/`rd_indam`/the derived-cache fields), owned in a
+//! `Box` and stored in the [`RelationIdCache`](core_entry_store) — a
+//! `thread_local` `RefCell<HashMap<Oid, Box<RelationData>>>` (the `id_cache`)
+//! keyed by `Oid` (the C `RelIdCacheEnt`). The [`Relation`] handle is the `Oid`;
+//! the `Box`'s stable heap address survives rehash and the in-place rebuild
+//! swap, matching the C pointer's stability invariant. The per-backend
 //! `eoxact_list`/`in_progress_list` bookkeeping lives alongside it in the same
 //! [`thread_local`] cell — a PostgreSQL backend is single-threaded, so the C
 //! file-statics map to one thread-local cell (matching the other ported cache
@@ -50,7 +47,7 @@
 //! # Family decomposition
 //!
 //! * [`core_entry_store`] — the real entry struct + the `id_cache`
-//!   `HashMap<Oid, Rc<RefCell<RelationData>>>` + the `with_rel`/`with_relation`/
+//!   `HashMap<Oid, Box<RelationData>>` + the `with_rel`/`with_relation`/
 //!   `RelationRef` accessor surface + refcount lifecycle,
 //!   `RelationIdGetRelation`/`RelationClose`/`Increment`/
 //!   `DecrementReferenceCount`, cache insert/delete/lookup, resowner glue.
@@ -98,9 +95,9 @@ pub use core_entry_store::entry::{self, RelationData};
 // Re-export the safe accessor surface + the RAII pin guard (the public API the
 // migrating consumers move onto).
 pub use core_entry_store::{
-    relation_id_get_relation_shared, try_with_relation, with_relation,
-    with_relation_mut, RelationRef, RelationClose, RelationIdGetRelation,
-    RelationIncrementReferenceCount, RelationDecrementReferenceCount,
+    try_with_relation, with_relation, with_relation_mut, RelationRef,
+    RelationClose, RelationIdGetRelation, RelationIncrementReferenceCount,
+    RelationDecrementReferenceCount,
 };
 
 use types_core::primitive::Oid;
@@ -109,10 +106,9 @@ use types_core::primitive::Oid;
 /// relation OID, so the "pointer" callers carry IS the [`Oid`]. A live handle
 /// names a descriptor owned by the `id_cache`; resolve it through the scoped
 /// accessors ([`with_relation`]/[`with_relation_mut`]/[`try_with_relation`]) or
-/// hold a pin across rebuilds with [`RelationRef`], or take C's live shared
-/// pointer (a clone of the cache cell) via [`relation_id_get_relation_shared`].
-/// The descriptor's `Rc<RefCell<..>>` allocation is stable across rehash and the
-/// in-place rebuild swap, so the handle stays valid exactly as the C pointer does.
+/// hold a pin across rebuilds with [`RelationRef`]. The descriptor's `Box` heap
+/// address is stable across rehash and the in-place rebuild swap, so the handle
+/// stays valid exactly as the C pointer does.
 pub type Relation = Oid;
 
 /// `MAX_EOXACT_LIST` (relcache.c) — the fixed `eoxact_list[]` bound.

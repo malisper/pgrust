@@ -63,10 +63,3 @@ seam_core::seam!(
     /// tree, by TransactionIdFollows order. Pure.
     pub fn transaction_id_latest(main_xid: TransactionId, children: &[TransactionId]) -> TransactionId
 );
-
-seam_core::seam!(
-    /// `TransactionIdGetCommitLSN(xid)` (transam.c) — the WAL LSN of the
-    /// transaction's commit record (or `InvalidXLogRecPtr` if not async-flushed).
-    /// Consults the clog/commit-LSN cache; can `ereport(ERROR)` on clog I/O.
-    pub fn transaction_id_get_commit_lsn(xid: TransactionId) -> PgResult<XLogRecPtr>
-);

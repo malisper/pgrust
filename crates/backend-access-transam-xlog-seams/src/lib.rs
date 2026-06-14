@@ -88,17 +88,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `XLogCheckBufferNeedsBackup(buffer)` (xloginsert.c) — would inserting a
-    /// WAL record that touches `buffer` need to take a full-page image (the
-    /// buffer's page LSN predates the current redo recptr)? Used by
-    /// `heap_page_prune_and_freeze` to decide whether opportunistic freezing is
-    /// "free" because an FPI is being emitted anyway.
-    pub fn xlog_check_buffer_needs_backup(
-        buffer: types_storage::Buffer,
-    ) -> types_error::PgResult<bool>
-);
-
-seam_core::seam!(
     /// `StartupXLOG()` (xlog.c) — perform crash/archive recovery and bring
     /// the system to a consistent, writable state. Many of its paths
     /// `ereport(ERROR)` (besides the FATAL/PANIC ones), so the error
@@ -150,13 +139,6 @@ seam_core::seam!(
     /// `XLogFlush(lsn)` — ensure WAL is flushed up to `lsn`; I/O errors
     /// `ereport(ERROR)` (PANIC inside critical sections).
     pub fn xlog_flush(lsn: XLogRecPtr) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `XLogNeedsFlush(lsn)` — true iff `lsn` is past the currently-flushed WAL
-    /// position and would therefore need a flush before being relied upon
-    /// (the hint-bit LSN interlock in `SetHintBits`).
-    pub fn xlog_needs_flush(lsn: XLogRecPtr) -> PgResult<bool>
 );
 
 seam_core::seam!(

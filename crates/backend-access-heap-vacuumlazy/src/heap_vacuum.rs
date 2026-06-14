@@ -203,9 +203,6 @@ pub fn lazy_vacuum_heap_page(
             InvalidTransactionId,
             false, /* no cleanup lock required */
             PRUNE_VACUUM_CLEANUP,
-            Vec::new(), /* no freeze plans */
-            Vec::new(), /* no redirections */
-            Vec::new(), /* no newly-dead items */
             unused.clone(),
         )?;
     }

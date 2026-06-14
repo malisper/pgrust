@@ -113,7 +113,6 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
             relispopulated: true,
             relreplident: b'n',
             relispartition: false,
-            relfrozenxid: 0,
         },
         rd_att: index_tupdesc(mcx, natts),
         rd_options: None,

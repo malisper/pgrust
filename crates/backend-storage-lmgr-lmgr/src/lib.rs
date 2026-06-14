@@ -1168,40 +1168,6 @@ fn seam_unlock_tuple(
     UnlockTuple(&lock_rel_id, tid.ip_blkid.block_number(), tid.ip_posid, lockmode)
 }
 
-/// The `conditional_lock_tuple` inward seam — non-blocking counterpart to
-/// [`seam_lock_tuple`].
-fn seam_conditional_lock_tuple(
-    relid: Oid,
-    tid: types_tuple::heaptuple::ItemPointerData,
-    lockmode: LOCKMODE,
-    log_lock_failure: bool,
-) -> PgResult<bool> {
-    let lock_rel_id = lock_rel_id_from_oid(relid);
-    ConditionalLockTuple(
-        &lock_rel_id,
-        tid.ip_blkid.block_number(),
-        tid.ip_posid,
-        lockmode,
-        log_lock_failure,
-    )
-}
-
-/// The `xact_lock_table_wait` inward seam — wait for `xid`, building the
-/// `XactLockTableWaitInfo` error context from the crossed address.
-fn seam_xact_lock_table_wait(
-    xid: TransactionId,
-    rel_name: alloc::string::String,
-    ctid: types_tuple::heaptuple::ItemPointerData,
-    oper: XLTW_Oper,
-) -> PgResult<()> {
-    let info = XactLockTableWaitInfo {
-        oper,
-        rel_name: Some(rel_name.as_str()),
-        ctid: Some((ctid.ip_blkid.block_number(), ctid.ip_posid)),
-    };
-    XactLockTableWait(xid, Some(&info))
-}
-
 /// Resolve the `LockRelId` for a bare relation OID, choosing `dbId` exactly as
 /// `SetLocktagRelationOid` does: shared (catalog) relations use `InvalidOid`,
 /// all others use the current database OID.
@@ -1237,10 +1203,6 @@ pub fn init_seams() {
     // Heavyweight tuple-tag lock/unlock (in-place-update tuple lock).
     inward::lock_tuple::set(seam_lock_tuple);
     inward::unlock_tuple::set(seam_unlock_tuple);
-    // Conditional heap-AM lock-wait primitives (heap_lock_tuple).
-    inward::conditional_lock_tuple::set(seam_conditional_lock_tuple);
-    inward::conditional_xact_lock_table_wait::set(ConditionalXactLockTableWait);
-    inward::xact_lock_table_wait::set(seam_xact_lock_table_wait);
     // Session-level apply-transaction locks (parallel-apply deadlock detection).
     inward::lock_apply_transaction_for_session::set(LockApplyTransactionForSession);
     inward::unlock_apply_transaction_for_session::set(UnlockApplyTransactionForSession);

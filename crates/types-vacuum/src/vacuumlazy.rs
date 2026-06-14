@@ -83,12 +83,15 @@ impl ParallelVacuumStateHandle {
 }
 
 /// A `GlobalVisState` (snapshot-visibility test). `id == 0` is `NULL`.
-///
-/// Defined in `types-core` to avoid a `types-snapshot -> types-vacuum`
-/// dependency cycle (`SnapshotData.vistest` needs it); re-exported here so
-/// existing `types_vacuum::vacuumlazy::GlobalVisStateHandle` consumers keep
-/// working unchanged.
-pub use types_core::GlobalVisStateHandle;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
+pub struct GlobalVisStateHandle {
+    pub id: u64,
+}
+impl GlobalVisStateHandle {
+    pub const fn new(id: u64) -> Self {
+        Self { id }
+    }
+}
 
 /// A `ReadStream` (sequential read-ahead over a relation fork).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]

@@ -51,21 +51,6 @@ pub struct BufferAccessStrategy {
     pub id: u32,
 }
 
-/// `BufferAccessStrategyType` (`storage/bufmgr.h`): the kind of ring buffer to
-/// create with `GetAccessStrategy`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum BufferAccessStrategyType {
-    /// `BAS_NORMAL` — Normal random access.
-    BasNormal = 0,
-    /// `BAS_BULKREAD` — Large read-only scan (hint bit updates are okay).
-    BasBulkread,
-    /// `BAS_BULKWRITE` — Large multi-block write (e.g. COPY IN).
-    BasBulkwrite,
-    /// `BAS_VACUUM` — VACUUM.
-    BasVacuum,
-}
-
 impl BufferAccessStrategy {
     /// The C `NULL` strategy.
     pub const NONE: BufferAccessStrategy = BufferAccessStrategy { id: 0 };

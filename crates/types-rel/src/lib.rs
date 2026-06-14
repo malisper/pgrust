@@ -76,10 +76,6 @@ pub struct FormData_pg_class<'mcx> {
     pub relreplident: u8,
     /// `bool relispartition` — is the relation a partition?
     pub relispartition: bool,
-    /// `TransactionId relfrozenxid` — all xids before this are frozen in this
-    /// table (`InvalidTransactionId` for relations without storage). Read by
-    /// `heap_abort_speculative` to pick a safe prune xid.
-    pub relfrozenxid: types_core::primitive::TransactionId,
 }
 
 /// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports

@@ -221,13 +221,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `GetTopTransactionId()` (xact.c): the top-level transaction's xid,
-    /// assigning one if none has been assigned yet. Assignment can
-    /// `ereport(ERROR)` (e.g. xid exhaustion / in a parallel worker).
-    pub fn get_top_transaction_id() -> PgResult<types_core::TransactionId>
-);
-
-seam_core::seam!(
     /// Set the `CheckXidAlive` global (xact.c) — `ResetLogicalStreamingState`.
     pub fn set_check_xid_alive(xid: types_core::TransactionId)
 );

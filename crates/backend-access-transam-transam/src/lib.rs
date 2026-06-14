@@ -345,7 +345,6 @@ pub fn init_seams() {
     });
     seams::transaction_id_abort_tree::set(|xid, children| TransactionIdAbortTree(xid, children));
     seams::transaction_id_latest::set(|main_xid, children| TransactionIdLatest(main_xid, children));
-    seams::transaction_id_get_commit_lsn::set(|xid| TransactionIdGetCommitLSN(xid));
 }
 
 #[cfg(test)]

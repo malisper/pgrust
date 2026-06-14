@@ -61,15 +61,6 @@ pub const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
 /// `PG_WAIT_IPC | 0` (= 134217728, matching c2rust).
 pub const WAIT_EVENT_APPEND_READY: u32 = PG_WAIT_IPC;
 
-/// `WAIT_EVENT_EXECUTE_GATHER` — "Waiting for activity from a child process
-/// while executing a Gather plan node." 14th entry (0-based 13) of the IPC
-/// section of `wait_event_names.txt` (APPEND_READY, ARCHIVE_CLEANUP_COMMAND,
-/// ARCHIVE_COMMAND, BACKEND_TERMINATION, BACKUP_WAIT_WAL_ARCHIVE,
-/// BGWORKER_SHUTDOWN, BGWORKER_STARTUP, BTREE_PAGE, BUFFER_IO,
-/// CHECKPOINT_DELAY_COMPLETE, CHECKPOINT_DELAY_START, CHECKPOINT_DONE,
-/// CHECKPOINT_START, EXECUTE_GATHER, ...), so `PG_WAIT_IPC + 13`.
-pub const WAIT_EVENT_EXECUTE_GATHER: u32 = PG_WAIT_IPC + 13;
-
 /// `WAIT_EVENT_BACKEND_TERMINATION` — "Waiting for the termination of another
 /// backend." 4th entry (0-based 3) of the IPC section of
 /// `wait_event_names.txt` (APPEND_READY, ARCHIVE_CLEANUP_COMMAND,

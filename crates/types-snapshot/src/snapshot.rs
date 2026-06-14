@@ -4,27 +4,6 @@ use alloc::vec::Vec;
 
 use types_core::{CommandId, TransactionId};
 
-pub use types_core::GlobalVisStateHandle;
-
-/// `HTSV_Result` (`access/heapam.h`) — the status of a tuple as judged by
-/// `HeapTupleSatisfiesVacuum`. Discriminants mirror the C enum order so the
-/// integer codes match (and so `as i32` agrees with the `i32`-coded vacuum
-/// seam).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(i32)]
-pub enum HTSV_Result {
-    /// `HEAPTUPLE_DEAD` — tuple is dead and deletable.
-    HEAPTUPLE_DEAD = 0,
-    /// `HEAPTUPLE_LIVE` — tuple is live (committed, not deleted).
-    HEAPTUPLE_LIVE,
-    /// `HEAPTUPLE_RECENTLY_DEAD` — tuple is dead, but not deletable yet.
-    HEAPTUPLE_RECENTLY_DEAD,
-    /// `HEAPTUPLE_INSERT_IN_PROGRESS` — inserting transaction is still active.
-    HEAPTUPLE_INSERT_IN_PROGRESS,
-    /// `HEAPTUPLE_DELETE_IN_PROGRESS` — deleting transaction is still active.
-    HEAPTUPLE_DELETE_IN_PROGRESS,
-}
-
 /// `SnapshotType` (`utils/snapshot.h`) — the different snapshot semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotType {
@@ -46,19 +25,6 @@ pub enum SnapshotType {
     SNAPSHOT_NON_VACUUMABLE,
 }
 
-/// Result of `ResolveCminCmaxDuringDecoding` (reorderbuffer.c) — the
-/// combo-CID-resolved cmin/cmax for a tuple seen during logical decoding.
-/// `resolved` mirrors the C `bool` return; `cmin`/`cmax` are the out-parameters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResolveCminCmaxResult {
-    /// C `bool` return: whether the combo CID was decoded and resolved.
-    pub resolved: bool,
-    /// `*cmin` out-parameter.
-    pub cmin: CommandId,
-    /// `*cmax` out-parameter.
-    pub cmax: CommandId,
-}
-
 /// `SnapshotData` (`utils/snapshot.h`).
 ///
 /// The MVCC payload (xmin/xmax/xip/subxip and the snapshot-manager
@@ -76,10 +42,6 @@ pub struct ResolveCminCmaxResult {
 pub struct SnapshotData {
     /// `snapshot_type` — what these values mean.
     pub snapshot_type: SnapshotType,
-
-    /// `vistest` — for `SNAPSHOT_NON_VACUUMABLE`, the `GlobalVisState *` that
-    /// decides whether a deleting xid is removable. `id == 0` is the C `NULL`.
-    pub vistest: GlobalVisStateHandle,
 
     /// `xmin` — all XID < xmin are visible to me.
     pub xmin: TransactionId,
@@ -106,10 +68,6 @@ pub struct SnapshotData {
     /// `curcid` — in my xact, CID < curcid are visible.
     pub curcid: CommandId,
 
-    /// `speculativeToken` — `HeapTupleSatisfiesDirty` output: the speculative
-    /// insertion token of an in-progress speculative insertion (0 if none).
-    pub speculativeToken: u32,
-
     /// `active_count` — refcount on the ActiveSnapshot stack.
     pub active_count: u32,
     /// `regd_count` — refcount on RegisteredSnapshots.
@@ -129,7 +87,6 @@ impl SnapshotData {
     pub const fn sentinel(snapshot_type: SnapshotType) -> Self {
         SnapshotData {
             snapshot_type,
-            vistest: GlobalVisStateHandle::new(0),
             xmin: 0,
             xmax: 0,
             xip: Vec::new(),
@@ -140,7 +97,6 @@ impl SnapshotData {
             takenDuringRecovery: false,
             copied: false,
             curcid: 0,
-            speculativeToken: 0,
             active_count: 0,
             regd_count: 0,
             snapXactCompletionCount: 0,

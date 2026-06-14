@@ -42,7 +42,6 @@ pub fn init_seams() {
 
     // --- derived ---
     sx::relation_get_identity_key_bitmap::set(relation_get_identity_key_bitmap);
-    sx::relation_get_index_attr_bitmap::set(relation_get_index_attr_bitmap);
     sx::relation_get_index_list::set(relation_get_index_list);
 
     // --- partition cache read/write (owned per-entry state; build via partcache) ---
@@ -326,32 +325,6 @@ fn relation_get_identity_key_bitmap<'mcx>(
     // owner's `bms_add_member` (the C `idindexattrs = bms_add_member(...,
     // attrnum - FirstLowInvalidHeapAttributeNumber)` already applied the offset
     // in the derived build). A run that adds no members yields the C NULL set.
-    let mut bms: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
-    for x in members {
-        bms = Some(backend_nodes_core_seams::bms_add_member::call(mcx, bms, x)?);
-    }
-    Ok(bms)
-}
-
-fn relation_get_index_attr_bitmap<'mcx>(
-    mcx: Mcx<'mcx>,
-    rel: &types_rel::RelationData<'_>,
-    attr_kind: sx::IndexAttrBitmapKind,
-) -> PgResult<Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
-    use crate::derived::IndexAttrBitmapKind as K;
-    // Map the seam-public kind onto the owner's enum.
-    let kind = match attr_kind {
-        sx::IndexAttrBitmapKind::Keys => K::Keys,
-        sx::IndexAttrBitmapKind::PrimaryKey => K::PrimaryKey,
-        sx::IndexAttrBitmapKind::Identity => K::Identity,
-        sx::IndexAttrBitmapKind::HotBlocking => K::HotBlocking,
-        sx::IndexAttrBitmapKind::Summarized => K::Summarized,
-    };
-    // Run the derived build (own logic over the store); it yields the offset
-    // members (already offset by FirstLowInvalidHeapAttributeNumber).
-    let members = crate::derived::RelationGetIndexAttrBitmap(rel.rd_id, kind)?;
-    // Encode into a node `Bitmapset` via the bitmapset owner's `bms_add_member`.
-    // An empty member list yields the C NULL set (`None`).
     let mut bms: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
     for x in members {
         bms = Some(backend_nodes_core_seams::bms_add_member::call(mcx, bms, x)?);

@@ -15,9 +15,4 @@ types-error = { path = "../types-error" }
 mcx = { path = "../mcx" }
 types-datum = { path = "../types-datum" }
 types-rel = { path = "../types-rel" }
-types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
-types-nbtree = { path = "../types-nbtree" }
-types-snapshot = { path = "../types-snapshot" }
-types-tableam = { path = "../types-tableam" }
-types-xlog-records = { path = "../types-xlog-records" }
