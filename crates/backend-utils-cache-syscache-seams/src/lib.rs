@@ -1042,10 +1042,17 @@ seam_core::seam!(
     /// tuple, so the caller must detoast/copy before the tuple is released.
     /// `Err` carries the `elog(ERROR, "...returned NULL")` from the NotNull
     /// assertion.
+    ///
+    /// The result is the canonical unified `Datum` (Datum-unification). It is
+    /// the raw machine word `SysCacheGetAttrNotNull` returns, still pointing
+    /// into the cached `pg_statistic` tuple; its lifetime is unconstrained at
+    /// this seam boundary (the caller detoasts/copies before the tuple is
+    /// released), so it is pinned to `'static` per the bare-word datum.c
+    /// contract.
     pub fn syscache_get_attr_not_null_statistic(
         stats_tuple: types_selfuncs::StatsTuple,
         attnum: types_core::AttrNumber,
-    ) -> PgResult<types_datum::Datum>
+    ) -> PgResult<types_tuple::Datum<'static>>
 );
 
 seam_core::seam!(
@@ -1178,11 +1185,15 @@ seam_core::seam!(
     /// `Ok(None)` for SQL null. An outer `Ok(None)` (the cache miss) lets the
     /// caller raise its own `cache lookup failed for attribute` error. `Err`
     /// carries OOM from the copy.
+    ///
+    /// The inner value is the canonical unified `Datum` (Datum-unification):
+    /// the `text[]` varlena image copied into `mcx` (C: `datumCopy`), so it
+    /// carries the caller's `'mcx` lifetime (the `ByRef` bytes live in `mcx`).
     pub fn pg_attribute_attoptions<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
         attnum: i16,
-    ) -> PgResult<Option<Option<types_datum::Datum>>>
+    ) -> PgResult<Option<Option<types_tuple::Datum<'mcx>>>>
 );
 
 /// The fixed-width `Form_pg_class` columns lsyscache.c reads off
