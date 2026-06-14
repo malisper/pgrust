@@ -25,6 +25,16 @@ fn charin_non_octal_4_bytes_takes_first() {
 }
 
 #[test]
+fn charin_octal_high_leading_digit_wraps() {
+    // C computes (o1<<6)+(o2<<3)+o3 in int then truncates to char on the
+    // PG_RETURN_CHAR assignment: \700 = (7<<6) = 448 -> 448 & 0xff = 192.
+    assert_eq!(charin("\\700") as u8, 192);
+    // \777 = 511 -> 511 & 0xff = 255.
+    assert_eq!(charin("\\777") as u8, 255);
+    assert_eq!(text_char(b"\\700") as u8, 192);
+}
+
+#[test]
 fn charout_plain() {
     {
         let cx = MemoryContext::new("t");

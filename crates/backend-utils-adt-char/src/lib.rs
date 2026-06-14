@@ -43,9 +43,21 @@ fn to_octal(c: u8) -> u8 {
 }
 
 /// `FROMOCTAL(c)` (char.c:26): `(unsigned char) c - '0'` — ASCII octal digit →
-/// value.
-fn from_octal(c: u8) -> u8 {
-    c - b'0'
+/// value. C promotes the result to `int` for the shift/add expression, so this
+/// returns the value already widened to match C's integer promotion (the
+/// `(o1 << 6) + (o2 << 3) + o3` sum is then truncated back to a byte on the
+/// `PG_RETURN_CHAR` assignment).
+fn from_octal(c: u8) -> u32 {
+    (c - b'0') as u32
+}
+
+/// Decode a `\ooo` triple to its byte. C computes
+/// `(FROMOCTAL(o1) << 6) + (FROMOCTAL(o2) << 3) + FROMOCTAL(o3)` in `int`
+/// arithmetic, then truncates to `char` on the `PG_RETURN_CHAR` assignment —
+/// so a leading digit > 3 (e.g. `\700`) wraps modulo 256, exactly as the `as
+/// u8` truncation here does.
+fn decode_octal(o1: u8, o2: u8, o3: u8) -> u8 {
+    ((from_octal(o1) << 6) + (from_octal(o2) << 3) + from_octal(o3)) as u8
 }
 
 /// `IS_HIGHBIT_SET(ch)` (`c.h`): the byte's top bit is set.
@@ -73,8 +85,7 @@ pub fn charin(ch: &str) -> i8 {
         && is_octal(bytes[2])
         && is_octal(bytes[3])
     {
-        let value = (from_octal(bytes[1]) << 6) + (from_octal(bytes[2]) << 3) + from_octal(bytes[3]);
-        return value as i8;
+        return decode_octal(bytes[1], bytes[2], bytes[3]) as i8;
     }
 
     // This does the right thing for a zero-length input string (C reads the
@@ -185,8 +196,7 @@ pub fn text_char(payload: &[u8]) -> i8 {
         && is_octal(payload[2])
         && is_octal(payload[3])
     {
-        ((from_octal(payload[1]) << 6) + (from_octal(payload[2]) << 3) + from_octal(payload[3]))
-            as i8
+        decode_octal(payload[1], payload[2], payload[3]) as i8
     } else if !payload.is_empty() {
         payload[0] as i8
     } else {
