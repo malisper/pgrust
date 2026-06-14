@@ -30,8 +30,10 @@ pub fn dsa_pointer_is_valid(p: dsa_pointer) -> bool {
 }
 
 /// `TIDBitmap` (`nodes/tidbitmap.c`) — opaque to every consumer outside
-/// `tidbitmap.c`. The owner downcasts the payload; the executor only stores
-/// and passes the handle. `None` is the C `NULL`.
+/// `tidbitmap.c`, which owns the real `struct TIDBitmap`. The box holds that
+/// real interior by value (the owner downcasts it); the executor / table-AM /
+/// index AMs only store and pass this carrier — it *is* the owning `TIDBitmap
+/// *` (no side table, no integer handle). `None` is the C `NULL`.
 #[derive(Default)]
 pub struct TIDBitmap(pub Option<Box<dyn Any>>);
 

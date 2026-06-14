@@ -403,6 +403,7 @@ dependencies = [
  "types-hash",
  "types-jsonb",
  "types-scan",
+ "types-tidbitmap",
  "types-tsearch",
  "types-tuple",
 ]
@@ -923,6 +924,7 @@ dependencies = [
  "types-rel",
  "types-scan",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -5965,6 +5967,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-pathnodes",
+ "types-tidbitmap",
  "types-tuple",
 ]
 

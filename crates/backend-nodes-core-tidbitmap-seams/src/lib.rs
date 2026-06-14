@@ -67,8 +67,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `tbm_intersect(a, b)` (tidbitmap.c): set `a = a ∩ b` (a modified in
-    /// place). Used by `MultiExecBitmapAnd` to AND child subplan bitmaps.
-    pub fn tbm_intersect(a: &TIDBitmap, b: &TIDBitmap) -> PgResult<()>
+    /// place). Used by `MultiExecBitmapAnd` to AND child subplan bitmaps. `a` is
+    /// the real `TIDBitmap *` the owner mutates in place.
+    pub fn tbm_intersect(a: &mut TIDBitmap, b: &TIDBitmap) -> PgResult<()>
 );
 
 seam_core::seam!(
