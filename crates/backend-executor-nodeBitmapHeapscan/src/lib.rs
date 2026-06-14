@@ -49,6 +49,7 @@ use types_error::PgResult;
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use types_nodes::EStateData;
 
+use backend_access_transam_parallel::shared_dsm_object;
 use backend_access_table_tableam_bm_seams as tableam_bm;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execExpr_seams as execExpr;
@@ -60,8 +61,9 @@ use backend_nodes_core_tidbitmap_seams as tidbitmap;
 pub mod nodes;
 
 use nodes::{
-    BitmapHeapScan, BitmapHeapScanInstrumentation, BitmapHeapScanState, ParallelBitmapHeapState,
-    SharedBitmapHeapInstrumentation, SpinLockGuard, BM_FINISHED, BM_INITIAL, BM_INPROGRESS,
+    BitmapHeapScan, BitmapHeapScanInstrumentation, BitmapHeapScanState, NodeSinstrument,
+    ParallelBitmapHeapState, SharedBitmapHeapInstrumentation, SharedBitmapHeapScanInstr,
+    SpinLockGuard, BM_FINISHED, BM_INITIAL, BM_INPROGRESS,
 };
 
 /// `WAIT_EVENT_PARALLEL_BITMAP_SCAN` (utils/wait_event.h) — the wait-event the
@@ -113,7 +115,7 @@ fn BitmapTableScanSetup<'mcx>(
         // pstate->tbmiterator = tbm_prepare_shared_iterate(node->tbm);
         let tbm = node.tbm.as_mut().expect("node->tbm");
         let dp = tidbitmap::tbm_prepare_shared_iterate::call(tbm)?;
-        node.pstate.as_mut().expect("pstate").tbmiterator = dp;
+        node.pstate.as_ref().expect("pstate").set_tbmiterator(dp);
 
         // We have initialized the shared state so wake up others.
         BitmapDoneInitializingSharedState(node)?;
@@ -122,7 +124,7 @@ fn BitmapTableScanSetup<'mcx>(
     // tbmiterator = tbm_begin_iterate(node->tbm, dsa,
     //     pstate ? pstate->tbmiterator : InvalidDsaPointer);
     let dsp = match &node.pstate {
-        Some(p) => p.tbmiterator,
+        Some(p) => p.tbmiterator(),
         None => types_tidbitmap::InvalidDsaPointer,
     };
     let tbm = node.tbm.as_mut().expect("node->tbm");
@@ -478,14 +480,24 @@ pub fn ExecEndBitmapHeapScan<'mcx>(
     if node.sinstrument.is_some() && backend_access_transam_parallel_seams::is_parallel_worker::call() {
         // Assert(ParallelWorkerNumber <= node->sinstrument->num_workers);
         let worker = backend_access_transam_parallel_seams::parallel_worker_number::call();
-        let sinstr = node.sinstrument.as_mut().expect("sinstrument");
-        debug_assert!(worker <= sinstr.num_workers);
+        let sinstr = node.sinstrument.as_ref().expect("sinstrument");
+        debug_assert!(worker <= sinstr.num_workers());
         // si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
         // si->exact_pages += node->stats.exact_pages;
         // si->lossy_pages += node->stats.lossy_pages;
-        let si = &mut sinstr.sinstrument[worker as usize];
-        si.exact_pages += node.stats.exact_pages;
-        si.lossy_pages += node.stats.lossy_pages;
+        //
+        // A worker's `sinstrument` is the in-DSM `Shared` placement; it writes
+        // its own slot through the shared `&self` (atomic accumulate).
+        match sinstr {
+            NodeSinstrument::Shared { slots, .. } => {
+                let si = &slots.get()[worker as usize];
+                si.accumulate(node.stats.exact_pages, node.stats.lossy_pages);
+            }
+            // A worker never holds the leader's private copy.
+            NodeSinstrument::Private { .. } => {
+                unreachable!("worker sinstrument is the shared DSM placement, not a private copy")
+            }
+        }
     }
 
     // close down subplans
@@ -618,13 +630,13 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
 /// `BitmapDoneInitializingSharedState(pstate)` — the leader has populated the
 /// TBM and initialized the shared state, so wake up other processes.
 fn BitmapDoneInitializingSharedState(node: &mut BitmapHeapScanState) -> PgResult<()> {
-    let pstate = node.pstate.as_mut().expect("pstate");
+    let pstate = node.pstate.as_ref().expect("pstate");
     // SpinLockAcquire(&pstate->mutex);
     // pstate->state = BM_FINISHED;
     // SpinLockRelease(&pstate->mutex);
     {
         let _guard = SpinLockGuard::acquire(&pstate.mutex);
-        pstate.state = BM_FINISHED;
+        pstate.set_state(BM_FINISHED);
     }
     // ConditionVariableBroadcast(&pstate->cv);
     backend_storage_lmgr_condition_variable::ConditionVariableBroadcast(&pstate.cv);
@@ -637,7 +649,7 @@ fn BitmapDoneInitializingSharedState(node: &mut BitmapHeapScanState) -> PgResult
 /// condition variable until the leader wakes them up. Returns `true` exactly
 /// for the single backend that observed `BM_INITIAL`.
 fn BitmapShouldInitializeSharedState(node: &mut BitmapHeapScanState) -> PgResult<bool> {
-    let pstate = node.pstate.as_mut().expect("pstate");
+    let pstate = node.pstate.as_ref().expect("pstate");
     let mut state;
     // while (1)
     loop {
@@ -647,9 +659,9 @@ fn BitmapShouldInitializeSharedState(node: &mut BitmapHeapScanState) -> PgResult
         // SpinLockRelease(&pstate->mutex);
         {
             let _guard = SpinLockGuard::acquire(&pstate.mutex);
-            state = pstate.state;
-            if pstate.state == BM_INITIAL {
-                pstate.state = BM_INPROGRESS;
+            state = pstate.state();
+            if pstate.state() == BM_INITIAL {
+                pstate.set_state(BM_INPROGRESS);
             }
         }
 
@@ -740,6 +752,7 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     let toc = backend_access_transam_parallel_seams::pcxt_toc::call(pcxt);
     let ptr = backend_access_transam_parallel_seams::shm_toc_allocate::call(toc, size);
     let plan_node_id = bitmap_heap_plan_node_id(node);
+    let seg = pcxt_seg_handle(pcxt);
 
     // pstate = (ParallelBitmapHeapState *) ptr;
     // ptr += MAXALIGN(sizeof(ParallelBitmapHeapState));
@@ -748,35 +761,47 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     //
     // The C places the `ParallelBitmapHeapState` (and the optional
     // instrumentation tail) DIRECTLY in the DSM chunk so every worker attaches
-    // to the SAME shared object. Typing that struct over the raw shm_toc byte
-    // cursor (so its `node->pstate`/`node->sinstrument` aliases point INTO the
-    // shared segment, and its `mutex`/`cv` are the real cross-process
-    // primitives) is owned by the DSM/shm_toc typed-shared-object resolution
-    // (execParallel), which has not yet landed.
-    let mut pstate = pstate_over_chunk(ptr);
-    let sinstr_cursor = chunk_advance(ptr, maxalign(core::mem::size_of::<ParallelBitmapHeapState>()));
-    let mut sinstrument = if want_instr {
-        Some(sinstrument_over_chunk(sinstr_cursor))
-    } else {
-        None
-    };
-
-    // pstate->tbmiterator = 0;
-    pstate.tbmiterator = 0;
-    // SpinLockInit(&pstate->mutex);  — S_INIT_LOCK: store zero into the lock word.
-    pstate.mutex.unlock();
-    // pstate->state = BM_INITIAL;
-    pstate.state = BM_INITIAL;
-    // ConditionVariableInit(&pstate->cv);
-    backend_storage_lmgr_condition_variable::ConditionVariableInit(&pstate.cv);
+    // to the SAME shared object; its `mutex`/`cv` are the real cross-process
+    // primitives and `node->pstate`/`node->sinstrument` alias INTO the segment.
+    // We place each typed object in place through the execParallel keystone's
+    // `shared_dsm_object` primitive:
+    //   pstate->tbmiterator = 0; SpinLockInit(&pstate->mutex);
+    //   pstate->state = BM_INITIAL; ConditionVariableInit(&pstate->cv);
+    // are all run by the in-place placement of `ParallelBitmapHeapState::new()`
+    // (S_INIT_LOCK / the CV's `proclist_init` are its Default; the leader is the
+    // sole writer pre-launch).
+    let pstate = shared_dsm_object::place_value::<ParallelBitmapHeapState>(
+        seg,
+        ptr,
+        ParallelBitmapHeapState::new(),
+    );
 
     // if (sinstrument) { sinstrument->num_workers = pcxt->nworkers;
     //   memset(sinstrument->sinstrument, 0,
     //          pcxt->nworkers * sizeof(BitmapHeapScanInstrumentation)); }
-    if let Some(si) = sinstrument.as_mut() {
-        si.num_workers = nworkers;
-        si.sinstrument = alloc::vec![BitmapHeapScanInstrumentation::default(); nworkers as usize];
-    }
+    //
+    // The sinstrument header + flexible array sit immediately after `pstate` in
+    // the SAME chunk, at `ptr + MAXALIGN(sizeof(ParallelBitmapHeapState))`.
+    let sinstrument = if want_instr {
+        let sinstr_cursor =
+            chunk_advance(ptr, maxalign(core::mem::size_of::<ParallelBitmapHeapState>()));
+        let (header, slots) = shared_dsm_object::place_flex::<
+            SharedBitmapHeapInstrumentation,
+            SharedBitmapHeapScanInstr,
+        >(
+            seg,
+            sinstr_cursor,
+            nworkers as usize,
+            SharedBitmapHeapInstrumentation {
+                num_workers: nworkers,
+            },
+            // memset(..., 0, ...) — each slot starts zeroed.
+            |_i| SharedBitmapHeapScanInstr::default(),
+        );
+        Some(NodeSinstrument::Shared { header, slots })
+    } else {
+        None
+    };
 
     // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pstate);
     backend_access_transam_parallel_seams::shm_toc_insert::call(toc, plan_node_id as u64, ptr);
@@ -802,17 +827,18 @@ pub fn ExecBitmapHeapReInitializeDSM<'mcx>(
         None => return Ok(()),
     };
 
-    let pstate = node.pstate.as_mut().expect("pstate");
+    let pstate = node.pstate.as_ref().expect("pstate");
     // pstate->state = BM_INITIAL;
-    pstate.state = BM_INITIAL;
+    pstate.set_state(BM_INITIAL);
 
     // if (DsaPointerIsValid(pstate->tbmiterator))
     //     tbm_free_shared_area(dsa, pstate->tbmiterator);
-    if types_tidbitmap::dsa_pointer_is_valid(pstate.tbmiterator) {
-        tidbitmap::tbm_free_shared_area::call(dsa, pstate.tbmiterator);
+    let it = pstate.tbmiterator();
+    if types_tidbitmap::dsa_pointer_is_valid(it) {
+        tidbitmap::tbm_free_shared_area::call(dsa, it);
     }
     // pstate->tbmiterator = InvalidDsaPointer;
-    pstate.tbmiterator = types_tidbitmap::InvalidDsaPointer;
+    pstate.set_tbmiterator(types_tidbitmap::InvalidDsaPointer);
     Ok(())
 }
 
@@ -843,14 +869,25 @@ pub fn ExecBitmapHeapInitializeWorker<'mcx>(
     //
     // The worker recovers the SAME in-DSM `ParallelBitmapHeapState` (and the
     // instrumentation tail) the leader placed in `ExecBitmapHeapInitializeDSM`,
-    // by reinterpreting the looked-up chunk cursor as those typed shared
-    // objects. That cursor-to-typed-shared-object resolution is owned by the
-    // DSM/shm_toc layer (execParallel), not yet landed.
-    node.pstate = Some(pstate_over_chunk(ptr));
+    // by attaching to the looked-up chunk through the execParallel keystone.
+    // The keystone uses the segment handle only as the `'seg` lifetime carrier
+    // (it never dereferences it); the worker's looked-up chunk address is the
+    // real in-segment address.
+    let seg = types_parallel::DsmSegmentHandle::NULL;
+    node.pstate = Some(shared_dsm_object::attach::<ParallelBitmapHeapState>(seg, ptr));
     if node.ss.ps.instrument.is_some() {
         let sinstr_cursor =
             chunk_advance(ptr, maxalign(core::mem::size_of::<ParallelBitmapHeapState>()));
-        node.sinstrument = Some(sinstrument_over_chunk(sinstr_cursor));
+        // The flexible-array length is the header's `num_workers` (exactly what
+        // the leader stored), so attach the header first to read it, then the
+        // array tail of that many slots.
+        let header = shared_dsm_object::attach::<SharedBitmapHeapInstrumentation>(seg, sinstr_cursor);
+        let nworkers = header.get().num_workers as usize;
+        let (header, slots) = shared_dsm_object::attach_flex::<
+            SharedBitmapHeapInstrumentation,
+            SharedBitmapHeapScanInstr,
+        >(seg, sinstr_cursor, nworkers);
+        node.sinstrument = Some(NodeSinstrument::Shared { header, slots });
     }
     Ok(())
 }
@@ -869,13 +906,26 @@ pub fn ExecBitmapHeapRetrieveInstrumentation(node: &mut BitmapHeapScanState) -> 
     //   + sinstrument->num_workers * sizeof(BitmapHeapScanInstrumentation);
     // node->sinstrument = palloc(size); memcpy(node->sinstrument, sinstrument, size);
     //
-    // The owned model deep-copies the shared struct into private memory
-    // (the `palloc` + `memcpy`).
-    let copy = SharedBitmapHeapInstrumentation {
-        num_workers: sinstrument.num_workers,
-        sinstrument: sinstrument.sinstrument.clone(),
+    // Deep-copy the shared header + array into private memory (the `palloc` +
+    // `memcpy`): snapshot each shared slot into a plain
+    // `BitmapHeapScanInstrumentation`.
+    let (num_workers, sinstr) = match sinstrument {
+        NodeSinstrument::Shared { header, slots } => {
+            let nw = header.get().num_workers;
+            let copy: alloc::vec::Vec<BitmapHeapScanInstrumentation> =
+                slots.get().iter().map(|si| si.snapshot()).collect();
+            (nw, copy)
+        }
+        // Already private (idempotent re-retrieve): clone the existing copy.
+        NodeSinstrument::Private {
+            num_workers,
+            sinstrument,
+        } => (*num_workers, sinstrument.clone()),
     };
-    node.sinstrument = Some(alloc::boxed::Box::new(copy));
+    node.sinstrument = Some(NodeSinstrument::Private {
+        num_workers,
+        sinstrument: sinstr,
+    });
     Ok(())
 }
 
@@ -885,33 +935,24 @@ pub fn ExecBitmapHeapRetrieveInstrumentation(node: &mut BitmapHeapScanState) -> 
 // `ParallelBitmapHeapState` (and its optional `SharedBitmapHeapInstrumentation`
 // tail) DIRECTLY in the DSM chunk so every parallel worker attaches the SAME
 // shared object — its `mutex`/`cv` are real cross-process primitives and
-// `node->pstate`/`node->sinstrument` alias INTO shared memory. Typing those
-// structs over a raw `shm_toc` byte cursor (`SerializeCursor`) is owned by the
-// DSM/shm_toc typed-shared-object resolution (execParallel), not yet landed —
-// exactly the resolution nodeSeqscan's `pscan_over_chunk` also defers. The
-// sizing, `shm_toc_allocate`/`shm_toc_insert`/`shm_toc_lookup` calls, and the
-// in-place init that operate around these helpers are this node's real logic.
+// `node->pstate`/`node->sinstrument` alias INTO shared memory. The typing of
+// those structs over the raw `shm_toc` chunk cursor goes through the
+// execParallel keystone's `shared_dsm_object` primitive (`place_value` /
+// `place_flex` on the leader, `attach` / `attach_flex` on the worker); the
+// sizing, `shm_toc_allocate`/`shm_toc_insert`/`shm_toc_lookup` calls around
+// them are this node's real logic.
 
-/// `(ParallelBitmapHeapState *) <dsm bytes at cursor>` — reinterpret a shm_toc
-/// DSM byte cursor as the typed shared bitmap-scan state placed over it.
-fn pstate_over_chunk(
-    _cursor: types_execparallel::SerializeCursor,
-) -> alloc::boxed::Box<ParallelBitmapHeapState> {
-    panic!(
-        "ParallelBitmapHeapState over a shm_toc DSM byte cursor requires the \
-         DSM/shm_toc typed-shared-object resolution (execParallel), not yet landed"
-    );
-}
-
-/// `(SharedBitmapHeapInstrumentation *) <dsm bytes at cursor>` — reinterpret a
-/// shm_toc DSM byte cursor as the typed shared instrumentation tail.
-fn sinstrument_over_chunk(
-    _cursor: types_execparallel::SerializeCursor,
-) -> alloc::boxed::Box<SharedBitmapHeapInstrumentation> {
-    panic!(
-        "SharedBitmapHeapInstrumentation over a shm_toc DSM byte cursor requires \
-         the DSM/shm_toc typed-shared-object resolution (execParallel), not yet landed"
-    );
+/// The `pcxt->seg` handle as the `types_parallel::DsmSegmentHandle` the keystone
+/// `shared_dsm_object` uses as its `'seg` lifetime carrier. `None` (private
+/// memory, `seg == NULL`) maps to the NULL handle; the keystone never
+/// dereferences it — the real chunk address comes from `shm_toc_allocate`.
+fn pcxt_seg_handle(
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> types_parallel::DsmSegmentHandle {
+    match backend_access_transam_parallel_seams::pcxt_seg::call(pcxt) {
+        Some(seg) => types_parallel::DsmSegmentHandle(seg.0),
+        None => types_parallel::DsmSegmentHandle::NULL,
+    }
 }
 
 /// `ptr += off` — advance a shm_toc DSM byte cursor by `off` bytes (the C

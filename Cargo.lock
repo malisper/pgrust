@@ -3731,6 +3731,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-tableam",
  "backend-access-table-tableam-bm-seams",
+ "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -3750,6 +3751,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-parallel",
  "types-rel",
  "types-storage",
  "types-tableam",
