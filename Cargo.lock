@@ -11258,6 +11258,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-main-main",
+ "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
  "backend-port-atomics",
@@ -11754,6 +11755,8 @@ dependencies = [
 name = "types-nodes"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
  "mcx",
  "types-condvar",
  "types-core",

@@ -9,7 +9,7 @@
 //!
 //! The owning `backend-nodes-copyfuncs` crate installs this from its
 //! `init_seams()`; until then a call panics loudly. The `Node` identity is the
-//! central enum generated into `types-nodes`.
+//! central enum generated into `types-nodes` ([`types_nodes::node_tree::Node`]).
 
 seam_core::seam!(
     /// `copyObject(n)` (copyfuncs.c) — deep-copy an arbitrary `Node` tree into
@@ -17,6 +17,6 @@ seam_core::seam!(
     /// structurally equal tree. Fallible: copying allocates against `dst`.
     pub fn copy_object<'dst>(
         dst: mcx::Mcx<'dst>,
-        n: &types_nodes::nodes::Node<'_>,
-    ) -> types_error::PgResult<types_nodes::nodes::Node<'dst>>
+        n: &types_nodes::node_tree::Node<'_>,
+    ) -> types_error::PgResult<types_nodes::node_tree::Node<'dst>>
 );

@@ -9,9 +9,9 @@
 //! `copyObjectImpl` again.
 //!
 //! In the owned-tree rewrite that generated switch + per-node copy logic *is*
-//! the central [`types_nodes::nodes::Node::clone_in`] dispatch: a `match` over
-//! every variant of the unified [`types_nodes::nodes::Node`] enum delegating each
-//! arm to that struct's `#[derive(PgNode)]`/`clone_in` copy, which recurses into
+//! the central [`types_nodes::node_tree::Node::copy_node_in`] dispatch: a `match` over
+//! every variant of the unified [`types_nodes::node_tree::Node`] enum delegating each
+//! arm to that struct's `#[derive(PgNode)]`/`copy_node_in` copy, which recurses into
 //! its child links through the same central dispatch. C's `copyObject` allocates
 //! into `CurrentMemoryContext`; the owned-tree analogue re-homes ALL allocation
 //! onto `mcx`, threading the destination context explicitly and returning
@@ -20,7 +20,7 @@
 //! This crate is therefore a **thin wrapper**: it exposes the `copyObject`
 //! public API and wires the centralized
 //! [`backend_nodes_copyfuncs_seams::copy_object`] seam — every call delegates
-//! directly to [`types_nodes::nodes::Node::clone_in`]. No per-node copy logic is
+//! directly to [`types_nodes::node_tree::Node::copy_node_in`]. No per-node copy logic is
 //! reimplemented here, and the crate declares zero local seams.
 
 #![no_std]
@@ -32,7 +32,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodes::Node;
+use types_nodes::node_tree::Node;
 
 /// `copyObjectImpl(from)` — implementation of `copyObject()`; see
 /// `nodes/nodes.h`. Deep-copies an arbitrary `Node` tree into the destination
@@ -40,12 +40,12 @@ use types_nodes::nodes::Node;
 /// Fallible: copying allocates against `dst` (the C `ereport(ERROR)` on OOM).
 ///
 /// This is the thin owned-tree analogue of `copyfuncs.c`'s `copyObjectImpl`: it
-/// delegates straight to the central [`Node::clone_in`] dispatch, which performs
+/// delegates straight to the central [`Node::copy_node_in`] dispatch, which performs
 /// the tag-discriminated recursion that the C generated `switch` + per-node
 /// `_copy<Type>` routines perform.
 #[inline]
 pub fn copyObjectImpl<'dst>(from: &Node<'_>, dst: Mcx<'dst>) -> PgResult<Node<'dst>> {
-    from.clone_in(dst)
+    from.copy_node_in(dst)
 }
 
 /// `copyObject(obj)` — public deep-copy entry point (`nodes/nodes.h` macro).
@@ -62,7 +62,7 @@ pub fn copyObject<'dst>(obj: &Node<'_>, dst: Mcx<'dst>) -> PgResult<Node<'dst>> 
 /// Wire the centralized [`backend_nodes_copyfuncs_seams::copy_object`] seam to
 /// this crate's implementation. Call once, single-threaded, during startup
 /// (`init_seams()`). The installed implementation delegates directly to the
-/// central [`Node::clone_in`] dispatch.
+/// central [`Node::copy_node_in`] dispatch.
 pub fn init_seams() {
-    backend_nodes_copyfuncs_seams::copy_object::set(|dst, n| n.clone_in(dst));
+    backend_nodes_copyfuncs_seams::copy_object::set(|dst, n| n.copy_node_in(dst));
 }

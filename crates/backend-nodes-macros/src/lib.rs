@@ -264,6 +264,15 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     } else {
         quote! { #name<'dst> }
     };
+    // The struct-literal constructor for the copied value. In *type* position
+    // `Foo<'dst>` is fine (that's `bound_ty`), but a struct *expression* must use
+    // turbofish for the generic (`Foo::<'dst> { .. }`) — `Foo<'dst> { .. }`
+    // mis-parses `<` as a comparison. A lifetime-free struct is just `Foo`.
+    let bound_ctor = if lifetimes.is_empty() {
+        quote! { #name }
+    } else {
+        quote! { #name::<'dst> }
+    };
 
     let fields = match &input.data {
         Data::Struct(s) => match &s.fields {
@@ -443,7 +452,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     &self,
                     __dst: ::backend_nodes_node_support::Mcx<'dst>,
                 ) -> ::backend_nodes_node_support::PgResult<Self::Bound<'dst>> {
-                    ::core::result::Result::Ok(#bound_ty {
+                    ::core::result::Result::Ok(#bound_ctor {
                         #(#copy_inits,)*
                     })
                 }
