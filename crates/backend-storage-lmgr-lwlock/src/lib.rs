@@ -776,6 +776,37 @@ pub fn GetLWLockIdentifier(classId: uint32, eventId: uint16) -> String {
     GetLWTrancheName(eventId)
 }
 
+/// Process-lifetime interner for tranche names returned to the
+/// `get_lwlock_identifier` seam as `&'static str`. In C
+/// `GetLWLockIdentifier`/`GetLWTrancheName` return a `const char *` that points
+/// into static built-in tables or into `LWLockTrancheNames[]` (allocated in
+/// `TopMemoryContext`, never freed) — i.e. a process-lifetime borrow. The owner
+/// impl returns an owned `String` (extension names live in a thread-local
+/// `Vec<String>`); to honour the seam's `&'static str` contract without
+/// changing it (the lone consumer, `waitevent`, wraps the result in
+/// `Cow::Borrowed`), we intern each distinct name once into a leaked store,
+/// matching C's never-freed process-lifetime storage.
+static INTERNED_TRANCHE_NAMES: std::sync::Mutex<Option<std::collections::HashMap<String, &'static str>>> =
+    std::sync::Mutex::new(None);
+
+fn intern_tranche_name(name: String) -> &'static str {
+    let mut guard = INTERNED_TRANCHE_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(s) = map.get(name.as_str()) {
+        return s;
+    }
+    let leaked: &'static str = Box::leak(name.clone().into_boxed_str());
+    map.insert(name, leaked);
+    leaked
+}
+
+/// Seam adapter for `get_lwlock_identifier`: matches the seam decl's
+/// `&'static str` return by interning the owned name `GetLWLockIdentifier`
+/// produces (see [`intern_tranche_name`]).
+fn get_lwlock_identifier_seam(class_id: uint32, event_id: uint16) -> &'static str {
+    intern_tranche_name(GetLWLockIdentifier(class_id, event_id))
+}
+
 /// `T_NAME(lock)`.
 fn t_name(lock: &LWLock) -> String {
     GetLWTrancheName(lock.tranche)
@@ -1730,6 +1761,7 @@ fn create_lwlocks_seam() -> PgResult<()> {
 /// Install every seam declared in `backend-storage-lmgr-lwlock-seams`.
 pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_initialize::set(LWLockInitialize);
+    backend_storage_lmgr_lwlock_seams::get_lwlock_identifier::set(get_lwlock_identifier_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_acquire::set(lwlock_acquire_guard);
     backend_storage_lmgr_lwlock_seams::lwlock_release::set(LWLockRelease);
     backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::set(lwlock_acquire_main_seam);
