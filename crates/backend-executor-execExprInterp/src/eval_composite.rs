@@ -39,21 +39,14 @@
 //! stubbing a result.
 
 // The bare-word newtype: the scalar form the composite eval helpers operate on.
-use types_datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what the
-// keystone-owned `ExprState.resvalue` / `ResultCell.value` carry.
-use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+// keystone-owned `ExprState.resvalue` / `ResultCell.value` carry, and what the
+// composite helpers operate on directly.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, STATE_RESULT_CELL,
 };
-
-/// Recover the bare scalar word from a stored canonical by-value datum (the
-/// transitional bridge: the composite helpers operate on a word).
-#[inline]
-fn word_of(v: &DatumV<'_>) -> Datum {
-    Datum::from_usize(v.as_usize())
-}
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 
@@ -82,31 +75,28 @@ fn composite_datum_owner_unported(what: &str) -> ! {
 /// `*op->resnull`). [`STATE_RESULT_CELL`] aliases the owning `ExprState`'s own
 /// `resvalue`/`resnull` (the C `&state->resvalue`/`&state->resnull` default
 /// target); any other id reads the per-step cell from the arena.
-fn load_result(state: &ExprState<'_>, op: usize) -> (Datum, bool) {
+fn load_result<'mcx>(state: &ExprState<'mcx>, op: usize) -> (Datum<'mcx>, bool) {
     let cell = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
-        // The canonical result value crosses back to the bare scalar word the
-        // composite helpers operate on.
-        (word_of(&state.resvalue), state.resnull)
+        (state.resvalue.clone(), state.resnull)
     } else {
         let c = state.result_cells.get(cell);
-        (word_of(&c.value), c.isnull)
+        (c.value, c.isnull)
     }
 }
 
 /// Write a step's `(value, isnull)` result (the C `*op->resvalue = value;
 /// *op->resnull = isnull;`). [`STATE_RESULT_CELL`] writes through the owning
 /// `ExprState`'s own `resvalue`/`resnull`; any other id writes the arena cell.
-fn store_result(state: &mut ExprState<'_>, op: usize, value: Datum, isnull: bool) {
+fn store_result<'mcx>(state: &mut ExprState<'mcx>, op: usize, value: Datum<'mcx>, isnull: bool) {
     let cell: ResultCellId = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
-        // The bare scalar word crosses into the canonical by-value arm.
-        state.resvalue = DatumV::ByVal(value);
+        state.resvalue = value;
         state.resnull = isnull;
     } else {
         state
             .result_cells
-            .set(cell, ResultCell { value: DatumV::ByVal(value), isnull });
+            .set(cell, ResultCell { value, isnull });
     }
 }
 
@@ -277,7 +267,7 @@ pub fn ExecEvalMinMax<'mcx>(
         if cur_isnull {
             // /* first nonnull input, adopt value */
             // *op->resvalue = values[off]; *op->resnull = false;
-            store_result(state, op, word_of(&values[off]), false);
+            store_result(state, op, values[off].clone(), false);
         } else {
             // /* apply comparison function */
             // fcinfo->args[0].value = *op->resvalue;
