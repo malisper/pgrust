@@ -9908,6 +9908,7 @@ dependencies = [
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeResult",
+ "backend-executor-nodeSamplescan",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
