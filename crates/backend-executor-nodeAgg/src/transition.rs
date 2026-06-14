@@ -621,16 +621,12 @@ pub fn process_ordered_aggregate_multi<'mcx>(
 /// `TUPLESORT_NONE` (tuplesort.h) — no extra sort options.
 const TUPLESORT_NONE: i32 = 0;
 
-/// `work_mem` (guc) — sort working-memory limit, in kilobytes. The GUC is
-/// owned by the not-yet-ported guc unit; it is a per-backend knob, so this
-/// reads it from that owner once it lands. Until then the value is needed
-/// only when an aggregate actually requires a sort (ORDER BY / DISTINCT), so
-/// it panics on that path.
+/// `work_mem` (guc) — sort working-memory limit, in kilobytes. The GUC is a
+/// per-backend global owned by `backend-utils-init-small` (`globals.c`); read
+/// it through that unit's installed seam (mirrors `spill.rs`'s
+/// `get_hash_memory_limit`).
 fn work_mem() -> i32 {
-    panic!(
-        "backend-executor-nodeAgg::work_mem: the work_mem GUC is owned by the \
-         not-yet-ported guc unit; no seam for it yet"
-    );
+    backend_utils_init_small_seams::work_mem::call()
 }
 
 /// `aggstate->curaggcontext->ecxt_per_tuple_memory` — assert the currently
