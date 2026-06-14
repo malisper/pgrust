@@ -100,6 +100,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationGetRelid(relation)`'s `rd_tableam` — the table-access-method
+    /// vtable for the cached relation identified by `relid` (the by-OID form of
+    /// [`relation_rd_tableam`], for dispatch wrappers that are keyed by OID
+    /// because the `rd_tableam` vtable cannot cross their seam boundary). `None`
+    /// for relations without an AM, or no cached entry. Pure lookup; cannot
+    /// `ereport`.
+    pub fn relation_rd_tableam_by_oid(
+        relid: types_core::primitive::Oid,
+    ) -> Option<types_tableam::TableAmRoutine>
+);
+
+seam_core::seam!(
     /// `RelationNeedsWAL(relation)` (utils/rel.h): true if the relation needs
     /// WAL — permanent and not skipping WAL for a new relfilenode this
     /// transaction. Reads `rd_createSubid`/`rd_firstRelfilelocatorSubid` (not

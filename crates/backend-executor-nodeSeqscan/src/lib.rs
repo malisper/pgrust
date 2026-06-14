@@ -24,10 +24,9 @@
 //! the C end-of-scan `NULL`.
 //!
 //! The active table scan descriptor is the table-AM-owned `TableScanDesc`,
-//! which crosses through the table-AM seam crate as the opaque
-//! [`tableam_seam::ScanToken`]. The node stores that token in its embedded
-//! `ScanState.ss_currentScanDesc` (the inherited-opaque carrier C
-//! forward-declares in execnodes.h) and threads it back into `getnextslot` /
+//! the C-faithful value type the tableam.c owner was ported with. The node
+//! stores it in [`SeqScanState::ss_currentScanDesc`] (the C
+//! `ScanState.ss_currentScanDesc`) and threads it back into `getnextslot` /
 //! `rescan` / `endscan`.
 
 #![allow(non_snake_case)]
@@ -107,32 +106,6 @@ fn scan_tuple_is_null(node: &SeqScanState<'_>, estate: &EStateData<'_>) -> bool 
     tup_is_null(node.ss.ss_ScanTupleSlot.map(|id| estate.slot(id)))
 }
 
-// --- `ss_currentScanDesc` opaque carrier marshaling --------------------------
-//
-// `TableScanDesc` is owned by the table-AM layer (above the executor knot), so
-// it crosses through the table-AM seam crate as an opaque
-// [`tableam_seam::ScanToken`] and the node stores that token in the
-// inherited-opaque `Opaque` slot (C forward-declares the type in execnodes.h).
-
-fn scandesc_store(
-    slot: &mut Option<types_nodes::execnodes::Opaque>,
-    token: tableam_seam::ScanToken,
-) {
-    *slot = Some(types_nodes::execnodes::Opaque(Some(alloc::boxed::Box::new(
-        token,
-    ))));
-}
-
-fn scandesc_token(slot: &Option<types_nodes::execnodes::Opaque>) -> tableam_seam::ScanToken {
-    let any = slot
-        .as_ref()
-        .and_then(|o| o.0.as_ref())
-        .expect("ss_currentScanDesc not set");
-    *any
-        .downcast_ref::<tableam_seam::ScanToken>()
-        .expect("ss_currentScanDesc is not a ScanToken")
-}
-
 /// `SeqNext(node)` — the workhorse for `ExecSeqScan`. Lazily creates the
 /// (serial) scan descriptor on first call, then fetches the next tuple into the
 /// node's scan slot. Returns `Ok(Some(scan_slot))` if a tuple was stored
@@ -153,7 +126,7 @@ fn SeqNext<'mcx>(
     // if (scandesc == NULL) { scandesc = table_beginscan(rel, es_snapshot, 0,
     //                                                     NULL);
     //                         node->ss.ss_currentScanDesc = scandesc; }
-    if node.ss.ss_currentScanDesc.is_none() {
+    if node.ss_currentScanDesc.is_none() {
         // We reach here if the scan is not parallel, or if we're serially
         // executing a scan that was planned to be parallel.
         let rel = node
@@ -167,16 +140,19 @@ fn SeqNext<'mcx>(
             .es_snapshot
             .clone()
             .expect("SeqNext: es_snapshot is NULL (C would pass NULL to the AM)");
-        let token = tableam_seam::table_beginscan::call(rel, snapshot)?;
-        scandesc_store(&mut node.ss.ss_currentScanDesc, token);
+        let scandesc = tableam_seam::table_beginscan::call(rel, snapshot)?;
+        node.ss_currentScanDesc = Some(scandesc);
     }
 
     // get the next tuple from the table:
     // if (table_scan_getnextslot(scandesc, direction, slot)) return slot;
     // return NULL;
-    let token = scandesc_token(&node.ss.ss_currentScanDesc);
+    let scandesc = node
+        .ss_currentScanDesc
+        .as_deref_mut()
+        .expect("SeqNext: ss_currentScanDesc not set");
     if tableam_seam::table_scan_getnextslot_direction::call(
-        token,
+        scandesc,
         direction,
         estate.slot_mut(slot_id),
     )? {
@@ -732,10 +708,8 @@ pub fn ExecInitSeqScan<'mcx>(
 pub fn ExecEndSeqScan<'mcx>(node: &mut SeqScanState<'mcx>) -> PgResult<()> {
     // scanDesc = node->ss.ss_currentScanDesc;
     // if (scanDesc != NULL) table_endscan(scanDesc);
-    if node.ss.ss_currentScanDesc.is_some() {
-        let token = scandesc_token(&node.ss.ss_currentScanDesc);
-        node.ss.ss_currentScanDesc = None;
-        tableam_seam::table_endscan::call(token)?;
+    if let Some(scandesc) = node.ss_currentScanDesc.take() {
+        tableam_seam::table_endscan::call(scandesc)?;
     }
     Ok(())
 }
@@ -747,9 +721,8 @@ pub fn ExecReScanSeqScan<'mcx>(
 ) -> PgResult<()> {
     // scan = node->ss.ss_currentScanDesc;
     // if (scan != NULL) table_rescan(scan, NULL);  /* scan desc / new keys */
-    if node.ss.ss_currentScanDesc.is_some() {
-        let token = scandesc_token(&node.ss.ss_currentScanDesc);
-        tableam_seam::table_rescan::call(token)?;
+    if let Some(scandesc) = node.ss_currentScanDesc.as_deref_mut() {
+        tableam_seam::table_rescan::call(scandesc)?;
     }
 
     // ExecScanReScan((ScanState *) node);
@@ -847,7 +820,7 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
         .as_ref()
         .expect("ExecSeqScanInitializeDSM: ss_currentRelation not opened");
     let scandesc = backend_access_table_tableam::table_beginscan_parallel(rel, pscan_arc)?;
-    store_parallel_scandesc(&mut node.ss.ss_currentScanDesc, scandesc);
+    node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }
 
@@ -867,7 +840,7 @@ pub fn ExecSeqScanReInitializeDSM<'mcx>(
     // `table_parallelscan_reinitialize` seam expects out of the shared `Arc` is
     // the parallel-scan shared-descriptor resolution (DSM interior mutability),
     // not yet landed.
-    let pscan = parallel_scandesc_rs_parallel(&node.ss.ss_currentScanDesc);
+    let pscan = parallel_scandesc_rs_parallel(&node.ss_currentScanDesc);
 
     // table_parallelscan_reinitialize(node->ss.ss_currentRelation, pscan);
     let rel = node
@@ -913,38 +886,32 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
     let pscan_arc: std::sync::Arc<ParallelTableScanDescData> =
         std::sync::Arc::from(pscan_over_chunk(pscan_cursor));
     let scandesc = backend_access_table_tableam::table_beginscan_parallel(rel, pscan_arc)?;
-    store_parallel_scandesc(&mut node.ss.ss_currentScanDesc, scandesc);
+    node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }
 
-// --- Parallel `ss_currentScanDesc` marshaling -------------------------------
+// --- Parallel `ss_currentScanDesc` access -----------------------------------
 //
-// The parallel paths produce/consume the typed `TableScanDesc` that
-// `table_beginscan_parallel` returns. Bridging that owned descriptor to/from
-// the inherited-opaque carrier — and reading its `rs_parallel` field — is part
-// of the same DSM resolution as the primitives above (the only callers reach
-// these helpers after `pscan_over_chunk` has already panicked), so they panic
-// rather than introduce a typed-descriptor opacity the executor knot does not
-// own.
+// The parallel paths store/read the typed `TableScanDesc` that
+// `table_beginscan_parallel` returns directly in the node's
+// `ss_currentScanDesc` field (the value model). Reading the shared parallel
+// descriptor off `rs_parallel` is a plain field read.
 
-fn store_parallel_scandesc<'mcx>(
-    _slot: &mut Option<types_nodes::execnodes::Opaque>,
-    _scandesc: types_tableam::relscan::TableScanDesc<'mcx>,
-) {
-    panic!(
-        "storing the parallel TableScanDesc into the node's opaque scan-desc \
-         slot requires the DSM typed-shared-object resolution (execParallel), \
-         not yet landed"
-    );
-}
-
+/// `node->ss.ss_currentScanDesc->rs_parallel` — the shared (DSM-resident,
+/// refcounted) parallel-scan descriptor. C dereferences `ss_currentScanDesc`
+/// unconditionally here (a NULL would be a crash), so a missing descriptor /
+/// non-parallel scan panics loudly.
 fn parallel_scandesc_rs_parallel(
-    _slot: &Option<types_nodes::execnodes::Opaque>,
+    slot: &Option<types_tableam::relscan::TableScanDesc<'_>>,
 ) -> std::sync::Arc<ParallelTableScanDescData> {
-    panic!(
-        "reading rs_parallel off the parallel scan descriptor requires the DSM \
-         typed-shared-object resolution (execParallel), not yet landed"
-    );
+    let scan = slot
+        .as_ref()
+        .expect("ExecSeqScanReInitializeDSM: ss_currentScanDesc not set");
+    std::sync::Arc::clone(
+        scan.rs_parallel
+            .as_ref()
+            .expect("ExecSeqScanReInitializeDSM: scan descriptor is not parallel (rs_parallel NULL)"),
+    )
 }
 
 // --- Inward seam installers (opaque-handle adapters) ------------------------

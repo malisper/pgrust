@@ -13,7 +13,9 @@ use types_core::TransactionId;
 use types_error::PgResult;
 use types_slot::{TupleSlotKind, TupleTableSlot};
 use types_rel::Relation;
+use types_scan::sdir::ScanDirection;
 use types_snapshot::SnapshotData;
+use types_storage::RelFileLocator;
 use types_tuple::heaptuple::ItemPointerData;
 
 use crate::relscan::{ParallelTableScanDescData, TableScanDesc, TableScanDescData};
@@ -156,6 +158,15 @@ pub struct TableAmRoutine {
         flags: u32,
     ) -> PgResult<TableScanDesc<'mcx>>,
 
+    /// `scan_getnextslot(scan, direction, slot)` — fetch the next tuple of an
+    /// in-progress scan into `slot`, returning `true` if a tuple was produced
+    /// (`false` at end of scan).
+    pub scan_getnextslot: fn(
+        scan: &mut TableScanDescData<'_>,
+        direction: ScanDirection,
+        slot: &mut TupleTableSlot,
+    ) -> PgResult<bool>,
+
     /// `parallelscan_estimate(rel)` — DSM space needed for the AM's shared
     /// parallel-scan state.
     pub parallelscan_estimate: fn(rel: &Relation<'_>) -> usize,
@@ -278,4 +289,14 @@ pub struct TableAmRoutine {
         flags: u8,
         tmfd: &mut TM_FailureData,
     ) -> PgResult<TM_Result>,
+
+    /// `relation_set_new_filelocator(rel, newrlocator, persistence,
+    /// &freezeXid, &minmulti)` — create storage for the relation's new
+    /// relfilelocator (and its init fork if unlogged), handing back the
+    /// AM-chosen `relfrozenxid`/`relminmxid` to store in pg_class.
+    pub relation_set_new_filelocator: fn(
+        rel: &Relation<'_>,
+        newrlocator: &RelFileLocator,
+        persistence: i8,
+    ) -> PgResult<(u32, u32)>,
 }

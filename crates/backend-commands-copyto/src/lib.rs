@@ -1010,11 +1010,11 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
         let rel_alias = rel.alias();
         let snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?
             .expect("COPY TO scan with no active snapshot");
-        let scandesc = tableam_s::table_beginscan::call(&rel_alias, snapshot)?;
+        let mut scandesc = tableam_s::table_beginscan::call(&rel_alias, snapshot)?;
         let mut slot = backend_access_table_tableam::table_slot_create(cstate.mcx, &rel_alias)?;
 
         let mut local_processed: u64 = 0;
-        while tableam_s::table_scan_getnextslot::call(scandesc, &mut slot)? {
+        while tableam_s::table_scan_getnextslot::call(&mut scandesc, &mut slot)? {
             // CHECK_FOR_INTERRUPTS();
             backend_tcop_postgres_seams::check_for_interrupts::call()?;
 
