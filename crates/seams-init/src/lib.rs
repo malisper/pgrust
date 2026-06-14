@@ -507,18 +507,10 @@ mod recurrence_guard {
         ("backend_access_transam_parallel", "initializing_parallel_worker"),
         ("backend_access_transam_xact", "define_savepoint"),
         ("backend_access_transam_xact", "set_xact_iso_level_read_committed"),
-        ("backend_access_transam_xlog", "boot_strap_xlog"),
-        ("backend_access_transam_xlog", "data_checksums_enabled"),
-        ("backend_access_transam_xlog", "enable_fsync"),
-        ("backend_access_transam_xlog", "enable_hot_standby"),
-        ("backend_access_transam_xlog", "recovery_in_progress"),
-        ("backend_access_transam_xlog", "startup_xlog"),
-        ("backend_access_transam_xlog", "wal_level"),
-        ("backend_access_transam_xlog", "wal_sync_method"),
-        ("backend_access_transam_xlog", "xlog_archive_command"),
-        ("backend_access_transam_xlog", "xlog_archive_library"),
-        ("backend_access_transam_xlog", "xlog_shmem_init"),
-        ("backend_access_transam_xlog", "xlog_shmem_size"),
+        // xlog reconciled out: CATALOG status corrected merged->needs-decomp
+        // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
+        // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
+        // no longer flags it (condition (b) false) — these entries went stale.
         ("backend_access_transam_xlogprefetcher", "xlog_prefetch_shmem_size"),
         ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
