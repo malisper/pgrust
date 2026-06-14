@@ -228,6 +228,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentTransactionIdIfAny()` (xact.c): the current (sub)transaction's
+    /// xid, or `InvalidTransactionId` if none has been assigned. Pure read of
+    /// backend-local state. Read by `XLogRecordAssemble` to set `xl_xid`.
+    pub fn get_current_transaction_id_if_any() -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// `IsSubxactTopXidLogPending()` (xact.c): whether the top-level xid still
+    /// needs to be logged in a record for the benefit of logical decoding (a
+    /// subtransaction performed its first WAL write without the top xid yet
+    /// having been included in any record). Pure read of backend-local state.
+    pub fn is_subxact_top_xid_log_pending() -> bool
+);
+
+seam_core::seam!(
     /// Set the `CheckXidAlive` global (xact.c) — `ResetLogicalStreamingState`.
     pub fn set_check_xid_alive(xid: types_core::TransactionId)
 );
