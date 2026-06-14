@@ -28,6 +28,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod freeze;
+
 use mcx::Mcx;
 use types_core::primitive::{
     BlockNumber, InvalidBlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId,
@@ -422,11 +424,61 @@ fn HeapTupleHeaderGetRawCommandId(hdr: &HeapTupleHeaderData) -> CommandId {
 // lands and installs them from here.
 // ===========================================================================
 
-/// Install the heapam inward seams this F0 skeleton can satisfy.
+/// Install the heapam inward seams this F0 skeleton can satisfy, plus the
+/// F5 FREEZE family's page-bound entry points (declared on the vacuumlazy
+/// owner's `-seams` crate, installed here by the heap AM).
 pub fn init_seams() {
     // `HeapTupleGetUpdateXid(htup)` reduces to the visibility crate's
     // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
     heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
+
+    // F5 FREEZE: `heap_tuple_should_freeze(buffer, offnum, cutoffs, ...)` reads
+    // the on-page `HeapTupleHeader` at `offnum` and runs the pure
+    // `freeze::heap_tuple_should_freeze`, returning the advanced "no freeze"
+    // trackers.
+    backend_access_heap_vacuumlazy_seams::heap_tuple_should_freeze::set(
+        |buffer, offnum, cutoffs, relfrozen_xid_in, relmin_mxid_in| {
+            let ctx = mcx::MemoryContext::new("heap_tuple_should_freeze");
+            let mcx = ctx.mcx();
+            let tuple = read_on_page_header(mcx, buffer, offnum)?;
+            freeze::heap_tuple_should_freeze(
+                mcx,
+                &tuple,
+                &cutoffs,
+                relfrozen_xid_in,
+                relmin_mxid_in,
+            )
+        },
+    );
+
+    // F5 FREEZE: `heap_tuple_needs_eventual_freeze(buffer, offnum)` reads the
+    // on-page header and runs the pure predicate.
+    backend_access_heap_vacuumlazy_seams::heap_tuple_needs_eventual_freeze::set(
+        |buffer, offnum| {
+            let ctx = mcx::MemoryContext::new("heap_tuple_needs_eventual_freeze");
+            let mcx = ctx.mcx();
+            let tuple = read_on_page_header(mcx, buffer, offnum)?;
+            Ok(freeze::heap_tuple_needs_eventual_freeze(&tuple))
+        },
+    );
+}
+
+/// Materialize an on-page `HeapTupleHeader` at `(buffer, offnum)` into `mcx`
+/// (C's `(HeapTupleHeader) PageGetItem(page, PageGetItemId(page, offnum))`).
+fn read_on_page_header<'mcx>(
+    mcx: Mcx<'mcx>,
+    buffer: Buffer,
+    offnum: OffsetNumber,
+) -> PgResult<HeapTupleHeaderData<'mcx>> {
+    let mut out: Option<HeapTupleHeaderData<'mcx>> = None;
+    bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+        let page = backend_storage_page::PageRef::new(page_bytes)?;
+        let item_id = backend_storage_page::PageGetItemId(&page, offnum)?;
+        let item = backend_storage_page::PageGetItem(&page, &item_id)?;
+        out = Some(HeapTupleHeaderData::read_on_page(mcx, item)?);
+        Ok(())
+    })?;
+    Ok(out.expect("with_buffer_page closure must have run"))
 }
 
 #[cfg(test)]

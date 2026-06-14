@@ -32,6 +32,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MultiXactIdCreateFromMembers(nmembers, members)` (multixact.c) — create
+    /// a new multixact carrying `members`, returning its id. Used by VACUUM's
+    /// `FreezeMultiXactId` when the surviving members of an old multi must be
+    /// carried forward into a fresh one. `Err` carries the SLRU/extend
+    /// `ereport(ERROR)` surface.
+    pub fn multi_xact_id_create_from_members(
+        members: &[types_xlog_records::multixact::MultiXactMember],
+    ) -> types_error::PgResult<types_core::primitive::MultiXactId>
+);
+
+seam_core::seam!(
     /// `multixact_twophase_recover(xid, info, recdata, len)` — restore the
     /// OldestMemberMXactId entry for a prepared transaction at recovery (slot
     /// `TWOPHASE_RM_MULTIXACT_ID` of `twophase_recover_callbacks`).

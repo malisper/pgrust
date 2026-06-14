@@ -29,3 +29,8 @@ backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-access-transam-transam = { path = "../backend-access-transam-transam" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-page = { path = "../backend-storage-page" }
+types-vacuum = { path = "../types-vacuum" }
