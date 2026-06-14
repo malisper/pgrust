@@ -516,6 +516,14 @@ mod adapters {
         parallel::parallel_has_curbatch(node)
     }
 
+    /// `get_hash_memory_limit(void)` (nodeHash.c:3622) — reads the `work_mem` /
+    /// `hash_mem_multiplier` backend GUCs and returns the per-hash memory budget
+    /// in bytes. Consumed by Memoize and hash-agg spill via the seam.
+    pub fn get_hash_memory_limit() -> PgResult<u64> {
+        let (work_mem, hash_mem_multiplier) = parallel::hash_mem_gucs();
+        Ok(hash_table::get_hash_memory_limit(work_mem, hash_mem_multiplier) as u64)
+    }
+
     // Silence unused-import lint for the bucket-chain link helper imported for
     // documentation parity.
     #[allow(dead_code)]
@@ -591,6 +599,7 @@ pub fn init_seams() {
     s::parallel_batch_set_done::set(adapters::parallel_batch_set_done);
     s::parallel_set_curbatch_invalid::set(adapters::parallel_set_curbatch_invalid);
     s::parallel_has_curbatch::set(adapters::parallel_has_curbatch);
+    s::get_hash_memory_limit::set(adapters::get_hash_memory_limit);
 }
 
 /// Silence the unused-`Size` import warning in the scaffold.

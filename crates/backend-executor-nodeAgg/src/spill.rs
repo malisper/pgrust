@@ -11,6 +11,7 @@ use types_nodes::nodeagg::{
 use types_nodes::{EStateData, SlotId};
 
 use backend_lib_hyperloglog_seams as hll_seams;
+use backend_executor_nodeHash_seams as nodeHash_seams;
 use backend_utils_sort_storage_seams as tape_seams;
 
 use crate::hash_grouping::hash_choose_num_partitions;
@@ -20,15 +21,14 @@ use crate::{
 
 /// `get_hash_memory_limit()` (nodeHash.c) — the per-hash-operation memory
 /// budget in bytes (`hash_mem_multiplier * work_mem * 1024`). Owned by the
-/// not-yet-ported `backend-executor-nodeHash` unit; called via its seam crate
-/// when it lands.
+/// now-ported `backend-executor-nodeHash` unit; called through its seam crate.
 fn get_hash_memory_limit() -> usize {
-    // The owner (nodeHash.c) is not ported; there is no seam declaration for
-    // it yet, so a call must fail loudly rather than fabricate a budget.
-    panic!(
-        "seam not installed: backend-executor-nodeHash::get_hash_memory_limit \
-         (nodeHash.c) — needed by the hash-agg spill memory-limit path"
-    )
+    // nodeHash owns the real `hash_table::get_hash_memory_limit` (reads the
+    // `work_mem` / `hash_mem_multiplier` GUCs) and installs this seam. The C
+    // function is infallible in practice; the `PgResult` only mirrors its
+    // `ereport`-capable surface, so unwrap it here.
+    nodeHash_seams::get_hash_memory_limit::call()
+        .expect("get_hash_memory_limit (nodeHash.c) does not ereport") as usize
 }
 
 /// `TupleHashEntrySize()` (execGrouping.c) — the fixed per-entry overhead used
