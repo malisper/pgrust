@@ -2487,6 +2487,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-comment"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-pg-class",
+ "backend-commands-comment-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-comment-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-commands-copy-seams"
 version = "0.0.0"
 dependencies = [
@@ -9899,6 +9932,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-amcmds",
  "backend-commands-cluster",
+ "backend-commands-comment",
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-foreigncmds",
