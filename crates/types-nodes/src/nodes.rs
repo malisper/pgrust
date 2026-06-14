@@ -136,6 +136,8 @@ pub enum Node<'mcx> {
     ModifyTable(crate::modifytable::ModifyTable<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
+    /// `T_Gather`.
+    Gather(crate::nodegather::Gather<'mcx>),
     /// `T_GatherMerge`.
     GatherMerge(crate::nodegathermerge::GatherMerge<'mcx>),
     /// `T_MergeAppend`.
@@ -213,6 +215,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(_) => T_Append,
             Node::ModifyTable(_) => crate::modifytable::T_ModifyTable,
             Node::Material(_) => T_Material,
+            Node::Gather(_) => crate::nodegather::T_Gather,
             Node::GatherMerge(_) => crate::nodegathermerge::T_GatherMerge,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::BitmapAnd(_) => T_BitmapAnd,
@@ -251,6 +254,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => &a.plan,
             Node::ModifyTable(m) => &m.plan,
             Node::Material(m) => &m.plan,
+            Node::Gather(g) => &g.plan,
             Node::GatherMerge(g) => &g.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::BitmapAnd(b) => &b.plan,
@@ -299,6 +303,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::ModifyTable(m) => Ok(Node::ModifyTable(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
+            Node::Gather(g) => Ok(Node::Gather(g.clone_in(mcx)?)),
             Node::GatherMerge(g) => Ok(Node::GatherMerge(g.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::BitmapAnd(b) => Ok(Node::BitmapAnd(b.clone_in(mcx)?)),

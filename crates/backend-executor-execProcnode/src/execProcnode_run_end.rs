@@ -273,6 +273,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::ForeignScan(state) => {
             backend_executor_nodeForeignscan::ExecEndForeignScan(state, estate)
         }
+        // case T_GatherState: ExecEndGather((GatherState *) node);
+        PlanStateNode::Gather(state) => {
+            backend_executor_nodeGather::ExecEndGather(state, estate)
+        }
         // case T_HashState: ExecEndHash((HashState *) node);
         PlanStateNode::Hash(state) => {
             backend_executor_nodeHash::exec_hash::ExecEndHash(state, estate)

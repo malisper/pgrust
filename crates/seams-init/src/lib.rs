@@ -95,6 +95,7 @@ pub fn init_all() {
     backend_executor_nodeCustom::init_seams();
     backend_executor_nodeForeignscan::init_seams();
     backend_foreign_foreign::init_seams();
+    backend_executor_nodeGather::init_seams();
     backend_executor_nodeGatherMerge::init_seams();
     backend_executor_nodeGroup::init_seams();
     backend_executor_nodeHash::init_seams();
