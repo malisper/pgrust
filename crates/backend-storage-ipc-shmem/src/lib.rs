@@ -835,6 +835,13 @@ pub fn init_seams() {
     backend_storage_ipc_shmem_seams::mul_size::set(mul_size);
     backend_storage_ipc_shmem_seams::shmem_lock_acquire::set(shmem_lock_acquire_impl);
     backend_storage_ipc_shmem_seams::shmem_lock_release::set(shmem_lock_release_impl);
+    backend_storage_ipc_shmem_seams::init_shmem_access::set(|seghdr| unsafe {
+        InitShmemAccess(seghdr)
+    });
+    backend_storage_ipc_shmem_seams::init_shmem_allocation::set(|| {
+        InitShmemAllocation().expect("InitShmemAllocation failed")
+    });
+    backend_storage_ipc_shmem_seams::init_shmem_index::set(InitShmemIndex);
 }
 
 #[cfg(test)]

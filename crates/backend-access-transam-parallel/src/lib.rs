@@ -2138,6 +2138,7 @@ pub fn init_seams() {
     seams::parallel_worker_report_last_rec_end::set(parallel_worker_report_last_rec_end);
 
     seams::create_parallel_context::set(create_parallel_context);
+    seams::launch_parallel_workers::set(launch_parallel_workers);
     seams::initialize_parallel_dsm::set(initialize_parallel_dsm);
     seams::reinitialize_parallel_dsm::set(reinitialize_parallel_dsm);
     seams::wait_for_parallel_workers_to_finish::set(wait_for_parallel_workers_to_finish);

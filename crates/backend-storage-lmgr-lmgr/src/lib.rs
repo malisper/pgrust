@@ -1182,6 +1182,7 @@ fn lock_rel_id_from_oid(relid: Oid) -> LockRelId {
 
 /// Install every seam declared in `backend-storage-lmgr-lmgr-seams`.
 pub fn init_seams() {
+    inward::get_lock_name_from_tag_type::set(GetLockNameFromTagType);
     inward::check_relation_locked_by_me::set(seam_check_relation_locked_by_me);
     inward::lock_relation_oid::set(seam_lock_relation_oid);
     inward::conditional_lock_relation_oid::set(seam_conditional_lock_relation_oid);
