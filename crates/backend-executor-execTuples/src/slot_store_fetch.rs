@@ -249,7 +249,7 @@ pub fn ExecStoreAllNullTuple<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) ->
     base.tts_values.clear();
     base.tts_values
         .try_reserve(natts)
-        .map_err(|_| mcx.oom(natts * core::mem::size_of::<types_datum::Datum>()))?;
+        .map_err(|_| mcx.oom(natts * core::mem::size_of::<Datum>()))?;
     for _ in 0..natts {
         base.tts_values.push(Datum::null());
     }
