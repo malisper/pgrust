@@ -56,14 +56,6 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::ExprEvalOp::*;
 
-/// Lower a canonical by-value datum to the bare scalar word the
-/// `exec_eval_expr_switch_context` seam still returns (the only remaining shim
-/// boundary; the seam crate is migrated alongside this one and this bridge goes
-/// away once it carries the canonical [`Datum`] too).
-#[inline]
-fn scalar_word(v: &Datum<'_>) -> types_datum::Datum {
-    types_datum::Datum::from_usize(v.as_usize())
-}
 use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell, ResultCellId};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
@@ -116,7 +108,7 @@ pub fn ExecInterpExpr<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(types_datum::Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     // C: op = state->steps; (program counter). The slots are resolved per-arm
     // from `econtext` below (see doc comment).
     let mut op: usize = 0;
@@ -139,12 +131,12 @@ pub fn ExecInterpExpr<'mcx>(
         match opcode {
             EEOP_DONE_RETURN => {
                 // *isnull = state->resnull; return state->resvalue;
-                return Ok((scalar_word(&state.resvalue), state.resnull));
+                return Ok((state.resvalue.clone(), state.resnull));
             }
 
             EEOP_DONE_NO_RETURN => {
                 // Assert(isnull == NULL); return (Datum) 0;
-                return Ok((types_datum::Datum::null(), false));
+                return Ok((Datum::null(), false));
             }
 
             EEOP_INNER_FETCHSOME
