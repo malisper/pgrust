@@ -27,7 +27,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_core::primitive::{Oid, ParseLoc};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::nodes::NodeTag;
 
@@ -36,10 +36,10 @@ use crate::nodes::NodeTag;
 pub const PARAM_FLAG_CONST: u16 = 0x0001;
 
 /// `ParamExternData` (`nodes/params.h`) — one external parameter value.
-#[derive(Clone, Copy, Debug)]
-pub struct ParamExternData {
+#[derive(Clone, Debug)]
+pub struct ParamExternData<'mcx> {
     /// `Datum value` — parameter value.
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// `bool isnull` — is it NULL?
     pub isnull: bool,
     /// `uint16 pflags` — flag bits, see [`PARAM_FLAG_CONST`].
@@ -48,10 +48,10 @@ pub struct ParamExternData {
     pub ptype: Oid,
 }
 
-impl ParamExternData {
+impl ParamExternData<'_> {
     /// A fresh, fully-NULL slot — the `palloc`'d initial state of each
     /// flexible-array entry and the C stack `prmdata` workspace.
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         ParamExternData {
             value: Datum::null(),
             isnull: false,
@@ -74,7 +74,7 @@ pub struct ParamHookArg {
 /// `params` is the C flexible array member: length `numParams`, or length zero
 /// when `param_fetch` is supplied (the dynamic path).
 #[derive(Clone, Debug)]
-pub struct ParamListInfoData {
+pub struct ParamListInfoData<'mcx> {
     /// `ParamFetchHook paramFetch` — whether a dynamic parameter-fetch hook is
     /// installed. The hook itself lives in the caller's subsystem; the params
     /// operations only branch on its presence (`paramFetch != NULL`).
@@ -97,16 +97,16 @@ pub struct ParamListInfoData {
     /// `int numParams` — nominal/maximum number of params represented.
     pub num_params: i32,
     /// `ParamExternData params[FLEXIBLE_ARRAY_MEMBER]`.
-    pub params: Vec<ParamExternData>,
+    pub params: Vec<ParamExternData<'mcx>>,
 }
 
 /// `ParamsErrorCbData` (`nodes/params.h`) — argument for `ParamsErrorCallback`.
 #[derive(Clone, Debug)]
-pub struct ParamsErrorCbData {
+pub struct ParamsErrorCbData<'mcx> {
     /// `const char *portalName`.
     pub portal_name: Option<String>,
     /// `ParamListInfo params`.
-    pub params: Option<Box<ParamListInfoData>>,
+    pub params: Option<Box<ParamListInfoData<'mcx>>>,
 }
 
 /// `T_Param` (`nodes/nodetags.h`) — node tag of a [`crate::primnodes::Param`]

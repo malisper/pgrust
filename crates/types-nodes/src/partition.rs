@@ -19,7 +19,7 @@
 use mcx::{Mcx, MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
@@ -69,7 +69,7 @@ pub struct PartitionBoundInfoData<'mcx> {
     /// `int ndatums` — length of the `datums[]` array.
     pub ndatums: i32,
     /// `Datum **datums`.
-    pub datums: PgVec<'mcx, PgVec<'mcx, Datum>>,
+    pub datums: PgVec<'mcx, PgVec<'mcx, Datum<'mcx>>>,
     /// `PartitionRangeDatumKind **kind` — NULL for hash and list.
     pub kind: Option<PgVec<'mcx, PgVec<'mcx, PartitionRangeDatumKind>>>,
     /// `Bitmapset *interleaved_parts` — interleaved LIST partition indexes.

@@ -16,7 +16,7 @@
 //! Mirroring C exactly (tuptable.h); the body-bearing `HeapTuple`/`MinimalTuple`
 //! fields are carried as the [`FormedTuple`]/[`FormedMinimalTuple`] carriers
 //! (header + owned data-area bytes) the form/deform owner already produces, and
-//! the `tts_values` array element is the [`TupleValue`] by-value/by-reference
+//! the `tts_values` array element is the [`Datum`] by-value/by-reference
 //! enum (so a by-reference `Datum` is faithfully a pointer into owned bytes):
 //!
 //! * `VirtualTupleTableSlot { TupleTableSlot base; char *data; }`
@@ -41,7 +41,7 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::{AttrNumber, Oid, Size};
 use types_error::PgResult;
 use types_storage::buf::Buffer;
-use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
 use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
 use crate::executor::{TupleSlotKind, TupleTableSlot, TTS_FLAG_EMPTY};
@@ -71,13 +71,13 @@ pub struct SlotBase<'mcx> {
     /// `TupleDesc tts_tupleDescriptor` — slot's tuple descriptor.
     pub tts_tupleDescriptor: TupleDesc<'mcx>,
     /// `Datum *tts_values` — current per-attribute values. Each element is a
-    /// [`TupleValue`] (`ByVal(Datum)` / `ByRef(bytes)`), faithfully modelling C's
+    /// [`Datum`] (`ByVal(word)` / `ByRef(bytes)`), faithfully modelling C's
     /// `Datum *` where a by-reference `Datum` is a pointer into owned bytes:
     /// `ByRef` carries the verbatim on-disk bytes (the same model the form/deform
     /// owner produces/consumes), so the array can hold a by-reference column.
     /// `slot_getattr`/`slot_getsysattr` project a single `Datum` back out
     /// (`ByVal` directly, `ByRef` via the owner's pointer-bytes convention).
-    pub tts_values: PgVec<'mcx, TupleValue<'mcx>>,
+    pub tts_values: PgVec<'mcx, Datum<'mcx>>,
     /// `bool *tts_isnull` — current per-attribute isnull flags.
     pub tts_isnull: PgVec<'mcx, bool>,
 }

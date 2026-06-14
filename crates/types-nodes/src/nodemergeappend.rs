@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_sortsupport::SortSupportData;
 
@@ -131,7 +131,7 @@ pub struct BinaryHeap<'mcx> {
     pub bh_has_heap_property: bool,
     /// `bh_node_type bh_nodes[]` — the slot-index entries (`Datum`s holding
     /// `int32` slot numbers).
-    pub bh_nodes: PgVec<'mcx, Datum>,
+    pub bh_nodes: PgVec<'mcx, Datum<'mcx>>,
 }
 
 impl<'mcx> BinaryHeap<'mcx> {

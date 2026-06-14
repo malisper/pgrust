@@ -24,7 +24,7 @@
 use mcx::{Mcx, MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Index, Oid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_tuple::heaptuple::{HeapTupleData, MinimalTuple, TupleDescData};
 
@@ -291,7 +291,7 @@ pub struct TupleHashIterator {
 
 /// `AggStatePerTransData` (executor/nodeAgg.h) — per-aggregate transition
 /// working state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AggStatePerTransData<'mcx> {
     /// `Aggref *aggref` — the (first) Aggref this state value is for.
     pub aggref: Option<PgBox<'mcx, Aggref<'mcx>>>,
@@ -336,7 +336,7 @@ pub struct AggStatePerTransData<'mcx> {
     /// `ExprState *equalfnMulti` — multi-column DISTINCT comparator.
     pub equalfn_multi: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `Datum initValue`.
-    pub init_value: Datum,
+    pub init_value: Datum<'mcx>,
     /// `bool initValueIsNull`.
     pub init_value_is_null: bool,
     /// `int16 inputtypeLen`.
@@ -354,7 +354,7 @@ pub struct AggStatePerTransData<'mcx> {
     /// `TupleDesc sortdesc` — descriptor of input tuples.
     pub sortdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
     /// `Datum lastdatum` — single-column DISTINCT last value.
-    pub lastdatum: Datum,
+    pub lastdatum: Datum<'mcx>,
     /// `bool lastisnull`.
     pub lastisnull: bool,
     /// `bool haslast`.
@@ -367,6 +367,52 @@ pub struct AggStatePerTransData<'mcx> {
     pub serialfn_fcinfo: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
     /// `FunctionCallInfo deserialfn_fcinfo`.
     pub deserialfn_fcinfo: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+}
+
+impl Default for AggStatePerTransData<'_> {
+    fn default() -> Self {
+        // C `palloc0` zero-init of the per-trans entry: the canonical `Datum`
+        // is not itself `Default`, so spell out the NULL values explicitly.
+        AggStatePerTransData {
+            aggref: None,
+            aggshared: false,
+            aggsortrequired: false,
+            num_inputs: 0,
+            num_trans_inputs: 0,
+            transfn_oid: Default::default(),
+            serialfn_oid: Default::default(),
+            deserialfn_oid: Default::default(),
+            aggtranstype: Default::default(),
+            transfn: Default::default(),
+            serialfn: Default::default(),
+            deserialfn: Default::default(),
+            agg_collation: Default::default(),
+            num_sort_cols: 0,
+            num_distinct_cols: 0,
+            sort_col_idx: None,
+            sort_operators: None,
+            sort_collations: None,
+            sort_nulls_first: None,
+            equalfn_one: Default::default(),
+            equalfn_multi: None,
+            init_value: Datum::null(),
+            init_value_is_null: false,
+            inputtype_len: 0,
+            transtype_len: 0,
+            inputtype_by_val: false,
+            transtype_by_val: false,
+            sortslot: None,
+            uniqslot: None,
+            sortdesc: None,
+            lastdatum: Datum::null(),
+            lastisnull: false,
+            haslast: false,
+            sortstates: None,
+            transfn_fcinfo: None,
+            serialfn_fcinfo: None,
+            deserialfn_fcinfo: None,
+        }
+    }
 }
 
 /// `AggStatePerAggData` (executor/nodeAgg.h) — per-aggregate finalfn info.
@@ -395,14 +441,25 @@ pub struct AggStatePerAggData<'mcx> {
 /// `AggStatePerGroupData` (executor/nodeAgg.h) — per-agg-per-group working
 /// state. `FIELDNO_AGGSTATEPERGROUPDATA_*`: transValue=0, transValueIsNull=1,
 /// noTransValue=2.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AggStatePerGroupData {
+#[derive(Clone, Debug)]
+pub struct AggStatePerGroupData<'mcx> {
     /// `Datum transValue` — current transition value (field 0).
-    pub trans_value: Datum,
+    pub trans_value: Datum<'mcx>,
     /// `bool transValueIsNull` (field 1).
     pub trans_value_is_null: bool,
     /// `bool noTransValue` — true if transValue not set yet (field 2).
     pub no_trans_value: bool,
+}
+
+impl Default for AggStatePerGroupData<'_> {
+    fn default() -> Self {
+        // C `palloc0` zero-init of a per-group entry.
+        AggStatePerGroupData {
+            trans_value: Datum::null(),
+            trans_value_is_null: false,
+            no_trans_value: false,
+        }
+    }
 }
 
 /// `AggStatePerPhaseData` (executor/nodeAgg.h) — per-grouping-set-phase state.
@@ -555,7 +612,7 @@ pub struct AggStateData<'mcx> {
     /// `TupleTableSlot *sort_slot`.
     pub sort_slot: Option<SlotId>,
     /// `AggStatePerGroup *pergroups` — grouping-set-indexed per-group arrays.
-    pub pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData>>>>,
+    pub pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
     /// `HeapTuple grp_firstTuple` — copy of first tuple of current group.
     pub grp_first_tuple: Option<PgBox<'mcx, HeapTupleData<'mcx>>>,
     /// `bool table_filled`.
@@ -599,9 +656,9 @@ pub struct AggStateData<'mcx> {
     /// `AggStatePerHash perhash` — array of per-hashtable data.
     pub perhash: Option<PgVec<'mcx, AggStatePerHashData<'mcx>>>,
     /// `AggStatePerGroup *hash_pergroup`.
-    pub hash_pergroup: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData>>>>,
+    pub hash_pergroup: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
     /// `AggStatePerGroup *all_pergroups` (field 54).
-    pub all_pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData>>>>,
+    pub all_pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
     /// `SharedAggInfo *shared_info` — one entry per worker.
     pub shared_info: Option<PgBox<'mcx, SharedAggInfo<'mcx>>>,
 }
