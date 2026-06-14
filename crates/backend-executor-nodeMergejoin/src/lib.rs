@@ -373,14 +373,12 @@ fn ApplySortComparator<'mcx>(
         }
     } else {
         // compare = ssup->comparator(datum1, datum2, ssup);
-        // The comparator seam takes the bare-word `Datum` (`types_datum::Datum`);
-        // the canonical clause values are non-null scalars here (`!is_null{1,2}`),
-        // so the by-value scalar word crosses back out.
-        let datum1 = types_datum::Datum::from_usize(clause.ldatum.as_usize());
-        let datum2 = types_datum::Datum::from_usize(clause.rdatum.as_usize());
+        // The comparator seam now takes the canonical `Datum<'_>`; the clause's
+        // `ldatum`/`rdatum` are already canonical (set from
+        // `exec_eval_expr_switch_context`), so they flow straight through.
         let mut compare = sortsupport::apply_sort_comparator::call(
-            datum1,
-            datum2,
+            clause.ldatum.clone(),
+            clause.rdatum.clone(),
             &clause.ssup,
         )?;
         if reverse {

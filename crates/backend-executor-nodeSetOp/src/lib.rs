@@ -1118,13 +1118,10 @@ fn apply_sort_comparator(
     } else {
         // compare = ssup->comparator(datum1, datum2, ssup);
         //
-        // The comparator seam is the audited ABI edge into the type's btree
-        // comparison function (fmgr): it consumes the bare machine word. A
-        // by-value column's canonical `Datum::ByVal` carries exactly that word,
-        // recovered here as the plain `types_datum::Datum` the seam expects.
-        let word1 = types_datum::Datum::from_usize(datum1.as_usize());
-        let word2 = types_datum::Datum::from_usize(datum2.as_usize());
-        let mut compare = sortsupport::apply_sort_comparator::call(word1, word2, ssup)?;
+        // The comparator seam now takes the canonical `Datum<'_>`; pass the
+        // clause values straight through.
+        let mut compare =
+            sortsupport::apply_sort_comparator::call(datum1.clone(), datum2.clone(), ssup)?;
         if reverse {
             // INVERT_COMPARE_RESULT(compare)
             compare = if compare < 0 { 1 } else { compare.wrapping_neg() };

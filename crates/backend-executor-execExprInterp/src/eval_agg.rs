@@ -526,10 +526,14 @@ pub fn ExecEvalAggOrderedTransDatum<'mcx>(
     };
 
     // tuplesort_putdatum(pertrans->sortstates[setno], *op->resvalue, *op->resnull);
+    // The seam now takes the canonical `Datum<'mcx>`; clone the result cell's
+    // value out before re-borrowing `state` to fetch the sortstate.
     let cell = state.result_cells.get(steps[op].resvalue);
+    let value = cell.value.clone();
+    let isnull = cell.isnull;
 
     let sortstate = ordered_sortstate(state, pertrans, setno)?;
-    tuplesort_putdatum::call(sortstate, word_of(&cell.value), cell.isnull)
+    tuplesort_putdatum::call(sortstate, value, isnull)
 }
 
 /// `ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,

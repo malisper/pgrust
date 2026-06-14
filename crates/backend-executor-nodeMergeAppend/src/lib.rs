@@ -906,7 +906,12 @@ fn ApplySortComparator(
             -1
         }
     } else {
-        let mut compare = sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
+        // The comparator seam now takes the canonical `Datum<'_>`. These are
+        // pass-by-value sort words flowing from `slot_getattr`; wrap each bare
+        // word in the `ByVal` arm (the `ScalarWord` payload is exactly the
+        // `StoredSlotWord` shim type).
+        let mut compare =
+            sortsupport::apply_sort_comparator::call(Datum::ByVal(datum1), Datum::ByVal(datum2), ssup)?;
         if ssup.ssup_reverse {
             compare = INVERT_COMPARE_RESULT(compare);
         }

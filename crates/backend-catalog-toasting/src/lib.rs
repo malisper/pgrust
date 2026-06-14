@@ -16,12 +16,9 @@ use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_I
 // reloptions value is a `bytea` varlena (`Datum::ByRef`), absence is
 // `Datum::null()`. This crate only forwards it opaquely into the
 // `heap_create_with_catalog` / `index_create` seams.
+// The `heap_create_with_catalog` / `index_create` seams now take the canonical
+// `Datum<'mcx>` for their `reloptions` field, so this crate forwards it directly.
 use types_tuple::backend_access_common_heaptuple::Datum;
-// The two consuming seams (`heap.c` / `index.c` owners unported) still take the
-// bare-word shim `types_datum::Datum` for their `reloptions` field — an
-// external/ABI seam edge. We bridge the canonical enum to that word at the call
-// site (see `reloptions_word`), imported here under an unambiguous alias.
-use types_datum::Datum as RelOptionsWord;
 use types_error::{PgError, PgResult};
 use types_nodes::execnodes::IndexInfo;
 use types_nodes::primnodes::OnCommitAction;
@@ -290,7 +287,7 @@ fn create_toast_table<'mcx>(
         shared_relation,
         mapped_relation,
         oncommit: OnCommitAction::ONCOMMIT_NOOP,
-        reloptions: reloptions_word(&reloptions),
+        reloptions,
         use_user_acl: false,
         allow_system_table_mods: true,
         is_internal: true,
@@ -348,7 +345,7 @@ fn create_toast_table<'mcx>(
             collation_ids: collationIds.to_vec(),
             opclass_ids: opclassIds.to_vec(),
             coloptions: coloptions.to_vec(),
-            reloptions: reloptions_word(&Datum::null()), // (Datum) 0
+            reloptions: Datum::null(), // (Datum) 0
             flags: INDEX_CREATE_IS_PRIMARY,
             constr_flags: 0,
             allow_system_table_mods: true,
@@ -485,26 +482,6 @@ fn snprintf_name(mut s: String) -> String {
     s
 }
 
-/// Bridge the canonical `reloptions` `Datum<'mcx>` down to the bare-word shim
-/// `types_datum::Datum` consumed by the still-unported `heap_create_with_catalog`
-/// / `index_create` seams (their `reloptions` field is `types_datum::Datum`, an
-/// external/ABI seam edge into `catalog/heap.c` / `catalog/index.c`).
-///
-/// `reloptions` is forwarded opaquely; this unit never reads it. In C the value
-/// is a single `Datum` word: `(Datum) 0` when default/unset, otherwise a pointer
-/// to a `bytea` (`text[]`) varlena. We mirror that exactly:
-///
-///   * `Datum::null()` / any by-value word -> that same scalar word (`(Datum) 0`
-///     for the default case);
-///   * a `ByRef` varlena image -> the pointer word into its bytes, the audited
-///     by-reference→bare-word ABI edge (the seam owner re-reads it as a varlena
-///     pointer, exactly as `heap_create_with_catalog` does in C).
-fn reloptions_word(reloptions: &Datum<'_>) -> RelOptionsWord {
-    match reloptions {
-        Datum::ByVal(word) => *word,
-        Datum::ByRef(bytes) => RelOptionsWord::from_usize(bytes.as_ptr() as usize),
-    }
-}
 
 /// Install this crate's seams. This unit declares no inward seams (no ported
 /// crate calls it across a cycle yet), so there is nothing to install.

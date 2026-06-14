@@ -186,10 +186,9 @@ pub fn ExecSort<'mcx>(
                 //                      slot->tts_isnull[0]);
                 let (val, is_null) =
                     execTuples::slot_getsomeattr::call(mcx, estate.slot_mut(slot_id), 1)?;
-                // The datum-sort column is `slot->tts_values[0]`, a scalar
-                // machine word; project the canonical value's by-value arm
-                // onto the bare-word `types_datum::Datum` tuplesort ABI edge.
-                let val = types_datum::Datum::from_usize(val.as_usize());
+                // The datum-sort column is `slot->tts_values[0]`; the
+                // tuplesort_putdatum seam now takes the canonical `Datum<'_>`,
+                // so the value flows through unchanged.
                 tuplesort::tuplesort_putdatum::call(&mut tuplesortstate, val, is_null)?;
             }
         } else {
