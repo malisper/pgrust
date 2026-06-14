@@ -7,18 +7,23 @@
 //! the refcount lifecycle. Nothing here is `todo!()`.
 //!
 //! The C `Relation` pointer becomes a copyable [`Oid`] handle ([`crate::Relation`]).
-//! The store *owns* each descriptor in a `Box<RelationData>`: the `Box` gives a
-//! stable heap address that survives `HashMap` rehash and the in-place
-//! `RelationRebuildRelation` field swap, matching the C pointer's stability
-//! invariant (`rd_refcnt > 0` pins the allocation). Callers reach a descriptor
+//! The store *owns* each descriptor in an `Rc<RefCell<RelationData>>` (the safe
+//! C-shaped rendering of the `RelationData *`): the `Rc` gives a stable heap
+//! allocation that survives `HashMap` rehash and the in-place
+//! `RelationRebuildRelation` field swap (`*cell.borrow_mut() = rebuilt`), matching
+//! the C pointer's stability invariant — and `Rc::strong_count` is the safe
+//! analog of "an external holder pins the allocation". Callers reach a descriptor
 //! through the scoped accessors [`with_rel`]/[`with_rel_mut`] (crate-internal)
 //! and [`with_relation`]/[`with_relation_mut`]/[`try_with_relation`] (public),
-//! or hold a pin across rebuilds via the [`RelationRef`] RAII guard.
+//! or hold a pin across rebuilds via the [`RelationRef`] RAII guard. A holder
+//! that wants C's live shared pointer takes a clone of the cell via
+//! [`relation_id_get_relation_shared`].
 
 pub mod entry;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use backend_utils_error::{ereport, emit_error_report_for, PgError, PgResult};
 use types_core::primitive::{Oid, ProcNumber};
@@ -76,13 +81,15 @@ pub(crate) struct InProgressEnt {
  * `eoxact_list`, `relcacheInvalsReceived`, `criticalRelcachesBuilt`, ...). A
  * PostgreSQL backend is single-threaded, so they map to one `thread_local`
  * cell (matching `inval.c` and the other ported cache crates). The
- * `id_cache` HashMap *owns* every descriptor in a `Box<RelationData>`.
+ * `id_cache` HashMap *owns* every descriptor in an `Rc<RefCell<RelationData>>`.
  * ======================================================================== */
 
 pub(crate) struct RelcacheState {
     /// `RelationIdCache` — the OID→reldesc store. Owns each `RelationData`
-    /// in a `Box` (the stable heap address the C `Relation` pointer protects).
-    pub(crate) id_cache: HashMap<Oid, Box<RelationData>>,
+    /// in an `Rc<RefCell<..>>` (the stable allocation the C `Relation` pointer
+    /// protects; a clone given out to a holder is C's live shared pointer, and
+    /// `Rc::strong_count > 1` means an external holder pins it).
+    pub(crate) id_cache: HashMap<Oid, Rc<RefCell<RelationData>>>,
     /// `in_progress_list` — stack of ongoing `RelationBuildDesc` calls.
     pub(crate) in_progress_list: Vec<InProgressEnt>,
     /// `eoxact_list[]` (fixed `MAX_EOXACT_LIST` bound, not a heap allocation).
@@ -157,29 +164,29 @@ pub(crate) fn create_id_cache() -> PgResult<()> {
  * re-enter the relcache while the borrow is live.
  * ======================================================================== */
 
+/// Clone the cell named by `rel` out of the store (so the store borrow is
+/// released before the cell is borrowed — avoids a nested-borrow hazard when `f`
+/// re-enters the store). `None` is the C NULL.
+pub(crate) fn cell_of(rel: Oid) -> Option<Rc<RefCell<RelationData>>> {
+    with_state(|st| st.id_cache.get(&rel).map(Rc::clone))
+}
+
 /// Borrow the descriptor named by `rel` immutably for the duration of `f`
 /// (replaces the prior `&*ptr` reads). Panics if the handle is stale, matching a
 /// C NULL-deref bug (the cache invariant is a live handle names a present desc).
 pub(crate) fn with_rel<R>(rel: Oid, f: impl FnOnce(&RelationData) -> R) -> R {
-    with_state(|st| {
-        let d = st
-            .id_cache
-            .get(&rel)
-            .expect("relcache: handle names no descriptor");
-        f(d)
-    })
+    let cell = cell_of(rel).expect("relcache: handle names no descriptor");
+    let r = cell.borrow();
+    f(&r)
 }
 
 /// Borrow the descriptor named by `rel` mutably for the duration of `f`
-/// (replaces the prior `&mut *ptr` writes).
+/// (replaces the prior `&mut *ptr` writes). The in-place `borrow_mut` is exactly
+/// C's "mutate the fields behind the live `Relation` pointer".
 pub(crate) fn with_rel_mut<R>(rel: Oid, f: impl FnOnce(&mut RelationData) -> R) -> R {
-    with_state(|st| {
-        let d = st
-            .id_cache
-            .get_mut(&rel)
-            .expect("relcache: handle names no descriptor");
-        f(d)
-    })
+    let cell = cell_of(rel).expect("relcache: handle names no descriptor");
+    let mut r = cell.borrow_mut();
+    f(&mut r)
 }
 
 /* ==========================================================================
@@ -190,26 +197,26 @@ pub(crate) fn with_rel_mut<R>(rel: Oid, f: impl FnOnce(&mut RelationData) -> R) 
 /// (loud) if `oid` names no live relcache entry — a caller-contract violation
 /// (the relation must already be open/pinned).
 pub fn with_relation<R>(oid: Oid, f: impl FnOnce(&RelationData) -> R) -> PgResult<R> {
-    with_state(|st| match st.id_cache.get(&oid) {
-        Some(d) => Ok(f(d)),
+    match cell_of(oid) {
+        Some(cell) => Ok(f(&cell.borrow())),
         None => Err(relcache_missing(oid)),
-    })
+    }
 }
 
 /// Run `f` with the descriptor identified by `oid` borrowed mutably (the
 /// in-place field-mutation arm).
 pub fn with_relation_mut<R>(oid: Oid, f: impl FnOnce(&mut RelationData) -> R) -> PgResult<R> {
-    with_state(|st| match st.id_cache.get_mut(&oid) {
-        Some(d) => Ok(f(d)),
+    match cell_of(oid) {
+        Some(cell) => Ok(f(&mut cell.borrow_mut())),
         None => Err(relcache_missing(oid)),
-    })
+    }
 }
 
 /// Like [`with_relation`] but yields the C-NULL semantics for a dropped/absent
 /// entry (`None`) instead of erroring — for the fetch sites whose C returns NULL
 /// when the relation is gone.
 pub fn try_with_relation<R>(oid: Oid, f: impl FnOnce(&RelationData) -> R) -> Option<R> {
-    with_state(|st| st.id_cache.get(&oid).map(|d| f(d)))
+    cell_of(oid).map(|cell| f(&cell.borrow()))
 }
 
 /// Loud error for an Oid that names no present descriptor.
@@ -228,45 +235,27 @@ fn relcache_missing(oid: Oid) -> PgError {
  * the struct's address never moves) because the rebuild never frees/moves a
  * pinned (`rd_refcnt > 0`) entry.
  *
- * `RelationRef` is the analog: it owns a +1 on `rd_refcnt` and a raw
- * `NonNull<RelationData>` into the `id_cache` `Box`. The `Box` gives a stable
- * heap address: HashMap rehash moves only the table slot, and the in-place
- * rebuild (`std::mem::swap` behind the `Box`'s `&mut RelationData`) leaves the
- * allocation in place — so the `NonNull` stays valid exactly as the C pointer
- * does (`rd_refcnt > 0` pins the allocation). The three `NonNull::as_ref`/
- * `as_mut` sites below are the crate's ONLY sanctioned `unsafe`.
+ * `RelationRef` is the safe analog: it owns a +1 on `rd_refcnt` AND a clone of
+ * the `id_cache`'s `Rc<RefCell<RelationData>>`. The `Rc` keeps the allocation
+ * stable across HashMap rehash and the in-place `*cell.borrow_mut() = rebuilt`
+ * swap, exactly as the C pointer's `rd_refcnt > 0` pin does — and there is no
+ * `unsafe`: every access goes through `RefCell::borrow`/`borrow_mut`. Construct
+ * it with [`RelationRef::open`]; drop it (or let it fall out of scope, including
+ * on a `?`/panic unwind) to unpin.
  * ======================================================================== */
-
-/// Capture the stable [`NonNull<RelationData>`](core::ptr::NonNull) for the
-/// descriptor named by `oid`, which MUST be present in the `id_cache`. Creating
-/// the `NonNull` takes no `unsafe`: `&**boxed` is the `Box`'s heap-allocation
-/// address (the stable identity the pin protects), and `NonNull::from` only
-/// records it. Re-derived (a fresh borrow) on EVERY access so the deref's
-/// provenance is current even after the cache mutated the same allocation
-/// through a `&mut` on its own path (the in-place rebuild swap).
-fn current_relptr(oid: Oid) -> core::ptr::NonNull<RelationData> {
-    with_state(|st| {
-        let boxed = st
-            .id_cache
-            .get(&oid)
-            .expect("relcache: RelationRef pins an absent descriptor");
-        core::ptr::NonNull::from(&**boxed)
-    })
-}
 
 /// A RAII pin on an open relation: the [`crate::Relation`] (`RelationData *`)
 /// analog for callers that hold a relation across rebuilds. Holds a +1 on the
-/// descriptor's `rd_refcnt` and the stable heap address of the `id_cache`
-/// `Box`'s `RelationData`. Construct it with [`RelationRef::open`]; drop it (or
-/// let it fall out of scope, including on a `?`/panic unwind) to unpin.
+/// descriptor's `rd_refcnt` and a clone of the cache cell (C's live shared
+/// pointer).
 pub struct RelationRef {
-    /// The relation OID — the cache key, what each access re-derives from, and
-    /// what `Drop` unpins.
+    /// The relation OID — the cache key and what `Drop` unpins.
     oid: Oid,
-    /// The stable address of the `id_cache` `Box`'s `RelationData`, recorded at
-    /// `open`. The stability *witness*: each access asserts the freshly
-    /// re-derived pointer still equals it. Never itself dereferenced.
-    ptr: core::ptr::NonNull<RelationData>,
+    /// A clone of the `id_cache` cell (C's `RelationData *`). Keeps the
+    /// allocation live; accesses borrow it through `RefCell`. This clone makes
+    /// `Rc::strong_count > 1` while the guard is held — the safe analog of the
+    /// pin keeping the allocation alive.
+    cell: Rc<RefCell<RelationData>>,
 }
 
 impl RelationRef {
@@ -282,8 +271,25 @@ impl RelationRef {
                 .into_error());
         }
         debug_assert_eq!(handle, oid);
-        let ptr = current_relptr(oid);
-        Ok(RelationRef { oid, ptr })
+        let cell = cell_of(oid).expect("relcache: RelationRef pins an absent descriptor");
+        Ok(RelationRef { oid, cell })
+    }
+
+    /// `RelationIdGetRelation(oid)` + pin, returning BOTH the RAII pin guard and
+    /// a clone of C's live shared pointer (the cache cell). The additive
+    /// shared-ref open: the returned `Rc` sees in-place rebuilds and keeps
+    /// `Rc::strong_count > 1`; the guard tracks the `rd_refcnt` pin and unpins on
+    /// drop. Use this when a caller wants to hold the shared cell across calls.
+    pub fn open_shared(oid: Oid) -> PgResult<(RelationRef, Rc<RefCell<RelationData>>)> {
+        let guard = RelationRef::open(oid)?;
+        let cell = Rc::clone(&guard.cell);
+        Ok((guard, cell))
+    }
+
+    /// A clone of the pinned descriptor's cell (C's live shared `RelationData *`).
+    #[inline]
+    pub fn cell(&self) -> Rc<RefCell<RelationData>> {
+        Rc::clone(&self.cell)
     }
 
     /// The pinned relation's OID (`RelationGetRelid`).
@@ -294,70 +300,16 @@ impl RelationRef {
 
     /// Run `f` with the descriptor borrowed immutably (the PREFERRED, momentary
     /// access form: the borrow cannot escape `f`).
-    #[allow(unsafe_code)]
     #[inline]
     pub fn with<R>(&self, f: impl FnOnce(&RelationData) -> R) -> R {
-        STATE.with(|s| {
-            let st = s.borrow();
-            let boxed = st
-                .id_cache
-                .get(&self.oid)
-                .expect("relcache: RelationRef pins an absent descriptor");
-            let fresh = core::ptr::NonNull::from(&**boxed);
-            debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
-            // SAFETY: this guard holds `rd_refcnt > 0` on `self.oid` (incremented
-            // in `open`, decremented only in `Drop`), so the cache neither frees
-            // nor moves the `Box<RelationData>` (the in-place rebuild swaps fields
-            // behind the same allocation; HashMap rehash moves only the table
-            // slot). `fresh` is re-derived from the live store borrow `st` held
-            // for this block (current provenance); the `&RelationData` lives only
-            // for `f` (momentary read), held under `st`.
-            let d: &RelationData = unsafe { fresh.as_ref() };
-            f(d)
-        })
+        f(&self.cell.borrow())
     }
 
     /// Run `f` with the descriptor borrowed mutably (the in-place field-mutation
     /// arm). Like [`with`](Self::with), the borrow is scoped to `f`.
-    #[allow(unsafe_code)]
     #[inline]
     pub fn with_mut<R>(&mut self, f: impl FnOnce(&mut RelationData) -> R) -> R {
-        STATE.with(|s| {
-            let mut st = s.borrow_mut();
-            let boxed = st
-                .id_cache
-                .get_mut(&self.oid)
-                .expect("relcache: RelationRef pins an absent descriptor");
-            let mut fresh = core::ptr::NonNull::from(&mut **boxed);
-            debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
-            // SAFETY: as `with` — `rd_refcnt > 0` keeps the allocation live and
-            // unmoved. `&mut self` proves no other `RelationRef`-derived borrow is
-            // live; `fresh` is re-derived from the unique store borrow `st` held
-            // for this block (current provenance); the `&mut RelationData` lives
-            // only for `f`.
-            let d: &mut RelationData = unsafe { fresh.as_mut() };
-            f(d)
-        })
-    }
-}
-
-impl core::ops::Deref for RelationRef {
-    type Target = RelationData;
-
-    /// Momentary read of the pinned descriptor. The result MUST NOT be held
-    /// across any call that can rebuild this rel (the pin keeps the allocation
-    /// alive but does NOT serialize against the in-place rebuild swap); prefer
-    /// [`with`](RelationRef::with) when a rebuild might intervene.
-    #[allow(unsafe_code)]
-    #[inline]
-    fn deref(&self) -> &RelationData {
-        let fresh = current_relptr(self.oid);
-        debug_assert_eq!(fresh, self.ptr, "pinned Box moved under RelationRef");
-        // SAFETY: `rd_refcnt > 0` (held by this guard) => the cache neither frees
-        // nor moves the `Box<RelationData>`, so `fresh` (== `self.ptr`) names a
-        // live allocation. The returned borrow is momentary; the caller must not
-        // hold it across a rebuild of this rel.
-        unsafe { fresh.as_ref() }
+        f(&mut self.cell.borrow_mut())
     }
 }
 
@@ -386,10 +338,12 @@ pub(crate) fn cache_insert(reldesc: Box<RelationData>, replace_allowed: bool) ->
         if let Some(old) = st.id_cache.get(&id) {
             // C: `Assert(replace_allowed)`.
             debug_assert!(replace_allowed);
+            let old = old.borrow();
             if old.rd_refcnt != 0 {
                 // Still-referenced: C ereport(WARNING) about a leak (the displaced
-                // pointer is simply overwritten in C; here the old `Box` is
-                // dropped when we `insert` the replacement).
+                // pointer is simply overwritten in C; here the old cell is dropped
+                // from the table when we `insert` the replacement — any external
+                // holder that still has a clone keeps its allocation alive).
                 let name = old.rd_rel.relname.clone();
                 emit_error_report_for(
                     &ereport(WARNING)
@@ -400,9 +354,11 @@ pub(crate) fn cache_insert(reldesc: Box<RelationData>, replace_allowed: bool) ->
                 );
             }
         }
-        // The previous `Box` (if any) is dropped here — freeing the whole owned
-        // subsidiary tree, the C `RelationDestroyRelation`/`pfree` cascade.
-        st.id_cache.insert(id, reldesc);
+        // The previous cell (if any) is dropped from the table here — when no
+        // external holder retains a clone, this frees the whole owned subsidiary
+        // tree (the C `RelationDestroyRelation`/`pfree` cascade). `reldesc` is the
+        // fresh build; move it into a new cell.
+        st.id_cache.insert(id, Rc::new(RefCell::new(*reldesc)));
     });
     Ok(())
 }
@@ -420,15 +376,22 @@ pub(crate) fn cache_lookup(id: Oid) -> Option<Oid> {
 }
 
 /// `RelationCacheDelete(RELATION)` (relcache.c macro): remove the entry for
-/// `rd_id` and reclaim the owned `Box<RelationData>` (the C
-/// `RelationDestroyRelation` `pfree` tree; here a single `Box` drop frees the
-/// whole owned descriptor). The C `elog(ERROR)` if the entry is missing.
+/// `rd_id` and reclaim the owned descriptor (the C `RelationDestroyRelation`
+/// `pfree` tree). Removing the cell from the table drops the cache's `Rc`; when
+/// it was the only holder (`strong_count == 1`, the safe analog of "no external
+/// reference pins it") the allocation is freed here. If an external holder still
+/// retains a clone the allocation survives until that holder drops it — exactly
+/// C's "a still-pinned `RelationData *` stays valid after the cache forgets it".
+/// The C `elog(ERROR)` if the entry is missing.
 pub(crate) fn cache_delete(id: Oid) -> PgResult<()> {
     let removed = with_state(|st| st.id_cache.remove(&id));
     match removed {
-        Some(d) => {
-            // `d` (Box<RelationData>) dropped here: frees all subsidiary data.
-            drop(d);
+        Some(cell) => {
+            // Dropping the cache's `Rc` here frees the descriptor iff it was the
+            // sole holder (cache-only eviction). `Rc::strong_count(&cell) == 1`
+            // at this point means cache-only; > 1 means an external holder pins
+            // it (the live-shared-pointer case).
+            drop(cell);
             Ok(())
         }
         None => Err(ereport(ERROR)
@@ -557,6 +520,31 @@ pub fn RelationIdGetRelation(relationId: Oid) -> PgResult<Oid> {
         RelationIncrementReferenceCount(rd)?;
     }
     Ok(rd)
+}
+
+/// `RelationIdGetRelation(relationId)` + hand back C's live shared pointer: the
+/// ADDITIVE shared-ref entry point. Identical lookup/build/pin logic as
+/// [`RelationIdGetRelation`], but instead of projecting a *copy* of the entry it
+/// returns a CLONE of the cache's `Rc<RefCell<RelationData>>` (C's
+/// `RelationData *` into the cache). A holder of this clone sees the in-place
+/// `*cell.borrow_mut() = rebuilt` rebuild (true C semantics) and makes
+/// `Rc::strong_count > 1` (the safe analog of `rd_refcnt > 0` pinning the
+/// allocation). The pin is still tracked on `rd_refcnt` so the existing eviction
+/// protocol is unchanged; the holder must `RelationClose`/drop a paired
+/// `RelationRef` to release it. `Ok(None)` is the C NULL (no `pg_class` row).
+///
+/// This coexists with the copy-projecting [`RelationIdGetRelation`] +
+/// [`crate::build::project_relation_data`] path (still alive for the consumers
+/// that have not migrated yet) — both representations are produced from the same
+/// cell.
+pub fn relation_id_get_relation_shared(
+    relation_id: Oid,
+) -> PgResult<Option<Rc<RefCell<RelationData>>>> {
+    let handle = RelationIdGetRelation(relation_id)?;
+    if handle == InvalidOid {
+        return Ok(None);
+    }
+    Ok(cell_of(handle))
 }
 
 /* ==========================================================================
