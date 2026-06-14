@@ -69,7 +69,7 @@ pub fn init_seams() {}
 #[inline]
 fn array_datum_bare_word(d: &types_tuple::Datum<'_>) -> types_datum::Datum {
     match d {
-        types_tuple::Datum::ByVal(w) => *w,
+        types_tuple::Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
         types_tuple::Datum::ByRef(_) => panic!(
             "tid[] array value crossed the bare-word deconstruct_tid_array seam \
              edge as a by-reference image (execTuples canonical-carrier follow-on \

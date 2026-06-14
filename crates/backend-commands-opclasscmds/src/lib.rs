@@ -1998,7 +1998,7 @@ fn systable_scan_foreach(
 /// Read a by-value `Oid` column from a deformed row (`GETSTRUCT(tup)->col`).
 fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
     match &row.cols[(attno - 1) as usize].0 {
-        Datum::ByVal(d) => d.as_oid(),
+        Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
         Datum::ByRef(_) => InvalidOid,
     }
 }
@@ -2006,7 +2006,7 @@ fn column_oid(row: &SysScanRow<'_>, attno: i16) -> Oid {
 /// Read a by-value `bool` column from a deformed row.
 fn column_bool(row: &SysScanRow<'_>, attno: i16) -> bool {
     match &row.cols[(attno - 1) as usize].0 {
-        Datum::ByVal(d) => d.as_bool(),
+        Datum::ByVal(d) => Datum::from_usize(*d).as_bool(),
         Datum::ByRef(_) => false,
     }
 }

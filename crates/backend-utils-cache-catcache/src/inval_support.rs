@@ -75,7 +75,7 @@ fn heap_getattr<'mcx>(
         return getmissingattr(mcx, tupdesc, attnum);
     }
     if heap_attisnull(tuple, attnum, Some(tupdesc)) {
-        return Ok((Datum::ByVal(ScalarWord::null()), true));
+        return Ok((Datum::ByVal(0), true));
     }
     Ok((nocachegetattr(mcx, tuple, attnum, tupdesc, data)?, false))
 }
@@ -129,7 +129,7 @@ fn catalog_cache_compute_tuple_hash_value(
             // un-collapsed (no `PointerGetDatum` pointer forge) and only lift the
             // `ByVal` word here.
             v[i] = match &value {
-                Datum::ByVal(d) => *d,
+                Datum::ByVal(d) => ScalarWord::from_usize(*d),
                 Datum::ByRef(_) => panic!(
                     "catcache::inval_support: a by-reference key value \
                      (name/text/oidvector) is hashed from its resolved payload \

@@ -227,7 +227,7 @@ pub fn RelidByRelfilenumber(
             // field reads, via the deformed columns.
             let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
             let relpersistence = match &row[(Anum_pg_class_relpersistence - 1) as usize].0 {
-                Datum::ByVal(d) => d.as_char(),
+                Datum::ByVal(d) => Datum::from_usize(*d).as_char(),
                 Datum::ByRef(_) => {
                     return Err(PgError::error("relpersistence is not by-value"))
                 }
@@ -244,17 +244,17 @@ pub fn RelidByRelfilenumber(
             found = true;
 
             let classform_oid = match &row[(Anum_pg_class_oid - 1) as usize].0 {
-                Datum::ByVal(d) => d.as_oid(),
+                Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
                 Datum::ByRef(_) => return Err(PgError::error("pg_class.oid is not by-value")),
             };
             #[cfg(debug_assertions)]
             {
                 let row_tblspc = match &row[(Anum_pg_class_reltablespace - 1) as usize].0 {
-                    Datum::ByVal(d) => d.as_oid(),
+                    Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
                     Datum::ByRef(_) => InvalidOid,
                 };
                 let row_filenode = match &row[(Anum_pg_class_relfilenode - 1) as usize].0 {
-                    Datum::ByVal(d) => d.as_oid(),
+                    Datum::ByVal(d) => Datum::from_usize(*d).as_oid(),
                     Datum::ByRef(_) => InvalidOid,
                 };
                 debug_assert_eq!(row_tblspc, reltablespace);

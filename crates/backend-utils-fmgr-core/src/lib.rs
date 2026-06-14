@@ -1467,7 +1467,7 @@ fn init_io3_ref(
 /// into the canonical `ByVal` arm (a pure by-value, lifetime-free wrap).
 #[inline]
 fn canon_byval(word: Datum) -> types_tuple::backend_access_common_heaptuple::Datum<'static> {
-    types_tuple::backend_access_common_heaptuple::Datum::ByVal(word)
+    types_tuple::backend_access_common_heaptuple::Datum::ByVal(word.as_usize())
 }
 
 /// Lower a canonical by-value `Datum` back to the bare ABI word. The boundary's
@@ -1476,7 +1476,7 @@ fn canon_byval(word: Datum) -> types_tuple::backend_access_common_heaptuple::Dat
 #[inline]
 fn canon_word(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> Datum {
     match d {
-        types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => *w,
+        types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
         types_tuple::backend_access_common_heaptuple::Datum::ByRef(_) => {
             panic!("fmgr boundary ByVal arm carried a by-reference Datum")
         }
@@ -2008,7 +2008,7 @@ fn tuple_value_to_arg(
 ) -> (Datum, Option<RefPayload>) {
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match val {
-        CanonDatum::ByVal(d) => (*d, None),
+        CanonDatum::ByVal(d) => (Datum::from_usize(*d), None),
         CanonDatum::ByRef(b) => (
             Datum::null(),
             Some(RefPayload::Varlena(b.as_slice().to_vec())),
@@ -2169,7 +2169,7 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     // bytes (C's `PointerGetDatum(palloc'd result)`).
     match oid_input_function_call_out(mcx, fn_oid, str_, typioparam, typmod)? {
         // A strict NULL / by-value scalar: keep the bare ABI word.
-        FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d))),
+        FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d).as_usize())),
         // C classifies by `attbyval`: a by-value type with a by-reference-shaped
         // result still reads its word back; otherwise materialize the payload.
         FmgrOut::Ref(payload) if attbyval => {
@@ -2181,9 +2181,7 @@ fn input_function_call_for_heap_form_seam<'mcx>(
             let mut word_bytes = [0u8; core::mem::size_of::<usize>()];
             let n = bytes.len().min(word_bytes.len());
             word_bytes[..n].copy_from_slice(&bytes[..n]);
-            Ok(CanonDatum::ByVal(Datum::from_usize(usize::from_ne_bytes(
-                word_bytes,
-            ))))
+            Ok(CanonDatum::ByVal(usize::from_ne_bytes(word_bytes)))
         }
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();

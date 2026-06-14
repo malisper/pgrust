@@ -521,7 +521,7 @@ pub unsafe fn RestoreParamList(
             let prm = &mut pl.params[i];
             prm.ptype = ptype;
             prm.pflags = pflags;
-            prm.value = Datum::ByVal(value);
+            prm.value = Datum::ByVal(value.as_usize());
             prm.isnull = isnull;
         });
     }

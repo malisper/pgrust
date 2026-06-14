@@ -215,7 +215,8 @@ pub fn ExecAggInitGroup<'mcx>(
     //                                  pertrans->transtypeLen);
     let _ = (pt.transtype_by_val, pt.transtype_len, &estate);
     let arg1 = transfn_arg_value(pt, 1);
-    pergroup.trans_value = DatumV::ByVal(group_init_datum_copy(aggstate, pertrans, arg1, estate));
+    pergroup.trans_value =
+        DatumV::ByVal(group_init_datum_copy(aggstate, pertrans, arg1, estate).as_usize());
 
     // pergroup->transValueIsNull = false;
     pergroup.trans_value_is_null = false;
@@ -310,7 +311,7 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
             .as_mut()
             .expect("ExecEvalPreOrderedDistinctSingle: pertrans")[pertrans];
         pt.haslast = true;
-        pt.lastdatum = DatumV::ByVal(new_lastdatum);
+        pt.lastdatum = DatumV::ByVal(new_lastdatum.as_usize());
         pt.lastisnull = isnull;
         return Ok(true);
     }
@@ -649,7 +650,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
         invoke_transfn(pt, word_of(&pergroup.trans_value), pergroup.trans_value_is_null);
 
     // pergroup->transValue = newVal;
-    pergroup.trans_value = DatumV::ByVal(new_val);
+    pergroup.trans_value = DatumV::ByVal(new_val.as_usize());
     // pergroup->transValueIsNull = fcinfo->isnull;
     pergroup.trans_value_is_null = fcinfo_isnull;
     // MemoryContextSwitchTo(oldContext);
@@ -703,7 +704,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     }
 
     // pergroup->transValue = newVal;
-    pergroup.trans_value = DatumV::ByVal(new_val);
+    pergroup.trans_value = DatumV::ByVal(new_val.as_usize());
     // pergroup->transValueIsNull = fcinfo->isnull;
     pergroup.trans_value_is_null = fcinfo_isnull;
     // MemoryContextSwitchTo(oldContext);

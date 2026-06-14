@@ -289,11 +289,10 @@ pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<
     // C builtins.h:
     //   #define CStringGetTextDatum(s) PointerGetDatum(cstring_to_text(s))
     // `cstring_to_text` (varlena.c) builds the `text` varlena in the current
-    // context and is owned by the varlena unit; route through its seam (still
-    // bare-word) and carry the pointer word in the canonical by-value arm.
-    Ok(DatumV::ByVal(
-        backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, s)?,
-    ))
+    // context and is owned by the varlena unit; route through its by-reference
+    // `_v` seam, which yields a `Datum::ByRef` over the freshly built varlena
+    // bytes (the canonical form for a pass-by-reference `text` value).
+    backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
 }
 
 // `SetFunctionReturnMode::Materialize` is the `rsinfo->returnMode = SFRM_Materialize`

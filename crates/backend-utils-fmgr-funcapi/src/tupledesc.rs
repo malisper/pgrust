@@ -263,7 +263,7 @@ pub fn extract_variadic_args<'mcx>(
         types_res = vec_with_capacity_in(mcx, elems.len())?;
 
         for (value, isnull) in elems.iter().copied() {
-            args_res.push(DatumV::ByVal(value));
+            args_res.push(DatumV::ByVal(value.as_usize()));
             nulls_res.push(isnull);
             // All the elements of the array have the same type.
             types_res.push(element_type);
@@ -320,7 +320,8 @@ pub fn extract_variadic_args<'mcx>(
                 // PGFunction-argument ABI edge); carry it in the by-value arm
                 // of the canonical value.
                 value = DatumV::ByVal(
-                    backend_utils_fmgr_fmgr_seams::pg_getarg_datum::call(fcinfo, argnum as usize),
+                    backend_utils_fmgr_fmgr_seams::pg_getarg_datum::call(fcinfo, argnum as usize)
+                        .as_usize(),
                 );
             }
             // (C keeps nulls_res[i] as captured from PG_ARGISNULL — the value

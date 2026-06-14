@@ -457,7 +457,7 @@ fn scan_members(
     // cur_skey[0..nkeys].sk_argument = v1..vN;  (only the first nkeys are used)
     for i in 0..(nkeys as usize) {
         // The per-search scalar argument crosses into the canonical by-value arm.
-        cur_skey[i].sk_argument = DatumV::ByVal(arguments[i]);
+        cur_skey[i].sk_argument = DatumV::ByVal(arguments[i].as_usize());
     }
 
     // scandesc = systable_beginscan(relation, cache->cc_indexoid,
@@ -558,7 +558,7 @@ fn build_fetched(
                     let col = &deformed[(attno - 1) as usize];
                     keys[i] = match &col.0 {
                         // By-value key: the scalar word is the key Datum.
-                        Datum::ByVal(d) => *d,
+                        Datum::ByVal(d) => ScalarWord::from_usize(*d),
                         // By-reference key: the payload cannot inhabit a bare
                         // Datum word; the comparison core re-resolves it from
                         // the cached bytes, so the stored word is the owned

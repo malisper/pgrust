@@ -253,7 +253,7 @@ pub fn datum_is_equal(
 ) -> PgResult<bool> {
     if typ_byval {
         let (w1, w2) = match (value1, value2) {
-            (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
+            (Datum::ByVal(a), Datum::ByVal(b)) => (*a, *b),
             _ => panic!("datumIsEqual: by-value type arrived as a by-reference value"),
         };
         Ok(w1 == w2)
@@ -328,7 +328,7 @@ pub fn datum_image_hash_bytes(
             }
         };
         // hash_bytes((unsigned char *) &value, sizeof(Datum))
-        Ok(common_hashfn::hash_bytes(&d.as_usize().to_ne_bytes()))
+        Ok(common_hashfn::hash_bytes(&d.to_ne_bytes()))
     } else if typ_len > 0 {
         let b = value.as_ref_bytes();
         Ok(common_hashfn::hash_bytes(&b[..typ_len as usize]))
@@ -357,7 +357,7 @@ fn byval_words(
     value2: &Datum<'_>,
 ) -> (usize, usize) {
     match (value1, value2) {
-        (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
+        (Datum::ByVal(a), Datum::ByVal(b)) => (*a, *b),
         _ => panic!("{who}: by-value type arrived as a by-reference value"),
     }
 }

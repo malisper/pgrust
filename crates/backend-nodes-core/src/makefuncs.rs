@@ -116,7 +116,8 @@ pub fn make_const<'mcx>(
     // compressed). We therefore detoast only the by-value (pointer-word) form.
     if !constisnull && constlen == -1 {
         if let Datum::ByVal(word) = constvalue {
-            constvalue = Datum::ByVal(pg_detoast_datum(mcx, word)?);
+            constvalue =
+                Datum::ByVal(pg_detoast_datum(mcx, ScalarWord::from_usize(word))?.as_usize());
         }
     }
 

@@ -769,7 +769,7 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
         // exists yet); wrap its scalar word into the canonical by-value arm.
         let (val, isnull, adv) = datumser::datum_restore::call(datumshared);
         datumshared = adv;
-        so.keyData[scan_key].sk_argument = Datum::ByVal(val);
+        so.keyData[scan_key].sk_argument = Datum::ByVal(val.as_usize());
         if isnull {
             debug_assert!(so.keyData[scan_key].sk_argument == Datum::null());
             debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHNULL) != 0);

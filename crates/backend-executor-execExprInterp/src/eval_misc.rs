@@ -219,7 +219,7 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     state.result_cells.set(
         resvalue_id,
         ResultCell {
-            value: Datum::ByVal(value),
+            value: Datum::ByVal(value.as_usize()),
             isnull: false,
         },
     );

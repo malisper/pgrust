@@ -629,7 +629,7 @@ fn build_index_value_desc<'b, 'mcx>(
     // in the by-value arm.
     let values_canon: Vec<types_tuple::backend_access_common_heaptuple::Datum> = values
         .iter()
-        .map(|d| types_tuple::backend_access_common_heaptuple::Datum::ByVal(*d))
+        .map(|d| types_tuple::backend_access_common_heaptuple::Datum::ByVal(d.as_usize()))
         .collect();
 
     let index_value = genam_seams::build_index_value_description::call(

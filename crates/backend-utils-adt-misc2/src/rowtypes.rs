@@ -1181,7 +1181,7 @@ fn column_image_cmp(
 ) -> PgResult<i32> {
     if attbyval {
         let (w1, w2) = match (v1, v2) {
-            (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
+            (Datum::ByVal(a), Datum::ByVal(b)) => (*a, *b),
             _ => panic!("record_image_cmp: by-value attribute deformed as by-reference"),
         };
         Ok(match w1.cmp(&w2) {

@@ -1814,7 +1814,7 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
 /// a caller bug (C would equally read garbage treating it as a scalar word).
 fn byval_word(value: &DatumV<'_>) -> types_datum::Datum {
     match value {
-        DatumV::ByVal(word) => *word,
+        DatumV::ByVal(word) => types_datum::Datum::from_usize(*word),
         DatumV::ByRef(_) => {
             panic!("Memoize: scalar slot word expected, found a by-reference value")
         }

@@ -63,24 +63,33 @@ fn setup() {
             Ok(())
         });
         funcapi::materialized_srf_putvalues::set(|_rsinfo, values, nulls| {
+            // The SRF emits two by-value scalar columns (id, is_builtin) and one
+            // by-reference `text` column (the rmgr name, built via the
+            // `cstring_to_text_v` `ByRef` seam below). Record by-value words
+            // verbatim and a by-reference column as its byte length, so the
+            // assertions can compare against `Datum::from_usize(name.len())`.
             let words: Vec<types_datum::Datum> = values
                 .iter()
                 .map(|d| match d {
-                    Datum::ByVal(w) => *w,
-                    Datum::ByRef(_) => {
-                        panic!("rmgr SRF emits only by-value columns")
-                    }
+                    Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
+                    Datum::ByRef(b) => types_datum::Datum::from_usize(b.len()),
                 })
                 .collect();
             ROWS.with(|r| r.borrow_mut().push((words, nulls.to_vec())));
             Ok(())
         });
-        // Stand-in text Datum: encode the name length so tests can assert it
-        // ran.
-        // `cstring_to_text` still hands back the bare scalar word
-        // (`types_datum::Datum`, the `ByVal` payload during coexistence); the
-        // SRF wraps it in `Datum::ByVal(..)`.
-        varlena::cstring_to_text::set(|_mcx, s| Ok(types_datum::Datum::from_usize(s.len())));
+        // Stand-in `text` value: a `Datum::ByRef` whose byte length equals the
+        // name length, so the SRF putvalues mock above records
+        // `from_usize(name.len())` and the assertions still hold.
+        // (`cstring_to_text_v` is the by-reference migration-target seam rmgr's
+        // production code now calls.)
+        varlena::cstring_to_text_v::set(|mcx, s| {
+            let mut bytes = mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
+            for _ in 0..s.len() {
+                bytes.push(0u8);
+            }
+            Ok(types_tuple::backend_access_common_heaptuple::Datum::ByRef(bytes))
+        });
     });
     IN_PRELOAD.with(|c| c.set(false));
     STARTUPS.with(|c| c.set(0));

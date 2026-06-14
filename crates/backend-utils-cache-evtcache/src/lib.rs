@@ -364,7 +364,7 @@ fn InvalidateEventCacheCallback(_arg: types_datum::datum::Datum, _cacheid: i32, 
 /// Read a by-value `char` attribute (`evtenabled`).
 fn byval_char(col: &(Datum<'_>, bool)) -> PgResult<i8> {
     match &col.0 {
-        Datum::ByVal(d) => Ok(d.as_i32() as i8),
+        Datum::ByVal(_) => Ok(col.0.as_i32() as i8),
         Datum::ByRef(_) => Err(PgError::error("pg_event_trigger char attr is by-reference")),
     }
 }
@@ -372,7 +372,7 @@ fn byval_char(col: &(Datum<'_>, bool)) -> PgResult<i8> {
 /// Read a by-value `Oid` attribute (`evtfoid`).
 fn byval_oid(col: &(Datum<'_>, bool)) -> PgResult<Oid> {
     match &col.0 {
-        Datum::ByVal(d) => Ok(d.as_oid()),
+        Datum::ByVal(_) => Ok(col.0.as_oid()),
         Datum::ByRef(_) => Err(PgError::error("pg_event_trigger oid attr is by-reference")),
     }
 }

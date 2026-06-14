@@ -63,13 +63,16 @@ pub fn domain_in<'mcx>(
     // escontext (hard-error caller), InputFunctionCallSafe is equivalent to
     // InputFunctionCall. The seam yields the bare scalar word; wrap it in the
     // canonical by-value arm.
-    let value = Datum::ByVal(fmgr_seams::input_function_call::call(
-        mcx,
-        io.typiofunc,
-        string,
-        io.typioparam,
-        io.typtypmod,
-    )?);
+    let value = Datum::ByVal(
+        fmgr_seams::input_function_call::call(
+            mcx,
+            io.typiofunc,
+            string,
+            io.typioparam,
+            io.typtypmod,
+        )?
+        .as_usize(),
+    );
 
     // Do the necessary checks to ensure it's a valid domain value.
     typcache_seams::domain_check_input::call(&value, string.is_none(), domain_type)?;
@@ -95,13 +98,16 @@ pub fn domain_recv<'mcx>(
 
     // Invoke the base type's typreceive procedure to convert the data. The seam
     // yields the bare scalar word; wrap it in the canonical by-value arm.
-    let value = Datum::ByVal(fmgr_seams::receive_function_call::call(
-        mcx,
-        io.typiofunc,
-        buf,
-        io.typioparam,
-        io.typtypmod,
-    )?);
+    let value = Datum::ByVal(
+        fmgr_seams::receive_function_call::call(
+            mcx,
+            io.typiofunc,
+            buf,
+            io.typioparam,
+            io.typtypmod,
+        )?
+        .as_usize(),
+    );
 
     // Do the necessary checks to ensure it's a valid domain value. (binary
     // input always supplies a non-null value, matching the C `buf == NULL`

@@ -722,7 +722,7 @@ fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, pids: &[i32]) -> PgResult<Datum<'m
     // The arrayfuncs owner hands back the bare scalar word (a pointer to the
     // detoasted `int4[]`); carry it in the canonical by-value arm.
     Ok(Datum::ByVal(
-        backend_utils_adt_arrayfuncs_seams::construct_int4_array::call(mcx, pids)?,
+        backend_utils_adt_arrayfuncs_seams::construct_int4_array::call(mcx, pids)?.as_usize(),
     ))
 }
 
