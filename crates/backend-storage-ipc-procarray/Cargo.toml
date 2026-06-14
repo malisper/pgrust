@@ -10,6 +10,11 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
+backend-access-transam-varsup-seams = { path = "../backend-access-transam-varsup-seams" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

@@ -7232,6 +7232,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-procarray"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-storage-ipc-procarray-seams"
 version = "0.0.0"
 dependencies = [
@@ -7241,6 +7260,7 @@ dependencies = [
  "types-error",
  "types-snapshot",
  "types-storage",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -10949,6 +10969,7 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
+ "backend-storage-ipc-procarray",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
