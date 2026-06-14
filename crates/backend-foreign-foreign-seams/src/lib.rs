@@ -527,3 +527,37 @@ seam_core::seam!(
     /// `...->fdwroutine->ForeignAsyncNotify(areq)`.
     pub fn foreign_async_notify(areq: &mut AsyncRequest) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetForeignServer(serverid)` (foreign.c): the server descriptor by OID;
+    /// `elog(ERROR)` on cache lookup failure (carried on `Err`). Allocated in
+    /// `mcx`.
+    pub fn get_foreign_server<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+    ) -> PgResult<ForeignServer<'mcx>>
+);
+
+seam_core::seam!(
+    /// `GetForeignDataWrapperExtended(fdwid, missing_ok)` (foreign.c): the FDW
+    /// descriptor by OID. With `missing_ok = true` a missing wrapper is
+    /// `Ok(None)`; otherwise `elog(ERROR)` (carried on `Err`). Allocated in
+    /// `mcx`.
+    pub fn get_foreign_data_wrapper_extended<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<ForeignDataWrapper<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetForeignServerExtended(serverid, missing_ok)` (foreign.c): the
+    /// server descriptor by OID. With `missing_ok = true` a missing server is
+    /// `Ok(None)`; otherwise `elog(ERROR)` (carried on `Err`). Allocated in
+    /// `mcx`.
+    pub fn get_foreign_server_extended<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<ForeignServer<'mcx>>>
+);
