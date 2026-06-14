@@ -165,7 +165,7 @@ pub fn generate_subscripts_nodir<'mcx>(
 /// (the element storage triple comes from `get_typlenbyvalalign`).
 pub fn array_unnest<'mcx>(
     mcx: Mcx<'mcx>,
-    array: &[u8],
+    array: &'mcx [u8],
 ) -> PgResult<PgVec<'mcx, (ArrayElementDatum<'mcx>, bool)>> {
     let element_type = foundation::arr_elemtype(array);
     let ndim = foundation::arr_ndim(array);
@@ -192,11 +192,9 @@ pub fn array_unnest<'mcx>(
             let elem: ArrayElementDatum<'mcx> = if elmbyval {
                 ArrayElementDatum::ByValue(foundation::fetch_att(array, off, elmbyval, elmlen))
             } else {
-                // SAFETY-of-model: the element window lives in the same `'mcx`
-                // buffer the caller owns; tie it to `'mcx`.
-                let window: &'mcx [u8] = unsafe {
-                    core::slice::from_raw_parts(array[off..after].as_ptr(), after - off)
-                };
+                // The element window is a sub-slice of the caller's `'mcx`
+                // buffer, so slicing already yields a `&'mcx [u8]`.
+                let window: &'mcx [u8] = &array[off..after];
                 ArrayElementDatum::ByRef(window)
             };
             dataptr = foundation::att_align_nominal(after, elmalign);
@@ -1133,15 +1131,11 @@ pub fn array_iterate<'mcx>(
                 let after =
                     foundation::att_addlength_pointer(p, iterator.typlen as i32, iterator.arr, p);
                 if !iterator.typbyval {
-                    // SAFETY-of-model: the element window lives in the iterator's
-                    // `'mcx` array buffer; tie it to `'mcx` (the by-ref element
-                    // convention shared with `array_unnest`/`array_replace`).
-                    let window: &'mcx [u8] = unsafe {
-                        core::slice::from_raw_parts(
-                            iterator.arr[p..after].as_ptr(),
-                            after - p,
-                        )
-                    };
+                    // The element window is a sub-slice of the iterator's `'mcx`
+                    // array buffer, so slicing already yields a `&'mcx [u8]` (the
+                    // by-ref element convention shared with
+                    // `array_unnest`/`array_replace`); no raw-pointer rebuild.
+                    let window: &'mcx [u8] = &iterator.arr[p..after];
                     windows.push(Some(window));
                 } else {
                     windows.push(None);
