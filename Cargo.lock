@@ -6505,6 +6505,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-repl-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-repl-scanner-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-parsenodes",
+ "types-replication",
+]
+
+[[package]]
+name = "backend-replication-repl-scanner-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-replication",
+]
+
+[[package]]
 name = "backend-replication-slot"
 version = "0.0.0"
 dependencies = [
@@ -11460,6 +11481,10 @@ version = "0.0.0"
 [[package]]
 name = "types-replication"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-parsenodes",
+]
 
 [[package]]
 name = "types-replication-applyparallel"
