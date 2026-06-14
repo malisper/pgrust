@@ -26,8 +26,6 @@ use types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
-use types_tuple::heaptuple::{FormData_pg_attribute, NameData};
-
 use crate::core_entry_store::entry::{FormPgClass, OwnedAttr, OwnedTupleDesc, RelationData};
 use crate::core_entry_store::{cache_insert, with_state, InProgressEnt};
 
@@ -54,7 +52,7 @@ pub fn relation_get_composite_tupdesc<'mcx>(
     let rel = crate::core_entry_store::RelationRef::open(typrelid)?;
     // CreateTupleDescCopyConstr(RelationGetDescr(rel)) — materialize a standalone
     // copy of the entry's tuple descriptor, tagged with the composite type.
-    let attrs = rel.with(|r| build_form_attrs(&r.rd_att, r.rd_id));
+    let attrs = rel.with(|r| r.rd_att.build_form_attrs(r.rd_id));
     let mut td = CreateTupleDesc(mcx, &attrs)?;
     td.tdtypeid = type_id;
     td.tdtypmod = -1;
@@ -120,13 +118,11 @@ fn project_entry<'mcx>(
 ) -> PgResult<types_rel::RelationData<'mcx>> {
     let rd_rel = project_form_pg_class(mcx, &r.rd_rel)?;
     // Materialize the tuple descriptor from the entry's owned attribute rows.
-    // `CreateTupleDesc` (tupdesc.c) populates the parallel compact_attrs.
-    let attrs = build_form_attrs(&r.rd_att, r.rd_id);
-    let mut td = CreateTupleDesc(mcx, &attrs)?;
-    td.tdtypeid = r.rd_att.tdtypeid;
-    td.tdtypmod = r.rd_att.tdtypmod;
-    td.tdrefcount = 1;
-    let rd_att = mcx::alloc_in(mcx, td)?;
+    // The owned->borrowed projection (build the `Form_pg_attribute[]`, feed it
+    // through `CreateTupleDesc` to populate the parallel compact_attrs, stamp
+    // the composite type id/typmod/refcount) now lives on the entry type as
+    // `OwnedTupleDesc::project_in` (F0''); delegate to it.
+    let rd_att = r.rd_att.project_in(mcx, r.rd_id)?;
     // Index fields: `rd_index` / `rd_opcintype` (None/empty for a table).
     let rd_index = r.rd_index.as_ref().map(|ix| types_rel::FormData_pg_index {
         indnkeyatts: ix.indnkeyatts,
@@ -180,39 +176,6 @@ fn project_form_pg_class<'mcx>(
         relispartition: f.relispartition,
         relfrozenxid: f.relfrozenxid,
     })
-}
-
-/// Build the full `FormData_pg_attribute[]` array from the entry's owned
-/// attribute rows, for the tuple-descriptor materialization. The entry carries
-/// the trimmed `OwnedAttr` subset; the remaining `Form_pg_attribute` fields are
-/// `Default` (they are not consumed across the relcache seam).
-fn build_form_attrs(td: &OwnedTupleDesc, relid: Oid) -> Vec<FormData_pg_attribute> {
-    td.attrs
-        .iter()
-        .map(|a| FormData_pg_attribute {
-            attrelid: relid,
-            attname: name_data(&a.attname),
-            atttypid: a.atttypid,
-            attlen: a.attlen,
-            attnum: a.attnum,
-            atttypmod: a.atttypmod,
-            attbyval: a.attbyval,
-            attalign: a.attalign,
-            attnotnull: a.attnotnull,
-            attisdropped: a.attisdropped,
-            attcollation: a.attcollation,
-            ..FormData_pg_attribute::default()
-        })
-        .collect()
-}
-
-/// `namestrcpy` into a fixed `NameData` (NUL-padded, truncated to NAMEDATALEN).
-fn name_data(s: &str) -> NameData {
-    let mut nd = NameData::default();
-    let bytes = s.as_bytes();
-    let n = bytes.len().min(nd.data.len() - 1);
-    nd.data[..n].copy_from_slice(&bytes[..n]);
-    nd
 }
 
 /// `RelationBuildDesc(targetRelId, insertIt)` (relcache.c): assemble a fresh

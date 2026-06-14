@@ -12630,10 +12630,14 @@ dependencies = [
 name = "types-relcache-entry"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
+ "mcx",
  "types-core",
+ "types-error",
  "types-reloptions",
  "types-storage",
  "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]

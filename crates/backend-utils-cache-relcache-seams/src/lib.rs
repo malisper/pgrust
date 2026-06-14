@@ -32,6 +32,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationIdGetRelation(relationId)` + hand back C's live shared pointer
+    /// (relcache.c): the ADDITIVE shared-ref entry point. Same lookup/build/pin
+    /// logic as [`relation_id_get_relation`], but instead of projecting a *copy*
+    /// of the entry it returns a CLONE of the cache's
+    /// `Rc<RefCell<RelationData>>` (C's `RelationData *` into the cache). A
+    /// holder of this clone sees the in-place `*cell.borrow_mut() = rebuilt`
+    /// rebuild (true C semantics) and makes `Rc::strong_count > 1` (the safe
+    /// analog of `rd_refcnt > 0` pinning the allocation). The pin is tracked on
+    /// `rd_refcnt`; the holder must `relation_close`/drop a paired pin to
+    /// release it. `Ok(None)` is the C NULL (no `pg_class` row).
+    ///
+    /// This is the cross-crate promotion of the relcache owner's crate-local
+    /// `relation_id_get_relation_shared`, declared here so the later Deref-flip
+    /// wave can re-key `types_rel::Relation` onto the shared entry cell across
+    /// crates. It coexists with the copy-projecting [`relation_id_get_relation`]
+    /// (kept alive for the consumers that have not migrated yet); both
+    /// representations are produced from the same cell.
+    pub fn relation_id_get_relation_shared(
+        relation_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<
+        Option<std::rc::Rc<std::cell::RefCell<types_relcache_entry::RelationData>>>,
+    >
+);
+
+seam_core::seam!(
     /// `RelationClose(relation)` (relcache.c): drop the relcache reference
     /// (`rd_refcnt -= 1`) for the entry identified by `relation_id`. C can
     /// `elog(WARNING)` on a refcount inconsistency, carried on `Err`.

@@ -21,6 +21,7 @@ use types_error::{PgError, PgResult};
 pub fn init_seams() {
     // --- core-entry-store ---
     sx::relation_id_get_relation::set(relation_id_get_relation);
+    sx::relation_id_get_relation_shared::set(relation_id_get_relation_shared);
     sx::relation_close::set(relation_close);
     sx::relation_rd_tableam::set(relation_rd_tableam);
     sx::relation_needs_wal::set(relation_needs_wal);
@@ -108,6 +109,18 @@ fn relation_id_get_relation<'mcx>(
     // full projection is build-family logic.
     crate::core_entry_store::with_relation(rd, |r| crate::build::project_relation_data(mcx, r))?
         .map(Some)
+}
+
+fn relation_id_get_relation_shared(
+    relation_id: Oid,
+) -> PgResult<
+    Option<std::rc::Rc<std::cell::RefCell<crate::core_entry_store::RelationData>>>,
+> {
+    // The ADDITIVE shared-ref open: hand back a clone of the cache cell (C's
+    // `RelationData *`) instead of a projected copy. Delegates to the
+    // crate-local core-entry-store routine; coexists with the copy-projecting
+    // `relation_id_get_relation` above.
+    crate::core_entry_store::relation_id_get_relation_shared(relation_id)
 }
 
 fn relation_close(relation_id: Oid) -> PgResult<()> {

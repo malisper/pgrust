@@ -22,6 +22,7 @@
 use types_core::primitive::{AttrNumber, Oid, ProcNumber, RegProcedure};
 use types_core::xact::SubTransactionId;
 use types_core::{InvalidOid, INVALID_PROC_NUMBER};
+use types_error::PgResult;
 use types_storage::lock::LockRelId;
 use types_storage::RelFileLocator;
 
@@ -109,6 +110,95 @@ pub struct OwnedTupleDesc {
     /// accounting; `None` is the C NULL (no constraints). Filled by
     /// `AttrDefaultFetch`/`CheckNNConstraintFetch` (build family).
     pub constr: Option<OwnedTupleConstr>,
+}
+
+impl OwnedTupleDesc {
+    /// `natts` (`access/tupdesc.h` `TupleDesc->natts`) — number of attributes.
+    pub fn natts(&self) -> i32 {
+        self.natts
+    }
+
+    /// `TupleDescAttr(rd_att, i)` (`access/tupdesc.h`) over the OWNED attribute
+    /// rows — the `i`-th [`OwnedAttr`] (0-based). The entry stores attributes in
+    /// owned form; this is the owned-side analog of
+    /// [`types_tuple::heaptuple::TupleDescData::attr`].
+    pub fn attr(&self, i: usize) -> &OwnedAttr {
+        &self.attrs[i]
+    }
+
+    /// `rd_att->constr` (`access/tupdesc.h`) — the owned `TupleConstr`, or `None`
+    /// (the C NULL: no defaults/check-constraints/not-null accounting).
+    pub fn constr(&self) -> Option<&OwnedTupleConstr> {
+        self.constr.as_ref()
+    }
+
+    /// Materialize the owned tuple descriptor into the cross-unit borrowed
+    /// [`types_tuple::heaptuple::TupleDescData`], allocated in `mcx`. This is the
+    /// owned->borrowed projection the relcache build family performed for
+    /// `rd_att` (`CreateTupleDescCopyConstr(RelationGetDescr(rel))`-shaped): the
+    /// full `Form_pg_attribute[]` is built from the owned rows, fed through
+    /// `CreateTupleDesc` (which populates the parallel `compact_attrs`), then the
+    /// composite type id/typmod/refcount are stamped.
+    ///
+    /// `relid` is the relation's OID, used to fill each `Form_pg_attribute`'s
+    /// `attrelid` (which `populate_compact_attribute` reads via
+    /// `IsCatalogRelationOid` to decide the not-null validity of a catalog
+    /// column). The C `TupleDescAttr(rd_att, i)->attrelid` carries it; the owned
+    /// `OwnedAttr` mirror does not store `attrelid` (it is identical for every
+    /// row), so the caller passes the relation OID.
+    ///
+    /// `rel.borrow().rd_att.project_in(mcx, rel_oid)?` is the call shape
+    /// consumers will use once the Deref flip lands.
+    pub fn project_in<'mcx>(
+        &self,
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+        let attrs = self.build_form_attrs(relid);
+        let mut td = backend_access_common_tupdesc::CreateTupleDesc(mcx, &attrs)?;
+        td.tdtypeid = self.tdtypeid;
+        td.tdtypmod = self.tdtypmod;
+        td.tdrefcount = 1;
+        mcx::alloc_in(mcx, td)
+    }
+
+    /// Build the full `Form_pg_attribute[]` array from the entry's owned
+    /// attribute rows, for the tuple-descriptor materialization. The entry
+    /// carries the trimmed [`OwnedAttr`] subset; the remaining
+    /// `Form_pg_attribute` fields are `Default` (they are not consumed across the
+    /// relcache seam). `relid` is copied into each row's `attrelid`.
+    pub fn build_form_attrs(
+        &self,
+        relid: Oid,
+    ) -> Vec<types_tuple::heaptuple::FormData_pg_attribute> {
+        self.attrs
+            .iter()
+            .map(|a| types_tuple::heaptuple::FormData_pg_attribute {
+                attrelid: relid,
+                attname: name_data(&a.attname),
+                atttypid: a.atttypid,
+                attlen: a.attlen,
+                attnum: a.attnum,
+                atttypmod: a.atttypmod,
+                attbyval: a.attbyval,
+                attalign: a.attalign,
+                attnotnull: a.attnotnull,
+                attisdropped: a.attisdropped,
+                attcollation: a.attcollation,
+                ..types_tuple::heaptuple::FormData_pg_attribute::default()
+            })
+            .collect()
+    }
+}
+
+/// `namestrcpy` into a fixed `NameData` (NUL-padded, truncated to NAMEDATALEN).
+/// Mirrors the build family's `name_data` helper.
+fn name_data(s: &str) -> types_tuple::heaptuple::NameData {
+    let mut nd = types_tuple::heaptuple::NameData::default();
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(nd.data.len() - 1);
+    nd.data[..n].copy_from_slice(&bytes[..n]);
+    nd
 }
 
 /// `struct TupleConstr` (`access/tupdesc.h`) — the owned mirror of `rd_att->
@@ -321,6 +411,104 @@ impl RelationData {
         };
         rd.rd_rel.relfrozenxid = 0;
         Box::new(rd)
+    }
+
+    /* ----------------------------------------------------------------------
+     * Convenience accessors (the `utils/rel.h` `RelationGet*` macros).
+     *
+     * F0'' additive: these mirror the methods the trimmed `types_rel::
+     * RelationData` exposes, but read the OWNED entry fields. They are placed
+     * here so that after the later Deref-target flip (when `types_rel::
+     * Relation` derefs to the shared entry cell instead of the projected
+     * trimmed copy) every existing `rel.<method>()` call resolves unchanged.
+     * The trimmed type keeps its copies until the atomic flip wave; this is a
+     * COPY, not a move.
+     * ---------------------------------------------------------------------- */
+
+    /// `RelationGetRelationName(relation)` (utils/rel.h):
+    /// `NameStr(relation->rd_rel->relname)`.
+    pub fn name(&self) -> &str {
+        &self.rd_rel.relname
+    }
+
+    /// `RelationIsScannable(relation)` (utils/rel.h):
+    /// `relation->rd_rel->relispopulated`.
+    pub fn is_scannable(&self) -> bool {
+        self.rd_rel.relispopulated
+    }
+
+    /// `RelationGetFillFactor(relation, defaultff)` (utils/rel.h).
+    pub fn get_fillfactor(&self, defaultff: i32) -> i32 {
+        match &self.rd_options {
+            Some(opts) => opts.fillfactor,
+            None => defaultff,
+        }
+    }
+
+    /// `RelationGetToastTupleTarget(relation, defaulttarg)` (utils/rel.h).
+    pub fn get_toast_tuple_target(&self, default_target: i32) -> i32 {
+        match &self.rd_options {
+            Some(opts) => opts.toast_tuple_target,
+            None => default_target,
+        }
+    }
+
+    /// `RelationUsesLocalBuffers(relation)` (utils/rel.h):
+    /// `relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP`. The entry
+    /// stores `relpersistence` as `i8`; `RELPERSISTENCE_TEMP` is `u8`.
+    pub fn uses_local_buffers(&self) -> bool {
+        self.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP as i8
+    }
+
+    /// `RelationIsMapped(relation)` (utils/rel.h): true if the relation uses the
+    /// relfilenumber map — `RELKIND_HAS_STORAGE(relkind) && relfilenode ==
+    /// InvalidRelFileNumber`. The entry stores `relkind` as `i8`; the
+    /// `RELKIND_*` constants are `u8`.
+    pub fn is_mapped(&self) -> bool {
+        use types_tuple::access::{
+            RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+        };
+        let relkind = self.rd_rel.relkind;
+        let has_storage = relkind == RELKIND_RELATION as i8
+            || relkind == RELKIND_INDEX as i8
+            || relkind == RELKIND_SEQUENCE as i8
+            || relkind == RELKIND_TOASTVALUE as i8
+            || relkind == RELKIND_MATVIEW as i8;
+        has_storage && self.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber
+    }
+
+    /// `indexRelation->rd_index->indnkeyatts` — the index's number of key
+    /// attributes; `0` when this is not an index (`rd_index` is NULL).
+    pub fn indnkeyatts(&self) -> i32 {
+        self.rd_index
+            .as_ref()
+            .map(|i| i.indnkeyatts as i32)
+            .unwrap_or(0)
+    }
+
+    /// `TupleDescAttr(rel->rd_att, attnum)->atttypid == CSTRINGOID &&
+    ///  rel->rd_opcintype[attnum] == NAMEOID` (nodeIndexonlyscan.c): does this
+    /// index key column store cstrings for a name-type opclass (btree
+    /// `name_ops`)? Read over the OWNED attribute rows + `rd_opcintype`.
+    pub fn index_attr_is_namecstring(&self, attnum: i32) -> bool {
+        let idx = attnum as usize;
+        if idx >= self.rd_att.attrs.len() || idx >= self.rd_opcintype.len() {
+            return false;
+        }
+        self.rd_att.attr(idx).atttypid == types_tuple::heaptuple::CSTRINGOID
+            && self.rd_opcintype[idx] == types_tuple::heaptuple::NAMEOID
+    }
+
+    /// `RelationGetDescr(relation)` deep-copied into `mcx` — the table slot's
+    /// descriptor for an index-only scan's recheck slot. Materializes the owned
+    /// `rd_att` into the borrowed `TupleDescData` via
+    /// [`OwnedTupleDesc::project_in`] (using the entry's own `rd_id` for the
+    /// per-attribute `attrelid`).
+    pub fn rd_att_clone_in<'b>(
+        &self,
+        mcx: mcx::Mcx<'b>,
+    ) -> PgResult<mcx::PgBox<'b, types_tuple::heaptuple::TupleDescData<'b>>> {
+        self.rd_att.project_in(mcx, self.rd_id)
     }
 }
 
