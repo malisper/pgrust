@@ -2648,6 +2648,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-discard"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace",
+ "backend-commands-async-seams",
+ "backend-commands-prepare",
+ "backend-commands-sequence-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-cache-plancache",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-portalmem",
+ "types-error",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-commands-event-trigger-seams"
 version = "0.0.0"
 dependencies = [

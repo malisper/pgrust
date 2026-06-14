@@ -19,3 +19,10 @@ seam_core::seam!(
     /// slot). The bufmask helpers `elog(ERROR)` on invalid page bounds.
     pub fn seq_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ResetSequenceCaches()` (sequence.c) — `DISCARD ALL` / `DISCARD
+    /// SEQUENCES`: drop this backend's cached sequence values so the next
+    /// `nextval` re-reads from the sequence relation. May `ereport(ERROR)`.
+    pub fn reset_sequence_caches() -> types_error::PgResult<()>
+);
