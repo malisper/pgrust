@@ -14,11 +14,17 @@ use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, RelFileNumber};
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::AccessShareLock;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum (`Datum<'mcx>`) is the migration target for the
+// deformed-column reads below. The bare-word newtype (`types_datum::Datum`)
+// survives only at the audited ABI/storage edges where a plain machine word is
+// stored: the relcache-callback function-pointer `arg` (its type is fixed by
+// `RelcacheCallbackFunction`) and `ScanKeyData.sk_argument` (a bare word in the
+// `types-scan` vocabulary). Those uses are spelled `ScalarWord` here.
+use types_datum::Datum as ScalarWord;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `RelationRelationId` (`catalog/pg_class.h`) — pg_class.
 const RelationRelationId: Oid = 1259;
@@ -62,7 +68,7 @@ thread_local! {
 
 /// `RelfilenumberMapInvalidateCallback` — flush mapping entries when pg_class
 /// is updated in a relevant fashion.
-fn RelfilenumberMapInvalidateCallback(_arg: Datum, relid: Oid) {
+fn RelfilenumberMapInvalidateCallback(_arg: ScalarWord, relid: Oid) {
     RELFILENUMBER_MAP.with(|cell| {
         let mut slot = cell.borrow_mut();
         // callback only gets registered after creating the hash
@@ -118,7 +124,7 @@ fn InitializeRelfilenumberMap() -> PgResult<()> {
     // Watch for invalidation events.
     inval_seams::cache_register_relcache_callback::call(
         RelfilenumberMapInvalidateCallback,
-        Datum::null(),
+        ScalarWord::null(),
     )
 }
 
@@ -181,8 +187,8 @@ pub fn RelidByRelfilenumber(
                 .unwrap()
                 .with(|s| s.relfilenumber_skey.clone())
         });
-        skey[0].sk_argument = Datum::from_oid(reltablespace);
-        skey[1].sk_argument = Datum::from_oid(relfilenumber);
+        skey[0].sk_argument = ScalarWord::from_oid(reltablespace);
+        skey[1].sk_argument = ScalarWord::from_oid(relfilenumber);
 
         // check for plain relations by looking in pg_class. The scan
         // temporaries land in a scratch context dropped below.
@@ -203,8 +209,8 @@ pub fn RelidByRelfilenumber(
             // field reads, via the deformed columns.
             let row = heap_deform_tuple(smcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
             let relpersistence = match &row[(Anum_pg_class_relpersistence - 1) as usize].0 {
-                TupleValue::ByVal(d) => d.as_char(),
-                TupleValue::ByRef(_) => {
+                Datum::ByVal(d) => d.as_char(),
+                Datum::ByRef(_) => {
                     return Err(PgError::error("relpersistence is not by-value"))
                 }
             };
@@ -220,18 +226,18 @@ pub fn RelidByRelfilenumber(
             found = true;
 
             let classform_oid = match &row[(Anum_pg_class_oid - 1) as usize].0 {
-                TupleValue::ByVal(d) => d.as_oid(),
-                TupleValue::ByRef(_) => return Err(PgError::error("pg_class.oid is not by-value")),
+                Datum::ByVal(d) => d.as_oid(),
+                Datum::ByRef(_) => return Err(PgError::error("pg_class.oid is not by-value")),
             };
             #[cfg(debug_assertions)]
             {
                 let row_tblspc = match &row[(Anum_pg_class_reltablespace - 1) as usize].0 {
-                    TupleValue::ByVal(d) => d.as_oid(),
-                    TupleValue::ByRef(_) => InvalidOid,
+                    Datum::ByVal(d) => d.as_oid(),
+                    Datum::ByRef(_) => InvalidOid,
                 };
                 let row_filenode = match &row[(Anum_pg_class_relfilenode - 1) as usize].0 {
-                    TupleValue::ByVal(d) => d.as_oid(),
-                    TupleValue::ByRef(_) => InvalidOid,
+                    Datum::ByVal(d) => d.as_oid(),
+                    Datum::ByRef(_) => InvalidOid,
                 };
                 debug_assert_eq!(row_tblspc, reltablespace);
                 debug_assert_eq!(row_filenode, relfilenumber);
