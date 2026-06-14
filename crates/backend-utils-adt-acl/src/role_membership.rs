@@ -131,8 +131,8 @@ pub fn role_membership_cache_callback(_arg: Datum, cacheid: i32, hashvalue: u32)
 /// `roles_list_append` (acl.c) — a helper for `roles_is_member_of` providing an
 /// optimized `list_append_unique_oid()` via a Bloom filter. The caller owns
 /// freeing `*bf` once done.
-fn roles_list_append(roles_list: &mut Vec<Oid>, bf: &mut *mut BloomFilter, role: Oid) {
-    let roleptr = (&role as *const Oid).cast::<u8>();
+fn roles_list_append(roles_list: &mut Vec<Oid>, bf: &mut Option<BloomFilter>, role: Oid) {
+    let rolebytes = role.to_ne_bytes();
 
     /*
      * If there is a previously-created Bloom filter, use it to try to
@@ -142,8 +142,9 @@ fn roles_list_append(roles_list: &mut Vec<Oid>, bf: &mut *mut BloomFilter, role:
      * filter, we must always do an ordinary linear search through the
      * existing list.
      */
-    if (!(*bf).is_null()
-        && bloom_seams::bloom_lacks_element::call(*bf, roleptr, std::mem::size_of::<Oid>()))
+    if (bf
+        .as_ref()
+        .is_some_and(|f| bloom_seams::bloom_lacks_element::call(f, &rolebytes)))
         || !list_member_oid(roles_list, role)
     {
         /*
@@ -151,20 +152,17 @@ fn roles_list_append(roles_list: &mut Vec<Oid>, bf: &mut *mut BloomFilter, role:
          * populating a Bloom filter to speed up future calls to this
          * function.
          */
-        if (*bf).is_null() && roles_list.len() as i32 > ROLES_LIST_BLOOM_THRESHOLD {
-            *bf = bloom_seams::bloom_create::call(
+        if bf.is_none() && roles_list.len() as i32 > ROLES_LIST_BLOOM_THRESHOLD {
+            let mut filter = bloom_seams::bloom_create::call(
                 (ROLES_LIST_BLOOM_THRESHOLD * 10) as i64,
                 globals_seams::work_mem::call(),
                 0,
             )
             .expect("bloom_create");
             for roleid in roles_list.iter() {
-                bloom_seams::bloom_add_element::call(
-                    *bf,
-                    (roleid as *const Oid).cast::<u8>(),
-                    std::mem::size_of::<Oid>(),
-                );
+                bloom_seams::bloom_add_element::call(&mut filter, &roleid.to_ne_bytes());
             }
+            *bf = Some(filter);
         }
 
         /*
@@ -172,8 +170,8 @@ fn roles_list_append(roles_list: &mut Vec<Oid>, bf: &mut *mut BloomFilter, role:
          * exists.
          */
         roles_list.push(role);
-        if !(*bf).is_null() {
-            bloom_seams::bloom_add_element::call(*bf, roleptr, std::mem::size_of::<Oid>());
+        if let Some(filter) = bf.as_mut() {
+            bloom_seams::bloom_add_element::call(filter, &rolebytes);
         }
     }
 }
@@ -240,7 +238,7 @@ fn roles_is_member_of(
      * already-found memberships and the agenda of roles yet to be scanned.
      */
     let mut roles_list: Vec<Oid> = vec![roleid];
-    let mut bf: *mut BloomFilter = ptr::null_mut();
+    let mut bf: Option<BloomFilter> = None;
 
     let mut idx = 0;
     while idx < roles_list.len() {
@@ -291,10 +289,10 @@ fn roles_is_member_of(
 
     /*
      * Free the Bloom filter created by roles_list_append(), if there is one.
+     * The owned filter is released by dropping it (the `bloom_free`/`pfree`
+     * analog).
      */
-    if !bf.is_null() {
-        bloom_seams::bloom_free::call(bf);
-    }
+    drop(bf);
 
     /*
      * Copy the completed list into TopMemoryContext so it will persist (here:
