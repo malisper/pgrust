@@ -65,6 +65,10 @@ pub enum PlanStateNode<'mcx> {
     ValuesScan(PgBox<'mcx, crate::nodevaluesscan::ValuesScanState<'mcx>>),
     /// `T_CteScanState`.
     CteScan(PgBox<'mcx, crate::nodectescan::CteScanState<'mcx>>),
+    /// `T_NamedTuplestoreScanState`.
+    NamedTuplestoreScan(
+        PgBox<'mcx, crate::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
+    ),
     /// `T_NestLoopState`.
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
@@ -100,6 +104,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::ValuesScan(_) => crate::nodevaluesscan::T_ValuesScanState,
             PlanStateNode::CteScan(_) => crate::nodectescan::T_CteScanState,
+            PlanStateNode::NamedTuplestoreScan(_) => {
+                crate::nodenamedtuplestorescan::T_NamedTuplestoreScanState
+            }
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
@@ -130,6 +137,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::ValuesScan(v) => &v.ss.ps,
             PlanStateNode::CteScan(c) => &c.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &n.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
@@ -159,6 +167,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::ValuesScan(v) => &mut v.ss.ps,
             PlanStateNode::CteScan(c) => &mut c.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &mut n.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
@@ -185,6 +194,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SubqueryScan(s) => Some(&s.ss),
             // `ValuesScanState` begins with a `ScanState`.
             PlanStateNode::ValuesScan(v) => Some(&v.ss),
+            // `NamedTuplestoreScanState` begins with a `ScanState`.
+            PlanStateNode::NamedTuplestoreScan(n) => Some(&n.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.

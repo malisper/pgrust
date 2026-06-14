@@ -164,6 +164,8 @@ pub enum Node<'mcx> {
     ValuesScan(crate::nodevaluesscan::ValuesScan<'mcx>),
     /// `T_CteScan`.
     CteScan(crate::nodectescan::CteScan<'mcx>),
+    /// `T_NamedTuplestoreScan`.
+    NamedTuplestoreScan(crate::nodenamedtuplestorescan::NamedTuplestoreScan<'mcx>),
     /// `T_NestLoop`.
     NestLoop(crate::nodenestloop::NestLoop<'mcx>),
     /// `T_HashJoin`.
@@ -213,6 +215,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(_) => T_TableFuncScan,
             Node::ValuesScan(_) => T_ValuesScan,
             Node::CteScan(_) => crate::nodectescan::T_CteScan,
+            Node::NamedTuplestoreScan(_) => T_NamedTuplestoreScan,
             Node::NestLoop(_) => crate::nodenestloop::T_NestLoop,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
@@ -244,6 +247,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(t) => &t.scan.plan,
             Node::ValuesScan(v) => &v.scan.plan,
             Node::CteScan(c) => &c.scan.plan,
+            Node::NamedTuplestoreScan(n) => &n.scan.plan,
             Node::NestLoop(m) => &m.join.plan,
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
@@ -285,6 +289,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
             Node::ValuesScan(v) => Ok(Node::ValuesScan(v.clone_in(mcx)?)),
             Node::CteScan(c) => Ok(Node::CteScan(c.clone_in(mcx)?)),
+            Node::NamedTuplestoreScan(n) => Ok(Node::NamedTuplestoreScan(n.clone_in(mcx)?)),
             Node::NestLoop(m) => Ok(Node::NestLoop(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
