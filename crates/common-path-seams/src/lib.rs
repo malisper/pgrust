@@ -16,3 +16,11 @@ seam_core::seam!(
     /// `/`).
     pub fn is_absolute_path(path: &str) -> bool
 );
+
+seam_core::seam!(
+    /// `get_share_path(my_exec_path, ret_path)` (`common/path.c`) — derive the
+    /// installation's `share` directory from the executable path. Infallible in
+    /// C (writes into a fixed `MAXPGPATH` buffer); the canonical share path is
+    /// returned here because its length is not known to the caller.
+    pub fn get_share_path(my_exec_path: &str) -> String
+);

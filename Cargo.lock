@@ -7860,6 +7860,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-timezone-pgtz"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-fd-seams",
+ "backend-timezone-localtime",
+ "backend-timezone-pgtz-seams",
+ "backend-utils-init-small",
+ "common-path-seams",
+ "port-pgstrcasecmp",
+ "state-pgtz",
+ "types-core",
+ "types-error",
+ "types-pgtime",
+]
+
+[[package]]
 name = "backend-timezone-pgtz-seams"
 version = "0.0.0"
 dependencies = [
@@ -10830,6 +10846,7 @@ dependencies = [
  "backend-tcop-backend-startup",
  "backend-tcop-fastpath",
  "backend-timezone-localtime",
+ "backend-timezone-pgtz",
  "backend-timezone-strftime",
  "backend-tsearch-ispell-regis",
  "backend-tsearch-spell",
