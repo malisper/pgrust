@@ -29,6 +29,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod freeze;
+pub mod index_delete;
 
 use mcx::Mcx;
 use types_core::primitive::{
@@ -461,6 +462,11 @@ pub fn init_seams() {
             Ok(freeze::heap_tuple_needs_eventual_freeze(&tuple))
         },
     );
+
+    // F6 — the heapam tableam `index_delete_tuples` implementation.
+    heapam_seam::heap_index_delete_tuples::set(|mcx, rel, delstate| {
+        index_delete::heap_index_delete_tuples(mcx, rel, delstate)
+    });
 }
 
 /// Materialize an on-page `HeapTupleHeader` at `(buffer, offnum)` into `mcx`

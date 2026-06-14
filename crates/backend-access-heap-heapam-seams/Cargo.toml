@@ -17,3 +17,5 @@ types-datum = { path = "../types-datum" }
 types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
+types-nbtree = { path = "../types-nbtree" }
+types-snapshot = { path = "../types-snapshot" }

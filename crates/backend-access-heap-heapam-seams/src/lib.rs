@@ -10,9 +10,14 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
-use types_rel::RelationData;
+use types_rel::{Relation, RelationData};
 use types_tuple::heaptuple::FormData_pg_attribute;
 use types_tuple::pg_type::FormData_pg_type;
+use types_core::primitive::{OffsetNumber, TransactionId};
+use types_nbtree::TmIndexDeleteOp;
+use types_snapshot::SnapshotData;
+use types_storage::Buffer;
+use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
 
 seam_core::seam!(
     /// The bootstrap-mode tuple-insert sequence, batched at the heap owner
@@ -79,4 +84,78 @@ seam_core::seam!(
         snapshot_conflict_horizon: types_core::primitive::TransactionId,
         vmflags: u8,
     ) -> PgResult<types_core::primitive::XLogRecPtr>
+);
+
+// ===========================================================================
+// F6 — INDEX DELETE.  These are the heap-AM's tableam `index_delete_tuples`
+// implementation and the two heapam.c primitives it leans on that live in
+// *other* (not-yet-ported) heapam families.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `heap_index_delete_tuples(rel, delstate)` (heapam.c) — the heapam
+    /// implementation of tableam's `index_delete_tuples` interface, called by
+    /// index AMs during (simple or bottom-up) index tuple deletion. Sorts and
+    /// (for bottom-up) shrinks `delstate->deltids`, visits the referenced heap
+    /// blocks under share lock to determine which TIDs are deletable, and
+    /// returns the operation's `snapshotConflictHorizon`. The `delstate`'s
+    /// `ndeltids` (the `deltids`/`status` arrays) is updated in place, so the
+    /// op is taken by `&mut`. `Err` carries the index-corruption / buffer
+    /// `ereport(ERROR)` surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_index_delete_tuples<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        delstate: &mut TmIndexDeleteOp<'mcx>,
+    ) -> PgResult<TransactionId>
+);
+
+/// The result of [`heap_hot_search_buffer`] — mirrors C's by-pointer outputs
+/// (`*tid` updated in place, `*heapTuple` filled, `*all_dead` optionally set)
+/// plus the `bool` return value.
+#[derive(Clone, Debug)]
+pub struct HotSearchResult<'mcx> {
+    /// C's `bool` return: a chain member satisfying the snapshot was found.
+    pub found: bool,
+    /// C's updated `*tid` (only meaningful when `found`).
+    pub tid: ItemPointerData,
+    /// C's `*heapTuple` output (only meaningful when `found`).
+    pub heap_tuple: HeapTupleData<'mcx>,
+    /// C's `*all_dead` output, when the caller requested it (`all_dead != NULL`).
+    pub all_dead: Option<bool>,
+}
+
+seam_core::seam!(
+    /// `heap_hot_search_buffer(tid, rel, buf, snapshot, heapTuple, all_dead,
+    /// first_call)` (heapam.c) — search the HOT chain rooted at `tid` (on the
+    /// already pinned + share-locked `buf`) for the first member satisfying
+    /// `snapshot`. `want_all_dead` requests C's `all_dead` output. The pin/lock
+    /// on `buf` is retained on return. `Err` carries the clog/multixact
+    /// `ereport(ERROR)` surface. **Owned by the heapam scan family (heapam.c);
+    /// uninstalled — and panics — until that family lands.**
+    pub fn heap_hot_search_buffer<'mcx>(
+        mcx: Mcx<'mcx>,
+        tid: ItemPointerData,
+        rel: &Relation<'mcx>,
+        buf: Buffer,
+        snapshot: &SnapshotData,
+        want_all_dead: bool,
+        first_call: bool,
+    ) -> PgResult<HotSearchResult<'mcx>>
+);
+
+seam_core::seam!(
+    /// Deform the on-page heap tuple header at `(buf, offnum)` into the
+    /// repo's `HeapTupleHeaderData` value — the faithful analog of C's
+    /// `(HeapTupleHeader) PageGetItem(page, PageGetItemId(page, offnum))`
+    /// for a normal (`LP_NORMAL`) line pointer, which casts the on-page bytes
+    /// to a `HeapTupleHeader`. The caller must already hold the page's content
+    /// lock and have validated that `offnum`'s item id is `LP_NORMAL`. `Err`
+    /// carries page-format `ereport(ERROR)`s. **Owned by the heapam scan family
+    /// (the on-page tuple-deform infrastructure); uninstalled — and panics —
+    /// until that family lands.**
+    pub fn heap_page_tuple_header<'mcx>(
+        mcx: Mcx<'mcx>,
+        buf: Buffer,
+        offnum: OffsetNumber,
+    ) -> PgResult<HeapTupleHeaderData<'mcx>>
 );
