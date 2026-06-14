@@ -45,7 +45,7 @@ use alloc::string::String;
 use backend_utils_error::{PgError, PgResult};
 
 use types_core::{
-    pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, Size, TimeLineID,
+    pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID,
     TransactionId, XLogRecPtr, XLogSegNo,
 };
 use types_tuple::Datum;
@@ -66,6 +66,14 @@ pub mod redo;
 pub use redo::xlog_redo;
 
 pub mod retention;
+
+pub mod shmem;
+pub use shmem::{
+    DataChecksumsEnabled, GetDefaultCharSignedness, GetFlushRecPtr, GetInsertRecPtr,
+    GetMockAuthenticationNonce, GetRedoRecPtr, GetSystemIdentifier, GetWALInsertionTimeLineIfSet,
+    GetXLogInsertRecPtr, ReadControlFile, UpdateControlFile, WriteControlFile, XLOGShmemInit,
+    XLOGShmemSize,
+};
 
 /// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
 pub const XLOG_FILE_SUFFIX_PARTIAL: &str = ".partial";
@@ -604,10 +612,6 @@ macro_rules! xlog_driver_deferred {
 }
 
 xlog_driver_deferred! {
-    /// `XLOGShmemSize()` — size of the `XLogCtl` shmem region.
-    pub fn XLOGShmemSize() -> Size;
-    /// `XLOGShmemInit()` — allocate + initialise the `XLogCtl` shmem region.
-    pub fn XLOGShmemInit();
     /// `XLogFlush(record)` — ensure WAL is flushed at least up to `record`.
     pub fn XLogFlush(record: XLogRecPtr);
     /// `XLogBackgroundFlush()` — opportunistic flush from the walwriter.
@@ -638,22 +642,12 @@ xlog_driver_deferred! {
     pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> i32;
 
     // --- XLogCtl shmem READ accessors ---
-    /// `GetRedoRecPtr()` — the latest checkpoint REDO pointer (shmem read).
-    pub fn GetRedoRecPtr() -> XLogRecPtr;
-    /// `GetInsertRecPtr()` — approximate WAL insert position (shmem read).
-    pub fn GetInsertRecPtr() -> XLogRecPtr;
-    /// `GetFlushRecPtr(*insertTLI)` — last flushed position + timeline.
-    pub fn GetFlushRecPtr() -> (XLogRecPtr, TimeLineID);
-    /// `GetXLogInsertRecPtr()` — exact WAL insert position (shmem read).
-    pub fn GetXLogInsertRecPtr() -> XLogRecPtr;
     /// `GetXLogWriteRecPtr()` — last written (not flushed) position.
     pub fn GetXLogWriteRecPtr() -> XLogRecPtr;
     /// `GetLastImportantRecPtr()` — start of the last important WAL record.
     pub fn GetLastImportantRecPtr() -> XLogRecPtr;
     /// `GetWALInsertionTimeLine()` — the WAL insertion timeline (shmem read).
     pub fn GetWALInsertionTimeLine() -> TimeLineID;
-    /// `GetWALInsertionTimeLineIfSet()` — the insertion timeline, or 0 if unset.
-    pub fn GetWALInsertionTimeLineIfSet() -> TimeLineID;
     /// `GetFullPageWriteInfo(*RedoRecPtr_p, *doPageWrites_p)` (shmem read).
     pub fn GetFullPageWriteInfo() -> (XLogRecPtr, bool);
     /// `RecoveryInProgress()` — whether the server is still in recovery.
@@ -662,14 +656,6 @@ xlog_driver_deferred! {
     pub fn GetRecoveryState() -> RecoveryState;
     /// `XLogInsertAllowed()` — whether WAL insertion is permitted right now.
     pub fn XLogInsertAllowed() -> bool;
-    /// `GetSystemIdentifier()` — the cluster's 64-bit system identifier.
-    pub fn GetSystemIdentifier() -> u64;
-    /// `GetMockAuthenticationNonce()` — the control-file mock-auth nonce.
-    pub fn GetMockAuthenticationNonce() -> Option<alloc::vec::Vec<u8>>;
-    /// `DataChecksumsEnabled()` — whether data-page checksums are on.
-    pub fn DataChecksumsEnabled() -> bool;
-    /// `GetDefaultCharSignedness()` — the cluster's default `char` signedness.
-    pub fn GetDefaultCharSignedness() -> bool;
     /// `GetFakeLSNForUnloggedRel()` — a monotonically-increasing fake LSN.
     pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr;
     /// `XLogGetLastRemovedSegno()` — highest WAL segment removed so far.
@@ -749,7 +735,20 @@ pub fn CreateRestartPoint(flags: i32) -> bool {
 /// front the still-deferred XLogCtl shmem driver and are installed as their
 /// legs land.
 pub fn init_seams() {
-    backend_access_transam_xlog_seams::xlog_redo::set(redo::xlog_redo);
+    use backend_access_transam_xlog_seams as s;
+    s::xlog_redo::set(redo::xlog_redo);
+
+    // XLogCtl shmem position readers + control-file-backed predicates (xlog.c).
+    s::get_redo_rec_ptr::set(shmem::GetRedoRecPtr);
+    s::get_xlog_insert_rec_ptr::set(shmem::GetXLogInsertRecPtr);
+    s::get_flush_rec_ptr::set(shmem::GetFlushRecPtr);
+    s::get_wal_insertion_timeline_if_set::set(shmem::GetWALInsertionTimeLineIfSet);
+    s::get_system_identifier::set(shmem::GetSystemIdentifier);
+    s::data_checksums_enabled::set(shmem::DataChecksumsEnabled);
+
+    // The ipci shmem accumulator slots (XLOGShmemSize/XLOGShmemInit).
+    s::xlog_shmem_size::set(shmem::xlog_shmem_size_seam);
+    s::xlog_shmem_init::set(shmem::xlog_shmem_init_seam);
 }
 
 #[cfg(test)]

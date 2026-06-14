@@ -160,6 +160,26 @@ pub fn signal_masks() -> SignalMasks {
     MASKS.get()
 }
 
+/// `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — install the current `BlockSig`
+/// as the process signal mask. The public, void-returning analog of the C
+/// statement `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` over the globals this
+/// crate owns. Used by the `InitPostmasterChild`/`InitStandaloneProcess`
+/// startup mask installs (miscinit.c).
+pub fn set_block_sig_mask() {
+    block_signals();
+}
+
+/// `sigdelset(&BlockSig, signal)` — persistently remove `signal` from the
+/// owned `BlockSig` snapshot (mutating the C global `BlockSig`, mirroring
+/// miscinit.c's `sigdelset(&BlockSig, SIGQUIT)`). The change sticks for every
+/// later `set_block_sig_mask()` / [`block_signals`] install, matching the C
+/// semantics where `sigdelset` edits the persistent global.
+pub fn block_sig_delete(signal: libc::c_int) {
+    let mut masks = MASKS.get();
+    delete_signal(&mut masks.block_sig, signal);
+    MASKS.set(masks);
+}
+
 fn empty_signal_set() -> libc::sigset_t {
     let mut set = MaybeUninit::<libc::sigset_t>::uninit();
     // SAFETY: `sigemptyset` initializes the whole set; we assume_init after.

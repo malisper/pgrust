@@ -9,6 +9,8 @@ name = "backend_postmaster_interrupt"
 path = "src/lib.rs"
 
 [dependencies]
+backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+backend-postmaster-interrupt-seams = { path = "../backend-postmaster-interrupt-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
@@ -16,5 +18,7 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 libc = "0.2"
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
+types-signal = { path = "../types-signal" }

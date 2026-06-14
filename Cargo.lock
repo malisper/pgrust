@@ -403,6 +403,7 @@ dependencies = [
  "types-hash",
  "types-jsonb",
  "types-scan",
+ "types-tidbitmap",
  "types-tsearch",
  "types-tuple",
 ]
@@ -923,6 +924,7 @@ dependencies = [
  "types-rel",
  "types-scan",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -1859,11 +1861,17 @@ name = "backend-access-transam-xlog"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-utils-error",
  "mcx",
+ "port-crc32c",
  "types-control",
  "types-core",
  "types-error",
+ "types-storage",
  "types-tuple",
  "types-wal",
 ]
@@ -6005,6 +6013,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-pathnodes",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -6532,6 +6541,8 @@ dependencies = [
 name = "backend-postmaster-interrupt"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqsignal",
+ "backend-postmaster-interrupt-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procsignal-seams",
@@ -6539,8 +6550,10 @@ dependencies = [
  "backend-utils-misc-guc-file-seams",
  "backend-utils-mmgr-mcxt-seams",
  "libc",
+ "port-pqsignal-seams",
  "types-error",
  "types-guc",
+ "types-signal",
 ]
 
 [[package]]

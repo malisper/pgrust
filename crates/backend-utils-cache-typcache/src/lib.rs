@@ -34,7 +34,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use std::collections::HashMap;
@@ -186,8 +187,9 @@ const TCFLAGS_OPERATOR_FLAGS: i32 = !(TCFLAGS_HAVE_PG_TYPE_DATA
 /// (re-looked-up in the cache), not handles — see the crate docs. The
 /// composite `tup_desc` is owned plain data held INLINE on the entry in the
 /// cache context (the C `tupDesc`); callers receive owned `clone_in` copies.
-/// `domain_data` is a token into the (shared, refcounted) `dcc_table`;
-/// `enum_data` is the 1:1-owned enum cache held inline (the C `enumData`).
+/// `domain_data` holds the shared, refcounted `DomainConstraintCache` directly
+/// via `Rc` (the C `domainData` pointer); `enum_data` is the 1:1-owned enum
+/// cache held inline (the C `enumData`).
 struct TypeCacheEntry<'mcx> {
     type_id: Oid,
     type_id_hash: u32,
@@ -229,8 +231,10 @@ struct TypeCacheEntry<'mcx> {
     rngtype: Option<Oid>,
     domain_base_type: Oid,
     domain_base_typmod: i32,
-    /// Token into [`TypCacheState::dcc_table`], or `None` (the C `domainData`).
-    domain_data: Option<u64>,
+    /// The shared, refcounted `DomainConstraintCache`, or `None` (the C
+    /// `domainData` pointer). Shared with every live `DomainConstraintRef.dcc`
+    /// via `Rc`; the explicit `dcc_refcount` cell mirrors the C `dccRefCount`.
+    domain_data: Option<Rc<DomainConstraintCache>>,
     flags: i32,
     /// The entry's enum sort cache (the C `enumData` pointer, owned 1:1 by the
     /// entry). `None` until `load_enum_cache_data` populates it; freed/replaced
@@ -293,11 +297,15 @@ impl<'mcx> TypeCacheEntry<'mcx> {
 /// `check_expr`/`check_exprstate` payloads inside each node are opaque
 /// planner/executor handles. `dcc_context` is the external "Domain
 /// constraints" memory context the nodes are allocated in.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct DomainConstraintCache {
     constraints: Vec<DomainConstraintState>,
     dcc_context: DomainCtxHandle,
-    dcc_refcount: i64,
+    /// The C `dccRefCount`. Mirrored explicitly (rather than leaning on
+    /// `Rc::strong_count`) because dropping the last reference must run the
+    /// fallible `delete_domain_ctx` seam, which `Drop` cannot do. Wrapped in a
+    /// `Cell` because the struct is shared through `Rc` (immutable borrows).
+    dcc_refcount: Cell<i64>,
 }
 
 /// `EnumItem` — OID + its sort position (typcache.c).
@@ -393,9 +401,8 @@ struct TypCacheState<'mcx> {
     /// `firstDomainTypeEntry` — head OID of the domain-entry chain threaded via
     /// `TypeCacheEntry.next_domain`.
     first_domain_type_entry: Option<Oid>,
-    /// Side table owning the (shared, refcounted) `DomainConstraintCache`s.
-    /// (Enum cache data is owned 1:1 inline on each entry, no side table.)
-    dcc_table: HashMap<u64, DomainConstraintCache>,
+    /// Monotonic allocator for `DomainConstraintRef` identity tokens (handed to
+    /// the external reset-callback ABI, which can only carry a plain word).
     next_token: u64,
     /// `RecordCacheHash` — structural row type → stored descriptor ids.
     record_cache: HashMap<u32, PgVec<'mcx, u64>>,
@@ -408,14 +415,20 @@ struct TypCacheState<'mcx> {
     /// `in_progress_list`.
     in_progress_list: PgVec<'mcx, Oid>,
     /// Live `DomainConstraintRef`s, keyed by token, so a reset callback can
-    /// release the dcc refcount.
+    /// release the dcc refcount. The external memory-context reset machinery
+    /// can only carry a plain word (`ref_token`) back to us, not the
+    /// caller-owned `DomainConstraintRef` itself, so we keep the ref's `Rc`
+    /// share here for the callback to release. Removing this table entirely
+    /// would require the reset-callback ABI to hand back the real ref — a
+    /// cross-crate carrier keystone outside this crate.
     refs: HashMap<u64, RefRecord>,
 }
 
-/// The recorded part of a `DomainConstraintRef` needed by the reset callback.
-#[derive(Clone, Copy, Debug)]
+/// The recorded part of a `DomainConstraintRef` needed by the reset callback:
+/// the shared `Rc` it holds, so releasing it decrements the dcc refcount.
+#[derive(Debug)]
 struct RefRecord {
-    dcc: Option<u64>,
+    dcc: Option<Rc<DomainConstraintCache>>,
 }
 
 impl<'mcx> TypCacheState<'mcx> {
@@ -426,7 +439,6 @@ impl<'mcx> TypCacheState<'mcx> {
             type_cache: HashMap::new(),
             rel_id_to_type_id: HashMap::new(),
             first_domain_type_entry: None,
-            dcc_table: HashMap::new(),
             next_token: 1,
             record_cache: HashMap::new(),
             record_cache_array: PgVec::new_in(mcx),
@@ -1209,10 +1221,9 @@ fn load_multirangetype_info(type_id: Oid) -> PgResult<()> {
 fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
     // If we're here, any existing constraint info is stale, so release it.
     // For safety, be sure to null the link before trying to delete the data.
-    let stale = with_state(|st| st.entry(type_id).domain_data);
-    if let Some(token) = stale {
-        with_state(|st| st.entry_mut(type_id).domain_data = None);
-        decr_dcc_refcount(token)?;
+    let stale = with_state(|st| st.entry_mut(type_id).domain_data.take());
+    if let Some(dcc) = stale {
+        decr_dcc_refcount(&dcc)?;
     }
 
     // We try to optimize the common case of no domain constraints, so don't
@@ -1309,17 +1320,12 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
     if let Some((ctx, constraints)) = dcc {
         domains_seams::set_parent_to_cache_context::call(ctx)?;
 
-        let dcc = DomainConstraintCache {
+        let dcc = Rc::new(DomainConstraintCache {
             constraints,
             dcc_context: ctx,
-            dcc_refcount: 1, // count the typcache's reference
-        };
-        let token = with_state(|st| {
-            let token = st.fresh_token();
-            st.dcc_table.insert(token, dcc);
-            token
+            dcc_refcount: Cell::new(1), // count the typcache's reference
         });
-        with_state(|st| st.entry_mut(type_id).domain_data = Some(token));
+        with_state(|st| st.entry_mut(type_id).domain_data = Some(dcc));
     }
 
     // Either way, the typcache entry's domain data is now valid.
@@ -1327,22 +1333,18 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/// `decr_dcc_refcount` — decrement and free when no references remain.
-fn decr_dcc_refcount(token: u64) -> PgResult<()> {
-    let to_delete = with_state(|st| {
-        let dcc = st.dcc_table.get_mut(&token).expect("decr_dcc_refcount: dcc must exist");
-        debug_assert!(dcc.dcc_refcount > 0);
-        dcc.dcc_refcount -= 1;
-        if dcc.dcc_refcount <= 0 {
-            let ctx = dcc.dcc_context;
-            st.dcc_table.remove(&token);
-            Some(ctx)
-        } else {
-            None
-        }
-    });
-    if let Some(ctx) = to_delete {
-        domains_seams::delete_domain_ctx::call(ctx)?;
+/// `decr_dcc_refcount` — decrement and free when no references remain. The
+/// `dcc` is shared via `Rc`; we decrement the explicit `dccRefCount` cell and,
+/// when it reaches zero, delete the external "Domain constraints" memory
+/// context (the C `MemoryContextDelete(dcc->dccContext)`). The `Rc`'s own
+/// allocation is reclaimed when the caller's clone drops.
+fn decr_dcc_refcount(dcc: &Rc<DomainConstraintCache>) -> PgResult<()> {
+    let count = dcc.dcc_refcount.get();
+    debug_assert!(count > 0);
+    let count = count - 1;
+    dcc.dcc_refcount.set(count);
+    if count <= 0 {
+        domains_seams::delete_domain_ctx::call(dcc.dcc_context)?;
     }
     Ok(())
 }
@@ -1351,8 +1353,8 @@ fn decr_dcc_refcount(token: u64) -> PgResult<()> {
 /// invoked through the reset callback registered on the ref's context.
 pub fn release_domain_constraint_ref(ref_token: u64) {
     let dcc = with_state(|st| st.refs.get_mut(&ref_token).and_then(|r| r.dcc.take()));
-    if let Some(token) = dcc {
-        let _ = decr_dcc_refcount(token);
+    if let Some(dcc) = dcc {
+        let _ = decr_dcc_refcount(&dcc);
     }
     with_state(|st| {
         st.refs.remove(&ref_token);
@@ -2460,13 +2462,19 @@ pub fn at_eosubxact_type_cache() {
  * ======================================================================== */
 
 /// `DomainConstraintRef` (typcache.h) — long-lived domain constraint reference.
-#[derive(Clone, Debug)]
+///
+/// Holds its share of the `DomainConstraintCache` directly via `Rc` (the C
+/// `ref->dcc` pointer); the same `Rc` is mirrored into `TypCacheState::refs` so
+/// the reset callback can release it. Not `Clone`: like the C struct, a ref's
+/// refcount share is unique to that ref (cloning would dup the share without a
+/// matching `dccRefCount` bump).
+#[derive(Debug)]
 pub struct DomainConstraintRef {
     pub constraints: Vec<DomainConstraintState>,
     pub refctx: DomainCtxHandle,
     pub tcache: Oid,
     pub need_exprstate: bool,
-    dcc: Option<u64>,
+    dcc: Option<Rc<DomainConstraintCache>>,
     /// Stable token identifying this ref to the reset callback.
     token: u64,
 }
@@ -2515,14 +2523,11 @@ pub fn init_domain_constraint_ref(
     domains_seams::register_ref_reset_callback::call(refctx, token)?;
 
     // Acquire refcount if there are constraints, and set up exported list.
-    let domain_data = with_state(|st| st.entry(type_id).domain_data);
-    if let Some(dcc_token) = domain_data {
-        r.dcc = Some(dcc_token);
-        let constraints = with_state(|st| {
-            let dcc = st.dcc_table.get_mut(&dcc_token).expect("dcc must exist");
-            dcc.dcc_refcount += 1;
-            dcc.constraints.clone()
-        });
+    let domain_data = with_state(|st| st.entry(type_id).domain_data.clone());
+    if let Some(dcc) = domain_data {
+        dcc.dcc_refcount.set(dcc.dcc_refcount.get() + 1);
+        let constraints = dcc.constraints.clone();
+        r.dcc = Some(dcc);
         r.constraints = if r.need_exprstate {
             prep_domain_constraints(&constraints, r.refctx)?
         } else {
@@ -2532,9 +2537,9 @@ pub fn init_domain_constraint_ref(
         r.constraints = Vec::new();
     }
 
-    // Record the ref so the reset callback can find it.
+    // Record the ref so the reset callback can find it (mirror its Rc share).
     with_state(|st| {
-        st.refs.insert(token, RefRecord { dcc: r.dcc });
+        st.refs.insert(token, RefRecord { dcc: r.dcc.clone() });
     });
     Ok(r)
 }
@@ -2552,20 +2557,24 @@ pub fn update_domain_constraint_ref(r: &mut DomainConstraintRef) -> PgResult<()>
         load_domaintype_info(type_id)?;
     }
 
-    let domain_data = with_state(|st| st.entry(type_id).domain_data);
-    if r.dcc != domain_data {
+    let domain_data = with_state(|st| st.entry(type_id).domain_data.clone());
+    // C compares the raw pointers `ref->dcc != typentry->domainData`; here the
+    // identity comparison is `Rc::ptr_eq` (same allocation = same dcc).
+    let same = match (&r.dcc, &domain_data) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    };
+    if !same {
         // Release the previous dcc (leaking previous exec list, as in C).
         if let Some(old) = r.dcc.take() {
             r.constraints = Vec::new();
-            decr_dcc_refcount(old)?;
+            decr_dcc_refcount(&old)?;
         }
-        if let Some(dcc_token) = domain_data {
-            r.dcc = Some(dcc_token);
-            let constraints = with_state(|st| {
-                let dcc = st.dcc_table.get_mut(&dcc_token).expect("dcc must exist");
-                dcc.dcc_refcount += 1;
-                dcc.constraints.clone()
-            });
+        if let Some(dcc) = domain_data {
+            dcc.dcc_refcount.set(dcc.dcc_refcount.get() + 1);
+            let constraints = dcc.constraints.clone();
+            r.dcc = Some(dcc);
             r.constraints = if r.need_exprstate {
                 prep_domain_constraints(&constraints, r.refctx)?
             } else {
@@ -2577,7 +2586,7 @@ pub fn update_domain_constraint_ref(r: &mut DomainConstraintRef) -> PgResult<()>
     // Keep the recorded copy (used by the reset callback) in sync.
     with_state(|st| {
         if let Some(slot) = st.refs.get_mut(&r.token) {
-            slot.dcc = r.dcc;
+            slot.dcc = r.dcc.clone();
         }
     });
     Ok(())

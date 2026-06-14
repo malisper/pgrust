@@ -114,25 +114,24 @@ seam_core::seam!(
 
 // === tidbitmap (tidbitmap.c) ===============================================
 
-/// Opaque token standing in for C's `TIDBitmap *` while the executor owns the
-/// live bitmap (it outlives a single `btgetbitmap` call).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TbmHandle(pub u64);
-
 seam_core::seam!(
     /// `tbm_add_tuples(tbm, &tid, 1, false)` (tidbitmap.c): add one heap TID
-    /// to the bitmap. `Err` carries OOM from growing the bitmap.
+    /// to the bitmap. The index AM holds the real `TIDBitmap *` (C: the
+    /// executor's `node->tbm`); the owner mutates its boxed interior. `Err`
+    /// carries OOM from growing the bitmap.
     pub fn tbm_add_tuple(
-        tbm: TbmHandle,
+        tbm: &mut types_tidbitmap::TIDBitmap,
         tid: types_tuple::heaptuple::ItemPointerData,
     ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `tbm_add_tuples(tbm, tids, ntids, recheck)` (tidbitmap.c): add an array
-    /// of heap TIDs to the bitmap. `Err` carries OOM from growing the bitmap.
+    /// of heap TIDs to the bitmap. The index AM holds the real `TIDBitmap *`;
+    /// the owner mutates its boxed interior. `Err` carries OOM from growing the
+    /// bitmap.
     pub fn tbm_add_tuples(
-        tbm: TbmHandle,
+        tbm: &mut types_tidbitmap::TIDBitmap,
         tids: &[types_tuple::heaptuple::ItemPointerData],
         recheck: bool,
     ) -> types_error::PgResult<()>

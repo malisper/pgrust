@@ -126,9 +126,44 @@ pub fn SignalHandlerForShutdownRequest() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::call();
 }
 
-/// This crate declares no inward seams of its own (callers can depend on it
-/// directly without creating a cycle), so there is nothing to install.
-pub fn init_seams() {}
+/// `fn(int)` wrapper around [`SignalHandlerForCrashExit`] (which is `-> !`) so
+/// it matches the `void (*)(int)` C `pqsigfunc` shape that `pqsignal()` installs.
+fn crash_exit_handler(_signo: i32) {
+    SignalHandlerForCrashExit()
+}
+
+/// Install this unit's inward seams: the miscinit.c child-startup signal-mask
+/// wrappers whose seam decls live in `backend-postmaster-interrupt-seams` and
+/// which compose interrupt.c's `SignalHandlerForCrashExit` with the pqsignal.c
+/// signal-mask machinery.
+pub fn init_seams() {
+    use backend_postmaster_interrupt_seams as s;
+
+    // miscinit.c InitPostmasterChild (lines 152-155): every postmaster child
+    // responds promptly to SIGQUIT — `pqsignal(SIGQUIT, SignalHandlerForCrashExit)`
+    // installs the crash handler (interrupt.c's body), then `sigdelset(&BlockSig,
+    // SIGQUIT); sigprocmask(SIG_SETMASK, &BlockSig, NULL)` unblocks it. The
+    // signal-mask globals belong to pqsignal.c (backend-libpq-pqsignal); the
+    // handler installer is src/port/pqsignal.c (reached through its seam).
+    s::install_crash_exit_sigquit_handler::set(|| {
+        port_pqsignal_seams::pqsignal::call(
+            libc::SIGQUIT,
+            types_signal::SigHandler::Handler(crash_exit_handler),
+        );
+        backend_libpq_pqsignal::block_sig_delete(libc::SIGQUIT);
+        backend_libpq_pqsignal::set_block_sig_mask();
+        Ok(())
+    });
+
+    // miscinit.c InitStandaloneProcess (lines 199-200): `pqinitmask();
+    // sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — initialize the masks and
+    // install BlockSig (no SIGQUIT unblock or default handler here).
+    s::pqinitmask_set_blocksig::set(|| {
+        backend_libpq_pqsignal::pqinitmask();
+        backend_libpq_pqsignal::set_block_sig_mask();
+        Ok(())
+    });
+}
 
 #[cfg(test)]
 mod tests;
