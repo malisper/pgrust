@@ -71,9 +71,12 @@ pub mod shmem;
 pub use shmem::{
     DataChecksumsEnabled, GetDefaultCharSignedness, GetFlushRecPtr, GetInsertRecPtr,
     GetMockAuthenticationNonce, GetRedoRecPtr, GetSystemIdentifier, GetWALInsertionTimeLineIfSet,
-    GetXLogInsertRecPtr, ReadControlFile, UpdateControlFile, WriteControlFile, XLOGShmemInit,
-    XLOGShmemSize,
+    GetXLogInsertRecPtr, ReadControlFile, RecoveryInProgress, UpdateControlFile, WriteControlFile,
+    XLOGShmemInit, XLOGShmemSize,
 };
+
+pub mod insert;
+pub use insert::{XLogInsertAllowed, XLogInsertRecord};
 
 /// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
 pub const XLOG_FILE_SUFFIX_PARTIAL: &str = ".partial";
@@ -650,12 +653,8 @@ xlog_driver_deferred! {
     pub fn GetWALInsertionTimeLine() -> TimeLineID;
     /// `GetFullPageWriteInfo(*RedoRecPtr_p, *doPageWrites_p)` (shmem read).
     pub fn GetFullPageWriteInfo() -> (XLogRecPtr, bool);
-    /// `RecoveryInProgress()` — whether the server is still in recovery.
-    pub fn RecoveryInProgress() -> bool;
     /// `GetRecoveryState()` — crash / archive / done recovery state.
     pub fn GetRecoveryState() -> RecoveryState;
-    /// `XLogInsertAllowed()` — whether WAL insertion is permitted right now.
-    pub fn XLogInsertAllowed() -> bool;
     /// `GetFakeLSNForUnloggedRel()` — a monotonically-increasing fake LSN.
     pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr;
     /// `XLogGetLastRemovedSegno()` — highest WAL segment removed so far.
@@ -749,7 +748,20 @@ pub fn init_seams() {
     // The ipci shmem accumulator slots (XLOGShmemSize/XLOGShmemInit).
     s::xlog_shmem_size::set(shmem::xlog_shmem_size_seam);
     s::xlog_shmem_init::set(shmem::xlog_shmem_init_seam);
+
+    // The WAL-insertion entry (xloginsert.c's XLogInsert calls this) + the
+    // recovery predicate + the per-backend record-position globals it updates.
+    s::xlog_insert_record::set(insert::XLogInsertRecord);
+    s::recovery_in_progress::set(shmem::RecoveryInProgress);
+    s::proc_last_rec_ptr::set(insert::proc_last_rec_ptr);
+    s::xact_last_rec_end::set(insert::xact_last_rec_end);
+    s::set_xact_last_rec_end::set(insert::set_xact_last_rec_end);
+    s::set_xact_last_commit_end::set(insert::set_xact_last_commit_end);
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "insert_tests.rs"]
+mod insert_tests;

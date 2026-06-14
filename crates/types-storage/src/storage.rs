@@ -100,6 +100,32 @@ impl pg_atomic_uint64 {
     pub fn write(&self, value: types_core::uint64) {
         self.value.store(value, Ordering::Relaxed);
     }
+
+    /// `pg_atomic_read_membarrier_u64(ptr)` — a read with full-barrier
+    /// semantics (`port/atomics.h`).
+    pub fn read_membarrier(&self) -> types_core::uint64 {
+        self.value.load(Ordering::SeqCst)
+    }
+
+    /// `pg_atomic_monotonic_advance_u64(ptr, target)` (`port/atomics.h`) —
+    /// advance `*ptr` to `target` unless it is already at least `target`;
+    /// returns the resulting value (always >= the prior value). Implemented
+    /// with the same compare-exchange loop C uses.
+    pub fn monotonic_advance(&self, target: types_core::uint64) -> types_core::uint64 {
+        let mut currval = self.value.load(Ordering::SeqCst);
+        while currval < target {
+            match self.value.compare_exchange_weak(
+                currval,
+                target,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return target,
+                Err(observed) => currval = observed,
+            }
+        }
+        currval
+    }
 }
 
 /// A PostgreSQL spinlock word (`slock_t`, `storage/s_lock.h`).

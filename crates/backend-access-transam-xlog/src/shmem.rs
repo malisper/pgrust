@@ -254,8 +254,39 @@ pub fn xlog_buffers() -> i32 {
 }
 
 #[inline]
-fn xlog_ctl() -> *mut XLogCtlData {
+pub(crate) fn xlog_ctl() -> *mut XLogCtlData {
     XLOG_CTL.with(Cell::get)
+}
+
+/// The genuine `WALInsertLocks` shmem array pointer (backend-local copy).
+#[inline]
+pub(crate) fn wal_insert_locks() -> *mut WALInsertLockPadded {
+    WAL_INSERT_LOCKS.with(Cell::get)
+}
+
+/// `static XLogRecPtr RedoRecPtr` (xlog.c) — the backend-local cached redo
+/// pointer cell, exposed for the insert path.
+pub(crate) fn redo_rec_ptr_cached() -> XLogRecPtr {
+    REDO_REC_PTR.with(Cell::get)
+}
+pub(crate) fn set_redo_rec_ptr_cached(v: XLogRecPtr) {
+    REDO_REC_PTR.with(|c| c.set(v));
+}
+
+/// `static XLogwrtResult LogwrtResult` (xlog.c) — backend-local cache.
+pub(crate) fn logwrt_result() -> XLogwrtResult {
+    LOGWRT_RESULT.with(Cell::get)
+}
+
+/// `RefreshXLogWriteResult(LogwrtResult)` (xlog.c macro) — pull the atomic
+/// write/flush results from shared memory into the backend-local cache.
+///
+/// # Safety
+/// `ctl` must reference the live `XLogCtl` shmem region.
+pub(crate) unsafe fn refresh_xlog_write_result(ctl: &XLogCtlData) {
+    let write = ctl.logWriteResult.read();
+    let flush = ctl.logFlushResult.read();
+    LOGWRT_RESULT.with(|c| c.set(XLogwrtResult { Write: write, Flush: flush }));
 }
 
 #[inline]
@@ -274,12 +305,12 @@ pub fn wal_segment_size() -> i32 {
 // ===========================================================================
 
 #[inline]
-fn spin_lock_acquire(lock: &Spinlock) {
+pub(crate) fn spin_lock_acquire(lock: &Spinlock) {
     backend_storage_lmgr_s_lock::s_lock_macro(lock, Some(file!()), line!() as i32, None);
 }
 
 #[inline]
-fn spin_lock_release(lock: &Spinlock) {
+pub(crate) fn spin_lock_release(lock: &Spinlock) {
     backend_storage_lmgr_s_lock::s_unlock(lock);
 }
 
@@ -524,6 +555,22 @@ pub fn GetXLogInsertRecPtr() -> XLogRecPtr {
 // ===========================================================================
 // Control-file readers (xlog.c:4615 / 4635 / 4649).
 // ===========================================================================
+
+/// `RecoveryInProgress()` (xlog.c:6411) — whether WAL recovery is still in
+/// progress. Reads the shared `SharedRecoveryState`; `RECOVERY_STATE_DONE`
+/// means recovery has ended and WAL insertion is permitted. (The backend-local
+/// `LocalRecoveryInProgress` fast-path cache is a behaviour-preserving omission;
+/// the read is cheap and the insert path only consults it when not in recovery.)
+pub fn RecoveryInProgress() -> bool {
+    let ctl = xlog_ctl();
+    if ctl.is_null() {
+        // Before XLOGShmemInit (bootstrap) C treats the system as not in
+        // recovery (InRecovery drives that path separately).
+        return false;
+    }
+    // SAFETY: live shmem region.
+    unsafe { (*ctl).SharedRecoveryState != RecoveryState::Done }
+}
 
 /// `GetSystemIdentifier()` (xlog.c:4615) — the cluster's 64-bit system id.
 pub fn GetSystemIdentifier() -> u64 {
