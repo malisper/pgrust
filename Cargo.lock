@@ -9097,8 +9097,8 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
