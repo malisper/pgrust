@@ -77,6 +77,7 @@ fn desc(info: u8, data: &[u8], origin: RepOriginId) -> Result<String, PgError> {
         ReadRecPtr: 0,
         EndRecPtr: 0,
         record: Some(decoded),
+        ..Default::default()
     };
     let mut buf = PgString::new_in(ctx.mcx());
     xact_desc(&mut buf, &reader)?;

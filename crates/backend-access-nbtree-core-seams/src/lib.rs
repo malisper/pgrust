@@ -18,7 +18,8 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::{BlockNumber, OffsetNumber};
 use types_error::PgResult;
 use types_nbtree::{
-    BTCycleId, BTScanOpaqueData, BTVacState, BTVacuumPosting, IndexUniqueCheck, TmIndexDeleteOp,
+    BTCycleId, BTScanInsert, BTScanOpaqueData, BTStack, BTVacState, BTVacuumPosting,
+    IndexUniqueCheck, TmIndexDeleteOp,
 };
 use types_rel::Relation;
 use types_scan::sdir::ScanDirection;
@@ -241,6 +242,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `BTPageGetOpaque(page)->btpo_level` (nbtree.h): the tree level recorded
+    /// in the page's special area (zero for leaf pages). Read separately from
+    /// [`page_opaque`] because amcheck needs the level for downlink-chain
+    /// verification while the common callers do not.
+    pub fn page_btpo_level(page: &[u8]) -> u32
+);
+
+seam_core::seam!(
     /// `opaque->btpo_cycleid = 0` written into the page in the shared buffer.
     pub fn page_clear_cycleid(buf: Buffer)
 );
@@ -312,4 +321,134 @@ seam_core::seam!(
         heap_rel: &Relation<'mcx>,
         delstate: TmIndexDeleteOp<'mcx>,
     ) -> PgResult<()>
+);
+
+// === search / scankey / page-format reads consumed by amcheck =============
+//
+// These are owned by `backend-access-nbtree-core` (nbtsearch.c / nbtutils.c /
+// nbtpage.c / nbtdedup.c), which is still `todo`, so every call panics loudly
+// until that unit lands and installs them from its `init_seams()` — exactly
+// like `bt_keep_natts_fast` / `bt_delitems_delete_check` above. The first
+// consumer is `contrib-amcheck-verify-nbtree` (verify_nbtree.c), whose
+// per-page invariant engine builds insertion scankeys and descends the tree.
+
+seam_core::seam!(
+    /// `_bt_mkscankey(rel, itup)` (nbtutils.c): build an insertion scankey
+    /// (`BTScanInsert`) from an index tuple (or with `itup == NULL`, from the
+    /// index's leftmost-key template). `Err` carries opclass-lookup ereports.
+    pub fn bt_mkscankey<'mcx>(rel: &Relation<'mcx>, itup: Option<&[u8]>) -> PgResult<BTScanInsert<'mcx>>
+);
+
+seam_core::seam!(
+    /// `_bt_compare(rel, key, page, offnum)` (nbtsearch.c): compare insertion
+    /// scankey `key` against the tuple at `offnum` on `page`. Returns `<0`,
+    /// `0`, `>0` per the 3-way ORDER semantics. `Err` carries the comparison
+    /// support-function ereports.
+    pub fn bt_compare<'mcx>(
+        rel: &Relation<'mcx>,
+        key: &BTScanInsert<'mcx>,
+        page: &[u8],
+        offnum: OffsetNumber,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `_bt_search(rel, heaprel, key, bufP, access)` (nbtsearch.c): descend
+    /// the tree to the leaf page where `key` belongs, returning the parent
+    /// `BTStack` and the located buffer (in `*bufP`). `access` is `BT_READ`
+    /// (false) or `BT_WRITE` (true). `Err` carries page-read ereports.
+    pub fn bt_search<'mcx>(
+        rel: &Relation<'mcx>,
+        heaprel: &Relation<'mcx>,
+        key: &BTScanInsert<'mcx>,
+        access_write: bool,
+    ) -> PgResult<(BTStack, Buffer)>
+);
+
+seam_core::seam!(
+    /// `_bt_moveright(rel, heaprel, key, buf, forupdate, stack, access)`
+    /// (nbtsearch.c): follow right-links until `buf` is the page on which
+    /// `key` belongs (handling concurrent splits). Returns the (possibly new)
+    /// buffer. `Err` carries page-read ereports.
+    pub fn bt_moveright<'mcx>(
+        rel: &Relation<'mcx>,
+        heaprel: &Relation<'mcx>,
+        key: &BTScanInsert<'mcx>,
+        buf: Buffer,
+        forupdate: bool,
+        access_write: bool,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
+    /// `_bt_binsrch(rel, key, buf)` (nbtsearch.c): binary-search the page in
+    /// `buf` for the offset where `key` belongs (the bare, non-insertion
+    /// variant). `Err` carries comparison-support ereports.
+    pub fn bt_binsrch<'mcx>(
+        rel: &Relation<'mcx>,
+        key: &BTScanInsert<'mcx>,
+        buf: Buffer,
+    ) -> PgResult<OffsetNumber>
+);
+
+seam_core::seam!(
+    /// `_bt_binsrch_insert(rel, insertstate)` (nbtsearch.c): binary search for
+    /// the insert position of `insertstate->itup`, caching bounds in
+    /// `insertstate` and returning the offset. `Err` carries comparison-support
+    /// ereports.
+    pub fn bt_binsrch_insert<'mcx>(
+        rel: &Relation<'mcx>,
+        insertstate: &mut types_nbtree::BTInsertStateData<'mcx>,
+    ) -> PgResult<OffsetNumber>
+);
+
+seam_core::seam!(
+    /// `_bt_metaversion(rel, heapkeyspace, allequalimage)` (nbtpage.c): read
+    /// the metapage and report whether the index is heapkeyspace and
+    /// allequalimage. `Err` carries metapage-read ereports.
+    pub fn bt_metaversion<'mcx>(rel: &Relation<'mcx>) -> PgResult<(bool, bool)>
+);
+
+seam_core::seam!(
+    /// `_bt_check_natts(rel, heapkeyspace, page, offnum)` (nbtutils.c): verify
+    /// that the tuple at `offnum` has a sane number of attributes for its page
+    /// kind (leaf/internal, pivot/non-pivot). Returns whether the count is
+    /// legal. `Err` carries page-read ereports.
+    pub fn bt_check_natts<'mcx>(
+        rel: &Relation<'mcx>,
+        heapkeyspace: bool,
+        page: &[u8],
+        offnum: OffsetNumber,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `_bt_form_posting(base, htids, nhtids)` (nbtdedup.c): build a posting-
+    /// list index tuple from `base` and the heap TID array, returned as owned
+    /// bytes in `mcx`. `Err` carries OOM.
+    pub fn bt_form_posting<'mcx>(
+        mcx: Mcx<'mcx>,
+        base: &[u8],
+        htids: &[ItemPointerData],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `_bt_freestack(stack)` (nbtsearch.c): free a `BTStack` chain. With the
+    /// owned boxed `BTStack` model this is a drop; the seam exists to mirror
+    /// the C call site exactly.
+    pub fn bt_freestack(stack: BTStack)
+);
+
+seam_core::seam!(
+    /// `_bt_allequalimage(index, debugmessage)` (nbtutils.c): are all index
+    /// columns "equalimage" (deduplication-safe)? Distinct decl from the
+    /// `bt_allequalimage` above (the btbuildempty caller passes no debug
+    /// flag); this variant carries the `debugmessage` argument amcheck and
+    /// `_bt_allequalimage`'s general callers use. `Err` carries opclass-lookup
+    /// ereports.
+    pub fn bt_allequalimage_dbg<'mcx>(
+        rel: &Relation<'mcx>,
+        debugmessage: bool,
+    ) -> PgResult<bool>
 );
