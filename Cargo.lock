@@ -1637,8 +1637,8 @@ dependencies = [
  "mcx",
  "types-control",
  "types-core",
- "types-datum",
  "types-error",
+ "types-tuple",
  "types-wal",
 ]
 
