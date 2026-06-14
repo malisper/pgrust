@@ -10279,6 +10279,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-parser-scansup-seams",
+ "backend-utils-adt-scalar-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-guc-tables-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-file"
 version = "0.0.0"
 dependencies = [
@@ -10299,6 +10322,36 @@ dependencies = [
  "types-core",
  "types-error",
  "types-guc",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-funcs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-commands-functioncmds-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-funcs-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-funcs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -11416,7 +11469,9 @@ dependencies = [
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
+ "backend-utils-misc-guc",
  "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-funcs",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
