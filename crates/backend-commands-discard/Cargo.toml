@@ -1,0 +1,27 @@
+[package]
+name = "backend-commands-discard"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_discard"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types-error = { path = "../types-error" }
+types-parsenodes = { path = "../types-parsenodes" }
+
+# Ported owners called directly (no cycle: nothing depends on discard).
+backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }
+backend-commands-prepare = { path = "../backend-commands-prepare" }
+backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+
+# Unported owners reached through their seam crates (panic until owner lands).
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
+backend-commands-async-seams = { path = "../backend-commands-async-seams" }
+backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }

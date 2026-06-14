@@ -2125,6 +2125,7 @@ name = "backend-catalog-pg-conversion-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -2496,6 +2497,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-conversioncmds"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-conversion-seams",
+ "backend-parser-parse-func-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-commands-copy-seams"
 version = "0.0.0"
 dependencies = [
@@ -2629,6 +2654,23 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-discard"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace",
+ "backend-commands-async-seams",
+ "backend-commands-prepare",
+ "backend-commands-sequence-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-cache-plancache",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-portalmem",
+ "types-error",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -9574,6 +9616,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-encnames-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-hashfn"
 version = "0.0.0"
 dependencies = [
@@ -9938,6 +9987,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-amcmds",
  "backend-commands-cluster",
+ "backend-commands-conversioncmds",
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-foreigncmds",

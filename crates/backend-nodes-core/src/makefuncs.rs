@@ -290,17 +290,18 @@ pub fn make_opclause(
 /// `makeTargetEntry(expr, resno, resname, resjunk)` (makefuncs.c) — a
 /// `TargetEntry` node, allocated in `mcx` (the boxed child `expr` and `resname`
 /// string live in the same context). The trimmed [`TargetEntry`] carries
-/// `expr`/`resname`/`resjunk`; `resno`, `ressortgroupref`, `resorigtbl`,
+/// `expr`/`resno`/`resname`/`resjunk`; `ressortgroupref`, `resorigtbl`,
 /// `resorigcol` (set to 0/InvalidOid by the C) are not modeled here.
 pub fn make_target_entry<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Expr,
-    _resno: AttrNumber,
+    resno: AttrNumber,
     resname: Option<&str>,
     resjunk: bool,
 ) -> PgResult<TargetEntry<'mcx>> {
     Ok(TargetEntry {
         expr: Some(alloc_in(mcx, expr)?),
+        resno,
         resname: match resname {
             Some(s) => Some(PgString::from_str_in(s, mcx)?),
             None => None,

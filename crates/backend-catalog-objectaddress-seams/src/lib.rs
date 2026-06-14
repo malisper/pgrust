@@ -8,6 +8,46 @@ use mcx::{Mcx, PgString};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_error::PgResult;
 use types_nodes::parsenodes::ObjectType;
+use types_parsenodes::Node;
+use types_rel::Relation;
+use types_storage::lock::LOCKMODE;
+
+/// `get_object_address(objtype, object, &relation, lockmode, missing_ok)`
+/// (objectaddress.c) result: the resolved [`ObjectAddress`] plus, for the
+/// relation-based object kinds, the relation it opened (`relation` out-param;
+/// `None` for non-relation objects, where C leaves `relation == NULL`). The
+/// caller closes the relation (`relation_close(rel, NoLock)`) once done.
+pub struct ResolvedObjectAddress<'mcx> {
+    pub address: ObjectAddress,
+    pub relation: Option<Relation<'mcx>>,
+}
+
+seam_core::seam!(
+    /// `get_object_address(objtype, object, &relation, lockmode, false)`
+    /// (objectaddress.c) — resolve the parser representation behind `object`
+    /// to an `ObjectAddress`, taking `lockmode` on the target to guard against
+    /// concurrent modification, and returning whatever relation it opened.
+    /// `ereport(ERROR)`s if the object does not exist.
+    pub fn get_object_address<'mcx>(
+        mcx: Mcx<'mcx>,
+        objtype: ObjectType,
+        object: &Node,
+        lockmode: LOCKMODE,
+    ) -> PgResult<ResolvedObjectAddress<'mcx>>
+);
+
+seam_core::seam!(
+    /// `check_object_ownership(roleid, objtype, address, object, relation)`
+    /// (objectaddress.c) — require ownership of the target object; errors
+    /// (`ACLCHECK_NOT_OWNER` → `ereport(ERROR)`) if `roleid` does not own it.
+    pub fn check_object_ownership<'mcx>(
+        roleid: types_core::Oid,
+        objtype: ObjectType,
+        address: ObjectAddress,
+        object: &Node,
+        relation: Option<&Relation<'mcx>>,
+    ) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `getObjectDescription(object, missing_ok)` (objectaddress.c): a
