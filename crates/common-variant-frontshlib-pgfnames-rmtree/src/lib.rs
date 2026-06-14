@@ -78,8 +78,7 @@ pub fn pgfnames<'mcx>(mcx: Mcx<'mcx>, path: &str) -> PgResult<Option<PgFileNames
             // The repalloc-doubling is handled by PgVec's fallible growth, which
             // charges the spine to `mcx` and surfaces OOM as Err (palloc abort
             // analog made recoverable).
-            let pushed = push_name(mcx, &mut filenames, &name)?;
-            let _ = pushed;
+            push_name(mcx, &mut filenames, &name)?;
         }
     }
 
@@ -158,10 +157,12 @@ fn rmtree_in(mcx: Mcx<'_>, path: &str, rmtopdir: bool) -> bool {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_error) => {
-                // errno set during readdir: C warns once after the loop and
-                // sets result=false; entry-level failures press on.
+                // C's `while (errno=0, (de = readdir(dir)))` exits the loop when
+                // readdir returns NULL on a read error, then `if (errno != 0)`
+                // warns and sets result=false. A read error therefore STOPS
+                // processing remaining entries — match that with `break`.
                 result = false;
-                continue;
+                break;
             }
         };
         let name = entry.file_name();
