@@ -73,6 +73,8 @@ use types_storage::storage::shm_toc_estimator;
 
 use backend_access_transam_parallel_rt_seams as rt;
 
+pub mod shared_dsm_object;
+
 // ===========================================================================
 // Constants (parallel.c:48-79).
 // ===========================================================================
@@ -2446,6 +2448,96 @@ mod dsm_substrate_tests {
         let (lib, func) = read_entrypoint(e_chunk).unwrap();
         assert_eq!(lib, "postgres");
         assert_eq!(func, "ParallelQueryMain");
+
+        drop_test_context(pcxt, top);
+    }
+
+    /// The typed-shared-DSM-object primitive (`shared_dsm_object`): the leader
+    /// `place_and_init`s a `repr(C)` object — with a launch-once scalar, an
+    /// in-segment `Spinlock`, and a `pg_atomic_uint64` — at a real
+    /// `shm_toc_allocate`'d chunk, the worker `attach`es to it via the SAME real
+    /// `shm_toc_lookup` address, and the concurrently-mutated fields round-trip
+    /// through the interior-mutable accessors. This is the cross-process
+    /// aliasing model `ParallelTableScanDescData` (phs_relid scalar + phs_mutex
+    /// spinlock + phs_nallocated atomic) rides on.
+    #[test]
+    fn shared_dsm_object_place_init_and_worker_attach_over_real_dsm() {
+        use core::sync::atomic::Ordering;
+        use shared_dsm_object::{attach, estimate, place_and_init, SharedDsmObject, SharedView};
+        use types_storage::storage::{pg_atomic_uint64, Spinlock};
+
+        // A `repr(C)` per-node shared object shaped like `ParallelTableScanDescData`:
+        // a launch-once leader-write scalar, an in-segment spinlock, and a shared
+        // atomic counter. Every concurrently-mutated field is interior-mutable.
+        #[repr(C)]
+        struct DemoShared {
+            /// launch-once scalar (leader writes pre-launch, workers read).
+            relid: u32,
+            /// `slock_t` protecting the allocation cursor.
+            mutex: Spinlock,
+            /// `pg_atomic_uint64` block distributor.
+            nallocated: pg_atomic_uint64,
+        }
+        // SAFETY (audited for the test): repr(C); the scalar is launch-once, the
+        // spinlock and atomic are interior-mutable; the initializer below fully
+        // initializes every field.
+        unsafe impl SharedDsmObject for DemoShared {}
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 2);
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, estimate::<DemoShared>());
+        shm_toc_estimate_keys(est, 1);
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+
+        let toc = pcxt_toc(pcxt);
+        let seg = with_globals(|g| g.get(pcxt).seg);
+
+        // --- leader: allocate a real chunk, place + init the object in place. ---
+        let chunk = shm_toc_allocate(toc, estimate::<DemoShared>());
+        let leader_ref = place_and_init::<DemoShared>(seg, chunk, |view: &SharedView<DemoShared>| {
+            // SAFETY: pre-launch the leader is the sole writer; `view.as_ptr()`
+            // addresses >= size_of writable suitably-aligned in-segment bytes.
+            let p = unsafe { view.as_ptr() };
+            unsafe {
+                // launch-once scalar by plain write; the atomic/spinlock by
+                // their in-place constructors (mirrors SpinLockInit /
+                // pg_atomic_init_u64).
+                (*p).relid = 12345;
+                core::ptr::write(&mut (*p).mutex, Spinlock::new());
+                core::ptr::write(&mut (*p).nallocated, pg_atomic_uint64::new(0));
+            }
+        });
+        shm_toc_insert(toc, PARALLEL_KEY_FIXED, chunk);
+
+        // Leader bumps the shared atomic before workers launch.
+        leader_ref.get().nallocated.value.fetch_add(7, Ordering::Relaxed);
+
+        // --- worker: shm_toc_lookup returns the SAME real address; attach. ---
+        let found = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).expect("key present");
+        assert_eq!(found.0, chunk.0, "worker lookup resolves the leader's chunk");
+        let worker_ref = attach::<DemoShared>(seg, found);
+
+        // Launch-once scalar reads back by copy.
+        assert_eq!(worker_ref.get().relid, 12345);
+        // The atomic is genuinely shared: the worker sees the leader's bump and
+        // its own fetch_add is visible back to the leader (same physical bytes).
+        assert_eq!(worker_ref.get().nallocated.value.load(Ordering::Relaxed), 7);
+        worker_ref.get().nallocated.value.fetch_add(35, Ordering::Relaxed);
+        assert_eq!(leader_ref.get().nallocated.value.load(Ordering::Relaxed), 42);
+
+        // The spinlock guards a critical section across the shared mapping.
+        {
+            use backend_storage_lmgr_s_lock::{s_lock_macro, s_unlock};
+            let lock = &worker_ref.get().mutex;
+            s_lock_macro(lock, Some(file!()), line!() as i32, Some("test"));
+            // ... critical section ...
+            s_unlock(lock);
+        }
 
         drop_test_context(pcxt, top);
     }
