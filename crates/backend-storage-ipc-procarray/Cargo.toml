@@ -34,6 +34,12 @@ backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-wai
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+libc = "0.2"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
