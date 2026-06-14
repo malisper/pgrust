@@ -84,7 +84,13 @@ pub fn GlobalVisTestIsRemovableFullXid(
 
 /// `GlobalVisTestIsRemovableXid(GlobalVisState *state, TransactionId xid)`
 /// (procarray.c) — removability test (32-bit xid; promoted via `FullXidRelativeTo`).
-pub fn GlobalVisTestIsRemovableXid(_state: GlobalVisStateHandle, _xid: TransactionId) -> bool {
+/// The installed seam is `PgResult<bool>` (the merged heapam-visibility /
+/// pruneheap consumers call it with `?`); the C is infallible, so a filled body
+/// returns `Ok(..)`.
+pub fn GlobalVisTestIsRemovableXid(
+    _state: types_snapshot::snapshot::GlobalVisStateHandle,
+    _xid: TransactionId,
+) -> PgResult<bool> {
     panic!("decomp: GlobalVisTestIsRemovableXid not yet filled")
 }
 

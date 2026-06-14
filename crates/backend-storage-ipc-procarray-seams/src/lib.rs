@@ -253,17 +253,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `GlobalVisTestIsRemovableXid(GlobalVisState *state, TransactionId xid)`
-    /// (procarray.c) — is `xid` definitely not visible to anyone, i.e.
-    /// removable under `state`? Promotes `xid` to a `FullTransactionId` relative
-    /// to `state->maybe_needed` and may lazily update `state`.
-    pub fn global_vis_test_is_removable_xid(
-        state: GlobalVisStateHandle,
-        xid: TransactionId,
-    ) -> bool
-);
-
-seam_core::seam!(
     /// `GlobalVisTestIsRemovableFullXid(GlobalVisState *state,
     /// FullTransactionId fxid)` (procarray.c) — the `FullTransactionId` variant
     /// of the removability test.

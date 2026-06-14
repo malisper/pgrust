@@ -120,7 +120,7 @@ pub fn ExpireTreeKnownAssignedTransactionIds(
     _xid: TransactionId,
     _subxids: &[TransactionId],
     _max_xid: TransactionId,
-) {
+) -> PgResult<()> {
     panic!("decomp: ExpireTreeKnownAssignedTransactionIds not yet filled")
 }
 
@@ -165,4 +165,6 @@ pub fn init_seams() {
     seams::proc_array_apply_recovery_info::set(ProcArrayApplyRecoveryInfo);
     seams::expire_all_known_assigned_transaction_ids::set(ExpireAllKnownAssignedTransactionIds);
     seams::proc_array_apply_xid_assignment::set(ProcArrayApplyXidAssignment);
+    seams::record_known_assigned_transaction_ids::set(RecordKnownAssignedTransactionIds);
+    seams::expire_tree_known_assigned_transaction_ids::set(ExpireTreeKnownAssignedTransactionIds);
 }
