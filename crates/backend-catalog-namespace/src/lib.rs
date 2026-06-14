@@ -127,6 +127,12 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::collation_is_visible::set(crate::CollationIsVisible);
     backend_catalog_namespace_seams::ts_config_is_visible::set(crate::TSConfigIsVisible);
     backend_catalog_namespace_seams::ts_dictionary_is_visible::set(crate::TSDictionaryIsVisible);
+    backend_catalog_namespace_seams::conversion_is_visible::set(crate::ConversionIsVisible);
+    backend_catalog_namespace_seams::opclass_is_visible::set(crate::OpclassIsVisible);
+    backend_catalog_namespace_seams::opfamily_is_visible::set(crate::OpfamilyIsVisible);
+    backend_catalog_namespace_seams::statistics_obj_is_visible::set(crate::StatisticsObjIsVisible);
+    backend_catalog_namespace_seams::ts_parser_is_visible::set(crate::TSParserIsVisible);
+    backend_catalog_namespace_seams::ts_template_is_visible::set(crate::TSTemplateIsVisible);
     backend_catalog_namespace_seams::at_eoxact_namespace::set(seam_at_eoxact_namespace);
     backend_catalog_namespace_seams::at_eosubxact_namespace::set(seam_at_eosubxact_namespace);
     backend_catalog_namespace_seams::get_ts_config_oid::set(seam_get_ts_config_oid);

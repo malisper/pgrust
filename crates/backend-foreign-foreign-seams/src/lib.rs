@@ -54,6 +54,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetForeignDataWrapperExtended(fdwid, FDW_MISSING_OK ? : 0)->fdwname`
+    /// (foreign.c) for the `getObjectDescription` FDW arm: the FDW's name, or
+    /// `Ok(None)` when the row vanished and `missing_ok`. Allocated in `mcx`.
+    pub fn foreign_data_wrapper_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `GetForeignServerExtended(serverid, FSV_MISSING_OK ? : 0)->servername`
+    /// (foreign.c) for the `getObjectDescription` server arm: the server's
+    /// name, or `Ok(None)` when the row vanished and `missing_ok`. Allocated in
+    /// `mcx`.
+    pub fn foreign_server_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `GetForeignServerByName(srvname, missing_ok)` (foreign.c): the server
     /// descriptor by name. With `missing_ok = false` a missing server raises
     /// (`Err`); with `missing_ok = true` it is `Ok(None)`. Allocated in `mcx`.
