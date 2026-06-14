@@ -207,6 +207,7 @@ pub fn init_all() {
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
+    backend_utils_mb_conv_string_helpers::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_guc_file::init_seams();

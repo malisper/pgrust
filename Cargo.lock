@@ -10105,6 +10105,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mb-conv-string-helpers"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-mb-wstrcmp",
+ "backend-utils-mb-wstrncmp",
+ "common-wchar",
+ "mcx",
+ "types-error",
+ "types-stringinfo",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-utils-mb-mbutils-seams"
 version = "0.0.0"
 dependencies = [
@@ -11281,6 +11297,7 @@ dependencies = [
  "backend-utils-init-miscinit",
  "backend-utils-init-postinit",
  "backend-utils-init-small",
+ "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-guc-file",

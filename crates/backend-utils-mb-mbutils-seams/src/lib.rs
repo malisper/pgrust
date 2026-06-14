@@ -187,3 +187,25 @@ seam_core::seam!(
         c: PgWChar,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `report_invalid_encoding(encoding, mbstr, len)` (mbutils.c): the
+    /// `pg_noreturn` reporter that raises `ERRCODE_CHARACTER_NOT_IN_REPERTOIRE`
+    /// ("invalid byte sequence for encoding ..."). `mbstr` is the remaining
+    /// input from the offending position (C derives the bad-char length and
+    /// hex dump itself). Always returns `Err`.
+    pub fn report_invalid_encoding(encoding: i32, mbstr: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `report_untranslatable_char(src_encoding, dest_encoding, mbstr, len)`
+    /// (mbutils.c): the `pg_noreturn` reporter that raises
+    /// `ERRCODE_UNTRANSLATABLE_CHARACTER` ("character ... has no equivalent in
+    /// encoding ..."). `mbstr` is the remaining input from the offending
+    /// character. Always returns `Err`.
+    pub fn report_untranslatable_char(
+        src_encoding: i32,
+        dest_encoding: i32,
+        mbstr: &[u8],
+    ) -> PgResult<()>
+);
