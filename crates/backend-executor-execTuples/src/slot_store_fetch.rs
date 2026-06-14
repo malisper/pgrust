@@ -20,7 +20,7 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, Fo
 use types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
 use crate::slot_ops_vtables::{
-    slot_clear, slot_copyslot, slot_materialize, tts_buffer_heap_copy_heap_tuple,
+    slot_clear, slot_copyslot, slot_materialize, slot_release, tts_buffer_heap_copy_heap_tuple,
     tts_buffer_heap_copy_minimal_tuple, tts_buffer_heap_get_heap_tuple, tts_heap_copy_heap_tuple,
     tts_heap_copy_minimal_tuple, tts_heap_get_heap_tuple, tts_heap_store_tuple,
     tts_minimal_copy_heap_tuple, tts_minimal_copy_minimal_tuple, tts_minimal_get_minimal_tuple,
@@ -387,6 +387,44 @@ pub fn ExecMaterializeSlot<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) -> P
 /// (`slot->tts_ops->clear`).
 pub fn ExecClearTuple(slot: &mut SlotData) -> PgResult<()> {
     slot_clear(slot);
+    Ok(())
+}
+
+/// `ExecResetTupleTable`'s per-slot processing (execTuples.c): release the
+/// resources held by one tuple-table slot.
+///
+/// ```c
+/// ExecClearTuple(slot);
+/// slot->tts_ops->release(slot);
+/// if (slot->tts_tupleDescriptor)
+/// {
+///     ReleaseTupleDesc(slot->tts_tupleDescriptor);
+///     slot->tts_tupleDescriptor = NULL;
+/// }
+/// ```
+///
+/// The C `shouldFree` branch (`pfree` of `tts_values`/`tts_isnull` and the slot
+/// itself) is the owning pool's drop in `ExecResetTupleTable`, so it is not
+/// performed here. `ReleaseTupleDesc(tupdesc)` is `if (tupdesc->tdrefcount >= 0)
+/// DecrTupleDescRefCount(tupdesc)`; a non-refcounted descriptor is left as-is
+/// (and dropped with the slot).
+pub fn ExecResetOneSlot(slot: &mut SlotData<'_>) -> PgResult<()> {
+    // Always release resources and reset the slot to empty.
+    slot_clear(slot);
+    slot_release(slot);
+    // if (slot->tts_tupleDescriptor) { ReleaseTupleDesc(...); = NULL; }
+    if let Some(desc) = slot.base_mut().tts_tupleDescriptor.take() {
+        // ReleaseTupleDesc(tupdesc): only refcounted descriptors are released;
+        // a non-refcounted one is simply dropped here (C leaves it for context
+        // teardown).
+        if desc.tdrefcount >= 0 {
+            // The owned descriptor lives in a PgBox; DecrTupleDescRefCount takes
+            // the value (and frees it when the count reaches zero).
+            backend_access_common_tupdesc::DecrTupleDescRefCount(
+                mcx::PgBox::into_inner(desc),
+            )?;
+        }
+    }
     Ok(())
 }
 

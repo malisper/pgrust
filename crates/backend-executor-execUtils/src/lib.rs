@@ -305,6 +305,108 @@ pub fn FreeExecutorState(mut estate: ExecutorState) -> PgResult<()> {
     result
 }
 
+/// `ExecResetTupleTable` — release any resources (buffer pins, tupdesc
+/// refcounts) held by the tuple table, and optionally release the memory
+/// occupied by the tuple table data structure. Expected to be called by
+/// `ExecEndPlan()`.
+///
+/// In C the tuple table is a `List *` of `TupleTableSlot *` passed by value;
+/// the owned model addresses the pool through the EState (`es_tupleTable`),
+/// where each slot is the payload-bearing [`types_nodes::tuptable::SlotData`].
+/// The per-slot processing (clear, release, descriptor release) flows through
+/// the execTuples-owned `exec_reset_one_slot` seam; the `should_free` memory
+/// release of the slot itself and its value arrays is, in the owned model, the
+/// drop of the pool when `should_free` is set (the C `pfree`/`list_free`).
+pub fn ExecResetTupleTable(estate: &mut EStateData<'_>, should_free: bool) -> PgResult<()> {
+    // foreach(lc, tupleTable) { ExecClearTuple; release; ReleaseTupleDesc; ... }
+    for i in 0..estate.es_tupleTable.len() {
+        let slot = estate.slot_data_mut(SlotId(i as u32));
+        // Always release resources and reset the slot to empty; if shouldFree,
+        // the C also pfrees the slot's value arrays and the slot struct — the
+        // owned model performs that as the pool drop below.
+        execTuples_seams::exec_reset_one_slot::call(slot)?;
+    }
+
+    // If shouldFree, release the list structure (list_free(tupleTable)). The
+    // owned pool's backing storage (and every slot's value arrays / stored
+    // tuple) is reclaimed by clearing the pool, which drops the SlotData values.
+    if should_free {
+        estate.es_tupleTable = PgVec::new_in(estate.es_query_cxt);
+    }
+    Ok(())
+}
+
+/// `ExecCloseResultRelations` — close any relations that have been opened for
+/// `ResultRelInfo`s.
+///
+/// The result relations themselves are closed in
+/// [`ExecCloseRangeTableRelations`]; this routine closes their indexes (and,
+/// in C, the stub RTs in each resultrel's `ri_ancestorResultRels`), then closes
+/// the trigger-only target relations opened by `ExecGetTriggerResultRel`.
+pub fn ExecCloseResultRelations(estate: &mut EStateData<'_>) -> PgResult<()> {
+    // close indexes of result relation(s) if any.  (Rels themselves are closed
+    // in ExecCloseRangeTableRelations())  In addition, close the stub RTs that
+    // may be in each resultrel's ri_ancestorResultRels.
+    //
+    // foreach(l, estate->es_opened_result_relations) {
+    //     ExecCloseIndices(resultRelInfo);
+    //     foreach(lc, resultRelInfo->ri_ancestorResultRels) { ... table_close }
+    // }
+    //
+    // Closing a result relation's indexes is `ExecCloseIndices`, owned by the
+    // not-yet-ported execIndexing.c (no seam-crate impl). The ancestor close
+    // walks `ri_ancestorResultRels`, a field trimmed from this repo's
+    // ResultRelInfo model. Both land with execIndexing.c + the full
+    // ResultRelInfo; until then a result relation cannot be closed here. A
+    // plain DestNone SELECT opens no result relations
+    // (es_opened_result_relations is NIL), so this loop body is never reached on
+    // that path — consistent with execPartition's ExecCleanupTupleRouting, panic
+    // loudly rather than leak the index opens. (`mirror-pg-and-panic`.)
+    if !estate.es_opened_result_relations.is_empty() {
+        panic!(
+            "ExecCloseResultRelations: closing a result relation's indexes needs \
+             ExecCloseIndices (execIndexing.c) and the trimmed \
+             ri_ancestorResultRels field, neither of which has landed"
+        );
+    }
+
+    // Close any relations that have been opened by ExecGetTriggerResultRel().
+    // foreach(l, estate->es_trig_target_relations) {
+    //     Assert(ri_RangeTableIndex == 0); Assert(ri_NumIndices == 0);
+    //     table_close(resultRelInfo->ri_RelationDesc, NoLock);
+    // }
+    for idx in 0..estate.es_trig_target_relations.len() {
+        let rri = estate.es_trig_target_relations[idx];
+        let result_rel_info = estate.result_rel(rri);
+        // Assert this is a "dummy" ResultRelInfo (a trigger-only target not in
+        // the range table) and that it carries no opened indices.
+        debug_assert_eq!(result_rel_info.ri_RangeTableIndex, 0);
+        debug_assert_eq!(result_rel_info.ri_NumIndices, 0);
+        // table_close consumes the relation handle (C: closes the open).
+        let rel = estate
+            .result_rel_mut(rri)
+            .ri_RelationDesc
+            .take()
+            .expect("ExecCloseResultRelations: trigger-target ResultRelInfo has no ri_RelationDesc");
+        table::table_close(rel, NoLock)?;
+    }
+    Ok(())
+}
+
+/// `ExecCloseRangeTableRelations` — close all relations opened by
+/// [`ExecGetRangeTableRelation`]. We do not release any locks we might hold on
+/// those rels (the C `table_close(..., NoLock)`).
+pub fn ExecCloseRangeTableRelations(estate: &mut EStateData<'_>) -> PgResult<()> {
+    // for (i = 0; i < estate->es_range_table_size; i++)
+    //     if (estate->es_relations[i]) table_close(estate->es_relations[i], NoLock);
+    for i in 0..estate.es_range_table_size {
+        if let Some(rel) = estate.es_relations[i].take() {
+            table::table_close(rel, NoLock)?;
+        }
+    }
+    Ok(())
+}
+
 /// Internal implementation for `CreateExprContext()` and
 /// `CreateWorkExprContext()` that allows control over the AllocSet
 /// parameters.

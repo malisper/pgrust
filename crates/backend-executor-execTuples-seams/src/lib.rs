@@ -75,6 +75,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecResetTupleTable`'s per-slot processing (execTuples.c): given one
+    /// live `es_tupleTable` slot, `ExecClearTuple(slot)` then
+    /// `slot->tts_ops->release(slot)` then `ReleaseTupleDesc` the slot's
+    /// descriptor (clearing it). The owned model carries the slot as the
+    /// payload-bearing [`types_nodes::tuptable::SlotData`]; the `shouldFree`
+    /// memory release of the slot/value-arrays is the pool drop in
+    /// `ExecResetTupleTable` (no separate `pfree`), so it is not a parameter
+    /// here. The descriptor release can run tupdesc-owner code, so fallible.
+    pub fn exec_reset_one_slot(
+        slot: &mut types_nodes::tuptable::SlotData<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `slot_getsomeattrs(slot, attnum)` then `(slot->tts_values[attnum-1],
     /// slot->tts_isnull[attnum-1])` (tuptable.h, via execTuples.c): ensure the
     /// first `attnum` columns are extracted and return the `(value, isnull)` of

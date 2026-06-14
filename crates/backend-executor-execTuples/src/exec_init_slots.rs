@@ -133,6 +133,13 @@ fn seam_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
     panic!("execTuples.c ExecClearTuple — needs the slot payload model (tts_ops->clear)")
 }
 
+/// Seam `exec_reset_one_slot` — `ExecResetTupleTable`'s per-slot processing.
+/// The full payload-bearing [`SlotData`] is in scope, so this delegates to the
+/// implemented [`crate::slot_store_fetch::ExecResetOneSlot`].
+fn seam_exec_reset_one_slot(slot: &mut SlotData<'_>) -> PgResult<()> {
+    crate::slot_store_fetch::ExecResetOneSlot(slot)
+}
+
 /// Seam `exec_copy_slot` — `ExecCopySlot` (provisional contract; see seam doc).
 ///
 /// PAYLOAD MODEL: copying a tuple between slots needs both slots' stored-tuple
@@ -372,6 +379,7 @@ pub fn init_seams() {
     seams::exec_init_result_tuple_slot_tl::set(seam_exec_init_result_tuple_slot_tl);
     seams::exec_init_result_type_tl::set(seam_exec_init_result_type_tl);
     seams::exec_clear_tuple::set(seam_exec_clear_tuple);
+    seams::exec_reset_one_slot::set(seam_exec_reset_one_slot);
     seams::exec_copy_slot::set(seam_exec_copy_slot);
     seams::exec_init_result_slot::set(seam_exec_init_result_slot);
     seams::exec_init_scan_tuple_slot::set(seam_exec_init_scan_tuple_slot);
