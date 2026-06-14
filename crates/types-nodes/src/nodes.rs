@@ -38,6 +38,7 @@ pub const T_Result: NodeTag = NodeTag(331);
 pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
 pub const T_MergeAppend: NodeTag = NodeTag(335);
+pub const T_BitmapAnd: NodeTag = NodeTag(337);
 pub const T_IndexScan: NodeTag = NodeTag(341);
 pub const T_IndexOnlyScan: NodeTag = NodeTag(342);
 pub const T_FunctionScan: NodeTag = NodeTag(348);
@@ -135,6 +136,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeAppend`.
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
+    /// `T_BitmapAnd`.
+    BitmapAnd(crate::nodebitmapand::BitmapAnd<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Group`.
@@ -161,6 +164,8 @@ pub enum Node<'mcx> {
     ValuesScan(crate::nodevaluesscan::ValuesScan<'mcx>),
     /// `T_CteScan`.
     CteScan(crate::nodectescan::CteScan<'mcx>),
+    /// `T_NamedTuplestoreScan`.
+    NamedTuplestoreScan(crate::nodenamedtuplestorescan::NamedTuplestoreScan<'mcx>),
     /// `T_NestLoop`.
     NestLoop(crate::nodenestloop::NestLoop<'mcx>),
     /// `T_HashJoin`.
@@ -175,6 +180,8 @@ pub enum Node<'mcx> {
     SubqueryScan(crate::nodeindexscan::SubqueryScan<'mcx>),
     /// `T_ForeignScan`.
     ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
+    /// `T_CustomScan`.
+    CustomScan(crate::nodeforeigncustom::CustomScan<'mcx>),
     /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
     ///
     /// In C, every `Expr`-derived node is a `Node *` via the
@@ -196,6 +203,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
+            Node::BitmapAnd(_) => T_BitmapAnd,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Group(_) => crate::nodegroup::T_Group,
             Node::ProjectSet(_) => crate::nodeprojectset::T_ProjectSet,
@@ -209,6 +217,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(_) => T_TableFuncScan,
             Node::ValuesScan(_) => T_ValuesScan,
             Node::CteScan(_) => crate::nodectescan::T_CteScan,
+            Node::NamedTuplestoreScan(_) => T_NamedTuplestoreScan,
             Node::NestLoop(_) => crate::nodenestloop::T_NestLoop,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
@@ -216,6 +225,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(_) => T_SeqScan,
             Node::SubqueryScan(_) => T_SubqueryScan,
             Node::ForeignScan(_) => T_ForeignScan,
+            Node::CustomScan(_) => T_CustomScan,
             Node::Expr(e) => expr_tag(e),
         }
     }
@@ -226,6 +236,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
+            Node::BitmapAnd(b) => &b.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Group(g) => &g.plan,
             Node::ProjectSet(p) => &p.plan,
@@ -239,6 +250,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(t) => &t.scan.plan,
             Node::ValuesScan(v) => &v.scan.plan,
             Node::CteScan(c) => &c.scan.plan,
+            Node::NamedTuplestoreScan(n) => &n.scan.plan,
             Node::NestLoop(m) => &m.join.plan,
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
@@ -246,6 +258,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(s) => &s.scan.plan,
             Node::SubqueryScan(s) => &s.scan.plan,
             Node::ForeignScan(f) => &f.scan.plan,
+            Node::CustomScan(c) => &c.scan.plan,
             // An expression node has no embedded `Plan` (C: `((Plan *) expr)`
             // would be a type error — `plan_head` is only called on plan nodes).
             Node::Expr(_) => {
@@ -266,6 +279,7 @@ impl<'mcx> Node<'mcx> {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
+            Node::BitmapAnd(b) => Ok(Node::BitmapAnd(b.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Group(g) => Ok(Node::Group(g.clone_in(mcx)?)),
             Node::ProjectSet(p) => Ok(Node::ProjectSet(p.clone_in(mcx)?)),
@@ -279,6 +293,7 @@ impl<'mcx> Node<'mcx> {
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
             Node::ValuesScan(v) => Ok(Node::ValuesScan(v.clone_in(mcx)?)),
             Node::CteScan(c) => Ok(Node::CteScan(c.clone_in(mcx)?)),
+            Node::NamedTuplestoreScan(n) => Ok(Node::NamedTuplestoreScan(n.clone_in(mcx)?)),
             Node::NestLoop(m) => Ok(Node::NestLoop(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
@@ -286,6 +301,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
             Node::SubqueryScan(s) => Ok(Node::SubqueryScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
+            Node::CustomScan(c) => Ok(Node::CustomScan(c.clone_in(mcx)?)),
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.
             Node::Expr(e) => Ok(Node::Expr(e.clone())),

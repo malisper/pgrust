@@ -28,6 +28,7 @@ pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodectescan;
+pub mod nodebitmapand;
 pub mod nodeforeigncustom;
 pub mod nodegroup;
 pub mod nodehash;
@@ -39,6 +40,7 @@ pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod nodeprojectset;
+pub mod nodenamedtuplestorescan;
 pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
@@ -107,6 +109,7 @@ pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
 };
+pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
@@ -138,8 +141,8 @@ pub use tuptable::{
 };
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{
-    AsyncRequest, FdwRoutine, ForeignScan, ForeignScanState, Material, MaterialState,
-    ParallelContext, ParallelWorkerContext,
+    AsyncRequest, CustomExecMethods, CustomScan, CustomScanState, FdwRoutine, ForeignScan,
+    ForeignScanState, Material, MaterialState, ParallelContext, ParallelWorkerContext,
 };
 pub use nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
