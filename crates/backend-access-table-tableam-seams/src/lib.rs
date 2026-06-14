@@ -12,8 +12,11 @@
 //! `access/heap/heapam_handler.c`, also unported, so the call panics until
 //! both land.)
 //!
-//! The scan descriptor (`TableScanDesc`) is owned by the AM; it crosses as an
-//! opaque [`ScanToken`].
+//! The scan descriptor crosses as the C-faithful value-typed
+//! [`TableScanDesc`](types_tableam::relscan::TableScanDesc) (an owned
+//! `Box<TableScanDescData>`), matching the bodies the tableam.c owner was
+//! ported with (and the value-typed bitmap-scan seams in
+//! `backend-access-table-tableam-bm-seams`).
 
 use std::rc::Rc;
 
@@ -22,6 +25,7 @@ use types_error::PgResult;
 use types_nodes::TupleTableSlot;
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
+use types_tableam::relscan::{TableScanDesc, TableScanDescData};
 
 seam_core::seam!(
     /// `GetTableAmRoutine(amhandler)` (access/table/tableamapi.c): call the
@@ -64,22 +68,18 @@ seam_core::seam!(
     ) -> PgResult<(u32, u32)>
 );
 
-/// An open `TableScanDesc` (the AM-owned scan state). C's pointer is opaque to
-/// the COPY driver, which only threads it back into `getnextslot`/`endscan`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ScanToken(pub u64);
-
 seam_core::seam!(
     /// `table_beginscan(relation, snapshot, 0, NULL)` (copyto.c:1076): start a
     /// forward sequential scan of `relation` under `snapshot`. The COPY driver
     /// passes `GetActiveSnapshot()` explicitly (the C call's second argument);
     /// the snapshot crosses as a shared `Rc<SnapshotData>` rather than being
-    /// read ambiently inside the AM. Returns the AM-owned scan token. `Err`
-    /// carries the AM's `ereport(ERROR)`.
-    pub fn table_beginscan(
-        relation: &Relation<'_>,
+    /// read ambiently inside the AM. Returns the AM-owned scan descriptor (the
+    /// C-faithful value `TableScanDesc`). `Err` carries the AM's
+    /// `ereport(ERROR)`.
+    pub fn table_beginscan<'mcx>(
+        relation: &Relation<'mcx>,
         snapshot: Rc<SnapshotData>,
-    ) -> PgResult<ScanToken>
+    ) -> PgResult<TableScanDesc<'mcx>>
 );
 
 seam_core::seam!(
@@ -87,8 +87,8 @@ seam_core::seam!(
     /// (copyto.c:1080): fetch the next tuple into `slot`, returning `true` if a
     /// tuple was produced (`false` at end of scan). `Err` carries the AM's
     /// `ereport(ERROR)`.
-    pub fn table_scan_getnextslot(
-        scan: ScanToken,
+    pub fn table_scan_getnextslot<'mcx>(
+        scan: &mut TableScanDescData<'mcx>,
         slot: &mut TupleTableSlot,
     ) -> PgResult<bool>
 );
@@ -99,8 +99,8 @@ seam_core::seam!(
     /// uses (`estate->es_direction`). Fetches the next tuple into `slot`,
     /// returning `true` if a tuple was produced (`false` at end of scan). `Err`
     /// carries the AM's `ereport(ERROR)`.
-    pub fn table_scan_getnextslot_direction(
-        scan: ScanToken,
+    pub fn table_scan_getnextslot_direction<'mcx>(
+        scan: &mut TableScanDescData<'mcx>,
         direction: types_scan::sdir::ScanDirection,
         slot: &mut TupleTableSlot,
     ) -> PgResult<bool>
@@ -110,7 +110,7 @@ seam_core::seam!(
     /// `table_rescan(scan, NULL)` (access/tableam.h, static inline) — restart
     /// the scan `scan` with no new scan keys (`nodeSeqscan.c`'s
     /// `ExecReScanSeqScan`). `Err` carries the AM's `ereport(ERROR)`.
-    pub fn table_rescan(scan: ScanToken) -> PgResult<()>
+    pub fn table_rescan<'mcx>(scan: &mut TableScanDescData<'mcx>) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -126,6 +126,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `table_endscan(scan)` (copyto.c:1099): close the scan and release its
-    /// resources. `Err` carries the AM's `ereport(ERROR)`.
-    pub fn table_endscan(scan: ScanToken) -> PgResult<()>
+    /// resources. Consumes the descriptor. `Err` carries the AM's
+    /// `ereport(ERROR)`.
+    pub fn table_endscan<'mcx>(scan: TableScanDesc<'mcx>) -> PgResult<()>
 );

@@ -586,7 +586,8 @@ fn CommitTransaction() -> PgResult<()> {
     namespace_seams::at_eoxact_namespace::call(true, is_parallel_worker);
     backend_storage_smgr_seams::at_eoxact_smgr::call();
     fd_seams::at_eoxact_files::call(true);
-    // AtEOXact_ComboCid / AtEOXact_HashTables dissolve (see crate docs).
+    combocid_seams::at_eoxact_combocid::call();
+    // AtEOXact_HashTables dissolves (see crate docs).
     pgstat_xact_seams::at_eoxact_pgstat::call(true, is_parallel_worker);
     snapmgr_seams::at_eoxact_snapshot::call(true, false)?;
     launcher_seams::at_eoxact_apply_launcher::call(true);
@@ -803,7 +804,8 @@ fn PrepareTransaction() -> PgResult<()> {
     namespace_seams::at_eoxact_namespace::call(true, false);
     backend_storage_smgr_seams::at_eoxact_smgr::call();
     fd_seams::at_eoxact_files::call(true);
-    // AtEOXact_ComboCid / AtEOXact_HashTables dissolve.
+    combocid_seams::at_eoxact_combocid::call();
+    // AtEOXact_HashTables dissolves.
     // don't call AtEOXact_PgStat here; we fixed pgstat state above.
     snapmgr_seams::at_eoxact_snapshot::call(true, true)?;
     // we treat PREPARE as ROLLBACK so far as waking workers goes
@@ -971,7 +973,8 @@ fn AbortTransaction() -> PgResult<()> {
         namespace_seams::at_eoxact_namespace::call(false, is_parallel_worker);
         backend_storage_smgr_seams::at_eoxact_smgr::call();
         fd_seams::at_eoxact_files::call(false);
-        // AtEOXact_ComboCid / AtEOXact_HashTables dissolve.
+        combocid_seams::at_eoxact_combocid::call();
+        // AtEOXact_HashTables dissolves.
         pgstat_xact_seams::at_eoxact_pgstat::call(false, is_parallel_worker);
         launcher_seams::at_eoxact_apply_launcher::call(false);
         lrworker_seams::at_eoxact_logical_rep_workers::call(false);

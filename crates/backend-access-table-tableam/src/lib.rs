@@ -56,18 +56,45 @@ use backend_utils_cache_relcache_seams as relcache;
 /// match those bodies (the bitmap rescan passes `NULL` scan keys, mirrored by
 /// the `key = None` argument), so they are installed here.
 ///
+/// The COPY/seqscan scan seams in `backend-access-table-tableam-seams`
+/// (`table_beginscan` / `table_scan_getnextslot{,_direction}` / `table_rescan`
+/// / `table_endscan` / `table_relation_set_new_filelocator`) are the
+/// value-typed `TableScanDesc<'mcx>` forms that match the bodies below; they
+/// are installed here, dispatching through `rel->rd_tableam` exactly as the
+/// inline wrappers do. (Like the bitmap-scan seams, they panic loudly at the
+/// `rd_tableam` dereference until the heap AM provider — `heapam_handler.c` —
+/// lands and installs a vtable; that is C's NULL-pointer crash, mirror-and-
+/// panic.)
+///
 /// The remaining `backend-access-table-tableam-seams` decls
 /// (`get_table_am_routine` / `table_relation_toast_am` /
-/// `table_relation_needs_toast_table` / the `ScanToken`-shaped
-/// `table_beginscan` / `table_scan_getnextslot{,_direction}` /
-/// `table_parallelscan_reinitialize` / `table_relation_set_new_filelocator`)
-/// are NOT installed — they have no matching value-typed body in this unit
-/// (the AM provider `heapam_handler.c` and `tableamapi.c` are unported, and the
-/// `ScanToken` scan model has no descriptor registry). See DESIGN_DEBT.md;
-/// they are tracked in `seams-init`'s `CONTRACT_RECONCILE_PENDING`.
+/// `table_relation_needs_toast_table` / `table_parallelscan_reinitialize`) are
+/// NOT installed — they are provider-unported (the AM handler `heapam_handler.c`
+/// and the vtable resolver `tableamapi.c` are `todo`, no body exists). See
+/// DESIGN_DEBT.md; they are tracked in `seams-init`'s
+/// `CONTRACT_RECONCILE_PENDING`.
 pub fn init_seams() {
-    backend_access_table_tableam_bm_seams::table_endscan::set(table_endscan);
+    backend_access_table_tableam_bm_seams::table_endscan::set(table_endscan_bm);
     backend_access_table_tableam_bm_seams::table_rescan::set(table_rescan_bm);
+
+    // The COPY/seqscan value-typed scan seams (unified off the retired
+    // `ScanToken` model onto the C-faithful `TableScanDesc<'mcx>`).
+    backend_access_table_tableam_seams::table_beginscan::set(table_beginscan_seam);
+    backend_access_table_tableam_seams::table_scan_getnextslot::set(table_scan_getnextslot_fwd);
+    backend_access_table_tableam_seams::table_scan_getnextslot_direction::set(
+        table_scan_getnextslot,
+    );
+    backend_access_table_tableam_seams::table_rescan::set(table_rescan_seam);
+    backend_access_table_tableam_seams::table_endscan::set(table_endscan);
+    backend_access_table_tableam_seams::table_relation_set_new_filelocator::set(
+        table_relation_set_new_filelocator,
+    );
+}
+
+/// Adapter for `backend-access-table-tableam-bm-seams::table_endscan` — the
+/// bitmap-scan `table_endscan(scan)`; identical body to [`table_endscan`].
+fn table_endscan_bm(scan: TableScanDesc<'_>) -> PgResult<()> {
+    table_endscan(scan)
 }
 
 /// Adapter for `backend-access-table-tableam-bm-seams::table_rescan` — the
@@ -75,6 +102,82 @@ pub fn init_seams() {
 /// scan keys.
 fn table_rescan_bm(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
     table_rescan(scan, None)
+}
+
+/// Adapter for `backend-access-table-tableam-seams::table_rescan` — the seqscan
+/// `table_rescan(scan, NULL)` form (`nodeSeqscan.c`'s `ExecReScanSeqScan`).
+fn table_rescan_seam(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
+    table_rescan(scan, None)
+}
+
+/// Adapter for `backend-access-table-tableam-seams::table_beginscan` — the
+/// COPY/seqscan `table_beginscan(rel, snapshot, 0, NULL)` form. The snapshot
+/// crosses as a shared `Rc<SnapshotData>`; the scan runs under it with no scan
+/// keys (`SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE`,
+/// the C `table_beginscan` flags).
+fn table_beginscan_seam<'mcx>(
+    relation: &Relation<'mcx>,
+    snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+    (am(relation).scan_begin)(relation, Some((*snapshot).clone()), 0, Vec::new(), None, flags)
+}
+
+/// Adapter for `backend-access-table-tableam-seams::table_scan_getnextslot` —
+/// the forward-direction `table_scan_getnextslot(scan, ForwardScanDirection,
+/// slot)` form (COPY TO's scan loop).
+fn table_scan_getnextslot_fwd(
+    scan: &mut TableScanDescData<'_>,
+    slot: &mut TupleTableSlot,
+) -> PgResult<bool> {
+    table_scan_getnextslot(scan, types_scan::sdir::ScanDirection::ForwardScanDirection, slot)
+}
+
+/// `table_scan_getnextslot(scan, direction, slot)` (access/tableam.h inline) —
+/// fetch the next tuple of the in-progress scan into `slot`. The direction-
+/// carrying form (`nodeSeqscan.c`'s `SeqNext` passes `estate->es_direction`).
+pub fn table_scan_getnextslot(
+    scan: &mut TableScanDescData<'_>,
+    direction: types_scan::sdir::ScanDirection,
+    slot: &mut TupleTableSlot,
+) -> PgResult<bool> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_getnextslot)(scan, direction, slot)
+}
+
+/// `table_relation_set_new_filelocator(rel, newrlocator, persistence,
+/// &freezeXid, &minmulti)` (access/tableam.h inline) — create storage for the
+/// relation's new relfilelocator (and its init fork if unlogged), handing back
+/// the AM-chosen `relfrozenxid`/`relminmxid`. Keyed by relation OID: the C call
+/// holds a `Relation*`, but the `rd_tableam` vtable cannot cross the seam
+/// boundary, so the dispatch resolves the AM by OID. Returns
+/// `(freeze_xid, minmulti)`.
+fn table_relation_set_new_filelocator(
+    relid: types_core::primitive::Oid,
+    newrlocator: types_storage::RelFileLocator,
+    relpersistence: i8,
+) -> PgResult<(u32, u32)> {
+    // relation->rd_tableam->relation_set_new_filelocator(...). C dereferences
+    // rd_tableam unconditionally: a missing vtable is the NULL-pointer crash,
+    // so panic loudly (the heap AM provider, heapam_handler.c, is unported, so
+    // there is no installed vtable yet — mirror-PG-and-panic).
+    let routine = relcache::relation_rd_tableam_by_oid::call(relid).expect(
+        "relation has no table access method (C would dereference NULL rd_tableam)",
+    );
+    // The AM callback takes the open `Relation`; reconstructing the `&Relation`
+    // from the OID is the relation_open plumbing (backend-access-common-relation
+    // needs an mcx the seam contract doesn't carry). Unreachable in practice —
+    // the callback's heapam_handler.c provider is unported, so the `.expect`
+    // above already panicked. Bind the resolved routine so its dispatch shape is
+    // wired and the resolver seam is exercised.
+    let _ = &routine.relation_set_new_filelocator;
+    let _ = (newrlocator, relpersistence);
+    panic!(
+        "table_relation_set_new_filelocator: dispatching to the AM \
+         relation_set_new_filelocator callback needs the open Relation handle \
+         (relation_open / mcx, backend-access-common-relation) and the heap AM \
+         provider (heapam_handler.c), both not yet reachable here"
+    );
 }
 
 // ===========================================================================

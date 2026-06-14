@@ -10,16 +10,35 @@
 //! are discarded at end of transaction.
 //!
 //! The C file's module-level statics (`comboCids`, `comboHash`,
-//! `usedComboCids`, `sizeComboCids`) become [`ComboCidState`], owned by the
-//! transaction machinery and threaded to each function. The dynahash becomes a
-//! `PgHashMap`, the array a `PgVec` (whose `len()` is `usedComboCids`), and
-//! both allocate in the `Mcx` handle the state was created with — the
-//! `TopTransactionContext` equivalent. Allocating paths return `PgResult`,
-//! mirroring C's OOM `ereport(ERROR)` surface.
+//! `usedComboCids`, `sizeComboCids`) become [`ComboCidState`]. Like the C
+//! statics — which live in `TopTransactionContext` and are reset every
+//! end-of-transaction by `AtEOXact_ComboCid` — this is per-backend state with
+//! a transaction lifetime, so it lives in a `thread_local!` cell (one backend
+//! = one thread, the faithful model of a C backend static). The dynahash
+//! becomes a `HashMap`, the array a `Vec` (whose `len()` is `usedComboCids`).
+//!
+//! Backing the transaction-lifetime containers with std `Vec`/`HashMap` rather
+//! than `PgVec`/`PgHashMap` charged to the `TopTransactionContext` is the same
+//! ledgered divergence the transaction owner (xact.c) already takes for
+//! `childXids`/savepoint names (see `DESIGN_DEBT.md`): the backend-local cell
+//! cannot borrow the context it would allocate in. Every allocating touch is
+//! still fallible (`try_reserve`-style), carrying C's OOM `ereport(ERROR)`
+//! surface via [`mcx::oom_named`] against the `ComboCidState` name; what is
+//! lost is only the context-accounting coupling.
+//!
+//! The `HeapTupleHeaderGetCmin`/`Cmax`/`AdjustCmax` macros over the file-scope
+//! state are exposed both as functions taking an explicit `&ComboCidState`
+//! (used by tests and by `AdjustCmax`'s internal `GetCmin`) and as installed
+//! seams (`init_seams`) that reach the live `thread_local!` state — the
+//! visibility predicates and `heap_delete`/`heap_update` call the latter, with
+//! no `ComboCidState` in hand, exactly as in C.
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgHashMap, PgVec};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use mcx::oom_named;
 use types_core::{CommandId, Size, TransactionId};
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use types_tuple::heaptuple::{
@@ -27,8 +46,38 @@ use types_tuple::heaptuple::{
     HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED, HEAP_XMIN_FROZEN,
 };
 
-/// Install this crate's seam implementations. This unit owns no seams.
-pub fn init_seams() {}
+/// The named C context this backend-local state stands in for, used for the
+/// OOM `ereport` message shape (`mcx::oom_named`).
+const COMBOCID_CONTEXT_NAME: &str = "TopTransactionContext";
+
+thread_local! {
+    /// The backend-private combo-CID state (C's `comboCids`/`comboHash`
+    /// file-scope statics). One backend = one thread.
+    static STATE: RefCell<ComboCidState> = RefCell::new(ComboCidState::new());
+}
+
+/// Run `f` with mutable access to the backend-local combo-CID state.
+fn with_state<T>(f: impl FnOnce(&mut ComboCidState) -> T) -> T {
+    STATE.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+/// Install this crate's seam implementations. The `HeapTupleHeaderGet*`/
+/// `AdjustCmax` macros resolve a combo CID against the file-scope state; the
+/// installed closures reach the live `thread_local!` [`STATE`] (the C statics),
+/// so visibility predicates and `heap_delete`/`heap_update` — which hold no
+/// `ComboCidState` — reach the resolved cmin/cmax through them.
+pub fn init_seams() {
+    backend_utils_time_combocid_seams::heap_tuple_header_get_cmin::set(|tuple| {
+        with_state(|s| HeapTupleHeaderGetCmin(s, tuple))
+    });
+    backend_utils_time_combocid_seams::heap_tuple_header_get_cmax::set(|tuple| {
+        with_state(|s| HeapTupleHeaderGetCmax(s, tuple))
+    });
+    backend_utils_time_combocid_seams::heap_tuple_header_adjust_cmax::set(|tuple, cmax| {
+        with_state(|s| HeapTupleHeaderAdjustCmax(s, tuple, cmax))
+    });
+    backend_utils_time_combocid_seams::at_eoxact_combocid::set(|| with_state(AtEOXact_ComboCid));
+}
 
 /// `CCID_HASH_SIZE` — initial size of the hash table.
 const CCID_HASH_SIZE: usize = 100;
@@ -47,30 +96,33 @@ pub struct ComboCidKeyData {
     pub cmax: CommandId,
 }
 
-/// The C file's backend-private statics as one owned value, allocated in (and
-/// bound to) the `TopTransactionContext` equivalent whose handle it stores.
+/// The C file's backend-private statics as one owned value (the `thread_local!`
+/// [`STATE`] cell holds the live instance; tests construct their own).
 ///
 /// * `combo_cids` — `comboCids`/`usedComboCids`/`sizeComboCids`: combo id
 ///   (index) -> `(cmin, cmax)`.
 /// * `combo_hash` — `comboHash`: `(cmin, cmax)` -> combo id. `None` mirrors
 ///   C's `comboHash == NULL` "not yet created this transaction" sentinel, so
 ///   the first `GetComboCommandId` performs the same one-time setup.
-pub struct ComboCidState<'mcx> {
-    mcx: Mcx<'mcx>,
-    combo_cids: PgVec<'mcx, ComboCidKeyData>,
-    combo_hash: Option<PgHashMap<'mcx, ComboCidKeyData, CommandId>>,
+pub struct ComboCidState {
+    combo_cids: Vec<ComboCidKeyData>,
+    combo_hash: Option<HashMap<ComboCidKeyData, CommandId>>,
 }
 
-impl<'mcx> ComboCidState<'mcx> {
-    /// Fresh, empty state for a transaction. `mcx` is the
-    /// `TopTransactionContext` handle all combo-cid structures allocate in.
-    /// Does not allocate; the C lazy creation happens on first use.
-    pub fn new(mcx: Mcx<'mcx>) -> Self {
+impl ComboCidState {
+    /// Fresh, empty state for a transaction. Does not allocate; the C lazy
+    /// creation happens on first use.
+    pub fn new() -> Self {
         Self {
-            mcx,
-            combo_cids: PgVec::new_in(mcx),
+            combo_cids: Vec::new(),
             combo_hash: None,
         }
+    }
+}
+
+impl Default for ComboCidState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -96,7 +148,7 @@ fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData<'_>) -> TransactionId {
 }
 
 /// `HeapTupleHeaderGetCmin(tup)`.
-pub fn HeapTupleHeaderGetCmin(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
+pub fn HeapTupleHeaderGetCmin(state: &ComboCidState, tup: &HeapTupleHeaderData<'_>) -> CommandId {
     let cid = HeapTupleHeaderGetRawCommandId(tup);
 
     debug_assert!((tup.t_infomask & HEAP_MOVED) == 0);
@@ -122,7 +174,7 @@ pub fn HeapTupleHeaderGetCmin(state: &ComboCidState<'_>, tup: &HeapTupleHeaderDa
 /// because `GetUpdateXid()` can allocate when xmax is a multixact); that check
 /// is waived here because `HeapTupleHeaderGetUpdateXid`'s multixact resolution
 /// (`access/heap/heapam.c`'s `HeapTupleGetUpdateXid`) is unported.
-pub fn HeapTupleHeaderGetCmax(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
+pub fn HeapTupleHeaderGetCmax(state: &ComboCidState, tup: &HeapTupleHeaderData<'_>) -> CommandId {
     let cid = HeapTupleHeaderGetRawCommandId(tup);
 
     debug_assert!((tup.t_infomask & HEAP_MOVED) == 0);
@@ -146,7 +198,7 @@ pub fn HeapTupleHeaderGetCmax(state: &ComboCidState<'_>, tup: &HeapTupleHeaderDa
 /// must run before entering the critical section that changes the tuple in
 /// shared buffers. The C out-parameters become the returned tuple.
 pub fn HeapTupleHeaderAdjustCmax(
-    state: &mut ComboCidState<'_>,
+    state: &mut ComboCidState,
     tup: &HeapTupleHeaderData<'_>,
     cmax: CommandId,
 ) -> PgResult<(CommandId, bool)> {
@@ -170,9 +222,9 @@ pub fn HeapTupleHeaderAdjustCmax(
 /// transaction, so we can forget about them at the end of transaction. C just
 /// nulls the pointers and lets the `TopTransactionContext` reset reclaim the
 /// memory; dropping the owned containers reclaims it here.
-pub fn AtEOXact_ComboCid(state: &mut ComboCidState<'_>) {
+pub fn AtEOXact_ComboCid(state: &mut ComboCidState) {
     state.combo_hash = None;
-    state.combo_cids = PgVec::new_in(state.mcx);
+    state.combo_cids = Vec::new();
 }
 
 /// `GetComboCommandId(cmin, cmax)` (static).
@@ -180,7 +232,7 @@ pub fn AtEOXact_ComboCid(state: &mut ComboCidState<'_>) {
 /// Get a combo command id that maps to `cmin` and `cmax`, reusing an existing
 /// one when possible.
 fn GetComboCommandId(
-    state: &mut ComboCidState<'_>,
+    state: &mut ComboCidState,
     cmin: CommandId,
     cmax: CommandId,
 ) -> PgResult<CommandId> {
@@ -192,16 +244,18 @@ fn GetComboCommandId(
             .combo_cids
             .try_reserve_exact(CCID_ARRAY_SIZE)
             .map_err(|_| {
-                state
-                    .mcx
-                    .oom(CCID_ARRAY_SIZE * core::mem::size_of::<ComboCidKeyData>())
+                oom_named(
+                    COMBOCID_CONTEXT_NAME,
+                    CCID_ARRAY_SIZE * core::mem::size_of::<ComboCidKeyData>(),
+                )
             })?;
 
-        let mut hash = PgHashMap::new_in(state.mcx);
+        let mut hash = HashMap::new();
         hash.try_reserve(CCID_HASH_SIZE).map_err(|_| {
-            state
-                .mcx
-                .oom(CCID_HASH_SIZE * core::mem::size_of::<(ComboCidKeyData, CommandId)>())
+            oom_named(
+                COMBOCID_CONTEXT_NAME,
+                CCID_HASH_SIZE * core::mem::size_of::<(ComboCidKeyData, CommandId)>(),
+            )
         })?;
         state.combo_hash = Some(hash);
     }
@@ -212,13 +266,13 @@ fn GetComboCommandId(
     if state.combo_cids.len() >= state.combo_cids.capacity() {
         let newslots = state.combo_cids.capacity(); // newsize = sizeComboCids * 2
         state.combo_cids.try_reserve_exact(newslots).map_err(|_| {
-            state
-                .mcx
-                .oom(newslots * core::mem::size_of::<ComboCidKeyData>())
+            oom_named(
+                COMBOCID_CONTEXT_NAME,
+                newslots * core::mem::size_of::<ComboCidKeyData>(),
+            )
         })?;
     }
 
-    let mcx = state.mcx;
     let key = ComboCidKeyData { cmin, cmax };
 
     // hash_search(comboHash, &key, HASH_ENTER, &found)
@@ -231,9 +285,12 @@ fn GetComboCommandId(
     }
 
     // Entering a new hash entry allocates; in C HASH_ENTER ereports on OOM.
-    combo_hash
-        .try_reserve(1)
-        .map_err(|_| mcx.oom(core::mem::size_of::<(ComboCidKeyData, CommandId)>()))?;
+    combo_hash.try_reserve(1).map_err(|_| {
+        oom_named(
+            COMBOCID_CONTEXT_NAME,
+            core::mem::size_of::<(ComboCidKeyData, CommandId)>(),
+        )
+    })?;
 
     // We have to create a new combo CID; we already made room in the array.
     let combocid = combo_cids.len() as CommandId;
@@ -245,13 +302,13 @@ fn GetComboCommandId(
 
 /// `GetRealCmin(combocid)` (static). The index expression carries C's
 /// `Assert(combocid < usedComboCids)` (out of range panics).
-fn GetRealCmin(state: &ComboCidState<'_>, combocid: CommandId) -> CommandId {
+fn GetRealCmin(state: &ComboCidState, combocid: CommandId) -> CommandId {
     state.combo_cids[combocid as usize].cmin
 }
 
 /// `GetRealCmax(combocid)` (static). The index expression carries C's
 /// `Assert(combocid < usedComboCids)` (out of range panics).
-fn GetRealCmax(state: &ComboCidState<'_>, combocid: CommandId) -> CommandId {
+fn GetRealCmax(state: &ComboCidState, combocid: CommandId) -> CommandId {
     state.combo_cids[combocid as usize].cmax
 }
 
@@ -266,7 +323,7 @@ const SIZEOF_COMBO_CID_KEY_DATA: usize = 8;
 /// Estimate the amount of space required to serialize the current combo CID
 /// state. Fallible because C computes it with `add_size`/`mul_size`, which
 /// `ereport(ERROR)` on overflow.
-pub fn EstimateComboCIDStateSpace(state: &ComboCidState<'_>) -> PgResult<Size> {
+pub fn EstimateComboCIDStateSpace(state: &ComboCidState) -> PgResult<Size> {
     // Add space required for saving usedComboCids
     let size: Size = SIZEOF_INT;
 
@@ -286,7 +343,7 @@ pub fn EstimateComboCIDStateSpace(state: &ComboCidState<'_>) -> PgResult<Size> {
 ///
 /// C stores the count before performing the size check; with a bounds-checked
 /// slice the check runs first, changing nothing on the success path.
-pub fn SerializeComboCIDState(state: &ComboCidState<'_>, buf: &mut [u8]) -> PgResult<()> {
+pub fn SerializeComboCIDState(state: &ComboCidState, buf: &mut [u8]) -> PgResult<()> {
     let used = state.combo_cids.len();
 
     // If maxsize is too small, throw an error.
@@ -321,7 +378,7 @@ pub fn SerializeComboCIDState(state: &ComboCidState<'_>, buf: &mut [u8]) -> PgRe
 ///
 /// C trusts the producer's pointer arithmetic; the slice reads are
 /// bounds-checked, with a short buffer surfacing as the same restore error.
-pub fn RestoreComboCIDState(state: &mut ComboCidState<'_>, buf: &[u8]) -> PgResult<()> {
+pub fn RestoreComboCIDState(state: &mut ComboCidState, buf: &[u8]) -> PgResult<()> {
     // Assert(!comboCids && !comboHash)
     debug_assert!(state.combo_cids.is_empty() && state.combo_hash.is_none());
 

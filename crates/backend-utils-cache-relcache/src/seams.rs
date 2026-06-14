@@ -24,6 +24,7 @@ pub fn init_seams() {
     sx::relation_id_get_relation_shared::set(relation_id_get_relation_shared);
     sx::relation_close::set(relation_close);
     sx::relation_rd_tableam::set(relation_rd_tableam);
+    sx::relation_rd_tableam_by_oid::set(relation_rd_tableam_by_oid);
     sx::relation_needs_wal::set(relation_needs_wal);
     sx::relation_is_local::set(relation_is_local);
     sx::relation_rd_indam::set(relation_rd_indam);
@@ -134,6 +135,10 @@ fn relation_rd_tableam(
     rel: &types_rel::RelationData<'_>,
 ) -> Option<types_tableam::TableAmRoutine> {
     crate::core_entry_store::try_with_relation(rel.rd_id, |rd| rd.rd_tableam).flatten()
+}
+
+fn relation_rd_tableam_by_oid(relid: Oid) -> Option<types_tableam::TableAmRoutine> {
+    crate::core_entry_store::try_with_relation(relid, |rd| rd.rd_tableam).flatten()
 }
 
 fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {

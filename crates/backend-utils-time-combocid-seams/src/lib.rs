@@ -44,3 +44,12 @@ seam_core::seam!(
     /// combo-CID state.
     pub fn heap_tuple_header_get_cmax(tuple: &HeapTupleHeaderData<'_>) -> CommandId
 );
+
+seam_core::seam!(
+    /// `AtEOXact_ComboCid()` (combocid.c) — discard the current transaction's
+    /// combo-CID state at end of transaction (commit/prepare/abort). Combo CIDs
+    /// are only interesting to the inserting/deleting transaction, so the
+    /// backend-local state is reset. Consumed by xact.c's commit/prepare/abort
+    /// cleanup, mirroring C's `AtEOXact_ComboCid()` calls.
+    pub fn at_eoxact_combocid()
+);

@@ -443,8 +443,33 @@ pub fn shm_toc_estimate(e: &shm_toc_estimator) -> PgResult<Size> {
     Ok(BUFFERALIGN(sz))
 }
 
-/// This crate declares no inward seams; nothing to install.
-pub fn init_seams() {}
+/// `shm_toc_estimate_chunk(&pcxt->estimator, nbytes)` over the owned
+/// `ParallelContext` — the seam form the FDW/custom-scan parallel-estimate
+/// entry points (`ExecForeignScanEstimate` / `ExecCustomScanEstimate`) call.
+/// Delegates to [`shm_toc_estimate_chunk`] against the context's backend-local
+/// `estimator`.
+fn shm_toc_estimate_chunk_pcxt(
+    pcxt: &mut types_nodes::ParallelContext,
+    nbytes: usize,
+) -> PgResult<()> {
+    shm_toc_estimate_chunk(&mut pcxt.estimator, nbytes)
+}
+
+/// `shm_toc_estimate_keys(&pcxt->estimator, nkeys)` over the owned
+/// `ParallelContext`; companion of [`shm_toc_estimate_chunk_pcxt`].
+fn shm_toc_estimate_keys_pcxt(
+    pcxt: &mut types_nodes::ParallelContext,
+    nkeys: usize,
+) -> PgResult<()> {
+    shm_toc_estimate_keys(&mut pcxt.estimator, nkeys)
+}
+
+/// Installs the `&mut ParallelContext`-keyed estimate seams over the context's
+/// real backend-local `estimator` field.
+pub fn init_seams() {
+    backend_storage_ipc_shm_toc_seams::shm_toc_estimate_chunk::set(shm_toc_estimate_chunk_pcxt);
+    backend_storage_ipc_shm_toc_seams::shm_toc_estimate_keys::set(shm_toc_estimate_keys_pcxt);
+}
 
 #[cfg(test)]
 mod tests;
