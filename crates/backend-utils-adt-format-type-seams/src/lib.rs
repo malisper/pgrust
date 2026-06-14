@@ -19,6 +19,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `format_type_extended(type_oid, typemod, flags)` (format_type.c): the
+    /// type's printable name with the `FORMAT_TYPE_*` flag bits applied.
+    /// `Ok(None)` is the C `NULL` (only with `FORMAT_TYPE_INVALID_AS_NULL` when
+    /// the type is gone). palloc'd in `mcx`; `Err` carries the invalid-type
+    /// cache-lookup `elog(ERROR)` and OOM.
+    pub fn format_type_extended<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_oid: Oid,
+        typemod: i32,
+        flags: u16,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `format_type_be_qualified(type_oid)` (format_type.c): like
     /// [`format_type_be`] but always schema-qualifies the type name
     /// (`FORMAT_TYPE_FORCE_QUALIFY`), palloc'd in `mcx`. `Err` carries the
@@ -57,3 +71,12 @@ seam_core::seam!(
     /// the type-lookup `ereport(ERROR)` surface.
     pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> PgResult<i32>
 );
+
+/// `utils/builtins.h`: `FORMAT_TYPE_TYPEMOD_GIVEN`.
+pub const FORMAT_TYPE_TYPEMOD_GIVEN: u16 = 0x01;
+/// `utils/builtins.h`: `FORMAT_TYPE_ALLOW_INVALID`.
+pub const FORMAT_TYPE_ALLOW_INVALID: u16 = 0x02;
+/// `utils/builtins.h`: `FORMAT_TYPE_FORCE_QUALIFY`.
+pub const FORMAT_TYPE_FORCE_QUALIFY: u16 = 0x04;
+/// `utils/builtins.h`: `FORMAT_TYPE_INVALID_AS_NULL`.
+pub const FORMAT_TYPE_INVALID_AS_NULL: u16 = 0x08;

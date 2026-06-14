@@ -276,3 +276,27 @@ seam_core::seam!(
         amtype: u8,
     ) -> PgResult<Oid>
 );
+
+/* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(Relation catalog, AttrNumber oidcol, Oid
+    /// objectId)` scan primitive (objectaddress.c 2790): over the already-open
+    /// `catalog` relation, `systable_beginscan` keyed on `oidcol = objectId`
+    /// (index scan when `oidcol` is the catalog's OID column, sequential
+    /// otherwise), `systable_getnext` the single matching row, `systable_endscan`,
+    /// returning the located tuple copied into `mcx` (or `None` when absent).
+    /// Backs `get_catalog_object_by_oid[_extended]`; declared additively here
+    /// because the indexing/genam owner (a sibling decomp) has not landed yet.
+    /// The `locktuple` flag mirrors the `_extended` variant
+    /// (`get_catalog_object_by_oid_extended`): when `true` a `LockTuple` is taken
+    /// on the located row before it is returned. `Err` carries the
+    /// index/heap-fetch error surface.
+    pub fn get_catalog_object_by_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        catalog: &RelationData<'mcx>,
+        oidcol: i16,
+        object_id: Oid,
+        locktuple: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);

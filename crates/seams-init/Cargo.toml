@@ -48,6 +48,7 @@ backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
+backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }

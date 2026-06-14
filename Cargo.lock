@@ -2111,6 +2111,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-objectaddress"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-indexing-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-constraint-seams",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-extension-seams",
+ "backend-commands-tablespace-seams",
+ "backend-commands-user-seams",
+ "backend-foreign-foreign-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-objectaddress-seams"
 version = "0.0.0"
 dependencies = [
@@ -8855,6 +8896,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-datum",
  "types-error",
  "types-tuple",
@@ -11322,6 +11364,7 @@ dependencies = [
  "backend-catalog-catalog",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
+ "backend-catalog-objectaddress",
  "backend-catalog-pg-class",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",

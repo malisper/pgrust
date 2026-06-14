@@ -44,6 +44,7 @@ pub fn init_all() {
     backend_catalog_catalog::init_seams();
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
+    backend_catalog_objectaddress::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_depend::init_seams();

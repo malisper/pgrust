@@ -198,6 +198,36 @@ seam_core::seam!(
     pub fn ts_dictionary_is_visible(mcx: Mcx<'_>, dict_id: Oid) -> PgResult<bool>
 );
 
+seam_core::seam!(
+    /// `ConversionIsVisible(conid)` (namespace.c).
+    pub fn conversion_is_visible(mcx: Mcx<'_>, conid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `OpclassIsVisible(opcid)` (namespace.c).
+    pub fn opclass_is_visible(mcx: Mcx<'_>, opcid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `OpfamilyIsVisible(opfid)` (namespace.c).
+    pub fn opfamily_is_visible(mcx: Mcx<'_>, opfid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `StatisticsObjIsVisible(stxid)` (namespace.c).
+    pub fn statistics_obj_is_visible(mcx: Mcx<'_>, stxid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `TSParserIsVisible(prsId)` (namespace.c).
+    pub fn ts_parser_is_visible(mcx: Mcx<'_>, prs_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `TSTemplateIsVisible(tmplId)` (namespace.c).
+    pub fn ts_template_is_visible(mcx: Mcx<'_>, tmpl_id: Oid) -> PgResult<bool>
+);
+
 /* ---- CLUSTER target resolution (used by backend-commands-cluster) -------- */
 
 seam_core::seam!(

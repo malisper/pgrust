@@ -53,6 +53,14 @@ pub fn init_seams() {
     // thin shim (scratch context + hard-error/soft folding) below.
     backend_utils_adt_regproc_seams::format_procedure::set(regproc::format_procedure);
     backend_utils_adt_regproc_seams::format_operator::set(regproc::format_operator);
+    backend_utils_adt_regproc_seams::format_procedure_extended::set(
+        regproc::format_procedure_extended,
+    );
+    backend_utils_adt_regproc_seams::format_operator_extended::set(
+        regproc::format_operator_extended,
+    );
+    backend_utils_adt_misc2_seams::format_procedure_parts::set(regproc::format_procedure_parts);
+    backend_utils_adt_misc2_seams::format_operator_parts::set(regproc::format_operator_parts);
     backend_utils_adt_regproc_seams::regprocedurein::set(seam_regprocedurein);
     backend_utils_adt_regproc_seams::regtypein::set(seam_regtypein);
     backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(
