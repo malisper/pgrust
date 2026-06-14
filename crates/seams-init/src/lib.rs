@@ -206,6 +206,7 @@ pub fn init_all() {
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
+    backend_utils_misc_stack_depth::init_seams();
     backend_utils_misc_timeout::init_seams();
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
@@ -575,6 +576,7 @@ mod recurrence_guard {
         ("backend_utils_init_small", "superuser_reserved_connections"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
+        ("backend_utils_misc_guc_file", "guc_check_errhint"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
     ];
