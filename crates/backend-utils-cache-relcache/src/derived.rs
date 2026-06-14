@@ -17,20 +17,18 @@
 //! `*_seam` helpers at the bottom of this module; the orchestration around them
 //! is real and operates on the owned [`RelationData`] store.
 
-#![allow(unsafe_code)]
-
 use backend_access_index_genam_seams as genam_seam;
 use backend_utils_cache_relcache_nodexform_seams as nodexform_seam;
-use backend_utils_error::{ereport, PgResult};
+use backend_utils_error::PgResult;
 use types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{InvalidOid, OidIsValid};
-use types_error::ERROR;
 use types_tuple::{
     FirstLowInvalidHeapAttributeNumber, RELKIND_PARTITIONED_TABLE, REPLICA_IDENTITY_DEFAULT,
     REPLICA_IDENTITY_INDEX,
 };
 
 use crate::core_entry_store::entry::{FormPgIndex, RelationData};
+use crate::core_entry_store::{with_rel, with_rel_mut};
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute-bitmap to fetch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,12 +54,10 @@ pub enum IndexAttrBitmapKind {
 
 /// `RelationGetFKeyList(relation)` (relcache.c): the relation's foreign-key
 /// cache-info list, built from `pg_constraint` and cached in `rd_fkeylist`.
-pub fn RelationGetFKeyList(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live cache-owned (or in-build) `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationGetFKeyList(relation: Oid) -> PgResult<()> {
     /* Quick exit if we already computed the list. */
-    if rd.rd_fkeyvalid {
+    let (fkeyvalid, relid) = with_rel(relation, |rd| (rd.rd_fkeyvalid, rd.rd_id));
+    if fkeyvalid {
         return Ok(());
     }
 
@@ -71,11 +67,10 @@ pub fn RelationGetFKeyList(relation: *mut RelationData) -> PgResult<()> {
      * `DeconstructFkConstraintRow`) is FK node vocabulary owned cross-unit; the
      * seam returns the assembled rows. The orchestration here mirrors C.
      */
-    let relid = rd.rd_id;
     let _fkeys = scan_pg_constraint_fkeys_seam(relid)?;
 
     /* Now mark the completed list saved in the relcache entry. */
-    rd.rd_fkeyvalid = true;
+    with_rel_mut(relation, |rd| rd.rd_fkeyvalid = true);
     Ok(())
 }
 
@@ -87,18 +82,20 @@ pub fn RelationGetFKeyList(relation: *mut RelationData) -> PgResult<()> {
 /// `RelationGetIndexList(relation)` (relcache.c): the OIDs of the relation's
 /// indexes, built from `pg_index` and cached in `rd_indexlist` (+ `rd_pkindex`/
 /// `rd_replidindex`). **Own logic.**
-pub fn RelationGetIndexList(relation: *mut RelationData) -> PgResult<Vec<Oid>> {
-    // SAFETY: live cache-owned (or in-build) `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationGetIndexList(relation: Oid) -> PgResult<Vec<Oid>> {
     /* Quick exit if we already computed the list. */
-    if rd.rd_indexvalid {
-        return Ok(rd.rd_indexlist.clone());
+    let (indexvalid, indexlist, replident, relkind, relid) = with_rel(relation, |rd| {
+        (
+            rd.rd_indexvalid,
+            rd.rd_indexlist.clone(),
+            rd.rd_rel.relreplident,
+            rd.rd_rel.relkind,
+            rd.rd_id,
+        )
+    });
+    if indexvalid {
+        return Ok(indexlist);
     }
-
-    let replident = rd.rd_rel.relreplident;
-    let relkind = rd.rd_rel.relkind;
-    let relid = rd.rd_id;
 
     /*
      * We build the list we intend to return while doing the scan. The pg_index
@@ -169,17 +166,19 @@ pub fn RelationGetIndexList(relation: *mut RelationData) -> PgResult<Vec<Oid>> {
     result.sort_unstable();
 
     /* Now save a copy of the completed list in the relcache entry. */
-    rd.rd_indexlist = result.clone();
-    rd.rd_pkindex = pkey_index;
-    rd.rd_ispkdeferrable = pkdeferrable;
-    if replident == REPLICA_IDENTITY_DEFAULT as i8 && OidIsValid(pkey_index) && !pkdeferrable {
-        rd.rd_replidindex = pkey_index;
-    } else if replident == REPLICA_IDENTITY_INDEX as i8 && OidIsValid(candidate_index) {
-        rd.rd_replidindex = candidate_index;
-    } else {
-        rd.rd_replidindex = InvalidOid;
-    }
-    rd.rd_indexvalid = true;
+    with_rel_mut(relation, |rd| {
+        rd.rd_indexlist = result.clone();
+        rd.rd_pkindex = pkey_index;
+        rd.rd_ispkdeferrable = pkdeferrable;
+        if replident == REPLICA_IDENTITY_DEFAULT as i8 && OidIsValid(pkey_index) && !pkdeferrable {
+            rd.rd_replidindex = pkey_index;
+        } else if replident == REPLICA_IDENTITY_INDEX as i8 && OidIsValid(candidate_index) {
+            rd.rd_replidindex = candidate_index;
+        } else {
+            rd.rd_replidindex = InvalidOid;
+        }
+        rd.rd_indexvalid = true;
+    });
 
     Ok(result)
 }
@@ -191,16 +190,13 @@ pub fn RelationGetIndexList(relation: *mut RelationData) -> PgResult<Vec<Oid>> {
 
 /// `RelationGetStatExtList(relation)` (relcache.c): the OIDs of the relation's
 /// extended-statistics objects, cached in `rd_statlist`. **Own logic.**
-pub fn RelationGetStatExtList(relation: *mut RelationData) -> PgResult<Vec<Oid>> {
-    // SAFETY: live cache-owned (or in-build) `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-
+pub fn RelationGetStatExtList(relation: Oid) -> PgResult<Vec<Oid>> {
     /* Quick exit if we already computed the list. */
-    if rd.rd_statvalid {
-        return Ok(rd.rd_statlist.clone());
+    let (statvalid, statlist, relid) =
+        with_rel(relation, |rd| (rd.rd_statvalid, rd.rd_statlist.clone(), rd.rd_id));
+    if statvalid {
+        return Ok(statlist);
     }
-
-    let relid = rd.rd_id;
 
     /*
      * Scan pg_statistic_ext for entries having stxrelid = this rel (genam
@@ -212,8 +208,10 @@ pub fn RelationGetStatExtList(relation: *mut RelationData) -> PgResult<Vec<Oid>>
     result.sort_unstable();
 
     /* Now save a copy of the completed list in the relcache entry. */
-    rd.rd_statlist = result.clone();
-    rd.rd_statvalid = true;
+    with_rel_mut(relation, |rd| {
+        rd.rd_statlist = result.clone();
+        rd.rd_statvalid = true;
+    });
 
     Ok(result)
 }
@@ -225,44 +223,34 @@ pub fn RelationGetStatExtList(relation: *mut RelationData) -> PgResult<Vec<Oid>>
 
 /// `RelationGetPrimaryKeyIndex(relation, deferrable_ok)` (relcache.c): the
 /// primary-key index OID (forces `RelationGetIndexList` first).
-pub fn RelationGetPrimaryKeyIndex(
-    relation: *mut RelationData,
-    deferrable_ok: bool,
-) -> PgResult<Oid> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &*relation };
-
-    if !rd.rd_indexvalid {
+pub fn RelationGetPrimaryKeyIndex(relation: Oid, deferrable_ok: bool) -> PgResult<Oid> {
+    if !with_rel(relation, |rd| rd.rd_indexvalid) {
         /* RelationGetIndexList does the heavy lifting. */
         let _ilist = RelationGetIndexList(relation)?;
-        debug_assert!(unsafe { (*relation).rd_indexvalid });
+        debug_assert!(with_rel(relation, |rd| rd.rd_indexvalid));
     }
 
-    // SAFETY: as above; reread after the possible build.
-    let rd = unsafe { &*relation };
-    if deferrable_ok {
-        Ok(rd.rd_pkindex)
-    } else if rd.rd_ispkdeferrable {
-        Ok(InvalidOid)
-    } else {
-        Ok(rd.rd_pkindex)
-    }
+    Ok(with_rel(relation, |rd| {
+        if deferrable_ok {
+            rd.rd_pkindex
+        } else if rd.rd_ispkdeferrable {
+            InvalidOid
+        } else {
+            rd.rd_pkindex
+        }
+    }))
 }
 
 /// `RelationGetReplicaIndex(relation)` (relcache.c): the replica-identity
 /// index OID.
-pub fn RelationGetReplicaIndex(relation: *mut RelationData) -> PgResult<Oid> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &*relation };
-
-    if !rd.rd_indexvalid {
+pub fn RelationGetReplicaIndex(relation: Oid) -> PgResult<Oid> {
+    if !with_rel(relation, |rd| rd.rd_indexvalid) {
         /* RelationGetIndexList does the heavy lifting. */
         let _ilist = RelationGetIndexList(relation)?;
-        debug_assert!(unsafe { (*relation).rd_indexvalid });
+        debug_assert!(with_rel(relation, |rd| rd.rd_indexvalid));
     }
 
-    // SAFETY: as above.
-    Ok(unsafe { (*relation).rd_replidindex })
+    Ok(with_rel(relation, |rd| rd.rd_replidindex))
 }
 
 /* ==========================================================================
@@ -276,9 +264,7 @@ pub fn RelationGetReplicaIndex(relation: *mut RelationData) -> PgResult<Oid> {
 
 /// `RelationGetIndexExpressions(relation)` (relcache.c): the index's expression
 /// trees (node vocabulary — seamed for the tree, own caching).
-pub fn RelationGetIndexExpressions(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let _rd = unsafe { &*relation };
+pub fn RelationGetIndexExpressions(relation: Oid) -> PgResult<()> {
     // Quick-exit / has-no-expressions decisions need the rd_indextuple's
     // `indexprs` datum, whose node-tree transform is node vocabulary owned
     // cross-unit. Route the whole build through the node-tree owner seam.
@@ -287,9 +273,7 @@ pub fn RelationGetIndexExpressions(relation: *mut RelationData) -> PgResult<()> 
 
 /// `RelationGetIndexPredicate(relation)` (relcache.c): the index's partial
 /// predicate tree (node vocabulary — seamed for the tree, own caching).
-pub fn RelationGetIndexPredicate(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let _rd = unsafe { &*relation };
+pub fn RelationGetIndexPredicate(relation: Oid) -> PgResult<()> {
     index_predicate_seam(relation)
 }
 
@@ -307,10 +291,7 @@ pub fn RelationGetIndexPredicate(relation: *mut RelationData) -> PgResult<()> {
 /// routine routes through the node-tree owner seam. The presence-only quick
 /// exit (no `rd_index`, i.e. not an index, or no expression columns) is the
 /// own-logic shell. **Own shell + node-owner seam.**
-pub fn RelationGetDummyIndexExpressions(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &*relation };
-
+pub fn RelationGetDummyIndexExpressions(relation: Oid) -> PgResult<()> {
     // Quick exit if there is nothing to do: the C tests `rd_indextuple == NULL
     // || heap_attisnull(rd_indextuple, Anum_pg_index_indexprs)`. In the owned
     // mirror, a non-index entry has no `rd_index` form at all (the C
@@ -318,7 +299,7 @@ pub fn RelationGetDummyIndexExpressions(relation: *mut RelationData) -> PgResult
     // expression columns (`indexprs` not null) is only observable from the raw
     // index tuple's `indexprs` attribute, which the owned model does not carry;
     // that no-expressions short-circuit therefore lives behind the seam.
-    if rd.rd_index.is_none() {
+    if with_rel(relation, |rd| rd.rd_index.is_none()) {
         return Ok(());
     }
 
@@ -345,27 +326,29 @@ pub fn RelationGetDummyIndexExpressions(relation: *mut RelationData) -> PgResult
 /// attribute bitmap, built (and cached on the entry) from the index list.
 /// Returns the offset members. **Own logic.**
 pub fn RelationGetIndexAttrBitmap(
-    relation: *mut RelationData,
+    relation: Oid,
     attrKind: IndexAttrBitmapKind,
 ) -> PgResult<Vec<i32>> {
     /* Quick exit if we already computed the result. */
-    // SAFETY: live `Relation` pointer.
-    {
-        let rd = unsafe { &*relation };
+    if let Some(cached) = with_rel(relation, |rd| {
         if rd.rd_attrsvalid {
-            return Ok(match attrKind {
+            Some(match attrKind {
                 IndexAttrBitmapKind::Keys => rd.rd_keyattr.clone(),
                 IndexAttrBitmapKind::PrimaryKey => rd.rd_pkattr.clone(),
                 IndexAttrBitmapKind::Identity => rd.rd_idattr.clone(),
                 IndexAttrBitmapKind::HotBlocking => rd.rd_hotblockingattr.clone(),
                 IndexAttrBitmapKind::Summarized => rd.rd_summarizedattr.clone(),
-            });
+            })
+        } else {
+            None
         }
+    }) {
+        return Ok(cached);
+    }
 
-        /* Fast path if definitely no indexes */
-        if !rd.rd_rel.relhasindex {
-            return Ok(Vec::new());
-        }
+    /* Fast path if definitely no indexes */
+    if !with_rel(relation, |rd| rd.rd_rel.relhasindex) {
+        return Ok(Vec::new());
     }
 
     /*
@@ -385,11 +368,8 @@ pub fn RelationGetIndexAttrBitmap(
          * relcache flush could occur inside index_open below, resetting the
          * fields managed by RelationGetIndexList.
          */
-        // SAFETY: live `Relation` pointer.
-        let (relpkindex, relreplindex) = {
-            let rd = unsafe { &*relation };
-            (rd.rd_pkindex, rd.rd_replidindex)
-        };
+        let (relpkindex, relreplindex) =
+            with_rel(relation, |rd| (rd.rd_pkindex, rd.rd_replidindex));
 
         let mut uindexattrs: Vec<i32> = Vec::new();
         let mut pkindexattrs: Vec<i32> = Vec::new();
@@ -461,11 +441,8 @@ pub fn RelationGetIndexAttrBitmap(
          * list. If so, start over to deliver up-to-date attribute bitmaps.
          */
         let newindexoidlist = RelationGetIndexList(relation)?;
-        // SAFETY: live `Relation` pointer.
-        let (newpk, newrepl) = {
-            let rd = unsafe { &*relation };
-            (rd.rd_pkindex, rd.rd_replidindex)
-        };
+        let (newpk, newrepl) =
+            with_rel(relation, |rd| (rd.rd_pkindex, rd.rd_replidindex));
         if newindexoidlist == indexoidlist && relpkindex == newpk && relreplindex == newrepl {
             /* Still the same index set, so proceed */
             break (
@@ -483,15 +460,15 @@ pub fn RelationGetIndexAttrBitmap(
      * Now save copies of the bitmaps in the relcache entry. We intentionally
      * set rd_attrsvalid last.
      */
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-    rd.rd_attrsvalid = false;
-    rd.rd_keyattr = uindexattrs.clone();
-    rd.rd_pkattr = pkindexattrs.clone();
-    rd.rd_idattr = idindexattrs.clone();
-    rd.rd_hotblockingattr = hotblockingattrs.clone();
-    rd.rd_summarizedattr = summarizedattrs.clone();
-    rd.rd_attrsvalid = true;
+    with_rel_mut(relation, |rd| {
+        rd.rd_attrsvalid = false;
+        rd.rd_keyattr = uindexattrs.clone();
+        rd.rd_pkattr = pkindexattrs.clone();
+        rd.rd_idattr = idindexattrs.clone();
+        rd.rd_hotblockingattr = hotblockingattrs.clone();
+        rd.rd_summarizedattr = summarizedattrs.clone();
+        rd.rd_attrsvalid = true;
+    });
 
     /* We return our original working copy for caller to play with */
     Ok(match attrKind {
@@ -515,19 +492,19 @@ pub fn RelationGetIndexAttrBitmap(
 /// `RelationGetIdentityKeyBitmap(relation)` (relcache.c): the replica-identity
 /// index key columns as offset members, or `None` when there is no identity
 /// index. **Own logic** (opens the identity index via the in-crate cache).
-pub fn RelationGetIdentityKeyBitmap(relation: *mut RelationData) -> PgResult<Option<Vec<i32>>> {
+pub fn RelationGetIdentityKeyBitmap(relation: Oid) -> PgResult<Option<Vec<i32>>> {
     /* Quick exit if we already computed the result */
-    // SAFETY: live `Relation` pointer.
-    {
-        let rd = unsafe { &*relation };
+    if let Some(early) = with_rel(relation, |rd| {
         if !rd.rd_idattr.is_empty() {
-            return Ok(Some(rd.rd_idattr.clone()));
+            Some(Some(rd.rd_idattr.clone()))
+        } else if !rd.rd_rel.relhasindex {
+            /* Fast path if definitely no indexes */
+            Some(None)
+        } else {
+            None
         }
-
-        /* Fast path if definitely no indexes */
-        if !rd.rd_rel.relhasindex {
-            return Ok(None);
-        }
+    }) {
+        return Ok(early);
     }
 
     /* Historic snapshot must be set (Assert in C; not modeled here). */
@@ -539,19 +516,12 @@ pub fn RelationGetIdentityKeyBitmap(relation: *mut RelationData) -> PgResult<Opt
         return Ok(None);
     }
 
-    /* Look up the description for the replica identity index. */
-    let index_desc = crate::core_entry_store::RelationIdGetRelation(replidindex)?;
-    if index_desc.is_null() {
-        return Err(ereport(ERROR)
-            .errmsg_internal("could not open relation with OID for replica identity")
-            .into_error());
-    }
+    /* Look up the description for the replica identity index (RAII pin). */
+    let index_desc = crate::core_entry_store::RelationRef::open(replidindex)?;
 
     /* Add referenced attributes to idindexattrs. */
     let mut idindexattrs: Vec<i32> = Vec::new();
-    // SAFETY: just-opened cache-owned index descriptor.
-    {
-        let idx = unsafe { &*index_desc };
+    index_desc.with(|idx| {
         let form: &FormPgIndex = idx
             .rd_index
             .as_ref()
@@ -566,15 +536,13 @@ pub fn RelationGetIdentityKeyBitmap(relation: *mut RelationData) -> PgResult<Opt
                 );
             }
         }
-    }
+    });
 
-    /* RelationClose(indexDesc): drop the relcache reference. */
-    crate::core_entry_store::RelationClose(index_desc)?;
+    /* RelationClose(indexDesc): drop the relcache reference (guard Drop). */
+    drop(index_desc);
 
     /* Now save copy of the bitmap in the relcache entry. */
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *relation };
-    rd.rd_idattr = idindexattrs.clone();
+    with_rel_mut(relation, |rd| rd.rd_idattr = idindexattrs.clone());
 
     /* We return our original working copy for caller to play with */
     Ok(Some(idindexattrs))
@@ -591,18 +559,18 @@ pub fn RelationGetIdentityKeyBitmap(relation: *mut RelationData) -> PgResult<Opt
 
 /// `RelationGetExclusionInfo(indexRelation, ...)` (relcache.c): the exclusion
 /// operator/proc/strategy arrays for an exclusion-constraint index.
-pub fn RelationGetExclusionInfo(index_relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &*index_relation };
-
-    let indnkeyatts = rd
-        .rd_index
-        .as_ref()
-        .map(|i| i.indnkeyatts as usize)
-        .unwrap_or(0);
+pub fn RelationGetExclusionInfo(index_relation: Oid) -> PgResult<()> {
+    let (indnkeyatts, cached, indrelid, relid) = with_rel(index_relation, |rd| {
+        (
+            rd.rd_index.as_ref().map(|i| i.indnkeyatts as usize).unwrap_or(0),
+            !rd.rd_exclstrats.is_empty(),
+            rd.rd_index.as_ref().map(|i| i.indrelid).unwrap_or(InvalidOid),
+            rd.rd_id,
+        )
+    });
 
     /* Quick exit if we have the data cached already */
-    if !rd.rd_exclstrats.is_empty() {
+    if cached {
         return Ok(());
     }
 
@@ -613,20 +581,14 @@ pub fn RelationGetExclusionInfo(index_relation: *mut RelationData) -> PgResult<(
      * cross-unit primitives (genam + lsyscache owners). The seam returns the
      * three arrays; storing them on the entry is own logic.
      */
-    let indrelid = rd
-        .rd_index
-        .as_ref()
-        .map(|i| i.indrelid)
-        .unwrap_or(InvalidOid);
-    let relid = rd.rd_id;
     let (ops, procs, strats) = exclusion_info_seam(relid, indrelid, indnkeyatts)?;
 
     /* Save a copy of the results in the relcache entry. */
-    // SAFETY: live `Relation` pointer.
-    let rd = unsafe { &mut *index_relation };
-    rd.rd_exclops = ops;
-    rd.rd_exclprocs = procs;
-    rd.rd_exclstrats = strats;
+    with_rel_mut(index_relation, |rd| {
+        rd.rd_exclops = ops;
+        rd.rd_exclprocs = procs;
+        rd.rd_exclstrats = strats;
+    });
     Ok(())
 }
 
@@ -638,18 +600,15 @@ pub fn RelationGetExclusionInfo(index_relation: *mut RelationData) -> PgResult<(
 
 /// `RelationBuildPublicationDesc(relation)` (relcache.c): build `rd_pubdesc`
 /// from `pg_publication*` (publication vocabulary — seamed where unported).
-pub fn RelationBuildPublicationDesc(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let _rd = unsafe { &*relation };
+pub fn RelationBuildPublicationDesc(relation: Oid) -> PgResult<()> {
     publication_desc_seam(relation)
 }
 
 /// `RelationBuildRuleLock(relation)` (relcache.c): build `rd_rules` from
-/// `pg_rewrite` (rewrite/node vocabulary — seamed where unported).
-pub fn RelationBuildRuleLock(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let _rd = unsafe { &*relation };
-    rule_lock_seam(relation)
+/// `pg_rewrite` (rewrite/node vocabulary — seamed where unported). Called during
+/// build on the not-yet-inserted descriptor, so it takes `&mut RelationData`.
+pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
+    rule_lock_seam(relation.rd_id)
 }
 
 /* ==========================================================================
@@ -748,20 +707,14 @@ pub(crate) struct ForeignKeyCacheInfo {
 /// `RelationGetIndexExpressions(relation)`'s node-tree transform: `stringToNode`
 /// of `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`, then cache
 /// into `rd_indexprs` (node owner).
-#[allow(unsafe_code)]
-fn index_expressions_seam(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let relid = unsafe { (*relation).rd_id };
+fn index_expressions_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::index_expressions::call(relid)
 }
 
 /// `RelationGetIndexPredicate(relation)`'s node-tree transform: `stringToNode`
 /// of `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
 /// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`.
-#[allow(unsafe_code)]
-fn index_predicate_seam(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let relid = unsafe { (*relation).rd_id };
+fn index_predicate_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::index_predicate::call(relid)
 }
 
@@ -771,10 +724,7 @@ fn index_predicate_seam(relation: *mut RelationData) -> PgResult<()> {
 /// exprTypmod, exprCollation, 1, (Datum) 0, true /*isnull*/, true /*byval*/)`.
 /// All node vocabulary (`stringToNode`/`makeConst`/`exprType`/`exprTypmod`/
 /// `exprCollation`) + the raw `rd_indextuple` read; node owner.
-#[allow(unsafe_code)]
-fn dummy_index_expressions_seam(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let relid = unsafe { (*relation).rd_id };
+fn dummy_index_expressions_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::dummy_index_expressions::call(relid)
 }
 
@@ -836,19 +786,13 @@ fn exclusion_info_seam(
 
 /// `RelationBuildPublicationDesc`'s `pg_publication*` traversal (publication
 /// owner): build `rd_pubdesc`.
-#[allow(unsafe_code)]
-fn publication_desc_seam(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let relid = unsafe { (*relation).rd_id };
+fn publication_desc_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::publication_desc::call(relid)
 }
 
 /// `RelationBuildRuleLock`'s `pg_rewrite` scan + rule-tree build (rewrite/node
 /// owner): build `rd_rules`.
-#[allow(unsafe_code)]
-fn rule_lock_seam(relation: *mut RelationData) -> PgResult<()> {
-    // SAFETY: live `Relation` pointer.
-    let relid = unsafe { (*relation).rd_id };
+fn rule_lock_seam(relid: Oid) -> PgResult<()> {
     nodexform_seam::rule_lock::call(relid)
 }
 
@@ -857,11 +801,7 @@ fn rule_lock_seam(relation: *mut RelationData) -> PgResult<()> {
 /// them in `rd_indexcxt`. **Own logic** (the `index_opclass_options`/
 /// `get_attoptions` calls are the cross-unit primitives). Filled with the
 /// derived family; `RelationInitIndexAccessInfo` forces a populate via this.
-#[allow(unsafe_code)]
-pub fn RelationGetIndexAttOptions(relation: *mut RelationData, _copy: bool) -> PgResult<()> {
-    // SAFETY: live cache-owned (or in-build) `Relation` pointer.
-    let rd = unsafe { &*relation };
-
+pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResult<()> {
     let relid = rd.rd_id;
     // `RelationGetNumberOfAttributes(relation)` — relnatts (see the XXX in C).
     let natts = rd.rd_rel.relnatts as usize;
@@ -896,8 +836,6 @@ pub fn RelationGetIndexAttOptions(relation: *mut RelationData, _copy: bool) -> P
 
     // Copy parsed options to the cache (C: into `rd_indexcxt`; the owned entry
     // holds them inline).
-    // SAFETY: live cache-owned descriptor.
-    let rd = unsafe { &mut *relation };
     rd.rd_opcoptions = Some(opts);
 
     Ok(())
