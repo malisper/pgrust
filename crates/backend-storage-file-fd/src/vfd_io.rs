@@ -579,7 +579,7 @@ pub fn FileZero(
 /// `pg_pwrite_zeros(int fd, size_t size, off_t offset)` (common/file_utils.c) —
 /// write `size` bytes of zeros at `offset` using vectored I/O, returning the
 /// total written or a negative value with errno set.
-fn pg_pwrite_zeros(fd: RawFd, size: usize, mut offset: i64) -> isize {
+pub(crate) fn pg_pwrite_zeros(fd: RawFd, size: usize, mut offset: i64) -> isize {
     // A single shared zero block, written repeatedly via the iovec batch.
     let zbuffer = [0u8; BLCKSZ];
     let mut remaining_size = size;

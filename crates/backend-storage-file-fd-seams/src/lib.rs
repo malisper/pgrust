@@ -345,6 +345,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_pwrite(fd, buf, count, offset)` — positioned write against a bare
+    /// kernel fd (the `BasicOpenFile`/`XLogFileInit` return value). Returns
+    /// bytes written (>=0) or `-errno`; writes `buf.len()` bytes at `offset`.
+    /// Consumed by `xlog.c`'s `XLogWrite` (the WAL-buffer-to-segment dump).
+    pub fn pg_pwrite(fd: i32, buf: &[u8], offset: i64) -> isize
+);
+
+seam_core::seam!(
+    /// `pg_pwrite_zeros(fd, size, offset)` (`fd.c`) — zero-fill `size` bytes of
+    /// a bare kernel fd starting at `offset`, allocating the file space (used to
+    /// initialize a fresh WAL segment when `wal_init_zero` is on). Returns the
+    /// total bytes written (>=0) or `-errno`.
+    pub fn pg_pwrite_zeros(fd: i32, size: usize, offset: i64) -> isize
+);
+
+seam_core::seam!(
+    /// `BasicOpenFile(path, flags)` (`fd.c`) — open a file with arbitrary
+    /// `open(2)` flags against a bare kernel fd (the form `xlog.c`'s
+    /// `XLogFileInit`/`XLogFileOpen` use, passing `O_RDWR|O_CREAT|O_EXCL` /
+    /// the `get_sync_bit` flags). `Ok(fd)` on success; `Err(errno)` carries the
+    /// errno the caller inspects (e.g. `ENOENT` -> create path).
+    pub fn basic_open_file_flags(path: &str, flags: i32) -> Result<i32, i32>
+);
+
+seam_core::seam!(
     /// `int pg_fsync(int fd)` (`fd.c`). 0 on success, `-errno` on failure.
     pub fn pg_fsync(fd: i32) -> i32
 );

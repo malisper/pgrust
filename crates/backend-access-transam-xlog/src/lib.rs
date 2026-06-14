@@ -78,6 +78,11 @@ pub use shmem::{
 pub mod insert;
 pub use insert::{XLogInsertAllowed, XLogInsertRecord};
 
+pub mod write;
+pub use write::{
+    issue_xlog_fsync, XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush,
+};
+
 /// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
 pub const XLOG_FILE_SUFFIX_PARTIAL: &str = ".partial";
 pub const TL_HISTORY_SUFFIX: &str = ".history";
@@ -614,11 +619,10 @@ macro_rules! xlog_driver_deferred {
     };
 }
 
+// `XLogFlush`, `XLogBackgroundFlush`, `XLogFileInit`, `XLogFileOpen` are now
+// REAL: ported in [`crate::write`] and re-exported above. They are no longer in
+// the deferred-driver list.
 xlog_driver_deferred! {
-    /// `XLogFlush(record)` — ensure WAL is flushed at least up to `record`.
-    pub fn XLogFlush(record: XLogRecPtr);
-    /// `XLogBackgroundFlush()` — opportunistic flush from the walwriter.
-    pub fn XLogBackgroundFlush() -> bool;
     /// `XLogNeedsFlush(record)` — whether `record` still needs flushing.
     pub fn XLogNeedsFlush(record: XLogRecPtr) -> bool;
     /// `StartupXLOG()` — the recovery + WAL-engine startup driver.
@@ -639,10 +643,6 @@ xlog_driver_deferred! {
     pub fn XLogShutdownWalRcv();
     /// `SetWalWriterSleeping(sleeping)` — publish the walwriter idle state.
     pub fn SetWalWriterSleeping(sleeping: bool);
-    /// `XLogFileInit(logsegno, logtli)` — create/recycle a WAL segment.
-    pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> i32;
-    /// `XLogFileOpen(segno, tli)` — open an existing WAL segment for write.
-    pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> i32;
 
     // --- XLogCtl shmem READ accessors ---
     /// `GetXLogWriteRecPtr()` — last written (not flushed) position.
@@ -757,6 +757,14 @@ pub fn init_seams() {
     s::xact_last_rec_end::set(insert::xact_last_rec_end);
     s::set_xact_last_rec_end::set(insert::set_xact_last_rec_end);
     s::set_xact_last_commit_end::set(insert::set_xact_last_commit_end);
+
+    // WAL-write / fsync driver (xlog.c XLogWrite/XLogFlush/issue_xlog_fsync/
+    // XLogFileInit) + the xlog.c-owned durability GUC reads consumed by fd.c.
+    s::xlog_flush::set(write::XLogFlush);
+    s::xlog_file_init::set(write::XLogFileInit);
+    s::issue_xlog_fsync::set(write::issue_xlog_fsync);
+    s::enable_fsync::set(write::enable_fsync);
+    s::wal_sync_method::set(write::wal_sync_method);
 }
 
 #[cfg(test)]
