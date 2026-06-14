@@ -1,0 +1,42 @@
+[package]
+name = "contrib-amcheck-verify-nbtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "contrib_amcheck_verify_nbtree"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-scan = { path = "../types-scan" }
+types-tuple = { path = "../types-tuple" }
+types-datum = { path = "../types-datum" }
+types-nbtree = { path = "../types-nbtree" }
+types-nodes = { path = "../types-nodes" }
+types-tableam = { path = "../types-tableam" }
+mcx = { path = "../mcx" }
+
+# Seam crates this unit OWNS (installs every decl from its own init_seams()).
+contrib-amcheck-verify-nbtree-seams = { path = "../contrib-amcheck-verify-nbtree-seams" }
+
+# Seam crates for UNPORTED neighbors (calls panic loudly until the owner lands).
+amcheck-verify-common-seams = { path = "../amcheck-verify-common-seams" }
+backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+
+# Already-landed seam crates / libraries consumed by the verifier.
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+backend-lib-bloomfilter-seams = { path = "../backend-lib-bloomfilter-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+types-snapshot = { path = "../types-snapshot" }

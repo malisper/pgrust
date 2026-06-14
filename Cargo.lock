@@ -21,6 +21,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "amcheck-verify-common-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-brin-entry-seams"
 version = "0.0.0"
 dependencies = [
@@ -11140,6 +11151,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-amcheck-verify-nbtree"
+version = "0.0.0"
+dependencies = [
+ "amcheck-verify-common-seams",
+ "backend-access-common-indextuple-seams",
+ "backend-access-nbtree-core-seams",
+ "backend-access-table-tableam",
+ "backend-catalog-index-seams",
+ "backend-lib-bloomfilter-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-time-snapmgr-seams",
+ "contrib-amcheck-verify-nbtree-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nbtree",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "contrib-amcheck-verify-nbtree-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -11579,6 +11630,7 @@ dependencies = [
  "common-pglz",
  "common-prng-base64",
  "common-string",
+ "contrib-amcheck-verify-nbtree",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",
  "port-pgsleep",
