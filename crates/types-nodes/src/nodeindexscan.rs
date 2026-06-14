@@ -344,6 +344,17 @@ pub struct PlannedStmt<'mcx> {
     /// `List *paramExecTypes` — type OIDs for `PARAM_EXEC` Params
     /// (`InitPlan` sizes `es_param_exec_vals` from this). `None` = the C `NIL`.
     pub paramExecTypes: Option<PgVec<'mcx, types_core::Oid>>,
+    /// `List *rtable` — list of `RangeTblEntry` nodes (`None` = the C `NIL`).
+    /// `InitPlan`/`ExecInitRangeTable` install this into `es_range_table`.
+    pub rtable: Option<PgVec<'mcx, crate::parsenodes::RangeTblEntry>>,
+    /// `Bitmapset *unprunableRelids` — RT indexes of relations not subject to
+    /// runtime pruning (or needed to perform it). `InitPlan` passes this into
+    /// `ExecInitRangeTable` as `es_unpruned_relids`. `None` = the C `NULL`.
+    pub unprunableRelids: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    /// `List *subplans` — plan trees for `SubPlan` expressions; note that some
+    /// elements can be `NULL` (hence the inner `Option`). `InitPlan` walks this
+    /// to build `es_subplanstates`. `None` = the C `NIL`.
+    pub subplans: Option<PgVec<'mcx, Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>>>,
 }
 
 impl PlannedStmt<'_> {
@@ -400,6 +411,29 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let rtable = match &self.rtable {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(x.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let subplans = match &self.subplans {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(match x {
+                        Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                        None => None,
+                    });
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             commandType: self.commandType,
             utilityStmt: match &self.utilityStmt {
@@ -420,6 +454,12 @@ impl PlannedStmt<'_> {
             jitFlags: self.jitFlags,
             permInfos,
             paramExecTypes,
+            rtable,
+            unprunableRelids: match &self.unprunableRelids {
+                Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
+            subplans,
         })
     }
 }
