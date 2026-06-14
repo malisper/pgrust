@@ -5342,6 +5342,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-main-main"
+version = "0.0.0"
+dependencies = [
+ "backend-bootstrap-bootstrap",
+ "backend-common-exec-seams",
+ "backend-main-main-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-error",
+ "backend-utils-misc-help-config",
+ "backend-utils-misc-more",
+ "backend-utils-mmgr-mcxt-seams",
+ "common-path-seams",
+ "common-username-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-startup",
+]
+
+[[package]]
 name = "backend-main-main-seams"
 version = "0.0.0"
 dependencies = [
@@ -10566,6 +10589,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-username-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "common-variant-frontshlib-pgfnames-rmtree"
 version = "0.0.0"
 dependencies = [
@@ -10886,6 +10917,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-main-main",
  "backend-nodes-core",
  "backend-nodes-extensible",
  "backend-port-atomics",

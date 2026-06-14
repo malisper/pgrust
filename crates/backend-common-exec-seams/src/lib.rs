@@ -9,3 +9,11 @@ seam_core::seam!(
     /// executable path cannot be located.
     pub fn resolve_standalone_paths(argv0: &str) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `set_pglocale_pgservice(argv0, app)` (`src/common/exec.c`): set up the
+    /// gettext text domain and `PGSYSCONFDIR`-relative locale/pgservice paths
+    /// from the executable location. Best-effort; the C function returns
+    /// `void` and swallows path-resolution failure.
+    pub fn set_pglocale_pgservice(argv0: &str, app: &str)
+);

@@ -89,6 +89,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PostgresSingleUserMain(argc, argv, username)` (tcop/postgres.c) — the
+    /// standalone single-user backend entry, reached from `main()` for the
+    /// `DISPATCH_SINGLE` case. Processes the command line, performs the
+    /// standalone bootstrap of GUC/auth, then runs `PostgresMain`. Never
+    /// returns (exits through `proc_exit`).
+    pub fn postgres_single_user_main(argv: &[&str], username: &str) -> !
+);
+
+seam_core::seam!(
+    /// `set_stack_base()` (tcop/postgres.c) — record the current stack frame as
+    /// the reference point for `check_stack_depth()`. Returns the previous base
+    /// (a `pg_stack_base_t`); `main()` ignores it. Infallible.
+    pub fn set_stack_base()
+);
+
+seam_core::seam!(
     /// `die(SIGNAL_ARGS)` (tcop/postgres.c) — the SIGTERM handler: set
     /// `ShutdownRequestPending`/`InterruptPending` and the latch.
     /// Async-signal-safe and infallible; installed as the SIGTERM handler.

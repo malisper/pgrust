@@ -24,3 +24,11 @@ seam_core::seam!(
     /// returned here because its length is not known to the caller.
     pub fn get_share_path(my_exec_path: &str) -> String
 );
+
+seam_core::seam!(
+    /// `get_progname(argv0)` (`common/path.c`) — strip the directory and any
+    /// `.exe` suffix from `argv[0]`, returning the bare program name (a fresh
+    /// owned copy, mirroring the C `strdup`). On a NULL/empty `argv0` the C
+    /// returns the literal `"(null)"`.
+    pub fn get_progname(argv0: &str) -> String
+);

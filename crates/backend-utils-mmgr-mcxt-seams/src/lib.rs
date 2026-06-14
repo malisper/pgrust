@@ -11,6 +11,14 @@
 extern crate alloc;
 
 seam_core::seam!(
+    /// `MemoryContextInit()` (mcxt.c): create the `TopMemoryContext` and
+    /// `ErrorContext` that bootstrap the whole allocator. Called exactly once,
+    /// very early in `main()`, before any other context exists.
+    /// `elog(FATAL)` on allocation failure.
+    pub fn memory_context_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `MemoryContextStrdup(context, string)` (mcxt.c): duplicate `s` into the
     /// given (foreign-owned) memory context. The PREPARE/EXECUTE driver copies
     /// the plan's query string into the portal's `portalContext` (owned by the
