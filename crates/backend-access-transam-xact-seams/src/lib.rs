@@ -125,6 +125,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsSubTransaction()` (xact.c): true when the current transaction state
+    /// is a subtransaction (`TBLOCK_SUBINPROGRESS` family). Pure read of
+    /// backend-local transaction state; consumed by SPI's
+    /// `SPI_inside_nonatomic_context`.
+    pub fn is_sub_transaction() -> bool
+);
+
+seam_core::seam!(
     /// `MyXactFlags |= XACT_FLAGS_ACCESSEDTEMPNAMESPACE` (xact.h flag on
     /// xact.c's `MyXactFlags`). Plain global-flag write.
     pub fn set_xact_accessed_temp_namespace()

@@ -89,6 +89,7 @@ pub fn init_all() {
     backend_executor_execScan::init_seams();
     backend_executor_execTuples::init_seams();
     backend_executor_execUtils::init_seams();
+    backend_executor_spi::init_seams();
     backend_executor_instrument::init_seams();
     backend_executor_nodeAgg::init_seams();
     backend_executor_nodeAppend::init_seams();
@@ -677,32 +678,6 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_rescan_is"),
         ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
-        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
-        // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
-        // WAL page-read driver solely through the prefetcher read-record seams,
-        // and inspects the decoded record through the `RecordRef`-keyed
-        // `xlog_rec_*` accessors. These five seams are declared but NOT installed:
-        //   * prefetcher_begin_read / prefetcher_read_record — declared in
-        //     backend-access-transam-xlogprefetcher-seams with the explicit note
-        //     "NOT installed: the page-read driver is not yet ported." The
-        //     "merged" xlogprefetcher unit ported only the prefetch-STATS shmem
-        //     (XLogPrefetchShmemSize/Init); the recovery read-record entry points
-        //     wrap the genuinely-unported hard-core WAL file I/O (XLogPageRead /
-        //     WaitForWALToBecomeAvailable / XLogFileRead{,AnyTLI} + restore_command
-        //     fetching), so they stay seam-and-panic until that driver lands.
-        //   * xlog_rec_rmid / xlog_rec_info / xlog_rec_total_len — declared in
-        //     xlogreader-seams keyed by the opaque `RecordRef(u64)` handle, but the
-        //     merged xlogreader models the record as a borrowed `&XLogReaderState`,
-        //     not a handle registry. The handle->reader mapping is owned by that
-        //     same unported page-read driver, so xlogreader cannot install them
-        //     without a forbidden token registry / a contract redesign.
-        // All five become real installs when the page-read driver (xlogprefetcher
-        // recovery leg) lands. See DESIGN_DEBT.md.
-        ("backend_access_transam_xlogprefetcher", "prefetcher_begin_read"),
-        ("backend_access_transam_xlogprefetcher", "prefetcher_read_record"),
-        ("backend_access_transam_xlogreader", "xlog_rec_info"),
-        ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
-        ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
         // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
         // access method through `rel->rd_tableam` (the TableAmRoutine vtable). The
         // heap AM provider (access/heap/heapam_handler.c) and the vtable resolver
@@ -1179,6 +1154,32 @@ mod recurrence_guard {
         // combo-CID state; its real body takes `&mut ComboCidState`, which the
         // owner can't reach from a static seam until the xact-owner threads it.
         ("backend_utils_time_combocid", "heap_tuple_header_adjust_cmax"),
+        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
+        // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
+        // WAL page-read driver solely through the prefetcher read-record seams,
+        // and inspects the decoded record through the `RecordRef`-keyed
+        // `xlog_rec_*` accessors. These five seams are declared but NOT installed:
+        //   * prefetcher_begin_read / prefetcher_read_record — declared in
+        //     backend-access-transam-xlogprefetcher-seams with the explicit note
+        //     "NOT installed: the page-read driver is not yet ported." The
+        //     "merged" xlogprefetcher unit ported only the prefetch-STATS shmem
+        //     (XLogPrefetchShmemSize/Init); the recovery read-record entry points
+        //     wrap the genuinely-unported hard-core WAL file I/O (XLogPageRead /
+        //     WaitForWALToBecomeAvailable / XLogFileRead{,AnyTLI} + restore_command
+        //     fetching), so they stay seam-and-panic until that driver lands.
+        //   * xlog_rec_rmid / xlog_rec_info / xlog_rec_total_len — declared in
+        //     xlogreader-seams keyed by the opaque `RecordRef(u64)` handle, but the
+        //     merged xlogreader models the record as a borrowed `&XLogReaderState`,
+        //     not a handle registry. The handle->reader mapping is owned by that
+        //     same unported page-read driver, so xlogreader cannot install them
+        //     without a forbidden token registry / a contract redesign.
+        // All five become real installs when the page-read driver (xlogprefetcher
+        // recovery leg) lands. See DESIGN_DEBT.md.
+        ("backend_access_transam_xlogprefetcher", "prefetcher_begin_read"),
+        ("backend_access_transam_xlogprefetcher", "prefetcher_read_record"),
+        ("backend_access_transam_xlogreader", "xlog_rec_info"),
+        ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
+        ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
