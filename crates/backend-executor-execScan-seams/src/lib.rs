@@ -34,9 +34,9 @@ seam_core::seam!(
     /// generic scan loop — fetch via `access`, qual-filter, project — for a
     /// table-func-scan node. Returns the result slot id, or `None` at end of
     /// scan. `Err` carries qual/projection `ereport(ERROR)`s and OOM.
-    pub fn exec_scan(
-        node: &mut TableFuncScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan<'mcx>(
+        node: &mut TableFuncScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: TableFuncScanAccessMtd,
         recheck: TableFuncScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>
@@ -56,9 +56,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
     /// (rescan EPQ, clear the result slot) at the start of a rescan.
-    pub fn exec_scan_rescan(
-        node: &mut TableFuncScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_rescan<'mcx>(
+        node: &mut TableFuncScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -87,9 +87,9 @@ seam_core::seam!(
     /// node's result/scan slot, `false` at end of scan. `Err` carries the
     /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
     /// execScan.c; this node passes its `IndexOnlyNext`/`IndexOnlyRecheck`.
-    pub fn exec_scan_indexonly(
-        node: &mut IndexOnlyScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_indexonly<'mcx>(
+        node: &mut IndexOnlyScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: IndexOnlyScanAccessMtd,
         recheck: IndexOnlyScanRecheckMtd,
     ) -> PgResult<bool>

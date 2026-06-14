@@ -63,6 +63,7 @@ backend-executor-execExprInterp = { path = "../backend-executor-execExprInterp" 
 backend-executor-execParallel = { path = "../backend-executor-execParallel" }
 backend-executor-execPartition = { path = "../backend-executor-execPartition" }
 backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }
+backend-executor-execScan = { path = "../backend-executor-execScan" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
