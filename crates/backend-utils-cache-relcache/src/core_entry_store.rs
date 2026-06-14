@@ -19,7 +19,17 @@
 //! that wants C's live shared pointer takes a clone of the cell via
 //! [`relation_id_get_relation_shared`].
 
-pub mod entry;
+/// The owned relcache entry-store type family.
+///
+/// F0' relocated these types into the standalone `types-relcache-entry` crate
+/// (so the relcache seams crate can name `RelationData` in a cross-crate
+/// `Rc<RefCell<RelationData>>` seam without a `types-rel` cycle). This module
+/// re-exports the whole family at the historical `core_entry_store::entry::*`
+/// path so every in-crate `use crate::core_entry_store::entry::X` keeps
+/// resolving unchanged.
+pub mod entry {
+    pub use types_relcache_entry::*;
+}
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -10128,6 +10128,7 @@ dependencies = [
  "types-nodes",
  "types-partition",
  "types-rel",
+ "types-relcache-entry",
  "types-reloptions",
  "types-storage",
  "types-tableam",
@@ -10155,6 +10156,7 @@ dependencies = [
  "types-nodes",
  "types-partition",
  "types-rel",
+ "types-relcache-entry",
  "types-storage",
  "types-tableam",
  "types-tuple",
@@ -12593,6 +12595,16 @@ dependencies = [
  "types-reloptions",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-relcache-entry"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-reloptions",
+ "types-storage",
+ "types-tableam",
 ]
 
 [[package]]

@@ -7,6 +7,16 @@
 //! plain field reads need no seam; only `rd_tableam` — whose vtable type
 //! lives above `types-rel` — is resolved through the owner.
 
+/// The owned relcache entry-store type family, relocated to the standalone
+/// `types-relcache-entry` crate in F0'. Re-exported here so this seam crate can
+/// name `RelationData` (+ companions) for the forthcoming cross-crate
+/// shared-`Rc<RefCell<RelationData>>` seam (`relation_id_get_relation_shared`,
+/// promoted in a later wave). No seam consumes it yet — this is the naming
+/// enabler only.
+pub use types_relcache_entry::{
+    FormPgClass, FormPgIndex, LockInfoData, OwnedAttr, OwnedAttrDefault, OwnedConstrCheck,
+    OwnedTupleConstr, OwnedTupleDesc, RelationData,
+};
 
 seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the

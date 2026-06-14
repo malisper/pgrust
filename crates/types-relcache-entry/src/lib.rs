@@ -1,8 +1,15 @@
 //! The real, mutable relcache entry: `struct RelationData` (`utils/rel.h`).
 //!
+//! This crate holds ONLY the owned relcache entry-store type family, relocated
+//! out of `backend-utils-cache-relcache` so the relcache **seams** crate
+//! (`backend-utils-cache-relcache-seams`) can name `RelationData` in a
+//! cross-crate `Rc<RefCell<RelationData>>` seam without a `types-rel` cycle.
+//! It deps only the vocabulary the entry embeds (`types-core`/`types-storage`/
+//! `types-tableam`/`types-reloptions`) — never `types-rel`.
+//!
 //! This is the OWN entry-store type — NOT the trimmed cross-unit value-slice
-//! [`types_rel::RelationData`]. It carries the full `rd_*` surface that the C
-//! `RelationData` does, field-for-field. Because the [`RelationIdCache`] owns
+//! `types_rel::RelationData`. It carries the full `rd_*` surface that the C
+//! `RelationData` does, field-for-field. Because the `RelationIdCache` owns
 //! each descriptor for the whole backend lifetime (the C `CacheMemoryContext`
 //! lifetime), the entry stores **owned, lifetime-free** mirrors of the
 //! catalog payloads (`String`/`Vec`/owned scalars). The lifetime-bearing
