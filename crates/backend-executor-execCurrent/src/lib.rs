@@ -293,7 +293,7 @@ fn resolve_scan_strategy(
     let scan_slot_is_null = match scanstate.ss_ScanTupleSlot {
         None => true,
         Some(slot_id) => match estate.es_tupleTable.get(slot_id.0 as usize) {
-            Some(slot) => slot.is_empty(),
+            Some(slot) => slot.base().is_empty(),
             None => true,
         },
     };

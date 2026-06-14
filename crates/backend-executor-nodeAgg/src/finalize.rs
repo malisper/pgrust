@@ -456,7 +456,7 @@ pub fn prepare_projection_slot<'mcx>(
         aggstate.grouped_cols = Some(copied);
 
         // if (TTS_EMPTY(slot)) ExecStoreAllNullTuple(slot);
-        let slot_empty = estate.es_tupleTable[slot.0 as usize].is_empty();
+        let slot_empty = estate.slot(slot).is_empty();
         if slot_empty {
             backend_executor_execTuples_seams::exec_store_all_null_tuple::call(estate, slot)?;
         } else if aggstate.all_grouped_cols.is_some() {
@@ -552,7 +552,7 @@ pub fn finalize_aggregates<'mcx>(
             } else {
                 let uniqslot = pertrans.uniqslot.expect("multi-distinct uniqslot set");
                 backend_executor_execTuples_seams::exec_clear_tuple::call(
-                    &mut estate.es_tupleTable[uniqslot.0 as usize],
+                    estate.slot_mut(uniqslot),
                 )?;
             }
         }
