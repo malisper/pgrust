@@ -9,26 +9,27 @@ use mcx::{alloc_in, slice_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 
 use crate::heaptuple::{HeapTupleData, MinimalTupleData};
-// The bare-word newtype (`types_datum::Datum`) is the transitional payload of
-// the by-value arm. It is imported under an alias so that the canonical value
-// type defined here can take the unqualified name `Datum`.
+// The bare-word newtype (`types_datum::Datum`) is the payload of the by-value
+// arm. It is imported under an alias so that the canonical value type defined
+// here can take the unqualified name `Datum`.
 use types_core::{Oid, TransactionId};
 use types_datum::Datum as ScalarWord;
 
 // ---------------------------------------------------------------------------
-// The canonical value type (Datum unification — KEYSTONE).
+// The canonical value type (Datum unification — KEYSTONE / type-carrier root).
 //
-// TARGET (post-cleanup) shape:
-//     pub enum Datum<'mcx> { ByVal(usize), ByRef(PgVec<'mcx, u8>) }
+// CANONICAL shape (datum-redesign-plan, Option A — RECOMMENDED):
+//     pub enum Datum<'mcx> { ByVal(Datum /*bare word*/), ByRef(PgVec<'mcx, u8>) }
 //
-// TRANSITIONAL shape (this keystone): the by-value arm carries the bare-word
-// newtype `types_datum::Datum` (here aliased `ScalarWord`) so that the ~200
-// unmigrated `Datum::ByVal(types_datum::Datum::from_i32(..))` construction
-// sites and the `ByVal(d) => d.as_oid()` read sites keep compiling untouched.
-// The newtype is itself a `#[repr(transparent)]`-shaped wrapper over `usize`,
-// so the cleanup that swaps `ByVal(ScalarWord)` -> `ByVal(usize)` is a pure
-// arm-payload change once every consumer has moved to the conversion methods
-// added below.
+// The by-value arm carries the bare-word newtype `types_datum::Datum` (here
+// aliased `ScalarWord`). Per the plan, `Datum(usize)` is kept *inside* `ByVal`
+// and at the two irreducible ABI edges (the `store_att_byval`/`fetch_att`
+// on-disk by-value codec and the `PGFunction -> Datum` fmgr return slot) — it
+// is NOT migrated away here. The `from_*` / `as_*` methods below are the
+// canonical `*GetDatum` / `DatumGet*` codec API on this enum; migrated
+// consumers call them instead of constructing a free-standing
+// `types_datum::Datum`, and they faithfully forward to the by-value word
+// carried in `ByVal`.
 // ---------------------------------------------------------------------------
 
 /// The one canonical value type — the faithful idiomatic substitute for C's
@@ -37,9 +38,8 @@ use types_datum::Datum as ScalarWord;
 /// is a transitional shim removed in cleanup.)
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Datum<'mcx> {
-    /// Pass-by-value scalar (`att->attbyval`); the machine word itself.
-    /// (Transitional payload: the bare-word newtype; cleanup swaps it to
-    /// `usize`.)
+    /// Pass-by-value scalar (`att->attbyval`); the machine word itself,
+    /// carried as the bare-word newtype (the sanctioned ABI-edge `Datum`).
     ByVal(ScalarWord),
     /// By-reference value (varlena `attlen == -1`, cstring `attlen == -2`, or
     /// fixed-length pass-by-reference `attlen > 0`): the verbatim on-disk
@@ -78,9 +78,9 @@ impl Datum<'_> {
     //
     // The `*GetDatum` / `DatumGet*` codec family as constructors/accessors on
     // the canonical enum (the by-value arm). These are what migrated consumers
-    // call instead of the deprecated `types_datum::Datum::from_*` free-newtype
-    // codecs. During the transition both spellings coexist; the body just
-    // forwards to the bare-word newtype carried in `ByVal`.
+    // call instead of constructing a free-standing `types_datum::Datum`; the
+    // body forwards to the bare-word newtype carried in `ByVal` (the sanctioned
+    // by-value ABI edge).
     //
     // `as_*` panic on a `ByRef` value — C would equally read garbage by
     // treating a by-reference image as a scalar word.
