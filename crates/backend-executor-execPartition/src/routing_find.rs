@@ -530,14 +530,16 @@ pub(crate) fn get_partition_for_tuple<'mcx>(
                 if last_found_count >= PARTITION_CACHED_FIND_THRESHOLD {
                     let last_datum_offset =
                         dispatch.partdesc.as_ref().unwrap().last_found_datum_index;
-                    let last_datum = dispatch
-                        .partdesc
-                        .as_ref()
-                        .unwrap()
-                        .boundinfo
-                        .as_ref()
-                        .unwrap()
-                        .datums[last_datum_offset as usize][0];
+                    let last_datum = key_word(
+                        &dispatch
+                            .partdesc
+                            .as_ref()
+                            .unwrap()
+                            .boundinfo
+                            .as_ref()
+                            .unwrap()
+                            .datums[last_datum_offset as usize][0],
+                    );
                     let cmpval =
                         backend_partitioning_partbounds_seams::partition_list_datum_cmp::call(
                             key, last_datum, key_word(&values[0]),
@@ -693,7 +695,7 @@ fn range_bound_at(
         .as_ref()
         .unwrap();
     let datums: alloc_vec::Vec<types_datum::Datum> =
-        boundinfo.datums[off].iter().copied().collect();
+        boundinfo.datums[off].iter().map(key_word).collect();
     let kind: alloc_vec::Vec<types_nodes::partition::PartitionRangeDatumKind> = boundinfo
         .kind
         .as_ref()

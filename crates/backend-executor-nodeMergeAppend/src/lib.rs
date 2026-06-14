@@ -601,23 +601,22 @@ fn binaryheap_empty(heap: &BinaryHeap<'_>) -> bool {
 /// the heap property (paired with [`binaryheap_build_node`]). The capacity was
 /// reserved in `binaryheap_allocate`; an overflow is the C
 /// `elog(ERROR, "out of binary heap slots")`.
-fn binaryheap_add_unordered(heap: &mut BinaryHeap<'_>, d: Datum<'_>) -> PgResult<()> {
+fn binaryheap_add_unordered<'mcx>(heap: &mut BinaryHeap<'mcx>, d: Datum<'mcx>) -> PgResult<()> {
     if heap.bh_size >= heap.bh_space {
         return Err(elog_error("out of binary heap slots"));
     }
     heap.bh_has_heap_property = false;
-    heap.bh_nodes.push(slot_word(&d));
+    heap.bh_nodes.push(d);
     heap.bh_size += 1;
     Ok(())
 }
 
 /// `binaryheap_first(heap)` — peek at the heap's top (root) entry. The caller
 /// must ensure the heap is non-empty.
-fn binaryheap_first<'mcx>(heap: &BinaryHeap<'_>) -> PgResult<Datum<'mcx>> {
+fn binaryheap_first<'mcx>(heap: &BinaryHeap<'mcx>) -> PgResult<Datum<'mcx>> {
     heap.bh_nodes
         .first()
-        .copied()
-        .map(slot_datum)
+        .cloned()
         .ok_or_else(|| elog_error("binaryheap_first on empty heap"))
 }
 
@@ -637,13 +636,13 @@ fn binaryheap_remove_first_node<'mcx>(
             return Err(elog_error("binaryheap_remove_first on empty heap"));
         }
         // extract the root node, which will be the result
-        let result = heap.bh_nodes[0];
+        let result = heap.bh_nodes[0].clone();
 
         // easy if heap contains one element
         if heap.bh_size == 1 {
             heap.bh_size -= 1;
             heap.bh_nodes.pop();
-            return Ok(slot_datum(result));
+            return Ok(result);
         }
 
         // Remove the last node, placing it in the vacated root entry, and sift
@@ -655,7 +654,7 @@ fn binaryheap_remove_first_node<'mcx>(
             .ok_or_else(|| elog_error("binaryheap underflow"))?;
         heap.bh_nodes[0] = last;
         sift_down(&mut heap, 0, &node.ms_slots, &node.ms_sortkeys, estate)?;
-        Ok(slot_datum(result))
+        Ok(result)
     })();
     node.ms_heap = Some(heap);
     result
@@ -706,7 +705,7 @@ fn binaryheap_replace_first_node<'mcx>(
         if binaryheap_empty(&heap) {
             return Err(elog_error("binaryheap_replace_first on empty heap"));
         }
-        heap.bh_nodes[0] = slot_word(&d);
+        heap.bh_nodes[0] = d;
         if heap.bh_size > 1 {
             sift_down(&mut heap, 0, &node.ms_slots, &node.ms_sortkeys, estate)?;
         }
@@ -714,22 +713,6 @@ fn binaryheap_replace_first_node<'mcx>(
     })();
     node.ms_heap = Some(heap);
     result
-}
-
-/// Storage-edge converter: the binary heap's `bh_nodes` is owned by
-/// `types-nodes` and still carries the bare-word shim (`StoredSlotWord`), into
-/// which `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`. Pack
-/// the canonical [`Datum`] (always a `ByVal` slot index here) back into that
-/// stored word. This is the audited ABI/storage edge where a plain word is the
-/// faithful representation (`Int32GetDatum`).
-fn slot_word(d: &Datum<'_>) -> StoredSlotWord {
-    StoredSlotWord::from_i32(d.as_i32())
-}
-
-/// Storage-edge converter: lift a stored slot-index word back into the
-/// canonical [`Datum`] enum (`DatumGetInt32` -> `Datum::from_i32`).
-fn slot_datum<'mcx>(w: StoredSlotWord) -> Datum<'mcx> {
-    Datum::from_i32(w.as_i32())
 }
 
 /// Offset of the parent of the node at index `i`.
@@ -758,10 +741,10 @@ fn sift_down<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut node_off = node_off;
-    // The heap stores the bare slot-index word (dep-owned `bh_nodes`); the
-    // comparator consumes the canonical `Datum` enum, so the word is lifted at
-    // each read site.
-    let node_val = heap.bh_nodes[node_off as usize];
+    // The heap stores the canonical `Datum` enum directly (dep-owned
+    // `bh_nodes`); the comparator consumes a `Datum` value, so each read site
+    // clones the (always-`ByVal` slot-index) entry.
+    let node_val = heap.bh_nodes[node_off as usize].clone();
 
     loop {
         let left_off = left_offset(node_off);
@@ -770,9 +753,9 @@ fn sift_down<'mcx>(
 
         // Is the right child larger than the left child?
         if right_off < heap.bh_size {
-            let left_val = heap.bh_nodes[left_off as usize];
-            let right_val = heap.bh_nodes[right_off as usize];
-            if heap_compare_slots(slots, sortkeys, slot_datum(left_val), slot_datum(right_val), estate)?
+            let left_val = heap.bh_nodes[left_off as usize].clone();
+            let right_val = heap.bh_nodes[right_off as usize].clone();
+            if heap_compare_slots(slots, sortkeys, left_val, right_val, estate)?
                 < 0
             {
                 swap_off = right_off;
@@ -784,15 +767,15 @@ fn sift_down<'mcx>(
         if left_off >= heap.bh_size {
             break;
         }
-        let swap_val = heap.bh_nodes[swap_off as usize];
-        if heap_compare_slots(slots, sortkeys, slot_datum(node_val), slot_datum(swap_val), estate)? >= 0
+        let swap_val = heap.bh_nodes[swap_off as usize].clone();
+        if heap_compare_slots(slots, sortkeys, node_val.clone(), swap_val, estate)? >= 0
         {
             break;
         }
 
         // Otherwise, swap the hole with the child that violates the heap
         // property; then go on to check its children.
-        heap.bh_nodes[node_off as usize] = heap.bh_nodes[swap_off as usize];
+        heap.bh_nodes[node_off as usize] = heap.bh_nodes[swap_off as usize].clone();
         node_off = swap_off;
     }
     // Re-fill the hole.
