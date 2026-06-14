@@ -132,3 +132,19 @@ seam_core::seam!(
     /// under `ProcArrayLock`). Owned in varsup; plain shared-memory increment.
     pub fn increment_xact_completion_count()
 );
+
+seam_core::seam!(
+    /// `TransamVariables->xactCompletionCount` (`access/transam.h`) — the current
+    /// completed-transaction generation counter, snapshotted by procarray.c's
+    /// `GetSnapshotData`/`GetSnapshotDataReuse` under `ProcArrayLock`. Owned in
+    /// varsup; plain shared-memory read.
+    pub fn get_xact_completion_count() -> u64
+);
+
+seam_core::seam!(
+    /// `TransamVariables->oldestXid` (`access/transam.h`) — the cluster-wide
+    /// oldest xid before which all data is frozen, read by procarray.c's
+    /// `GetSnapshotData` (to seed the GlobalVis lower bounds). Owned in varsup;
+    /// plain shared-memory read.
+    pub fn get_oldest_xid() -> TransactionId
+);

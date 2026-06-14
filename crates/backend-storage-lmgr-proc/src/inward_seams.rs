@@ -261,6 +261,29 @@ fn proc_vxid(pgprocno: ProcNumber) -> (ProcNumber, u32) {
     with_proc_by_number(pgprocno, |p| (p.vxid.procNumber, p.vxid.lxid))
 }
 
+fn proc_xmin(pgprocno: ProcNumber) -> TransactionId {
+    with_proc_by_number(pgprocno, |p| p.xmin)
+}
+
+fn proc_subxids(procno: ProcNumber) -> (i32, Vec<TransactionId>) {
+    with_proc_by_number(procno, |p| {
+        let count = p.subxidStatus.count as i32;
+        (count, p.subxids.xids[..count as usize].to_vec())
+    })
+}
+
+fn my_proc_xmin() -> TransactionId {
+    crate::proc_shmem::with_my_proc_ref(|p| p.xmin)
+}
+
+fn set_my_proc_xmin(value: TransactionId) {
+    with_my_proc(|p| p.xmin = value);
+}
+
+fn set_my_proc_status_flags(flags: u8) {
+    with_my_proc(|p| p.statusFlags = flags);
+}
+
 fn prepared_xact_procno(i: i32) -> ProcNumber {
     crate::proc_shmem::prepared_xact_procno(i)
 }
@@ -588,6 +611,11 @@ pub(crate) fn install() {
     seams::proc_database_id::set(proc_database_id);
     seams::proc_xid::set(proc_xid);
     seams::proc_vxid::set(proc_vxid);
+    seams::proc_xmin::set(proc_xmin);
+    seams::proc_subxids::set(proc_subxids);
+    seams::my_proc_xmin::set(my_proc_xmin);
+    seams::set_my_proc_xmin::set(set_my_proc_xmin);
+    seams::set_my_proc_status_flags::set(set_my_proc_status_flags);
     seams::prepared_xact_procno::set(prepared_xact_procno);
     seams::set_delay_chkpt_start::set(set_delay_chkpt_start);
 

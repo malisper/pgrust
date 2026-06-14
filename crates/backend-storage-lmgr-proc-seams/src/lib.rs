@@ -226,6 +226,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UINT32_ACCESS_ONCE(GetPGProcByNumber(pgprocno)->xmin)` — an arbitrary
+    /// proc's advertised xmin, read by `ProcArrayInstall{Imported,Restored}Xmin`
+    /// and `GetConflictingVirtualXIDs`. Plain shared-memory read.
+    pub fn proc_xmin(pgprocno: ProcNumber) -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// `MyProc->statusFlags = flags;` — store the calling backend's status
+    /// flags, used by `ProcArrayInstallRestoredXmin` to copy `PROC_XMIN_FLAGS`
+    /// from the source proc. The dense `ProcGlobal->statusFlags[]` mirror is
+    /// updated separately via `set_proc_array_status_flags`.
+    pub fn set_my_proc_status_flags(flags: u8)
+);
+
+seam_core::seam!(
     /// `GetNumberFromPGProc(&PreparedXactProcs[i])` — the proc number assigned
     /// to the i-th preallocated dummy proc by `InitProcGlobal`; used by
     /// `TwoPhaseShmemInit` to build the freelist. Pure read.

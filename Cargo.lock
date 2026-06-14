@@ -1861,6 +1861,9 @@ name = "backend-access-transam-xlog"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogarchive",
+ "backend-postmaster-checkpointer-seams",
+ "backend-replication-walsender-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
@@ -1868,9 +1871,12 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-storage-lmgr-s-lock",
  "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "libc",
  "mcx",
  "port-crc32c",
  "types-control",
@@ -7965,6 +7971,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-transam-seams",
  "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-shmem-seams",
@@ -7974,6 +7981,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-pc-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -12637,6 +12645,7 @@ name = "types-parallel"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-execparallel",
 ]
 
 [[package]]

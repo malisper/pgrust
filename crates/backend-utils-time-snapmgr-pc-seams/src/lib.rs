@@ -24,3 +24,10 @@ seam_core::seam!(
     /// `TransactionXmin` (the backend-global).
     pub fn transaction_xmin() -> PgResult<u32>
 );
+
+seam_core::seam!(
+    /// `TransactionXmin = xmin;` — store the backend-global oldest-snapshot xmin
+    /// (snapmgr.c owns it). Written by procarray.c's
+    /// `ProcArrayInstall{Imported,Restored}Xmin` atomically with `MyProc->xmin`.
+    pub fn set_transaction_xmin(xmin: u32)
+);

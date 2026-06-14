@@ -1602,6 +1602,9 @@ pub fn init_seams() {
     pc_seams::pop_active_snapshot::set(PopActiveSnapshot);
     // `TransactionXmin` is a backend-global the consumers read directly.
     pc_seams::transaction_xmin::set(|| Ok(TransactionXmin()));
+    // `TransactionXmin = xmin;` — procarray.c's ProcArrayInstall*Xmin set it
+    // atomically with MyProc->xmin; snapmgr owns the backend-global.
+    pc_seams::set_transaction_xmin::set(|xmin| with_state(|s| s.transaction_xmin = xmin));
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket
