@@ -13,7 +13,10 @@ use std::sync::Mutex;
 use std::vec::Vec;
 
 use mcx::MemoryContext;
-use types_datum::Datum;
+// `super::*` re-exports the canonical `types_tuple::...::Datum` used at the
+// `apply_sort_comparator` boundary. The fmgr-builtin lane (`cmp_builtin`'s
+// return) still speaks the transitional bare-word `types_datum::Datum`.
+use types_datum::Datum as ShimDatum;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use super::*;
@@ -44,11 +47,11 @@ fn reset_script() {
 }
 
 /// A builtin btree comparison function: returns `arg0 - arg1` clamped to a sign.
-fn cmp_builtin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn cmp_builtin(fcinfo: &mut FunctionCallInfoBaseData) -> ShimDatum {
     let a = backend_utils_fmgr_core::arg_value(fcinfo, 0).as_i32();
     let b = backend_utils_fmgr_core::arg_value(fcinfo, 1).as_i32();
     let r = (a > b) as i32 - (a < b) as i32;
-    Datum::from_i32(r)
+    ShimDatum::from_i32(r)
 }
 
 const CMP_OID: Oid = 9001;
