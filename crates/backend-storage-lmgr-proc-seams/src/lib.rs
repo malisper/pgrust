@@ -241,6 +241,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetPGProcByNumber(pgprocno)->roleId` — the dummy PGPROC's authenticated
+    /// role, read by `BackendPidGetProc`. Plain shared-memory read.
+    pub fn proc_role_id(pgprocno: ProcNumber) -> Oid
+);
+
+seam_core::seam!(
+    /// `GetPGProcByNumber(pgprocno)->tempNamespaceId` — the dummy PGPROC's
+    /// temp-namespace oid, read by `checkTempNamespaceStatus`. Plain
+    /// shared-memory read.
+    pub fn proc_temp_namespace_id(pgprocno: ProcNumber) -> Oid
+);
+
+seam_core::seam!(
+    /// `ProcGlobal->allProcCount` — total number of PGPROC slots, used by
+    /// `ProcNumberGetTransactionIds` / `ProcNumberGetProc` for the bounds check.
+    /// Pure read.
+    pub fn proc_all_proc_count() -> u32
+);
+
+seam_core::seam!(
     /// `GetNumberFromPGProc(&PreparedXactProcs[i])` — the proc number assigned
     /// to the i-th preallocated dummy proc by `InitProcGlobal`; used by
     /// `TwoPhaseShmemInit` to build the freelist. Pure read.

@@ -9,9 +9,16 @@
 //! GlobalVis for some removability checks.
 
 use mcx::{Mcx, PgVec};
-use types_core::{Oid, ProcNumber, TransactionId};
+use types_core::{
+    InvalidLocalTransactionId, InvalidTransactionId, Oid, ProcNumber, TransactionId,
+};
 use types_error::PgResult;
-use types_storage::{ProcSignalReason, VirtualTransactionId};
+use types_storage::{LWLockMode, ProcSignalReason, VirtualTransactionId};
+
+use backend_storage_lmgr_lwlock_seams as lwlock;
+use backend_storage_lmgr_proc_seams as proc;
+
+use crate::shmem_model::PROC_ARRAY;
 
 /// `TransactionIdIsInProgress(TransactionId xid)` (procarray.c) — is `xid` still
 /// shown running in the ProcArray (or a still-running subxact)? Allocates a
@@ -26,50 +33,145 @@ pub fn TransactionIdIsActive(_xid: TransactionId) -> PgResult<bool> {
     panic!("decomp: TransactionIdIsActive not yet filled")
 }
 
+/// `ProcNumberGetProc(ProcNumber procNumber)` (procarray.c) — is the slot a live
+/// (pid != 0) backend within `[0, allProcCount)`? Returns the slot number when
+/// the PGPROC is active, mirroring the C "NULL when inactive" contract.
+fn ProcNumberGetProc(proc_number: ProcNumber) -> Option<ProcNumber> {
+    // if (procNumber < 0 || procNumber >= ProcGlobal->allProcCount) return NULL;
+    if proc_number < 0 || proc_number as u32 >= proc::proc_all_proc_count::call() {
+        return None;
+    }
+    // result = GetPGProcByNumber(procNumber); if (result->pid == 0) return NULL;
+    if proc::proc_pid::call(proc_number) == 0 {
+        return None;
+    }
+    Some(proc_number)
+}
+
 /// `ProcNumberGetProc(ProcNumber procNumber)->pid` (procarray.c) — pid of the
 /// PGPROC in that slot, or 0 when the slot is inactive (C NULL).
-pub fn ProcNumberGetProcPid(_proc_number: ProcNumber) -> i32 {
-    panic!("decomp: ProcNumberGetProcPid not yet filled")
+pub fn ProcNumberGetProcPid(proc_number: ProcNumber) -> i32 {
+    match ProcNumberGetProc(proc_number) {
+        Some(p) => proc::proc_pid::call(p),
+        None => 0,
+    }
 }
 
 /// `ProcNumberGetProc(procNumber)` projected to `(databaseId, tempNamespaceId)`
 /// (procarray.c) — `checkTempNamespaceStatus`'s reads; `None` when the slot is
 /// empty.
-pub fn ProcStatus(_proc_number: ProcNumber) -> Option<(Oid, Oid)> {
-    panic!("decomp: ProcStatus not yet filled")
+pub fn ProcStatus(proc_number: ProcNumber) -> Option<(Oid, Oid)> {
+    ProcNumberGetProc(proc_number)
+        .map(|p| (proc::proc_database_id::call(p), proc::proc_temp_namespace_id::call(p)))
 }
 
 /// `ProcNumberGetTransactionIds(ProcNumber procNumber, ...)` (procarray.c) —
 /// the `(xid, xmin, nsubxid, overflowed)` advertised by that slot.
 pub fn ProcNumberGetTransactionIds(
-    _proc_number: ProcNumber,
+    proc_number: ProcNumber,
 ) -> (TransactionId, TransactionId, i32, bool) {
-    panic!("decomp: ProcNumberGetTransactionIds not yet filled")
-}
+    // *xid = InvalidTransactionId; *xmin = InvalidTransactionId;
+    // *nsubxid = 0; *overflowed = false;
+    let mut xid = InvalidTransactionId;
+    let mut xmin = InvalidTransactionId;
+    let mut nsubxid = 0;
+    let mut overflowed = false;
 
-/// `BackendPidGetProc(int pid)` projected to `(roleId, procNumber)`
-/// (procarray.c + `GetNumberFromPGProc`) — the live backend with that pid, or
-/// `None`.
-pub fn BackendPidGetProcRole(_pid: i32) -> Option<(Oid, ProcNumber)> {
-    panic!("decomp: BackendPidGetProcRole not yet filled")
+    // if (procNumber < 0 || procNumber >= ProcGlobal->allProcCount) return;
+    if proc_number < 0 || proc_number as u32 >= proc::proc_all_proc_count::call() {
+        return (xid, xmin, nsubxid, overflowed);
+    }
+
+    // Need to lock out additions/removals of backends.
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)
+        .expect("ProcNumberGetTransactionIds: ProcArrayLock acquire");
+
+    if proc::proc_pid::call(proc_number) != 0 {
+        xid = proc::proc_xid::call(proc_number);
+        xmin = proc::proc_xmin::call(proc_number);
+        let (count, ovf) = proc::proc_subxid_status::call(proc_number);
+        nsubxid = count;
+        overflowed = ovf;
+    }
+
+    lwlock::lwlock_release_proc_array::call()
+        .expect("ProcNumberGetTransactionIds: ProcArrayLock release");
+
+    (xid, xmin, nsubxid, overflowed)
 }
 
 /// `BackendPidGetProcWithLock(int pid)` (procarray.c) — like `BackendPidGetProc`
 /// but the caller already holds `ProcArrayLock`; returns the slot's
 /// `ProcNumber` or `None`.
-pub fn BackendPidGetProcWithLock(_pid: i32) -> Option<ProcNumber> {
-    panic!("decomp: BackendPidGetProcWithLock not yet filled")
+pub fn BackendPidGetProcWithLock(pid: i32) -> Option<ProcNumber> {
+    // if (pid == 0) return NULL; /* never match dummy PGPROCs */
+    if pid == 0 {
+        return None;
+    }
+
+    let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
+    for index in 0..num_procs {
+        let pgprocno =
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+        if proc::proc_pid::call(pgprocno) == pid {
+            return Some(pgprocno);
+        }
+    }
+    None
+}
+
+/// `BackendPidGetProc(int pid)` projected to `(roleId, procNumber)`
+/// (procarray.c + `GetNumberFromPGProc`) — the live backend with that pid, or
+/// `None`. Takes `ProcArrayLock` shared around the scan.
+pub fn BackendPidGetProcRole(pid: i32) -> Option<(Oid, ProcNumber)> {
+    // if (pid == 0) return NULL; /* never match dummy PGPROCs */
+    if pid == 0 {
+        return None;
+    }
+
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)
+        .expect("BackendPidGetProc: ProcArrayLock acquire");
+
+    let result = BackendPidGetProcWithLock(pid);
+
+    lwlock::lwlock_release_proc_array::call().expect("BackendPidGetProc: ProcArrayLock release");
+
+    result.map(|p| (proc::proc_role_id::call(p), p))
 }
 
 /// `BackendXidGetPid(TransactionId xid)` (procarray.c) — pid of the backend
-/// running top-level `xid`, or 0.
-pub fn BackendXidGetPid(_xid: TransactionId) -> i32 {
-    panic!("decomp: BackendXidGetPid not yet filled")
+/// running top-level `xid`, or 0. Only main transaction ids are considered.
+pub fn BackendXidGetPid(xid: TransactionId) -> i32 {
+    let mut result = 0;
+
+    // if (xid == InvalidTransactionId) return 0; /* never match invalid xid */
+    if xid == InvalidTransactionId {
+        return 0;
+    }
+
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)
+        .expect("BackendXidGetPid: ProcArrayLock acquire");
+
+    // TransactionId *other_xids = ProcGlobal->xids; scanned by dense index.
+    let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
+    for index in 0..num_procs {
+        if proc::proc_array_xid::call(index) == xid {
+            let pgprocno =
+                PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+            result = proc::proc_pid::call(pgprocno);
+            break;
+        }
+    }
+
+    lwlock::lwlock_release_proc_array::call().expect("BackendXidGetPid: ProcArrayLock release");
+
+    result
 }
 
 /// `IsBackendPid(int pid)` (procarray.c) — is `pid` a live backend?
-pub fn IsBackendPid(_pid: i32) -> bool {
-    panic!("decomp: IsBackendPid not yet filled")
+pub fn IsBackendPid(pid: i32) -> bool {
+    // return (BackendPidGetProc(pid) != NULL);
+    BackendPidGetProcRole(pid).is_some()
 }
 
 /// `GetCurrentVirtualXIDs(...)` (procarray.c) — the VXIDs of currently-running
@@ -84,19 +186,85 @@ pub fn GetCurrentVirtualXIDs<'mcx>(
     panic!("decomp: GetCurrentVirtualXIDs not yet filled")
 }
 
-/// `GetVirtualXIDsDelayingChkpt(...)` (procarray.c) — VXIDs of backends with
-/// `delayChkpt` set matching `type`, allocated in `mcx`.
+/// `GetVirtualXIDsDelayingChkpt(int *nvxids, int type)` (procarray.c) — VXIDs of
+/// backends with `delayChkptFlags & type` set, allocated in `mcx`.
 pub fn GetVirtualXIDsDelayingChkpt<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _delay_chkpt_type: i32,
+    mcx: Mcx<'mcx>,
+    delay_chkpt_type: i32,
 ) -> PgResult<PgVec<'mcx, VirtualTransactionId>> {
-    panic!("decomp: GetVirtualXIDsDelayingChkpt not yet filled")
+    debug_assert!(delay_chkpt_type != 0);
+
+    // palloc enough result space; PgVec grows as the (bounded) scan pushes.
+    let mut vxids = PgVec::new_in(mcx);
+
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)?;
+
+    let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
+    for index in 0..num_procs {
+        let pgprocno =
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+
+        if (proc::proc_delay_chkpt_flags::call(pgprocno) & delay_chkpt_type) != 0 {
+            let (proc_number, lxid) = proc::proc_vxid::call(pgprocno);
+            let vxid = VirtualTransactionId {
+                procNumber: proc_number,
+                localTransactionId: lxid,
+            };
+            // if (VirtualTransactionIdIsValid(vxid)) vxids[count++] = vxid;
+            if vxid.localTransactionId != InvalidLocalTransactionId {
+                vxids.push(vxid);
+            }
+        }
+    }
+
+    lwlock::lwlock_release_proc_array::call()?;
+
+    Ok(vxids)
 }
 
 /// `HaveVirtualXIDsDelayingChkpt(VirtualTransactionId *vxids, int nvxids, int type)`
 /// (procarray.c) — are any of `vxids` still delaying a checkpoint?
-pub fn HaveVirtualXIDsDelayingChkpt(_vxids: &[VirtualTransactionId], _delay_chkpt_type: i32) -> bool {
-    panic!("decomp: HaveVirtualXIDsDelayingChkpt not yet filled")
+pub fn HaveVirtualXIDsDelayingChkpt(vxids: &[VirtualTransactionId], delay_chkpt_type: i32) -> bool {
+    debug_assert!(delay_chkpt_type != 0);
+
+    let mut result = false;
+
+    lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)
+        .expect("HaveVirtualXIDsDelayingChkpt: ProcArrayLock acquire");
+
+    let num_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().numProcs);
+    for index in 0..num_procs {
+        let pgprocno =
+            PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos[index as usize]);
+
+        let (proc_number, lxid) = proc::proc_vxid::call(pgprocno);
+        let vxid = VirtualTransactionId {
+            procNumber: proc_number,
+            localTransactionId: lxid,
+        };
+
+        if (proc::proc_delay_chkpt_flags::call(pgprocno) & delay_chkpt_type) != 0
+            && vxid.localTransactionId != InvalidLocalTransactionId
+        {
+            for other in vxids.iter() {
+                // VirtualTransactionIdEquals: both fields match.
+                if vxid.procNumber == other.procNumber
+                    && vxid.localTransactionId == other.localTransactionId
+                {
+                    result = true;
+                    break;
+                }
+            }
+            if result {
+                break;
+            }
+        }
+    }
+
+    lwlock::lwlock_release_proc_array::call()
+        .expect("HaveVirtualXIDsDelayingChkpt: ProcArrayLock release");
+
+    result
 }
 
 /// `CancelVirtualTransaction(VirtualTransactionId vxid, ProcSignalReason sigmode)`

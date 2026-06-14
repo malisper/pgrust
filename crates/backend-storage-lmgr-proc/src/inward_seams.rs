@@ -265,6 +265,18 @@ fn proc_xmin(pgprocno: ProcNumber) -> TransactionId {
     with_proc_by_number(pgprocno, |p| p.xmin)
 }
 
+fn proc_role_id(pgprocno: ProcNumber) -> Oid {
+    with_proc_by_number(pgprocno, |p| p.roleId)
+}
+
+fn proc_temp_namespace_id(pgprocno: ProcNumber) -> Oid {
+    with_proc_by_number(pgprocno, |p| p.tempNamespaceId)
+}
+
+fn proc_all_proc_count() -> u32 {
+    crate::proc_shmem::all_proc_count()
+}
+
 fn proc_subxids(procno: ProcNumber) -> (i32, Vec<TransactionId>) {
     with_proc_by_number(procno, |p| {
         let count = p.subxidStatus.count as i32;
@@ -612,6 +624,9 @@ pub(crate) fn install() {
     seams::proc_xid::set(proc_xid);
     seams::proc_vxid::set(proc_vxid);
     seams::proc_xmin::set(proc_xmin);
+    seams::proc_role_id::set(proc_role_id);
+    seams::proc_temp_namespace_id::set(proc_temp_namespace_id);
+    seams::proc_all_proc_count::set(proc_all_proc_count);
     seams::proc_subxids::set(proc_subxids);
     seams::my_proc_xmin::set(my_proc_xmin);
     seams::set_my_proc_xmin::set(set_my_proc_xmin);
