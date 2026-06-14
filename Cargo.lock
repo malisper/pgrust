@@ -9747,6 +9747,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
  "types-error",
