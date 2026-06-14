@@ -453,6 +453,7 @@ dependencies = [
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-hio",
+ "backend-access-heap-hio-seams",
  "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-multixact-seams",
  "backend-access-transam-parallel-seams",
@@ -462,24 +463,33 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-catalog-seams",
+ "backend-nodes-core-seams",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-predicate-seams",
+ "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-cache-inval",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-spccache",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-time-combocid-seams",
  "backend-utils-time-snapmgr-pc-seams",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nbtree",
+ "types-nodes",
  "types-rel",
  "types-snapshot",
  "types-storage",
@@ -505,6 +515,7 @@ dependencies = [
  "types-storage",
  "types-tableam",
  "types-tuple",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -595,6 +606,49 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-heap-pruneheap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-hio-seams",
+ "backend-access-heap-pruneheap-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-catalog-seams",
+ "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-page",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
+name = "backend-access-heap-pruneheap-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -1760,6 +1814,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-logical",
+ "types-storage",
  "types-wal",
 ]
 
@@ -10976,6 +11031,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -11520,6 +11576,7 @@ dependencies = [
  "backend-access-heap-heapam",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
+ "backend-access-heap-pruneheap",
  "backend-access-heap-vacuumlazy",
  "backend-access-heap-visibilitymap",
  "backend-access-index-indexam",

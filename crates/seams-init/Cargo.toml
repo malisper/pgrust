@@ -23,6 +23,7 @@ backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
+backend-access-heap-pruneheap = { path = "../backend-access-heap-pruneheap" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-heap-visibilitymap = { path = "../backend-access-heap-visibilitymap" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }

@@ -79,42 +79,12 @@ use backend_rmgrdesc_next::heapdesc::XLOG_HEAP2_NEW_CID;
 // HeapTupleFreeze / HeapPageFreeze — NET-NEW descriptors (access/heapam.h).
 // ===========================================================================
 
-/// `HeapTupleFreeze` (`access/heapam.h`) — a single tuple's freeze plan,
-/// produced by `heap_prepare_freeze_tuple` and executed by
-/// `heap_execute_freeze_tuple` / `heap_freeze_prepared_tuples`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HeapTupleFreeze {
-    /* Fields describing how to process tuple */
-    pub xmax: TransactionId,
-    pub t_infomask2: u16,
-    pub t_infomask: u16,
-    pub frzflags: u8,
-
-    /* xmin/xmax check flags */
-    pub checkflags: u8,
-    /* Page offset number for tuple */
-    pub offset: OffsetNumber,
-}
-
-/// `HeapPageFreeze` (`access/heapam.h`) — VACUUM's per-page freeze state,
-/// updated across each `heap_prepare_freeze_tuple` call. It tracks whether
-/// freezing the page is required and the oldest extant XID/MXID under both the
-/// "freeze" and "no freeze" plans (for advancing relfrozenxid/relminmxid).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HeapPageFreeze {
-    /// Is `heap_prepare_freeze_tuple` caller required to freeze the page?
-    pub freeze_required: bool,
-
-    /// "Freeze" `NewRelfrozenXid` tracker.
-    pub FreezePageRelfrozenXid: TransactionId,
-    /// "Freeze" `NewRelminMxid` tracker.
-    pub FreezePageRelminMxid: MultiXactId,
-
-    /// "No freeze" `NewRelfrozenXid` tracker.
-    pub NoFreezePageRelfrozenXid: TransactionId,
-    /// "No freeze" `NewRelminMxid` tracker.
-    pub NoFreezePageRelminMxid: MultiXactId,
-}
+/// `HeapTupleFreeze` / `HeapPageFreeze` (`access/heapam.h`) — the per-tuple and
+/// per-page freeze plans. They live in `types-vacuum` (the `access/heapam.h`
+/// vocabulary, alongside `VacuumCutoffs`) so the prune/freeze + vacuum seams can
+/// carry them across the cycle; re-exported here so the heap AM families keep
+/// referring to them by their canonical names.
+pub use types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze};
 
 // ===========================================================================
 // BulkInsertStateData — bulk-insert carrier (access/hio.h struct).

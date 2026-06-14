@@ -58,6 +58,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_update_heap_dead_tuples(rel, delta)` (pgstat_relation.c): add
+    /// `delta` to the relation's pending dead-tuple counter (on-access pruning
+    /// reports tuples it reclaimed this way). Keyed by the relation OID;
+    /// no-ops when the relation has no pending-stats entry, never errors.
+    pub fn pgstat_update_heap_dead_tuples(relid: types_core::primitive::Oid, delta: i32)
+);
+
+seam_core::seam!(
     /// Run `f` on `&pgStatLocal.shmem->archiver`.
     pub fn with_shmem_archiver(f: &mut dyn FnMut(&mut PgStatShared_Archiver))
 );

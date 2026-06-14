@@ -28,7 +28,7 @@ use types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TimestampTz, TransactionId,
 };
 use types_error::PgResult;
-use types_vacuum::vacuum::{VacuumCutoffs, VacuumParams};
+use types_vacuum::vacuum::{HeapTupleFreeze, VacuumCutoffs, VacuumParams};
 use types_vacuum::vacuumlazy::{
     GlobalVisStateHandle, LinePointerState, ParallelVacuumInit, ParallelVacuumInitArgs,
     ParallelVacuumStateHandle, PruneAndFreezeArgs, PruneAndFreezeOut, ReadStreamHandle,
@@ -148,14 +148,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `log_heap_prune_and_freeze(...)`. The second-pass reap only ever passes
-    /// `unused`.
+    /// `log_heap_prune_and_freeze(...)` — emit the combined
+    /// `XLOG_HEAP2_PRUNE_FREEZE` record. Used for page pruning (redirects /
+    /// dead / removed), opportunistic/required freezing, and VACUUM's 2nd-pass
+    /// reap (which only ever passes `unused`, with the other arrays empty and
+    /// `cleanup_lock=false`). The freeze-plan array is deduplicated into the
+    /// record by the owner.
     pub fn log_heap_prune_and_freeze(
         relation: Oid,
         buffer: Buffer,
         conflict_xid: TransactionId,
         cleanup_lock: bool,
         reason: i32,
+        frozen: Vec<HeapTupleFreeze>,
+        redirected: Vec<OffsetNumber>,
+        dead: Vec<OffsetNumber>,
         unused: Vec<OffsetNumber>,
     ) -> PgResult<()>
 );
