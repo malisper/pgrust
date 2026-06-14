@@ -86,6 +86,7 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
             relhassubclass: false,
             relpersistence: persistence,
             relkind: b'r',
+            relam: 0,
             relispopulated: true,
             relreplident: b'd',
             relispartition: false,

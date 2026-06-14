@@ -71,6 +71,10 @@ pub struct FormData_pg_class<'mcx> {
     pub relpersistence: u8,
     /// `char relkind` — `RELKIND_*`.
     pub relkind: u8,
+    /// `Oid relam` — the relation's access method (the table/index AM OID).
+    /// Read by logical-replication index selection
+    /// (`IsIndexUsableForReplicaIdentityFull`: `idxrel->rd_rel->relam`).
+    pub relam: Oid,
     /// `bool relispopulated` — matview currently holds query results.
     pub relispopulated: bool,
     /// `char relreplident` — replica identity setting, see
@@ -472,6 +476,7 @@ mod tests {
                 relhassubclass: false,
                 relpersistence: b'p',
                 relkind: b'r',
+                relam: 0,
                 relispopulated: true,
                 relreplident: b'd',
                 relispartition: false,

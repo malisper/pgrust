@@ -150,3 +150,14 @@ seam_core::seam!(
     /// carry it. `Err` carries the handler-load `ereport`s.
     pub fn index_am_searcharray(amoid: types_core::Oid) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `GetIndexAmRoutineByAmId(amoid, false)->amgettuple != NULL` (amapi.c):
+    /// whether the AM implements the `amgettuple` callback (logical
+    /// replication's `IsIndexUsableForReplicaIdentityFull` requires it so the
+    /// apply worker can fetch tuples via the index). The owning amapi unit loads
+    /// the AM handler and checks the function pointer; the trimmed in-cache
+    /// `IndexAmRoutine` vtable does not carry it. `Err` carries the handler-load
+    /// `ereport`s.
+    pub fn index_am_has_gettuple(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);
