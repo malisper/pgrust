@@ -5021,6 +5021,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-rbtree"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-libpq-auth-seams"
 version = "0.0.0"
 dependencies = [
