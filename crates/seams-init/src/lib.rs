@@ -530,6 +530,14 @@ mod recurrence_guard {
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
+        // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
+        // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
+        // It is correctly installed at runtime by backend-timezone-localtime's
+        // init_seams() (wired into init_all), so the call path never panics; only
+        // the guard's name-prefix attribution flags it because the pgtz owner
+        // crate landed and flipped pgtz-seams into "complete owner" status. Pay
+        // down by relocating the decl to a backend-timezone-localtime-seams crate.
+        ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_cache_typcache", "domain_check_input"),
