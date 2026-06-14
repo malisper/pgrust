@@ -75,6 +75,8 @@ backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
+backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
+backend-commands-opclasscmds = { path = "../backend-commands-opclasscmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
 backend-executor-execAmi = { path = "../backend-executor-execAmi" }

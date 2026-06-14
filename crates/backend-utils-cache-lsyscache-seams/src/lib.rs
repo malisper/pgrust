@@ -269,6 +269,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_cast_oid(sourcetypeid, targettypeid, missing_ok)` (lsyscache.c):
+    /// the OID of the cast from `sourcetypeid` to `targettypeid`, or
+    /// `InvalidOid` (with `missing_ok = true`). With `missing_ok = false` a
+    /// miss raises `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_cast_oid(
+        sourcetypeid: Oid,
+        targettypeid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `get_relname_relid(relname, relnamespace)` (lsyscache.c):
     /// `GetSysCacheOid2(RELNAMENSP, ...)` — the relation's OID or
     /// `InvalidOid`. `Err` carries catcache-path `ereport(ERROR)`s.

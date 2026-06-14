@@ -108,6 +108,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UnlockSharedObject(classid, objid, objsubid, lockmode)` (lmgr.c):
+    /// release a lock on a shared-catalog object. Used by the
+    /// `get_object_address` retry loop to drop the lock taken on a now-stale
+    /// shared object before re-resolving. Can `elog(WARNING/ERROR)` on a
+    /// lock-table inconsistency, carried on `Err`.
+    pub fn unlock_shared_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `LockApplyTransactionForSession(suboid, xid, objid, lockmode)` (lmgr.c):
     /// take a *session-level* lock on a transaction being applied on a logical
     /// replication subscriber (the parallel-apply deadlock-detection STREAM and

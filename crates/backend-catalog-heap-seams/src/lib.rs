@@ -73,6 +73,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetAttrDefaultOid(relid, attnum)` (catalog/heap.c): scan `pg_attrdef`
+    /// for the default-expression row of column `attnum` on relation `relid`,
+    /// returning the `pg_attrdef` OID (`InvalidOid` if none). Used by
+    /// `get_object_address`'s `OBJECT_DEFAULT` arm. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn get_attr_default_oid(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `heap_create_with_catalog(...)` (heap.c) as specialized for the cluster
     /// transient heap: the NewHeap clones OldHeap's tuple descriptor, owner,
     /// AM, persistence, mapped-ness and reloptions, with `relid = OIDOldHeap`

@@ -14,3 +14,14 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> types_error::PgResult<types_core::Oid>
 );
+
+seam_core::seam!(
+    /// `get_am_oid(amname, missing_ok)` (amcmds.c): resolve an access method
+    /// name to its OID, accepting any `amtype` (the `get_object_address`
+    /// `OBJECT_ACCESS_METHOD` arm). With `missing_ok = false` a missing AM
+    /// raises (`Err`); with `missing_ok = true` it returns `InvalidOid`.
+    pub fn get_am_oid(
+        amname: &str,
+        missing_ok: bool,
+    ) -> types_error::PgResult<types_core::Oid>
+);

@@ -71,6 +71,8 @@ pub fn init_all() {
     backend_commands_define::init_seams();
     backend_commands_dropcmds::init_seams();
     backend_commands_foreigncmds::init_seams();
+    backend_commands_functioncmds::init_seams();
+    backend_commands_opclasscmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
     backend_executor_execAmi::init_seams();
@@ -755,6 +757,18 @@ mod recurrence_guard {
         ("backend_commands_functioncmds", "guc_array_add"),
         ("backend_commands_functioncmds", "guc_array_delete"),
         ("backend_commands_functioncmds", "guc_array_reset"),
+        // DESIGN_DEBT (TD-FUNCCMDS-MISHOMED): aclcheck_error_type (aclchk.c) and
+        // get_language_oid (proclang.c) are declared in
+        // backend-commands-functioncmds-seams because functioncmds was their
+        // first consumer; their real owners (aclchk.c / proclang.c) are still
+        // unported, so neither is installed. objectaddress's resolution engine
+        // (#112) is now a second consumer (TRANSFORM/LANGUAGE arms +
+        // check_object_ownership type/transform arms), making them `::call`ed in
+        // non-test code while the dir-owner functioncmds is COMPLETE — hence the
+        // allowlist. They become real installs when aclchk.c / proclang.c land
+        // (or are re-homed to their proper -seams crates).
+        ("backend_commands_functioncmds", "aclcheck_error_type"),
+        ("backend_commands_functioncmds", "get_language_oid"),
         // DESIGN_DEBT (TD-EXECEXPR-PARAMSETEQ): `exec_build_param_set_equal`'s seam
         // decl (backend-executor-execExpr-seams) still carries the pre-owned-model
         // shape — trailing `parent: &mut PlanStateData` + `estate: &mut EStateData`

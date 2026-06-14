@@ -308,4 +308,8 @@ pub fn init_seams() {
         let scratch = mcx::MemoryContext::new("amcmds get_index_am_oid");
         get_index_am_oid(scratch.mcx(), amname, missing_ok)
     });
+    backend_commands_amcmds_seams::get_am_oid::set(|amname, missing_ok| {
+        let scratch = mcx::MemoryContext::new("amcmds get_am_oid");
+        get_am_oid(scratch.mcx(), amname, missing_ok)
+    });
 }

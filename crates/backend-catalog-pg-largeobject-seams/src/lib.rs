@@ -18,3 +18,11 @@ seam_core::seam!(
         snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `LargeObjectExists(loid)` (pg_largeobject.c): whether
+    /// `pg_largeobject_metadata` has a row for `loid` under the latest catalog
+    /// state (the `LargeObjectExistsWithSnapshot(loid, NULL)` wrapper). Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn large_object_exists(loid: Oid) -> PgResult<bool>
+);

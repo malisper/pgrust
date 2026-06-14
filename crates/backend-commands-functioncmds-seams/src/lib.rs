@@ -270,6 +270,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_transform_oid(type_id, lang_id, missing_ok)` (functioncmds.c): the
+    /// OID of the transform for (`type_id`, `lang_id`), or `InvalidOid` with
+    /// `missing_ok = true`. With `missing_ok = false` a miss raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_transform_oid(
+        mcx: mcx::Mcx<'_>,
+        type_id: Oid,
+        lang_id: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `extension_file_exists(language)`.
     pub fn extension_file_exists(ext_name: String) -> PgResult<bool>
 );

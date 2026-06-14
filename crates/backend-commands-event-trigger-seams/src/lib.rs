@@ -20,6 +20,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_event_trigger_oid(trigname, missing_ok)` (event_trigger.c): the OID
+    /// of the named event trigger, or `InvalidOid` with `missing_ok = true`.
+    /// With `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT`
+    /// (`Err`).
+    pub fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `EventTriggerCollectCreateOpClass(stmt, opclassoid, operators,
     /// procedures)` (event_trigger.c): record a CREATE OPERATOR CLASS for
     /// possibly-interested event triggers. `Err` carries any allocation

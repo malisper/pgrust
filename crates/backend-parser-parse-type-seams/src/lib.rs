@@ -77,6 +77,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `typenameTypeId(NULL, typeName)` (parse_type.c), over the raw-parser
+    /// `TypeName` node (`nodes/parsenodes.h`). Used by `check_object_ownership`'s
+    /// `OBJECT_CAST` / `OBJECT_TRANSFORM` arms (the source/target type ownership
+    /// probe). Raises if the type does not exist or is only a shell.
+    pub fn typename_type_id_node(type_name: &ParseTypeName) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `TypeNameListToString(typenames)` (parse_func.c): render a comma-
     /// separated list of raw-parser `TypeName` nodes (a function/aggregate
     /// argument-type list) for an error message, palloc'd in the caller's

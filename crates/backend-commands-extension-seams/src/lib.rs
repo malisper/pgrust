@@ -30,3 +30,10 @@ seam_core::seam!(
         ext_oid: Oid,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `get_extension_oid(extname, missing_ok)` (extension.c): the OID of the
+    /// named extension, or `InvalidOid` with `missing_ok = true`. With
+    /// `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_extension_oid(extname: &str, missing_ok: bool) -> PgResult<Oid>
+);

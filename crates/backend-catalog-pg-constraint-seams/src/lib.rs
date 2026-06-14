@@ -56,3 +56,29 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn constraint_type_oids(constroid: Oid) -> PgResult<Option<(Oid, Oid, Oid)>>
 );
+
+seam_core::seam!(
+    /// `get_relation_constraint_oid(relid, conname, missing_ok)`
+    /// (pg_constraint.c): the OID of the named constraint on relation `relid`,
+    /// or `InvalidOid` with `missing_ok = true`. With `missing_ok = false` a
+    /// miss raises `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_relation_constraint_oid(
+        mcx: Mcx<'_>,
+        relid: Oid,
+        conname: &str,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_domain_constraint_oid(typid, conname, missing_ok)`
+    /// (pg_constraint.c): the OID of the named constraint on domain `typid`, or
+    /// `InvalidOid` with `missing_ok = true`. With `missing_ok = false` a miss
+    /// raises `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_domain_constraint_oid(
+        mcx: Mcx<'_>,
+        typid: Oid,
+        conname: &str,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);

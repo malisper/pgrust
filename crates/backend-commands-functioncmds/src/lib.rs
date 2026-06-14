@@ -44,9 +44,14 @@ pub use ddl_core::{
 // Seam installation
 // ===========================================================================
 
-/// Install every seam this crate owns. functioncmds owns no inward seam (no
-/// other crate calls back into it across a cycle yet), so this installs nothing.
-pub fn init_seams() {}
+/// Install every seam this crate owns. functioncmds owns the `get_transform_oid`
+/// lookup seam (consumed by objectaddress's resolution engine); the rest of the
+/// crate's surface is reached only from unported callers.
+pub fn init_seams() {
+    backend_commands_functioncmds_seams::get_transform_oid::set(
+        cast_transform_do::get_transform_oid,
+    );
+}
 
 #[allow(unused_imports)]
 use backend_commands_functioncmds_seams as _functioncmds_seams_dep;
