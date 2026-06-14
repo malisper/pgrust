@@ -26,8 +26,8 @@
 //! - the identifier helpers (`parser/scansup.c`
 //!   `downcase_truncate_identifier`/`truncate_identifier`) and
 //!   `canonicalize_path` (`port/path.c`) for the `Split*String` parsers,
-//!   `quote_identifier` (`ruleutils.c`) / `quote_literal_cstr` (`quote.c`) and
-//!   `pg_strtoint32` (`numutils.c`) for `%I`/`%L`/indirect-width formatting,
+//!   `quote_identifier` (`ruleutils.c`, owner not yet ported) for the `%I`
+//!   formatting conversion,
 //! - the TOAST owner (`access/common/detoast.c` `toast_datum_size`,
 //!   `access/common/toast_compression.c` `toast_get_compression_id`, the
 //!   on-disk-external `va_valueid` extraction) for `pg_column_*`.
@@ -161,22 +161,35 @@ fn quote_identifier<'mcx>(_mcx: Mcx<'mcx>, _ident: &[u8]) -> PgResult<PgVec<'mcx
     )
 }
 
-/// C: `quote_literal_cstr(literal)` (quote.c) for the `%L` conversion. Owner
-/// not yet ported.
-fn quote_literal_cstr<'mcx>(_mcx: Mcx<'mcx>, _literal: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    panic!(
-        "unported owner: utils/adt/quote.c quote_literal_cstr (format() %L) — \
-         port backend-utils-adt-quote"
-    )
+/// C: `quote_literal_cstr(literal)` (quote.c) for the `%L` conversion. Calls the
+/// merged `backend-utils-adt-quote` owner via its installed seam. The C input is
+/// a NUL-terminated C string in the database encoding and the result is a freshly
+/// `palloc`'d quoted literal; the seam contract crosses the content as `&str` ->
+/// `String` (see backend-utils-adt-quote-seams), so we marshal the payload bytes
+/// to/from a `PgVec` charged to `mcx`. Non-UTF-8 input surfaces as the encoding
+/// error the fmgr text<->cstring boundary would otherwise raise.
+fn quote_literal_cstr<'mcx>(mcx: Mcx<'mcx>, literal: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let s = core::str::from_utf8(literal).map_err(|_| {
+        types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+    })?;
+    let quoted = backend_utils_adt_quote_seams::quote_literal_cstr::call(s);
+    let bytes = quoted.as_bytes();
+    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(out)
 }
 
 /// C: `pg_strtoint32(s)` (numutils.c) — parse a stringified indirect-width arg.
-/// Owner not yet ported.
-fn pg_strtoint32(_s: &[u8]) -> PgResult<i32> {
-    panic!(
-        "unported owner: utils/adt/numutils.c pg_strtoint32 (format() indirect \
-         width) — port backend-utils-adt-numutils"
-    )
+/// Calls the merged `backend-utils-adt-numutils` owner directly (a leaf with no
+/// seam crate). The C input is a NUL-terminated C string; `pg_strtoint32`
+/// ereports on bad data or overflow, surfaced here as the `Err`.
+fn pg_strtoint32(s: &[u8]) -> PgResult<i32> {
+    let s = core::str::from_utf8(s).map_err(|_| {
+        types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+    })?;
+    backend_utils_adt_numutils::pg_strtoint32(s)
 }
 
 /// C: `toast_datum_size(value)` (access/common/detoast.c) for `pg_column_size`.
@@ -2029,4 +2042,45 @@ fn datum_get_int32(value: &Datum<'_>) -> i32 {
 /// C: `DatumGetInt16(value)` (postgres.h) — the low 16 bits of the Datum.
 fn datum_get_int16(value: &Datum<'_>) -> i16 {
     value.as_i16()
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    fn null_arg<'mcx>(typid: Oid) -> FormatArg<'mcx> {
+        FormatArg { value: Datum::null(), is_null: true, typid }
+    }
+
+    // C: SELECT format('%L', NULL::text) -> "NULL". The %L NULL leg
+    // (varlena.c:6313) is now live (no OutputFunctionCall needed); width 0 so
+    // the append fast path avoids the mb seam.
+    #[test]
+    fn format_percent_l_null_yields_null_keyword() {
+        let ctx = mcx::MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        // text-typed NULL argument; TEXTOID = 25.
+        let out = text_format(mcx, Some(b"%L"), &[null_arg(25)]).unwrap().unwrap();
+        assert_eq!(&out[..], b"NULL");
+    }
+
+    // The pg_strtoint32 owner-call helper rejects garbage (numutils ereport),
+    // surfaced as Err — proving the stand-in panic is gone.
+    #[test]
+    fn pg_strtoint32_helper_rejects_garbage() {
+        assert!(pg_strtoint32(b"42").is_ok());
+        assert_eq!(pg_strtoint32(b"42").unwrap(), 42);
+        assert!(pg_strtoint32(b"notanumber").is_err());
+    }
+
+    // The quote_literal_cstr owner-call helper now produces a real quoted
+    // literal via the merged quote.c seam (must be installed by init_seams).
+    #[test]
+    fn quote_literal_cstr_helper_quotes() {
+        backend_utils_adt_quote::init_seams();
+        let ctx = mcx::MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let q = quote_literal_cstr(mcx, b"it's").unwrap();
+        assert_eq!(&q[..], b"'it''s'");
+    }
 }
