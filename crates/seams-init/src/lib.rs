@@ -105,6 +105,7 @@ pub fn init_all() {
     backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
     backend_lib_hyperloglog::init_seams();
+    backend_main_main::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();

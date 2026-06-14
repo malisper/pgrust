@@ -36,13 +36,21 @@ pub enum RegexWcClass {
 }
 
 /// The `int category` argument to `pg_perm_setlocale` (`locale.h` `LC_*`),
-/// trimmed to the categories postinit passes.
+/// covering the categories `postinit` and `main()` pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcCategory {
     /// `LC_COLLATE`
     LcCollate,
     /// `LC_CTYPE`
     LcCtype,
+    /// `LC_MESSAGES`
+    LcMessages,
+    /// `LC_MONETARY`
+    LcMonetary,
+    /// `LC_NUMERIC`
+    LcNumeric,
+    /// `LC_TIME`
+    LcTime,
 }
 
 seam_core::seam!(

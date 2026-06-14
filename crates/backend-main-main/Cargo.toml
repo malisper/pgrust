@@ -1,0 +1,35 @@
+[package]
+name = "backend-main-main"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_main_main"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-startup = { path = "../types-startup" }
+backend-utils-error = { path = "../backend-utils-error" }
+
+# Inward seam this unit OWNS (parse_dispatch_option).
+backend-main-main-seams = { path = "../backend-main-main-seams" }
+
+# Real ported subprograms reached by the dispatch switch.
+backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
+backend-utils-misc-help-config = { path = "../backend-utils-misc-help-config" }
+backend-utils-misc-more = { path = "../backend-utils-misc-more" }
+
+# Owner seams for callees whose owning unit is not yet ported (panic until
+# the owner lands — mirror-pg-and-panic).
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+backend-common-exec-seams = { path = "../backend-common-exec-seams" }
+common-path-seams = { path = "../common-path-seams" }
+common-username-seams = { path = "../common-username-seams" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }

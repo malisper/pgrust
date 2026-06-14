@@ -4,6 +4,13 @@
 
 
 seam_core::seam!(
+    /// `PostmasterMain(argc, argv)` (`postmaster.c`): the postmaster's main
+    /// entry, reached from `main()` for the `DISPATCH_POSTMASTER` case. It
+    /// never returns — it runs the server until shutdown and then `proc_exit`s.
+    pub fn postmaster_main(argv: &[&str]) -> !
+);
+
+seam_core::seam!(
     /// `ClosePostmasterPorts(am_syslogger)` (`postmaster.c`): in a child
     /// process, close the postmaster's listen sockets and other
     /// postmaster-only file descriptors.
