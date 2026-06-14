@@ -8,7 +8,7 @@ use types_brin::{
 };
 use types_core::{BlockNumber, Size};
 use types_error::PgResult;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_typcache::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
 use backend_access_common_heaptuple::{heap_compute_data_size, heap_fill_tuple};
@@ -46,13 +46,13 @@ pub fn brin_form_tuple<'mcx>(
     debug_assert!(brdesc.bd_totalstored > 0);
 
     // values = palloc(Datum * bd_totalstored); nulls = palloc0(bool * total).
-    // In the byte model, `values` are TupleValues; default-fill with empty
+    // In the byte model, `values` are Datums; default-fill with empty
     // ByVal(0) placeholders for slots never written (the C palloc leaves them
     // uninitialized but only the written slots are read by heap_fill_tuple).
-    let mut values: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, total)?;
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, total)?;
     let mut nulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, total)?;
     for _ in 0..total {
-        values.push(TupleValue::ByVal(types_datum::Datum::null()));
+        values.push(Datum::null());
         nulls.push(false);
     }
 
@@ -82,11 +82,11 @@ pub fn brin_form_tuple<'mcx>(
         // If needed, serialize the values before forming the on-disk tuple.
         // The opclass serialize callback fills a fresh `col_values` slice from
         // bv_mem_value; otherwise the column's bv_values are used directly.
-        let mut serialized: Option<PgVec<'mcx, TupleValue<'mcx>>> = None;
+        let mut serialized: Option<PgVec<'mcx, Datum<'mcx>>> = None;
         if col.bv_has_serialize {
-            let mut dst: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, nstored)?;
+            let mut dst: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, nstored)?;
             for _ in 0..nstored {
-                dst.push(TupleValue::ByVal(types_datum::Datum::null()));
+                dst.push(Datum::null());
             }
             let mem = col
                 .bv_mem_value
@@ -102,7 +102,7 @@ pub fn brin_form_tuple<'mcx>(
             // We must look at the stored type, not the index descriptor.
             let atttype = &brdesc.bd_info[keyno].oi_typcache[datumno];
 
-            let src_value: &TupleValue<'_> = match &serialized {
+            let src_value: &Datum<'_> = match &serialized {
                 Some(s) => &s[datumno],
                 None => &col.bv_values[datumno],
             };
@@ -155,7 +155,7 @@ pub fn brin_form_tuple<'mcx>(
                 }
             }
 
-            values[idxattno] = TupleValue::ByRef(value);
+            values[idxattno] = Datum::ByRef(value);
             idxattno += 1;
         }
     }
@@ -251,9 +251,9 @@ pub fn brin_form_tuple<'mcx>(
     Ok((rettuple, len))
 }
 
-/// Deep-clone a [`TupleValue`] into `mcx` (the by-value path of `brin_form_tuple`
+/// Deep-clone a [`Datum`] into `mcx` (the by-value path of `brin_form_tuple`
 /// just copies the scalar; this matches that and keeps lifetimes uniform).
-fn clone_value<'mcx>(mcx: Mcx<'mcx>, v: &TupleValue<'_>) -> PgResult<TupleValue<'mcx>> {
+fn clone_value<'mcx>(mcx: Mcx<'mcx>, v: &Datum<'_>) -> PgResult<Datum<'mcx>> {
     v.clone_in(mcx)
 }
 
@@ -395,9 +395,9 @@ pub fn brin_memtuple_initialize<'mcx>(
     for i in 0..brdesc.natts() {
         let nstored = brdesc.bd_info[i].nstored();
         // bv_values points into the trailing Datum area, oi_nstored long.
-        let mut bv_values: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, nstored)?;
+        let mut bv_values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, nstored)?;
         for _ in 0..nstored {
-            bv_values.push(TupleValue::ByVal(types_datum::Datum::null()));
+            bv_values.push(Datum::null());
         }
         dtuple.bt_columns.push(BrinValues {
             bv_attno: (i + 1) as i16,
@@ -450,9 +450,9 @@ pub fn brin_deform_tuple<'mcx>(
 
     // values/allnulls/hasnulls scratch arrays (bd_totalstored / natts).
     let total = brdesc.bd_totalstored as usize;
-    let mut values: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, total)?;
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, total)?;
     for _ in 0..total {
-        values.push(TupleValue::ByVal(types_datum::Datum::null()));
+        values.push(Datum::null());
     }
     let mut allnulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, brdesc.natts())?;
     let mut hasnulls: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, brdesc.natts())?;
@@ -530,7 +530,7 @@ fn brin_deconstruct_tuple<'mcx>(
     tp: &[u8],
     nullbits: Option<&[u8]>,
     nulls: bool,
-    values: &mut [TupleValue<'mcx>],
+    values: &mut [Datum<'mcx>],
     allnulls: &mut [bool],
     hasnulls: &mut [bool],
 ) -> PgResult<()> {
@@ -633,15 +633,15 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, attptr: &[u8]) -> usize
 }
 
 /// `fetchatt(att, T)` (`tupmacs.h`): read one attribute from the data area.
-/// By-value scalars become a [`TupleValue::ByVal`] machine word; by-reference
-/// fields become a [`TupleValue::ByRef`] copy of the field's verbatim bytes
+/// By-value scalars become a [`Datum::ByVal`] machine word; by-reference
+/// fields become a [`Datum::ByRef`] copy of the field's verbatim bytes
 /// (the faithful idiomatic stand-in for C's bare pointer into the tuple).
 fn fetchatt<'mcx>(
     mcx: Mcx<'mcx>,
     attbyval: bool,
     attlen: i16,
     src: &[u8],
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if attbyval {
         // fetch_att: read attlen bytes into a Datum word.
         let word: u64 = match attlen {
@@ -653,7 +653,7 @@ fn fetchatt<'mcx>(
             ]),
             _ => panic!("unsupported byval length: {attlen}"),
         };
-        Ok(TupleValue::ByVal(types_datum::Datum::from_usize(word as usize)))
+        Ok(Datum::from_usize(word as usize))
     } else {
         // by-reference: copy the field's bytes (its on-disk span).
         let span = if attlen > 0 {
@@ -668,6 +668,6 @@ fn fetchatt<'mcx>(
             }
             len + 1
         };
-        Ok(TupleValue::ByRef(slice_in(mcx, &src[..span])?))
+        Ok(Datum::ByRef(slice_in(mcx, &src[..span])?))
     }
 }
