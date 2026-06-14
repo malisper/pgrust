@@ -5,7 +5,12 @@
 //! model cannot smuggle pointers through `Datum`, so a key crosses as this
 //! enum: by-value scalars keep the word, by-reference keys carry their bytes.
 
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// A by-value system-cache search key is the bare machine word C passes as
+// `Datum key1..key4` (`ObjectIdGetDatum`, `Int16GetDatum`, ...); it carries no
+// deformed value (by-reference keys travel as `Str`/`Bytes` here), so it stays
+// the audited bare word rather than the canonical `Datum<'mcx>` enum.
+use types_datum::Datum as ScalarWord;
 use mcx::PgVec;
 use types_core::primitive::{AttrNumber, Oid as OidT};
 
@@ -50,7 +55,7 @@ pub struct PgIndexInfo<'mcx> {
 pub enum SysCacheKey<'a> {
     /// Pass-by-value key: the `Datum` word itself (`ObjectIdGetDatum`,
     /// `Int16GetDatum`, `CharGetDatum`, ...).
-    Value(Datum),
+    Value(ScalarWord),
     /// NUL-free string key (`CStringGetDatum(name)` for `name`/`cstring` key
     /// columns, `CStringGetTextDatum` for `text` ones).
     Str(&'a str),
@@ -63,7 +68,7 @@ pub enum SysCacheKey<'a> {
 
 impl SysCacheKey<'_> {
     /// The C `0` placeholder for an unused key slot.
-    pub const UNUSED: SysCacheKey<'static> = SysCacheKey::Value(Datum::null());
+    pub const UNUSED: SysCacheKey<'static> = SysCacheKey::Value(ScalarWord::null());
 }
 
 impl Default for SysCacheKey<'_> {
@@ -72,8 +77,8 @@ impl Default for SysCacheKey<'_> {
     }
 }
 
-impl From<Datum> for SysCacheKey<'static> {
-    fn from(d: Datum) -> Self {
+impl From<ScalarWord> for SysCacheKey<'static> {
+    fn from(d: ScalarWord) -> Self {
         SysCacheKey::Value(d)
     }
 }
