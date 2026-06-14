@@ -7,6 +7,18 @@
 //! a call panics loudly. The expanded object crosses as the typed
 //! [`types_datum::ExpandedObjectRef`] handle (C's `ExpandedObjectHeader *`
 //! via `DatumGetEOHP`), not raw bytes.
+//!
+//! Datum-unification keystone: the value-carrying
+//! `make_expanded_object_read_only_internal` seam gains a `_v` migration-target
+//! variant that takes/returns the unified [`types_tuple::…::Datum`] enum
+//! (aliased [`DatumV`]); the bare-word `types_datum::Datum` variant is a
+//! transitional shim kept until every consumer migrates, then removed in
+//! Cleanup.
+
+// The canonical unified value type (Datum-unification keystone). The `_v`
+// seam variant below takes/returns it; the bare-word `Datum` variant is a
+// transitional shim kept until every consumer migrates.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 seam_core::seam!(
     /// `EOH_get_flat_size(DatumGetEOHP(datum))` (utils/adt/expandeddatum.c):
@@ -40,8 +52,26 @@ seam_core::seam!(
     /// dereference of the `Datum` pointer word is the expandeddatum owner's, so
     /// the transform crosses here rather than in the node. Allocates the R/O
     /// pointer copy in `mcx`; fallible on OOM.
+    ///
+    /// TRANSITIONAL SHIM: superseded by
+    /// [`make_expanded_object_read_only_internal_v`], which carries the unified
+    /// `types_tuple::Datum` value. Kept until callers migrate.
     pub fn make_expanded_object_read_only_internal<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         d: types_datum::Datum,
     ) -> types_error::PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `MakeExpandedObjectReadOnlyInternal(d)` (utils/adt/expandeddatum.c) over
+    /// the unified value type — the migration-target form of
+    /// [`make_expanded_object_read_only_internal`]. A read-write expanded-object
+    /// pointer is rewritten to its built-in read-only pointer
+    /// (`EOHPGetRODatum`); any other datum is returned verbatim (a by-value arm
+    /// passes through unchanged, a non-expanded by-reference arm is returned as
+    /// is). Allocates the R/O pointer copy in `mcx`; fallible on OOM.
+    pub fn make_expanded_object_read_only_internal_v<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        d: &DatumV<'_>,
+    ) -> types_error::PgResult<DatumV<'mcx>>
 );
