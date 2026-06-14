@@ -489,10 +489,9 @@ pub fn init_seams() {
         update::simple_heap_update(mcx, rel, otid, tup)
     });
     // NB: the `insert_one_tuple` seam (bootstrap.c `InsertOneTuple` batch) stays
-    // uninstalled here, exactly as F0 left it: forming the tuple requires
-    // bridging bootstrap's bare-word `types_datum::Datum` array to the canonical
-    // `Datum<'mcx>` that `heap_form_tuple` consumes — the datum-model bridge
-    // (see the Datum-redesign plan) is out of the heap-INSERT family's scope.
+    // uninstalled here: it carries canonical `Datum<'mcx>` (so by-ref column
+    // images survive), but forming + `simple_heap_insert`ing the tuple is the
+    // heap-INSERT family's job, out of this slice's scope.
 }
 
 /// Materialize an on-page `HeapTupleHeader` at `(buffer, offnum)` into `mcx`

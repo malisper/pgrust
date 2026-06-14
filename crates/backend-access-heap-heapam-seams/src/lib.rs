@@ -8,7 +8,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
 use types_error::PgResult;
 use types_rel::{Relation, RelationData};
 use types_tuple::heaptuple::FormData_pg_attribute;
@@ -33,13 +33,16 @@ seam_core::seam!(
     /// simple_heap_insert(boot_reldesc, tuple); heap_freetuple(tuple)`. The
     /// provider forms the tuple from the borrowed relation's descriptor and
     /// the supplied column data, then `simple_heap_insert`s it.
-    /// `attrtypes`/`values`/`nulls` are `numattr` long. `Err` carries the
-    /// heap-insert error surface (and OOM).
+    /// `attrtypes`/`values`/`nulls` are `numattr` long. `values` are the
+    /// canonical `Datum<'mcx>` (`heap_form_tuple`'s element type), so
+    /// by-reference column images (`bytea`/`text`/`oidvector`/etc.) carry their
+    /// bytes through, not a nulled bare word. `Err` carries the heap-insert
+    /// error surface (and OOM).
     pub fn insert_one_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &RelationData<'mcx>,
         attrtypes: &[FormData_pg_attribute],
-        values: &[Datum],
+        values: &[TupleDatum<'mcx>],
         nulls: &[bool],
     ) -> PgResult<()>
 );
