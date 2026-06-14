@@ -36,9 +36,9 @@ seam_core::seam!(
     /// body (rangetypes.c:1703): the `numeric` subtype distance `v1 - v2` as a
     /// `float8`. `v1` / `v2` are `numeric` `Datum`s. `Err` carries the
     /// `numeric_sub` / `numeric_float8` `ereport(ERROR)`s (e.g. overflow).
-    pub fn numeric_subdiff(
-        v1: types_datum::Datum,
-        v2: types_datum::Datum,
+    pub fn numeric_subdiff<'mcx>(
+        v1: types_tuple::Datum<'mcx>,
+        v2: types_tuple::Datum<'mcx>,
     ) -> types_error::PgResult<f64>
 );
 
