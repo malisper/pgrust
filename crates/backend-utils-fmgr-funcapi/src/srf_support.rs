@@ -11,12 +11,15 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_datum::Datum;
 use types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
-use types_error::{PgResult, ERROR};
+use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::{
-    FuncCallContext, ReturnSetInfo, SetFunctionReturnMode, MAT_SRF_USE_EXPECTED_DESC,
-    SFRM_Materialize,
+    FuncCallContext, ReturnSetInfo, SetFunctionReturnMode, TypeFuncClass, MAT_SRF_BLESS,
+    MAT_SRF_USE_EXPECTED_DESC, SFRM_Materialize, SFRM_Materialize_Random,
 };
+use types_tuple::heaptuple::RECORDOID;
+
+use crate::result_type::internal_get_result_type;
 
 /// `InitMaterializedSRF(fcinfo, flags)` (funcapi.c:76) — sanity-check the
 /// `ReturnSetInfo` at `fcinfo->resultinfo`, create the materialize-mode
@@ -63,6 +66,10 @@ pub fn InitMaterializedSRF<'mcx>(
             .errmsg("materialize mode required, but it is not allowed in this context")
             .into_error());
     }
+    // Captured before the call frame is re-borrowed for the result-type reads
+    // and the final mutable store (C reads `rsinfo->allowedModes` again at the
+    // `random_access` line).
+    let rsinfo_allowed_modes = rsinfo.allowedModes;
 
     // C funcapi.c:96-122 (the descriptor + tuplestore build):
     //   per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
@@ -79,24 +86,116 @@ pub fn InitMaterializedSRF<'mcx>(
     //   rsinfo->setDesc = stored_tupdesc;
     //   MemoryContextSwitchTo(old_context);
     //
-    // Every allocation here (the result descriptor and the tuplestore) lives
-    // in `rsinfo->econtext->ecxt_per_query_memory` so it outlives the SRF call
-    // frame, and resolving the result type (`get_call_result_type`) needs both
-    // the per-query `Mcx` and the call expression reached through
-    // `fcinfo->flinfo->fn_expr`. The owned `ReturnSetInfo` is trimmed: it
-    // carries no `econtext` and the call frame carries no `flinfo`, so the
-    // per-query context this body must allocate in is not reachable from the
-    // ported shape. Mirror PG and panic at that boundary rather than restructure
-    // around it (the per-query-context handle lands when ExprContext / the SRF
-    // call frame widen here).
-    let _ = rsinfo;
-    panic!(
-        "InitMaterializedSRF: the per-query memory context \
-         (rsinfo->econtext->ecxt_per_query_memory) and the call expression \
-         (fcinfo->flinfo->fn_expr) needed to build the result tupledesc and \
-         tuplestore are not reachable from the trimmed ReturnSetInfo / call \
-         frame; widen ReturnSetInfo (econtext) and the call frame (flinfo) here"
-    )
+    // Every allocation here (the result descriptor and the tuplestore) must
+    // outlive the SRF call frame. C reaches that context through
+    // `rsinfo->econtext->ecxt_per_query_memory` and switches the global
+    // `CurrentMemoryContext` into it before allocating; the trimmed
+    // `ReturnSetInfo` carries no `econtext`. In the owned model the
+    // tuplestore/tupledesc builders take an explicit `Mcx` instead of relying
+    // on a switched global context, and the call's memory context is reached
+    // through the fmgr owner's call frame (the trimmed `FunctionCallInfoBaseData`
+    // has no `flinfo`/`context` either, so both the context and the
+    // `fn_oid`/`fn_expr` `get_call_result_type` needs come through the fmgr
+    // seams). This is the `switch_to_per_query_context` of src-idiomatic
+    // expressed as a context argument: `pg_call_mcx` is C's
+    // `CurrentMemoryContext` at fmgr dispatch — the same context the consumers
+    // (`pg_get_shmem_allocations`, …) build their row datums in.
+    let mcx: Mcx<'mcx> = backend_utils_fmgr_fmgr_seams::pg_call_mcx::call(fcinfo);
+
+    // `get_call_result_type` (funcapi.c) pulls `fn_oid`/`fn_expr` off
+    // `fcinfo->flinfo`; the `fn_oid_and_expr` seam reads them from the
+    // fmgr-widened frame. Its contract borrows the frame for `'mcx` (the
+    // `fn_expr` node it can hand back lives in the call's arena), so a `'mcx`
+    // shared view of the frame is needed.
+    //
+    // SAFETY: `fcinfo_ref` aliases `*fcinfo` as a shared `'mcx` view used ONLY
+    // for the read-only result-type resolution below; it is dead before the
+    // single `&mut fcinfo.resultinfo` store at the end of this function (the
+    // resolution produces owned `TupleDesc`/`Tuplestorestate` values that do
+    // not borrow the frame), so the shared and exclusive accesses never
+    // overlap in time. This is the trimmed call-frame boundary: the seam
+    // contract is `&'mcx`, the owning seam here receives `&mut`, and the frame
+    // is the SRF call frame both views describe.
+    let fcinfo_ref: &'mcx FunctionCallInfoBaseData<'mcx> = unsafe { &*(fcinfo as *const _) };
+    let (fn_oid, call_expr) = backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::call(fcinfo_ref);
+
+    // Build a tuple descriptor for our result type.
+    //
+    // C: if (flags & MAT_SRF_USE_EXPECTED_DESC)
+    //        stored_tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
+    let mut stored_tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
+        if (flags & MAT_SRF_USE_EXPECTED_DESC) != 0 {
+            let expected = fcinfo_ref
+                .resultinfo
+                .as_ref()
+                .and_then(|r| r.expectedDesc.as_deref())
+                .expect(
+                    "InitMaterializedSRF: MAT_SRF_USE_EXPECTED_DESC checked rsinfo->expectedDesc != NULL above",
+                );
+            let copy = backend_access_common_tupdesc_seams::create_tuple_desc_copy::call(mcx, expected)?;
+            Some(mcx::alloc_in(mcx, copy)?)
+        } else {
+            // C: if (get_call_result_type(fcinfo, NULL, &stored_tupdesc)
+            //         != TYPEFUNC_COMPOSITE)
+            //        elog(ERROR, "return type must be a row type");
+            //
+            // get_call_result_type funnels into internal_get_result_type with
+            // the function OID + call expression off the fmgr frame and the
+            // ReturnSetInfo for the RECORD-via-expectedDesc arm.
+            let rsinfo_for_resolve = fcinfo_ref.resultinfo.as_ref();
+            let resolved = internal_get_result_type(mcx, fn_oid, call_expr, rsinfo_for_resolve)?;
+            if resolved.class != Some(TypeFuncClass::Composite) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INTERNAL_ERROR)
+                    .errmsg("return type must be a row type")
+                    .into_error());
+            }
+            resolved.result_tuple_desc
+        };
+
+    // C: if (flags & MAT_SRF_BLESS) BlessTupleDesc(stored_tupdesc);
+    //
+    // BlessTupleDesc (execTuples.c) assigns a transient typmod to an anonymous
+    // RECORD descriptor via the typcache; mirrored inline (the only owned step
+    // is the RECORDOID/typmod<0 guard around assign_record_type_typmod).
+    if (flags & MAT_SRF_BLESS) != 0 {
+        if let Some(td) = stored_tupdesc.as_deref_mut() {
+            if td.tdtypeid == RECORDOID && td.tdtypmod < 0 {
+                backend_utils_cache_typcache_seams::assign_record_type_typmod::call(td)?;
+            }
+        }
+    }
+
+    // C: random_access = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+    let random_access = (rsinfo_allowed_modes & SFRM_Materialize_Random) != 0;
+
+    // C: tupstore = tuplestore_begin_heap(random_access, false, work_mem);
+    //    (the store is allocated in the per-query/current context via `mcx`.)
+    let tupstore = backend_utils_sort_storage_seams::tuplestore_begin_heap::call(
+        mcx,
+        random_access,
+        false,
+        backend_utils_init_small_seams::work_mem::call(),
+    )?;
+
+    // C: rsinfo->returnMode = SFRM_Materialize;
+    //    rsinfo->setResult = tupstore;
+    //    rsinfo->setDesc = stored_tupdesc;
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("InitMaterializedSRF: resultinfo present (checked at entry)");
+    rsinfo.returnMode = SetFunctionReturnMode::Materialize;
+    // The storage seam hands back the carrier inside an `mcx`-allocated box (its
+    // `PgBox<Tuplestorestate>` MEMCTX-RETYPE); `setResult` is the carrier by
+    // value, so move it out of the box.
+    rsinfo.setResult = allocator_api2::boxed::Box::into_inner(tupstore);
+    rsinfo.setDesc = stored_tupdesc;
+
+    // C funcapi.c:122: MemoryContextSwitchTo(old_context) — no global context
+    // is switched in the owned model (the builders allocated into `mcx`
+    // directly), so there is nothing to restore.
+    Ok(())
 }
 
 /// The `tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls)`

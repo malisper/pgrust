@@ -57,3 +57,25 @@ seam_core::seam!(
     /// wakeup list before testing the wait condition. Infallible.
     pub fn condition_variable_prepare_to_sleep(cv: &ConditionVariable)
 );
+
+seam_core::seam!(
+    /// Resolve the CV identity recorded in `cv_sleep_target` back to the live
+    /// `&ConditionVariable` and run `body` over it, returning `body`'s result.
+    ///
+    /// `ConditionVariableCancelSleep()` takes no `cv` argument; in C it
+    /// dereferences the process-local `cv_sleep_target` pointer to reach
+    /// `cv->mutex`/`cv->wakeup`. This port records only the CV's *identity* (its
+    /// address) in `cv_sleep_target`, never a borrow, so the single
+    /// address-to-reference reconstruction is confined to this seam — exactly
+    /// the role of `with_target_cv` in the src-idiomatic port. The seam adds no
+    /// algorithm of its own: the spinlock-guarded
+    /// contains/delete-or-mark-signaled branch runs in `body`, in-crate, over
+    /// the resolved `&ConditionVariable`, just as `Signal`/`Broadcast`/`Sleep`
+    /// run their branch over their own `cv` argument. `target` is the value of
+    /// `CvIdentity` (the recorded address); it is only ever resolved, never
+    /// arithmetic'd.
+    pub fn with_target_cv(
+        target: usize,
+        body: &mut dyn FnMut(&ConditionVariable) -> bool,
+    ) -> bool
+);
