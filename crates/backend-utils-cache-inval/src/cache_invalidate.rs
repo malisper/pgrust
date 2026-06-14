@@ -4,7 +4,11 @@
 
 use types_core::primitive::{OidIsValid, InvalidOid};
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// the opaque callback-registration cookie, stored and handed back verbatim
+// (never deformed). See the crate-root note; the canonical `Datum<'mcx>` enum
+// is for deformed tuple values, not passthrough args.
+use types_datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, FATAL};
 use types_rel::RelationData;
 use types_storage::{
@@ -331,7 +335,7 @@ pub fn CacheInvalidateRelmap(databaseId: Oid) -> PgResult<()> {
 pub fn CacheRegisterSyscacheCallback(
     cacheid: i32,
     func: SyscacheCallbackFunction,
-    arg: Datum,
+    arg: ScalarWord,
 ) -> PgResult<()> {
     if cacheid < 0 || cacheid >= SYS_CACHE_SIZE as i32 {
         /* elog(FATAL, "invalid cache ID: %d", cacheid) */
@@ -374,7 +378,7 @@ pub fn CacheRegisterSyscacheCallback(
 }
 
 /// `CacheRegisterRelcacheCallback`.
-pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: Datum) -> PgResult<()> {
+pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: ScalarWord) -> PgResult<()> {
     with_state(|state| {
         if state.relcache_callback_list.len() >= MAX_RELCACHE_CALLBACKS {
             /* elog(FATAL, "out of relcache_callback_list slots") */
@@ -393,7 +397,7 @@ pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: Datum)
 }
 
 /// `CacheRegisterRelSyncCallback`.
-pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: Datum) -> PgResult<()> {
+pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: ScalarWord) -> PgResult<()> {
     with_state(|state| {
         if state.relsync_callback_list.len() >= MAX_RELSYNC_CALLBACKS {
             /* elog(FATAL, "out of relsync_callback_list slots") */
@@ -425,7 +429,7 @@ pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
      * the borrow of the state across the user callback, which may re-enter the
      * inval machinery; collect the (function, arg) pairs first.
      */
-    let to_call: Vec<(SyscacheCallbackFunction, Datum)> = with_state(|state| {
+    let to_call: Vec<(SyscacheCallbackFunction, ScalarWord)> = with_state(|state| {
         let mut out = Vec::new();
         let mut i = (state.syscache_callback_links[cacheid as usize] - 1) as i32;
         while i >= 0 {
@@ -446,7 +450,7 @@ pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
 
 /// `CallRelSyncCallbacks`.
 pub fn CallRelSyncCallbacks(relid: Oid) -> PgResult<()> {
-    let to_call: Vec<(RelSyncCallbackFunction, Datum)> = with_state(|state| {
+    let to_call: Vec<(RelSyncCallbackFunction, ScalarWord)> = with_state(|state| {
         state
             .relsync_callback_list
             .iter()
