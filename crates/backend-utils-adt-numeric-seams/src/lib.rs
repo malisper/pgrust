@@ -36,9 +36,15 @@ seam_core::seam!(
     /// body (rangetypes.c:1703): the `numeric` subtype distance `v1 - v2` as a
     /// `float8`. `v1` / `v2` are `numeric` `Datum`s. `Err` carries the
     /// `numeric_sub` / `numeric_float8` `ereport(ERROR)`s (e.g. overflow).
-    pub fn numeric_subdiff(
-        v1: types_datum::Datum,
-        v2: types_datum::Datum,
+    ///
+    /// Datum-unification: `v1` / `v2` are the canonical unified value type
+    /// (`types_tuple::Datum<'mcx>`). They are pointer-bearing `numeric` Datums
+    /// (detoasted by the caller, exactly as C's `DirectFunctionCall2` treats
+    /// the `Datum` as a `Numeric` pointer), so they ride the by-value arm; the
+    /// owner reads each image's varlena bytes off the carried machine word.
+    pub fn numeric_subdiff<'mcx>(
+        v1: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        v2: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     ) -> types_error::PgResult<f64>
 );
 
