@@ -7,8 +7,8 @@
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::Datum;
 use types_nodes::nodes::Node;
 use types_parsenodes::{Node as ParseNode, TypeName as ParseTypeName};
 
@@ -22,7 +22,7 @@ seam_core::seam!(
         consttypmod: i32,
         constcollid: Oid,
         constlen: i32,
-        constvalue: Datum,
+        constvalue: Datum<'mcx>,
         constisnull: bool,
         constbyval: bool,
     ) -> PgResult<PgBox<'mcx, Node<'mcx>>>
