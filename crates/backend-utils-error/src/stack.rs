@@ -450,6 +450,29 @@ pub fn errdetail_internal(detail: &str) -> PgResult<()> {
     errdetail(detail)
 }
 
+/// Implementation behind the `backend-utils-error-elog-seams::ereport_msg`
+/// seam. It crosses a pre-rendered message + optional detail and mirrors the
+/// C `ereport(elevel, (errmsg("%s", msg)[, errdetail("%s", detail)]))`
+/// expansion: `if (errstart(elevel, domain)) { errmsg(...); [errdetail(...);]
+/// errfinish(__FILE__, __LINE__, __func__); }`.
+///
+/// Callers (e.g. `cluster.c`'s `copy_table_data` progress logging) pass an
+/// already-formatted message, so the body uses the untranslated, no-%-format
+/// `errmsg_internal`/`errdetail` setters; the `%` characters in the message
+/// are user-supplied data, not a format string.
+pub fn ereport_msg(elevel: ErrorLevel, msg: String, detail: Option<String>) -> PgResult<()> {
+    if !errstart(elevel, None) {
+        // Not to be reported at this elevel: short-circuit exactly like the C
+        // ereport() macro, which skips the whole errmsg/errfinish body.
+        return Ok(());
+    }
+    errmsg_internal(&msg)?;
+    if let Some(detail) = detail {
+        errdetail(&detail)?;
+    }
+    errfinish(None, 0, None)
+}
+
 /// `errdetail_log` — add a detail_log message (server log only).
 pub fn errdetail_log(detail_log: &str) -> PgResult<()> {
     with_current_mut(|error| {
