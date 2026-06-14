@@ -789,19 +789,61 @@ macro_rules! impl_uint_leaf {
 // textual form is a plain unsigned decimal.
 impl_uint_leaf!(u8, u16, u32, u64);
 
-// NOTE on FLOAT fields: `WRITE_FLOAT_FIELD` (outfuncs.c) renders a C `double`
-// via `outDouble` -> `double_to_shortest_decimal_buf` (src/common/d2s.c, the
-// Ryū shortest-round-trip algorithm). A byte-identical OUT requires that d2s
-// port, which this workspace does not yet have (no `common-ryu` crate). The
-// executor-reachable node subset this serialization layer currently serves (the
-// value.h leaves: Integer/Float/Boolean/String/BitString, where the `Float`
-// node stores its value as a STRING, not a `double`) has NO `f64`/`f32` field,
-// so no float `PgNodeOut`/`PgNodeRead` impl is reachable today. Rather than emit
-// a `core::fmt`-based float token that would silently DIVERGE from PostgreSQL's
-// byte stream (breaking round-trip with a real `nodeToString`), the float leaf
-// impls are intentionally omitted until the Ryū d2s port lands — the
-// prerequisite for the F1 wave that adds `Cost`/`Selectivity` (f64) fields to
-// `Plan`/`Path`. See the K1 phase-3 notes.
+// FLOAT fields: `WRITE_FLOAT_FIELD` (outfuncs.c) renders a C `double` via
+// `outDouble` -> `double_to_shortest_decimal_buf` (src/common/d2s.c, the Ryū
+// shortest-round-trip algorithm), and `READ_FLOAT_FIELD` (readfuncs.c) parses it
+// back with `atof` (strtod). The `common-ryu` crate is the faithful port of that
+// algorithm, so the f64 OUT below is byte-identical to PostgreSQL's node text
+// stream, and READ uses Rust's `str::parse::<f64>` (the standard shortest-form
+// strtod) which round-trips the d2s output exactly. This is the WRITE_FLOAT_FIELD
+// / READ_FLOAT_FIELD leaf the F1 wave needs for `Cost`/`Selectivity` (f64) fields
+// on `Plan`/`Path`. The f32 leaf mirrors the same shape via the single-precision
+// `f2s` path (PostgreSQL emits doubles in node text, but a symmetric f32 leaf is
+// provided for completeness and uses Ryū's f2s shortest form + `parse::<f32>`).
+
+impl PgNodeOut for f64 {
+    #[inline]
+    fn out_node(&self, buf: &mut String) {
+        // outDouble (outfuncs.c:217) -> double_to_shortest_decimal_buf (d2s.c).
+        let mut tmp = [0u8; common_ryu::DOUBLE_SHORTEST_DECIMAL_LEN];
+        let len = common_ryu::double_to_shortest_decimal_bufn(*self, &mut tmp);
+        // The Ryū render buffer is ASCII by construction.
+        buf.push_str(core::str::from_utf8(&tmp[..len]).expect("Ryū output is ASCII"));
+    }
+}
+impl PgNodeRead for f64 {
+    type Bound<'dst> = Self;
+    #[inline]
+    fn read_node<'dst>(cur: &mut ReadCursor<'_>, _dst: Mcx<'dst>) -> PgResult<Self> {
+        // atof/strtod (READ_FLOAT_FIELD, readfuncs.c:109) — parse the value token.
+        Ok(cur
+            .expect_token()
+            .text
+            .parse::<f64>()
+            .expect("invalid float token"))
+    }
+}
+
+impl PgNodeOut for f32 {
+    #[inline]
+    fn out_node(&self, buf: &mut String) {
+        // Single-precision analogue: float_to_shortest_decimal_buf (f2s.c).
+        let mut tmp = [0u8; common_ryu::FLOAT_SHORTEST_DECIMAL_LEN];
+        let len = common_ryu::float_to_shortest_decimal_bufn(*self, &mut tmp);
+        buf.push_str(core::str::from_utf8(&tmp[..len]).expect("Ryū output is ASCII"));
+    }
+}
+impl PgNodeRead for f32 {
+    type Bound<'dst> = Self;
+    #[inline]
+    fn read_node<'dst>(cur: &mut ReadCursor<'_>, _dst: Mcx<'dst>) -> PgResult<Self> {
+        Ok(cur
+            .expect_token()
+            .text
+            .parse::<f32>()
+            .expect("invalid float token"))
+    }
+}
 
 impl PgNodeOut for bool {
     #[inline]
@@ -1314,6 +1356,66 @@ mod serialization_tests {
         assert!(!round_trip_scalar(false));
         for c in ['a', 'Z', '0', '!', ' ', '(', ')', '{', '}', '\\', '"', '<', '\0'] {
             assert_eq!(round_trip_scalar(c), c, "char round-trip failed for {c:?}");
+        }
+    }
+
+    // --- FLOAT leaves: byte-exact OUT vs outDouble + exact-bits round-trip --
+
+    #[test]
+    fn float_token_bytes_match_outdouble() {
+        // WRITE_FLOAT_FIELD -> outDouble -> double_to_shortest_decimal_buf.
+        // These tokens are exactly what PostgreSQL emits into the node stream.
+        assert_eq!(out_to_string(&0.0_f64), "0");
+        assert_eq!(out_to_string(&(-0.0_f64)), "-0");
+        assert_eq!(out_to_string(&1.0_f64), "1");
+        assert_eq!(out_to_string(&0.1_f64), "0.1");
+        assert_eq!(out_to_string(&(-1.25_f64)), "-1.25");
+        assert_eq!(out_to_string(&0.0001_f64), "0.0001");
+        assert_eq!(out_to_string(&1e-5_f64), "1e-05");
+        assert_eq!(out_to_string(&1e15_f64), "1e+15");
+        assert_eq!(out_to_string(&1e308_f64), "1e+308");
+        assert_eq!(out_to_string(&1.2345678901234567_f64), "1.2345678901234567");
+        // Typical planner cost values (the f64 fields this leaf unblocks).
+        assert_eq!(out_to_string(&0.0025_f64), "0.0025");
+        assert_eq!(out_to_string(&10000.0_f64), "10000");
+        assert_eq!(out_to_string(&f64::INFINITY), "Infinity");
+        assert_eq!(out_to_string(&f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(out_to_string(&f64::NAN), "NaN");
+        // f32 leaf (single-precision Ryū f2s shortest form).
+        assert_eq!(out_to_string(&1.234567_f32), "1.234567");
+        assert_eq!(out_to_string(&1e6_f32), "1e+06");
+    }
+
+    #[test]
+    fn round_trip_floats_exact_bits() {
+        // OUT -> READ (atof) must recover the EXACT same IEEE-754 value.
+        let doubles = [
+            0.0_f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            0.2,
+            0.3,
+            3.141592653589793,
+            2.718281828459045,
+            1e-300,
+            1e300,
+            1.7976931348623157e308,
+            5e-324,
+            123456789.123456789,
+            0.0025,
+            10000.0,
+            -273.15,
+        ];
+        for v in doubles {
+            let back = round_trip_scalar(v);
+            assert_eq!(back.to_bits(), v.to_bits(), "f64 {v:?} did not round-trip");
+        }
+        let floats = [0.0_f32, -0.0, 1.0, 0.1, 1.234567, 1e6, -42.5, 3.4028235e38];
+        for v in floats {
+            let back = round_trip_scalar(v);
+            assert_eq!(back.to_bits(), v.to_bits(), "f32 {v:?} did not round-trip");
         }
     }
 
