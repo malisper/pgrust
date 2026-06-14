@@ -2350,6 +2350,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-largeobject"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-largeobject-seams"
 version = "0.0.0"
 dependencies = [
@@ -11360,6 +11386,7 @@ dependencies = [
  "backend-catalog-pg-class",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
+ "backend-catalog-pg-largeobject",
  "backend-catalog-pg-namespace",
  "backend-catalog-pg-shdepend",
  "backend-catalog-toasting",
