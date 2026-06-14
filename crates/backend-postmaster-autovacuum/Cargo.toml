@@ -16,5 +16,6 @@ types-vacuum = { path = "../types-vacuum" }
 types-autovacuum = { path = "../types-autovacuum" }
 types-startup = { path = "../types-startup" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
 backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autovacuum-ext-seams" }
