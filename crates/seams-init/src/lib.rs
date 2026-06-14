@@ -860,6 +860,42 @@ mod recurrence_guard {
         ("backend_utils_adt_rangetypes", "range_out"),
         ("backend_utils_adt_rangetypes", "range_recv"),
         ("backend_utils_adt_rangetypes", "range_send"),
+        // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
+        // facing plancache seam in backend-utils-cache-plancache-seams is written
+        // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned
+        // `RawStmt<'mcx>` / `Node<'mcx>` / `PlannedStmt<'mcx>` / `TupleDescData
+        // <'mcx>` / `PgVec<'mcx,_>` / `PgString<'mcx>` values keyed by an opaque
+        // `CachedPlanSourceHandle` / `CachedPlanHandle`. The merged/audited owner
+        // is built entirely on a handle REGISTRY: its real bodies (CreateCachedPlan
+        // / CompleteCachedPlan / SaveCachedPlan / DropCachedPlan / GetCachedPlan /
+        // ReleaseCachedPlan / CachedPlanGetTargetList) take/return handles
+        // (RawStmtHandle, QueryListHandle, CtxId, TupleDescHandle) into an internal
+        // `Rc<RefCell<CachedPlanSourceData>>` map and have no `Mcx`; the
+        // `plansource_*` / `cached_plan_stmt_list` field accessors have no owner fn
+        // at all (the data lives behind handles, not as `'mcx` values). Installing
+        // these would require either forging fake values out of stored handles (a
+        // forbidden token/pointer-registry hack, opacity-inherited-never-introduced)
+        // or migrating plancache's whole CachedPlanSource/CachedPlan storage off
+        // opaque handles onto owned `'mcx` values — the K1 plancache de-handle
+        // redesign tracked in task #159, which also retires the CtxId fields. No
+        // thin adapter bridges value<->handle here. Pay down with #159, not seam
+        // wiring. See DESIGN_DEBT.md.
+        ("backend_utils_cache_plancache", "cached_plan_get_target_list"),
+        ("backend_utils_cache_plancache", "cached_plan_stmt_list"),
+        ("backend_utils_cache_plancache", "complete_cached_plan"),
+        ("backend_utils_cache_plancache", "create_cached_plan"),
+        ("backend_utils_cache_plancache", "drop_cached_plan"),
+        ("backend_utils_cache_plancache", "get_cached_plan"),
+        ("backend_utils_cache_plancache", "plansource_command_tag"),
+        ("backend_utils_cache_plancache", "plansource_fixed_result"),
+        ("backend_utils_cache_plancache", "plansource_num_custom_plans"),
+        ("backend_utils_cache_plancache", "plansource_num_generic_plans"),
+        ("backend_utils_cache_plancache", "plansource_num_params"),
+        ("backend_utils_cache_plancache", "plansource_param_types"),
+        ("backend_utils_cache_plancache", "plansource_query_string"),
+        ("backend_utils_cache_plancache", "plansource_result_desc"),
+        ("backend_utils_cache_plancache", "release_cached_plan"),
+        ("backend_utils_cache_plancache", "save_cached_plan"),
         ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
