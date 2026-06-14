@@ -7083,6 +7083,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "types-core",
  "types-error",
+ "types-pgstat",
  "types-storage",
 ]
 
