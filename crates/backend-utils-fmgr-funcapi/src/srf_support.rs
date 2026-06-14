@@ -9,20 +9,13 @@
 use backend_utils_error::ereport;
 use mcx::Mcx;
 use types_core::Oid;
-// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
-// funcapi never holds a value it owns the bytes of; every `Datum` here is a
-// raw word it forwards across a not-yet-migrated seam contract:
-// `materialized_srf_putvalues` forwards `values` straight to the tuplestore
-// seam (`tuplestore_putvalues`, still `&[types_datum::Datum]`), and
-// `cstring_get_text_datum` returns the word the varlena seam
-// (`cstring_to_text`, still `-> types_datum::Datum`) hands back. Both are
-// audited bare-word ABI edges, so the word stays here until those owners
-// migrate.
-use types_datum::Datum as ScalarWord;
 // The canonical unified value (Datum-unification keystone): the public funcapi
-// seams (`materialized_srf_putvalues`, `cstring_get_text_datum`) now carry it.
-// The still-bare-word tuplestore/varlena owner seams are bridged at those
-// audited ABI edges below.
+// seams (`materialized_srf_putvalues`, `cstring_get_text_datum`) carry it.
+// `materialized_srf_putvalues` threads it straight through to the
+// `tuplestore_putvalues` seam, which is itself canonical (Datum-completion
+// Wave 7). `cstring_get_text_datum` bridges the still-bare-word `cstring_to_text`
+// varlena seam at that audited ABI edge: its returned pointer word is carried in
+// the canonical by-value arm here, with no shim type held by funcapi.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_error::{PgResult, ERROR};
