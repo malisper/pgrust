@@ -180,6 +180,8 @@ pub enum Node<'mcx> {
     SubqueryScan(crate::nodeindexscan::SubqueryScan<'mcx>),
     /// `T_ForeignScan`.
     ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
+    /// `T_CustomScan`.
+    CustomScan(crate::nodeforeigncustom::CustomScan<'mcx>),
     /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
     ///
     /// In C, every `Expr`-derived node is a `Node *` via the
@@ -223,6 +225,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(_) => T_SeqScan,
             Node::SubqueryScan(_) => T_SubqueryScan,
             Node::ForeignScan(_) => T_ForeignScan,
+            Node::CustomScan(_) => T_CustomScan,
             Node::Expr(e) => expr_tag(e),
         }
     }
@@ -255,6 +258,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(s) => &s.scan.plan,
             Node::SubqueryScan(s) => &s.scan.plan,
             Node::ForeignScan(f) => &f.scan.plan,
+            Node::CustomScan(c) => &c.scan.plan,
             // An expression node has no embedded `Plan` (C: `((Plan *) expr)`
             // would be a type error — `plan_head` is only called on plan nodes).
             Node::Expr(_) => {
@@ -297,6 +301,7 @@ impl<'mcx> Node<'mcx> {
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
             Node::SubqueryScan(s) => Ok(Node::SubqueryScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
+            Node::CustomScan(c) => Ok(Node::CustomScan(c.clone_in(mcx)?)),
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.
             Node::Expr(e) => Ok(Node::Expr(e.clone())),
