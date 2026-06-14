@@ -42,7 +42,6 @@ use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_adt_misc2_seams as expandeddatum;
 
 use mcx::alloc_in;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_execparallel::PGJIT_NONE;
 use types_nodes::nodes::Node;
