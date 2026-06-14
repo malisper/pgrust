@@ -131,6 +131,7 @@ backend-replication-logical-logical = { path = "../backend-replication-logical-l
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
+backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
 backend-replication-slot = { path = "../backend-replication-slot" }
 backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
 backend-replication-walreceiverfuncs = { path = "../backend-replication-walreceiverfuncs" }
