@@ -7,8 +7,25 @@
 use mcx::{Mcx, PgString, PgVec};
 use types_error::PgResult;
 // The canonical unified value type (Datum-unification keystone). The `*_v` seam
-// variants below take/return it; the bare-word `types_datum::Datum` variants are
-// transitional shims kept until every consumer migrates (removed in Cleanup).
+// variants below take/return it and are the migration target for this unit's
+// value-carrying seams; migrated consumers call them.
+//
+// Wave 3 (Datum-completion) status for this seam-decl crate: every
+// value-carrying seam already has its canonical `DatumV<'mcx>` form
+// (`cstring_to_text_v`, `bytes_to_varlena_v`, `text_to_cstring_v`). A seam-decl
+// crate has no function bodies, so there is no this-crate-owned shim
+// construction/read site (`from_usize`/`as_usize`/`from_*`/`as_*`) to migrate.
+//
+// The three bare-word `types_datum::Datum` variants that remain
+// (`cstring_to_text`, `bytes_to_varlena`, `text_to_cstring`) are NOT one of the
+// two genuinely-sanctioned ABI edges (store_att_byval/fetch_att + the PGFunction
+// bare-word return); they are transitional shims that stay only because they are
+// externally pinned — the owner unit (backend-utils-adt-varlena) installs them
+// via `init_seams()` (`cstring_to_text::set` / `text_to_cstring::set` / …) and
+// ~22 consumer crates still `::call` the bare-word shape. Dropping them here
+// would break those out-of-scope consumers + the owner's `::set`, so it is the
+// consumer-reconcile Cleanup follow-on (cf. #112 / the "execExpr datum-mig is
+// contract-blocked" pattern), not this gate.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 seam_core::seam!(
