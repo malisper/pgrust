@@ -23,7 +23,7 @@ types-tuple = { path = "../types-tuple" }
 types-cache = { path = "../types-cache" }
 types-datum = { path = "../types-datum" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
-backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
