@@ -883,6 +883,10 @@ pub fn init_seams() {
     s::get_session_user_id::set(GetSessionUserId);
     s::initialize_session_user_id_standalone::set(InitializeSessionUserIdStandalone);
     s::validate_pg_version::set(ValidatePgVersion);
+    s::initialize_session_user_id::set(InitializeSessionUserId);
+    s::initialize_system_user::set(InitializeSystemUser);
+    s::set_database_path_once::set(SetDatabasePath);
+    s::process_session_preload_libraries::set(process_session_preload_libraries);
 }
 
 #[cfg(test)]
