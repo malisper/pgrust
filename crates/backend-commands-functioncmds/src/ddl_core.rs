@@ -1050,7 +1050,9 @@ pub fn CreateFunction(
                 .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                 .errmsg(format!(
                     "function result type must be {} because of OUT parameters",
-                    seam::format_type_be::call(params.required_result_type)?
+                    backend_utils_adt_format_type_seams::format_type_be_str::call(
+                        params.required_result_type,
+                    )?
                 ))
                 .into_error());
         }

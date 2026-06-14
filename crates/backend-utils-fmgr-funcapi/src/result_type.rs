@@ -203,7 +203,7 @@ pub fn internal_get_result_type<'mcx>(
                 .errmsg(format!(
                     "could not determine actual result type for function \"{}\" declared to return type {}",
                     procform.proname.as_str(),
-                    backend_commands_functioncmds_seams::format_type_be::call(rettype)?
+                    backend_utils_adt_format_type_seams::format_type_be_str::call(rettype)?
                 ))
                 .into_error());
         }
@@ -296,7 +296,7 @@ pub fn get_expr_result_tupdesc<'mcx>(
                 .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
                     "type {} is not composite",
-                    backend_commands_functioncmds_seams::format_type_be::call(expr_type_id)?
+                    backend_utils_adt_format_type_seams::format_type_be_str::call(expr_type_id)?
                 ))
                 .into_error());
         } else {
