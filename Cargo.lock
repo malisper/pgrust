@@ -2057,8 +2057,12 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
+ "types-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -2966,6 +2970,41 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-seclabel"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-catalog",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-class",
+ "backend-commands-seclabel-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-seclabel-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

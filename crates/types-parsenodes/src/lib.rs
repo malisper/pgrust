@@ -411,6 +411,23 @@ pub struct ReassignOwnedStmt {
     pub newrole: Option<Box<Node>>,
 }
 
+/// `typedef struct SecLabelStmt` (`nodes/parsenodes.h`) — the SECURITY LABEL
+/// command parse node. `object` is the opaque parser representation of the
+/// target object (a qualified-name `List *` / typename / etc.), passed through
+/// to `get_object_address`/`check_object_ownership`. `provider` and `label` are
+/// `NULL` in C when omitted (`SECURITY LABEL ... IS NULL` removes the label).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecLabelStmt {
+    /// Object's type.
+    pub objtype: types_nodes::parsenodes::ObjectType,
+    /// Qualified name of the object.
+    pub object: Option<Box<Node>>,
+    /// Label provider (or `None`).
+    pub provider: Option<String>,
+    /// New security label to be assigned (or `None` to remove).
+    pub label: Option<String>,
+}
+
 /// `typedef struct ParseState` (`parser/parse_node.h`), trimmed. user.c only
 /// passes the `ParseState *` through to `errorConflictingDefElem` /
 /// `parser_errposition` for error positioning; the parser (its owner) fills
