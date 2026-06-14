@@ -4,3 +4,6 @@ Cargo.lock.orig
 *.patch
 .DS_Store
 .claude/worktrees/
+
+/target-iso/
+/.isolated-target/
