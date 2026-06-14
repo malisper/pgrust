@@ -12,7 +12,7 @@ use std::boxed::Box;
 use std::sync::Mutex;
 use std::vec::Vec as StdVec;
 
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_core::primitive::{BlockNumber, InvalidBlockNumber};
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
@@ -228,7 +228,7 @@ pub struct IndexScanDescData<'mcx> {
     /* ordering-operator result data */
     /// `Datum *xs_orderbyvals` — ORDER BY expression values of the last
     /// returned tuple.
-    pub xs_orderbyvals: StdVec<Datum>,
+    pub xs_orderbyvals: StdVec<Datum<'mcx>>,
     /// `bool *xs_orderbynulls`.
     pub xs_orderbynulls: StdVec<bool>,
     /// `bool xs_recheckorderby`.
