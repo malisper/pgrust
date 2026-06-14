@@ -9,14 +9,7 @@ name = "backend_nodes_extensible"
 path = "src/lib.rs"
 
 [dependencies]
-types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-hash = { path = "../types-hash" }
 types-extensible = { path = "../types-extensible" }
 backend-utils-error = { path = "../backend-utils-error" }
-backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-nodes-extensible-seams = { path = "../backend-nodes-extensible-seams" }
-
-[dev-dependencies]
-common-hashfn-seams = { path = "../common-hashfn-seams" }
-backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
