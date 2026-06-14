@@ -1,0 +1,33 @@
+[package]
+name = "backend-commands-collationcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_commands_collationcmds"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+common-string = { path = "../common-string" }
+
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
+types-locale = { path = "../types-locale" }
+types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-tuple = { path = "../types-tuple" }
+types-wchar = { path = "../types-wchar" }
+
+backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
