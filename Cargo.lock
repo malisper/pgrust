@@ -2103,6 +2103,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-objectaddress"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-fmgr-funcapi-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-objectaddress-seams"
 version = "0.0.0"
 dependencies = [
@@ -10852,6 +10874,7 @@ dependencies = [
  "backend-catalog-catalog",
  "backend-catalog-namespace",
  "backend-catalog-objectaccess",
+ "backend-catalog-objectaddress",
  "backend-catalog-pg-class",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-namespace",
