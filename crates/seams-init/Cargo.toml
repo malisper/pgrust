@@ -57,6 +57,7 @@ backend-commands-comment = { path = "../backend-commands-comment" }
 backend-commands-conversioncmds = { path = "../backend-commands-conversioncmds" }
 backend-commands-copyto = { path = "../backend-commands-copyto" }
 backend-commands-define = { path = "../backend-commands-define" }
+backend-commands-dropcmds = { path = "../backend-commands-dropcmds" }
 backend-commands-foreigncmds = { path = "../backend-commands-foreigncmds" }
 backend-commands-matview = { path = "../backend-commands-matview" }
 backend-commands-portalcmds = { path = "../backend-commands-portalcmds" }
@@ -75,10 +76,12 @@ backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
 backend-executor-nodeBitmapAnd = { path = "../backend-executor-nodeBitmapAnd" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapIndexscan" }
 backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }
+backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
 backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
@@ -89,6 +92,7 @@ backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
 backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeRecursiveunion = { path = "../backend-executor-nodeRecursiveunion" }
 backend-executor-nodeProjectSet = { path = "../backend-executor-nodeProjectSet" }
 backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
 backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
@@ -101,7 +105,9 @@ backend-executor-nodeSubplan = { path = "../backend-executor-nodeSubplan" }
 backend-executor-tqueue = { path = "../backend-executor-tqueue" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
+backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
