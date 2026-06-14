@@ -7258,6 +7258,7 @@ version = "0.0.0"
 dependencies = [
  "backend-lib-dshash-seams",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-dsm-registry-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-error",
@@ -11251,6 +11252,7 @@ dependencies = [
  "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-dsm-registry",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
  "backend-storage-ipc-procsignal",
