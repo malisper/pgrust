@@ -244,6 +244,157 @@ pub fn place_and_init_mut<'seg, T: SharedDsmObject>(
     }
 }
 
+/// Leader side: placement-init a `T` from a fully-constructed value, returning
+/// a [`SharedRef`]. This is the 100%-safe variant of [`place_and_init`]: the
+/// caller hands a `T` it built with safe constructors (atomics/spinlock/CV all
+/// constructed by their own `new`/`Default`), and the primitive performs the
+/// single placement write into the chunk. The caller writes NO raw pointer.
+///
+/// Mirrors the leader's `*obj = (T){ … }` followed by the explicit
+/// atomic/spinlock/CV initializers — here folded into one move of a value whose
+/// fields are already correctly constructed. The leader is the sole writer
+/// until the launch barrier releases, so moving the constructed `T` into the
+/// shared bytes is sound (no other process aliases it yet).
+pub fn place_value<'seg, T: SharedDsmObject>(
+    seg: DsmSegmentHandle,
+    chunk: SerializeCursor,
+    value: T,
+) -> SharedRef<'seg, T> {
+    place_and_init::<T>(seg, chunk, |view: &SharedView<'seg, T>| {
+        // SAFETY: pre-launch the leader is the sole writer; `view.as_ptr()`
+        // addresses `>= size_of::<T>()` writable suitably-aligned in-segment
+        // bytes (the `place_and_init` contract). The single raw write is the
+        // placement move of an already-constructed value.
+        let p = unsafe { view.as_ptr() };
+        unsafe { core::ptr::write(p, value) };
+    })
+}
+
+/// A shared borrow of a `[E]` flexible-array tail living in-segment immediately
+/// after a header object, tied to the DSM segment's lifetime `'seg`. Each `E`
+/// is accessed through its own interior-mutable accessor methods (`&self`);
+/// there is no `&mut E` path.
+#[derive(Clone, Copy)]
+pub struct SharedSlice<'seg, E: SharedDsmObject> {
+    ptr: *const E,
+    len: usize,
+    _seg: PhantomData<&'seg E>,
+}
+
+// SAFETY: same reasoning as `SharedRef` — a borrow of a shared segment whose
+// cross-process synchronization is the element type's interior-mutable fields'
+// responsibility.
+unsafe impl<E: SharedDsmObject> Send for SharedSlice<'_, E> {}
+unsafe impl<E: SharedDsmObject> Sync for SharedSlice<'_, E> {}
+
+impl<'seg, E: SharedDsmObject> SharedSlice<'seg, E> {
+    /// Number of elements in the tail.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the tail is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The shared slice `&[E]`. Each element's concurrent mutation happens
+    /// through its interior-mutable fields, so a shared slice aliasing another
+    /// process's shared slice over the same bytes is sound.
+    #[inline]
+    pub fn get(&self) -> &'seg [E] {
+        // SAFETY: see the module SAFETY contract: `ptr` addresses `len`
+        // initialized `E`s laid out contiguously in-segment, live for `'seg`;
+        // `E: SharedDsmObject` guarantees every concurrently-mutated field is
+        // interior-mutable, so the shared `&[E]` is sound.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+/// `offsetof(H, tail)` for a `#[repr(C)]` header `H` whose last C field is a
+/// `FLEXIBLE_ARRAY_MEMBER` of `E`: the header size rounded up to `E`'s
+/// alignment (where the C array begins). Mirrors the `offsetof` the C uses to
+/// size the chunk and to locate the array.
+#[inline]
+fn flex_tail_offset<H, E>() -> usize {
+    let h = size_of::<H>();
+    let a = core::mem::align_of::<E>();
+    (h + a - 1) & !(a - 1)
+}
+
+/// Leader side: placement-init a flexible-array object — a `#[repr(C)]` header
+/// `H` immediately followed by `len` elements of `E` — at a real chunk sized
+/// via [`estimate_flex`]. Returns the header [`SharedRef`] and the tail
+/// [`SharedSlice`]. `init_header` builds the header value and `init_elem(i)`
+/// builds each element value (the C `sinstrument->num_workers = …; memset(…)`).
+/// The leader is the sole writer pre-launch.
+pub fn place_flex<'seg, H, E>(
+    _seg: DsmSegmentHandle,
+    chunk: SerializeCursor,
+    len: usize,
+    header: H,
+    mut elem: impl FnMut(usize) -> E,
+) -> (SharedRef<'seg, H>, SharedSlice<'seg, E>)
+where
+    H: SharedDsmObject,
+    E: SharedDsmObject,
+{
+    let base = chunk.0;
+    let hdr_ptr = base as *mut H;
+    let tail_ptr = (base + flex_tail_offset::<H, E>()) as *mut E;
+    // SAFETY: pre-launch the leader is the sole writer; `chunk` addresses
+    // `>= estimate_flex(offsetof(H, tail) + len * size_of::<E>())` writable
+    // suitably-aligned in-segment bytes (the `estimate_flex`/`shm_toc_allocate`
+    // contract). Placement-move each already-constructed value into place.
+    unsafe {
+        core::ptr::write(hdr_ptr, header);
+        for i in 0..len {
+            core::ptr::write(tail_ptr.add(i), elem(i));
+        }
+    }
+    (
+        SharedRef {
+            ptr: hdr_ptr as *const H,
+            _seg: PhantomData,
+        },
+        SharedSlice {
+            ptr: tail_ptr as *const E,
+            len,
+            _seg: PhantomData,
+        },
+    )
+}
+
+/// Worker side: attach to a flexible-array object that `shm_toc_lookup` already
+/// located. Reinterprets the header bytes as `&H` and the `len`-element tail as
+/// `&[E]` (no init — the leader already placement-initialized them). `len` is
+/// recovered from the header (e.g. `header.num_workers`), exactly as the C
+/// computes `offsetof(H, tail) + num_workers * sizeof(E)`.
+pub fn attach_flex<'seg, H, E>(
+    _seg: DsmSegmentHandle,
+    chunk: SerializeCursor,
+    len: usize,
+) -> (SharedRef<'seg, H>, SharedSlice<'seg, E>)
+where
+    H: SharedDsmObject,
+    E: SharedDsmObject,
+{
+    let base = chunk.0;
+    (
+        SharedRef {
+            ptr: base as *const H,
+            _seg: PhantomData,
+        },
+        SharedSlice {
+            ptr: (base + flex_tail_offset::<H, E>()) as *const E,
+            len,
+            _seg: PhantomData,
+        },
+    )
+}
+
 /// Worker side: attach to a `T` that `shm_toc_lookup` already located at its
 /// real in-segment address in this process's mapping. Reinterprets the bytes as
 /// a shared `&T` (no init — the leader already placement-initialized it before
