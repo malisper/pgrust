@@ -4321,6 +4321,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-executor-nodeHash-seams",
+ "backend-executor-nodeHashjoin-pq-seams",
  "backend-executor-nodeHashjoin-seams",
  "backend-storage-file-buffile-seams",
  "backend-storage-file-sharedfileset-seams",
