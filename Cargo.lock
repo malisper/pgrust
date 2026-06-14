@@ -10472,6 +10472,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-variant-frontshlib-pgfnames-rmtree"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-wchar"
 version = "0.0.0"
 dependencies = [
