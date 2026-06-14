@@ -47,7 +47,6 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_datum::varlena::VARHDRSZ;
-use types_datum::Datum;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
@@ -63,7 +62,7 @@ use backend_access_common_heaptuple::{heap_deform_tuple, heap_form_tuple};
 use backend_libpq_pqformat::{
     pq_begintypsend, pq_endtypsend, pq_getmsgbytes, pq_getmsgint, pq_sendbytes, pq_sendint32,
 };
-use backend_utils_adt_datum_seams::datum_image_eq;
+use backend_utils_adt_datum_seams::datum_image_eq_v;
 use backend_utils_adt_format_type_seams::format_type_be;
 use backend_utils_cache_typcache_seams::{
     lookup_rowtype_tupdesc, record_column_cmp, record_column_eq, record_column_hash,
@@ -125,7 +124,7 @@ pub fn record_in<'mcx>(
     let mut values: Vec<TupleValue<'mcx>> = Vec::with_capacity(ncolumns);
     let mut nulls: Vec<bool> = Vec::with_capacity(ncolumns);
     for _ in 0..ncolumns {
-        values.push(TupleValue::ByVal(types_datum::Datum::null()));
+        values.push(TupleValue::null());
         nulls.push(false);
     }
 
@@ -156,7 +155,7 @@ pub fn record_in<'mcx>(
 
         // Ignore dropped columns in datatype, but fill with nulls.
         if att.attisdropped {
-            values[i] = TupleValue::ByVal(types_datum::Datum::null());
+            values[i] = TupleValue::null();
             nulls[i] = true;
             continue;
         }
@@ -403,7 +402,7 @@ pub fn record_recv<'mcx>(
     let mut values: Vec<TupleValue<'mcx>> = Vec::with_capacity(ncolumns);
     let mut nulls: Vec<bool> = Vec::with_capacity(ncolumns);
     for _ in 0..ncolumns {
-        values.push(TupleValue::ByVal(types_datum::Datum::null()));
+        values.push(TupleValue::null());
         nulls.push(false);
     }
 
@@ -434,7 +433,7 @@ pub fn record_recv<'mcx>(
 
         // Ignore dropped columns in datatype, but fill with nulls.
         if att.attisdropped {
-            values[i] = TupleValue::ByVal(types_datum::Datum::null());
+            values[i] = TupleValue::null();
             nulls[i] = true;
             continue;
         }
@@ -943,11 +942,14 @@ pub fn record_image_eq<'mcx>(
             }
 
             // Compare the pair of elements via datum.c's canonical
-            // `datum_image_eq(Datum, Datum, typByVal, typLen)` over att1's
-            // storage, exactly as rowtypes.c does.
-            result = datum_image_eq::call(
-                tuple_value_as_datum(v1),
-                tuple_value_as_datum(v2),
+            // `datum_image_eq(value1, value2, typByVal, typLen)` over att1's
+            // storage, exactly as rowtypes.c does. The unified-value `_v` seam
+            // takes the columns as `&Datum<'mcx>` directly (by-value arms are
+            // the scalar word, by-reference arms the detoasted image), so no
+            // pointer-forge bridge is needed.
+            result = datum_image_eq_v::call(
+                v1,
+                v2,
                 att1.attbyval,
                 att1.attlen,
             )?;
@@ -1158,24 +1160,6 @@ fn form_tuple<'mcx>(
 /// Copy a borrowed byte slice into an `mcx`-allocated `PgVec`.
 fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
     mcx::slice_in(mcx, src)
-}
-
-/// View a deformed column value as the raw `Datum` datum.c's `datum_image_eq`
-/// expects (`postgres.h`): a by-value column is its scalar word; a
-/// by-reference column is the pointer to its (already-detoasted) on-disk image.
-///
-/// In C `heap_deform_tuple` hands `record_image_eq` exactly such a `Datum` per
-/// column — for a by-ref type a pointer into the tuple's data buffer. The owned
-/// deform splits that into [`TupleValue::ByRef`] holding the column's image in
-/// the call's `mcx`; this re-derives the pointer-shaped `Datum` over those
-/// bytes (the same `PointerGetDatum(&owned_bytes)` bridge arrayfuncs uses when
-/// re-crossing a `Datum`-typed seam). The image stays alive in `mcx` for the
-/// whole call, exactly as C's tuple buffer does.
-fn tuple_value_as_datum(value: &TupleValue<'_>) -> Datum {
-    match value {
-        TupleValue::ByVal(d) => *d,
-        TupleValue::ByRef(bytes) => Datum::from_usize(bytes.as_ptr() as usize),
-    }
 }
 
 /// The byte-image three-way comparison of two non-null column values, inlined
