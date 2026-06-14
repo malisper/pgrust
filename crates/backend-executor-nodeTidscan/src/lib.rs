@@ -25,12 +25,10 @@
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Index;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_nodes::execexpr::ExprState;
-use types_nodes::execnodes::{EStateData, ScanStateData};
+use types_nodes::execnodes::EStateData;
 use types_nodes::nodeindexscan::TidScan;
-use types_nodes::primnodes::{CurrentOfExpr, Expr};
+use types_nodes::primnodes::Expr;
 use types_nodes::SlotId;
-use types_tableam::relscan::TableScanDesc;
 use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
 
 use backend_access_table_tableam as tableam;
@@ -79,91 +77,16 @@ fn array_datum_bare_word(d: &types_tuple::Datum<'_>) -> types_datum::Datum {
 }
 
 // ===========================================================================
-// `TidExpr` — one element in `TidScanState::tss_tidexprs`.
+// `TidExpr` / `TidScanState` — node-state and helper vocabulary.
+//
+// These structs relocated DOWN into `types-nodes` (so the central
+// `PlanStateNode` dispatch enum can name `TidScanState` as a variant — the
+// slot-vocab F0 "Edge A": `types-nodes` now depends on `types-tableam`). They
+// are re-exported here so the executor logic below names them at their historical
+// `backend_executor_nodeTidscan::{TidExpr, TidScanState}` paths unchanged.
 // ===========================================================================
 
-/// `TidExpr` (nodeTidscan.c) — a compiled TID-yielding subexpression, or a
-/// `WHERE CURRENT OF`:
-///
-/// ```c
-/// typedef struct TidExpr {
-///     ExprState  *exprstate;   /* ExprState for a TID-yielding subexpr */
-///     bool        isarray;     /* if true, it yields tid[] not just tid */
-///     CurrentOfExpr *cexpr;    /* alternatively, we can have CURRENT OF */
-/// } TidExpr;
-/// ```
-pub struct TidExpr<'mcx> {
-    /// `ExprState *exprstate` — compiled TID-yielding subexpr, or `None`.
-    pub exprstate: Option<PgBox<'mcx, ExprState<'mcx>>>,
-    /// `bool isarray` — if true, it yields `tid[]` not just `tid`.
-    pub isarray: bool,
-    /// `CurrentOfExpr *cexpr` — alternatively, we can have CURRENT OF.
-    pub cexpr: Option<CurrentOfExpr>,
-}
-
-impl Default for TidExpr<'_> {
-    fn default() -> Self {
-        TidExpr {
-            exprstate: None,
-            isarray: false,
-            cexpr: None,
-        }
-    }
-}
-
-/// `TidScanState` (execnodes.h) — the TID-scan executor node state, in the
-/// owned shape this crate works with. The leading `ss` field carries the
-/// embedded `ScanState`/`PlanState`/`Scan` heads (shared [`ScanStateData`]);
-/// the remaining fields are the TID-scan working state.
-///
-/// `ss_currentScanDesc` (the C `ScanState.ss_currentScanDesc`) lives here, not
-/// in the shared `ScanStateData`, because its type [`TableScanDesc`] sits above
-/// the `types-nodes` layer (docs/types.md rule 3 — the type lives in the
-/// consuming unit's crate).
-pub struct TidScanState<'mcx> {
-    /// `ScanState ss` — its first field is `NodeTag`.
-    pub ss: ScanStateData<'mcx>,
-    /// `TableScanDesc ss_currentScanDesc` — the on-demand TID scan descriptor;
-    /// `None` is the C `NULL` (no scan started yet).
-    pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
-    /// `List *tss_tidexprs` — compiled TID-yielding subexpressions.
-    pub tss_tidexprs: PgVec<'mcx, TidExpr<'mcx>>,
-    /// `bool tss_isCurrentOf` — true if this is a `WHERE CURRENT OF` scan.
-    pub tss_isCurrentOf: bool,
-    /// `int tss_NumTids` — number of valid TIDs in `tss_TidList`.
-    pub tss_NumTids: i32,
-    /// `int tss_TidPtr` — index of the current TID, or `-1` before the scan.
-    pub tss_TidPtr: i32,
-    /// `ItemPointerData *tss_TidList` — sorted, de-duplicated TID array.
-    /// `None` is the C `NULL` (TID list not computed yet).
-    pub tss_TidList: Option<PgVec<'mcx, ItemPointerData>>,
-    /// `((Scan *) node->ss.ps.plan)->scanrelid` — the range-table index of the
-    /// scanned base relation. In C this is read off the `Scan` plan node via
-    /// the `PlanState.plan` back-link; the trimmed [`ScanStateData`]/
-    /// `PlanStateData` does not retain that borrow, so `ExecInitTidScan`
-    /// captures the plan's `scanrelid` here for the EvalPlanQual path
-    /// (`ExecScanFetch`) to recover. A `TidScan` always scans a base relation,
-    /// so this is always a real positive RTE index (never the `0`
-    /// ForeignScan/CustomScan pushed-down-join sentinel).
-    pub scanrelid: Index,
-}
-
-impl<'mcx> TidScanState<'mcx> {
-    /// `makeNode(TidScanState)` — a freshly zeroed node, allocating its
-    /// collections in `mcx` (the EState per-query context).
-    fn new_in(mcx: Mcx<'mcx>) -> Self {
-        TidScanState {
-            ss: ScanStateData::default(),
-            ss_currentScanDesc: None,
-            tss_tidexprs: PgVec::new_in(mcx),
-            tss_isCurrentOf: false,
-            tss_NumTids: 0,
-            tss_TidPtr: -1,
-            tss_TidList: None,
-            scanrelid: 0,
-        }
-    }
-}
+pub use types_nodes::nodetidscan::{TidExpr, TidScanState};
 
 // ===========================================================================
 // `IsCTIDVar` / `is_opclause` / `get_leftop` / `get_rightop` — node tests over

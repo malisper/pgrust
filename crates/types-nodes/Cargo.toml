@@ -25,6 +25,12 @@ types-condvar = { path = "../types-condvar" }
 types-execparallel = { path = "../types-execparallel" }
 types-parallel = { path = "../types-parallel" }
 types-tidbitmap = { path = "../types-tidbitmap" }
+# Table-AM scan-descriptor vocabulary (`TableScanDesc`), named by the relocated
+# `TidScanState` / `BitmapHeapScanState` node-state structs (their
+# `ss_currentScanDesc` field). `types-tableam` deps only the leaf type crates
+# (core/error/tuple/slot/rel/scan/snapshot/storage/tidbitmap) — none of which
+# reach `types-nodes` — so this edge is acyclic (the slot-vocab F0 "Edge A").
+types-tableam = { path = "../types-tableam" }
 # Node-support runtime traits + the `#[derive(PgNode)]` proc-macro consumed by
 # the leaf node families (value.h / bitmapset / list) and by the central
 # build.rs-generated `node_tree` dispatch. `node-support` is a LEAF crate
