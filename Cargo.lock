@@ -3781,9 +3781,9 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11503,6 +11503,7 @@ name = "types-copy"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-cache",
  "types-core",
  "types-datum",
  "types-rel",
