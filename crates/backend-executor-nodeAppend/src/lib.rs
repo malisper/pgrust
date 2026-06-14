@@ -37,7 +37,6 @@ use backend_access_transam_parallel_seams as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execAsync_seams as execAsync;
 use backend_executor_execPartition_seams as execPartition;
-use backend_executor_execParallel_support_seams as parallel_sup;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
@@ -71,26 +70,90 @@ const EVENT_BUFFER_SIZE: i32 = 16;
 // ===========================================================================
 // Install this crate's implementations into its inward seam slots.
 //
-// `backend-executor-nodeAppend-seams` declares the four parallel-Append methods
-// in the handle-based shape execParallel.c calls them with
-// (`PlanStateHandle`/`ParallelContextHandle`). Each installed function owns the
-// C control flow of its `nodeAppend.c` counterpart (the `pstate_len` sizing, the
-// choose-strategy selection) and reaches the live `AppendState` node's fields
-// and the not-yet-ported DSM/`ParallelContext` through the
-// `execParallel-support-seams` `append_*` family — exactly as nodeSort/nodeHash
-// drive their parallel methods. Those support seams are installed by
-// execParallel/`access/parallel.c` when that planstate-handle dispatch lands;
-// until then a call panics loudly (mirror-PG-and-panic).
+// The four parallel-Append public entry points now take the OWNED
+// `&mut AppendStateData` (mirroring the already-owned nodeBitmapHeapscan /
+// nodeHashjoin / nodeAgg parallel surfaces) and read node fields directly; the
+// orthogonal DSM `shm_toc` estimate/allocate/lookup goes through the
+// `backend-access-transam-parallel` seams (the DSM owner), keeping the DSM
+// layout behind those.
+//
+// `backend-executor-nodeAppend-seams` still declares the four methods in the
+// handle-based shape `execParallel.c` calls them with
+// (`PlanStateHandle`/`ParallelContext|WorkerContextHandle`), because the
+// parallel executor dispatches the per-node hooks generically over a
+// `PlanState *`. Each seam slot is installed with a thin shim that performs the
+// C `(AppendState *) node` cast through `resolve_append_state` (the executor
+// `PlanState`-pointer registry, unported — panics until it lands) and then runs
+// the real owned entry point above. This mirrors nodeHashjoin's
+// `exec_hashjoin_*_shim` / nodeAgg's `resolve_agg_state` pq-seam shims.
 // ===========================================================================
 
 /// Install every seam in `backend-executor-nodeAppend-seams`.
 pub fn init_seams() {
-    backend_executor_nodeAppend_seams::exec_append_estimate::set(ExecAppendEstimate);
-    backend_executor_nodeAppend_seams::exec_append_initialize_dsm::set(ExecAppendInitializeDSM);
-    backend_executor_nodeAppend_seams::exec_append_reinitialize_dsm::set(ExecAppendReInitializeDSM);
-    backend_executor_nodeAppend_seams::exec_append_initialize_worker::set(
-        ExecAppendInitializeWorker,
+    backend_executor_nodeAppend_seams::exec_append_estimate::set(exec_append_estimate_shim);
+    backend_executor_nodeAppend_seams::exec_append_initialize_dsm::set(
+        exec_append_initialize_dsm_shim,
     );
+    backend_executor_nodeAppend_seams::exec_append_reinitialize_dsm::set(
+        exec_append_reinitialize_dsm_shim,
+    );
+    backend_executor_nodeAppend_seams::exec_append_initialize_worker::set(
+        exec_append_initialize_worker_shim,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Handle-resolving shims installed into `backend-executor-nodeAppend-seams`.
+//
+// `execParallel` holds the opaque `PlanStateHandle`; the C `ExecAppendEstimate`
+// etc. begin with the `(AppendState *) node` cast. Recovering the live
+// `AppendStateData` from the handle is the executor's `PlanState`-pointer
+// registry — that pointer table is the unported executor surface, so each shim
+// performs the cast through `resolve_append_state` (which panics until that
+// registry lands) and then runs the real, owned entry point.
+// ---------------------------------------------------------------------------
+
+/// `(AppendState *) node` — recover the live `AppendStateData` a
+/// `PlanStateHandle` refers to. The executor's `PlanState` pointer registry that
+/// backs this lookup is not yet ported.
+fn resolve_append_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut AppendStateData<'mcx> {
+    panic!(
+        "backend-executor-nodeAppend: resolving a PlanStateHandle to the live AppendState needs \
+         the executor PlanState pointer registry (unported); the (AppendState *) node cast in the \
+         ExecAppend* parallel hooks cannot run yet"
+    );
+}
+
+/// Seam shim for `ExecAppendEstimate`.
+fn exec_append_estimate_shim(
+    node: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    ExecAppendEstimate(resolve_append_state(node), pcxt)
+}
+
+/// Seam shim for `ExecAppendInitializeDSM`.
+fn exec_append_initialize_dsm_shim(
+    node: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    ExecAppendInitializeDSM(resolve_append_state(node), pcxt)
+}
+
+/// Seam shim for `ExecAppendReInitializeDSM`.
+fn exec_append_reinitialize_dsm_shim(
+    node: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    ExecAppendReInitializeDSM(resolve_append_state(node), pcxt)
+}
+
+/// Seam shim for `ExecAppendInitializeWorker`.
+fn exec_append_initialize_worker_shim(
+    node: PlanStateHandle,
+    pwcxt: ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    ExecAppendInitializeWorker(resolve_append_state(node), pwcxt)
 }
 
 // ===========================================================================
@@ -521,24 +584,25 @@ pub fn ExecReScanAppend<'mcx>(
 /// `ExecAppendEstimate(node, pcxt)` — compute the amount of space we'll need in
 /// the parallel query DSM, and inform `pcxt->estimator` about our needs.
 ///
-/// nodeAppend owns this control flow; the live `AppendState` node's `as_nplans`
-/// read / `pstate_len` write are reached through `execParallel-support-seams`
-/// (the handle is resolved to a live node by execParallel's parallel-worker
-/// dispatch, `access/parallel.c`).
+/// nodeAppend owns this control flow over its OWNED [`AppendStateData`]: the
+/// `as_nplans` read and `pstate_len` write are plain field accesses on the node.
+/// Only the orthogonal `shm_toc` reservation (which lives behind the DSM owner,
+/// `access/parallel.c`/`shm_toc.c`) goes through `backend-access-transam-parallel`
+/// seams.
 pub fn ExecAppendEstimate(
-    node: PlanStateHandle,
+    node: &mut AppendStateData<'_>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // node->pstate_len = add_size(offsetof(ParallelAppendState, pa_finished),
     //                             sizeof(bool) * node->as_nplans);
-    let as_nplans = parallel_sup::append_as_nplans::call(node);
     let base = pa_finished_offset();
-    let tail = shmem::add_size::call(0, as_nplans as usize)?; // sizeof(bool) == 1
-    let len = shmem::add_size::call(base, tail)?;
-    parallel_sup::append_set_pstate_len::call(node, len);
+    let tail = shmem::add_size::call(0, node.as_nplans as usize)?; // sizeof(bool) == 1
+    node.pstate_len = shmem::add_size::call(base, tail)?;
 
+    // shm_toc_estimate_chunk(&pcxt->estimator, node->pstate_len);
+    // shm_toc_estimate_keys(&pcxt->estimator, 1);
     let estimator = parallel::pcxt_estimator::call(pcxt);
-    parallel::shm_toc_estimate_chunk::call(estimator, len);
+    parallel::shm_toc_estimate_chunk::call(estimator, node.pstate_len);
     parallel::shm_toc_estimate_keys::call(estimator, 1);
     Ok(())
 }
@@ -546,49 +610,110 @@ pub fn ExecAppendEstimate(
 /// `ExecAppendInitializeDSM(node, pcxt)` — set up shared state for Parallel
 /// Append.
 ///
-/// The DSM allocation/zeroing, `pa_lock` init, TOC insert, `as_pstate`
-/// install, and `choose_next_subplan = choose_next_subplan_for_leader` switch
-/// all act on the live node and the not-yet-ported `ParallelContext`/`shm_toc`,
-/// so they run inside the `append_initialize_dsm_pstate` support seam (mirrors
-/// `LWTRANCHE_PARALLEL_APPEND` from the C). nodeAppend owns reading
-/// `pstate_len`/`plan_node_id` to drive it.
+/// nodeAppend owns the C control flow over its OWNED [`AppendStateData`] (the
+/// `pstate_len`/`plan_node_id` reads, the `choose_next_subplan` strategy switch).
+/// The orthogonal DSM allocation (`shm_toc_allocate`) is a real call into the
+/// `access/parallel.c`/`shm_toc.c` owner via its seams. What is genuinely
+/// unported is the **DSM-resident `ParallelAppendState` carrier**: the C
+/// `node->as_pstate` points INTO the just-allocated DSM chunk so every worker
+/// that `shm_toc_lookup`s the same key shares the one `pa_lock`/`pa_next_plan`/
+/// `pa_finished[]` coordination struct. The merged `AppendStateData.as_pstate`
+/// is an in-process `Box<ParallelAppendState>` (which cannot be cross-process
+/// shared), and the keystone typed-shared-DSM-object primitive
+/// (`shared_dsm_object`) has no flexible-array-tail placement variant for the
+/// `pa_finished[FLEXIBLE_ARRAY_MEMBER]` layout — so re-establishing the shared
+/// carrier (placement-init + `memset` + `LWLockInitialize` + `shm_toc_insert` +
+/// installing it as `as_pstate`) mirror-and-panics into the parallel DSM owner.
+/// This is the same blocker nodeAgg's `ExecAggInitializeDSM` carries for its
+/// `SharedAggInfo`.
 pub fn ExecAppendInitializeDSM(
-    node: PlanStateHandle,
+    node: &mut AppendStateData<'_>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
+    let plan_node_id = append_plan_node_id(node);
+    let toc = parallel::pcxt_toc::call(pcxt);
+    let chunk = parallel::shm_toc_allocate::call(toc, node.pstate_len);
+    let _ = (chunk, plan_node_id);
+
     // memset(pstate, 0, node->pstate_len);
     // LWLockInitialize(&pstate->pa_lock, LWTRANCHE_PARALLEL_APPEND);
     // shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
     // node->as_pstate = pstate;
     // node->choose_next_subplan = choose_next_subplan_for_leader;
-    let plan_node_id = parallel_sup::append_plan_node_id::call(node);
-    let pstate_len = parallel_sup::append_pstate_len::call(node);
-    parallel_sup::append_initialize_dsm_pstate::call(node, pcxt, plan_node_id, pstate_len)
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: ParallelAppendState \
+         DSM place_and_init + carrier handoff (ExecAppendInitializeDSM) — needs a \
+         DSM-resident as_pstate carrier (merged AppendState uses in-process \
+         Box<ParallelAppendState>; a Box cannot be cross-process shared) and a \
+         keystone flexible-array-tail (pa_finished[]) placement primitive; unported"
+    );
 }
 
 /// `ExecAppendReInitializeDSM(node, pcxt)` — reset shared state before
 /// beginning a fresh scan.
+///
+/// In C this resets the DSM-resident `node->as_pstate`; over the owned node it
+/// resets the [`ParallelAppendState`] carrier directly (the field is the C
+/// `pstate->...` write). The carrier is only present once the (unported, see
+/// [`ExecAppendInitializeDSM`]) DSM handoff has installed it.
 pub fn ExecAppendReInitializeDSM(
-    node: PlanStateHandle,
+    node: &mut AppendStateData<'_>,
     _pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
+    // ParallelAppendState *pstate = node->as_pstate;
     // pstate->pa_next_plan = 0;
     // memset(pstate->pa_finished, 0, sizeof(bool) * node->as_nplans);
-    parallel_sup::append_reinitialize_dsm_pstate::call(node)
+    let nplans = node.as_nplans as usize;
+    let pstate = node
+        .as_pstate
+        .as_deref_mut()
+        .ok_or_else(|| elog_error("ExecAppendReInitializeDSM: as_pstate is NULL"))?;
+    pstate.pa_next_plan = 0;
+    for slot in pstate.pa_finished.iter_mut().take(nplans) {
+        *slot = false;
+    }
+    Ok(())
 }
 
 /// `ExecAppendInitializeWorker(node, pwcxt)` — copy relevant information from
 /// the TOC into planstate, and initialize whatever is required to choose and
 /// execute the optimal subplan.
+///
+/// nodeAppend owns the `plan_node_id` read and the `choose_next_subplan` worker
+/// switch over the owned node; the `shm_toc_lookup` of the leader's chunk is a
+/// real call into the DSM owner's seams. Re-establishing `node->as_pstate` from
+/// the looked-up DSM chunk is blocked on the same DSM-resident carrier surface
+/// as [`ExecAppendInitializeDSM`] (the in-process `Box` cannot alias the shared
+/// DSM bytes), so it mirror-and-panics into the parallel DSM owner.
 pub fn ExecAppendInitializeWorker(
-    node: PlanStateHandle,
+    node: &mut AppendStateData<'_>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
     // node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
+    let plan_node_id = append_plan_node_id(node);
+    let toc = parallel::pwcxt_toc::call(pwcxt);
+    let chunk = parallel::shm_toc_lookup::call(toc, plan_node_id as u64, false);
+    let _ = chunk;
+
     // node->choose_next_subplan = choose_next_subplan_for_worker;
-    let plan_node_id = parallel_sup::append_plan_node_id::call(node);
-    parallel_sup::append_initialize_worker_pstate::call(node, pwcxt, plan_node_id)
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: ParallelAppendState \
+         DSM attach + carrier handoff (ExecAppendInitializeWorker) — needs a \
+         DSM-resident as_pstate carrier (merged AppendState uses in-process \
+         Box<ParallelAppendState>) and a keystone flexible-array-tail placement \
+         primitive; unported"
+    );
+}
+
+/// `node->ps.plan->plan_node_id` — the toc key the shared
+/// [`ParallelAppendState`] is registered under.
+#[inline]
+fn append_plan_node_id(node: &AppendStateData<'_>) -> i32 {
+    node.ps
+        .plan
+        .map(|n| n.plan_head().plan_node_id)
+        .expect("AppendState.ps.plan")
 }
 
 /// Dispatch `node->choose_next_subplan(node)` (the C function-pointer call).
