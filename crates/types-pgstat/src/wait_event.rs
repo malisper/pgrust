@@ -80,6 +80,15 @@ pub const WAIT_EVENT_MESSAGE_QUEUE_RECEIVE: u32 = PG_WAIT_IPC | 35;
 /// message queue." `PG_WAIT_IPC | 36` (= 134217764, matching c2rust).
 pub const WAIT_EVENT_MESSAGE_QUEUE_SEND: u32 = PG_WAIT_IPC | 36;
 
+/// `WAIT_EVENT_REGISTER_SYNC_REQUEST` — "Waiting while sending synchronization
+/// requests to the checkpointer, because the request queue is full." 6th entry
+/// (0-based 5) of the `WaitEventTimeout` section of `wait_event_names.txt`
+/// (BASE_BACKUP_THROTTLE is index 0), so the generated enum value is
+/// `PG_WAIT_TIMEOUT | 5` (consistent with this section's `SPIN_DELAY` = `| 6`
+/// and `WAL_SUMMARIZER_ERROR` = `| 9`). `RegisterSyncRequest` (sync.c) waits
+/// here for ~10 ms before retrying a full checkpointer request queue.
+pub const WAIT_EVENT_REGISTER_SYNC_REQUEST: u32 = PG_WAIT_TIMEOUT | 5;
+
 /// `WAIT_EVENT_SPIN_DELAY` — "Waiting while acquiring a contended spinlock."
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
