@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-lib-bloomfilter-seams = { path = "../backend-lib-bloomfilter-seams" }
-backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }

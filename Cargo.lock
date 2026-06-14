@@ -3778,6 +3778,7 @@ dependencies = [
 name = "backend-commands-user"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-catalog-seams",
  "backend-commands-user-seams",
  "backend-utils-error",
  "mcx",
@@ -7959,6 +7960,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-procarray"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-storage-ipc-procarray-seams"
 version = "0.0.0"
 dependencies = [
@@ -7968,6 +7988,7 @@ dependencies = [
  "types-error",
  "types-snapshot",
  "types-storage",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -9025,12 +9046,12 @@ name = "backend-utils-adt-acl"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-pg-largeobject-seams",
  "backend-commands-dbcommands-seams",
  "backend-commands-proclang-seams",
  "backend-commands-tablespace-seams",
- "backend-commands-user-seams",
  "backend-foreign-foreign-seams",
  "backend-lib-bloomfilter-seams",
  "backend-utils-adt-acl-seams",
@@ -12098,6 +12119,7 @@ dependencies = [
  "backend-storage-ipc-dsm-registry",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-pmsignal",
+ "backend-storage-ipc-procarray",
  "backend-storage-ipc-procsignal",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
