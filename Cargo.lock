@@ -657,6 +657,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-nbt-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-nbt-dedup",
+ "backend-access-nbt-xlog-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nbtree",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-nbt-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -1733,6 +1753,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "common-pglz",
  "mcx",
  "port-crc32c",
@@ -1742,6 +1763,7 @@ dependencies = [
  "types-logical",
  "types-storage",
  "types-wal",
+ "types-walsummarizer",
 ]
 
 [[package]]
@@ -11412,6 +11434,7 @@ dependencies = [
  "backend-access-heap-vacuumlazy",
  "backend-access-index-indexam",
  "backend-access-nbt-dedup",
+ "backend-access-nbt-xlog",
  "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
