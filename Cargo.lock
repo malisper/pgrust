@@ -437,6 +437,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hash-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-hash-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-hash-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -11615,6 +11635,7 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-hash-xlog",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",

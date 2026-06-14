@@ -210,14 +210,19 @@ seam_core::seam!(
     /// `DestReceiver` handle the caller built (`CreateCopyDestReceiver`, whose
     /// `cstate` it has already associated). The active snapshot is the copied
     /// one the caller has just pushed (copyto.c:830-831). Returns the started
-    /// `QueryDesc` (its `tupDesc` set, `exec_token` the executor's handle).
-    /// `Err` carries any `ExecutorStart` `ereport(ERROR)`.
+    /// owned [`types_nodes::querydesc::QueryDesc`] (lifetime-free; its `work`
+    /// bundle holds the `EState`/plan-state tree that `ExecutorStart` populated,
+    /// so the result tupdesc is readable via
+    /// [`types_nodes::querydesc::QueryDesc::with_result_tupdesc`]). `parent` is
+    /// the `CurrentMemoryContext` the per-query "ExecutorState" context is made
+    /// an (accounting) child of. `Err` carries any `ExecutorStart`
+    /// `ereport(ERROR)`.
     pub fn create_query_desc_and_start<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        plan: types_nodes::nodeindexscan::PlannedStmt<'mcx>,
+        parent: &mcx::MemoryContext,
+        plan: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
         source_text: &str,
         copy_receiver: u64,
-    ) -> types_error::PgResult<types_nodes::copy_query::QueryDesc<'mcx>>
+    ) -> types_error::PgResult<types_nodes::querydesc::QueryDesc>
 );
 
 seam_core::seam!(
@@ -227,14 +232,21 @@ seam_core::seam!(
     /// `cstate.receiver_processed`, the C `((DR_copy *) dest)->processed`). The
     /// processed count is read by copyto from its own `cstate` after the run, so
     /// it is *not* returned here. `Err` carries execution `ereport(ERROR)`s.
-    pub fn executor_run_copy(exec_token: u64) -> types_error::PgResult<()>
+    /// Takes the started owned `QueryDesc` by `&mut` (`ExecutorRun` mutates the
+    /// `EState` interior — `es_processed`, `already_executed`).
+    pub fn executor_run_copy(
+        query_desc: &mut types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// The COPY-(query)-TO teardown (copyto.c:1010-1012): `ExecutorFinish` +
     /// `ExecutorEnd` + `FreeQueryDesc` for the started query. `Err` carries any
-    /// teardown `ereport(ERROR)`.
-    pub fn end_copy_query(exec_token: u64) -> types_error::PgResult<()>
+    /// teardown `ereport(ERROR)`. Consumes the started owned `QueryDesc`
+    /// (`FreeQueryDesc` frees it; the bundle drops with the value).
+    pub fn end_copy_query(
+        query_desc: types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
