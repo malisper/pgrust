@@ -74,3 +74,12 @@ seam_core::seam!(
         is_internal: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `InvokeFunctionExecuteHook(objectId)` (objectaccess.h macro /
+    /// `RunFunctionExecuteHook`): fire the object-access hook for a function
+    /// about to be executed if one is installed; a no-op otherwise. Used by
+    /// `tcop/fastpath.c`'s `HandleFunctionRequest` after the `ACL_EXECUTE`
+    /// check. The hook may raise, carried on `Err`.
+    pub fn invoke_function_execute_hook(object_id: Oid) -> PgResult<()>
+);

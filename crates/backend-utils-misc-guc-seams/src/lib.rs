@@ -156,3 +156,20 @@ seam_core::seam!(
         restrict_privileged: bool,
     ) -> Option<String>
 );
+
+seam_core::seam!(
+    /// `SetPGVariable("session_authorization", NIL, false)` (guc.c) — the one
+    /// `DISCARD ALL` call site. With a `NIL` args list this resets
+    /// `session_authorization` to its session default; `is_local` is `false`.
+    /// Encapsulated at the GUC owner because the generic
+    /// `SetPGVariable(name, args, is_local)` marshals a `List *` of `A_Const`
+    /// the owner has yet to model here. `Err` carries its `ereport(ERROR)`.
+    pub fn set_pg_variable_session_authorization_reset() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResetAllOptions()` (guc.c) — reset all GUCs to their session-start /
+    /// reset values (`DISCARD ALL` and `RESET ALL`). May `ereport(ERROR)` from
+    /// per-variable assign hooks.
+    pub fn reset_all_options() -> types_error::PgResult<()>
+);

@@ -1217,7 +1217,6 @@ dependencies = [
  "backend-storage-ipc-shm-toc",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
- "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
  "backend-utils-mmgr-freepage",
@@ -2117,6 +2116,7 @@ name = "backend-catalog-pg-conversion-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -2488,6 +2488,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-conversioncmds"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-conversion-seams",
+ "backend-parser-parse-func-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+ "types-wchar",
+]
+
+[[package]]
 name = "backend-commands-copy-seams"
 version = "0.0.0"
 dependencies = [
@@ -2621,6 +2645,23 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-discard"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace",
+ "backend-commands-async-seams",
+ "backend-commands-prepare",
+ "backend-commands-sequence-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-cache-plancache",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-portalmem",
+ "types-error",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -3287,20 +3328,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-execJunk"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execTuples",
- "backend-executor-execTuples-seams",
- "mcx",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-tuple",
-]
-
-[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -3468,32 +3495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-execSRF-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-datum",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-execScan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execExpr-seams",
- "backend-executor-execMain-seams",
- "backend-executor-execScan-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-nodes-core-seams",
- "backend-tcop-postgres-seams",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
 name = "backend-executor-execScan-seams"
 version = "0.0.0"
 dependencies = [
@@ -3624,7 +3625,6 @@ dependencies = [
 name = "backend-executor-nodeAgg"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-catalog-aclchk-seams",
  "backend-executor-execExpr-seams",
@@ -3699,40 +3699,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeBitmapAnd"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execUtils-seams",
- "backend-executor-instrument-seams",
- "backend-executor-nodeBitmapAnd-seams",
- "backend-nodes-core-tidbitmap-seams",
- "backend-utils-error",
- "mcx",
- "types-error",
- "types-nodes",
- "types-tidbitmap",
-]
-
-[[package]]
-name = "backend-executor-nodeBitmapAnd-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-error",
- "types-nodes",
- "types-tidbitmap",
-]
-
-[[package]]
 name = "backend-executor-nodeBitmapHeapscan"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-tableam",
  "backend-access-table-tableam-bm-seams",
- "backend-access-transam-parallel",
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
@@ -3752,7 +3723,6 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
- "types-parallel",
  "types-rel",
  "types-storage",
  "types-tableam",
@@ -3776,43 +3746,6 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
- "types-nodes",
- "types-tidbitmap",
-]
-
-[[package]]
-name = "backend-executor-nodeBitmapOr"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execUtils-seams",
- "backend-executor-instrument-seams",
- "backend-executor-nodeBitmapIndexscan-seams",
- "backend-nodes-core-tidbitmap-seams",
- "backend-utils-init-small-seams",
- "mcx",
- "types-core",
- "types-error",
- "types-execparallel",
- "types-nodes",
- "types-tidbitmap",
-]
-
-[[package]]
-name = "backend-executor-nodeCtescan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execExpr-seams",
- "backend-executor-execMain-seams",
- "backend-executor-execScan-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "mcx",
- "seam-core",
- "types-error",
- "types-nodes",
- "types-tuple",
 ]
 
 [[package]]
@@ -3854,24 +3787,6 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
-]
-
-[[package]]
-name = "backend-executor-nodeGroup"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execGrouping-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-tcop-postgres-seams",
- "mcx",
- "types-core",
- "types-error",
- "types-nodes",
- "types-tuple",
 ]
 
 [[package]]
@@ -3934,8 +3849,6 @@ dependencies = [
 name = "backend-executor-nodeHashjoin"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-parallel",
- "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execProcnode-seams",
@@ -3944,18 +3857,13 @@ dependencies = [
  "backend-executor-nodeHash-seams",
  "backend-executor-nodeHashjoin-seams",
  "backend-storage-file-buffile-seams",
- "backend-storage-file-sharedfileset-seams",
- "backend-storage-ipc-barrier-seams",
- "backend-storage-lmgr-lwlock-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
  "types-error",
- "types-execparallel",
  "types-nodes",
- "types-storage",
  "types-tuple",
 ]
 
@@ -4235,24 +4143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeProjectSet"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execSRF-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-tcop-postgres-seams",
- "backend-utils-error",
- "mcx",
- "types-datum",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
 name = "backend-executor-nodeResult"
 version = "0.0.0"
 dependencies = [
@@ -4267,33 +4157,6 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-executor-nodeSamplescan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-nodeSamplescan-seams",
- "mcx",
- "seam-core",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-samplescan",
-]
-
-[[package]]
-name = "backend-executor-nodeSamplescan-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-samplescan",
 ]
 
 [[package]]
@@ -4419,22 +4282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeSubqueryscan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execScan-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "mcx",
- "types-error",
- "types-nodes",
- "types-tuple",
-]
-
-[[package]]
 name = "backend-executor-nodeTableFuncscan"
 version = "0.0.0"
 dependencies = [
@@ -4521,67 +4368,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeUnique"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execGrouping-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-tcop-postgres-seams",
- "mcx",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-nodeValuesscan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execExpr-seams",
- "backend-executor-execMain-seams",
- "backend-executor-execScan-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-nodes-core-seams",
- "backend-optimizer-util-clauses-seams",
- "backend-tcop-postgres-seams",
- "backend-utils-adt-misc2-seams",
- "mcx",
- "types-core",
- "types-datum",
- "types-error",
- "types-execparallel",
- "types-nodes",
- "types-tuple",
-]
-
-[[package]]
-name = "backend-executor-nodeWorktablescan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-nodeWorktablescan-seams",
- "mcx",
- "seam-core",
- "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-nodeWorktablescan-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
@@ -4603,25 +4389,6 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-tqueue"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execTuples-seams",
- "backend-executor-tqueue-seams",
- "backend-storage-ipc-shm-mq-seams",
- "backend-utils-error",
- "mcx",
- "seam-core",
- "types-core",
- "types-dest",
- "types-error",
- "types-execparallel",
- "types-nodes",
- "types-parallel",
- "types-tuple",
 ]
 
 [[package]]
@@ -4941,7 +4708,6 @@ dependencies = [
 name = "backend-nodes-core-tidbitmap-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
  "types-error",
  "types-execparallel",
@@ -5086,15 +4852,6 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-optimizer-util-clauses-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
  "types-error",
  "types-nodes",
 ]
@@ -6428,15 +6185,6 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
-]
-
-[[package]]
-name = "backend-storage-file-sharedfileset-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-execparallel",
- "types-storage",
 ]
 
 [[package]]
@@ -7990,7 +7738,6 @@ dependencies = [
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
  "types-datum",
  "types-error",
@@ -9860,6 +9607,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-encnames-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-hashfn"
 version = "0.0.0"
 dependencies = [
@@ -10224,6 +9978,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-amcmds",
  "backend-commands-cluster",
+ "backend-commands-conversioncmds",
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-foreigncmds",
@@ -10232,22 +9987,16 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
- "backend-executor-execJunk",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
- "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",
  "backend-executor-instrument",
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
- "backend-executor-nodeBitmapAnd",
  "backend-executor-nodeBitmapHeapscan",
- "backend-executor-nodeBitmapOr",
- "backend-executor-nodeCtescan",
  "backend-executor-nodeForeignscan",
- "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
@@ -10256,17 +10005,11 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
- "backend-executor-nodeProjectSet",
  "backend-executor-nodeResult",
- "backend-executor-nodeSamplescan",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
- "backend-executor-nodeSubqueryscan",
- "backend-executor-nodeUnique",
- "backend-executor-nodeValuesscan",
- "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
@@ -10746,7 +10489,6 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-opclass",
- "types-parallel",
  "types-rel",
  "types-scan",
  "types-snapshot",
@@ -10916,19 +10658,6 @@ dependencies = [
 [[package]]
 name = "types-rusage"
 version = "0.0.0"
-
-[[package]]
-name = "types-samplescan"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "types-core",
- "types-datum",
- "types-nodes",
- "types-pathnodes",
- "types-rel",
- "types-tableam",
-]
 
 [[package]]
 name = "types-scan"

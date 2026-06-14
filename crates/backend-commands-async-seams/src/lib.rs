@@ -58,3 +58,9 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn async_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `Async_UnlistenAll()` (async.c) — `DISCARD ALL` / session reset: remove
+    /// all of this backend's LISTEN registrations. May `ereport(ERROR)`.
+    pub fn async_unlisten_all() -> PgResult<()>
+);
