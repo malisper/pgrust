@@ -63,3 +63,20 @@ seam_core::seam!(
     /// Used by CLUSTER's `get_tables_to_cluster`.
     pub fn scan_indisclustered<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, (Oid, Oid)>>
 );
+
+seam_core::seam!(
+    /// `log_heap_visible(rel, heap_buffer, vm_buffer, snapshotConflictHorizon,
+    /// vmflags)` (heapam.c): emit the `XLOG_HEAP2_VISIBLE` WAL record when a
+    /// visibility-map bit is *set* during VACUUM, registering the VM buffer
+    /// (and, when `XLogHintBitIsNeeded()`, the heap buffer as an FPI) and
+    /// returning the record's LSN. The `RelationIsAccessibleInLogicalDecoding`
+    /// catalog-rel flag is OR'd into the record flags inside the owner. `Err`
+    /// carries the `XLogInsert` `ereport(ERROR)` surface.
+    pub fn log_heap_visible(
+        rel: &RelationData<'_>,
+        heap_buffer: types_storage::Buffer,
+        vm_buffer: types_storage::Buffer,
+        snapshot_conflict_horizon: types_core::primitive::TransactionId,
+        vmflags: u8,
+    ) -> PgResult<types_core::primitive::XLogRecPtr>
+);

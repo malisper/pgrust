@@ -443,6 +443,31 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-heap-heapam-visibility"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-utils-time-combocid-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -532,6 +557,28 @@ dependencies = [
  "types-core",
  "types-error",
  "types-vacuum",
+]
+
+[[package]]
+name = "backend-access-heap-visibilitymap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-heap-visibilitymap-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -6596,7 +6643,12 @@ name = "backend-replication-logical-reorderbuffer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
  "types-logical",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10717,6 +10769,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-time-combocid-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-time-snapmgr"
 version = "0.0.0"
 dependencies = [
@@ -11214,8 +11275,10 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-hashvalidate",
+ "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",
+ "backend-access-heap-visibilitymap",
  "backend-access-index-indexam",
  "backend-access-nbt-dedup",
  "backend-access-nbtree-nbtree",
@@ -12038,6 +12101,7 @@ name = "types-snapshot"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-vacuum",
 ]
 
 [[package]]

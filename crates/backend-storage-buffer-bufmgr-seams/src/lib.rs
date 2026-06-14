@@ -307,3 +307,33 @@ seam_core::seam!(
         fsm_nblocks: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::Buffer>
 );
+
+// ---------------------------------------------------------------------------
+// Visibility-map fork buffer round-trip (visibilitymap.c `vm_readbuf` /
+// `vm_extend` consumer). Same shape as the FSM-fork pair above: the visibility
+// map is a separate fork (`VISIBILITYMAP_FORKNUM`) and the buffer manager owns
+// the shared page, so the VM algorithm crosses the boundary by `Buffer` id.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, VISIBILITYMAP_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
+    /// NULL)` (bufmgr.c) for the VM fork — pin (reading in, zeroing a torn page)
+    /// a block of the relation's `VISIBILITYMAP_FORKNUM`. `Err` carries the smgr
+    /// read `ereport(ERROR)`s.
+    pub fn read_buffer_extended_vm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `ExtendBufferedRelTo(BMR_REL(rel), VISIBILITYMAP_FORKNUM, NULL,
+    /// EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE, vm_nblocks,
+    /// RBM_ZERO_ON_ERROR)` (bufmgr.c) — ensure the VM fork is at least
+    /// `vm_nblocks` long, extending with all-zero pages, and pin the target
+    /// block. `Err` carries the extension `ereport(ERROR)`s.
+    pub fn extend_buffered_rel_to_vm<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        vm_nblocks: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
