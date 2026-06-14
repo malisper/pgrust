@@ -14,7 +14,7 @@
 //! current ports consume; the xlogreader and logical-decoding ports widen
 //! them as they land.
 
-use mcx::{Mcx, PgString, PgVec};
+use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use types_core::{
     uint32, BlockNumber, TimeLineID, XLogRecPtr, XLogSegNo, MAXPGPATH,
@@ -124,6 +124,40 @@ pub type XLogPageReadCB = fn(
     target_rec_ptr: XLogRecPtr,
 ) -> PgResult<i32>;
 
+/// `WALSegmentOpenCB` (access/xlogreader.h) — the segment-open callback:
+/// `void (*)(XLogReaderState *xlogreader, XLogSegNo nextSegNo,
+/// TimeLineID *tli_p)`. On success it sets `reader->seg.ws_file` to the open
+/// file descriptor; on failure it `ereport(ERROR)`s and does not return
+/// (carried on `Err`). `tli_p` is an in/out argument: the caller passes the
+/// timeline to look the segment up in, and the callback may overwrite it with
+/// the TLI it actually opened — modeled as `&mut TimeLineID`.
+pub type WALSegmentOpenCB = fn(
+    reader: &mut XLogReaderState<'_>,
+    next_seg_no: XLogSegNo,
+    tli_p: &mut TimeLineID,
+) -> PgResult<()>;
+
+/// `WALSegmentCloseCB` (access/xlogreader.h) — the segment-close callback:
+/// `void (*)(XLogReaderState *xlogreader)`. Sets `reader->seg.ws_file` to a
+/// negative number. Infallible.
+pub type WALSegmentCloseCB = fn(reader: &mut XLogReaderState<'_>);
+
+/// `XLogReaderRoutine` (access/xlogreader.h) — the operational callbacks an
+/// `XLogReaderState` dispatches through. The C struct holds three function
+/// pointers; a caller that never drives a record read may leave any of them
+/// `NULL` (modeled as `None`). `page_read` is the data-input callback;
+/// `segment_open`/`segment_close` are required only by callers that use the
+/// built-in `page_read` helpers (`read_local_xlog_page` / `WALRead`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XLogReaderRoutine {
+    /// `XLogPageReadCB page_read` — data input. `None` is the C NULL.
+    pub page_read: Option<XLogPageReadCB>,
+    /// `WALSegmentOpenCB segment_open`. `None` is the C NULL.
+    pub segment_open: Option<WALSegmentOpenCB>,
+    /// `WALSegmentCloseCB segment_close`. `None` is the C NULL.
+    pub segment_close: Option<WALSegmentCloseCB>,
+}
+
 /// `XLogPageReadResult` (access/xlogreader.h) — return-code sentinels from
 /// `XLogPageReadCB`.
 pub const XLREAD_SUCCESS: i32 = 0;
@@ -142,14 +176,27 @@ pub const XLREAD_WOULDBLOCK: i32 = -2;
 /// state (`readBuf`/`seg`/`segcxt`) are modeled as owned bytes/handles; the
 /// `decode_arena` `Mcx` handle is the C `MemoryContext` the reader allocates
 /// decoded records in (`None` before `XLogReaderAllocate` wires it, mirroring
-/// the C all-zero pre-init state). `page_read` is the nullable
-/// `routine.page_read` callback.
-#[derive(Debug, Default)]
+/// the C all-zero pre-init state). The operational callbacks live in
+/// `routine` (`page_read`/`segment_open`/`segment_close`).
+#[derive(Default)]
 pub struct XLogReaderState<'mcx> {
+    // ---- Operational callbacks ----
+    /// `XLogReaderRoutine routine` — the data-input / segment-open /
+    /// segment-close callbacks (`page_read`, `segment_open`, `segment_close`).
+    /// All-`None` (the C all-NULL routine) is the `Default` pre-init state.
+    pub routine: XLogReaderRoutine,
+
     // ---- Public parameters ----
     /// `uint64 system_identifier` — system identifier of the xlog files
     /// (0 when unknown/unimportant).
     pub system_identifier: u64,
+
+    /// `void *private_data` — opaque data for the reader's callbacks (not used
+    /// by xlogreader itself). The C `void *` block is allocated in the
+    /// reader's allocator and cast to the owner's concrete private struct
+    /// (e.g. `ReadLocalXLogPageNoWaitPrivate`); modeled as a type-erased
+    /// arena box the owner downcasts. `None` is the C NULL.
+    pub private_data: Option<PgBox<'mcx, dyn core::any::Any>>,
 
     /// `XLogRecPtr ReadRecPtr` — start of last record read.
     pub ReadRecPtr: XLogRecPtr,
@@ -202,6 +249,29 @@ pub struct XLogReaderState<'mcx> {
     /// `decode_buffer`.
     pub decode_buffer_tail: usize,
 
+    /// `DecodedXLogRecord *decode_queue_head` / `*decode_queue_tail` — the
+    /// queue of decoded records (a C linked list chaining `DecodedXLogRecord`
+    /// via `->next`, the records usually consecutive in `decode_buffer` but
+    /// some `palloc`'d separately when oversized).
+    ///
+    /// Modeled as a FIFO over the *external* `decode_arena` (per the borrowed
+    /// `'mcx` payload contract, **not** the src-idiomatic owned-Vec): the
+    /// records live in `decode_queue` (allocated in `decode_arena`, like the C
+    /// records live in the reader's context), and `decode_queue_head` is the
+    /// read cursor — the oldest still-queued record is
+    /// `decode_queue[decode_queue_head]` (the C `decode_queue_head`), the
+    /// newest is `decode_queue.last()` (the C `decode_queue_tail`). Records
+    /// before `decode_queue_head` have been consumed by `XLogNextRecord`.
+    /// `None`/empty is the C all-NULL empty queue. Because the records' byte
+    /// slices borrow `decode_arena` and not the reader, this is not
+    /// self-referential and preserves the `&'mcx [u8]` the consumers read.
+    pub decode_queue: Option<PgVec<'mcx, DecodedXLogRecord<'mcx>>>,
+    /// Read cursor into [`Self::decode_queue`]: the index of the C
+    /// `decode_queue_head` (oldest still-queued) record. Equal to
+    /// `decode_queue.len()` when the queue is empty (`decode_queue_head ==
+    /// NULL`).
+    pub decode_queue_head: usize,
+
     /// `char *readBuf` — buffer for the currently read page (`XLOG_BLCKSZ`
     /// bytes, valid up to at least `readLen`). Owned bytes; `None` is the C
     /// NULL (allocated by `XLogReaderAllocate`).
@@ -250,11 +320,6 @@ pub struct XLogReaderState<'mcx> {
     /// `bool nonblocking` — tell `XLogPageReadCB` not to block waiting for
     /// data.
     pub nonblocking: bool,
-
-    /// `routine.page_read` (`XLogReaderRoutine.page_read`) — the nullable
-    /// data-input callback. `None` is the C NULL (callers that never call
-    /// `XLogReadRecord`/`XLogFindNextRecord` may leave it unset).
-    pub page_read: Option<XLogPageReadCB>,
 }
 
 /// `LogicalDecodingContext` (replication/logical.h), trimmed.

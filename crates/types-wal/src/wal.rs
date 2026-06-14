@@ -274,28 +274,57 @@ impl<'a> DecodedBkpBlock<'a> {
 /// buffer with the same lifetime.
 #[derive(Debug)]
 pub struct DecodedXLogRecord<'mcx> {
+    /// `size_t size` — total size of the decoded record (private; used by the
+    /// decode-buffer resource manager to advance the ring cursor).
+    size: usize,
+    /// `bool oversized` — the record was allocated outside the regular decode
+    /// buffer (a separate `palloc`, because it did not fit).
+    oversized: bool,
+    /// `XLogRecPtr lsn` — the record's location (start LSN).
+    lsn: XLogRecPtr,
+    /// `XLogRecPtr next_lsn` — location of the next record.
+    next_lsn: XLogRecPtr,
     header: XLogRecord,
-    /// `XLogRecGetData` — the record's main data.
-    main_data: &'mcx [u8],
-    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
     /// `DecodedXLogRecord.record_origin` — the replication origin decoded from
     /// the record (`XLogRecGetOrigin`); `InvalidRepOriginId` when none.
     record_origin: RepOriginId,
+    /// `TransactionId toplevel_xid` — XID of the top-level transaction.
+    toplevel_xid: TransactionId,
+    /// `XLogRecGetData` — the record's main data.
+    main_data: &'mcx [u8],
+    /// `uint32 main_data_len` — the main data portion's length. Stored
+    /// explicitly (mirroring C); equal to `main_data.len()`.
+    main_data_len: uint32,
+    /// `int max_block_id` — highest block_id in use (`-1` if none). Stored
+    /// explicitly (mirroring C); the block array is sized `0..=max_block_id`.
+    max_block_id: i32,
+    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
     /// `blocks` must hold the block references `0..=max_block_id` (in-use or
     /// not), mirroring the C array indexed by block id.
-    pub const fn new(
+    pub fn new(
         header: XLogRecord,
         main_data: &'mcx [u8],
         blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
     ) -> Self {
+        let main_data_len = main_data.len() as uint32;
+        // The block array is sized `0..=max_block_id`, so the highest in-use id
+        // is `blocks.len() - 1` (`-1` when empty), matching `XLogRecMaxBlockId`.
+        let max_block_id = blocks.len() as i32 - 1;
         Self {
+            size: 0,
+            oversized: false,
+            lsn: types_core::InvalidXLogRecPtr,
+            next_lsn: types_core::InvalidXLogRecPtr,
             header,
-            main_data,
-            blocks,
             record_origin: types_core::InvalidRepOriginId,
+            toplevel_xid: types_core::InvalidTransactionId,
+            main_data,
+            main_data_len,
+            max_block_id,
+            blocks,
         }
     }
 
@@ -304,6 +333,64 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
     pub const fn with_origin(mut self, origin: RepOriginId) -> Self {
         self.record_origin = origin;
         self
+    }
+
+    /// Set `lsn` / `next_lsn` (the record's location and the next record's
+    /// location), builder-style; `DecodeXLogRecord` fills these as it links the
+    /// record onto the decode queue.
+    pub const fn with_lsns(mut self, lsn: XLogRecPtr, next_lsn: XLogRecPtr) -> Self {
+        self.lsn = lsn;
+        self.next_lsn = next_lsn;
+        self
+    }
+
+    /// Set `toplevel_xid` (`XLogRecGetTopXid`), builder-style; the decoder
+    /// fills it from the record's `XLR_BLOCK_ID_TOPLEVEL_XID` block-data when
+    /// present.
+    pub const fn with_toplevel_xid(mut self, xid: TransactionId) -> Self {
+        self.toplevel_xid = xid;
+        self
+    }
+
+    /// Set the resource-management bookkeeping (`size` total decoded size and
+    /// `oversized`), builder-style; `DecodeXLogRecord` fills these when sizing
+    /// the record in the decode buffer.
+    pub const fn with_size(mut self, size: usize, oversized: bool) -> Self {
+        self.size = size;
+        self.oversized = oversized;
+        self
+    }
+
+    /// `record->size` — total decoded size, used by the decode-buffer ring
+    /// bookkeeping.
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    /// `record->oversized` — whether the record was allocated outside the
+    /// regular decode buffer.
+    pub const fn oversized(&self) -> bool {
+        self.oversized
+    }
+
+    /// `record->lsn` — the record's location (start LSN).
+    pub const fn lsn(&self) -> XLogRecPtr {
+        self.lsn
+    }
+
+    /// `record->next_lsn` — location of the next record.
+    pub const fn next_lsn(&self) -> XLogRecPtr {
+        self.next_lsn
+    }
+
+    /// `XLogRecGetTopXid(record)` — `record->toplevel_xid`.
+    pub const fn toplevel_xid(&self) -> TransactionId {
+        self.toplevel_xid
+    }
+
+    /// `XLogRecGetDataLen(record)` — `record->main_data_len`.
+    pub const fn main_data_len(&self) -> uint32 {
+        self.main_data_len
     }
 
     pub const fn header(&self) -> &XLogRecord {
@@ -346,9 +433,9 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
 
     /// `XLogRecMaxBlockId(record)` — the highest block id in the record
     /// (`record->max_block_id`); `-1` when no blocks are registered. The block
-    /// array is sized `0..=max_block_id`, so this is `blocks.len() - 1`.
-    pub fn max_block_id(&self) -> i32 {
-        self.blocks.len() as i32 - 1
+    /// array is sized `0..=max_block_id`, so this equals `blocks.len() - 1`.
+    pub const fn max_block_id(&self) -> i32 {
+        self.max_block_id
     }
 
     /// `XLogRecHasBlockRef(record, block_id)` — whether the block id is in
