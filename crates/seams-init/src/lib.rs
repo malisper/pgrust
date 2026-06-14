@@ -757,7 +757,6 @@ mod recurrence_guard {
         //   * GUCArrayAdd/Delete/Reset (guc.c) still have NO impl: the GUC array
         //     helpers live in guc.c, not yet ported. Consumed by functioncmds
         //     (ddl_core) + pg-db-role-setting.
-        ("backend_commands_functioncmds", "extract_set_variable_args"),
         ("backend_commands_functioncmds", "guc_array_add"),
         ("backend_commands_functioncmds", "guc_array_delete"),
         ("backend_commands_functioncmds", "guc_array_reset"),
@@ -977,7 +976,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "clog_group_first_compare_exchange"),
         ("backend_storage_lmgr_proc", "clog_group_first_exchange"),
         ("backend_storage_lmgr_proc", "clog_group_first_read"),
-        ("backend_storage_lmgr_proc", "init_proc_global"),
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_next"),
@@ -987,8 +985,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "proc_clog_group_member_page"),
         ("backend_storage_lmgr_proc", "proc_clog_group_member_update"),
         ("backend_storage_lmgr_proc", "proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "proc_global_semas"),
-        ("backend_storage_lmgr_proc", "proc_global_shmem_size"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member_data"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_next"),
@@ -1120,11 +1116,6 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        ("backend_utils_misc_guc_file", "at_eoxact_guc"),
-        ("backend_utils_misc_guc_file", "guc_check_errdetail"),
-        ("backend_utils_misc_guc_file", "guc_check_errhint"),
-        ("backend_utils_misc_guc_file", "new_guc_nest_level"),
-        ("backend_utils_misc_guc_file", "set_config_with_handle"),
         // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
         // seams (backend-utils-time-combocid-seams) consumed by the heap
         // visibility predicates resolve a combo CID against the *file-scope*
