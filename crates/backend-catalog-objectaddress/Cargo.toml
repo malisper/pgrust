@@ -25,3 +25,15 @@ backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
+backend-catalog-pg-largeobject-seams = { path = "../backend-catalog-pg-largeobject-seams" }
