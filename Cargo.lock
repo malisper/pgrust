@@ -2896,6 +2896,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-replication-launcher",
 ]
@@ -5615,6 +5616,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-spi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-executor-spi-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-ri-triggers",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
@@ -7221,6 +7238,37 @@ dependencies = [
  "types-stringinfo",
  "types-tuple",
  "types-wal",
+]
+
+[[package]]
+name = "backend-replication-logical-relation"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-next-seams",
+ "backend-access-index-amapi-seams",
+ "backend-access-index-indexam",
+ "backend-access-table-table",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-subscription-seams",
+ "backend-nodes-core",
+ "backend-replication-logical-proto",
+ "backend-replication-logical-worker-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-relcache",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12204,6 +12252,7 @@ dependencies = [
  "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
+ "backend-executor-spi",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-geqo-all",

@@ -49,6 +49,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `make_attrmap(maplen)` (attmap.c): allocate an [`AttrMap`] with `maplen`
+    /// slots (the C `palloc0`s `attnums`), in the caller's `mcx`. `Err` carries
+    /// OOM.
+    pub fn make_attrmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        maplen: i32,
+    ) -> types_error::PgResult<types_tuple::attmap::AttrMap<'mcx>>
+);
+
+seam_core::seam!(
+    /// `free_attrmap(map)` (attmap.c): release an [`AttrMap`] (the C `pfree`s
+    /// `attnums` then the struct). In the owned model the value's storage is
+    /// reclaimed when it drops; the seam exists to mirror the C call site.
+    pub fn free_attrmap(map: types_tuple::attmap::AttrMap<'_>)
+);
+
+seam_core::seam!(
     /// `execute_attr_map_cols(attrMap, in_cols)` (tupconvert.c): remap a
     /// bitmapset of (offset-shifted) attribute numbers through the map,
     /// allocating the result in `mcx`. A `None` input yields `None`.
