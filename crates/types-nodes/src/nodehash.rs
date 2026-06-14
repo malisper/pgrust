@@ -17,7 +17,7 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_condvar::Barrier;
 use types_core::{uint32, Oid, Size};
 use types_core::FmgrInfo;
-use types_execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle};
+use types_execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle, SerializeCursor};
 use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
 use types_storage::fileset::SharedFileSet;
 use types_storage::file::{File, PGAlignedBlock};
@@ -488,6 +488,14 @@ pub struct AttStatsSlot<'mcx> {
 pub use crate::nodehashjoin::Hash;
 
 /// `HashInstrumentation` (`nodes/execnodes.h`) — per-process hash-build stats.
+///
+/// `#[repr(C)]` because it is the element type of the `SharedHashInfo`
+/// flexible-array member that lives DIRECTLY in the parallel-query DSM segment
+/// (`ExecHashInitializeDSM` `shm_toc_allocate`s the chunk and the workers
+/// `shm_toc_lookup` + index into it). Placed/attached through the typed
+/// shared-DSM-object flex primitive (`shared_dsm_object::place_flex` /
+/// `attach_flex`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HashInstrumentation {
     /// `int nbuckets` — number of buckets at end of execution.
@@ -502,14 +510,95 @@ pub struct HashInstrumentation {
     pub space_peak: Size,
 }
 
-/// `SharedHashInfo` (`nodes/execnodes.h`) — DSM-resident array of per-worker
-/// [`HashInstrumentation`] (C uses a `FLEXIBLE_ARRAY_MEMBER`).
-#[derive(Debug)]
-pub struct SharedHashInfo<'mcx> {
+// SAFETY (audited per the `SharedDsmObject` contract):
+//   1. `HashInstrumentation` is `#[repr(C)]` and matches `execnodes.h`
+//      field-for-field (five scalars in C order: nbuckets, nbuckets_original,
+//      nbatch, nbatch_original, space_peak).
+//   2. There is NO concurrent mutation of any single element across processes:
+//      each parallel worker writes ONLY its own `hinstrument[ParallelWorkerNumber]`
+//      slot (set up in `ExecHashInitializeWorker`), and the leader reads the
+//      whole array only in `ExecHashRetrieveInstrumentation`, which the C runs
+//      after the workers have detached from the DSM segment. The element bytes
+//      are therefore never aliased-and-mutated concurrently, so plain (non
+//      interior-mutable) POD scalars satisfy clause 2 by partition.
+//   3. The leader's placement initializer (`ExecHashInitializeDSM`) zero-fills
+//      every element before any worker attaches (`place_flex` writes
+//      `HashInstrumentation::default()` into each slot).
+//   4. A shared `&HashInstrumentation` aliasing another process's mapping of
+//      the SAME element is never created concurrently with a write (clause 2),
+//      so such a shared borrow is sound.
+unsafe impl types_parallel::SharedDsmObject for HashInstrumentation {}
+
+/// `offsetof(SharedHashInfo, num_workers)`-bearing header of `SharedHashInfo`
+/// (`nodes/execnodes.h`): `{ int num_workers; HashInstrumentation hinstrument[]; }`.
+/// This is the `H` of the `place_flex`/`attach_flex` flexible-array placement;
+/// the `hinstrument[]` tail is the `E = HashInstrumentation` slice.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedHashInfoHeader {
     /// `int num_workers`.
     pub num_workers: i32,
-    /// `HashInstrumentation hinstrument[]`.
-    pub hinstrument: PgVec<'mcx, HashInstrumentation>,
+}
+
+// SAFETY: `#[repr(C)]` POD header written once by the leader
+// (`ExecHashInitializeDSM`) before any worker attaches, read-only thereafter
+// (workers only read `num_workers`); no concurrent mutation. Matches the C
+// `SharedHashInfo` header field-for-field.
+unsafe impl types_parallel::SharedDsmObject for SharedHashInfoHeader {}
+
+/// `SharedHashInfo *` (`nodes/execnodes.h`) — `node->shared_info`. In C this is
+/// a single `SharedHashInfo *` pointer that is FIRST the DSM-resident shared
+/// area (set in `ExecHashInitializeDSM` / inherited by workers) and is LATER
+/// REPLACED, in `ExecHashRetrieveInstrumentation`, by a backend-local `palloc`'d
+/// copy. The two states have different ownership (cross-process DSM view vs.
+/// owned backend-local array), so they are modelled as the two arms here.
+#[derive(Debug)]
+pub enum SharedHashInfo<'mcx> {
+    /// The DSM-resident shared area: a cursor to the `shm_toc`-allocated chunk
+    /// (`{ SharedHashInfoHeader; HashInstrumentation[num_workers] }`) plus the
+    /// worker count needed to recover the flex length. Mirrors the leader's
+    /// `node->shared_info = shm_toc_allocate(...)`.
+    Dsm {
+        /// Real in-segment chunk address (the `shm_toc_allocate`/`shm_toc_lookup`
+        /// return value).
+        chunk: SerializeCursor,
+        /// The DSM segment the chunk lives in (the leader's `pcxt->seg`), so the
+        /// retrieve path can `attach_flex` the array before detach.
+        seg: types_execparallel::DsmSegmentHandle,
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+    },
+    /// The backend-local copy `ExecHashRetrieveInstrumentation` makes before the
+    /// DSM segment is detached (`node->shared_info = palloc(size); memcpy(...)`).
+    Local {
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+        /// `HashInstrumentation hinstrument[]` copied out of DSM.
+        hinstrument: PgVec<'mcx, HashInstrumentation>,
+    },
+}
+
+/// `HashInstrumentation *` (`nodes/execnodes.h`) — `node->hinstrument`, this
+/// process's stats-collection slot. Like the C pointer it is either a
+/// backend-local `palloc0_object(HashInstrumentation)` (serial / leader without
+/// workers) or an alias INTO the leader's DSM `SharedHashInfo` array at this
+/// worker's index (`&shared_info->hinstrument[ParallelWorkerNumber]`).
+#[derive(Debug)]
+pub enum HashInstrumentSlot<'mcx> {
+    /// Backend-local `palloc0`'d `HashInstrumentation`.
+    Local(PgBox<'mcx, HashInstrumentation>),
+    /// Alias into the DSM `SharedHashInfo` flex array: the header chunk cursor
+    /// plus this worker's element index (`ParallelWorkerNumber`).
+    Dsm {
+        /// Cursor to the `SharedHashInfo` chunk header (the array starts at
+        /// `flex_tail_offset::<SharedHashInfoHeader, HashInstrumentation>()`).
+        chunk: SerializeCursor,
+        /// The DSM segment the chunk lives in (the worker's `pwcxt->seg`), so
+        /// the slot can be mutated via `shared_dsm_object::with_mut`.
+        seg: types_execparallel::DsmSegmentHandle,
+        /// `ParallelWorkerNumber` — this worker's slot index in the array.
+        worker_index: i32,
+    },
 }
 
 /// `HashState` (`nodes/execnodes.h`) — the Hash executor node.
@@ -527,10 +616,10 @@ pub struct HashState<'mcx> {
     pub skew_collation: Oid,
     /// `SharedHashInfo *shared_info` — leader's pointer to the shared stats
     /// area; `None` in workers / non-parallel joins.
-    pub shared_info: Option<PgBox<'mcx, SharedHashInfo<'mcx>>>,
+    pub shared_info: Option<SharedHashInfo<'mcx>>,
     /// `HashInstrumentation *hinstrument` — this process's stats collection
     /// area (local or shared); `None` when not collecting.
-    pub hinstrument: Option<PgBox<'mcx, HashInstrumentation>>,
+    pub hinstrument: Option<HashInstrumentSlot<'mcx>>,
     /// `struct ParallelHashJoinState *parallel_state` — `None` in serial mode.
     pub parallel_state: Option<DsaPointer>,
 }

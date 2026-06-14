@@ -302,13 +302,16 @@ mod adapters {
         {
             let state = inner_hash_state(node);
             if state.hinstrument.is_none() {
-                state.hinstrument = Some(mcx::alloc_in(
-                    table.spillCxt,
-                    types_nodes::nodehash::HashInstrumentation::default(),
-                )?);
+                state.hinstrument =
+                    Some(types_nodes::nodehash::HashInstrumentSlot::Local(mcx::alloc_in(
+                        table.spillCxt,
+                        types_nodes::nodehash::HashInstrumentation::default(),
+                    )?));
             }
-            let instr = state.hinstrument.as_deref_mut().unwrap();
-            instrument::ExecHashAccumInstrumentation(instr, &table);
+            let slot = state.hinstrument.as_mut().unwrap();
+            instrument::with_hinstrument_mut(slot, |instr| {
+                instrument::ExecHashAccumInstrumentation(instr, &table);
+            });
         }
         node.hj_HashTable = Some(table);
         Ok(())
@@ -544,16 +547,12 @@ mod adapters {
 pub fn init_seams() {
     use backend_executor_nodeHash_seams as s;
 
-    backend_executor_nodeHash_pq_seams::exec_hash_estimate::set(instrument::ExecHashEstimate);
-    backend_executor_nodeHash_pq_seams::exec_hash_initialize_dsm::set(
-        instrument::ExecHashInitializeDSM,
-    );
-    backend_executor_nodeHash_pq_seams::exec_hash_initialize_worker::set(
-        instrument::ExecHashInitializeWorker,
-    );
-    backend_executor_nodeHash_pq_seams::exec_hash_retrieve_instrumentation::set(
-        instrument::ExecHashRetrieveInstrumentation,
-    );
+    // The four parallel-context node hooks. `execParallel` holds an opaque
+    // `PlanStateHandle`, so these are installed as `PlanStateHandle`-typed shims
+    // that recover the OWNED `&mut HashState` (via the unported PlanState
+    // pointer registry) and call the real owned-typed entry points. The
+    // `parallel_sup::hash_*` handle support-seams are RETIRED.
+    instrument::init_pq_seams();
 
     s::exec_hash_table_create::set(adapters::exec_hash_table_create);
     s::multi_exec_hash::set(adapters::multi_exec_hash);

@@ -18,6 +18,7 @@ types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 types-execparallel = { path = "../types-execparallel" }
+types-parallel = { path = "../types-parallel" }
 mcx = { path = "../mcx" }
 
 # Seams: executor neighbors
