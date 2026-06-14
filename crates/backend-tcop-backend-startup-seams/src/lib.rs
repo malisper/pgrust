@@ -22,14 +22,3 @@ seam_core::seam!(
         fork_end: types_core::TimestampTz,
     )
 );
-
-// --- backend-utils-init-postinit consumer (backend_startup.c) ---
-
-seam_core::seam!(
-    /// `MyCancelKey` / `MyCancelKeyLength` (backend_startup.c globals): the
-    /// backend's cancel key bytes, copied into `mcx`. Passed to
-    /// `ProcSignalInit`. `Err` carries OOM from the copy.
-    pub fn my_cancel_key<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
-);

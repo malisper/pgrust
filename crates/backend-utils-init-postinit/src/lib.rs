@@ -657,8 +657,8 @@ pub fn InitPostgres(
 
     // ProcSignalInit(MyCancelKey, MyCancelKeyLength). The ported owner reads
     // MyProcNumber/MyProcPid explicitly; the cancel-key bytes come from the
-    // backend-startup owner (MyCancelKey/MyCancelKeyLength globals).
-    let cancel_key = backend_tcop_backend_startup_seams::my_cancel_key::call(mcx)?;
+    // globals.c owner (MyCancelKey/MyCancelKeyLength globals).
+    let cancel_key = backend_utils_init_small_seams::my_cancel_key::call(mcx)?;
     backend_storage_ipc_procsignal::ProcSignalInit(
         backend_utils_init_small_seams::my_proc_number::call(),
         backend_utils_init_small_seams::my_proc_pid::call(),

@@ -10,6 +10,17 @@ pub mod usercontext;
 
 pub use usercontext::{RestoreUserContext, SwitchToUntrustedUser};
 
+/// `MyCancelKey[..MyCancelKeyLength]` (globals.c): copy the backend's cancel
+/// key bytes into `mcx`. `Err` carries OOM from the copy. Mirrors the C use in
+/// `ProcSignalInit(MyProcNumber, &MyCancelKey, MyCancelKeyLength)`.
+pub fn my_cancel_key<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<mcx::PgVec<'mcx, u8>> {
+    let key = globals::MyCancelKey();
+    let len = globals::MyCancelKeyLength() as usize;
+    mcx::slice_in(mcx, &key[..len])
+}
+
 /// Install this unit's seams (`backend-utils-init-small-seams`).
 pub fn init_seams() {
     backend_utils_init_small_seams::work_mem::set(globals::work_mem);
@@ -23,6 +34,7 @@ pub fn init_seams() {
     );
     backend_utils_init_small_seams::my_proc_pid::set(globals::MyProcPid);
     backend_utils_init_small_seams::my_proc_number::set(globals::MyProcNumber);
+    backend_utils_init_small_seams::my_cancel_key::set(my_cancel_key);
     backend_utils_init_small_seams::is_under_postmaster::set(globals::IsUnderPostmaster);
     backend_utils_init_small_seams::postmaster_pid::set(globals::PostmasterPid);
     backend_utils_init_small_seams::my_pm_child_slot::set(globals::MyPMChildSlot);

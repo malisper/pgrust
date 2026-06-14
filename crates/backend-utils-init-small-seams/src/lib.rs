@@ -25,6 +25,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyCancelKey` / `MyCancelKeyLength` (globals.c globals): the backend's
+    /// cancel key bytes (`MyCancelKey[..MyCancelKeyLength]`), copied into `mcx`.
+    /// Passed to `ProcSignalInit`. `Err` carries OOM from the copy.
+    pub fn my_cancel_key<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `IsUnderPostmaster` (globals.c) — false in the postmaster itself, true
     /// in a forked backend.
     pub fn is_under_postmaster() -> bool
