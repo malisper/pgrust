@@ -155,6 +155,7 @@ pub fn init_all() {
     backend_tcop_backend_startup::init_seams();
     backend_tcop_fastpath::init_seams();
     backend_timezone_localtime::init_seams();
+    backend_timezone_pgtz::init_seams();
     backend_timezone_strftime::init_seams();
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
