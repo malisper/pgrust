@@ -64,6 +64,7 @@ pub(crate) use backend_utils_adt_timestamp_seams as timestamp_seams;
 pub(crate) use backend_utils_cache_inval_seams as inval_seams;
 pub(crate) use backend_utils_cache_relmapper_seams as relmapper_seams;
 pub(crate) use backend_utils_misc_guc_file_seams as guc_seams;
+pub(crate) use backend_utils_misc_guc_seams as guc_core_seams;
 pub(crate) use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
 mod engine;

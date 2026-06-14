@@ -243,8 +243,8 @@ fn install_fakes() {
         backend_utils_adt_acl_seams::member_can_set_role::set(|member, role| {
             Ok(MEMBERSHIPS.with_borrow(|m| m.contains(&(member, role))))
         });
-        backend_utils_misc_guc_file_seams::new_guc_nest_level::set(|| NEXT_NEST_LEVEL.get());
-        backend_utils_misc_guc_file_seams::at_eoxact_guc::set(|is_commit, nest_level| {
+        backend_utils_misc_guc_seams::new_guc_nest_level::set(|| NEXT_NEST_LEVEL.get());
+        backend_utils_misc_guc_seams::at_eoxact_guc::set(|is_commit, nest_level| {
             assert!(!is_commit);
             ABORTED_NEST_LEVELS.with_borrow_mut(|v| v.push(nest_level));
             Ok(())

@@ -60,7 +60,7 @@ backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" 
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
-backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

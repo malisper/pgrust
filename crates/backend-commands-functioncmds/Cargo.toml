@@ -15,6 +15,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

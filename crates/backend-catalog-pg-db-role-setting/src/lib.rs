@@ -45,7 +45,8 @@ pub fn AlterSetting(
     setstmt: &VariableSetStmt,
 ) -> PgResult<()> {
     // char *valuestr = ExtractSetVariableArgs(setstmt);
-    let valuestr = guc::extract_set_variable_args::call(setstmt.clone())?;
+    let valuestr =
+        backend_utils_misc_guc_funcs_seams::extract_set_variable_args::call(setstmt.clone())?;
 
     // The SET subcommand kind + the variable name are read straight from the
     // owned node, as the C reads `setstmt->kind` / `setstmt->name`. A `None`

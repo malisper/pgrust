@@ -1038,7 +1038,7 @@ fn fmgr_security_definer_body(
     // C: if (fcache->configNames != NIL) save_nestlevel = NewGUCNestLevel(); else 0;
     let has_config = !fcache.config_names.is_empty();
     let save_nestlevel = if has_config {
-        backend_utils_misc_guc_file_seams::new_guc_nest_level::call()
+        backend_utils_misc_guc_seams::new_guc_nest_level::call()
     } else {
         0
     };
@@ -1067,7 +1067,7 @@ fn fmgr_security_definer_body(
             };
             // C: GetUserId() — the srole argument.
             let srole = backend_utils_init_miscinit_seams::get_user_id::call();
-            backend_utils_misc_guc_file_seams::set_config_with_handle::call(
+            backend_utils_misc_guc_seams::set_config_with_handle::call(
                 name.as_str(),
                 value.as_str(),
                 context,
@@ -1105,7 +1105,7 @@ fn fmgr_security_definer_body(
 
     // C: if (fcache->configNames != NIL) AtEOXact_GUC(true, save_nestlevel);
     if has_config {
-        backend_utils_misc_guc_file_seams::at_eoxact_guc::call(true, save_nestlevel)?;
+        backend_utils_misc_guc_seams::at_eoxact_guc::call(true, save_nestlevel)?;
     }
     // C: if (OidIsValid(fcache->userid)) SetUserIdAndSecContext(save_userid, save_sec_context);
     if oid_is_valid(fcache.userid) {

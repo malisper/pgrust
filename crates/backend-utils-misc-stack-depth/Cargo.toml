@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
-backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }

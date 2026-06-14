@@ -149,7 +149,7 @@ fn installed_seam_extract_set_variable_args() {
         location: -1,
     };
     let out =
-        backend_commands_functioncmds_seams::extract_set_variable_args::call(stmt).unwrap();
+        backend_utils_misc_guc_funcs_seams::extract_set_variable_args::call(stmt).unwrap();
     assert_eq!(out, Some("7".to_string()));
 }
 

@@ -20,7 +20,6 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
-use mcx::Mcx;
 use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
@@ -479,7 +478,7 @@ pub(crate) fn dlist_delete_lock_group_link(member: ProcNumber) {
 /// `InitProcGlobal(void)` — postmaster-time setup: build the `PGPROC` array,
 /// the dense `ProcGlobal` mirror arrays, the embedded latches/semaphores/
 /// fast-path arrays, and the four by-class freelists.
-pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
+pub fn InitProcGlobal() -> PgResult<()> {
     let max_backends = globals::max_backends::call();
     let max_connections = globals::max_connections::call();
     let autovacuum_worker_slots = globals::autovacuum_worker_slots::call();

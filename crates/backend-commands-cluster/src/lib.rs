@@ -79,7 +79,7 @@ use backend_utils_error_elog_seams as elog;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_init_miscinit_seams as miscinit;
-use backend_utils_misc_guc_file_seams as guc;
+use backend_utils_misc_guc_seams as guc;
 
 mod seams_install;
 pub use seams_install::init_seams;

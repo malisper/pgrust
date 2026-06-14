@@ -782,4 +782,14 @@ pub(crate) fn install() {
     // (`() -> LatchHandle` over this unit's PGPROC slot).
     seams::am_regular_backend_process::set(crate::seam::am_regular_backend_process);
     seams::my_proc_latch::set(my_proc_latch);
+
+    // PGPROC-array shmem sizing + one-time setup (proc.c). The bodies live in
+    // `proc_shmem` and depend only on this unit's own state plus already-merged
+    // globals/lwlock seams — no procarray/clog group-update wiring is needed
+    // for them, so they install for real here (retires their
+    // CONTRACT_RECONCILE_PENDING lines). ProcGlobalShmemSize's local add_size
+    // does not overflow-check, so the `PgResult` is always `Ok`.
+    seams::proc_global_semas::set(crate::proc_shmem::ProcGlobalSemas);
+    seams::proc_global_shmem_size::set(|| Ok(crate::proc_shmem::ProcGlobalShmemSize()));
+    seams::init_proc_global::set(crate::proc_shmem::InitProcGlobal);
 }

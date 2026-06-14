@@ -757,12 +757,12 @@ fn unrecognized_node_type(node: &Node) -> PgError {
 // ===========================================================================
 
 /// Install the inward seam this crate OWNS. `ExtractSetVariableArgs` is
-/// declared on `backend-commands-functioncmds-seams` (mis-homed there because
-/// functioncmds was the first consumer); this crate is its real owner, so it
-/// re-homes the install here. The value-typed `VariableSetStmt` crosses the
-/// seam, so the body borrows it.
+/// guc_funcs.c's own function; its seam decl now lives on this crate's own
+/// `-seams` crate (`backend-utils-misc-guc-funcs-seams`), so the install is
+/// dir-owner-attributable and the guard re-asserts the contract. The
+/// value-typed `VariableSetStmt` crosses the seam, so the body borrows it.
 pub fn init_seams() {
-    backend_commands_functioncmds_seams::extract_set_variable_args::set(|sstmt| {
+    backend_utils_misc_guc_funcs_seams::extract_set_variable_args::set(|sstmt| {
         ExtractSetVariableArgs(&sstmt)
     });
 }

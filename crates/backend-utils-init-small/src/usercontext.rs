@@ -77,7 +77,7 @@ pub fn SwitchToUntrustedUser(mcx: Mcx<'_>, userid: Oid, context: &mut UserContex
         // target user, inasmuch as they could be malicious.
         let sec_context = context.save_sec_context | SECURITY_RESTRICTED_OPERATION;
         backend_utils_init_miscinit_seams::set_user_id_and_sec_context::call(userid, sec_context);
-        context.save_nestlevel = backend_utils_misc_guc_file_seams::new_guc_nest_level::call();
+        context.save_nestlevel = backend_utils_misc_guc_seams::new_guc_nest_level::call();
     }
 
     Ok(())
@@ -90,7 +90,7 @@ pub fn SwitchToUntrustedUser(mcx: Mcx<'_>, userid: Oid, context: &mut UserContex
 /// made within it.
 pub fn RestoreUserContext(context: &UserContext) -> PgResult<()> {
     if context.save_nestlevel != USER_CONTEXT_NO_NEST_LEVEL {
-        backend_utils_misc_guc_file_seams::at_eoxact_guc::call(false, context.save_nestlevel)?;
+        backend_utils_misc_guc_seams::at_eoxact_guc::call(false, context.save_nestlevel)?;
     }
     backend_utils_init_miscinit_seams::set_user_id_and_sec_context::call(
         context.save_userid,

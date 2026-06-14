@@ -122,7 +122,7 @@ use backend_utils_fmgr_funcapi_seams as funcapi_seams;
 use backend_utils_init_miscinit_seams as miscinit_seams;
 use backend_utils_init_small_seams as globals_seams;
 use backend_utils_mb_mbutils_seams as mbutils_seams;
-use backend_utils_misc_guc_file_seams as guc_seams;
+use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
 /// Install this crate's seam implementations (`backend-catalog-namespace-seams`).
