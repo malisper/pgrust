@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr};
+use types_wal::wal::TimeLineHistoryEntry;
 use types_wal::xlog_consts::MAXFNAMELEN;
 
 /// `RecoveryPauseState` (access/xlogrecovery.h) — re-exported from the canonical
@@ -197,6 +198,13 @@ pub struct XLogRecoveryState {
     /// `wal_receiver_create_temp_slot`.
     pub wal_receiver_create_temp_slot: bool,
 
+    // -- expected timeline history (xlogrecovery.c:109-125) --
+    /// `expectedTLEs` — a list of `TimeLineHistoryEntry`s for
+    /// `recoveryTargetTLI` and its known parents. Read in from the timeline
+    /// history file by the InitWalRecovery family; the `ReadRecord` retry loop
+    /// and `checkTimeLineSwitch` consult it (`tliInHistory` / `tliOfPointInHistory`).
+    pub expected_tles: Vec<TimeLineHistoryEntry>,
+
     // -- timeline target (xlogrecovery.c:122-126) --
     /// `recoveryTargetTimeLineGoal`.
     pub recovery_target_timeline_goal: RecoveryTargetTimeLineGoal,
@@ -356,6 +364,7 @@ impl XLogRecoveryState {
             primary_conn_info: String::new(),
             primary_slot_name: String::new(),
             wal_receiver_create_temp_slot: false,
+            expected_tles: Vec::new(),
             // C: `recoveryTargetTimeLineGoal = RECOVERY_TARGET_TIMELINE_LATEST;`
             recovery_target_timeline_goal: RecoveryTargetTimeLineGoal::Latest,
             recovery_target_tli_requested: 0,
