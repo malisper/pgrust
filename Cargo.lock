@@ -10300,6 +10300,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-stack-depth"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-error",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-stack-depth-seams",
+ "libc",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-stack-depth-seams"
 version = "0.0.0"
 dependencies = [
@@ -11275,6 +11288,7 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-misc-stack-depth",
  "backend-utils-misc-timeout",
  "backend-utils-mmgr-dsa",
  "backend-utils-mmgr-freepage",

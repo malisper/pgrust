@@ -218,6 +218,7 @@ backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
+backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
 backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
 backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
