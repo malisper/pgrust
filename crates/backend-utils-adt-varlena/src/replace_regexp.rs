@@ -76,7 +76,7 @@ pub fn replace_text_regexp<'mcx>(
         // C: pg_regexec(re, data, data_len, search_start, NULL, nmatch,
         //               pmatch, 0).
         let regexec_result = regex_core::pg_regexec::call(
-            re.handle,
+            &re,
             &data,
             search_start,
             &mut pmatch[..nmatch],

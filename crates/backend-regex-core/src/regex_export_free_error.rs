@@ -1,36 +1,32 @@
 //! Family: **regex-export-free-error** — `regexport.c` (the 11 `pg_reg_get*`
 //! NFA/color exporters), `regfree.c` (`pg_regfree`), `regerror.c`
-//! (`pg_regerror` message table), plus the opaque-[`RegexHandle`] seam adapter
-//! and the per-backend `thread_local!` handle registry that the four inward
-//! seams marshal through.
+//! (`pg_regerror` message table), plus the seam adapters that marshal the
+//! compiled regex across the public seam.
 //!
-//! # The opaque-handle boundary
+//! # The compiled-regex boundary
 //!
 //! Across the public seam ([`backend_regex_core_seams`]) the compiled regex is
-//! the opaque [`types_regex::RegexHandle`] token (see `types-regex` for why
-//! that opacity is inherited from the engine's compile/exec split, not
-//! introduced). The real owned [`RegexT`] lives in this crate; the registry
-//! maps a handle to its `RegexT`. `pg_regcomp` registers and returns a handle;
-//! `pg_regexec`/`pg_regprefix` look it up; `pg_regfree` removes it.
-//!
-//! The registry is **per-backend** (`thread_local!`): every backend compiles
-//! its own regexes (the ADT cache is itself per-backend), so a shared static
-//! would cross-link sessions — forbidden by AGENTS.md backend-global rules.
+//! [`types_regex::RegexCompiled`], which carries the real owned [`RegexT`]
+//! value type-erased as an `Rc<dyn Any>` (see `types-regex` for why this
+//! real-value/downcast cycle-break introduces no handle or opacity). `pg_regcomp`
+//! boxes the freshly-compiled `RegexT` into the carrier; `pg_regexec`/
+//! `pg_regprefix` recover it with `downcast_ref::<RegexT>()`; `pg_regfree`
+//! takes the carrier by value and drops it (freeing the engine state when the
+//! last `Rc` reference goes away). No per-backend registry is needed: the
+//! engine value travels with the carrier, exactly as the relcache cell carries
+//! its relation.
 
 extern crate alloc;
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
-
-use std::cell::RefCell;
-use std::collections::HashMap;
 
 use mcx::{slice_in, Mcx, MemoryContext};
 use types_core::PgWChar;
 use types_error::PgResult;
 use types_regex::{
-    RegMatch, RegcompResult, RegexCompiled, RegexFailure, RegexHandle, RegexecResult,
-    RegprefixResult,
+    RegMatch, RegcompResult, RegexCompiled, RegexFailure, RegexecResult, RegprefixResult,
 };
 
 use crate::regex_consts::{
@@ -42,46 +38,22 @@ use crate::regex_consts::{
 use crate::regguts::{chr, RegexT, COLORLESS, CHR_MIN, MAX_SIMPLE_CHR, PSEUDO};
 
 // ===========================================================================
-// per-backend handle registry
-// ===========================================================================
-
-thread_local! {
-    /// Maps a live [`RegexHandle`] to its owned [`RegexT`]. Per-backend; see
-    /// the module docs for why this is `thread_local!`, not a shared static.
-    static REGEX_REGISTRY: RefCell<HashMap<u64, RegexT>> = RefCell::new(HashMap::new());
-    /// Monotonic handle id allocator (C uses the `regex_t *` pointer identity;
-    /// here a per-backend counter mints the opaque token).
-    static NEXT_HANDLE: RefCell<u64> = const { RefCell::new(1) };
-}
-
-/// Register an owned [`RegexT`], returning the opaque handle the public seam
-/// hands back to the ADT layer.
-fn register(re: RegexT) -> RegexHandle {
-    let id = NEXT_HANDLE.with(|n| {
-        let mut n = n.borrow_mut();
-        let id = *n;
-        *n += 1;
-        id
-    });
-    REGEX_REGISTRY.with(|reg| {
-        reg.borrow_mut().insert(id, re);
-    });
-    RegexHandle(id)
-}
-
-/// Run `f` with a shared reference to the [`RegexT`] behind `handle` (the
-/// exec/prefix/export read path). Returns the registry-miss case to the caller.
-fn with_regex<R>(handle: RegexHandle, f: impl FnOnce(&RegexT) -> R) -> Option<R> {
-    REGEX_REGISTRY.with(|reg| reg.borrow().get(&handle.0).map(f))
-}
-
-// ===========================================================================
 // public seam adapters (installed by `crate::init_seams`)
 // ===========================================================================
 
+/// Recover the owned [`RegexT`] carried (type-erased) inside a public
+/// [`RegexCompiled`]. C dereferences the `regex_t *` directly; the downcast
+/// can only fail if a foreign value were smuggled into the carrier, which is a
+/// can't-happen — the only producer is `seam_pg_regcomp` below.
+fn regex_of(re: &RegexCompiled) -> &RegexT {
+    re.engine
+        .downcast_ref::<RegexT>()
+        .expect("RegexCompiled.engine is not a RegexT")
+}
+
 /// Adapter for the `pg_regcomp` inward seam: compile the pattern (compile
-/// family), register the result, and return the handle as `RegcompResult`. The
-/// non-OK `REG_*` code is mapped through [`pg_regerror`] into
+/// family) and carry the owned `RegexT` across as `RegcompResult::Compiled`.
+/// The non-OK `REG_*` code is mapped through [`pg_regerror`] into
 /// [`RegexFailure`].
 pub fn seam_pg_regcomp(
     pattern: &[PgWChar],
@@ -96,8 +68,11 @@ pub fn seam_pg_regcomp(
     match crate::regex_compile::pg_regcomp(cx.mcx(), pattern, cflags, collation) {
         Ok(re) => {
             let re_nsub = re.re_nsub;
-            let handle = register(re);
-            Ok(RegcompResult::Compiled(RegexCompiled { handle, re_nsub }))
+            // Carry the real compiled `regex_t` value across the seam,
+            // type-erased; the consumer keeps it (in its RE cache) and hands it
+            // back to exec/prefix/free, where `regex_of` downcasts it back.
+            let engine: Rc<dyn core::any::Any> = Rc::new(re);
+            Ok(RegcompResult::Compiled(RegexCompiled { engine, re_nsub }))
         }
         Err(e) => Ok(RegcompResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
@@ -105,10 +80,11 @@ pub fn seam_pg_regcomp(
     }
 }
 
-/// Adapter for the `pg_regexec` inward seam: look up `handle`, run the matcher
-/// (exec family), fill `pmatch` in place, and map the result code.
+/// Adapter for the `pg_regexec` inward seam: recover the `RegexT` from the
+/// carrier, run the matcher (exec family), fill `pmatch` in place, and map the
+/// result code.
 pub fn seam_pg_regexec(
-    handle: RegexHandle,
+    re: &RegexCompiled,
     data: &[PgWChar],
     search_start: i32,
     pmatch: &mut [RegMatch],
@@ -119,46 +95,39 @@ pub fn seam_pg_regexec(
     // the result code do not borrow it).
     let cx = MemoryContext::new("RegexpExecContext");
 
-    // `with_regex` returns None on a registry miss (a freed/never-registered
-    // handle). C dereferences the `regex_t *` directly; a miss here is a
-    // can't-happen, mirrored as REG_ASSERT.
-    let res = with_regex(handle, |re| {
-        let guts = re
-            .re_guts
-            .as_ref()
-            .expect("pg_regexec: compiled regex has no guts");
-        crate::regex_exec::pg_regexec(cx.mcx(), guts, data, search_start, pmatch, 0)
-    });
+    let re = regex_of(re);
+    let guts = re
+        .re_guts
+        .as_ref()
+        .expect("pg_regexec: compiled regex has no guts");
+    let res = crate::regex_exec::pg_regexec(cx.mcx(), guts, data, search_start, pmatch, 0);
 
     match res {
-        Some(Ok(true)) => Ok(RegexecResult::Matched),
-        Some(Ok(false)) => Ok(RegexecResult::NoMatch),
-        Some(Err(e)) if e.code() == REG_NOMATCH => Ok(RegexecResult::NoMatch),
-        Some(Err(e)) => Ok(RegexecResult::Failed(RegexFailure {
+        Ok(true) => Ok(RegexecResult::Matched),
+        Ok(false) => Ok(RegexecResult::NoMatch),
+        Err(e) if e.code() == REG_NOMATCH => Ok(RegexecResult::NoMatch),
+        Err(e) => Ok(RegexecResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
-        })),
-        None => Ok(RegexecResult::Failed(RegexFailure {
-            message: pg_regerror(REG_ASSERT),
         })),
     }
 }
 
-/// Adapter for the `pg_regprefix` inward seam: look up `handle`, run the prefix
-/// extractor (exec family), and copy the prefix into `mcx`.
+/// Adapter for the `pg_regprefix` inward seam: recover the `RegexT` from the
+/// carrier, run the prefix extractor (exec family), and copy the prefix into
+/// `mcx`.
 pub fn seam_pg_regprefix<'mcx>(
     mcx: Mcx<'mcx>,
-    handle: RegexHandle,
+    re: &RegexCompiled,
 ) -> PgResult<RegprefixResult<'mcx>> {
-    let res = with_regex(handle, |re| {
-        let guts = re
-            .re_guts
-            .as_ref()
-            .expect("pg_regprefix: compiled regex has no guts");
-        crate::regex_exec::pg_regprefix(mcx, guts)
-    });
+    let re = regex_of(re);
+    let guts = re
+        .re_guts
+        .as_ref()
+        .expect("pg_regprefix: compiled regex has no guts");
+    let res = crate::regex_exec::pg_regprefix(mcx, guts);
 
     match res {
-        Some(Ok(pr)) => match pr.code {
+        Ok(pr) => match pr.code {
             REG_PREFIX => {
                 let v = slice_in(mcx, &pr.prefix)?;
                 Ok(RegprefixResult::Prefix(v))
@@ -172,41 +141,31 @@ pub fn seam_pg_regprefix<'mcx>(
                 message: pg_regerror(code),
             })),
         },
-        Some(Err(e)) if e.code() == REG_NOMATCH => Ok(RegprefixResult::NoMatch),
-        Some(Err(e)) => Ok(RegprefixResult::Failed(RegexFailure {
+        Err(e) if e.code() == REG_NOMATCH => Ok(RegprefixResult::NoMatch),
+        Err(e) => Ok(RegprefixResult::Failed(RegexFailure {
             message: pg_regerror(e.code()),
-        })),
-        None => Ok(RegprefixResult::Failed(RegexFailure {
-            message: pg_regerror(REG_ASSERT),
         })),
     }
 }
 
-/// Adapter for the `pg_regfree` inward seam: remove `handle` from the registry,
-/// dropping the owned [`RegexT`] (which frees the engine state).
-pub fn seam_pg_regfree(handle: RegexHandle) {
-    // C: `pg_regfree(NULL)` is a no-op; here a missing handle simply removes
-    // nothing. The removed `RegexT` is dropped, which runs `pg_regfree`'s
-    // effect (the owned guts are freed by Rust ownership).
-    let removed = REGEX_REGISTRY.with(|reg| reg.borrow_mut().remove(&handle.0));
-    if let Some(re) = removed {
-        pg_regfree(re);
-    }
+/// Adapter for the `pg_regfree` inward seam: take the carrier by value and drop
+/// it, freeing the engine state when the last `Rc` reference goes away.
+pub fn seam_pg_regfree(re: RegexCompiled) {
+    pg_regfree(re);
 }
 
 // ===========================================================================
 // regfree.c
 // ===========================================================================
 
-/// `pg_regfree(regex_t *re)` — free a compiled RE. Under Rust ownership this
-/// drops the owned [`RegexT`] (and thus its `guts`); the registry removal is
-/// done by [`seam_pg_regfree`].
-pub fn pg_regfree(re: RegexT) {
-    // C: `if (re == NULL) return;` — the NULL guard is handled by the caller
-    // (`seam_pg_regfree` only calls this for a present handle). C then dispatches
-    // `(*re->re_fns->free)(re)` to the RE-specific freer, which frees `re_guts`.
-    // Here that destructor has no analogue: dropping the owned `RegexT` frees
-    // its `Box<Guts>` and all arena Vecs.
+/// `pg_regfree(regex_t *re)` — free a compiled RE. Here the public carrier is
+/// taken by value: dropping its `Rc<dyn Any>` releases the owned [`RegexT`]
+/// (and thus its `Box<Guts>` and arena Vecs) once the last reference is gone.
+pub fn pg_regfree(re: RegexCompiled) {
+    // C: `if (re == NULL) return;` then `(*re->re_fns->free)(re)` dispatches to
+    // the RE-specific freer, which frees `re_guts`. Here that destructor has no
+    // analogue: dropping the carrier drops the `Rc`, and the last drop frees
+    // the owned `RegexT`.
     drop(re);
 }
 

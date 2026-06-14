@@ -129,8 +129,9 @@ pub enum AffixReg<'mcx> {
     Simple,
     /// `isregis`: a [`Regis`] fast-subset matcher.
     Regis(Regis<'mcx>),
-    /// neither: an engine-owned compiled-regex handle (the C `regex_t *pregex`).
-    Regex(types_regex::RegexHandle),
+    /// neither: an engine-owned compiled regex (the C `regex_t *pregex`),
+    /// carried as the [`types_regex::RegexCompiled`] value.
+    Regex(types_regex::RegexCompiled),
 }
 
 impl Drop for AffixReg<'_> {
@@ -138,8 +139,10 @@ impl Drop for AffixReg<'_> {
         match self {
             AffixReg::Simple | AffixReg::Regis(_) => {}
             // C: the regex state lives in the dictionary context and is freed
-            // when it is destroyed; the engine owns it, so release the handle.
-            AffixReg::Regex(h) => backend_regex_core_seams::pg_regfree::call(*h),
+            // when it is destroyed; the engine owns it, so release it through
+            // the free seam (the clone drops one `Rc` ref; the carrier in
+            // `self` is dropped immediately after, releasing the last one).
+            AffixReg::Regex(h) => backend_regex_core_seams::pg_regfree::call(h.clone()),
         }
     }
 }

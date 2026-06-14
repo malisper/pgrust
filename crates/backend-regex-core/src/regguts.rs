@@ -629,8 +629,9 @@ pub struct Guts {
 /// pointers; here `guts`/`fns` hold the real owned types (opacity is inherited
 /// from the engine's compile/exec split, not introduced -- the consumer still
 /// only reads `re_nsub`). The compiled regex crosses the public seam boundary
-/// as the [`types_regex::RegexHandle`] token registered against an owned
-/// `RegexT` in the export-free-error family's handle registry.
+/// as the owned `RegexT` value itself, carried type-erased inside
+/// [`types_regex::RegexCompiled`] and downcast back in the export-free-error
+/// family's seam adapters.
 pub struct RegexT {
     /// `re_magic` -- REMAGIC
     pub re_magic: i32,

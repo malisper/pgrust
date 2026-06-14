@@ -260,7 +260,7 @@ impl<'mcx> IspellDict<'mcx> {
                 REG_ADVANCED | REG_NOSUB,
                 DEFAULT_COLLATION_OID,
             )? {
-                RegcompResult::Compiled(c) => AffixReg::Regex(c.handle),
+                RegcompResult::Compiled(c) => AffixReg::Regex(c),
                 RegcompResult::Failed(f) => {
                     return Err(backend_utils_error::ereport(types_error::ERROR)
                         .errcode(ERRCODE_INVALID_REGULAR_EXPRESSION)
