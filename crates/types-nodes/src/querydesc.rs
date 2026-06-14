@@ -39,7 +39,7 @@ use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgString, PgVec};
 
 use crate::execnodes::EStateData;
 use crate::nodeindexscan::PlannedStmt;
-use crate::nodes::CmdType;
+use crate::nodes::{CmdType, Node};
 use crate::parsestmt::{DestReceiverHandle, ParamListInfoHandle};
 use crate::planstate::PlanStateNode;
 use types_error::PgResult;
@@ -207,6 +207,56 @@ impl QueryDesc {
     ) -> R {
         self.work
             .with_mut(|w| f(w.planstate.as_deref_mut()))
+    }
+
+    /// The leak-projection InitPlan needs (`execMain.c` `InitPlan`): hand the
+    /// closure (1) an HONEST `&'mcx Node` for the plan tree
+    /// (`plannedstmt->planTree`), (2) a split `&mut EStateData`, and (3) a
+    /// `&mut Option<PgBox<PlanStateNode>>` slot to store the built tree into
+    /// (`queryDesc->planstate`).
+    ///
+    /// ## Why this primitive exists
+    ///
+    /// `ExecInitNode` is signed `node: Option<&'mcx Node<'mcx>>` (C's
+    /// `ExecInitNode(plannedstmt->planTree, estate, eflags)`), so `InitPlan`
+    /// must pass the plan tree as a real `&'mcx Node`. But the tree lives inside
+    /// the [`McxOwned`] bundle (`w.plannedstmt.planTree`), whose interior is only
+    /// reachable through `for<'mcx>`-universal closures so that no borrow at the
+    /// bundle's private lifetime escapes. This accessor bridges the two: inside
+    /// the bundle (at its genuine `'mcx`), it leaks the `planTree`
+    /// [`PgBox`](mcx::PgBox) into an honest `&'mcx Node` via [`mcx::leak_in`]
+    /// (the value still lives until the per-query context drop — faithful to C's
+    /// "plan freed with its context"), takes the split `&mut estate` /
+    /// `&mut planstate` borrows, and runs the `for<'mcx>` closure. The closure
+    /// body must typecheck for an arbitrary `'mcx`, so the `&'mcx Node` cannot
+    /// leave the bundle — the same soundness guarantee the other accessors give.
+    ///
+    /// `planTree` is `None` (the C `plannedstmt->planTree == NULL`) only for a
+    /// degenerate plan; the closure sees `None` and would mirror the C handling
+    /// (`ExecInitNode(NULL, ...)` returns `NULL`). The leak consumes the bundle's
+    /// `planTree` box; the leaked value lives on in the same context until the
+    /// bundle (and its per-query context) is dropped, so nothing is freed early.
+    pub fn with_plan_and_estate_mut<R>(
+        &mut self,
+        f: impl for<'mcx> FnOnce(
+            Option<&'mcx Node<'mcx>>,
+            &mut EStateData<'mcx>,
+            &mut Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+        ) -> R,
+    ) -> R {
+        self.work.with_mut(|w| {
+            // plan = plannedstmt->planTree; leak the owning PgBox into an honest
+            // &'mcx Node (lives until the per-query context drops). `take()`
+            // moves the box out of the bundle so the leak owns the allocation;
+            // the leaked &mut is re-borrowed as a shared &'mcx Node for
+            // ExecInitNode's `Option<&'mcx Node>` parameter.
+            let plan: Option<&Node<'_>> = w
+                .plannedstmt
+                .planTree
+                .take()
+                .map(|tree| &*mcx::leak_in(tree));
+            f(plan, &mut w.estate, &mut w.planstate)
+        })
     }
 }
 

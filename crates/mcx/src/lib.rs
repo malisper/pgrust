@@ -558,6 +558,28 @@ pub fn alloc_in<'mcx, T>(mcx: Mcx<'mcx>, value: T) -> PgResult<PgBox<'mcx, T>> {
     PgBox::try_new_in(value, mcx).map_err(|_| mcx.oom(core::mem::size_of::<T>()))
 }
 
+/// Leak a [`PgBox`] into an honest `&'mcx mut T` borrow of the value, tied to
+/// the box's own context lifetime `'mcx`.
+///
+/// The `PgBox<'mcx, T>` allocates `T` in a context whose handle is `Mcx<'mcx>`;
+/// the value lives until that context is reset/dropped. `allocator_api2::Box::
+/// leak` forgets the box's `Drop` (so the value is *not* individually freed) and
+/// hands back a reference whose lifetime is bounded only by the allocator
+/// (`A: 'a`, here `Mcx<'mcx>: 'mcx`). That makes the returned `&'mcx mut T` an
+/// HONEST borrow, not a `transmute`: the memory genuinely lives for `'mcx`,
+/// because the per-context drop is what reclaims it — faithful to C, where a
+/// plan node is "freed with its context", never individually.
+///
+/// This is the one primitive the executor's `InitPlan` needs over the
+/// run/teardown family: `ExecInitNode` is signed `node: Option<&'mcx Node<'mcx>>`
+/// (C's `ExecInitNode(plannedstmt->planTree, ...)`), so the plan tree must cross
+/// as a real `&'mcx Node`, while the bundle that owns it (`QueryWorkState`) hands
+/// it out only through `for<'mcx>`-universal accessors that keep the borrow from
+/// escaping.
+pub fn leak_in<'mcx, T>(b: PgBox<'mcx, T>) -> &'mcx mut T {
+    PgBox::leak(b)
+}
+
 /// Fallible `Vec` construction with the context's OOM error. Enforces
 /// `palloc`'s `MaxAllocSize` gate on the byte size of the request.
 pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgVec<'mcx, T>> {
