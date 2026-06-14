@@ -415,7 +415,7 @@ fn ExecScanExtended<'mcx>(
                 .ss
                 .ps
                 .qual
-                .as_deref()
+                .as_deref_mut()
                 .expect("ExecScanExtended: has_qual but qual is None");
             execExpr::exec_qual::call(qual, econtext, estate)?
         } else {

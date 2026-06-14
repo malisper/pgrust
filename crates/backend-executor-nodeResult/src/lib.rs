@@ -77,7 +77,7 @@ pub fn ExecResult<'mcx>(
     if node.rs_checkqual {
         // bool qualResult = ExecQual(node->resconstantqual, econtext);
         // ExecQual with a NULL state is always-true.
-        let qual_result = match node.resconstantqual.as_deref() {
+        let qual_result = match node.resconstantqual.as_deref_mut() {
             None => true,
             Some(state) => execExpr::exec_qual::call(state, econtext, estate)?,
         };

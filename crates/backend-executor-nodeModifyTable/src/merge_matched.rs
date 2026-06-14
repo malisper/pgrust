@@ -92,12 +92,12 @@ fn eval_merge_join_condition<'mcx>(
     rri: RriId,
     econtext: types_nodes::EcxtId,
 ) -> PgResult<bool> {
-    let cond = estate
+    let mut cond = estate
         .result_rel(rri)
         .ri_MergeJoinCondition
         .as_ref()
         .map(|c| (**c).clone());
-    match cond.as_ref() {
+    match cond.as_mut() {
         Some(state) => backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate),
         None => Ok(true),
     }
@@ -226,7 +226,7 @@ pub fn ExecMergeMatched<'mcx>(
             // from `mas_action`, and clones of the `mas_whenqual`/`mas_proj`
             // exec-state structs so the `estate` borrow is free for the
             // `ExecQual`/`ExecProject` owner seams. Mirrors `ExecMergeNotMatched`.
-            let (command_type, action_match_kind, action_overriding, whenqual, proj) = {
+            let (command_type, action_match_kind, action_overriding, mut whenqual, proj) = {
                 let action = &estate.result_rel(result_rel_info).ri_MergeActions
                     [action_kind as usize]
                     .as_ref()
@@ -255,7 +255,7 @@ pub fn ExecMergeMatched<'mcx>(
             // perform the action unconditionally (ExecQual returns true if
             // there are no conditions to evaluate).
             //   if (!ExecQual(relaction->mas_whenqual, econtext)) continue;
-            let passed = match whenqual.as_ref() {
+            let passed = match whenqual.as_mut() {
                 Some(state) => {
                     backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)?
                 }

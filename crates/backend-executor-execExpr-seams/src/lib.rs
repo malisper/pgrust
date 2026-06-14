@@ -145,7 +145,7 @@ seam_core::seam!(
     /// (nodeSubplan.c:399): evaluate the combining expression over the econtext
     /// (id into the EState pool), returning `(result, isNull)`. Fallible.
     pub fn eval_testexpr_switch_context<'mcx>(
-        node: &SubPlanState<'mcx>,
+        node: &mut SubPlanState<'mcx>,
         estate: &mut EStateData<'mcx>,
         econtext: types_nodes::EcxtId,
     ) -> types_error::PgResult<(types_datum::Datum, bool)>
@@ -320,7 +320,7 @@ seam_core::seam!(
     /// evaluation reads the econtext's linked tuples and runs in its per-tuple
     /// memory; fallible on `ereport(ERROR)` from the expression.
     pub fn exec_eval_expr_switch_context<'mcx>(
-        state: &types_nodes::execexpr::ExprState<'mcx>,
+        state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(types_datum::Datum, bool)>
@@ -348,7 +348,7 @@ seam_core::seam!(
     /// reinterpret a `Datum` pointer word itself, so the dereference happens in
     /// the interpreter that produced it.) Fallible on `ereport(ERROR)`.
     pub fn exec_eval_tid_expr_switch_context<'mcx>(
-        state: &types_nodes::execexpr::ExprState<'mcx>,
+        state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(types_tuple::heaptuple::ItemPointerData, bool)>
@@ -360,7 +360,7 @@ seam_core::seam!(
     /// `Datum` and is-null flag, for the caller to deconstruct via
     /// `deconstruct_array_builtin`. Fallible on `ereport(ERROR)`.
     pub fn exec_eval_array_expr_switch_context<'mcx>(
-        state: &types_nodes::execexpr::ExprState<'mcx>,
+        state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(types_datum::Datum, bool)>
@@ -372,7 +372,7 @@ seam_core::seam!(
     /// whether it passed (a `NULL` state is always-true, handled by the
     /// caller). Fallible on `ereport(ERROR)`.
     pub fn exec_qual<'mcx>(
-        state: &types_nodes::execexpr::ExprState<'mcx>,
+        state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>
@@ -420,7 +420,7 @@ seam_core::seam!(
     /// then reset the econtext's per-tuple memory (`ResetExprContext`). Returns
     /// whether the qual passed. Fallible on `ereport(ERROR)`.
     pub fn exec_qual_and_reset<'mcx>(
-        state: &types_nodes::execexpr::ExprState<'mcx>,
+        state: &mut types_nodes::execexpr::ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<bool>

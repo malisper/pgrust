@@ -190,7 +190,7 @@ fn ForeignRecheck<'mcx>(
     }
 
     // return ExecQual(node->fdw_recheck_quals, econtext);
-    match (node.fdw_recheck_quals.as_deref(), node.ss.ps.ps_ExprContext) {
+    match (node.fdw_recheck_quals.as_deref_mut(), node.ss.ps.ps_ExprContext) {
         // ExecQual(NULL, ...) is treated as always-true by the caller of an
         // ExprState, but ExecQual itself returns true for a NULL state.
         (None, _) => Ok(true),
@@ -814,7 +814,7 @@ fn ExecScanExtended<'mcx>(
         let passes = if !has_qual {
             true
         } else {
-            match (node.ss.ps.qual.as_deref(), node.ss.ps.ps_ExprContext) {
+            match (node.ss.ps.qual.as_deref_mut(), node.ss.ps.ps_ExprContext) {
                 (Some(state), Some(econtext)) => execExpr::exec_qual::call(state, econtext, estate)?,
                 _ => true,
             }

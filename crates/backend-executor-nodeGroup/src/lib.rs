@@ -190,7 +190,7 @@ pub fn ExecGroup<'mcx>(
             //   if (!ExecQualAndReset(node->eqfunction, econtext)) break;
             let eq = node
                 .eqfunction
-                .as_deref()
+                .as_deref_mut()
                 .expect("ExecGroup: eqfunction must be set (execTuplesMatchPrepare ran in init)");
             if !execExpr::exec_qual_and_reset::call(eq, econtext, estate)? {
                 break outerslot;
@@ -223,11 +223,11 @@ pub fn ExecGroup<'mcx>(
 /// `ExprState` (the C `qual == NULL`) is always-true, handled here in-crate;
 /// otherwise it goes through the execExpr seam.
 fn exec_qual_having<'mcx>(
-    node: &GroupStateData<'mcx>,
+    node: &mut GroupStateData<'mcx>,
     econtext: types_nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    match node.ss.ps.qual.as_deref() {
+    match node.ss.ps.qual.as_deref_mut() {
         None => Ok(true),
         Some(qual) => execExpr::exec_qual::call(qual, econtext, estate),
     }

@@ -328,15 +328,15 @@ pub fn advance_aggregates<'mcx>(
     // (no result) in the tmpcontext's per-tuple memory. ExecEvalExpr* is owned
     // by the not-yet-ported execExpr unit and reached through its seam.
     let phase = aggstate.phase as usize;
+    let tmpcontext = tmpcontext_ecxt(aggstate);
     let phases = aggstate
         .phases
-        .as_ref()
+        .as_mut()
         .expect("advance_aggregates: phases not built");
     let evaltrans = phases[phase]
         .evaltrans
-        .as_ref()
+        .as_mut()
         .expect("advance_aggregates: phase->evaltrans not compiled");
-    let tmpcontext = tmpcontext_ecxt(aggstate);
     backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
         evaltrans, tmpcontext, estate,
     )?;

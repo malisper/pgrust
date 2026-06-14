@@ -433,7 +433,7 @@ fn tfunc_fetch_body<'mcx>(
     //   value = ExecEvalExpr(tstate->docexpr, econtext, &isnull);
     let docexpr = tstate
         .docexpr
-        .as_deref()
+        .as_deref_mut()
         .expect("tfuncFetchRows: docexpr not initialized");
     let (value, isnull) =
         execExpr::exec_eval_expr_switch_context::call(docexpr, econtext, estate)?;
@@ -482,7 +482,7 @@ fn tfuncInitialize<'mcx>(
     for i in 0..pairs {
         //   value = ExecEvalExpr(expr, econtext, &isnull);
         let (value, isnull) =
-            execExpr::exec_eval_expr_switch_context::call(&tstate.ns_uris[i], econtext, estate)?;
+            execExpr::exec_eval_expr_switch_context::call(&mut tstate.ns_uris[i], econtext, estate)?;
         if isnull {
             return Err(null_value_error("namespace URI must not be null", None));
         }
@@ -509,7 +509,7 @@ fn tfuncInitialize<'mcx>(
     if routine::routine_has_set_row_filter::call(kind) {
         let rowexpr = tstate
             .rowexpr
-            .as_deref()
+            .as_deref_mut()
             .expect("tfuncInitialize: rowexpr not initialized");
         //   value = ExecEvalExpr(tstate->rowexpr, econtext, &isnull);
         let (value, isnull) =
@@ -534,10 +534,20 @@ fn tfuncInitialize<'mcx>(
             //   if (colexpr != NULL) { value = ExecEvalExpr(...); ... }
             //   else colfilter = NameStr(att->attname);
             let colfilter_owned;
-            let colfilter: &str = match tstate.colexprs[colno as usize].as_ref() {
+            // SAFETY: `colexpr_ptr` points at the node's owned colexprs slot; the
+            // eval call mutates only that ExprState (per-eval scratch) + the
+            // estate, neither of which aliases the later `scan_slot_attname`
+            // borrow of `tstate`.
+            let colexpr_ptr: Option<*mut types_nodes::execexpr::ExprState<'mcx>> = tstate.colexprs
+                [colno as usize]
+                .as_mut()
+                .map(|c| c as *mut _);
+            let colfilter: &str = match colexpr_ptr {
                 Some(colexpr) => {
                     let (value, isnull) = execExpr::exec_eval_expr_switch_context::call(
-                        colexpr, econtext, estate,
+                        unsafe { &mut *colexpr },
+                        econtext,
+                        estate,
                     )?;
                     if isnull {
                         let attname = scan_slot_attname(tstate, colno, estate)?;
@@ -656,7 +666,7 @@ fn tfuncLoadRows<'mcx>(
                 //                                        &isnull);
                 //   }
                 if isnull && cell < ncoldefs {
-                    if let Some(coldefexpr) = tstate.coldefexprs[cell].as_ref() {
+                    if let Some(coldefexpr) = tstate.coldefexprs[cell].as_mut() {
                         let (dv, dnull) = execExpr::exec_eval_expr_switch_context::call(
                             coldefexpr, econtext, estate,
                         )?;

@@ -395,7 +395,7 @@ fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
             true
         } else {
             let ss = node.ss();
-            match (ss.ps.qual.as_deref(), ss.ps.ps_ExprContext) {
+            match (ss.ps.qual.as_deref_mut(), ss.ps.ps_ExprContext) {
                 (Some(state), Some(econtext)) => {
                     execExpr::exec_qual::call(state, econtext, estate)?
                 }

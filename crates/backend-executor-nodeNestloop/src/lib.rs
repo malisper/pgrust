@@ -344,7 +344,7 @@ fn exec_joinqual<'mcx>(
         .ps
         .ps_ExprContext
         .expect("exec_joinqual: ps_ExprContext not created");
-    match node.js.joinqual.as_deref() {
+    match node.js.joinqual.as_deref_mut() {
         Some(state) => execExpr::exec_qual::call(state, econtext, estate),
         None => Ok(true),
     }
@@ -361,7 +361,7 @@ fn exec_otherqual<'mcx>(
         .ps
         .ps_ExprContext
         .expect("exec_otherqual: ps_ExprContext not created");
-    match node.js.ps.qual.as_deref() {
+    match node.js.ps.qual.as_deref_mut() {
         Some(state) => execExpr::exec_qual::call(state, econtext, estate),
         None => Ok(true),
     }
