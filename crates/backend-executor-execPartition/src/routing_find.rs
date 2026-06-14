@@ -307,23 +307,6 @@ fn key_word<'mcx>(d: &Datum<'mcx>) -> Datum<'mcx> {
     d.clone()
 }
 
-/// Extract the bare machine word from a partition-key value for a seam ABI edge
-/// that still trades in the bare-word `types_datum::Datum` (the fmgr
-/// `oid_output_function_call_datum` output-function seam). C threads the raw
-/// `Datum` machine word straight through; for a by-reference key column the word
-/// is the pointer. A `ByRef` value (a detoasted image we never materialize on
-/// this path, since `slot_getattr` hands back the stored word) would be a caller
-/// bug, matching the C contract.
-#[inline]
-fn key_word_bare(d: &Datum<'_>) -> types_datum::Datum {
-    match d {
-        Datum::ByVal(w) => *w,
-        Datum::ByRef(_) => {
-            panic!("partition key value crossed a bare-word seam edge as a by-reference image")
-        }
-    }
-}
-
 /// `rootResultRelInfo->ri_RelationDesc->rd_rel->relispartition`.
 fn root_result_rel_info_relispartition(estate: &EStateData<'_>, rri: RriId) -> bool {
     estate
@@ -780,7 +763,7 @@ pub(crate) fn ExecBuildSlotPartitionKeyDescription<'mcx>(
             // val = OidOutputFunctionCall(foutoid, values[i]);
             let out =
                 backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
-                    mcx, foutoid, key_word_bare(&values[i]),
+                    mcx, foutoid, values[i].clone(),
                 )?;
             val_bytes = out.as_bytes().to_vec();
             val = &val_bytes;

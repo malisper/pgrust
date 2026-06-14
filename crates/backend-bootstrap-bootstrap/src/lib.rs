@@ -797,12 +797,23 @@ pub fn InsertOneValue(mcx: Mcx<'static>, value: &str, i: i32) -> PgResult<()> {
     let io = boot_get_type_io_data(typoid)?;
 
     let datum = backend_utils_fmgr_fmgr_seams::oid_input_function_call::call(
+        mcx,
         io.typinput,
         value,
         io.typioparam,
         -1,
     )?;
-    set_values(i as usize, datum);
+    // `static Datum values[MAXATTR]` is bootstrap's bare-word C array (the
+    // audited by-value storage edge); store the canonical value's by-value
+    // machine word into it. A by-reference referent has no bare-word form here
+    // (the registry that once minted one is gone); the `insert_one_tuple` seam
+    // that consumes `values[]` is unimplemented, and by-ref bootstrap columns
+    // do not reach it, so the NULL word is the safe placeholder.
+    let word = match &datum {
+        types_tuple::backend_access_common_heaptuple::Datum::ByVal(_) => datum.as_usize(),
+        types_tuple::backend_access_common_heaptuple::Datum::ByRef(_) => 0,
+    };
+    set_values(i as usize, Datum::from_usize(word));
 
     /*
      * We use ereport not elog here so parameters aren't evaluated unless the
