@@ -6692,7 +6692,6 @@ dependencies = [
  "seam-core",
  "types-condvar",
  "types-core",
- "types-datum",
  "types-error",
  "types-guc",
  "types-logical",
