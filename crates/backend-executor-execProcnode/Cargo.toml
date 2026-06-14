@@ -20,9 +20,24 @@ mcx = { path = "../mcx" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
-# Landed leaf node unit this dispatch routes ExecInitNode/ExecEndNode to
-# directly (nodeLimit depends only on *-seams crates, so this is acyclic).
+# Landed node units this dispatch routes ExecInitNode/ExecEndNode (and
+# MultiExecProcNode) to directly. Each owner depends only on
+# backend-executor-execProcnode-seams (the seam crate), never on this crate, so
+# routing to them directly is acyclic — exactly as for nodeLimit.
 backend-executor-nodeLimit = { path = "../backend-executor-nodeLimit" }
+backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
+backend-executor-nodeMergeAppend = { path = "../backend-executor-nodeMergeAppend" }
+backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
+backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
+backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
+backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
+backend-executor-nodeNestloop = { path = "../backend-executor-nodeNestloop" }
+backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
+backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
+backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
+backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
+backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 # Per-owner seam crates for the unported neighbours this dispatch routes through
 # (loud panic until each owner wires its init_seams()).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

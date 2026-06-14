@@ -49,6 +49,7 @@ backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
+backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
@@ -140,6 +141,7 @@ backend-replication-walreceiverfuncs = { path = "../backend-replication-walrecei
 backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-storage-file-buffile = { path = "../backend-storage-file-buffile" }
 backend-storage-file-fd = { path = "../backend-storage-file-fd" }
+backend-storage-file-fileset = { path = "../backend-storage-file-fileset" }
 backend-storage-freespace = { path = "../backend-storage-freespace" }
 backend-storage-ipc = { path = "../backend-storage-ipc" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
@@ -174,6 +176,7 @@ backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
+backend-utils-adt-char = { path = "../backend-utils-adt-char" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
@@ -190,6 +193,7 @@ backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
 backend-utils-cache-catcache = { path = "../backend-utils-cache-catcache" }
+backend-utils-cache-evtcache = { path = "../backend-utils-cache-evtcache" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-plancache = { path = "../backend-utils-cache-plancache" }
@@ -208,6 +212,7 @@ backend-utils-hash-dynahash = { path = "../backend-utils-hash-dynahash" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-postinit = { path = "../backend-utils-init-postinit" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc-file = { path = "../backend-utils-misc-guc-file" }
@@ -215,6 +220,7 @@ backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
+backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
 backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
 backend-utils-mmgr-dsa = { path = "../backend-utils-mmgr-dsa" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }

@@ -146,8 +146,11 @@ pub struct EscontextHandle(pub u64);
 pub struct FmgrInfoSlot(pub u64);
 
 /// An `ExprState *` (`cstate->defexprs[m]`) for a column default expression.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExprStateHandle(pub u64);
+///
+/// Single canonical definition lives in [`types_cache::typcache`]; this is the
+/// same `ExprState *` token the typcache/domains seams use. Re-exported here so
+/// the COPY seam contracts keep the `types_copy::ExprStateHandle` path.
+pub use types_cache::typcache::ExprStateHandle;
 
 /// `FILE *` opened for the COPY input (file or program pipe).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

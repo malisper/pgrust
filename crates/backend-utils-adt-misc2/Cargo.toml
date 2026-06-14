@@ -28,6 +28,9 @@ mcx = { path = "../mcx" }
 # domain-constraint engine and the base type's fmgr I/O via those same seams.
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+# hashtid/hashtidextended hash the ItemPointer byte image via the merged
+# common/hashfn owner (pure, no-alloc; no seam install needed).
+common-hashfn = { path = "../common-hashfn" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

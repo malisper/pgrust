@@ -94,6 +94,7 @@ pub fn init_seams() {
     backend_utils_init_small_seams::my_proc_port_guc_options::set(
         globals::my_proc_port_guc_options,
     );
+    backend_utils_init_small_seams::data_dir::set(globals::DataDir);
 }
 
 #[cfg(test)]

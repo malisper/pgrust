@@ -1,0 +1,25 @@
+[package]
+name = "backend-utils-adt-cash"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_adt_cash"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-cash = { path = "../types-cash" }
+types-error = { path = "../types-error" }
+# float8_mul / float8_div (utils/float.h): the float owner is not yet ported,
+# so they cross the owner's seam crate and panic until it lands.
+backend-utils-adt-float-seams = { path = "../backend-utils-adt-float-seams" }
+# PGLC_localeconv (pg_locale.c): owner not yet ported, crosses the seam.
+backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
+# numeric arithmetic cores (numeric.c): the owner IS ported, no cycle, so we
+# depend directly and call the real functions.
+backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }
+types-numeric = { path = "../types-numeric" }
+# pg_toupper (port/pgstrcasecmp.c): a leaf, depend directly.
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }

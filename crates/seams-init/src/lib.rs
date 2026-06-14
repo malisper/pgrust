@@ -45,6 +45,7 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_pg_class::init_seams();
+    backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
@@ -136,6 +137,7 @@ pub fn init_all() {
     backend_rmgrdesc_next::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
+    backend_storage_file_fileset::init_seams();
     backend_storage_freespace::init_seams();
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
@@ -170,6 +172,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
+    backend_utils_adt_char::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
@@ -186,6 +189,7 @@ pub fn init_all() {
     backend_utils_adt_ri_triggers::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_catcache::init_seams();
+    backend_utils_cache_evtcache::init_seams();
     backend_utils_cache_inval::init_seams();
     backend_utils_cache_lsyscache::init_seams();
     backend_utils_cache_plancache::init_seams();
@@ -204,6 +208,7 @@ pub fn init_all() {
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
+    backend_utils_mb_conv_string_helpers::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_guc_file::init_seams();
@@ -211,6 +216,7 @@ pub fn init_all() {
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
+    backend_utils_misc_stack_depth::init_seams();
     backend_utils_misc_timeout::init_seams();
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
@@ -548,6 +554,7 @@ mod recurrence_guard {
         ("backend_utils_init_small", "init_process_globals"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
+        ("backend_utils_misc_guc_file", "guc_check_errhint"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
     ];
