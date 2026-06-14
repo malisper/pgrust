@@ -71,7 +71,11 @@ pub fn domain_in<'mcx>(
     )?;
 
     // Do the necessary checks to ensure it's a valid domain value.
-    typcache_seams::domain_check_input::call(value, string.is_none(), domain_type)?;
+    typcache_seams::domain_check_input::call(
+        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
+        string.is_none(),
+        domain_type,
+    )?;
 
     Ok(value)
 }
@@ -105,7 +109,11 @@ pub fn domain_recv<'mcx>(
     // input always supplies a non-null value, matching the C `buf == NULL`
     // being unreachable for the normal system path; we mirror the not-strict
     // shape by reporting isnull == false.)
-    typcache_seams::domain_check_input::call(value, false, domain_type)?;
+    typcache_seams::domain_check_input::call(
+        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
+        false,
+        domain_type,
+    )?;
 
     Ok(value)
 }
@@ -123,7 +131,11 @@ pub fn domain_check<'mcx>(
     isnull: bool,
     domain_type: u32,
 ) -> PgResult<()> {
-    typcache_seams::domain_check_input::call(value, isnull, domain_type)
+    typcache_seams::domain_check_input::call(
+        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
+        isnull,
+        domain_type,
+    )
 }
 
 /// `errdatatype(datatypeOid)` — errcontext helper naming the domain type.

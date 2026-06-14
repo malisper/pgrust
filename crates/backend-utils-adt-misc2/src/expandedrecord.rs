@@ -265,7 +265,11 @@ fn assign_record_type_typmod(_tupdesc: &mut TupleDescData<'_>) -> i32 {
 /// typcache-resident `domain_check_input` engine. We route through that same
 /// engine seam directly (the owned model carries no `extra` memoization handle).
 fn domain_check(value: types_datum::Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
-    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
+    backend_utils_cache_typcache_seams::domain_check_input::call(
+        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
+        isnull,
+        domain_type,
+    )
 }
 
 /// `detoast_external_attr(attr)` (access/common/detoast.c). Owner not yet ported
