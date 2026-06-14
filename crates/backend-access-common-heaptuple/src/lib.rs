@@ -1246,31 +1246,12 @@ fn copy_tuple_identity(new_tuple: &mut FormedTuple, old: &FormedTuple) {
 // heap_form_minimal_tuple (heaptuple.c:1452)
 // ---------------------------------------------------------------------------
 
-/// A fully-formed minimal tuple: the owned `MinimalTupleData` header (incl. its
-/// `t_bits` null bitmap) plus the user-data area bytes.
-///
-/// As with [`FormedTuple`], the user data that C lays out contiguously after the
-/// header (at `(char *) tuple + hoff`) travels alongside as [`Self::data`]. The
-/// header's `t_hoff` is the full on-disk header offset including
-/// `MINIMAL_TUPLE_OFFSET`, exactly as C sets it; `t_len` is `hoff + data.len()`
-/// *without* `MINIMAL_TUPLE_OFFSET` (per the `t_len` contract).
-#[derive(Clone, Debug)]
-pub struct FormedMinimalTuple<'mcx> {
-    pub tuple: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
-    /// The user-data area (`data_len` bytes), i.e. the bytes at `tuple + hoff`.
-    pub data: PgVec<'mcx, u8>,
-}
-
-impl FormedMinimalTuple<'_> {
-    /// Deep copy into `mcx` (C: `heap_copy_minimal_tuple`'s single-block copy
-    /// into the caller's current context).
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<FormedMinimalTuple<'b>> {
-        Ok(FormedMinimalTuple {
-            tuple: alloc_in(mcx, self.tuple.clone_in(mcx)?)?,
-            data: slice_in(mcx, &self.data)?,
-        })
-    }
-}
+/// A fully-formed minimal tuple — re-exported from
+/// [`types_tuple::backend_access_common_heaptuple`] (where it lives so the
+/// `types-nodes` slot payload model can carry it as the
+/// `MinimalTupleTableSlot.mintuple` field), matching the homing of
+/// [`FormedTuple`]/[`TupleValue`].
+pub use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 
 /// `heap_form_minimal_tuple(tupleDescriptor, values, isnull, extra)`
 /// (heaptuple.c:1452) — construct a `MinimalTuple` from the given
