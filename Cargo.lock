@@ -9789,6 +9789,7 @@ dependencies = [
  "backend-postmaster-syslogger-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-utils-activity-stat-seams",
+ "backend-utils-error-elog-seams",
  "backend-utils-error-seams",
  "backend-utils-error-small-seams",
  "backend-utils-init-small-seams",
