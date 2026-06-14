@@ -1,14 +1,15 @@
 [package]
-name = "backend-storage-ipc-procarray-seams"
+name = "backend-storage-ipc-procarray"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_ipc_procarray_seams"
+name = "backend_storage_ipc_procarray"
 path = "src/lib.rs"
 
 [dependencies]
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
