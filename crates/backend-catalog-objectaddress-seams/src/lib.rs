@@ -6,6 +6,7 @@
 
 use mcx::{Mcx, PgString};
 use types_catalog::catalog_dependency::ObjectAddress;
+use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::ObjectType;
 use types_parsenodes::Node;
@@ -23,23 +24,44 @@ pub struct ResolvedObjectAddress<'mcx> {
 }
 
 seam_core::seam!(
-    /// `get_object_address(objtype, object, &relation, lockmode, false)`
+    /// `get_object_address(objtype, object, &relp, lockmode, missing_ok)`
     /// (objectaddress.c) — resolve the parser representation behind `object`
-    /// to an `ObjectAddress`, taking `lockmode` on the target to guard against
-    /// concurrent modification, and returning whatever relation it opened.
-    /// `ereport(ERROR)`s if the object does not exist.
+    /// to an [`ObjectAddress`], taking `lockmode` on the target to guard
+    /// against concurrent modification, and returning whatever relation it
+    /// opened (the C `*relp` out-parameter): for relation-member objects the
+    /// containing relation is opened so the caller can release the relcache
+    /// reference while keeping the lock; for other object types it is `None`.
+    ///
+    /// `missing_ok` mirrors the C `bool missing_ok`: when `true` a missing
+    /// object yields a [`ResolvedObjectAddress`] whose `address.objectId` is
+    /// `InvalidOid` rather than an error; when `false` (the default for most
+    /// callers) a vanished object raises (`Err`). Any other catalog failure is
+    /// carried on `Err` regardless. `mcx` anchors the lifetime of the opened
+    /// relation (the relcache arena the caller can later release).
     pub fn get_object_address<'mcx>(
         mcx: Mcx<'mcx>,
         objtype: ObjectType,
         object: &Node,
         lockmode: LOCKMODE,
+        missing_ok: bool,
     ) -> PgResult<ResolvedObjectAddress<'mcx>>
 );
 
 seam_core::seam!(
+    /// `get_object_namespace(&address)` (objectaddress.c): the OID of the
+    /// schema containing the object, or `InvalidOid` for an object that is not
+    /// schema-qualified. Catalog lookups can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `check_object_ownership(roleid, objtype, address, object, relation)`
-    /// (objectaddress.c) — require ownership of the target object; errors
-    /// (`ACLCHECK_NOT_OWNER` → `ereport(ERROR)`) if `roleid` does not own it.
+    /// (objectaddress.c): verify that `roleid` owns (or otherwise may drop)
+    /// the object, raising `ERRCODE_INSUFFICIENT_PRIVILEGE` /
+    /// `ACLCHECK_NOT_OWNER` → `ereport(ERROR)` otherwise (carried on `Err`).
+    /// `relation` is the open relation alias for relation-member objects, else
+    /// `None`.
     pub fn check_object_ownership<'mcx>(
         roleid: types_core::Oid,
         objtype: ObjectType,

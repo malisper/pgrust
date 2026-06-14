@@ -23,3 +23,4 @@ types-opclass = { path = "../types-opclass" }
 types-condvar = { path = "../types-condvar" }
 types-execparallel = { path = "../types-execparallel" }
 types-parallel = { path = "../types-parallel" }
+types-tidbitmap = { path = "../types-tidbitmap" }

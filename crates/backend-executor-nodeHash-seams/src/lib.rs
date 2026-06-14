@@ -10,6 +10,7 @@
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 use types_nodes::nodehashjoin::{ExprState, HashJoinState};
 use types_nodes::EStateData;
 use types_tuple::heaptuple::MinimalTupleData;
@@ -132,12 +133,22 @@ seam_core::seam!(
     /// ExprState. `is_outer` selects which side (outer → `hj_OuterHash`, inner →
     /// the HashState's `hash_expr`); `keep_nulls` is the `HJ_FILL_*` flag.
     /// `hashfuncids`/`collations` are the per-key resolved hash functions and
-    /// collations. Returns the compiled ExprState. Allocates.
+    /// collations; `hash_exprs` are the per-side hash key expressions
+    /// (`node->hashkeys` for outer, `hash->hashkeys` for inner) and `opstrict`
+    /// the per-key `op_strict(hashop)` flags. The node's result `desc`/`ops` are
+    /// read off the relevant PlanState (`js.ps` for outer, the inner HashState's
+    /// `ps` for inner). The actual compilation is delegated to execExpr's
+    /// `ExecBuildHash32Expr`; nodeHash owns this seam only because the inner
+    /// program is stored on the inner `HashState`'s `hash_expr`. Returns the
+    /// compiled ExprState (outer side; inner side is also stored on the
+    /// HashState). Allocates.
     pub fn exec_build_hash32_expr<'mcx>(
         node: &mut HashJoinState<'mcx>,
         is_outer: bool,
         hashfuncids: &[Oid],
         collations: &[Oid],
+        hash_exprs: &[Expr],
+        opstrict: &[bool],
         keep_nulls: bool,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<mcx::PgBox<'mcx, ExprState<'mcx>>>

@@ -84,6 +84,106 @@ pub const BTNProcs: u16 = 6;
 /// `BTOPTIONS_PROC` (`access/nbtree.h`).
 pub const BTOPTIONS_PROC: u16 = 5;
 
+/// `BTMaxItemSize` (`access/nbtree.h`): the largest tuple `_bt_dedup_pass` may
+/// produce.
+///
+/// `MAXALIGN_DOWN((BLCKSZ - MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData))`
+/// ` - MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - MAXALIGN(sizeof(ItemPointerData))`
+///   = `MAXALIGN_DOWN((8192 - MAXALIGN(24+12) - MAXALIGN(16)) / 3) - MAXALIGN(6)`
+///   = `MAXALIGN_DOWN((8192 - 40 - 16) / 3) - 8` = `2712 - 8` = 2704.
+pub const BTMaxItemSize: types_core::Size = 2704;
+
+/// `BTREE_SINGLEVAL_FILLFACTOR` (`access/nbtree.h`) — effective leaf-page
+/// fillfactor when a page is full of duplicates of a single value.
+pub const BTREE_SINGLEVAL_FILLFACTOR: i32 = 96;
+
+/// `INDEX_ALT_TID_MASK` (`access/itup.h`, `= INDEX_AM_RESERVED_BIT`) — set in a
+/// `t_info` to indicate an alternative (overloaded) `t_tid` interpretation.
+pub const INDEX_ALT_TID_MASK: uint16 = 0x2000;
+/// `BT_OFFSET_MASK` (`access/nbtree.h`) — mask for the number of posting-list
+/// items / pivot-tuple attributes stored in the overloaded `t_tid` offset.
+pub const BT_OFFSET_MASK: uint16 = 0x0FFF;
+/// `BT_PIVOT_HEAP_TID_ATTR` (`access/nbtree.h`) — set when a pivot tuple stores
+/// a tiebreaker heap TID attribute.
+pub const BT_PIVOT_HEAP_TID_ATTR: uint16 = 0x1000;
+/// `BT_IS_POSTING` (`access/nbtree.h`) — set in the overloaded `t_tid` offset
+/// to indicate a posting-list tuple.
+pub const BT_IS_POSTING: uint16 = 0x2000;
+
+/// `XLOG_BTREE_DEDUP` (`access/nbtxlog.h`) — WAL info bits for a dedup record.
+pub const XLOG_BTREE_DEDUP: u8 = 0x60;
+
+/// `SizeOfBtreeDedup` (`access/nbtxlog.h`) — `offsetof(xl_btree_dedup,`
+/// `nintervals) + sizeof(uint16)` = 2 (the record is a single `uint16`).
+pub const SizeOfBtreeDedup: usize = 2;
+
+/// `BTPageOpaqueData` (`access/nbtree.h`) — the btree-specific special-area
+/// header at the end of every btree page (16 bytes, `#[repr(C)]`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BTPageOpaqueData {
+    /// left sibling, or `P_NONE` if leftmost
+    pub btpo_prev: BlockNumber,
+    /// right sibling, or `P_NONE` if rightmost
+    pub btpo_next: BlockNumber,
+    /// tree level --- zero for leaf pages
+    pub btpo_level: u32,
+    /// flag bits, see `BTP_*`
+    pub btpo_flags: uint16,
+    /// vacuum cycle ID of latest split
+    pub btpo_cycleid: BTCycleId,
+}
+
+/// `BTDedupInterval` (`access/nbtree.h`) — describes a deduplicated interval
+/// (a posting list that replaced one or more plain tuples) for WAL.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BTDedupInterval {
+    pub baseoff: OffsetNumber,
+    pub nitems: uint16,
+}
+
+/// `TM_IndexDelete` (`access/tableam.h`) — one TID handed to the tableam by an
+/// index AM during (bottom-up) index deletion.
+#[derive(Clone, Copy, Debug)]
+pub struct TmIndexDelete {
+    /// table TID from index tuple
+    pub tid: ItemPointerData,
+    /// offset into the `TM_IndexStatus` array
+    pub id: i16,
+}
+
+/// `TM_IndexStatus` (`access/tableam.h`) — mutable per-TID status that the
+/// index AM initializes and the tableam updates.
+#[derive(Clone, Copy, Debug)]
+pub struct TmIndexStatus {
+    /// index AM page offset number
+    pub idxoffnum: OffsetNumber,
+    /// currently known to be deletable?
+    pub knowndeletable: bool,
+    /// promising (duplicate) index tuple? (bottom-up only)
+    pub promising: bool,
+    /// space freed in index if deleted (bottom-up only)
+    pub freespace: i16,
+}
+
+/// `TM_IndexDeleteOp` (`access/tableam.h`) — describes a (bottom-up) index
+/// deletion operation. `irel` is carried by the caller's `Relation` argument
+/// across the `_bt_delitems_delete_check` seam, so it is not duplicated here.
+#[derive(Clone, Debug)]
+pub struct TmIndexDeleteOp<'mcx> {
+    /// index block number (for error reports)
+    pub iblknum: BlockNumber,
+    /// bottom-up (not simple) deletion?
+    pub bottomup: bool,
+    /// bottom-up space target
+    pub bottomupfreespace: i32,
+    /// the `deltids` array (its length is C's `ndeltids`)
+    pub deltids: PgVec<'mcx, TmIndexDelete>,
+    /// the per-TID `status` array (parallel to `deltids`)
+    pub status: PgVec<'mcx, TmIndexStatus>,
+}
+
 /// `IndexUniqueCheck` (`access/genam.h`) — the uniqueness-check mode requested
 /// by the executor for an index insert.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

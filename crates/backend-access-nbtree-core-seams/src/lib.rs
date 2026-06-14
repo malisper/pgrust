@@ -18,7 +18,7 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::{BlockNumber, OffsetNumber};
 use types_error::PgResult;
 use types_nbtree::{
-    BTCycleId, BTScanOpaqueData, BTVacState, BTVacuumPosting, IndexUniqueCheck,
+    BTCycleId, BTScanOpaqueData, BTVacState, BTVacuumPosting, IndexUniqueCheck, TmIndexDeleteOp,
 };
 use types_rel::Relation;
 use types_scan::sdir::ScanDirection;
@@ -282,4 +282,34 @@ seam_core::seam!(
     /// `BTreeTupleGetPostingN(itup, n)` (nbtree.h): the `n`th heap TID in a
     /// posting-list tuple.
     pub fn tuple_posting_tid(itup: &[u8], n: i32) -> ItemPointerData
+);
+
+// === nbtutils.c =============================================================
+
+seam_core::seam!(
+    /// `_bt_keep_natts_fast(rel, lastleft, firstright)` (nbtutils.c): a faster,
+    /// opclass-oblivious variant of `_bt_keep_natts` based on
+    /// `datum_image_eq()`. Returns the number of attributes that must be kept
+    /// to distinguish the two tuples; a value `> IndexRelationGetNumberOfKey`
+    /// `Attributes(rel)` means the two tuples are equal across all key columns.
+    /// `lastleft`/`firstright` are page-item byte slices.
+    pub fn bt_keep_natts_fast<'mcx>(
+        rel: &Relation<'mcx>,
+        lastleft: &[u8],
+        firstright: &[u8],
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `_bt_delitems_delete_check(rel, buf, heapRel, delstate)` (nbtpage.c):
+    /// ask the tableam which of `delstate`'s TIDs are deletable, then
+    /// physically delete the corresponding index entries from `buf`'s page
+    /// (WAL-logged inside its own critical section). Consumes `delstate`.
+    /// `Err` carries the tableam / WAL `ereport(ERROR)`s.
+    pub fn bt_delitems_delete_check<'mcx>(
+        rel: &Relation<'mcx>,
+        buf: Buffer,
+        heap_rel: &Relation<'mcx>,
+        delstate: TmIndexDeleteOp<'mcx>,
+    ) -> PgResult<()>
 );

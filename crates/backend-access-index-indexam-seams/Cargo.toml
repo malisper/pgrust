@@ -20,3 +20,4 @@ types-tuple = { path = "../types-tuple" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-nbtree = { path = "../types-nbtree" }
+types-tidbitmap = { path = "../types-tidbitmap" }
