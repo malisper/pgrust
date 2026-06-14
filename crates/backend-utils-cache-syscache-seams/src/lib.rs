@@ -1881,3 +1881,106 @@ seam_core::seam!(
     /// when no such attrdef row exists (the C `InvalidObjectAddress`).
     pub fn attrdef_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>>
 );
+
+/* ------------------------------------------------------------------------
+ *  pg_constraint reads/writes for backend-catalog-pg-constraint
+ *  (SearchSysCache1(CONSTROID) + pg_class relchecks read/decrement, plus the
+ *  conkey/FK array-column detoast reads). Owned by backend-utils-cache-syscache
+ *  (and heaptuple for the array reads); panic until they land.
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(CONSTROID, ObjectIdGetDatum(oid))` (syscache.c) —
+    /// the catcache hash value for a `pg_constraint` row, used by
+    /// `ri_LoadConstraintInfo`'s `oid_hash_value` / hash-of-root. `Err` carries
+    /// the catcache-path `ereport(ERROR)`s.
+    pub fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` + `GETSTRUCT`
+    /// projected to the scalar `Form_pg_constraint` columns plus the `conkey`
+    /// array column, copied into `mcx`, then `ReleaseSysCache`. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); the caller raises `cache lookup failed
+    /// for constraint %u`. `Err` carries OOM / catcache `ereport(ERROR)`s.
+    pub fn search_constraint_form_by_oid(
+        conoid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_constraint::ConstraintFormCopy>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` + `heap_copytuple`
+    /// — the full `pg_constraint` tuple (for `DeconstructFkConstraintRow`),
+    /// copied into `mcx`, then `ReleaseSysCache`. `Ok(None)` on a cache miss.
+    /// `Err` carries OOM / catcache `ereport(ERROR)`s.
+    pub fn search_constraint_tuple_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))` +
+    /// `GETSTRUCT(Form_pg_class)->relchecks` (RemoveConstraintById): the
+    /// relation's check-constraint count. `Ok(None)` on a cache miss; the
+    /// caller raises `cache lookup failed for relation %u`.
+    pub fn fetch_relchecks(relid: Oid) -> PgResult<Option<i16>>
+);
+
+seam_core::seam!(
+    /// RemoveConstraintById's relchecks update: `table_open(RelationRelationId,
+    /// RowExclusiveLock)` + `SearchSysCacheCopy1(RELOID)` + `classForm->relchecks--`
+    /// + `CatalogTupleUpdate` + `heap_freetuple` + `table_close`. The
+    /// `relchecks == 0` guard is the caller's (it has already read the value via
+    /// [`fetch_relchecks`]); this seam performs the decrement-and-store. `Err`
+    /// carries the heap-mutation `ereport(ERROR)`s.
+    pub fn decrement_relchecks(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SysCacheGetAttrNotNull(CONSTROID, constrTup, Anum_pg_constraint_conkey)`
+    /// + `DatumGetArrayTypeP` (heaptuple/array detoast): the `conkey` 1-D
+    /// smallint array of a not-null constraint tuple, with the validated
+    /// `ARR_*` fields. The caller performs the 1-D/elemtype/hasnull/dim
+    /// validation + error message. `Err` carries the detoast `ereport(ERROR)`s.
+    pub fn get_conkey_array(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::ConKeyArray>
+);
+
+seam_core::seam!(
+    /// `DeconstructFkConstraintRow`'s `SysCacheGetAttrNotNull` /
+    /// `SysCacheGetAttr` reads of `conkey` / `confkey` / `conpfeqop` /
+    /// `conppeqop` / `conffeqop` / `confdelsetcols` + `DatumGetArrayTypeP`
+    /// (heaptuple/array detoast). Returns all six array columns; the caller
+    /// performs every dimension/elemtype/null validation + the FK error
+    /// messages. `confdelsetcols` is `None` when the column is SQL NULL.
+    pub fn deconstruct_fk_arrays(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::FkArrayProjection>
+);
+
+seam_core::seam!(
+    /// `heap_getattr(tuple, Anum_pg_constraint_conkey,
+    /// RelationGetDescr(pg_constraint), &isNull)` + `DatumGetArrayTypeP`
+    /// (get_primary_key_attnos): the `conkey` array column of a scanned
+    /// `pg_constraint` tuple, against the open relation's descriptor.
+    /// `Ok(None)` when the column is SQL NULL (the C `isNull` branch → the
+    /// caller's `null conkey for constraint %u`). `Err` carries the detoast
+    /// `ereport(ERROR)`s.
+    pub fn heap_get_conkey(
+        rel: &types_rel::RelationData<'_>,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<Option<types_catalog::pg_constraint::ConKeyArray>>
+);
+
+seam_core::seam!(
+    /// `(Form_pg_constraint) GETSTRUCT(tup)` of a held `pg_constraint` tuple
+    /// (AdjustNotNullInheritance reads the form off the tuple returned by
+    /// `findNotNullConstraintAttnum`). Projects the fixed-width scalar columns.
+    /// Owned by the heaptuple/syscache layer (GETSTRUCT decode). `Err` carries
+    /// any decode `ereport(ERROR)`.
+    pub fn read_constraint_form(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::FormData_pg_constraint>
+);

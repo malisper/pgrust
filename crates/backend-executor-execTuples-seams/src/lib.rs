@@ -414,6 +414,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecCopySlotHeapTuple(slot)` (execTuples.c): make a palloc'd heap-tuple
+    /// copy of the slot's current contents (in the EState per-query context).
+    /// Targets the slot by pool id. The owned model returns the
+    /// [`FormedTuple`](types_tuple::backend_access_common_heaptuple::FormedTuple)
+    /// carrier (header + user-data area). Fallible on OOM.
+    pub fn exec_copy_slot_heap_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
+);
+
+seam_core::seam!(
     /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c):
     /// store a heap tuple in the slot regardless of the slot's native format
     /// (materializing it if the slot is not a heap-tuple slot). Targets the

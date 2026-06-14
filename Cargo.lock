@@ -62,6 +62,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-xlog-seams",
+ "backend-access-common-bufmask-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "seams-init",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-brin-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -414,6 +434,26 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-hash-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-hash-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -801,6 +841,26 @@ dependencies = [
  "types-error",
  "types-nbtree",
  "types-rel",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-nbt-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-nbt-dedup",
+ "backend-access-nbt-xlog-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nbtree",
  "types-storage",
  "types-tuple",
  "types-wal",
@@ -1819,6 +1879,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogarchive"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogarchive-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-postmaster-pgarch-seams",
+ "backend-postmaster-startup-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "common-archive-seams",
+ "common-percentrepl",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlogarchive-seams"
 version = "0.0.0"
 dependencies = [
@@ -1920,6 +2007,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
 ]
 
 [[package]]
@@ -2397,6 +2485,40 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-constraint"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-pg-constraint-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-commands-indexcmds-seams",
+ "backend-nodes-core",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ri-triggers-seams",
+ "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-amapi",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-ri-triggers",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3293,6 +3415,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-indexcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-amapi",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-commands-matview"
 version = "0.0.0"
 dependencies = [
@@ -3390,6 +3522,7 @@ dependencies = [
  "backend-nodes-queryjumble-seams",
  "backend-parser-analyze-seams",
  "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-dest-seams",
  "backend-tcop-postgres-seams",
  "backend-tcop-pquery-seams",
  "backend-utils-init-miscinit-seams",
@@ -3841,6 +3974,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execMain"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-executor-execMain-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -3850,7 +4002,6 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
- "types-portal",
  "types-rel",
  "types-scan",
  "types-tableam",
@@ -4654,6 +4805,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeIndexscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeIndexscan-pq-seams",
+ "backend-executor-nodeIndexscan-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-shm_toc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeIndexscan-pq-seams"
 version = "0.0.0"
 dependencies = [
@@ -5302,6 +5488,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-nodes",
  "types-portal",
 ]
 
@@ -5808,6 +5995,7 @@ dependencies = [
 name = "backend-nodes-node-support"
 version = "0.0.0"
 dependencies = [
+ "common-ryu",
  "mcx",
  "types-error",
 ]
@@ -7917,6 +8105,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-large-object"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess",
+ "backend-catalog-pg-largeobject",
+ "backend-catalog-pg-shdepend-seams",
+ "backend-storage-large-object-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-catalog",
+ "types-cluster",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-storage-large-object-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-condition-variable"
 version = "0.0.0"
 dependencies = [
@@ -8273,10 +8505,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-dest"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-dest-seams",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-dest-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-dest",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -10024,6 +10268,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cache",
+ "types-catalog",
  "types-cluster",
  "types-core",
  "types-error",
@@ -10032,6 +10277,7 @@ dependencies = [
  "types-hash",
  "types-namespace",
  "types-partition",
+ "types-rel",
  "types-selfuncs",
  "types-storage",
  "types-tuple",
@@ -11103,6 +11349,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "common-archive-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "common-blkreftable-seams"
 version = "0.0.0"
 dependencies = [
@@ -11262,6 +11517,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-ryu"
+version = "0.0.0"
+
+[[package]]
 name = "common-string"
 version = "0.0.0"
 dependencies = [
@@ -11311,6 +11570,13 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-error",
+]
+
+[[package]]
+name = "common-wait-error-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -11564,6 +11830,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
@@ -11572,6 +11839,7 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-hash-xlog",
  "backend-access-hashvalidate",
  "backend-access-heap-heapam",
  "backend-access-heap-heapam-visibility",
@@ -11581,6 +11849,7 @@ dependencies = [
  "backend-access-heap-visibilitymap",
  "backend-access-index-indexam",
  "backend-access-nbt-dedup",
+ "backend-access-nbt-xlog",
  "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
@@ -11597,6 +11866,7 @@ dependencies = [
  "backend-access-transam-varsup",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
+ "backend-access-transam-xlogarchive",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogreader",
  "backend-access-transam-xlogstats",
@@ -11609,6 +11879,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-constraint",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-largeobject",
@@ -11630,6 +11901,7 @@ dependencies = [
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execJunk",
+ "backend-executor-execMain",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
@@ -11651,6 +11923,7 @@ dependencies = [
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
+ "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMemoize",
@@ -11718,6 +11991,7 @@ dependencies = [
  "backend-storage-ipc-shmem",
  "backend-storage-ipc-sinval",
  "backend-storage-ipc-standby",
+ "backend-storage-large-object",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
@@ -11728,6 +12002,7 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
+ "backend-tcop-dest",
  "backend-tcop-fastpath",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",
@@ -11934,6 +12209,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12285,7 +12561,6 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
- "types-dest",
  "types-nodes",
  "types-snapshot",
  "types-tuple",
@@ -12434,6 +12709,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-snapshot",
 ]
 
 [[package]]

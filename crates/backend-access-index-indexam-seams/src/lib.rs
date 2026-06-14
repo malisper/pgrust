@@ -58,6 +58,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_rescan(node->iss_ScanDesc, node->iss_ScanKeys,
+    /// node->iss_NumScanKeys, node->iss_OrderByKeys, node->iss_NumOrderByKeys)`
+    /// (indexam.c), for a plain index scan node: restart the scan with the
+    /// node's (possibly recomputed) scan + order-by keys. Fallible on
+    /// `ereport(ERROR)`.
+    pub fn index_rescan_is<'mcx>(
+        node: &mut types_nodes::IndexScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `index_beginscan_bitmap(indexRelation, snapshot, instrument, nkeys)`
     /// (indexam.c): begin a scan of an index for a bitmap index scan
     /// (`amgetbitmap`-style; no heap relation, no order-by keys), returning a
@@ -103,6 +114,21 @@ seam_core::seam!(
         scan: &mut types_nodes::IndexScanDescData<'mcx>,
         direction: ScanDirection,
     ) -> types_error::PgResult<Option<ItemPointerData>>
+);
+
+seam_core::seam!(
+    /// `index_getnext_slot(scan, direction, slot)` (indexam.c): fetch the next
+    /// tuple satisfying the scan keys + snapshot into the table slot (id into
+    /// the EState pool), returning whether one was found (the C `bool`; `false`
+    /// at end of scan). Loops `index_getnext_tid` + `index_fetch_heap`
+    /// internally, walking HOT chains. Fallible on `ereport(ERROR)`; pins a
+    /// heap buffer recorded in the scan descriptor on success.
+    pub fn index_getnext_slot<'mcx>(
+        scan: &mut types_nodes::IndexScanDescData<'mcx>,
+        direction: ScanDirection,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

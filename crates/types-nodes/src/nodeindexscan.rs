@@ -135,6 +135,81 @@ impl Scan<'_> {
     }
 }
 
+/// `IndexScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct IndexScan
+/// {
+///     Scan          scan;
+///     Oid           indexid;
+///     List         *indexqual;
+///     List         *indexqualorig;
+///     List         *indexorderby;
+///     List         *indexorderbyorig;
+///     List         *indexorderbyops;
+///     ScanDirection indexorderdir;
+/// } IndexScan;
+/// ```
+#[derive(Debug)]
+pub struct IndexScan<'mcx> {
+    /// `Scan scan` — the abstract scan base (embeds `Plan plan` first).
+    pub scan: Scan<'mcx>,
+    /// `Oid indexid` — OID of index to scan.
+    pub indexid: types_core::Oid,
+    /// `List *indexqual` — list of index quals (usually OpExprs).
+    pub indexqual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexqualorig` — the same in original form.
+    pub indexqualorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderby` — list of index ORDER BY exprs.
+    pub indexorderby: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderbyorig` — the same in original form.
+    pub indexorderbyorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// `List *indexorderbyops` — OIDs of sort ops for ORDER BY exprs.
+    pub indexorderbyops: Option<PgVec<'mcx, types_core::Oid>>,
+    /// `ScanDirection indexorderdir` — forward or backward or don't care.
+    pub indexorderdir: types_scan::sdir::ScanDirection,
+}
+
+impl IndexScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexScan<'b>> {
+        let clone_exprs = |src: &Option<PgVec<'_, crate::primnodes::Expr>>|
+            -> PgResult<Option<PgVec<'b, crate::primnodes::Expr>>> {
+            match src {
+                Some(list) => {
+                    let mut out = vec_with_capacity_in(mcx, list.len())?;
+                    for e in list.iter() {
+                        out.push(e.clone());
+                    }
+                    Ok(Some(out))
+                }
+                None => Ok(None),
+            }
+        };
+        let indexorderbyops = match &self.indexorderbyops {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(IndexScan {
+            scan: self.scan.clone_in(mcx)?,
+            indexid: self.indexid,
+            indexqual: clone_exprs(&self.indexqual)?,
+            indexqualorig: clone_exprs(&self.indexqualorig)?,
+            indexorderby: clone_exprs(&self.indexorderby)?,
+            indexorderbyorig: clone_exprs(&self.indexorderbyorig)?,
+            indexorderbyops,
+            indexorderdir: self.indexorderdir,
+        })
+    }
+}
+
 /// `SubqueryScanStatus` (nodes/plannodes.h) — caches the trivial-subqueryscan
 /// property of the node; `SUBQUERY_SCAN_UNKNOWN` means not yet determined (only
 /// used during planning).
@@ -245,6 +320,30 @@ pub struct PlannedStmt<'mcx> {
     /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
     /// the first stmt with this set.
     pub canSetTag: bool,
+    /// `bool hasReturning` — is it insert|update|delete|merge RETURNING?
+    /// (execMain `ExecutorStart` reads this to decide RETURNING projection;
+    /// additive, defaults to the C `false`.)
+    pub hasReturning: bool,
+    /// `bool hasModifyingCTE` — has insert|update|delete|merge in WITH?
+    /// (`ExecCheckXactReadOnly` forces parallel-unsafe when set.)
+    pub hasModifyingCTE: bool,
+    /// `bool parallelModeNeeded` — parallel mode required to execute?
+    /// (`ExecutorStart` reads this with the parallel-mode GUC to decide
+    /// `es_use_parallel_mode`.)
+    pub parallelModeNeeded: bool,
+    /// `int jitFlags` — which forms of JIT should be performed
+    /// (`ExecutorStart` copies it into `es_jit_flags`).
+    pub jitFlags: i32,
+    /// `List *permInfos` — list of `RTEPermissionInfo` nodes for the query's
+    /// RTEs (`ExecCheckPermissions` / `ExecCheckXactReadOnly` walk it). `None`
+    /// = the C `NIL`. The trimmed `RTEPermissionInfo` (parsenodes.rs) carries
+    /// only the fields its current consumers read; the permission-bit fields
+    /// (`requiredPerms`/`selectedCols`) land with the full
+    /// `ExecCheckPermissions` consumer (docs/types.md rule 3).
+    pub permInfos: Option<PgVec<'mcx, crate::parsenodes::RTEPermissionInfo<'mcx>>>,
+    /// `List *paramExecTypes` — type OIDs for `PARAM_EXEC` Params
+    /// (`InitPlan` sizes `es_param_exec_vals` from this). `None` = the C `NIL`.
+    pub paramExecTypes: Option<PgVec<'mcx, types_core::Oid>>,
 }
 
 impl PlannedStmt<'_> {
@@ -281,6 +380,26 @@ impl PlannedStmt<'_> {
             }
             None => None,
         };
+        let permInfos = match &self.permInfos {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(x.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let paramExecTypes = match &self.paramExecTypes {
+            Some(v) => {
+                let mut out = vec_with_capacity_in(mcx, v.len())?;
+                for x in v.iter() {
+                    out.push(*x);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(PlannedStmt {
             commandType: self.commandType,
             utilityStmt: match &self.utilityStmt {
@@ -295,6 +414,12 @@ impl PlannedStmt<'_> {
             },
             rowMarks,
             canSetTag: self.canSetTag,
+            hasReturning: self.hasReturning,
+            hasModifyingCTE: self.hasModifyingCTE,
+            parallelModeNeeded: self.parallelModeNeeded,
+            jitFlags: self.jitFlags,
+            permInfos,
+            paramExecTypes,
         })
     }
 }

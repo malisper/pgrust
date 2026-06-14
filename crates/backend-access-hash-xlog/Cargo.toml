@@ -1,0 +1,39 @@
+[package]
+name = "backend-access-hash-xlog"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_hash_xlog"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+types-wal = { path = "../types-wal" }
+types-xlog-records = { path = "../types-xlog-records" }
+
+# Owns these rmgr-table callbacks (hash_redo / hash_mask); installs them on
+# landing.
+backend-access-hash-xlog-seams = { path = "../backend-access-hash-xlog-seams" }
+
+# Page-byte primitives (bufpage.c): PageInit / PageAddItemExtended /
+# PageIndexMultiDelete / PageSetLSN / PageGetSpecialPointer.
+backend-storage-page = { path = "../backend-storage-page" }
+
+# WAL-recovery substrate.
+backend-access-transam-xlogutils-seams = { path = "../backend-access-transam-xlogutils-seams" }
+backend-access-transam-xlogreader-seams = { path = "../backend-access-transam-xlogreader-seams" }
+
+# Buffer manager (bufmgr.c) — page access during redo.
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# Page masking for WAL consistency checking (bufmask.c).
+backend-access-common-bufmask-seams = { path = "../backend-access-common-bufmask-seams" }
+
+# Hot-Standby recovery-conflict resolution (standby.c).
+backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-seams" }

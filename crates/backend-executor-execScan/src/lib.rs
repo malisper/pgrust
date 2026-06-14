@@ -75,6 +75,13 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
     }
 }
 
+impl<'mcx> ScanNode<'mcx> for types_nodes::IndexScanState<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
 impl<'mcx> ScanNode<'mcx> for SubqueryScanState<'mcx> {
     #[inline]
     fn ss(&mut self) -> &mut ScanStateData<'mcx> {
@@ -107,6 +114,7 @@ pub fn init_seams() {
     execScan_seams::exec_assign_scan_projection_info::set(exec_assign_scan_projection_info);
     execScan_seams::exec_scan_rescan::set(exec_scan_rescan_tablefunc);
     execScan_seams::exec_scan_indexonly::set(exec_scan_indexonly);
+    execScan_seams::exec_scan_index::set(exec_scan_index);
     execScan_seams::exec_scan_rescan_ss::set(exec_scan_rescan_ss);
     execScan_seams::exec_scan_subquery::set(exec_scan_subquery);
     execScan_seams::exec_scan_cte::set(exec_scan_cte);
@@ -639,6 +647,19 @@ fn exec_scan_indexonly<'mcx>(
     estate: &mut EStateData<'mcx>,
     access: execScan_seams::IndexOnlyScanAccessMtd,
     recheck: execScan_seams::IndexOnlyScanRecheckMtd,
+) -> PgResult<bool> {
+    let produced = exec_scan_core(node, into_slot_access(access), recheck, estate)?;
+    Ok(!tup_is_null(estate, produced))
+}
+
+/// `exec_scan_index` seam — `ExecScan(&node->ss, IndexNext{,WithReorder},
+/// IndexRecheck)` for a plain index scan node. Like the index-only variant, the
+/// C returns the result `TupleTableSlot *`; this seam reports `!TupIsNull(slot)`.
+fn exec_scan_index<'mcx>(
+    node: &mut types_nodes::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::IndexScanAccessMtd,
+    recheck: execScan_seams::IndexScanRecheckMtd,
 ) -> PgResult<bool> {
     let produced = exec_scan_core(node, into_slot_access(access), recheck, estate)?;
     Ok(!tup_is_null(estate, produced))

@@ -1232,4 +1232,6 @@ pub fn init_seams() {
     // `PgArchShmemInit() -> ()` (both infallible).
     backend_postmaster_pgarch_seams::pg_arch_shmem_size::set(PgArchShmemSize);
     backend_postmaster_pgarch_seams::pg_arch_shmem_init::set(PgArchShmemInit);
+    backend_postmaster_pgarch_seams::pg_arch_wakeup::set(PgArchWakeup);
+    backend_postmaster_pgarch_seams::pg_arch_force_dir_scan::set(PgArchForceDirScan);
 }

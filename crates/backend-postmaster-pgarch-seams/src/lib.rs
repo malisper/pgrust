@@ -21,3 +21,18 @@ seam_core::seam!(
     /// body returns `()`.
     pub fn pg_arch_shmem_init()
 );
+
+seam_core::seam!(
+    /// `PgArchWakeup()` (`src/backend/postmaster/pgarch.c`) — set the archiver's
+    /// latch so it notices a freshly-created `.ready` status file. Infallible in
+    /// C (`void`); touches shared memory.
+    pub fn pg_arch_wakeup()
+);
+
+seam_core::seam!(
+    /// `PgArchForceDirScan()` (`src/backend/postmaster/pgarch.c`) — force the
+    /// archiver to rescan `archive_status/` on its next pass (used for
+    /// high-priority timeline-history files). Infallible in C (`void`); touches
+    /// shared memory.
+    pub fn pg_arch_force_dir_scan()
+);

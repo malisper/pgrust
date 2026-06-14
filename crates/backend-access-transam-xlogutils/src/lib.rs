@@ -942,6 +942,14 @@ pub fn init_seams() {
     backend_access_transam_xlogutils_seams::xlog_read_buffer_for_redo::set(
         |record, block_id| XLogReadBufferForRedo(record, block_id),
     );
+    backend_access_transam_xlogutils_seams::xlog_read_buffer_for_redo_extended::set(
+        |record, block_id, mode, get_cleanup_lock| {
+            XLogReadBufferForRedoExtended(record, block_id, mode, get_cleanup_lock)
+        },
+    );
+    backend_access_transam_xlogutils_seams::xlog_init_buffer_for_redo::set(|record, block_id| {
+        XLogInitBufferForRedo(record, block_id)
+    });
     // `XLogReadBufferExtended(rlocator, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
     // InvalidBuffer)` — the FSM-fork redo read used by
     // `XLogRecordPageWithFreeSpace`.

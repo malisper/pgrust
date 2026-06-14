@@ -431,6 +431,12 @@ seam_core::seam!(
     /// miss (the C dereferences `rd_indam` unconditionally).
     pub fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
+seam_core::seam!(
+    /// `indexRel->rd_indam->amsearcharray` — whether the index AM expands
+    /// `ScalarArrayOpExpr` quals itself (the `SK_SEARCHARRAY` build path in
+    /// `ExecIndexBuildScanKeys`). `Err` only on a relcache miss.
+    pub fn rd_indam_amsearcharray(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
+);
 
 seam_core::seam!(
     /// `criticalRelcachesBuilt` (relcache.c): true once relcache

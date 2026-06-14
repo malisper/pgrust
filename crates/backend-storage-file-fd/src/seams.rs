@@ -15,7 +15,7 @@ use std::path::Path;
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 
 use backend_storage_file_fd_seams::{
-    PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
+    CreateEmptyFileOutcome, PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
 };
 
 use crate::{allocated_desc, sync_cleanup, vfd_core};
@@ -95,6 +95,27 @@ pub fn allocate_file_write(path: &str, bytes: &[u8]) -> PgResult<()> {
 
     // if (FreeFile(f)) ereport(ERROR, ...)
     allocated_desc::FreeFile(index)
+}
+
+/// `create_empty_file` — `AllocateFile(path, "w")` immediately followed by
+/// `FreeFile` (xlogarchive.c's `.ready`/`.done` status-file idiom). Never
+/// throws: the open-failure and the deferred FreeFile-failure are returned as
+/// [`CreateEmptyFileOutcome`] variants carrying `errno`, so the caller can emit
+/// its own non-throwing `ereport(LOG)` and continue.
+pub fn create_empty_file(path: &str) -> CreateEmptyFileOutcome {
+    // fd = AllocateFile(archiveStatusPath, "w"); if (fd == NULL) { LOG; return }
+    let index = match allocated_desc::AllocateFile(Path::new(path), "w") {
+        Ok(index) => index,
+        Err(e) => {
+            return CreateEmptyFileOutcome::CreateFailed(e.saved_errno().unwrap_or(0));
+        }
+    };
+
+    // if (FreeFile(fd)) { LOG; return }
+    match allocated_desc::FreeFile(index) {
+        Ok(()) => CreateEmptyFileOutcome::Ok,
+        Err(e) => CreateEmptyFileOutcome::WriteFailed(e.saved_errno().unwrap_or(0)),
+    }
 }
 
 /// `allocate_file_read` — `AllocateFile(path, PG_BINARY_R)` + `fstat` + `fread`

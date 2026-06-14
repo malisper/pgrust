@@ -82,6 +82,7 @@ pub fn init_seams() {
     sx::rd_opfamily::set(rd_opfamily);
     sx::rd_opcintype::set(rd_opcintype);
     sx::rd_indam_amcanorder::set(rd_indam_amcanorder);
+    sx::rd_indam_amsearcharray::set(rd_indam_amsearcharray);
 }
 
 /* ==========================================================================
@@ -595,4 +596,11 @@ fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     // AM OID (`rd_rel->relam`).
     let relam = with_entry(index.rd_id, |rd| rd.rd_rel.relam)?;
     backend_access_index_amapi_seams::index_am_canorder::call(relam)
+}
+
+fn rd_indam_amsearcharray(index: &types_rel::Relation<'_>) -> PgResult<bool> {
+    // `index->rd_indam->amsearcharray`: as for amcanorder, projected off the
+    // AM's untrimmed routine by AM OID.
+    let relam = with_entry(index.rd_id, |rd| rd.rd_rel.relam)?;
+    backend_access_index_amapi_seams::index_am_searcharray::call(relam)
 }

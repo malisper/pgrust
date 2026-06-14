@@ -8,6 +8,8 @@ pub type SysCacheIdentifier = i32;
 pub const AUTHMEMROLEMEM: SysCacheIdentifier = 9;
 /// `AUTHOID`
 pub const AUTHOID: SysCacheIdentifier = 11;
+/// `CONSTROID`
+pub const CONSTROID: SysCacheIdentifier = 19;
 /// `DATABASEOID`
 pub const DATABASEOID: SysCacheIdentifier = 21;
 /// `NAMESPACEOID`

@@ -335,7 +335,7 @@ impl<'mcx> BTDedupState<'mcx> {
 /// `_bt_bottomupdel_pass`. `base`/`htids` start empty (C: `base = NULL`,
 /// `htids = palloc(maxpostingsize)`; here the heap-TID workspace grows on
 /// demand, capped by maxpostingsize in `_bt_dedup_save_htid`).
-fn new_dedup_state<'mcx>(mcx: Mcx<'mcx>, maxpostingsize: Size) -> PgResult<BTDedupState<'mcx>> {
+pub fn new_dedup_state<'mcx>(mcx: Mcx<'mcx>, maxpostingsize: Size) -> PgResult<BTDedupState<'mcx>> {
     // C: state->intervals is sized MaxIndexTuplesPerPage up front.
     let cap = MaxIndexTuplesPerPage;
     let mut intervals: PgVec<'mcx, BTDedupInterval> = vec_with_capacity_in(mcx, cap)?;

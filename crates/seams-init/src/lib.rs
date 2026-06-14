@@ -24,11 +24,14 @@ pub fn init_all() {
     backend_access_heap_visibilitymap::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_nbt_dedup::init_seams();
+    backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
     backend_access_rmgrdesc_small::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_brin_xlog::init_seams();
+    backend_access_hash_xlog::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
@@ -40,6 +43,7 @@ pub fn init_all() {
     backend_access_transam_varsup::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
+    backend_access_transam_xlogarchive::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogreader::init_seams();
     backend_access_transam_xlogstats::init_seams();
@@ -53,6 +57,7 @@ pub fn init_all() {
     backend_catalog_objectaddress::init_seams();
     backend_catalog_pg_class::init_seams();
     backend_catalog_pg_db_role_setting::init_seams();
+    backend_catalog_pg_constraint::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_largeobject::init_seams();
     backend_catalog_pg_namespace::init_seams();
@@ -73,6 +78,7 @@ pub fn init_all() {
     backend_executor_execExpr::init_seams();
     backend_executor_execExprInterp::init_seams();
     backend_executor_execJunk::init_seams();
+    backend_executor_execMain::init_seams();
     backend_executor_execParallel::init_seams();
     backend_executor_execPartition::init_seams();
     backend_executor_execProcnode::init_seams();
@@ -95,6 +101,7 @@ pub fn init_all() {
     backend_executor_nodeHashjoin::init_seams();
     backend_executor_nodeBitmapIndexscan::init_seams();
     backend_executor_nodeIndexonlyscan::init_seams();
+    backend_executor_nodeIndexscan::init_seams();
     backend_executor_nodeLimit::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMemoize::init_seams();
@@ -161,6 +168,7 @@ pub fn init_all() {
     backend_storage_ipc_shmem::init_seams();
     backend_storage_ipc_sinval::init_seams();
     backend_storage_ipc_standby::init_seams();
+    backend_storage_large_object::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lmgr::init_seams();
@@ -171,6 +179,7 @@ pub fn init_all() {
     backend_storage_page_checksum::init_seams();
     backend_storage_sync::init_seams();
     backend_tcop_backend_startup::init_seams();
+    backend_tcop_dest::init_seams();
     backend_tcop_fastpath::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_pgtz::init_seams();
@@ -651,6 +660,7 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_endscan"),
         ("backend_access_index_indexam", "index_fetch_heap"),
         ("backend_access_index_indexam", "index_getbitmap"),
+        ("backend_access_index_indexam", "index_getnext_slot"),
         ("backend_access_index_indexam", "index_getnext_tid"),
         ("backend_access_index_indexam", "index_markpos"),
         ("backend_access_index_indexam", "index_parallelrescan"),
@@ -658,6 +668,7 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_parallelscan_initialize"),
         ("backend_access_index_indexam", "index_rescan"),
         ("backend_access_index_indexam", "index_rescan_bis"),
+        ("backend_access_index_indexam", "index_rescan_is"),
         ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
         // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
@@ -775,6 +786,7 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
         ("backend_executor_execTuples", "cur_tuple_getattr"),
+        ("backend_executor_execTuples", "exec_copy_slot_heap_tuple"),
         ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
