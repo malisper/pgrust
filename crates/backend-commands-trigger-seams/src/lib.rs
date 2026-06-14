@@ -116,6 +116,24 @@ seam_core::seam!(
     pub fn tg_newslot(trigdata: TriggerDataRef) -> TupleTableSlotRef
 );
 seam_core::seam!(
+    /// `trigdata->tg_trigtuple` — the OLD/row-being-modified `HeapTuple` the
+    /// trigger manager handed the trigger function, copied into `mcx`.
+    /// `Ok(None)` mirrors a NULL `tg_trigtuple`.
+    pub fn tg_trigtuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+);
+seam_core::seam!(
+    /// `trigdata->tg_newtuple` — the NEW `HeapTuple` (for an UPDATE) the trigger
+    /// manager handed the trigger function, copied into `mcx`. `Ok(None)`
+    /// mirrors a NULL `tg_newtuple`.
+    pub fn tg_newtuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+);
+seam_core::seam!(
     /// `trigger->tgconstraint`.
     pub fn trigger_constraint(trigger: TriggerRef) -> Oid
 );
