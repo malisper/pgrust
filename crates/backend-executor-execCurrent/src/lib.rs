@@ -66,6 +66,36 @@ use types_tuple::heaptuple::{item_pointer_is_valid, REFCURSOROID};
 /// enumerator) — the only strategy `execCurrentOf` accepts.
 const PORTAL_ONE_SELECT: u32 = 0;
 
+/// Install this crate's implementations into its seam slots.
+pub fn init_seams() {
+    backend_executor_execCurrent_seams::exec_current_of::set(exec_current_of_seam);
+}
+
+/// Seam adapter for [`backend_executor_execCurrent_seams::exec_current_of`].
+///
+/// The seam contract (consumed by `nodeTidscan`) is the C `execCurrentOf`
+/// surface: `(cexpr, econtext, table_oid, &current_tid) -> bool`, modelled here
+/// as `EcxtId` + `&mut EStateData` in, `Option<ItemPointerData>` out (the C
+/// out-parameter + boolean). This thin shim resolves the `EcxtId` against the
+/// EState's ExprContext pool and the per-query memory context, forwards to the
+/// real [`exec_current_of`], and maps [`CurrentOfTid`] back to the contract's
+/// `Option`: `Found(tid)` is the C `true` (`*current_tid` set), `NotOnThisTable`
+/// is the C `false`.
+fn exec_current_of_seam<'mcx>(
+    cexpr: &CurrentOfExpr,
+    econtext: types_nodes::EcxtId,
+    table_oid: Oid,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+    // mcx is Copy; copy it out before borrowing the ExprContext pool.
+    let mcx = estate.es_query_cxt;
+    let econtext_ref: &ExprContext = estate.ecxt(econtext);
+    match exec_current_of(mcx, cexpr, econtext_ref, table_oid)? {
+        CurrentOfTid::Found(tid) => Ok(Some(tid)),
+        CurrentOfTid::NotOnThisTable => Ok(None),
+    }
+}
+
 /// `execCurrentOf`
 ///
 /// Given a `CURRENT OF` expression and the OID of a table, determine which row

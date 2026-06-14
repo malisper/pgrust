@@ -43,7 +43,7 @@ use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_utils_cache_inval_seams as inval;
 use backend_utils_init_small_seams as init_small;
 
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{PgError, PgResult, DEBUG4, PANIC};
 use types_storage::sinval::{SharedInvalCatcacheMsg, SharedInvalidationMessage};
 use types_storage::storage::Spinlock;
@@ -695,7 +695,7 @@ pub fn SharedInvalBackendInit(sendOnly: bool) -> PgResult<()> {
 // ===========================================================================
 
 /// `on_shmem_exit` trampoline matching `void (*)(int code, Datum arg)`.
-fn cleanup_invalidation_state_callback(_code: c_int, _arg: Datum) -> PgResult<()> {
+fn cleanup_invalidation_state_callback(_code: c_int, _arg: Datum<'static>) -> PgResult<()> {
     CleanupInvalidationState()
 }
 

@@ -15,7 +15,12 @@ use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_cache::SysCacheKey;
 use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_datum::Datum;
+// The syscache search-key word (`SysCacheKey::Value`) is the bare C machine
+// word (`Datum key1..key4`) — the `ByVal` payload of the canonical
+// `types_tuple::Datum`, not the rich value enum. We reference that bare word
+// directly (aliased `ScalarWord` to make the intent explicit), matching the
+// other syscache consumers (`ts-cache`, `attoptcache`, replication `proto`).
+use types_datum::Datum as ScalarWord;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
@@ -504,8 +509,8 @@ pub fn get_transform_oid(
         mcx,
         backend_utils_cache_syscache::TRFTYPELANG,
         Anum_pg_transform_oid,
-        SysCacheKey::Value(Datum::from_oid(type_id)),
-        SysCacheKey::Value(Datum::from_oid(lang_id)),
+        SysCacheKey::Value(ScalarWord::from_oid(type_id)),
+        SysCacheKey::Value(ScalarWord::from_oid(lang_id)),
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
     )?;

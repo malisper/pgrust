@@ -197,19 +197,25 @@ seam_core::seam!(pub fn serialize_param_list(param_li: ParamListInfoHandle, chun
 /// `RestoreParamList(&start_address)`.
 seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> ParamListInfoHandle);
 /// `estate->es_param_exec_vals[paramid]` value/isnull + resolved type metadata.
-seam_core::seam!(pub fn param_exec_value(estate: EStateHandle, paramid: i32) -> ParamExecValue);
+// The serialized param value is a machine-word `Datum` read out of
+// `es_param_exec_vals` and copied through the DSM chunk (params.c/datum.c),
+// not a live by-reference borrow into a memory context — so the carried
+// `Datum`'s lifetime is unconstrained at this seam boundary (`'static`),
+// matching the bare-word `datum_serialize`/`datum_restore` contract in
+// `backend-utils-adt-datum-seams`.
+seam_core::seam!(pub fn param_exec_value(estate: EStateHandle, paramid: i32) -> ParamExecValue<'static>);
 /// Write `{value, isnull}` back into `es_param_exec_vals[paramid]`, clearing `execPlan`.
-seam_core::seam!(pub fn set_param_exec_value(estate: EStateHandle, paramid: i32, restored: RestoredParam));
+seam_core::seam!(pub fn set_param_exec_value<'mcx>(estate: EStateHandle, paramid: i32, restored: RestoredParam<'mcx>));
 /// `datumEstimateSpace(value, isnull, typByVal, typLen)`.
-seam_core::seam!(pub fn datum_estimate_space(prm: ParamExecValue) -> Size);
+seam_core::seam!(pub fn datum_estimate_space<'mcx>(prm: ParamExecValue<'mcx>) -> Size);
 /// `datumSerialize(value, isnull, typByVal, typLen, &start_address)`.
-seam_core::seam!(pub fn datum_serialize(prm: ParamExecValue, cursor: SerializeCursor) -> SerializeCursor);
+seam_core::seam!(pub fn datum_serialize<'mcx>(prm: ParamExecValue<'mcx>, cursor: SerializeCursor) -> SerializeCursor);
 /// `memcpy(start_address, &v, sizeof(int)); start_address += sizeof(int)`.
 seam_core::seam!(pub fn datum_serialize_i32(cursor: SerializeCursor, v: i32) -> SerializeCursor);
 /// `memcpy(&v, start_address, sizeof(int)); start_address += sizeof(int)`.
 seam_core::seam!(pub fn datum_restore_i32(cursor: SerializeCursor) -> (i32, SerializeCursor));
 /// `datumRestore(&start_address, &isnull)`.
-seam_core::seam!(pub fn datum_restore(cursor: SerializeCursor) -> (RestoredParam, SerializeCursor));
+seam_core::seam!(pub fn datum_restore(cursor: SerializeCursor) -> (RestoredParam<'static>, SerializeCursor));
 /// Read a NUL-terminated string from the cursor.
 seam_core::seam!(pub fn cursor_cstring(chunk: SerializeCursor) -> PgResult<String>);
 

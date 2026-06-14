@@ -164,19 +164,3 @@ seam_core::seam!(
         relcache_init_file_inval: bool,
     ) -> PgResult<()>
 );
-
-seam_core::seam!(
-    /// `RecordKnownAssignedTransactionIds(xid)` — hot-standby bookkeeping for
-    /// as-yet-unobserved XIDs in a completion record.
-    pub fn record_known_assigned_transaction_ids(xid: TransactionId) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `ExpireTreeKnownAssignedTransactionIds(xid, nsubxids, subxids,
-    /// max_xid)`.
-    pub fn expire_tree_known_assigned_transaction_ids(
-        xid: TransactionId,
-        subxids: &[TransactionId],
-        max_xid: TransactionId,
-    ) -> PgResult<()>
-);

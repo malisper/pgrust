@@ -1011,7 +1011,7 @@ fn copy_table_data(
     if OldHeap.rd_id != RelationRelationId {
         indexing::catalog_tuple_update_pg_class::call(mcx, &relRelation, tid, &reltup)?;
     } else {
-        inval::cache_invalidate_relcache_by_pg_class::call(tid, &reltup)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(NewHeap.rd_id, &reltup)?;
     }
 
     /* Clean up (heap_freetuple = drop). */
@@ -1175,8 +1175,8 @@ fn swap_relation_files(
         indexing::catalog_close_indexes::call(indstate)?;
     } else {
         /* no update ... but we do still need relcache inval */
-        inval::cache_invalidate_relcache_by_pg_class::call(tid1, &relform1)?;
-        inval::cache_invalidate_relcache_by_pg_class::call(tid2, &relform2)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(r1, &relform1)?;
+        inval::cache_invalidate_relcache_by_pg_class::call(r2, &relform2)?;
     }
 
     /* Update the dependency of the relations to point to their new table AM, if changed. */

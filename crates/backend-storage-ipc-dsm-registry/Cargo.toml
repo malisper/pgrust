@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
+backend-storage-ipc-dsm-registry-seams = { path = "../backend-storage-ipc-dsm-registry-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }

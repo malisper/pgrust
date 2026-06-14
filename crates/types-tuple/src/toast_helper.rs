@@ -4,13 +4,13 @@
 //!
 //! In C the context is a stack struct whose `Datum` arrays alias the caller's
 //! deformed-value arrays; here the context owns the deformed values
-//! ([`TupleValue`]) and the relation crosses as its `Oid` (relations cross
+//! ([`Datum`]) and the relation crosses as its `Oid` (relations cross
 //! seams by OID; the relcache resolves them back to the live entry).
 
 use mcx::PgVec;
 use types_core::Oid;
 
-use crate::backend_access_common_heaptuple::TupleValue;
+use crate::backend_access_common_heaptuple::Datum;
 
 // Flags indicating the overall state of a TOAST operation (toast_helper.h).
 
@@ -76,11 +76,11 @@ pub struct ToastTupleContext<'mcx> {
     /// The relation that contains the tuple (crosses as its OID).
     pub ttc_rel: Oid,
     /// Values from the tuple columns (mutated in place by the toast passes).
-    pub ttc_values: PgVec<'mcx, TupleValue<'mcx>>,
+    pub ttc_values: PgVec<'mcx, Datum<'mcx>>,
     /// Null flags for the tuple columns.
     pub ttc_isnull: PgVec<'mcx, bool>,
     /// Values from the previous tuple (UPDATE only).
-    pub ttc_oldvalues: Option<PgVec<'mcx, TupleValue<'mcx>>>,
+    pub ttc_oldvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
     /// Null flags from the previous tuple (UPDATE only).
     pub ttc_oldisnull: Option<PgVec<'mcx, bool>>,
     pub ttc_flags: u8,

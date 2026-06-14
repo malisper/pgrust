@@ -204,7 +204,7 @@ pub fn btbuildempty(index: &Relation) -> PgResult<()> {
 pub fn btinsert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    values: &[types_datum::Datum],
+    values: &[Datum<'mcx>],
     isnull: &[bool],
     ht_ctid: ItemPointerData,
     heap_rel: &Relation<'mcx>,
@@ -614,7 +614,8 @@ pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> Pg
         &Datum::null(),
         false,
         true,
-        ::core::mem::size_of::<types_datum::Datum>() as i32,
+        // C: `sizeof(Datum)` — the machine word that backs a by-value scalar.
+        ::core::mem::size_of::<usize>() as i32,
     );
     for attnum in 1..nkeyatts {
         // Every skip array must have space to store its scan key's sk_flags.
@@ -684,8 +685,10 @@ fn _bt_parallel_serialize_arrays(btscan: &mut BTParallelScanDescData, so: &mut B
         }
 
         if (skey.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) != 0 {
-            // No sk_argument datum to serialize.
-            debug_assert!(skey.sk_argument.as_usize() == 0);
+            // No sk_argument datum to serialize (C: `Assert(skey->sk_argument == 0)`).
+            // The canonical NULL word is `Datum::null()` (`ByVal(0)`); the value
+            // compare avoids `as_usize()` on a `ByRef`.
+            debug_assert!(skey.sk_argument == Datum::null());
             continue;
         }
 
@@ -725,20 +728,27 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
             debug_assert!((so.keyData[scan_key].sk_flags & SK_BT_SKIP) == 0);
             so.arrayKeys[i].cur_elem = cur_elem_saved;
             let ce = so.arrayKeys[i].cur_elem as usize;
-            // `elem_values` is still the transitional bare-word `types_datum::Datum`
-            // (types-nbtree's struct is not yet migrated); wrap its scalar word
-            // into the canonical by-value arm of `sk_argument: Datum<'mcx>`.
-            so.keyData[scan_key].sk_argument = Datum::ByVal(so.arrayKeys[i].elem_values[ce]);
+            // `elem_values` is now the canonical `Datum<'mcx>` (types-nbtree
+            // migrated): copy the saved array element straight into
+            // `sk_argument: Datum<'mcx>` (C: `skey->sk_argument = array->elem_values[curelem]`).
+            so.keyData[scan_key].sk_argument = so.arrayKeys[i].elem_values[ce].clone();
             continue;
         }
 
         // Restore skip array by restoring its key directly.
         {
             let skey = &mut so.keyData[scan_key];
-            if !attbyval && skey.sk_argument.as_usize() != 0 {
+            if !attbyval && skey.sk_argument != Datum::null() {
                 // pfree(DatumGetPointer(skey->sk_argument)): the C frees the old
                 // pass-by-ref datum; under mcx ownership it is released when the
                 // owning context resets. (Pointer is into another context.)
+                //
+                // C's `if (!array->attbyval && skey->sk_argument)` is a non-NULL
+                // pointer test. On the canonical `Datum<'mcx>` a NULL pass-by-ref
+                // word is `ByVal(0)` (== `Datum::null()`) and a live by-reference
+                // image is a `ByRef`, so this value compare is the faithful
+                // non-NULL test and never calls the by-value-only `as_usize()` on
+                // a `ByRef` (which would panic).
             }
             skey.sk_argument = Datum::null();
             // memcpy(&skey->sk_flags, datumshared, sizeof(int)); datumshared += 4.
@@ -759,9 +769,9 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
         // exists yet); wrap its scalar word into the canonical by-value arm.
         let (val, isnull, adv) = datumser::datum_restore::call(datumshared);
         datumshared = adv;
-        so.keyData[scan_key].sk_argument = Datum::ByVal(val);
+        so.keyData[scan_key].sk_argument = Datum::ByVal(val.as_usize());
         if isnull {
-            debug_assert!(so.keyData[scan_key].sk_argument.as_usize() == 0);
+            debug_assert!(so.keyData[scan_key].sk_argument == Datum::null());
             debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHNULL) != 0);
             debug_assert!((so.keyData[scan_key].sk_flags & SK_ISNULL) != 0);
         }

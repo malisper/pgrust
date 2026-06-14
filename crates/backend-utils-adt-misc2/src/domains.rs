@@ -37,8 +37,8 @@
 use backend_utils_cache_typcache_seams as typcache_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use mcx::Mcx;
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `domain_in(string, typioparam, typmod)` — FmgrInfo entrypoint.
 ///
@@ -52,7 +52,7 @@ pub fn domain_in<'mcx>(
     string: Option<&str>,
     typioparam: u32,
     _typmod: i32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let domain_type = typioparam;
 
     // domain_state_setup(domainType, /*binary=*/false, ...): the typcache half
@@ -61,21 +61,21 @@ pub fn domain_in<'mcx>(
 
     // Invoke the base type's typinput procedure to convert the data. With no
     // escontext (hard-error caller), InputFunctionCallSafe is equivalent to
-    // InputFunctionCall.
-    let value = fmgr_seams::input_function_call::call(
-        mcx,
-        io.typiofunc,
-        string,
-        io.typioparam,
-        io.typtypmod,
-    )?;
+    // InputFunctionCall. The seam yields the bare scalar word; wrap it in the
+    // canonical by-value arm.
+    let value = Datum::ByVal(
+        fmgr_seams::input_function_call::call(
+            mcx,
+            io.typiofunc,
+            string,
+            io.typioparam,
+            io.typtypmod,
+        )?
+        .as_usize(),
+    );
 
     // Do the necessary checks to ensure it's a valid domain value.
-    typcache_seams::domain_check_input::call(
-        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
-        string.is_none(),
-        domain_type,
-    )?;
+    typcache_seams::domain_check_input::call(&value, string.is_none(), domain_type)?;
 
     Ok(value)
 }
@@ -90,30 +90,30 @@ pub fn domain_recv<'mcx>(
     buf: &[u8],
     typioparam: u32,
     _typmod: i32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let domain_type = typioparam;
 
     // domain_state_setup(domainType, /*binary=*/true, ...).
     let io = typcache_seams::domain_get_base_input_info::call(domain_type, true)?;
 
-    // Invoke the base type's typreceive procedure to convert the data.
-    let value = fmgr_seams::receive_function_call::call(
-        mcx,
-        io.typiofunc,
-        buf,
-        io.typioparam,
-        io.typtypmod,
-    )?;
+    // Invoke the base type's typreceive procedure to convert the data. The seam
+    // yields the bare scalar word; wrap it in the canonical by-value arm.
+    let value = Datum::ByVal(
+        fmgr_seams::receive_function_call::call(
+            mcx,
+            io.typiofunc,
+            buf,
+            io.typioparam,
+            io.typtypmod,
+        )?
+        .as_usize(),
+    );
 
     // Do the necessary checks to ensure it's a valid domain value. (binary
     // input always supplies a non-null value, matching the C `buf == NULL`
     // being unreachable for the normal system path; we mirror the not-strict
     // shape by reporting isnull == false.)
-    typcache_seams::domain_check_input::call(
-        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
-        false,
-        domain_type,
-    )?;
+    typcache_seams::domain_check_input::call(&value, false, domain_type)?;
 
     Ok(value)
 }
@@ -127,15 +127,11 @@ pub fn domain_recv<'mcx>(
 /// the typcache-resident `domain_check_input` engine.
 pub fn domain_check<'mcx>(
     _mcx: Mcx<'mcx>,
-    value: Datum,
+    value: &Datum<'mcx>,
     isnull: bool,
     domain_type: u32,
 ) -> PgResult<()> {
-    typcache_seams::domain_check_input::call(
-        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
-        isnull,
-        domain_type,
-    )
+    typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
 /// `errdatatype(datatypeOid)` — errcontext helper naming the domain type.

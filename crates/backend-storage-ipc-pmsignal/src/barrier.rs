@@ -27,7 +27,6 @@ use backend_storage_lmgr_condition_variable_seams as cv;
 use backend_storage_lmgr_s_lock::{s_init_lock, s_lock_macro, s_unlock};
 use types_condvar::{Barrier, ConditionVariable};
 use types_core::uint32;
-use types_storage::storage::proclist_head;
 
 /// `SpinLockAcquire(&barrier->mutex)`: `s_lock` if the test-and-set fails. C's
 /// `SpinLockAcquire` macro is `TAS_SPIN` then `s_lock` on contention; the
@@ -57,10 +56,7 @@ pub fn BarrierInit(barrier: &mut Barrier, participants: i32) {
     barrier.static_party = participants > 0;
     // ConditionVariableInit(&barrier->condition_variable):
     //   SpinLockInit(&cv->mutex); proclist_init(&cv->wakeup).
-    barrier.condition_variable = ConditionVariable {
-        mutex: types_storage::Spinlock::default(),
-        wakeup: proclist_head::default(),
-    };
+    barrier.condition_variable = ConditionVariable::default();
 }
 
 /// Arrive at this barrier, wait for all other attached participants to arrive

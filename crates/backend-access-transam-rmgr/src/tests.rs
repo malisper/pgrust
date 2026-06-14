@@ -10,7 +10,12 @@ thread_local! {
     static STARTUPS: Cell<u32> = const { Cell::new(0) };
     static CLEANUPS: Cell<u32> = const { Cell::new(0) };
     static SRF_INITS: Cell<u32> = const { Cell::new(0) };
-    static ROWS: RefCell<Vec<(Vec<Datum>, Vec<bool>)>> = const { RefCell::new(Vec::new()) };
+    // The SRF hands canonical `Datum<'mcx>` values whose lifetime is tied to
+    // the per-query context; this `'static` thread_local cannot hold a borrow,
+    // so we capture the by-value scalar word (`types_datum::Datum`, the `ByVal`
+    // payload) — every emitted column is a by-value scalar here.
+    static ROWS: RefCell<Vec<(Vec<types_datum::Datum>, Vec<bool>)>> =
+        const { RefCell::new(Vec::new()) };
     static LOGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -58,12 +63,33 @@ fn setup() {
             Ok(())
         });
         funcapi::materialized_srf_putvalues::set(|_rsinfo, values, nulls| {
-            ROWS.with(|r| r.borrow_mut().push((values.to_vec(), nulls.to_vec())));
+            // The SRF emits two by-value scalar columns (id, is_builtin) and one
+            // by-reference `text` column (the rmgr name, built via the
+            // `cstring_to_text_v` `ByRef` seam below). Record by-value words
+            // verbatim and a by-reference column as its byte length, so the
+            // assertions can compare against `Datum::from_usize(name.len())`.
+            let words: Vec<types_datum::Datum> = values
+                .iter()
+                .map(|d| match d {
+                    Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
+                    Datum::ByRef(b) => types_datum::Datum::from_usize(b.len()),
+                })
+                .collect();
+            ROWS.with(|r| r.borrow_mut().push((words, nulls.to_vec())));
             Ok(())
         });
-        // Stand-in text Datum: encode the name length so tests can assert it
-        // ran.
-        varlena::cstring_to_text::set(|_mcx, s| Ok(Datum::from_usize(s.len())));
+        // Stand-in `text` value: a `Datum::ByRef` whose byte length equals the
+        // name length, so the SRF putvalues mock above records
+        // `from_usize(name.len())` and the assertions still hold.
+        // (`cstring_to_text_v` is the by-reference migration-target seam rmgr's
+        // production code now calls.)
+        varlena::cstring_to_text_v::set(|mcx, s| {
+            let mut bytes = mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
+            for _ in 0..s.len() {
+                bytes.push(0u8);
+            }
+            Ok(types_tuple::backend_access_common_heaptuple::Datum::ByRef(bytes))
+        });
     });
     IN_PRELOAD.with(|c| c.set(false));
     STARTUPS.with(|c| c.set(0));
@@ -272,16 +298,16 @@ fn pg_get_wal_resource_managers_emits_one_row_per_existing_rmgr() {
         assert_eq!(values.len(), 3);
         assert_eq!(nulls, &vec![false, false, false]);
         // col0 = Int32GetDatum(0)
-        assert_eq!(values[0], Datum::from_i32(0));
+        assert_eq!(values[0], types_datum::Datum::from_i32(0));
         // col1 = CStringGetTextDatum("XLOG") -> stub encodes len("XLOG") = 4
-        assert_eq!(values[1], Datum::from_usize(4));
+        assert_eq!(values[1], types_datum::Datum::from_usize(4));
         // col2 = BoolGetDatum(RmgrIdIsBuiltin(0)) = true
-        assert_eq!(values[2], Datum::from_bool(true));
+        assert_eq!(values[2], types_datum::Datum::from_bool(true));
 
         // Last row is LogicalMessage (id 21), still builtin.
         let (values, _) = &rows[21];
-        assert_eq!(values[0], Datum::from_i32(21));
-        assert_eq!(values[1], Datum::from_usize("LogicalMessage".len()));
-        assert_eq!(values[2], Datum::from_bool(true));
+        assert_eq!(values[0], types_datum::Datum::from_i32(21));
+        assert_eq!(values[1], types_datum::Datum::from_usize("LogicalMessage".len()));
+        assert_eq!(values[2], types_datum::Datum::from_bool(true));
     });
 }

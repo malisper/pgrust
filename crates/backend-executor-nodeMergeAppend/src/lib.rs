@@ -49,13 +49,14 @@ use backend_utils_sort_sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::AttrNumber;
-// Migration target: the canonical enum `Datum<'mcx>` from the keystone tuple
-// crate. The binary heap's `bh_nodes` storage (owned by `types-nodes`) is still
-// the bare-word shim `types_datum::Datum` and carries a plain `SlotNumber`
-// (`int32`) word — that dep-owned storage word is the audited ABI/storage edge,
-// so the canonical enum is converted to/from the stored slot-index at the
-// `bh_nodes` push/read boundary inside the heap helpers below.
-use types_datum::Datum as StoredSlotWord;
+// This crate is fully on the canonical enum `Datum<'mcx>` from the keystone
+// tuple crate. The binary heap's `bh_nodes` storage (owned by `types-nodes`)
+// holds canonical `Datum<'mcx>` (a `ByVal` slot-index word), and both edge
+// seams this crate consumes — `slot_getattr` (returns canonical `Datum`) and
+// `apply_sort_comparator` (takes canonical `Datum`) — speak the canonical type,
+// so the sort values thread through canonically end-to-end with no bare-word
+// shim conversion (no `as_usize()`/`from_usize` forge that would panic on a
+// by-reference value).
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -470,11 +471,15 @@ fn heap_compare_slots<'mcx>(
         let attno: AttrNumber = sort_key.ssup_attno;
 
         // datum1 = slot_getattr(s1, attno, &isNull1);
-        let (datum1, is_null1) = execTuples::slot_getattr::call(estate.slot_mut(id1), attno)?;
+        let mcx = estate.es_query_cxt;
+        let (datum1, is_null1) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id1), attno)?;
         // datum2 = slot_getattr(s2, attno, &isNull2);
-        let (datum2, is_null2) = execTuples::slot_getattr::call(estate.slot_mut(id2), attno)?;
+        let (datum2, is_null2) = execTuples::slot_getattr::call(mcx, estate.slot_mut(id2), attno)?;
 
         // compare = ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
+        // `datum1`/`datum2` are the canonical sort-column values straight from
+        // the `slot_getattr` seam; thread them into `ApplySortComparator`
+        // without any bare-word projection (it speaks canonical `Datum`).
         let mut compare = ApplySortComparator(datum1, is_null1, datum2, is_null2, sort_key)?;
         if compare != 0 {
             // INVERT_COMPARE_RESULT(compare); return compare;
@@ -875,14 +880,13 @@ fn list_length(l: &[types_nodes::nodes::Node<'_>]) -> i32 {
 /// }
 /// ```
 // `datum1`/`datum2` are real per-column sort values that flow straight from the
-// `slot_getattr` seam into the `apply_sort_comparator` seam. Both seams still
-// carry the bare-word shim (`StoredSlotWord`) in their contracts and are owned
-// by other crates (out of this migration's scope), so this pass-through stays
-// on the shim — migrating it here would diverge those seam contracts.
-fn ApplySortComparator(
-    datum1: StoredSlotWord,
+// `slot_getattr` seam (canonical `Datum`) into the `apply_sort_comparator` seam
+// (also canonical `Datum`), so this pass-through carries the canonical type with
+// no bare-word projection.
+fn ApplySortComparator<'mcx>(
+    datum1: Datum<'mcx>,
     is_null1: bool,
-    datum2: StoredSlotWord,
+    datum2: Datum<'mcx>,
     is_null2: bool,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {
@@ -901,7 +905,11 @@ fn ApplySortComparator(
             -1
         }
     } else {
-        let mut compare = sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
+        // The comparator seam takes the canonical `Datum<'_>`; the operands are
+        // already canonical values from `slot_getattr`, so they pass straight
+        // through (a by-reference image is carried faithfully, no forge).
+        let mut compare =
+            sortsupport::apply_sort_comparator::call(datum1, datum2, ssup)?;
         if ssup.ssup_reverse {
             compare = INVERT_COMPARE_RESULT(compare);
         }
@@ -952,36 +960,36 @@ mod tests {
     fn apply_sort_comparator_null_handling() {
         let ctx = MemoryContext::new("ma-test");
         let mut key = SortSupportData::new(ctx.mcx());
-        // `ApplySortComparator` carries the shim column-value word at its seam
-        // boundary (see its definition), so these args use `StoredSlotWord`.
+        // `ApplySortComparator` carries the canonical `Datum` at its seam
+        // boundary (see its definition), so these args use canonical `Datum`.
         // both null -> 0 (the seam is never consulted on a null branch).
         assert_eq!(
-            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::null(), true, &key).unwrap(),
+            ApplySortComparator(Datum::null(), true, Datum::null(), true, &key).unwrap(),
             0
         );
         // null1 only, nulls_first -> -1 ; nulls_last -> 1
         key.ssup_nulls_first = true;
         assert_eq!(
-            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::from_i32(5), false, &key)
+            ApplySortComparator(Datum::null(), true, Datum::from_i32(5), false, &key)
                 .unwrap(),
             -1
         );
         key.ssup_nulls_first = false;
         assert_eq!(
-            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::from_i32(5), false, &key)
+            ApplySortComparator(Datum::null(), true, Datum::from_i32(5), false, &key)
                 .unwrap(),
             1
         );
         // null2 only, nulls_first -> 1 ; nulls_last -> -1
         key.ssup_nulls_first = true;
         assert_eq!(
-            ApplySortComparator(StoredSlotWord::from_i32(5), false, StoredSlotWord::null(), true, &key)
+            ApplySortComparator(Datum::from_i32(5), false, Datum::null(), true, &key)
                 .unwrap(),
             1
         );
         key.ssup_nulls_first = false;
         assert_eq!(
-            ApplySortComparator(StoredSlotWord::from_i32(5), false, StoredSlotWord::null(), true, &key)
+            ApplySortComparator(Datum::from_i32(5), false, Datum::null(), true, &key)
                 .unwrap(),
             -1
         );

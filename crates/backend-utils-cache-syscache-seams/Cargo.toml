@@ -18,7 +18,6 @@ types-namespace = { path = "../types-namespace" }
 types-cache = { path = "../types-cache" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
-types-datum = { path = "../types-datum" }
 types-selfuncs = { path = "../types-selfuncs" }
 types-partition = { path = "../types-partition" }
 types-fmgr = { path = "../types-fmgr" }

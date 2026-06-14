@@ -883,8 +883,17 @@ pub fn get_typdefault<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<PgBox
     } else if let Some(str_default_val) = t.typdefault {
         // Perhaps we have a plain literal default. Convert the string to a value
         // of the given type, then build a Const node containing it.
-        let datum =
-            fmgr::oid_input_function_call::call(t.typinput, &str_default_val, t.typioparam, -1)?;
+        // `oid_input_function_call` yields the canonical unified value (its
+        // `ByVal` arm is C's by-value `Datum`; `ByRef` carries the referent
+        // bytes) — `make_const_node` (make_const's `Const.constvalue`) takes it
+        // directly.
+        let datum = fmgr::oid_input_function_call::call(
+            mcx,
+            t.typinput,
+            &str_default_val,
+            t.typioparam,
+            -1,
+        )?;
         let expr = makefuncs::make_const_node::call(
             mcx,
             typid,

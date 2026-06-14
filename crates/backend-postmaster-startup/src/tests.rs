@@ -360,11 +360,11 @@ fn barrier_and_memory_context_interrupts_are_serviced() {
 #[test]
 fn startup_proc_exit_shuts_down_recovery_env_only_when_standby_active() {
     let _guard = install_mocks();
-    StartupProcExit(0, types_datum::Datum::null());
+    StartupProcExit(0, types_tuple::backend_access_common_heaptuple::Datum::null());
     assert_eq!(calls(), vec![]);
 
     with_mock(|m| m.standby_state = types_wal::STANDBY_SNAPSHOT_READY);
-    StartupProcExit(0, types_datum::Datum::null());
+    StartupProcExit(0, types_tuple::backend_access_common_heaptuple::Datum::null());
     assert_eq!(calls(), vec![Call::ShutdownRecoveryTxnEnv]);
 }
 

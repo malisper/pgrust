@@ -17,7 +17,7 @@ use types_core::primitive::{
     uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
 use types_core::xact::FullTransactionId;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
 use types_storage::storage::{Buffer, InvalidBuffer, LocationIndex};
@@ -296,12 +296,12 @@ impl BTParallelScanDescData {
 }
 
 /// `BTSkipSupport` opclass sentinels for a skip array (`access/nbtree.h`).
-#[derive(Clone, Copy, Debug)]
-pub struct BTSkipSupport {
+#[derive(Clone, Debug)]
+pub struct BTSkipSupport<'mcx> {
     /// lowest sorting non-NULL value
-    pub low_elem: Datum,
+    pub low_elem: Datum<'mcx>,
     /// highest sorting non-NULL value
-    pub high_elem: Datum,
+    pub high_elem: Datum<'mcx>,
     /// 1-based attribute number the skip support is for
     pub attno: AttrNumber,
 }
@@ -315,7 +315,7 @@ pub struct BTArrayKeyInfo<'mcx> {
     /// number of elems (-1 means skip array)
     pub num_elems: i32,
     /// array of num_elems Datums (skip arrays leave this empty)
-    pub elem_values: PgVec<'mcx, Datum>,
+    pub elem_values: PgVec<'mcx, Datum<'mcx>>,
     /// index of current element in elem_values
     pub cur_elem: i32,
     /// attr's length, in bytes
@@ -327,7 +327,7 @@ pub struct BTArrayKeyInfo<'mcx> {
     /// skip support fmgr handle (`None` if opclass lacks it)
     pub sksup: Option<u64>,
     /// skip-support sentinels (only meaningful when `sksup.is_some()`)
-    pub sksup_data: Option<BTSkipSupport>,
+    pub sksup_data: Option<BTSkipSupport<'mcx>>,
 }
 
 /// `BTScanPosItem` — what we remember about each match (`access/nbtree.h`).

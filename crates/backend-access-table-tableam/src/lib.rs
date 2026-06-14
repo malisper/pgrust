@@ -47,9 +47,35 @@ use types_tuple::heaptuple::ItemPointerData;
 
 use backend_utils_cache_relcache_seams as relcache;
 
-/// Install this crate's seam implementations. No other crate declares seams
-/// owned by this unit yet, so there is nothing to install.
-pub fn init_seams() {}
+/// Install this crate's seam implementations.
+///
+/// The bitmap-scan table-AM wrappers (`table_endscan` / `table_rescan`) in
+/// `backend-access-table-tableam-bm-seams` dispatch through the relation's
+/// `rd_tableam` vtable to the concrete AM, exactly as the value-typed
+/// `table_endscan` / `table_rescan` bodies below do. Their seam contracts
+/// match those bodies (the bitmap rescan passes `NULL` scan keys, mirrored by
+/// the `key = None` argument), so they are installed here.
+///
+/// The remaining `backend-access-table-tableam-seams` decls
+/// (`get_table_am_routine` / `table_relation_toast_am` /
+/// `table_relation_needs_toast_table` / the `ScanToken`-shaped
+/// `table_beginscan` / `table_scan_getnextslot{,_direction}` /
+/// `table_parallelscan_reinitialize` / `table_relation_set_new_filelocator`)
+/// are NOT installed — they have no matching value-typed body in this unit
+/// (the AM provider `heapam_handler.c` and `tableamapi.c` are unported, and the
+/// `ScanToken` scan model has no descriptor registry). See DESIGN_DEBT.md;
+/// they are tracked in `seams-init`'s `CONTRACT_RECONCILE_PENDING`.
+pub fn init_seams() {
+    backend_access_table_tableam_bm_seams::table_endscan::set(table_endscan);
+    backend_access_table_tableam_bm_seams::table_rescan::set(table_rescan_bm);
+}
+
+/// Adapter for `backend-access-table-tableam-bm-seams::table_rescan` — the
+/// bitmap-scan `table_rescan(scan, NULL)` form, i.e. [`table_rescan`] with no
+/// scan keys.
+fn table_rescan_bm(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
+    table_rescan(scan, None)
+}
 
 // ===========================================================================
 // Constants controlling parallel-seqscan block allocation (tableam.c)

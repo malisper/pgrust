@@ -14,6 +14,7 @@ seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-deadlock = { path = "../types-deadlock" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }

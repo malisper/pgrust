@@ -8,8 +8,8 @@
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{Oid, SubTransactionId};
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::Datum;
 use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
 
 /// One row of the `ts_rewrite(query, text)` SPI result: the `target`
@@ -114,9 +114,9 @@ seam_core::seam!(
     /// read_only, fire_triggers, tcount)`. `nulls[i]` is `true` when the C
     /// `nulls[i] == 'n'`. `None` snapshots are C's `InvalidSnapshot`. Returns
     /// the SPI code + `SPI_processed`; can `ereport(ERROR)`, carried on `Err`.
-    pub fn spi_execute_snapshot(
+    pub fn spi_execute_snapshot<'mcx>(
         plan: SpiPlanPtr,
-        vals: &[Datum],
+        vals: &[Datum<'mcx>],
         nulls: &[bool],
         snapshot: Option<types_snapshot::SnapshotData>,
         crosscheck: Option<types_snapshot::SnapshotData>,

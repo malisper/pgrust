@@ -22,7 +22,14 @@ use types_core::{
     TYPE_RELATION_ID,
 };
 use types_datum::varlena::Bytea;
-use types_datum::Datum;
+// Datum-unification: every `has_*_privilege` / `pg_has_role` entrypoint here is
+// a `PG_FUNCTION_ARGS` callee whose return value is the raw `Datum` machine
+// word the fmgr layer hands back (produced by the `pg_return_bool` /
+// `pg_return_null` seams, which yield `types_datum::Datum`). The PGFunction
+// return is an audited edge site that stays the bare-word `types_datum::Datum`
+// (aliased `DatumWord`, matching the fmgr-seams contract) — NOT the canonical
+// `types_tuple::Datum<'mcx>` enum.
+use types_datum::Datum as DatumWord;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
@@ -52,7 +59,7 @@ use backend_utils_time_snapmgr_seams as snapmgr;
 // ===========================================================================
 
 /// `has_table_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -67,7 +74,7 @@ pub fn has_table_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum
 }
 
 /// `has_table_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -81,7 +88,7 @@ pub fn has_table_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `has_table_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -97,7 +104,7 @@ pub fn has_table_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> 
 }
 
 /// `has_table_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
 
@@ -112,7 +119,7 @@ pub fn has_table_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `has_table_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -126,7 +133,7 @@ pub fn has_table_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> 
 }
 
 /// `has_table_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_table_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_table_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -166,7 +173,7 @@ fn rel_name_str<'a>(name: &'a Option<mcx::PgString<'_>>) -> &'a str {
 }
 
 /// `has_sequence_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let sequencename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -184,7 +191,7 @@ pub fn has_sequence_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Da
 }
 
 /// `has_sequence_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let sequencename = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -201,7 +208,7 @@ pub fn has_sequence_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> 
 }
 
 /// `has_sequence_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let sequenceoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
@@ -225,7 +232,7 @@ pub fn has_sequence_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datu
 }
 
 /// `has_sequence_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let sequenceoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -248,7 +255,7 @@ pub fn has_sequence_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `has_sequence_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let sequencename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -265,7 +272,7 @@ pub fn has_sequence_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datu
 }
 
 /// `has_sequence_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_sequence_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_sequence_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let sequenceoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
@@ -292,7 +299,7 @@ pub fn has_sequence_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum>
 // ===========================================================================
 
 /// `has_any_column_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -310,7 +317,7 @@ pub fn has_any_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<
 }
 
 /// `has_any_column_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -327,7 +334,7 @@ pub fn has_any_column_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum
 }
 
 /// `has_any_column_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -351,7 +358,7 @@ pub fn has_any_column_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Da
 }
 
 /// `has_any_column_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
 
@@ -374,7 +381,7 @@ pub fn has_any_column_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> 
 }
 
 /// `has_any_column_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -391,7 +398,7 @@ pub fn has_any_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Da
 }
 
 /// `has_any_column_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_any_column_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_any_column_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -418,7 +425,7 @@ pub fn has_any_column_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datu
 // ===========================================================================
 
 /// Shared tail: encode a `column_privilege_check` tri-state result.
-fn column_priv_return(fcinfo: FunctionCallInfo, privresult: i32) -> Datum {
+fn column_priv_return(fcinfo: FunctionCallInfo, privresult: i32) -> DatumWord {
     if privresult < 0 {
         fmgr::pg_return_null::call(fcinfo)
     } else {
@@ -427,7 +434,7 @@ fn column_priv_return(fcinfo: FunctionCallInfo, privresult: i32) -> Datum {
 }
 
 /// `has_column_privilege_name_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -444,7 +451,7 @@ pub fn has_column_privilege_name_name_name(fcinfo: FunctionCallInfo) -> PgResult
 }
 
 /// `has_column_privilege_name_name_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -460,7 +467,7 @@ pub fn has_column_privilege_name_name_attnum(fcinfo: FunctionCallInfo) -> PgResu
 }
 
 /// `has_column_privilege_name_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
@@ -476,7 +483,7 @@ pub fn has_column_privilege_name_id_name(fcinfo: FunctionCallInfo) -> PgResult<D
 }
 
 /// `has_column_privilege_name_id_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let colattnum = fmgr::pg_getarg_int16::call(fcinfo, 2);
@@ -490,7 +497,7 @@ pub fn has_column_privilege_name_id_attnum(fcinfo: FunctionCallInfo) -> PgResult
 }
 
 /// `has_column_privilege_id_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -506,7 +513,7 @@ pub fn has_column_privilege_id_name_name(fcinfo: FunctionCallInfo) -> PgResult<D
 }
 
 /// `has_column_privilege_id_name_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -521,7 +528,7 @@ pub fn has_column_privilege_id_name_attnum(fcinfo: FunctionCallInfo) -> PgResult
 }
 
 /// `has_column_privilege_id_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
@@ -536,7 +543,7 @@ pub fn has_column_privilege_id_id_name(fcinfo: FunctionCallInfo) -> PgResult<Dat
 }
 
 /// `has_column_privilege_id_id_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let colattnum = fmgr::pg_getarg_int16::call(fcinfo, 2);
@@ -549,7 +556,7 @@ pub fn has_column_privilege_id_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<D
 }
 
 /// `has_column_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let column = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -565,7 +572,7 @@ pub fn has_column_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datu
 }
 
 /// `has_column_privilege_name_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let tablename = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let colattnum = fmgr::pg_getarg_int16::call(fcinfo, 1);
@@ -580,7 +587,7 @@ pub fn has_column_privilege_name_attnum(fcinfo: FunctionCallInfo) -> PgResult<Da
 }
 
 /// `has_column_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let column = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -595,7 +602,7 @@ pub fn has_column_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum>
 }
 
 /// `has_column_privilege_id_attnum(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_column_privilege_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_column_privilege_id_attnum(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let tableoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let colattnum = fmgr::pg_getarg_int16::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -617,7 +624,7 @@ fn object_priv_name_name(
     classid: Oid,
     convert_name: impl Fn(Mcx<'_>, &Bytea) -> PgResult<Oid>,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let objname = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -636,7 +643,7 @@ fn object_priv_name(
     classid: Oid,
     convert_name: impl Fn(Mcx<'_>, &Bytea) -> PgResult<Oid>,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let objname = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -653,7 +660,7 @@ fn object_priv_name_id(
     fcinfo: FunctionCallInfo,
     classid: Oid,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let objoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -672,7 +679,7 @@ fn object_priv_id(
     fcinfo: FunctionCallInfo,
     classid: Oid,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let objoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
 
@@ -691,7 +698,7 @@ fn object_priv_id_name(
     classid: Oid,
     convert_name: impl Fn(Mcx<'_>, &Bytea) -> PgResult<Oid>,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let mcx = fmgr::pg_call_mcx::call(fcinfo);
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let objname = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -708,7 +715,7 @@ fn object_priv_id_id(
     fcinfo: FunctionCallInfo,
     classid: Oid,
     convert_priv: impl Fn(&Bytea) -> PgResult<AclMode>,
-) -> PgResult<Datum> {
+) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let objoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -725,216 +732,216 @@ fn object_priv_id_id(
 // --- database ---
 
 /// `has_database_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, DATABASE_RELATION_ID, convert_database_name, convert_database_priv_string)
 }
 /// `has_database_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, DATABASE_RELATION_ID, convert_database_name, convert_database_priv_string)
 }
 /// `has_database_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, DATABASE_RELATION_ID, convert_database_priv_string)
 }
 /// `has_database_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, DATABASE_RELATION_ID, convert_database_priv_string)
 }
 /// `has_database_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, DATABASE_RELATION_ID, convert_database_name, convert_database_priv_string)
 }
 /// `has_database_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_database_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_database_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, DATABASE_RELATION_ID, convert_database_priv_string)
 }
 
 // --- foreign-data wrapper ---
 
 /// `has_foreign_data_wrapper_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_name, convert_foreign_data_wrapper_priv_string)
 }
 /// `has_foreign_data_wrapper_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_name, convert_foreign_data_wrapper_priv_string)
 }
 /// `has_foreign_data_wrapper_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_priv_string)
 }
 /// `has_foreign_data_wrapper_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_priv_string)
 }
 /// `has_foreign_data_wrapper_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_name, convert_foreign_data_wrapper_priv_string)
 }
 /// `has_foreign_data_wrapper_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_foreign_data_wrapper_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_foreign_data_wrapper_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, FOREIGN_DATA_WRAPPER_RELATION_ID, convert_foreign_data_wrapper_priv_string)
 }
 
 // --- function ---
 
 /// `has_function_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, PROCEDURE_RELATION_ID, convert_function_name, convert_function_priv_string)
 }
 /// `has_function_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, PROCEDURE_RELATION_ID, convert_function_name, convert_function_priv_string)
 }
 /// `has_function_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, PROCEDURE_RELATION_ID, convert_function_priv_string)
 }
 /// `has_function_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, PROCEDURE_RELATION_ID, convert_function_priv_string)
 }
 /// `has_function_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, PROCEDURE_RELATION_ID, convert_function_name, convert_function_priv_string)
 }
 /// `has_function_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_function_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_function_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, PROCEDURE_RELATION_ID, convert_function_priv_string)
 }
 
 // --- language ---
 
 /// `has_language_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, LANGUAGE_RELATION_ID, convert_language_name, convert_language_priv_string)
 }
 /// `has_language_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, LANGUAGE_RELATION_ID, convert_language_name, convert_language_priv_string)
 }
 /// `has_language_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, LANGUAGE_RELATION_ID, convert_language_priv_string)
 }
 /// `has_language_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, LANGUAGE_RELATION_ID, convert_language_priv_string)
 }
 /// `has_language_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, LANGUAGE_RELATION_ID, convert_language_name, convert_language_priv_string)
 }
 /// `has_language_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_language_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_language_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, LANGUAGE_RELATION_ID, convert_language_priv_string)
 }
 
 // --- schema ---
 
 /// `has_schema_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, NAMESPACE_RELATION_ID, convert_schema_name, convert_schema_priv_string)
 }
 /// `has_schema_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, NAMESPACE_RELATION_ID, convert_schema_name, convert_schema_priv_string)
 }
 /// `has_schema_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, NAMESPACE_RELATION_ID, convert_schema_priv_string)
 }
 /// `has_schema_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, NAMESPACE_RELATION_ID, convert_schema_priv_string)
 }
 /// `has_schema_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, NAMESPACE_RELATION_ID, convert_schema_name, convert_schema_priv_string)
 }
 /// `has_schema_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_schema_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_schema_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, NAMESPACE_RELATION_ID, convert_schema_priv_string)
 }
 
 // --- server ---
 
 /// `has_server_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_name, convert_server_priv_string)
 }
 /// `has_server_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_name, convert_server_priv_string)
 }
 /// `has_server_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_priv_string)
 }
 /// `has_server_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_priv_string)
 }
 /// `has_server_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_name, convert_server_priv_string)
 }
 /// `has_server_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_server_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_server_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, FOREIGN_SERVER_RELATION_ID, convert_server_priv_string)
 }
 
 // --- tablespace ---
 
 /// `has_tablespace_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_name, convert_tablespace_priv_string)
 }
 /// `has_tablespace_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_name, convert_tablespace_priv_string)
 }
 /// `has_tablespace_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_priv_string)
 }
 /// `has_tablespace_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_priv_string)
 }
 /// `has_tablespace_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_name, convert_tablespace_priv_string)
 }
 /// `has_tablespace_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_tablespace_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_tablespace_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, TABLE_SPACE_RELATION_ID, convert_tablespace_priv_string)
 }
 
 // --- type ---
 
 /// `has_type_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_name(fcinfo, TYPE_RELATION_ID, convert_type_name, convert_type_priv_string)
 }
 /// `has_type_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name(fcinfo, TYPE_RELATION_ID, convert_type_name, convert_type_priv_string)
 }
 /// `has_type_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_name_id(fcinfo, TYPE_RELATION_ID, convert_type_priv_string)
 }
 /// `has_type_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id(fcinfo, TYPE_RELATION_ID, convert_type_priv_string)
 }
 /// `has_type_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_name(fcinfo, TYPE_RELATION_ID, convert_type_name, convert_type_priv_string)
 }
 /// `has_type_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_type_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_type_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     object_priv_id_id(fcinfo, TYPE_RELATION_ID, convert_type_priv_string)
 }
 
@@ -943,7 +950,7 @@ pub fn has_type_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 // ===========================================================================
 
 /// `has_parameter_privilege_name_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_parameter_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_parameter_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let parameter = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
     let r#priv = convert_parameter_priv_string(&fmgr::pg_getarg_text_pp::call(fcinfo, 2)?)?;
@@ -954,7 +961,7 @@ pub fn has_parameter_privilege_name_name(fcinfo: FunctionCallInfo) -> PgResult<D
 }
 
 /// `has_parameter_privilege_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_parameter_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_parameter_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let parameter = fmgr::pg_getarg_text_pp::call(fcinfo, 0)?;
     let r#priv = convert_parameter_priv_string(&fmgr::pg_getarg_text_pp::call(fcinfo, 1)?)?;
 
@@ -963,7 +970,7 @@ pub fn has_parameter_privilege_name(fcinfo: FunctionCallInfo) -> PgResult<Datum>
 }
 
 /// `has_parameter_privilege_id_name(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_parameter_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_parameter_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let parameter = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
     let r#priv = convert_parameter_priv_string(&fmgr::pg_getarg_text_pp::call(fcinfo, 2)?)?;
@@ -977,7 +984,7 @@ pub fn has_parameter_privilege_id_name(fcinfo: FunctionCallInfo) -> PgResult<Dat
 // ===========================================================================
 
 /// `has_largeobject_privilege_name_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_largeobject_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_largeobject_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let roleid = crate::role_membership::get_role_oid_or_public(&username)?;
     let lobj_id = fmgr::pg_getarg_oid::call(fcinfo, 1);
@@ -994,7 +1001,7 @@ pub fn has_largeobject_privilege_name_id(fcinfo: FunctionCallInfo) -> PgResult<D
 }
 
 /// `has_largeobject_privilege_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_largeobject_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_largeobject_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let lobj_id = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let roleid = miscinit::get_user_id::call();
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
@@ -1010,7 +1017,7 @@ pub fn has_largeobject_privilege_id(fcinfo: FunctionCallInfo) -> PgResult<Datum>
 }
 
 /// `has_largeobject_privilege_id_id(PG_FUNCTION_ARGS)` — SQL privilege check.
-pub fn has_largeobject_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn has_largeobject_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let lobj_id = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -1030,7 +1037,7 @@ pub fn has_largeobject_privilege_id_id(fcinfo: FunctionCallInfo) -> PgResult<Dat
 // ===========================================================================
 
 /// `pg_has_role_name_name(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_name_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -1044,7 +1051,7 @@ pub fn pg_has_role_name_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `pg_has_role_name(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
 
@@ -1057,7 +1064,7 @@ pub fn pg_has_role_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `pg_has_role_name_id(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_name_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let username = fmgr::pg_getarg_name::call(fcinfo, 0);
     let roleoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -1070,7 +1077,7 @@ pub fn pg_has_role_name_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `pg_has_role_id(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleoid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 1)?;
 
@@ -1082,7 +1089,7 @@ pub fn pg_has_role_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `pg_has_role_id_name(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_id_name(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let rolename = fmgr::pg_getarg_name::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;
@@ -1095,7 +1102,7 @@ pub fn pg_has_role_id_name(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
 }
 
 /// `pg_has_role_id_id(PG_FUNCTION_ARGS)` — SQL role-privilege check.
-pub fn pg_has_role_id_id(fcinfo: FunctionCallInfo) -> PgResult<Datum> {
+pub fn pg_has_role_id_id(fcinfo: FunctionCallInfo) -> PgResult<DatumWord> {
     let roleid = fmgr::pg_getarg_oid::call(fcinfo, 0);
     let roleoid = fmgr::pg_getarg_oid::call(fcinfo, 1);
     let priv_type_text = fmgr::pg_getarg_text_pp::call(fcinfo, 2)?;

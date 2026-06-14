@@ -341,7 +341,7 @@ const Anum_pg_type_typsend: i32 = 19;
 /// `GETSTRUCT(tup)->...` for a by-value pg_type field (Oid columns).
 fn pg_type_attr_oid(mcx: Mcx<'_>, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<Oid> {
     match SysCacheGetAttrNotNull(mcx, TYPEOID, tup, attnum)? {
-        Datum::ByVal(d) => Ok(d.as_oid()),
+        Datum::ByVal(d) => Ok(Datum::from_usize(d).as_oid()),
         Datum::ByRef(_) => Err(elog_error(
             "proto: expected a by-value pg_type attribute".into(),
         )),

@@ -20,11 +20,9 @@
 //! `ExecInitExprRec` can thread distinct output targets exactly as C does.
 
 use mcx::{Mcx, PgBox, PgVec};
-// The bare-word newtype: the transitional return word of the interpreter eval
-// seam (`exec_eval_*_switch_context` return `(types_datum::Datum, bool)`).
-use types_datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what
-// `ExprEvalStepData::ConstVal { value }` carries.
+// `ExprEvalStepData::ConstVal { value }` carries, and the value the interpreter
+// eval seam (`exec_eval_*_switch_context`) returns.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_nodes::execexpr::{
@@ -1907,7 +1905,7 @@ pub fn exec_eval_expr_switch_context<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(DatumV<'mcx>, bool)> {
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::call(
         state, econtext, estate,
     )
@@ -1931,7 +1929,7 @@ pub fn exec_eval_array_expr_switch_context<'mcx>(
     state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(DatumV<'mcx>, bool)> {
     backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::call(
         state, econtext, estate,
     )

@@ -86,7 +86,7 @@ pub fn LocalExecuteInvalidationMessage(msg: &SharedInvalidationMessage) -> PgRes
                 let callbacks =
                     with_state(|s| s.relcache_callback_list.iter().copied().collect::<Vec<_>>());
                 for ccitem in callbacks {
-                    (ccitem.function)(ccitem.arg, m.relId);
+                    ccitem.invoke(m.relId);
                 }
             }
         }
@@ -150,11 +150,11 @@ pub fn InvalidateSystemCachesExtended(debug_discard: bool) -> PgResult<()> {
     });
 
     for ccitem in syscache {
-        (ccitem.function)(ccitem.arg, ccitem.id as i32, 0);
+        ccitem.invoke(ccitem.id as i32, 0);
     }
 
     for ccitem in relcache {
-        (ccitem.function)(ccitem.arg, InvalidOid);
+        ccitem.invoke(InvalidOid);
     }
 
     for ccitem in relsync {

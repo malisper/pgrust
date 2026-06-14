@@ -140,3 +140,75 @@ impl<'mcx> List<'mcx> {
 pub fn list_length(l: Option<&List<'_>>) -> i32 {
     l.map_or(0, |l| l.length())
 }
+
+// `List` is handled specially by `copyfuncs.c`/`equalfuncs.c` (it is not a
+// generated `_copyFoo`/`_equalFoo`; `copyObjectImpl` switches on the list tag
+// and `equal()` calls `_equalList`). The owned-tree analogue is these
+// hand-written trait impls, mirroring those special cases.
+
+impl<'mcx> backend_nodes_node_support::PgNodeCopy for List<'mcx> {
+    type Bound<'dst> = List<'dst>;
+    /// `copyObjectImpl` list arm. For `T_IntList`/`T_OidList`/`T_XidList` C does
+    /// a shallow `list_copy` (scalar cells need no deep copy). For `T_List` C
+    /// does `list_copy_deep` (each cell is a `Node *` deep-copied via
+    /// `copyObject`). This `List` is the raw `pg_list.h` cell carrier: a
+    /// `T_List` cell holds an opaque `void *ptr_value` ([`ListCell`]), so the
+    /// carrier deep-copies the cell array verbatim (the pointed-to `Node`s are
+    /// owned by whatever typed list owner threads them — opacity inherited from
+    /// the C union, not introduced here). The word storage is re-homed onto the
+    /// target context.
+    fn copy_node_in<'dst>(
+        &self,
+        dst: mcx::Mcx<'dst>,
+    ) -> types_error::PgResult<Self::Bound<'dst>> {
+        Ok(List {
+            r#type: self.r#type,
+            elements: mcx::slice_in(dst, &self.elements)?,
+        })
+    }
+}
+
+impl backend_nodes_node_support::PgNodeEqual for List<'_> {
+    /// `_equalList(a, b)` (equalfuncs.c). Reject quickly on `type`/`length`, then
+    /// compare cells per the list flavour: `T_IntList`/`T_OidList`/`T_XidList`
+    /// compare the live scalar union member; `T_List` compares the cell pointer
+    /// word (the carrier holds opaque `void *` payloads — see `copy_node_in`).
+    fn equal_node(&self, other: &Self) -> bool {
+        // COMPARE_SCALAR_FIELD(type); COMPARE_SCALAR_FIELD(length);
+        if self.r#type != other.r#type || self.length() != other.length() {
+            return false;
+        }
+        // The switch is outside the loop, like C, for efficiency.
+        match self.r#type {
+            crate::nodes::T_IntList => self
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                // SAFETY: a `T_IntList` keeps the `int_value` member live in
+                // every cell (the list tag selects the union member, exactly as
+                // in C's `lfirst_int`).
+                .all(|(a, b)| unsafe { a.int_value == b.int_value }),
+            crate::nodes::T_OidList => self
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                // SAFETY: a `T_OidList` keeps the `oid_value` member live.
+                .all(|(a, b)| unsafe { a.oid_value == b.oid_value }),
+            crate::nodes::T_XidList => self
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                // SAFETY: a `T_XidList` keeps the `xid_value` member live.
+                .all(|(a, b)| unsafe { a.xid_value == b.xid_value }),
+            _ => self
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                // T_List: opaque `ptr_value` cells. The carrier compares the
+                // pointer word (it does not own the typed `Node` payload to
+                // recurse into via `equal()` — opacity inherited from the C
+                // union). SAFETY: a `T_List` keeps the `ptr_value` member live.
+                .all(|(a, b)| unsafe { a.ptr_value == b.ptr_value }),
+        }
+    }
+}

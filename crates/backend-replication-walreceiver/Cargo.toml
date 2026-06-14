@@ -17,6 +17,7 @@ types-wal = { path = "../types-wal" }
 types-walreceiver = { path = "../types-walreceiver" }
 types-pgstat = { path = "../types-pgstat" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-guc = { path = "../types-guc" }
 
 backend-utils-error = { path = "../backend-utils-error" }

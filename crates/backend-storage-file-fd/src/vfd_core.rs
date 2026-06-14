@@ -17,7 +17,7 @@ use backend_storage_aio_seams as aio_seams;
 use backend_storage_ipc_dsm_core_seams as ipc_seams;
 use backend_utils_error::{elog, ereport};
 use types_core::{Oid, SubTransactionId};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::{
     ErrorLevel, ErrorLocation, PgResult, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, FATAL, LOG, PANIC,
     WARNING,
@@ -722,7 +722,7 @@ pub fn InitTemporaryFileAccess() -> PgResult<()> {
 
 /// Adapter matching the `before_shmem_exit` seam callback signature, dispatching
 /// to `BeforeShmemExit_Files` (owned by the `sync_cleanup` sibling family).
-fn before_shmem_exit_files_cb(_code: i32, _arg: Datum) -> PgResult<()> {
+fn before_shmem_exit_files_cb(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
     crate::sync_cleanup::BeforeShmemExit_Files();
     Ok(())
 }

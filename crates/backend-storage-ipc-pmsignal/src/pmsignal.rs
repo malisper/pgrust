@@ -255,6 +255,12 @@ pub fn send_postmaster_signal_bgworker_change() {
     SendPostmasterSignal(PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE);
 }
 
+/// `SendPostmasterSignal(PMSIGNAL_START_AUTOVAC_LAUNCHER)` — the single reason
+/// `varsup.c` signals (XID-wraparound pressure), exposed as a narrow seam.
+pub fn send_postmaster_signal_start_autovac() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_LAUNCHER);
+}
+
 /// `CheckPostmasterSignal` — check whether `reason` was signaled, clearing the
 /// flag if so. Called by the postmaster after receiving `SIGUSR1`.
 ///
@@ -399,10 +405,10 @@ pub fn RegisterPostmasterChildActive() -> PgResult<()> {
         |_code, _arg| MarkPostmasterChildInactive(),
         // C: `on_shmem_exit(MarkPostmasterChildInactive, 0)` — the callback
         // takes an unused `Datum arg`. The `on_shmem_exit` seam contract is
-        // owned by `backend-storage-ipc-dsm-core` and is not yet migrated off
-        // the bare-word shim, so the null arg must cross this seam edge as a
-        // `types_datum::Datum`. Forced ABI/seam-contract residual.
-        types_datum::Datum::null(),
+        // owned by `backend-storage-ipc-dsm-core`, now on the canonical
+        // unified `types_tuple::Datum<'static>` (Datum-unification); the null
+        // arg crosses this seam edge as that type.
+        types_tuple::Datum::null(),
     )
 }
 

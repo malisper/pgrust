@@ -240,6 +240,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InLocalUserIdChange()` (miscinit.c) — true while a SECURITY DEFINER
+    /// local-userid context is in effect. Read by the GUC permission switch
+    /// (`set_config_with_handle`, guc.c) for `GUC_NOT_WHILE_SEC_REST`.
+    pub fn in_local_user_id_change() -> bool
+);
+
+seam_core::seam!(
     /// `superuser()` (superuser.c) — true if the *current* user
     /// (`GetUserId()`) has superuser privilege. Used by
     /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when

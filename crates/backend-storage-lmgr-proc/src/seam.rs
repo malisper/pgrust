@@ -27,7 +27,7 @@
 
 use types_core::init::BackendType;
 use types_core::{LocalTransactionId, ProcNumber, TransactionId};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::PgResult;
 use types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
 use types_storage::storage::PGPROC;
@@ -314,7 +314,7 @@ pub(crate) fn register_postmaster_child_active() {
 // ---- ipc ----
 
 /// `on_shmem_exit(callback, arg)` — register a backend-exit callback.
-pub(crate) fn on_shmem_exit(callback: fn(i32, Datum) -> PgResult<()>, arg: Datum) {
+pub(crate) fn on_shmem_exit(callback: fn(i32, Datum<'static>) -> PgResult<()>, arg: Datum<'static>) {
     // C `on_shmem_exit` ereport(FATAL)s only on the static-array overflow past
     // `MAX_ON_EXITS`; surface that `Err` as a panic rather than swallow.
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(callback, arg)

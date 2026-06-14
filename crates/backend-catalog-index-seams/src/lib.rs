@@ -11,7 +11,7 @@
 /// `stattargets`, and the `Oid *constraintId` out-parameter are NULL/ignored
 /// at the current call sites and are not carried.
 #[derive(Clone, Debug)]
-pub struct IndexCreateArgs {
+pub struct IndexCreateArgs<'mcx> {
     /// `const char *indexRelationName`.
     pub index_relation_name: std::string::String,
     /// `Oid indexRelationId`.
@@ -37,7 +37,7 @@ pub struct IndexCreateArgs {
     /// `const int16 *coloptions`.
     pub coloptions: std::vec::Vec<i16>,
     /// `Datum reloptions`.
-    pub reloptions: types_datum::Datum,
+    pub reloptions: types_tuple::Datum<'mcx>,
     /// `bits16 flags`.
     pub flags: u16,
     /// `bits16 constr_flags`.
@@ -54,9 +54,9 @@ seam_core::seam!(
     /// relation's OID. `Err` carries the catalog-mutation / validation
     /// `ereport(ERROR)`s and OOM. The open `heapRelation` crosses by
     /// reference; the caller retains ownership and closes it afterward.
-    pub fn index_create(
+    pub fn index_create<'mcx>(
         heap_relation: &types_rel::Relation<'_>,
-        args: IndexCreateArgs,
+        args: IndexCreateArgs<'mcx>,
     ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 
@@ -89,6 +89,13 @@ seam_core::seam!(
     /// context. The C fills caller-provided `Datum values[INDEX_MAX_KEYS]` /
     /// `bool isnull[INDEX_MAX_KEYS]` buffers; they return by value here.
     /// Expression evaluation can `ereport(ERROR)`, carried on `Err`.
+    ///
+    /// The result array stays on the word-model `types_datum::Datum` (rather
+    /// than the canonical `Datum`): the sole consumer feeds it straight
+    /// into `backend-access-index-genam-seams::build_index_value_description`,
+    /// whose `values: &[types_datum::Datum]` contract is owned outside this
+    /// batch. Migrating the element type here would diverge from that landed
+    /// contract; it follows when genam migrates.
     pub fn form_index_datum<'mcx>(
         index_info: &types_nodes::execnodes::IndexInfo,
         slot: types_nodes::execnodes::SlotId,

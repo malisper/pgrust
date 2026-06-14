@@ -47,13 +47,11 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_rel::Relation;
 // The one canonical per-attribute value type (the unified enum). The old
-// `TupleValue` alias / bare-word `types_datum::Datum` newtype are gone from
-// this crate's own logic; the only remaining bare word is the `ScanKeyData`
-// `sk_argument` ABI edge (`types-scan`), constructed below as `ScanArg`.
+// `Datum` alias / bare-word `types_datum::Datum` newtype are gone from
+// this crate entirely: every value site (deform/form, ScanKey args, fastgetattr
+// reads) is the canonical `Datum<'mcx>` enum, including `ScanKeyData.sk_argument`
+// and the args threaded into `ScanKeyInit`.
 use types_tuple::backend_access_common_heaptuple::Datum;
-// `types_datum::Datum` survives ONLY at the external `types-scan`
-// `ScanKeyData.sk_argument` ABI struct-field edge consumed by `ScanKeyInit`.
-use types_datum::Datum as ScanArg;
 use types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
@@ -668,8 +666,7 @@ pub fn heap_fetch_toast_slice(
         1 as AttrNumber,
         BTEqualStrategyNumber,
         F_OIDEQ,
-        // ScanKeyData.sk_argument ABI edge (types-scan): bare word.
-        ScanArg::from_oid(valueid),
+        Datum::from_oid(valueid),
     )?;
 
     // No additional condition if fetching all chunks. Otherwise, use an
@@ -682,7 +679,7 @@ pub fn heap_fetch_toast_slice(
             2 as AttrNumber,
             BTEqualStrategyNumber,
             F_INT4EQ,
-            ScanArg::from_i32(startchunk),
+            Datum::from_i32(startchunk),
         )?;
         2
     } else {
@@ -691,14 +688,14 @@ pub fn heap_fetch_toast_slice(
             2 as AttrNumber,
             BTGreaterEqualStrategyNumber,
             F_INT4GE,
-            ScanArg::from_i32(startchunk),
+            Datum::from_i32(startchunk),
         )?;
         ScanKeyInit(
             &mut toastkey[2],
             2 as AttrNumber,
             BTLessEqualStrategyNumber,
             F_INT4LE,
-            ScanArg::from_i32(endchunk),
+            Datum::from_i32(endchunk),
         )?;
         3
     };

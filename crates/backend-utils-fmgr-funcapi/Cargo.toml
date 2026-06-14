@@ -9,6 +9,7 @@ name = "backend_utils_fmgr_funcapi"
 path = "src/lib.rs"
 
 [dependencies]
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
@@ -25,6 +26,7 @@ types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # Neighbor seam crates this unit calls (owned by their respective units).
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
@@ -32,6 +34,7 @@ backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

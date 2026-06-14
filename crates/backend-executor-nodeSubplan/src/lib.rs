@@ -52,17 +52,19 @@ use exec_expr::ProjectionKind;
 use mcx::{vec_with_capacity_in, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
-// The fmgr-call ABI / seam contracts still hand and return the bare-word
-// `Datum` newtype: the subplan result `Datum` (the `ExecSubPlan` /
-// `eval_testexpr_switch_context` seams), `FunctionCall2Coll`, the
-// `make_array_result_any` / `pfree_array_datum` array seams, and the
-// `*GetDatum` / `DatumGet*` scalar codecs. Those edges stay on the word until
-// their owners migrate.
-use types_datum::Datum;
-// The canonical unified value type (Datum-unification keystone) — what the
-// now-migrated `ParamExecData.value` and `SubPlanState.curArray` carry. The
-// per-value words crossing the still-word seams enter via its by-value arm.
-use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+// The fmgr-call ABI / array-seam contracts still hand and return the bare-word
+// `Datum` newtype at their (un-migrated owner) edges: `FunctionCall2Coll`
+// (fmgr), and `accum_array_result_any` / `make_array_result_any` /
+// `pfree_array_datum` (arrayfuncs). Those words enter/leave via the canonical
+// value's by-value arm; this crate touches `types_datum::Datum` ONLY to bridge
+// across those still-word seams (see `word`/`from_word`). Everything internal
+// — the `result` register, the per-param values, `curArray` — is the canonical
+// unified value.
+use types_datum::Datum as Word;
+// The canonical unified value type (Datum-unification keystone): what the
+// `result` register, `ParamExecData.value`, `SubPlanState.curArray`, and the
+// migrated seam returns all carry.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::SubPlanState;
 use types_nodes::primnodes::SubLinkType;
@@ -75,16 +77,35 @@ type HashTable<'mcx> = types_nodes::nodeagg::TupleHashTable<'mcx>;
 // postgres.h inline helpers (pure node-layer).
 // ===========================================================================
 
-/// `BoolGetDatum(X)` (postgres.h).
+/// `BoolGetDatum(X)` (postgres.h) — onto the canonical value's by-value arm.
 #[inline]
-fn BoolGetDatum(x: bool) -> Datum {
+fn BoolGetDatum<'mcx>(x: bool) -> Datum<'mcx> {
     Datum::from_bool(x)
 }
 
 /// `DatumGetBool(X)` (postgres.h) — `(X) != 0`.
 #[inline]
-fn DatumGetBool(x: Datum) -> bool {
-    x.as_usize() != 0
+fn DatumGetBool(x: &Datum<'_>) -> bool {
+    x.as_bool()
+}
+
+/// Project a canonical scalar value onto the bare machine word
+/// (`types_datum::Datum`) for the still-bare-word array/fmgr seams
+/// (`accum_array_result_any` `dvalue`, `function_call2_coll` args). The columns
+/// fed to those edges are scalar (by-value) words; a by-reference value would
+/// `panic` here exactly as the C would misread a pointer image as a scalar —
+/// the canonical-carrier follow-on (#113) is what lets these owners take a
+/// by-reference value, and is recorded as the remaining bare-word edge.
+#[inline]
+fn word(d: &Datum<'_>) -> Word {
+    Word::from_usize(d.as_usize())
+}
+
+/// Carry a bare machine word returned by a still-word seam
+/// (`make_array_result_any`) into the canonical value's by-value arm.
+#[inline]
+fn from_word<'mcx>(w: Word) -> Datum<'mcx> {
+    Datum::from_usize(w.as_usize())
 }
 
 // ===========================================================================
@@ -98,7 +119,7 @@ pub fn ExecSubPlan<'mcx>(
     node: &mut SubPlanState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     let subplan = subplan_ref(node)?;
     let subLinkType = subplan.subLinkType;
     let has_setparam = !subplan.setParam.is_empty();
@@ -134,6 +155,9 @@ pub fn ExecSubPlan<'mcx>(
     // restore scan direction
     estate.es_direction = dir;
 
+    // The internal `result` register is already the canonical unified value
+    // (scalar results on the by-value arm; an ARRAY result carries the array
+    // word on the by-value arm too, matching the C `Datum`).
     let result = retval?;
     Ok((result, isNull))
 }
@@ -144,7 +168,7 @@ fn ExecHashSubPlan<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
     isNull: &mut bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let mut result = false;
 
     let subplan = subplan_ref(node)?;
@@ -219,7 +243,7 @@ fn ExecScanSubPlan<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
     isNull: &mut bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let subplan = subplan_ref(node)?;
     let subLinkType = subplan.subLinkType;
     let firstColType = subplan.firstColType;
@@ -330,7 +354,7 @@ fn ExecScanSubPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerTuple,
                 astate,
-                attr.value,
+                word(&attr.value),
                 attr.isnull,
                 firstColType,
             )?;
@@ -354,6 +378,7 @@ fn ExecScanSubPlan<'mcx>(
             col += 1;
         }
 
+        // The testexpr seam already returns the canonical unified value.
         let (rowresult, rownull) =
             exec_expr::eval_testexpr_switch_context::call(node, estate, econtext)?;
 
@@ -361,7 +386,7 @@ fn ExecScanSubPlan<'mcx>(
             // combine across rows per OR semantics
             if rownull {
                 *isNull = true;
-            } else if DatumGetBool(rowresult) {
+            } else if DatumGetBool(&rowresult) {
                 result = BoolGetDatum(true);
                 *isNull = false;
                 break; // needn't look at any more rows
@@ -370,7 +395,7 @@ fn ExecScanSubPlan<'mcx>(
             // combine across rows per AND semantics
             if rownull {
                 *isNull = true;
-            } else if !DatumGetBool(rowresult) {
+            } else if !DatumGetBool(&rowresult) {
                 result = BoolGetDatum(false);
                 *isNull = false;
                 break; // needn't look at any more rows
@@ -385,13 +410,15 @@ fn ExecScanSubPlan<'mcx>(
     if subLinkType == SubLinkType::Array {
         // We return the result in the caller's context.
         //   result = makeArrayResultAny(astate, oldcontext, true);
-        // `oldcontext` is the entry-time per-tuple eval context.
-        result = arrayfuncs::make_array_result_any::call(
+        // `oldcontext` is the entry-time per-tuple eval context. The arrayfuncs
+        // owner is un-migrated, so the array varlena comes back as a bare word;
+        // carry it into the canonical value's by-value arm (the C `Datum`).
+        result = from_word(arrayfuncs::make_array_result_any::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerTuple,
             astate,
-        )?;
+        )?);
     } else if !found {
         // deal with empty subplan result.  result/isNull were previously
         // initialized correctly for all sublink types except EXPR and
@@ -651,12 +678,15 @@ fn execTuplesUnequal<'mcx>(
         // functions); collations are hashtable->tab_collations.
         let collation = subplan_hash_table_ref(node, is_nulls).tab_collations.as_ref().unwrap()[i as usize];
         let fn_oid = node.cur_eq_funcs.as_ref().unwrap()[i as usize].fn_oid;
-        if !DatumGetBool(fmgr::function_call2_coll::call(
+        // The fmgr owner is un-migrated: the equality function takes/returns
+        // bare words. Bridge the two scalar columns down and the boolean result
+        // back through the canonical value.
+        if !DatumGetBool(&from_word(fmgr::function_call2_coll::call(
             fn_oid,
             collation,
-            attr1.value,
-            attr2.value,
-        )?) {
+            word(&attr1.value),
+            word(&attr2.value),
+        )?)) {
             result = true; // they are unequal
             break;
         }
@@ -822,7 +852,7 @@ pub fn ExecInitSubPlan<'mcx>(
     // Default; the hash arrays are None until the useHashTable branch fills
     // them).
     sstate.curTuple = None;
-    sstate.curArray = DatumV::null();
+    sstate.curArray = Datum::null();
 
     // If this is an initplan with output params and no direct correlation (and
     // not a CTE), mark those params as needing evaluation.  We don't set
@@ -1030,7 +1060,7 @@ pub fn ExecSetParamPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerQuery,
                 astate,
-                attr.value,
+                word(&attr.value),
                 attr.isnull,
                 firstColType,
             )?;
@@ -1070,17 +1100,18 @@ pub fn ExecSetParamPlan<'mcx>(
         //                                       econtext->ecxt_per_query_memory,
         //                                       true);
         // pfree(DatumGetPointer(node->curArray)). The array seam still takes the
-        // bare-word `Datum`; recover it from the canonical by-value arm.
-        arrayfuncs::pfree_array_datum::call(Datum::from_usize(node.curArray.as_usize()));
-        let arr = arrayfuncs::make_array_result_any::call(
+        // bare-word `Datum`; project it off the canonical by-value arm.
+        arrayfuncs::pfree_array_datum::call(word(&node.curArray));
+        // The un-migrated arrayfuncs owner returns the array varlena as a bare
+        // word; carry it into the canonical value once and reuse it.
+        let arr = from_word(arrayfuncs::make_array_result_any::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
-        )?;
-        // node->curArray holds the freshly built array varlena `Datum`; carry
-        // the seam's bare word into the canonical value's by-value arm.
-        node.curArray = DatumV::ByVal(arr);
+        )?);
+        // node->curArray holds the freshly built array value for cross-call reuse.
+        node.curArray = arr.clone();
         set_exec_param_clear_execplan(estate, paramid, arr, false)?;
     } else if !found {
         if subLinkType == SubLinkType::Exists {
@@ -1316,14 +1347,13 @@ fn reset_per_tuple_memory(estate: &mut EStateData<'_>, ecxt: EcxtId) -> PgResult
 fn set_exec_param<'mcx>(
     estate: &mut EStateData<'mcx>,
     paramid: i32,
-    value: Datum,
+    value: Datum<'mcx>,
     isnull: bool,
 ) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
-    // ParamExecData.value is the canonical unified value; the scalar word
-    // produced by the caller (a slot column, a bool, or a NULL placeholder)
-    // crosses into its by-value arm.
-    prm.value = DatumV::ByVal(value);
+    // `ParamExecData.value` is the canonical unified value; a by-reference
+    // column value rides through verbatim (no longer flattened to a word).
+    prm.value = value;
     prm.isnull = isnull;
     Ok(())
 }
@@ -1335,12 +1365,12 @@ fn set_exec_param<'mcx>(
 fn set_exec_param_clear_execplan<'mcx>(
     estate: &mut EStateData<'mcx>,
     paramid: i32,
-    value: Datum,
+    value: Datum<'mcx>,
     isnull: bool,
 ) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
-    // As above: the bare-word value crosses into the canonical by-value arm.
-    prm.value = DatumV::ByVal(value);
+    // As above: the canonical value is stored verbatim.
+    prm.value = value;
     prm.isnull = isnull;
     // prm->execPlan = NULL; — the execPlan link is modeled by the executor's
     // param-pending seam below; the value/isnull writes above are the data.

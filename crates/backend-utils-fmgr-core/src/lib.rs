@@ -42,8 +42,6 @@ use types_fmgr::{
 use types_guc::GucContext;
 use types_nodes::parsenodes::ObjectType;
 
-pub mod datum_ref_registry;
-
 /// C: `BYTEAOID` (`pg_type.h`) — the `consttype` of the opclass-options `Const`.
 pub const BYTEAOID: Oid = 17;
 /// C: `ProcedureRelationId` (`pg_proc` relation Oid).
@@ -1462,26 +1460,52 @@ fn init_io3_ref(
     fcinfo
 }
 
+/// Datum-unification bridge: the fmgr boundary `FmgrArg`/`FmgrOut` `ByVal` arm
+/// is now the canonical `types_tuple::Datum<'mcx>` (Wave 3 types-fmgr migration),
+/// while this crate's internal call machinery still speaks the bare-word
+/// `types_datum::Datum` (the sanctioned fmgr-ABI scalar edge). Lift a bare word
+/// into the canonical `ByVal` arm (a pure by-value, lifetime-free wrap).
+#[inline]
+fn canon_byval(word: Datum) -> types_tuple::backend_access_common_heaptuple::Datum<'static> {
+    types_tuple::backend_access_common_heaptuple::Datum::ByVal(word.as_usize())
+}
+
+/// Lower a canonical by-value `Datum` back to the bare ABI word. The boundary's
+/// `ByVal` arm only ever carries a scalar (`ByVal`); a `ByRef` here would be a
+/// contract violation (C would read garbage treating a referent as a word).
+#[inline]
+fn canon_word(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> Datum {
+    match d {
+        types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
+        types_tuple::backend_access_common_heaptuple::Datum::ByRef(_) => {
+            panic!("fmgr boundary ByVal arm carried a by-reference Datum")
+        }
+    }
+}
+
 /// Read the dispatched I/O function's result as an [`FmgrOut`].
-fn io_result_out(result: Datum, fcinfo: &mut FunctionCallInfoBaseData) -> FmgrOut {
+fn io_result_out<'mcx>(
+    result: Datum,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> FmgrOut<'mcx> {
     match fcinfo.take_ref_result() {
         Some(payload) => FmgrOut::Ref(payload),
-        None => FmgrOut::ByVal(result),
+        None => FmgrOut::ByVal(canon_byval(result)),
     }
 }
 
 /// Option-4 port of `InputFunctionCall` (`cstring` in). C's `char *str` is
 /// `input: &str`; a NULL input is `None`. The result is an [`FmgrOut`].
-pub fn input_function_call_typed(
-    mcx: Mcx<'_>,
+pub fn input_function_call_typed<'mcx>(
+    mcx: Mcx<'mcx>,
     res: &FmgrResolution,
     flinfo: FmgrInfo,
     input: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<FmgrOut> {
+) -> PgResult<FmgrOut<'mcx>> {
     if input.is_none() && flinfo.fn_strict {
-        return Ok(FmgrOut::ByVal(Datum::null()));
+        return Ok(FmgrOut::ByVal(canon_byval(Datum::null())));
     }
     let fn_oid = flinfo.fn_oid;
     let arg_ref = RefPayload::Cstring(input.unwrap_or("").to_string());
@@ -1504,17 +1528,17 @@ pub fn input_function_call_typed(
 
 /// Option-4 port of `InputFunctionCallSafe` (`cstring` in, soft-error capable).
 /// `Ok(None)` means a soft error was saved into `escontext`.
-pub fn input_function_call_safe_typed(
-    mcx: Mcx<'_>,
+pub fn input_function_call_safe_typed<'mcx>(
+    mcx: Mcx<'mcx>,
     res: &FmgrResolution,
     flinfo: FmgrInfo,
     input: Option<&str>,
     typioparam: Oid,
     typmod: i32,
     escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<FmgrOut>> {
+) -> PgResult<Option<FmgrOut<'mcx>>> {
     if input.is_none() && flinfo.fn_strict {
-        return Ok(Some(FmgrOut::ByVal(Datum::null())));
+        return Ok(Some(FmgrOut::ByVal(canon_byval(Datum::null()))));
     }
     let fn_oid = flinfo.fn_oid;
     let arg_ref = RefPayload::Cstring(input.unwrap_or("").to_string());
@@ -1563,16 +1587,16 @@ pub fn output_function_call_typed(
 
 /// Option-4 port of `ReceiveFunctionCall` (binary `bytea` buffer in). C's
 /// `StringInfo buf` is `buf: &[u8]`; a NULL buffer is `None`.
-pub fn receive_function_call_typed(
-    mcx: Mcx<'_>,
+pub fn receive_function_call_typed<'mcx>(
+    mcx: Mcx<'mcx>,
     res: &FmgrResolution,
     flinfo: FmgrInfo,
     buf: Option<&[u8]>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<FmgrOut> {
+) -> PgResult<FmgrOut<'mcx>> {
     if buf.is_none() && flinfo.fn_strict {
-        return Ok(FmgrOut::ByVal(Datum::null()));
+        return Ok(FmgrOut::ByVal(canon_byval(Datum::null())));
     }
     let fn_oid = flinfo.fn_oid;
     let arg_ref = RefPayload::Varlena(buf.unwrap_or(&[]).to_vec());
@@ -1613,7 +1637,9 @@ pub fn send_function_call_typed(
 /// Build the 1-arg `fcinfo` for an output/send function (C: `FunctionCall1`).
 fn init_output_fcinfo(flinfo: FmgrInfo, value: FmgrArg) -> FunctionCallInfoBaseData {
     match value {
-        FmgrArg::ByVal(d) => init_fcinfo(Some(flinfo), InvalidOid, vec![NullableDatum::value(d)]),
+        FmgrArg::ByVal(d) => {
+            init_fcinfo(Some(flinfo), InvalidOid, vec![NullableDatum::value(canon_word(&d))])
+        }
         FmgrArg::Ref(payload) => {
             let mut fcinfo = init_fcinfo(
                 Some(flinfo),
@@ -1664,118 +1690,17 @@ fn out_varlena(
 /// bare-word `Datum` across the fmgr-return ABI edge fold a `Ref` into the
 /// registry themselves (the `_typed` wrapper below); callers that build the
 /// canonical `Datum<'mcx>` enum map it straight onto `ByVal`/`ByRef`.
-fn oid_input_function_call_out(
-    mcx: Mcx<'_>,
+fn oid_input_function_call_out<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     input: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<FmgrOut> {
+) -> PgResult<FmgrOut<'mcx>> {
     let resolved = fmgr_info(mcx, function_id)?;
     input_function_call_typed(mcx, &resolved.resolution, resolved.finfo, input, typioparam, typmod)
 }
 
-/// `OidInputFunctionCall` over the Option-4 typed boundary, returning the value
-/// as a bare `Datum` word. A by-reference result is minted into the per-backend
-/// [`datum_ref_registry`] (the owned-model `PointerGetDatum(palloc'd result)`) so
-/// it can ride through the fmgr-return ABI edge as a single word — the audited
-/// edge where a by-reference value is a plain pointer-shaped `Datum`.
-pub fn oid_input_function_call_typed(
-    mcx: Mcx<'_>,
-    function_id: Oid,
-    input: Option<&str>,
-    typioparam: Oid,
-    typmod: i32,
-) -> PgResult<Datum> {
-    Ok(match oid_input_function_call_out(mcx, function_id, input, typioparam, typmod)? {
-        FmgrOut::ByVal(d) => d,
-        FmgrOut::Ref(payload) => datum_ref_registry::register(payload),
-    })
-}
-
-/// `OidOutputFunctionCall` over the Option-4 typed boundary, returning the
-/// rendered text as an owned `String`. `arg_byval` is the value type's
-/// `pg_type.typbyval` (the fact C encodes statically in its calling convention).
-pub fn oid_output_function_call_typed(
-    mcx: Mcx<'_>,
-    function_id: Oid,
-    val: Datum,
-    arg_byval: bool,
-) -> PgResult<String> {
-    let resolved = fmgr_info(mcx, function_id)?;
-    if arg_byval {
-        output_function_call_typed(mcx, &resolved.resolution, resolved.finfo, FmgrArg::ByVal(val))
-    } else {
-        let payload = datum_ref_registry::fetch(val)?;
-        output_function_call_typed(mcx, &resolved.resolution, resolved.finfo, FmgrArg::Ref(&payload))
-    }
-}
-
-/// `InputFunctionCallSafe` over the Option-4 typed boundary with one-shot
-/// `fmgr_info`. `Ok(None)` means a soft error was saved into `escontext`.
-pub fn oid_input_function_call_safe_typed(
-    mcx: Mcx<'_>,
-    function_id: Oid,
-    input: Option<&str>,
-    typioparam: Oid,
-    typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<Datum>> {
-    let resolved = fmgr_info(mcx, function_id)?;
-    let out = input_function_call_safe_typed(
-        mcx,
-        &resolved.resolution,
-        resolved.finfo,
-        input,
-        typioparam,
-        typmod,
-        escontext,
-    )?;
-    Ok(out.map(|out| match out {
-        FmgrOut::ByVal(d) => d,
-        FmgrOut::Ref(payload) => datum_ref_registry::register(payload),
-    }))
-}
-
-/// `OidReceiveFunctionCall` over the Option-4 typed boundary.
-pub fn oid_receive_function_call_typed(
-    mcx: Mcx<'_>,
-    function_id: Oid,
-    buf: Option<&[u8]>,
-    typioparam: Oid,
-    typmod: i32,
-) -> PgResult<Datum> {
-    let resolved = fmgr_info(mcx, function_id)?;
-    let out = receive_function_call_typed(
-        mcx,
-        &resolved.resolution,
-        resolved.finfo,
-        buf,
-        typioparam,
-        typmod,
-    )?;
-    Ok(match out {
-        FmgrOut::ByVal(d) => d,
-        FmgrOut::Ref(payload) => datum_ref_registry::register(payload),
-    })
-}
-
-/// `OidSendFunctionCall` over the Option-4 typed boundary, returning the full
-/// flat varlena byte image.
-pub fn oid_send_function_call_typed(
-    mcx: Mcx<'_>,
-    function_id: Oid,
-    val: Datum,
-    arg_byval: bool,
-) -> PgResult<Vec<u8>> {
-    let resolved = fmgr_info(mcx, function_id)?;
-    if arg_byval {
-        send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, FmgrArg::ByVal(val))
-    } else {
-        let payload = datum_ref_registry::fetch(val)?;
-        send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, FmgrArg::Ref(&payload))
-    }
-}
 
 // ===========================================================================
 // fn_expr parse-tree extraction (get_fn_expr_* / get_call_expr_*).
@@ -2074,17 +1999,17 @@ fn oid_function_call_1_deflist(
     null_check(&fcinfo, result, &oid.to_string())
 }
 
-/// Marshal a tuple-attribute [`TupleValue`] into the boundary [`FmgrArg`] an
+/// Marshal a tuple-attribute [`Datum`] into the boundary [`FmgrArg`] an
 /// output/send function expects: a by-value scalar stays a `Datum` word; a
 /// by-reference attribute's owned byte image is its `Varlena` referent (the
 /// already-detoasted `struct varlena *` C would have passed).
 fn tuple_value_to_arg(
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> (Datum, Option<RefPayload>) {
-    use types_tuple::backend_access_common_heaptuple::TupleValue;
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match val {
-        TupleValue::ByVal(d) => (*d, None),
-        TupleValue::ByRef(b) => (
+        CanonDatum::ByVal(d) => (Datum::from_usize(*d), None),
+        CanonDatum::ByRef(b) => (
             Datum::null(),
             Some(RefPayload::Varlena(b.as_slice().to_vec())),
         ),
@@ -2108,13 +2033,13 @@ fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 fn oid_send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),
-        None => FmgrArg::ByVal(datum),
+        None => FmgrArg::ByVal(canon_byval(datum)),
     };
     // C: SendFunctionCall -> DatumGetByteaP(FunctionCall1(...)), a full bytea.
     let image = send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
@@ -2131,13 +2056,13 @@ fn oid_send_function_call_seam<'mcx>(
 fn oid_output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),
-        None => FmgrArg::ByVal(datum),
+        None => FmgrArg::ByVal(canon_byval(datum)),
     };
     let s = output_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
     bytes_into(mcx, s.as_bytes())
@@ -2183,7 +2108,7 @@ fn function_call3_seam(
 fn output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_output_function_call_seam(mcx, flinfo.fn_oid, val)
 }
@@ -2194,29 +2119,37 @@ fn output_function_call_seam<'mcx>(
 fn send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_send_function_call_seam(mcx, flinfo.fn_oid, val)
 }
 
 /// `OidInputFunctionCall(functionId, str, typioparam, typmod)` seam used by
 /// bootstrap's `InsertOneValue`: one-shot lookup + call of a type's text input
-/// function on `str_`. A by-reference result is minted into the per-backend
-/// [`datum_ref_registry`] (the owned `PointerGetDatum(palloc'd result)`); the
-/// returned `Datum` is that token (or the by-value word).
-fn oid_input_function_call_seam(
+/// function on `str_`. The result is the canonical `Datum<'mcx>` — a by-value
+/// scalar is `ByVal` (the bare word); a by-reference result is an owned `ByRef`
+/// over the input function's flattened payload bytes (C's
+/// `PointerGetDatum(palloc'd result)`), with no per-backend registry token.
+fn oid_input_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
     function_id: Oid,
     str_: &str,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<Datum> {
-    let ctx = MemoryContext::new("oid_input_function_call");
-    oid_input_function_call_typed(ctx.mcx(), function_id, Some(str_), typioparam, typmod)
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    match oid_input_function_call_out(mcx, function_id, Some(str_), typioparam, typmod)? {
+        FmgrOut::ByVal(d) => Ok(d),
+        FmgrOut::Ref(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+    }
 }
 
 /// `InputFunctionCall(&flinfo, str, typioparam, typmod)` seam over a
 /// caller-cached `FmgrInfo` (`BuildTupleFromCStrings`), returning the result
-/// classified as a [`TupleValue`] for `heap_form_tuple`. The owned `FmgrInfo`
+/// classified as a [`Datum`] for `heap_form_tuple`. The owned `FmgrInfo`
 /// carries only `fn_oid`, so this is the `Option<&str>` (NULL-allowing) form of
 /// the one-shot lookup + call. By-value results travel as `ByVal`; by-reference
 /// results have their registry payload materialized into `mcx`-owned bytes.
@@ -2227,8 +2160,8 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     typioparam: Oid,
     typmod: i32,
     attbyval: bool,
-) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>> {
-    use types_tuple::backend_access_common_heaptuple::TupleValue;
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     // The seam contract is the canonical `Datum<'mcx>` enum, so the input
     // function's result maps straight onto it — no per-backend registry token
     // round-trip. A by-value result is `ByVal` (the bare word); a by-reference
@@ -2236,49 +2169,57 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     // bytes (C's `PointerGetDatum(palloc'd result)`).
     match oid_input_function_call_out(mcx, fn_oid, str_, typioparam, typmod)? {
         // A strict NULL / by-value scalar: keep the bare ABI word.
-        FmgrOut::ByVal(d) => Ok(TupleValue::ByVal(d)),
+        FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d).as_usize())),
         // C classifies by `attbyval`: a by-value type with a by-reference-shaped
         // result still reads its word back; otherwise materialize the payload.
         FmgrOut::Ref(payload) if attbyval => {
-            // attbyval but the input function produced a referent — fold it into
-            // a bare word at this audited edge (mirrors the registry-token path).
-            Ok(TupleValue::ByVal(datum_ref_registry::register(payload)))
+            // attbyval but the input function produced a referent — read the
+            // leading machine word out of the flattened payload (C's
+            // `fetch_att`: a by-value attribute reads `sizeof(Datum)` bytes from
+            // the storage the pointer addresses).
+            let bytes = payload.flatten();
+            let mut word_bytes = [0u8; core::mem::size_of::<usize>()];
+            let n = bytes.len().min(word_bytes.len());
+            word_bytes[..n].copy_from_slice(&bytes[..n]);
+            Ok(CanonDatum::ByVal(usize::from_ne_bytes(word_bytes)))
         }
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(TupleValue::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
 
-/// `OidOutputFunctionCall(functionId, val)` seam over a bare `Datum` (bootstrap's
-/// `InsertOneValue` DEBUG4 trace): one-shot lookup + call of a type's text output
-/// function on the `Datum` just built. A by-reference `Datum` is a
-/// [`datum_ref_registry`] token (probed via the registry); a by-value `Datum` is
-/// the literal word. Returns the rendered cstring (no NUL) as a `PgString` in
-/// `mcx`.
+/// `OidOutputFunctionCall(functionId, val)` seam over the canonical `Datum`
+/// (bootstrap's `InsertOneValue` DEBUG4 trace): one-shot lookup + call of a
+/// type's text output function on the `Datum` just built. The canonical enum's
+/// own arm decides the boundary classification: a `ByVal` scalar crosses as the
+/// machine word; a `ByRef` referent crosses as a borrowed [`RefPayload`] over
+/// its bytes (no per-backend registry token). Returns the rendered cstring (no
+/// NUL) as a `PgString` in `mcx`.
 fn oid_output_function_call_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: Datum,
+    val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<PgString<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     let resolved = fmgr_info(mcx, function_id)?;
-    // A by-reference `Datum` is a token into the per-backend payload table; a
-    // by-value `Datum` is the literal word. Probe the table to decide which
-    // boundary arm the output function expects.
-    let s = match datum_ref_registry::fetch(val) {
-        Ok(payload) => output_function_call_typed(
+    let s = match &val {
+        CanonDatum::ByVal(_) => output_function_call_typed(
             mcx,
             &resolved.resolution,
             resolved.finfo,
-            FmgrArg::Ref(&payload),
+            FmgrArg::ByVal(val.clone()),
         )?,
-        Err(_) => output_function_call_typed(
-            mcx,
-            &resolved.resolution,
-            resolved.finfo,
-            FmgrArg::ByVal(val),
-        )?,
+        CanonDatum::ByRef(bytes) => {
+            let payload = types_fmgr::boundary::RefPayload::Varlena(bytes.as_slice().to_vec());
+            output_function_call_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                FmgrArg::Ref(&payload),
+            )?
+        }
     };
     PgString::from_str_in(&s, mcx)
 }

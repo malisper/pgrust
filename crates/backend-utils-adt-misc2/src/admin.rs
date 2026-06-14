@@ -28,7 +28,10 @@
 
 use alloc::format;
 use mcx::Mcx;
-use types_datum::Datum;
+// The canonical unified value (Datum-unification keystone); these SQL-callable
+// builtins return / assemble the unified `Datum<'mcx>`. The varlena owner still
+// hands back the bare scalar word, bridged at `text_datum`/`bytes_to_varlena`.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -148,17 +151,19 @@ fn pg_read_binary_file_common<'mcx>(
 fn bytes_to_varlena_datum<'mcx>(
     mcx: Mcx<'mcx>,
     bytes: Option<mcx::PgVec<'mcx, u8>>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     match bytes {
-        Some(b) => varlena::bytes_to_varlena::call(mcx, &b[..]),
+        Some(b) => Ok(varlena::bytes_to_varlena_v::call(mcx, &b[..])?),
         None => Ok(Datum::null()),
     }
 }
 
 /// `CStringGetTextDatum(s)` — a `text` `Datum` from a Rust string, via the
 /// varlena owner.
-fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum> {
-    varlena::cstring_to_text::call(mcx, s)
+fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    // `text` is pass-by-reference; the `_v` seam variant returns a
+    // `Datum::ByRef` varlena directly.
+    Ok(varlena::cstring_to_text_v::call(mcx, s)?)
 }
 
 /// `pg_read_file_off_len(filename, offset, length)` (genfile.c).
@@ -167,7 +172,7 @@ pub fn pg_read_file_off_len<'mcx>(
     filename: &str,
     offset: i64,
     length: i64,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_file_common(mcx, filename, offset, length, false, false)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -179,13 +184,13 @@ pub fn pg_read_file_off_len_missing<'mcx>(
     offset: i64,
     length: i64,
     missing_ok: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_file_common(mcx, filename, offset, length, false, missing_ok)?;
     bytes_to_varlena_datum(mcx, ret)
 }
 
 /// `pg_read_file_all(filename)`.
-pub fn pg_read_file_all<'mcx>(mcx: Mcx<'mcx>, filename: &str) -> PgResult<Datum> {
+pub fn pg_read_file_all<'mcx>(mcx: Mcx<'mcx>, filename: &str) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_file_common(mcx, filename, 0, -1, true, false)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -195,7 +200,7 @@ pub fn pg_read_file_all_missing<'mcx>(
     mcx: Mcx<'mcx>,
     filename: &str,
     missing_ok: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_file_common(mcx, filename, 0, -1, true, missing_ok)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -206,7 +211,7 @@ pub fn pg_read_binary_file_off_len<'mcx>(
     filename: &str,
     offset: i64,
     length: i64,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_binary_file_common(mcx, filename, offset, length, false, false)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -218,13 +223,13 @@ pub fn pg_read_binary_file_off_len_missing<'mcx>(
     offset: i64,
     length: i64,
     missing_ok: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_binary_file_common(mcx, filename, offset, length, false, missing_ok)?;
     bytes_to_varlena_datum(mcx, ret)
 }
 
 /// `pg_read_binary_file_all(filename)`.
-pub fn pg_read_binary_file_all<'mcx>(mcx: Mcx<'mcx>, filename: &str) -> PgResult<Datum> {
+pub fn pg_read_binary_file_all<'mcx>(mcx: Mcx<'mcx>, filename: &str) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_binary_file_common(mcx, filename, 0, -1, true, false)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -234,7 +239,7 @@ pub fn pg_read_binary_file_all_missing<'mcx>(
     mcx: Mcx<'mcx>,
     filename: &str,
     missing_ok: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let ret = pg_read_binary_file_common(mcx, filename, 0, -1, true, missing_ok)?;
     bytes_to_varlena_datum(mcx, ret)
 }
@@ -247,7 +252,7 @@ pub fn pg_stat_file<'mcx>(
     filename: &str,
     missing_ok: bool,
     _two_args: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let filename = path::convert_and_check_filename::call(mcx, filename)?;
 
     let st = match fd::stat_file::call(filename.as_str(), missing_ok)? {
@@ -290,7 +295,7 @@ pub fn pg_ls_dir<'mcx>(
     dirname: &str,
     missing_ok: bool,
     include_dot_dirs: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let location = path::convert_and_check_filename::call(mcx, dirname)?;
 
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
@@ -325,7 +330,7 @@ fn pg_ls_dir_files<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     dir: &str,
     missing_ok: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
     let rsinfo = fcinfo
         .resultinfo
@@ -363,7 +368,7 @@ fn pg_ls_dir_files<'mcx>(
 pub fn pg_ls_logdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::LogDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), false)
 }
@@ -372,7 +377,7 @@ pub fn pg_ls_logdir<'mcx>(
 pub fn pg_ls_waldir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::WalDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), false)
 }
@@ -383,7 +388,7 @@ fn pg_ls_tmpdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     tblspc: u32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     if !syscache::tablespace_exists::call(tblspc)? {
         return Err(PgError::new(
             ERROR,
@@ -399,7 +404,7 @@ fn pg_ls_tmpdir<'mcx>(
 pub fn pg_ls_tmpdir_noargs<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     pg_ls_tmpdir(mcx, fcinfo, DEFAULTTABLESPACE_OID)
 }
 
@@ -408,7 +413,7 @@ pub fn pg_ls_tmpdir_1arg<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     tablespace: u32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     pg_ls_tmpdir(mcx, fcinfo, tablespace)
 }
 
@@ -416,7 +421,7 @@ pub fn pg_ls_tmpdir_1arg<'mcx>(
 pub fn pg_ls_archive_statusdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::ArchiveStatusDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), true)
 }
@@ -425,7 +430,7 @@ pub fn pg_ls_archive_statusdir<'mcx>(
 pub fn pg_ls_summariesdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::SummariesDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), true)
 }
@@ -434,7 +439,7 @@ pub fn pg_ls_summariesdir<'mcx>(
 pub fn pg_ls_logicalsnapdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::LogicalSnapDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), false)
 }
@@ -443,7 +448,7 @@ pub fn pg_ls_logicalsnapdir<'mcx>(
 pub fn pg_ls_logicalmapdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let dir = path::wal_or_log_subdir::call(mcx, path::WellKnownDir::LogicalMapDir);
     pg_ls_dir_files(mcx, fcinfo, dir.as_str(), false)
 }
@@ -454,7 +459,7 @@ pub fn pg_ls_replslotdir<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     slotname: &str,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     if !slot::SearchNamedReplicationSlot::call(slotname, true)? {
         return Err(PgError::new(
             ERROR,
@@ -477,7 +482,7 @@ pub fn pg_ls_replslotdir<'mcx>(
 /// (the genuinely-unported hba.c parser) crosses the hba seam.
 pub fn pg_hba_file_rules<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
     let rsinfo = fcinfo
         .resultinfo
@@ -491,7 +496,7 @@ pub fn pg_hba_file_rules<'mcx>(
 /// pg_ident.conf maps.
 pub fn pg_ident_file_mappings<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
     let rsinfo = fcinfo
         .resultinfo
@@ -536,7 +541,7 @@ const NUM_LOCK_STATUS_COLUMNS: usize = 16;
 pub fn pg_lock_status<'mcx>(
     _mcx: Mcx<'mcx>,
     _fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     // The whole-function value-per-call SRF machinery is funcapi-owned and
     // unported (only the materialize path exists). Mirror-pg-and-panic at the
     // owner boundary rather than silently degrade the SRF protocol or stub.
@@ -554,8 +559,9 @@ fn fill_lock_row<'mcx>(
     instance: &lk::LockInstanceData,
     granted: bool,
     mode: lk::LOCKMODE,
-) -> PgResult<([Datum; NUM_LOCK_STATUS_COLUMNS], [bool; NUM_LOCK_STATUS_COLUMNS])> {
-    let mut values = [Datum::null(); NUM_LOCK_STATUS_COLUMNS];
+) -> PgResult<([Datum<'mcx>; NUM_LOCK_STATUS_COLUMNS], [bool; NUM_LOCK_STATUS_COLUMNS])> {
+    let mut values: [Datum<'mcx>; NUM_LOCK_STATUS_COLUMNS] =
+        core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; NUM_LOCK_STATUS_COLUMNS];
 
     let tag = &instance.locktag;
@@ -684,7 +690,7 @@ fn fill_lock_row<'mcx>(
 /// `VXIDGetDatum(procNumber, lxid)` (lockfuncs.c) — the "<procNumber>/<lxid>"
 /// text representation of a VXID.
 #[allow(dead_code)]
-fn vxid_datum<'mcx>(mcx: Mcx<'mcx>, proc_number: i32, lxid: u32) -> PgResult<Datum> {
+fn vxid_datum<'mcx>(mcx: Mcx<'mcx>, proc_number: i32, lxid: u32) -> PgResult<Datum<'mcx>> {
     // snprintf(vxidstr, "%d/%u", procNumber, lxid)
     text_datum(mcx, &format!("{proc_number}/{lxid}"))
 }
@@ -694,7 +700,7 @@ fn vxid_datum<'mcx>(mcx: Mcx<'mcx>, proc_number: i32, lxid: u32) -> PgResult<Dat
 /// the lock-method conflict tables (lock.c-internal, genuinely unported), so
 /// the PID list crosses the lock seam; the int4[] construction is this unit's
 /// glue.
-pub fn pg_blocking_pids<'mcx>(mcx: Mcx<'mcx>, blocked_pid: i32) -> PgResult<Datum> {
+pub fn pg_blocking_pids<'mcx>(mcx: Mcx<'mcx>, blocked_pid: i32) -> PgResult<Datum<'mcx>> {
     let pids = lock::blocking_pids::call(mcx, blocked_pid)?;
     construct_int4_array(mcx, &pids[..])
 }
@@ -706,14 +712,18 @@ pub fn pg_blocking_pids<'mcx>(mcx: Mcx<'mcx>, blocked_pid: i32) -> PgResult<Datu
 pub fn pg_safe_snapshot_blocking_pids<'mcx>(
     mcx: Mcx<'mcx>,
     blocked_pid: i32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let pids = lock::safe_snapshot_blocking_pids::call(mcx, blocked_pid)?;
     construct_int4_array(mcx, &pids[..])
 }
 
 /// `construct_array_builtin(datums, n, INT4OID)` for a list of PIDs.
-fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, pids: &[i32]) -> PgResult<Datum> {
-    backend_utils_adt_arrayfuncs_seams::construct_int4_array::call(mcx, pids)
+fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, pids: &[i32]) -> PgResult<Datum<'mcx>> {
+    // The arrayfuncs owner hands back the bare scalar word (a pointer to the
+    // detoasted `int4[]`); carry it in the canonical by-value arm.
+    Ok(Datum::ByVal(
+        backend_utils_adt_arrayfuncs_seams::construct_int4_array::call(mcx, pids)?.as_usize(),
+    ))
 }
 
 // --- advisory locks ---
@@ -926,7 +936,7 @@ pub fn pg_partition_tree<'mcx>(
     _mcx: Mcx<'mcx>,
     _fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     _rootrelid: u32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     funcapi::value_srf_unported::call();
     unreachable!("value_srf_unported panics until the funcapi value-SRF owner lands")
 }
@@ -941,8 +951,8 @@ fn pg_partition_tree_row(
     rootrelid: u32,
     relkind: u8,
     ancestors: &[u32],
-) -> ([Datum; 4], [bool; 4]) {
-    let mut values = [Datum::null(); 4];
+) -> ([Datum<'static>; 4], [bool; 4]) {
+    let mut values: [Datum<'static>; 4] = core::array::from_fn(|_| Datum::null());
     let mut nulls = [false; 4];
 
     // relid
@@ -977,7 +987,7 @@ fn pg_partition_tree_row(
 /// `pg_partition_root(relid)` (partitionfuncs.c): the top-most parent of the
 /// partition tree `relid` belongs to, or NULL if it is not (or cannot be) a
 /// partition-tree member.
-pub fn pg_partition_root<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> PgResult<Datum> {
+pub fn pg_partition_root<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> PgResult<Datum<'mcx>> {
     if !check_rel_can_be_partition(relid)? {
         return Ok(Datum::null());
     }
@@ -1004,7 +1014,7 @@ pub fn pg_partition_ancestors<'mcx>(
     _mcx: Mcx<'mcx>,
     _fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     _relid: u32,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     funcapi::value_srf_unported::call();
     unreachable!("value_srf_unported panics until the funcapi value-SRF owner lands")
 }

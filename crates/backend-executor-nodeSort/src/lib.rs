@@ -185,7 +185,10 @@ pub fn ExecSort<'mcx>(
                 //   tuplesort_putdatum(tuplesortstate, slot->tts_values[0],
                 //                      slot->tts_isnull[0]);
                 let (val, is_null) =
-                    execTuples::slot_getsomeattr::call(estate.slot_mut(slot_id), 1)?;
+                    execTuples::slot_getsomeattr::call(mcx, estate.slot_mut(slot_id), 1)?;
+                // The datum-sort column is `slot->tts_values[0]`; the
+                // tuplesort_putdatum seam now takes the canonical `Datum<'_>`,
+                // so the value flows through unchanged.
                 tuplesort::tuplesort_putdatum::call(&mut tuplesortstate, val, is_null)?;
             }
         } else {
@@ -255,6 +258,11 @@ pub fn ExecSort<'mcx>(
         let (found, val, is_null) =
             tuplesort::tuplesort_getdatum::call(ts, forward, false)?;
         if found {
+            // `tuplesort_getdatum` already returns the canonical `Datum<'mcx>`
+            // (by-value or by-reference), and `exec_store_first_datum` consumes
+            // the same canonical type, so the sorted column value flows through
+            // unchanged — no shim round-trip (the old `from_usize(as_usize())`
+            // hop would have panicked on a by-reference value).
             execTuples::exec_store_first_datum::call(estate, slot, val, is_null)?;
             Ok(true)
         } else {

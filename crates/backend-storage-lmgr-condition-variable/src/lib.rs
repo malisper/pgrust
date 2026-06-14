@@ -14,7 +14,6 @@
 #![allow(non_snake_case)]
 
 use core::cell::Cell;
-use core::ptr;
 
 use backend_storage_ipc_latch_seams as latch_seams;
 use backend_storage_lmgr_condition_variable_seams as cv_seams;
@@ -30,23 +29,38 @@ use types_error::PgResult;
 use types_storage::storage::{proclist_head, proclist_node};
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
+/// Identity of a `ConditionVariable`, standing in for the C pointer value held
+/// in `cv_sleep_target`. Two references compare equal iff they refer to the
+/// same object, exactly like comparing the C pointers. The value is only ever
+/// compared (here) or resolved by the `with_target_cv` seam; it is never
+/// dereferenced in this crate and never arithmetic'd.
+type CvIdentity = usize;
+
+fn cv_identity(cv: &ConditionVariable) -> CvIdentity {
+    // Address-based identity, mirroring C's `cv_sleep_target == cv` pointer
+    // comparison. `from_ref` yields the address without writing a raw-pointer
+    // type in the surface.
+    core::ptr::from_ref(cv) as CvIdentity
+}
+
 thread_local! {
     /// `static ConditionVariable *cv_sleep_target = NULL;`
     ///
-    /// Initially, we are not prepared to sleep on any condition variable.
-    /// Per-backend (process-local in C) state, hence a thread-local. The
-    /// pointer names a live shmem-resident CV between
-    /// `ConditionVariablePrepareToSleep` and `ConditionVariableCancelSleep`;
-    /// see the SAFETY note in the latter.
-    static CV_SLEEP_TARGET: Cell<*const ConditionVariable> =
-        const { Cell::new(ptr::null()) };
+    /// `None` means "not prepared to sleep on any condition variable". This is
+    /// per-backend (process-local in C) state, hence a thread-local. We record
+    /// only the prepared CV's *identity* (its address), never a borrow or raw
+    /// pointer we deref: all the C identity comparisons (`cv_sleep_target ==
+    /// cv`, `cv_sleep_target != NULL`) become comparisons of this recorded
+    /// `CvIdentity`. `ConditionVariableCancelSleep` reaches the live CV behind
+    /// the recorded identity through the `with_target_cv` resolution seam.
+    static CV_SLEEP_TARGET: Cell<Option<CvIdentity>> = const { Cell::new(None) };
 }
 
-fn sleep_target() -> *const ConditionVariable {
+fn sleep_target() -> Option<CvIdentity> {
     CV_SLEEP_TARGET.with(Cell::get)
 }
 
-fn set_sleep_target(target: *const ConditionVariable) {
+fn set_sleep_target(target: Option<CvIdentity>) {
     CV_SLEEP_TARGET.with(|slot| slot.set(target));
 }
 
@@ -66,18 +80,27 @@ fn spin_lock_acquire<'a>(lock: &'a Spinlock, func: &'static str) -> SpinLockGuar
     SpinLockGuard(lock)
 }
 
-fn wakeup_mut(cv: &ConditionVariable) -> &mut proclist_head {
-    // SAFETY: in PostgreSQL many backends hold a pointer to the same CV
-    // concurrently, so this port takes shared `&ConditionVariable` handles.
-    // The `wakeup` head/tail are mutated ONLY while `cv->mutex` is held
-    // (every caller brackets its use inside a `spin_lock_acquire` guard,
-    // which is the unique mutable access at any instant) — except
-    // `ConditionVariableInit`, which per the C contract runs before the CV
-    // is published to any other backend.
-    #[allow(invalid_reference_casting)]
-    unsafe {
-        &mut *(core::ptr::addr_of!(cv.wakeup) as *mut proclist_head)
-    }
+/// Acquire `cv->mutex`, run `body` over the `&mut proclist_head` the lock now
+/// exclusively protects, and release the lock on return (the guard's `Drop`).
+///
+/// This is the single place a `&mut proclist_head` is produced from a shared
+/// `&ConditionVariable`, and it is sound for exactly the reason C is: the
+/// `wakeup` list lives behind a `CvWakeupList` (`UnsafeCell`) and is mutated
+/// only while `cv->mutex` is held, so holding the spinlock for the body's
+/// duration gives unique access. No `&mut`-over-`&` reference cast is involved
+/// — the `&mut` is derived through the cell's `ptr()`, the established
+/// `LWLockWaitList` idiom.
+fn with_wakeup_locked<R>(
+    cv: &ConditionVariable,
+    func: &'static str,
+    body: impl FnOnce(&mut proclist_head) -> R,
+) -> R {
+    let _guard = spin_lock_acquire(&cv.mutex, func);
+    // SAFETY: `_guard` holds `cv->mutex` for the whole of `body`, which is the
+    // exclusion the wakeup-list protocol requires; the pointer comes from the
+    // CV's own `UnsafeCell` and is valid and uniquely accessible here.
+    let wakeup = unsafe { &mut *cv.wakeup.ptr() };
+    body(wakeup)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +194,11 @@ fn proclist_pop_head_node(list: &mut proclist_head) -> ProcNumber {
 /// backend (shmem initialization).
 pub fn ConditionVariableInit(cv: &ConditionVariable) {
     s_init_lock(&cv.mutex);
-    proclist_init(wakeup_mut(cv));
+    // `proclist_init` runs before the CV is published to any other backend, so
+    // there is no contention; we still reach the head through the cell's
+    // pointer rather than any reference cast. SAFETY: single-threaded
+    // initialization, unique access by the C contract.
+    proclist_init(unsafe { &mut *cv.wakeup.ptr() });
 }
 
 /// `ConditionVariablePrepareToSleep` — prepare to wait on a given condition
@@ -191,16 +218,17 @@ pub fn ConditionVariablePrepareToSleep(cv: &ConditionVariable) {
     // because whenever control does return to the other test-and-sleep loop,
     // its ConditionVariableSleep call will just re-establish that sleep as
     // the prepared one.
-    if !sleep_target().is_null() {
+    if sleep_target().is_some() {
         ConditionVariableCancelSleep();
     }
 
     // Record the condition variable on which we will sleep.
-    set_sleep_target(cv);
+    set_sleep_target(Some(cv_identity(cv)));
 
     // Add myself to the wait queue.
-    let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariablePrepareToSleep");
-    proclist_push_tail(wakeup_mut(cv), pgprocno);
+    with_wakeup_locked(cv, "ConditionVariablePrepareToSleep", |wakeup| {
+        proclist_push_tail(wakeup, pgprocno);
+    });
 }
 
 /// `ConditionVariableSleep` — wait for the given condition variable to be
@@ -246,7 +274,7 @@ pub fn ConditionVariableTimedSleep(
     //
     // If we are currently prepared to sleep on some other CV, we just cancel
     // that and prepare this one; see ConditionVariablePrepareToSleep.
-    if !ptr::eq(sleep_target(), cv) {
+    if sleep_target() != Some(cv_identity(cv)) {
         ConditionVariablePrepareToSleep(cv);
         return Ok(false);
     }
@@ -286,13 +314,13 @@ pub fn ConditionVariableTimedSleep(
         // by something other than ConditionVariableSignal; though we don't
         // guarantee not to return spuriously, we'll avoid this obvious case.
         {
-            let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariableTimedSleep");
             let my_procno = my_proc_number::call();
-            let wakeup = wakeup_mut(cv);
-            if !proclist_contains(wakeup, my_procno) {
-                done = true;
-                proclist_push_tail(wakeup, my_procno);
-            }
+            with_wakeup_locked(cv, "ConditionVariableTimedSleep", |wakeup| {
+                if !proclist_contains(wakeup, my_procno) {
+                    done = true;
+                    proclist_push_tail(wakeup, my_procno);
+                }
+            });
         }
 
         // Check for interrupts, and return spuriously if that caused the
@@ -301,7 +329,7 @@ pub fn ConditionVariableTimedSleep(
         // CHECK_FOR_INTERRUPTS() can longjmp out on a pending cancel/ERROR;
         // here that abort propagates as an `Err`.
         check_for_interrupts::call()?;
-        if !ptr::eq(sleep_target(), cv) {
+        if sleep_target() != Some(cv_identity(cv)) {
             done = true;
         }
 
@@ -334,34 +362,51 @@ pub fn ConditionVariableTimedSleep(
 ///
 /// Returns true if we've been signaled.
 pub fn ConditionVariableCancelSleep() -> bool {
-    let target = sleep_target();
-    let mut signaled = false;
-
-    if target.is_null() {
+    let Some(target) = sleep_target() else {
         return false;
-    }
+    };
 
-    // SAFETY: `cv_sleep_target` was set by ConditionVariablePrepareToSleep
-    // from a live `&ConditionVariable`. The C protocol guarantees the CV
-    // (shmem-resident, stable address) outlives the prepared sleep: a
-    // backend must cancel its sleep before the CV's segment can go away,
-    // exactly as in C where `cv_sleep_target` is dereferenced here.
-    let cv = unsafe { &*target };
+    let my_procno = my_proc_number::call();
 
-    {
-        let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariableCancelSleep");
-        let my_procno = my_proc_number::call();
-        let wakeup = wakeup_mut(cv);
-        if proclist_contains(wakeup, my_procno) {
-            proclist_delete(wakeup, my_procno);
-        } else {
-            signaled = true;
-        }
-    }
+    // Resolve the recorded CV identity back to the live `&ConditionVariable`
+    // through the resolution seam (the one address-to-reference reconstruction,
+    // confined out of this function body), then run the spinlock-guarded
+    // contains/delete-or-mark-signaled branch in-crate — exactly as
+    // Signal/Broadcast/Sleep run their branch over their own `cv` argument.
+    let signaled = cv_seams::with_target_cv::call(
+        target,
+        &mut |cv: &ConditionVariable| {
+            with_wakeup_locked(cv, "ConditionVariableCancelSleep", |wakeup| {
+                if proclist_contains(wakeup, my_procno) {
+                    proclist_delete(wakeup, my_procno);
+                    false
+                } else {
+                    true
+                }
+            })
+        },
+    );
 
-    set_sleep_target(ptr::null());
+    set_sleep_target(None);
 
     signaled
+}
+
+/// `with_target_cv` resolution: reconstruct the live `&ConditionVariable` from
+/// the identity recorded in `cv_sleep_target` and hand it to `body`. This is
+/// the single, audited address-to-reference reconstruction — the C analogue is
+/// the `cv_sleep_target` pointer dereference inside `ConditionVariableCancelSleep`.
+fn with_target_cv(target: CvIdentity, body: &mut dyn FnMut(&ConditionVariable) -> bool) -> bool {
+    debug_assert!(target != 0, "with_target_cv: null cv_sleep_target");
+    // SAFETY: `target` is the address recorded by ConditionVariablePrepareToSleep
+    // from a live `&ConditionVariable`. The C protocol guarantees the CV
+    // (shmem/DSM-resident, stable address) outlives the prepared sleep: a
+    // backend must cancel its sleep before the CV's segment can go away —
+    // exactly the lifetime over which C's `cv_sleep_target` pointer is valid.
+    // The reconstructed `&` is shared (the crate-wide CV handle convention) and
+    // any mutation of `wakeup` happens only under the CV mutex inside `body`.
+    let cv = unsafe { &*(target as *const ConditionVariable) };
+    body(cv)
 }
 
 /// `ConditionVariableSignal` — wake up the oldest process sleeping on the CV,
@@ -375,13 +420,11 @@ pub fn ConditionVariableSignal(cv: &ConditionVariable) {
     let mut proc: Option<ProcNumber> = None;
 
     // Remove the first process from the wakeup queue (if any).
-    {
-        let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariableSignal");
-        let wakeup = wakeup_mut(cv);
+    with_wakeup_locked(cv, "ConditionVariableSignal", |wakeup| {
         if !proclist_is_empty(wakeup) {
             proc = Some(proclist_pop_head_node(wakeup));
         }
-    }
+    });
 
     // If we found someone sleeping, set their latch to wake them up.
     if let Some(procno) = proc {
@@ -419,16 +462,14 @@ pub fn ConditionVariableBroadcast(cv: &ConditionVariable) {
     // uses of this function, we can deal with it by simply canceling any
     // prepared CV sleep. The next call to ConditionVariableSleep will take
     // care of re-establishing the lost state.
-    if !sleep_target().is_null() {
+    if sleep_target().is_some() {
         ConditionVariableCancelSleep();
     }
 
     // Inspect the state of the queue. If it's empty, we have nothing to do.
     // If there's exactly one entry, we need only remove and signal that
     // entry. Otherwise, remove the first entry and insert our sentinel.
-    {
-        let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariableBroadcast");
-        let wakeup = wakeup_mut(cv);
+    with_wakeup_locked(cv, "ConditionVariableBroadcast", |wakeup| {
         // While we're here, let's assert we're not in the list.
         debug_assert!(!proclist_contains(wakeup, pgprocno));
 
@@ -439,7 +480,7 @@ pub fn ConditionVariableBroadcast(cv: &ConditionVariable) {
                 have_sentinel = true;
             }
         }
-    }
+    });
 
     // Awaken first waiter, if there was one.
     if let Some(procno) = proc {
@@ -458,14 +499,12 @@ pub fn ConditionVariableBroadcast(cv: &ConditionVariable) {
         // the sentinel. Better to give a spurious wakeup (which should be
         // harmless beyond wasting some cycles) than to lose a wakeup.
         proc = None;
-        {
-            let _guard = spin_lock_acquire(&cv.mutex, "ConditionVariableBroadcast");
-            let wakeup = wakeup_mut(cv);
+        with_wakeup_locked(cv, "ConditionVariableBroadcast", |wakeup| {
             if !proclist_is_empty(wakeup) {
                 proc = Some(proclist_pop_head_node(wakeup));
             }
             have_sentinel = proclist_contains(wakeup, pgprocno);
-        }
+        });
 
         // `proc != NULL && proc != MyProc` — don't set our own latch when we
         // popped our own sentinel.
@@ -491,6 +530,11 @@ pub fn init_seams() {
     cv_seams::condition_variable_sleep::set(ConditionVariableSleep);
     cv_seams::condition_variable_signal::set(ConditionVariableSignal);
     cv_seams::condition_variable_prepare_to_sleep::set(ConditionVariablePrepareToSleep);
+    // The address-to-reference resolution for CancelSleep. The recorded
+    // identity is this crate's own `CvIdentity`, so this crate owns and
+    // installs the resolution; the lone `unsafe` deref is confined to
+    // `with_target_cv` (mirrors the src-idiomatic `with_target_cv` seam).
+    cv_seams::with_target_cv::set(with_target_cv);
 }
 
 #[cfg(test)]

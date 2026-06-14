@@ -7,7 +7,9 @@
 //! (e.g. `ExecSupportsMarkRestore`) needs no resolution seam. Variants and
 //! fields are added as their consuming units are ported.
 
-use mcx::{PgBox, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
+use types_error::PgResult;
+
 use crate::nodes::NodeTag;
 
 /// `Path` (pathnodes.h) — the abstract base every path node embeds first.
@@ -20,11 +22,32 @@ pub struct PathData {
     pub pathtype: NodeTag,
 }
 
+impl PathData {
+    /// Deep copy of the embedded `Path` base into `mcx` (C: `copyObject`
+    /// shape). Fallible to mirror the family-wide `clone_in` convention; the
+    /// only field is the `Copy` `pathtype` tag.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<PathData> {
+        Ok(PathData {
+            pathtype: self.pathtype,
+        })
+    }
+}
+
 /// `IndexOptInfo` (pathnodes.h) — per-index planning information, trimmed.
 #[derive(Debug)]
 pub struct IndexOptInfo {
     /// `bool amcanmarkpos` — does the index AM support mark/restore?
     pub amcanmarkpos: bool,
+}
+
+impl IndexOptInfo {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible to mirror the
+    /// family-wide `clone_in` convention; the only field is a `Copy` `bool`.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<IndexOptInfo> {
+        Ok(IndexOptInfo {
+            amcanmarkpos: self.amcanmarkpos,
+        })
+    }
 }
 
 /// `IndexPath` (pathnodes.h), trimmed.
@@ -37,6 +60,17 @@ pub struct IndexPath<'mcx> {
     pub indexinfo: PgBox<'mcx, IndexOptInfo>,
 }
 
+impl IndexPath<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates the embedded `IndexOptInfo`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexPath<'b>> {
+        Ok(IndexPath {
+            path: self.path.clone_in(mcx)?,
+            indexinfo: mcx::alloc_in(mcx, self.indexinfo.clone_in(mcx)?)?,
+        })
+    }
+}
+
 /// `CustomPath` (pathnodes.h), trimmed.
 #[derive(Debug)]
 pub struct CustomPath {
@@ -44,6 +78,17 @@ pub struct CustomPath {
     pub path: PathData,
     /// `uint32 flags` — mask of `CUSTOMPATH_*` flags.
     pub flags: u32,
+}
+
+impl CustomPath {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible to mirror the
+    /// family-wide `clone_in` convention.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CustomPath> {
+        Ok(CustomPath {
+            path: self.path.clone_in(mcx)?,
+            flags: self.flags,
+        })
+    }
 }
 
 /// `ProjectionPath` (pathnodes.h) — a projection over a subpath, trimmed.
@@ -57,6 +102,17 @@ pub struct ProjectionPath<'mcx> {
     pub subpath: PgBox<'mcx, PathNode<'mcx>>,
 }
 
+impl ProjectionPath<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// recurses into the owned `subpath`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ProjectionPath<'b>> {
+        Ok(ProjectionPath {
+            path: self.path.clone_in(mcx)?,
+            subpath: mcx::alloc_in(mcx, self.subpath.clone_in(mcx)?)?,
+        })
+    }
+}
+
 /// `MinMaxAggPath` (pathnodes.h), trimmed — a childless-Result producer.
 #[derive(Debug)]
 pub struct MinMaxAggPath {
@@ -64,11 +120,31 @@ pub struct MinMaxAggPath {
     pub path: PathData,
 }
 
+impl MinMaxAggPath {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible to mirror the
+    /// family-wide `clone_in` convention.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MinMaxAggPath> {
+        Ok(MinMaxAggPath {
+            path: self.path.clone_in(mcx)?,
+        })
+    }
+}
+
 /// `GroupResultPath` (pathnodes.h), trimmed — a childless-Result producer.
 #[derive(Debug)]
 pub struct GroupResultPath {
     /// `Path path` — the embedded base (pathtype `T_Result`).
     pub path: PathData,
+}
+
+impl GroupResultPath {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible to mirror the
+    /// family-wide `clone_in` convention.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GroupResultPath> {
+        Ok(GroupResultPath {
+            path: self.path.clone_in(mcx)?,
+        })
+    }
 }
 
 /// `AppendPath` (pathnodes.h), trimmed.
@@ -80,6 +156,21 @@ pub struct AppendPath<'mcx> {
     pub subpaths: PgVec<'mcx, PathNode<'mcx>>,
 }
 
+impl AppendPath<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying recurses
+    /// into the owned `subpaths` list.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AppendPath<'b>> {
+        let mut subpaths = mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
+        for child in self.subpaths.iter() {
+            subpaths.push(child.clone_in(mcx)?);
+        }
+        Ok(AppendPath {
+            path: self.path.clone_in(mcx)?,
+            subpaths,
+        })
+    }
+}
+
 /// `MergeAppendPath` (pathnodes.h), trimmed.
 #[derive(Debug)]
 pub struct MergeAppendPath<'mcx> {
@@ -87,6 +178,21 @@ pub struct MergeAppendPath<'mcx> {
     pub path: PathData,
     /// `List *subpaths` — the component Paths.
     pub subpaths: PgVec<'mcx, PathNode<'mcx>>,
+}
+
+impl MergeAppendPath<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying recurses
+    /// into the owned `subpaths` list.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MergeAppendPath<'b>> {
+        let mut subpaths = mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
+        for child in self.subpaths.iter() {
+            subpaths.push(child.clone_in(mcx)?);
+        }
+        Ok(MergeAppendPath {
+            path: self.path.clone_in(mcx)?,
+            subpaths,
+        })
+    }
 }
 
 /// A path-tree node (`Path *` in C). The concrete node type (`IsA`) is the
@@ -125,6 +231,21 @@ impl PathNode<'_> {
             PathNode::GroupResultPath(p) => &p.path,
             PathNode::AppendPath(p) => &p.path,
             PathNode::MergeAppendPath(p) => &p.path,
+        }
+    }
+
+    /// Deep copy of the path node (and its sub-path tree) into `mcx`
+    /// (C: `copyObject` shape). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PathNode<'b>> {
+        match self {
+            PathNode::Path(p) => Ok(PathNode::Path(p.clone_in(mcx)?)),
+            PathNode::IndexPath(p) => Ok(PathNode::IndexPath(p.clone_in(mcx)?)),
+            PathNode::CustomPath(p) => Ok(PathNode::CustomPath(p.clone_in(mcx)?)),
+            PathNode::ProjectionPath(p) => Ok(PathNode::ProjectionPath(p.clone_in(mcx)?)),
+            PathNode::MinMaxAggPath(p) => Ok(PathNode::MinMaxAggPath(p.clone_in(mcx)?)),
+            PathNode::GroupResultPath(p) => Ok(PathNode::GroupResultPath(p.clone_in(mcx)?)),
+            PathNode::AppendPath(p) => Ok(PathNode::AppendPath(p.clone_in(mcx)?)),
+            PathNode::MergeAppendPath(p) => Ok(PathNode::MergeAppendPath(p.clone_in(mcx)?)),
         }
     }
 }

@@ -35,5 +35,8 @@ seam_core::seam!(
         state: &mut ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        bool,
+    )>
 );

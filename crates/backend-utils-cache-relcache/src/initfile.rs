@@ -294,8 +294,8 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
 /// and the rule/trigger/RLS builders are owner seams (syscache/derived);
 /// `RelationInitTableAccessMethod` is the index family. The own logic is the
 /// decision of which fields are missing and the restart protocol.
-#[allow(unsafe_code)]
 fn finish_relcache_entries() -> PgResult<()> {
+    use crate::core_entry_store::{with_rel, with_rel_mut};
     loop {
         // Snapshot the current set of cached relation OIDs (the C
         // `hash_seq_init`/`hash_seq_search` walk; the snapshot lets us mutate
@@ -308,62 +308,59 @@ fn finish_relcache_entries() -> PgResult<()> {
                 None => continue,
             };
             RelationIncrementReferenceCount(rd)?;
-            // SAFETY: live cache-owned descriptor, pinned above.
-            let r = unsafe { &mut *rd };
 
-            if r.rd_rel.relowner == InvalidOid {
+            if with_rel(rd, |r| r.rd_rel.relowner == InvalidOid) {
                 // C: SearchSysCache1(RELOID, rd_id) + memcpy of pg_class +
                 // RelationParseRelOptions; the syscache read is the owner seam.
                 let relp = xunit::SearchSysCacheRelOid(oid)?;
-                r.rd_rel = relp;
-                crate::build::RelationParseRelOptions(r)?;
-                if r.rd_rel.relowner == InvalidOid {
+                let bad = with_rel_mut(rd, |r| {
+                    r.rd_rel = relp;
+                    crate::build::RelationParseRelOptions(r)?;
+                    Ok::<bool, backend_utils_error::PgError>(r.rd_rel.relowner == InvalidOid)
+                })?;
+                if bad {
+                    let relname = with_rel(rd, |r| r.rd_rel.relname.clone());
                     crate::core_entry_store::RelationDecrementReferenceCount(rd)?;
                     return Err(ereport(ERROR)
                         .errmsg_internal(format!(
-                            "invalid relowner in pg_class entry for \"{}\"",
-                            r.rd_rel.relname
+                            "invalid relowner in pg_class entry for \"{relname}\""
                         ))
                         .into_error());
                 }
                 restart = true;
             }
-            if r.rd_rel.relhasrules && !r.rd_has_rules {
-                crate::derived::RelationBuildRuleLock(rd)?;
-                // SAFETY: still pinned.
-                let r = unsafe { &mut *rd };
-                if !r.rd_has_rules {
-                    r.rd_rel.relhasrules = false;
-                }
+            if with_rel(rd, |r| r.rd_rel.relhasrules && !r.rd_has_rules) {
+                with_rel_mut(rd, crate::derived::RelationBuildRuleLock)?;
+                with_rel_mut(rd, |r| {
+                    if !r.rd_has_rules {
+                        r.rd_rel.relhasrules = false;
+                    }
+                });
                 restart = true;
             }
-            // SAFETY: still pinned.
-            let r = unsafe { &mut *rd };
-            if r.rd_rel.relhastriggers && !r.rd_has_trigdesc {
+            if with_rel(rd, |r| r.rd_rel.relhastriggers && !r.rd_has_trigdesc) {
                 xunit::RelationBuildTriggers(rd)?;
-                // SAFETY: still pinned.
-                let r = unsafe { &mut *rd };
-                if !r.rd_has_trigdesc {
-                    r.rd_rel.relhastriggers = false;
-                }
+                with_rel_mut(rd, |r| {
+                    if !r.rd_has_trigdesc {
+                        r.rd_rel.relhastriggers = false;
+                    }
+                });
                 restart = true;
             }
-            // SAFETY: still pinned.
-            let r = unsafe { &mut *rd };
-            if r.rd_rel.relrowsecurity && !r.rd_has_rsdesc {
+            if with_rel(rd, |r| r.rd_rel.relrowsecurity && !r.rd_has_rsdesc) {
                 xunit::RelationBuildRowSecurity(rd)?;
                 restart = true;
             }
-            // SAFETY: still pinned.
-            let r = unsafe { &mut *rd };
-            let relkind = r.rd_rel.relkind as u8;
-            if r.rd_tableam.is_none()
-                && (relkind == RELKIND_RELATION
-                    || relkind == RELKIND_TOASTVALUE
-                    || relkind == RELKIND_MATVIEW
-                    || relkind == RELKIND_SEQUENCE)
-            {
-                crate::index::RelationInitTableAccessMethod(rd)?;
+            let needs_tableam = with_rel(rd, |r| {
+                let relkind = r.rd_rel.relkind as u8;
+                r.rd_tableam.is_none()
+                    && (relkind == RELKIND_RELATION
+                        || relkind == RELKIND_TOASTVALUE
+                        || relkind == RELKIND_MATVIEW
+                        || relkind == RELKIND_SEQUENCE)
+            });
+            if needs_tableam {
+                with_rel_mut(rd, crate::index::RelationInitTableAccessMethod)?;
                 restart = true;
             }
             crate::core_entry_store::RelationDecrementReferenceCount(rd)?;
@@ -386,7 +383,6 @@ fn finish_relcache_entries() -> PgResult<()> {
 /// system-catalog index into the cache during phase 3. **Own logic**; the lock
 /// manager is an owner seam and `RelationGetIndexAttOptions` is the real
 /// in-crate derived-family routine.
-#[allow(unsafe_code)]
 pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
     // C: LockRelationOid(heapoid, AccessShareLock); LockRelationOid(indexoid,
     // AccessShareLock); — lock manager owner seam.
@@ -395,18 +391,17 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
 
     // C: ird = RelationBuildDesc(indexoid, true); — in-crate build family.
     let ird = crate::build::RelationBuildDesc(indexoid, true)?;
-    if ird.is_null() {
+    if ird == InvalidOid {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DATA_CORRUPTED)
             .errmsg_internal(format!("could not open critical system index {indexoid}"))
             .into_error());
     }
     // C: ird->rd_isnailed = true; ird->rd_refcnt = 1;
-    // SAFETY: freshly built, cache-owned descriptor.
-    unsafe {
-        (*ird).rd_isnailed = true;
-        (*ird).rd_refcnt = 1;
-    }
+    crate::core_entry_store::with_rel_mut(ird, |r| {
+        r.rd_isnailed = true;
+        r.rd_refcnt = 1;
+    });
     // C: UnlockRelationOid(indexoid/heapoid, AccessShareLock); — owner seam.
     xunit::UnlockRelationOid(indexoid)?;
     xunit::UnlockRelationOid(heapoid)?;
@@ -414,7 +409,9 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
     // per-column opclass index options (the leaf `get_attoptions` /
     // `index_opclass_options` primitives are the only cross-unit calls, reached
     // via real seams inside the derived-family implementation).
-    crate::derived::RelationGetIndexAttOptions(ird, false)?;
+    crate::core_entry_store::with_rel_mut(ird, |r| {
+        crate::derived::RelationGetIndexAttOptions(r, false)
+    })?;
     Ok(())
 }
 
@@ -429,7 +426,6 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
 /// the build/index families; this family's signature carries the scalar identity
 /// the entry stores directly plus the `relfilenumber` the C uses to set
 /// `relfilenode` (unmapped relations) or seed the relation map (mapped).
-#[allow(unsafe_code)]
 pub fn RelationBuildLocalRelation(
     relname: &str,
     relnamespace: Oid,
@@ -440,7 +436,7 @@ pub fn RelationBuildLocalRelation(
     relpersistence: i8,
     relkind: i8,
     relfilenumber: types_core::RelFileNumber,
-) -> PgResult<*mut RelationData> {
+) -> PgResult<Oid> {
     // C: nailit for the seven bootstrap-nailed catalogs.
     let nailit = matches!(
         relid,
@@ -549,11 +545,9 @@ pub fn RelationBuildLocalRelation(
     rel.rd_rel = relform;
 
     // C: RelationInitLockInfo(rel); RelationInitPhysicalAddr(rel); — index
-    // family (physical addr) over the owned entry.
-    let rel_ptr = Box::into_raw(rel);
-    crate::index::RelationInitPhysicalAddr(rel_ptr)?;
-    // SAFETY: just-boxed descriptor, sole owner here.
-    unsafe { (*rel_ptr).rd_rel.relam = InvalidOid };
+    // family (physical addr) over the owned (not-yet-inserted) entry.
+    crate::index::RelationInitPhysicalAddr(&mut rel)?;
+    rel.rd_rel.relam = InvalidOid;
 
     // C: for relations with storage AM, RelationInitTableAccessMethod(rel).
     let relkind_u = relkind as u8;
@@ -562,43 +556,23 @@ pub fn RelationBuildLocalRelation(
         || relkind_u == RELKIND_MATVIEW
         || relkind_u == RELKIND_SEQUENCE
     {
-        crate::index::RelationInitTableAccessMethod(rel_ptr)?;
+        crate::index::RelationInitTableAccessMethod(&mut rel)?;
     }
+
+    // C: rel->rd_isvalid = true (set before insert; the entry is valid).
+    rel.rd_isvalid = true;
 
     // C: RelationCacheInsert(rel, true) — replace-allowed; on a same-OID
     // collision the C destroys the old entry if unreferenced or warns if still
-    // referenced (outside bootstrap). `cache_insert` returns the displaced
-    // descriptor; reclaim it when unreferenced.
-    // SAFETY: re-take ownership of the boxed descriptor for insertion.
-    let rel_box = unsafe { Box::from_raw(rel_ptr) };
-    let oldrel = cache_insert(rel_box, true)?;
-    if let Some(old_ptr) = oldrel {
-        // SAFETY: the displaced descriptor was cache-owned; it is no longer in
-        // the cache (its slot now points at the new entry).
-        let old_refcnt = unsafe { (*old_ptr).rd_refcnt };
-        if old_refcnt == 0 {
-            // C: RelationDestroyRelation(oldrel, false) — drop the owned tree.
-            // SAFETY: unreferenced, removed from the cache.
-            unsafe { drop(Box::from_raw(old_ptr)) };
-        } else if !xunit::IsBootstrapProcessingMode() {
-            // C: WARNING "leaking still-referenced relcache entry".
-            let _ = ereport(WARNING)
-                .errmsg_internal("leaking still-referenced relcache entry")
-                .into_error();
-        }
-    }
-
-    // Re-resolve the stable cache pointer for the just-inserted entry.
-    let installed = crate::core_entry_store::cache_lookup(relid).expect("just inserted");
+    // referenced (outside bootstrap). The entry store handles that displacement.
+    cache_insert(rel, true)?;
 
     // C: EOXactListAdd(rel).
     with_state(|st| eoxact_list_add(st, relid));
 
-    // C: rel->rd_isvalid = true; RelationIncrementReferenceCount(rel);
-    // SAFETY: live cache-owned descriptor.
-    unsafe { (*installed).rd_isvalid = true };
-    RelationIncrementReferenceCount(installed)?;
-    Ok(installed)
+    // C: RelationIncrementReferenceCount(rel);
+    RelationIncrementReferenceCount(relid)?;
+    Ok(relid)
 }
 
 /* ==========================================================================
@@ -635,16 +609,19 @@ fn relkind_has_table_am(relkind: i8) -> bool {
 /// (catalog), `CacheInvalidateRelcache` (inval), `GetCurrentTransactionId` /
 /// `CommandCounterIncrement` (xact) — are owner seams (panic until each owner
 /// lands). The trailing `RelationAssumeNewRelfilelocator` is own logic.
-#[allow(unsafe_code)]
-pub fn RelationSetNewRelfilenumber(relation: *mut RelationData, persistence: i8) -> PgResult<()> {
-    // SAFETY: live cache-owned descriptor.
-    let rd = unsafe { &*relation };
-    let relid = rd.rd_id;
-    let relkind = rd.rd_rel.relkind;
-    let reltablespace = rd.rd_rel.reltablespace;
-    let relisshared = rd.rd_rel.relisshared;
-    let rd_locator = rd.rd_locator;
-    let rd_backend = rd.rd_backend;
+pub fn RelationSetNewRelfilenumber(relation: Oid, persistence: i8) -> PgResult<()> {
+    let (relid, relkind, reltablespace, relisshared, rd_locator, rd_backend, relfilenode) =
+        crate::core_entry_store::with_rel(relation, |rd| {
+            (
+                rd.rd_id,
+                rd.rd_rel.relkind,
+                rd.rd_rel.reltablespace,
+                rd.rd_rel.relisshared,
+                rd.rd_locator,
+                rd.rd_backend,
+                rd.rd_rel.relfilenode,
+            )
+        });
 
     let is_binary_upgrade = backend_catalog_binary_upgrade_seams::is_binary_upgrade::call();
 
@@ -726,7 +703,7 @@ pub fn RelationSetNewRelfilenumber(relation: *mut RelationData, persistence: i8)
     // C: RelationIsMapped(relation) == RELKIND_HAS_STORAGE && relfilenode ==
     //    InvalidRelFileNumber.
     let is_mapped =
-        relkind_has_storage(relkind) && rd.rd_rel.relfilenode == InvalidRelFileNumber;
+        relkind_has_storage(relkind) && relfilenode == InvalidRelFileNumber;
     if is_mapped {
         // C: in some paths the would-be tuple update is the only thing that
         // assigns an XID, but we must have one to delete files — force one.
@@ -768,16 +745,15 @@ pub fn RelationSetNewRelfilenumber(relation: *mut RelationData, persistence: i8)
 
 /// `RelationAssumeNewRelfilelocator(relation)` (relcache.c): update the
 /// `rd_*Subid` tracking after an external relfilenumber change. **Own logic.**
-#[allow(unsafe_code)]
-pub fn RelationAssumeNewRelfilelocator(relation: *mut RelationData) -> PgResult<()> {
+pub fn RelationAssumeNewRelfilelocator(relation: Oid) -> PgResult<()> {
     let subid = xunit::GetCurrentSubTransactionId();
-    // SAFETY: live cache-owned descriptor.
-    let rd = unsafe { &mut *relation };
-    rd.rd_newRelfilelocatorSubid = subid;
-    if rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId {
-        rd.rd_firstRelfilelocatorSubid = rd.rd_newRelfilelocatorSubid;
-    }
-    let relid = rd.rd_id;
+    let relid = crate::core_entry_store::with_rel_mut(relation, |rd| {
+        rd.rd_newRelfilelocatorSubid = subid;
+        if rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId {
+            rd.rd_firstRelfilelocatorSubid = rd.rd_newRelfilelocatorSubid;
+        }
+        rd.rd_id
+    });
     // C: EOXactListAdd(relation).
     with_state(|st| eoxact_list_add(st, relid));
     Ok(())
@@ -803,7 +779,6 @@ pub fn RelationAssumeNewRelfilelocator(relation: *mut RelationData) -> PgResult<
 /// relcache entries to the on-disk init file. **Own logic** (item framing,
 /// per-entry field sequence, the `RelCacheInitLock` rename dance); the file IO
 /// is the owner seam.
-#[allow(unsafe_code)]
 pub fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     // C: if (relcacheInvalsReceived != 0) return; (don't write a stale file).
     if with_state(|st| st.relcache_invals_received) != 0 {
@@ -834,21 +809,23 @@ pub fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     // C: hash_seq over RelationIdCache; serialize matching nailed entries.
     let oids: Vec<Oid> = with_state(|st| crate::core_entry_store::id_cache_oids(st));
     for oid in oids {
-        let rd = match crate::core_entry_store::cache_lookup(oid) {
-            Some(p) => p,
-            None => continue,
-        };
-        // SAFETY: live cache-owned descriptor.
-        let r = unsafe { &*rd };
-        // C: if (relform->relisshared != shared) continue;
-        if r.rd_rel.relisshared != shared {
+        if crate::core_entry_store::cache_lookup(oid).is_none() {
             continue;
         }
-        // C: if (!shared && !RelationIdIsInInitFile(rel->rd_id)) continue;
-        if !shared && !RelationIdIsInInitFile(r.rd_id) {
+        // C: if (relform->relisshared != shared) continue; if (!shared &&
+        // !RelationIdIsInInitFile(rel->rd_id)) continue; else write_item(...).
+        // RelationIdIsInInitFile re-enters the store (read-only), so decide it
+        // before opening the borrow.
+        let (skip, is_in_init_file) = crate::core_entry_store::with_rel(oid, |r| {
+            (r.rd_rel.relisshared != shared, r.rd_id)
+        });
+        if skip {
             continue;
         }
-        write_entry(&mut buf, r);
+        if !shared && !RelationIdIsInInitFile(is_in_init_file) {
+            continue;
+        }
+        crate::core_entry_store::with_rel(oid, |r| write_entry(&mut buf, r));
     }
 
     // C: FreeFile; LWLockAcquire(RelCacheInitLock); AcceptInvalidationMessages;
@@ -1018,7 +995,6 @@ fn encode_i16_vec(xs: &[i16]) -> Vec<u8> {
 /// rebuild-from-catalog. **Own logic** (the magic check, item framing, the
 /// per-entry field sequence, the nailed-rel/index validation, and the cache
 /// install); the file IO and table-AM/index re-init are owner seams.
-#[allow(unsafe_code)]
 pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
     // C: build the file name; fp = AllocateFile(initfilename, PG_BINARY_R);
     let initfilename = if shared {
@@ -1129,10 +1105,8 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
                     None => return read_failed(rels),
                 }
             };
-            // C: InitIndexAmRoutine(rel) — index family.
-            // SAFETY: `rel` is the sole owner here; the raw pointer is used only
-            // for the duration of this call (the family mutates the entry).
-            crate::index::InitIndexAmRoutine(&mut *rel as *mut RelationData)?;
+            // C: InitIndexAmRoutine(rel) — index family (on the local entry).
+            crate::index::InitIndexAmRoutine(&mut rel)?;
             // C: rd_opfamily / rd_opcintype / rd_support / rd_indcollation /
             // rd_indoption, then per-column rd_opcoptions.
             rel.rd_opfamily = match cur.read_item() {
@@ -1174,8 +1148,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
                 || relkind == RELKIND_MATVIEW
                 || relkind == RELKIND_SEQUENCE
             {
-                // SAFETY: `rel` is the sole owner; raw pointer used only here.
-                crate::index::RelationInitTableAccessMethod(&mut *rel as *mut RelationData)?;
+                crate::index::RelationInitTableAccessMethod(&mut rel)?;
             }
         }
 
@@ -1207,10 +1180,8 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         rel.rd_firstRelfilelocatorSubid = InvalidSubTransactionId;
         rel.rd_droppedSubid = InvalidSubTransactionId;
         // C: RelationInitLockInfo(rel); RelationInitPhysicalAddr(rel).
-        let p = Box::into_raw(rel);
-        crate::index::RelationInitPhysicalAddr(p)?;
-        // SAFETY: sole owner of the just-boxed descriptor.
-        rels.push(unsafe { Box::from_raw(p) });
+        crate::index::RelationInitPhysicalAddr(&mut rel)?;
+        rels.push(rel);
     }
 
     // C: validate the nailed-rel/index counts against expectations.
@@ -1230,21 +1201,11 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         return read_failed(rels);
     }
 
-    // C: install every entry into RelationIdCache (replace-allowed).
+    // C: install every entry into RelationIdCache (replace-allowed). The entry
+    // store handles a same-OID displacement (destroy-if-unreferenced /
+    // leak-warning), the C `RelationCacheInsert` macro's collision arm.
     for rel in rels {
-        let oldrel = cache_insert(rel, true)?;
-        if let Some(old_ptr) = oldrel {
-            // SAFETY: displaced descriptor, no longer in the cache.
-            let refcnt = unsafe { (*old_ptr).rd_refcnt };
-            if refcnt == 0 {
-                // SAFETY: unreferenced, removed from cache.
-                unsafe { drop(Box::from_raw(old_ptr)) };
-            } else if !xunit::IsBootstrapProcessingMode() {
-                let _ = ereport(WARNING)
-                    .errmsg_internal("leaking still-referenced relcache entry")
-                    .into_error();
-            }
-        }
+        cache_insert(rel, true)?;
     }
 
     // C: set the critical-built flags for this scope.
@@ -1807,13 +1768,13 @@ mod xunit {
     /// `RelationBuildTriggers(rel)` (trigger.c): scan `pg_trigger`, build
     /// `rel->trigdesc`. Mutates the relcache entry in place; the trigger unit is
     /// not yet ported. Panics until it lands.
-    pub(super) fn RelationBuildTriggers(_rel: *mut RelationData) -> PgResult<()> {
+    pub(super) fn RelationBuildTriggers(_rel: types_core::primitive::Oid) -> PgResult<()> {
         panic!("relcache-initfile: RelationBuildTriggers (backend-commands-trigger not yet ported)")
     }
     /// `RelationBuildRowSecurity(rel)` (policy.c): scan `pg_policy`, build
     /// `rel->rd_rsdesc`. Mutates the relcache entry in place; the policy unit is
     /// not yet ported. Panics until it lands.
-    pub(super) fn RelationBuildRowSecurity(_rel: *mut RelationData) -> PgResult<()> {
+    pub(super) fn RelationBuildRowSecurity(_rel: types_core::primitive::Oid) -> PgResult<()> {
         panic!("relcache-initfile: RelationBuildRowSecurity (backend-commands-policy not yet ported)")
     }
 }

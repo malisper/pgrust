@@ -29,9 +29,15 @@ seam_core::seam!(
     /// is the entry point the interpreter's `EEOP_SUBPLAN` step calls
     /// (`*op->resvalue = ExecSubPlan(sstate, econtext, op->resnull)`). Can
     /// `ereport(ERROR)` (sanity checks, sub-execution); carried on `Err`.
+    ///
+    /// Datum-unification: the returned value is the canonical unified value
+    /// type (`types_tuple::Datum<'mcx>`). A scalar sub-select result rides the
+    /// by-value arm (the C `Datum` machine word); ARRAY/EXPR_SUBLINK results
+    /// that C returns as a pointer to a freshly constructed `ArrayType` ride
+    /// the by-reference arm, allocated in the per-query `mcx`.
     pub fn exec_sub_plan<'mcx>(
         node: &mut types_nodes::SubPlanState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
+    ) -> types_error::PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>
 );

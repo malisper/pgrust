@@ -1586,6 +1586,22 @@ pub fn init_seams() {
         UnregisterSnapshotFromOwner(&new_handle((*snapshot).clone()))
             .expect("UnregisterSnapshotFromOwner: SnapshotResetXmin must not ereport");
     });
+
+    // plancache/xact/standby/subtrans's split slice of snapmgr's contract
+    // (`backend-utils-time-snapmgr-pc-seams`). Same inward seams as the base
+    // crate above, redeclared in the consumers' own seam crate; the owner
+    // installs both. `active_snapshot_set` carries `PgResult<bool>` here (vs the
+    // base crate's bare `bool`), so it's wrapped in `Ok` — `ActiveSnapshotSet`
+    // is infallible in C.
+    use backend_utils_time_snapmgr_pc_seams as pc_seams;
+    pc_seams::active_snapshot_set::set(|| Ok(ActiveSnapshotSet()));
+    pc_seams::push_active_snapshot_transaction::set(|| {
+        PushActiveSnapshot(&GetTransactionSnapshot()?);
+        Ok(())
+    });
+    pc_seams::pop_active_snapshot::set(PopActiveSnapshot);
+    // `TransactionXmin` is a backend-global the consumers read directly.
+    pc_seams::transaction_xmin::set(|| Ok(TransactionXmin()));
 }
 
 /// The `RemoveTempRelationsCallback` snapshot bracket

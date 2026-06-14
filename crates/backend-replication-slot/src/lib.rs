@@ -402,21 +402,20 @@ pub fn ReplicationSlotsShmemInit() {
 
 /// `void ReplicationSlotInitialize(void)` (slot.c:239).
 pub fn ReplicationSlotInitialize() -> PgResult<()> {
-    // Residual bare-word `types_datum::Datum` survives ONLY at this
-    // callback-registration ABI edge: `before_shmem_exit` takes the opaque
-    // callback token by the bare-word seam contract
-    // (`fn(i32, types_datum::Datum)` / `arg: types_datum::Datum`). This crate's
-    // own logic constructs/reads no scalars, so there is nothing to move onto
-    // the canonical `types_tuple::backend_access_common_heaptuple::Datum<'mcx>`
-    // enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
+    // The `before_shmem_exit` seam carries its opaque callback token as the
+    // canonical unified `types_tuple::Datum<'static>` (the machine word the C
+    // `Datum arg` carries, pinned to `'static` and stored by value in the
+    // registration list). This crate's own logic constructs/reads no scalars,
+    // so there is nothing else to migrate; the token here is `(Datum) 0` in C,
+    // i.e. `Datum::null()`.
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
-        types_datum::Datum::null(),
+        types_tuple::Datum::null(),
     )
 }
 
 /// `static void ReplicationSlotShmemExit(int code, Datum arg)` (slot.c:248).
-fn replication_slot_shmem_exit_cb(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn replication_slot_shmem_exit_cb(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if my_replication_slot().is_some() {
         ReplicationSlotRelease()?;
     }
@@ -2937,6 +2936,16 @@ fn seam_search_named_replication_slot(
         None => ReplicationSlotHandle::NONE,
     })
 }
+/// Boolean-existence adapter over `SearchNamedReplicationSlot` for the
+/// `SearchNamedReplicationSlot(name, need_lock) -> PgResult<bool>` seam that
+/// `genfile.c::pg_ls_replslotdir` consumes (it only needs "does a slot with
+/// this name exist?", not the slot itself).
+fn seam_search_named_replication_slot_exists(
+    name: &str,
+    need_lock: bool,
+) -> PgResult<bool> {
+    Ok(SearchNamedReplicationSlot(name, need_lock)?.is_some())
+}
 fn seam_replication_slot_set_inactive_since(
     handle: ReplicationSlotHandle,
     now: TimestampTz,
@@ -3068,4 +3077,7 @@ pub fn init_seams() {
     s::slot_data_database::set(seam_slot_data_database);
     s::slot_active_pid::set(seam_slot_active_pid);
     s::slot_data_invalidated::set(seam_slot_data_invalidated);
+
+    // Boolean-existence form consumed by genfile.c::pg_ls_replslotdir.
+    s::SearchNamedReplicationSlot::set(seam_search_named_replication_slot_exists);
 }

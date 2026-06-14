@@ -41,7 +41,7 @@
 //!   in full; only the container/runtime crossing panics.
 
 use mcx::Mcx;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult};
 use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE,
@@ -134,7 +134,7 @@ fn tid_invalid_syntax(str: &str) -> PgError {
 /// ported in full. NULL (`None`) cstring cannot reach a C cstring-in (the cstring
 /// is never SQL-NULL); we treat it as the empty string, which fails the syntax
 /// check exactly like a C empty input would.
-pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum> {
+pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum<'mcx>> {
     let str = string.unwrap_or("");
     let bytes = str.as_bytes();
 
@@ -197,8 +197,8 @@ pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum> {
 }
 
 /// `tidout(itemPtr)` — `snprintf(buf, "(%u,%u)", block, offset)` then `pstrdup`.
-pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
-    let item_ptr = unported::getarg_itempointer(item_ptr);
+pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum<'mcx>> {
+    let item_ptr = unported::getarg_itempointer(&item_ptr);
     let block_number = item_ptr.block_number_no_check();
     let offset_number = item_ptr.offset_number_no_check();
     // "Perhaps someday we should output this as a record."
@@ -208,7 +208,7 @@ pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
 }
 
 /// `tidrecv(buf)` — `pq_getmsgint(blocknum)` + `pq_getmsgint(offnum)`.
-pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum> {
+pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum<'mcx>> {
     // Wrap the wire bytes as a real StringInfo (cursor = 0) and read through the
     // libpq/pqformat owner, exactly mirroring tidrecv's two pq_getmsgint calls.
     let mut msg = types_stringinfo::StringInfo::from_vec(mcx::slice_in(mcx, buf)?);
@@ -221,8 +221,8 @@ pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum> {
 }
 
 /// `tidsend(itemPtr)` — `pq_sendint32(block)` + `pq_sendint16(offset)`.
-pub fn tidsend<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
-    let item_ptr = unported::getarg_itempointer(item_ptr);
+pub fn tidsend<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum<'mcx>> {
+    let item_ptr = unported::getarg_itempointer(&item_ptr);
     // pq_begintypsend(&buf); pq_sendint32(&buf, block); pq_sendint16(&buf, off);
     let mut buf = backend_libpq_pqformat::pq_begintypsend(mcx)?;
     backend_libpq_pqformat::pq_sendint32(&mut buf, item_ptr.block_number_no_check())?;
@@ -235,58 +235,58 @@ pub fn tidsend<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum> {
 }
 
 /// `tideq(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) == 0`.
-pub fn tideq(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tideq(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) == 0)
 }
 
 /// `tidne(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) != 0`.
-pub fn tidne(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidne(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) != 0)
 }
 
 /// `tidlt(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) < 0`.
-pub fn tidlt(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidlt(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) < 0)
 }
 
 /// `tidle(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) <= 0`.
-pub fn tidle(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidle(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) <= 0)
 }
 
 /// `tidgt(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) > 0`.
-pub fn tidgt(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidgt(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) > 0)
 }
 
 /// `tidge(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) >= 0`.
-pub fn tidge(arg1: Datum, arg2: Datum) -> PgResult<bool> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidge(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<bool> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2) >= 0)
 }
 
 /// `bttidcmp(arg1, arg2)` — three-way TID comparison shared by the operators.
-pub fn bttidcmp(arg1: Datum, arg2: Datum) -> PgResult<i32> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn bttidcmp(arg1: Datum<'_>, arg2: Datum<'_>) -> PgResult<i32> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(item_pointer_compare(&a1, &a2))
 }
 
 /// `tidlarger(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) >= 0 ? arg1 : arg2`.
-pub fn tidlarger(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidlarger<'mcx>(arg1: Datum<'mcx>, arg2: Datum<'mcx>) -> PgResult<Datum<'mcx>> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(if item_pointer_compare(&a1, &a2) >= 0 {
         arg1
     } else {
@@ -295,9 +295,9 @@ pub fn tidlarger(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
 }
 
 /// `tidsmaller(arg1, arg2)` — `ItemPointerCompare(arg1, arg2) <= 0 ? arg1 : arg2`.
-pub fn tidsmaller(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
-    let a1 = unported::getarg_itempointer(arg1);
-    let a2 = unported::getarg_itempointer(arg2);
+pub fn tidsmaller<'mcx>(arg1: Datum<'mcx>, arg2: Datum<'mcx>) -> PgResult<Datum<'mcx>> {
+    let a1 = unported::getarg_itempointer(&arg1);
+    let a2 = unported::getarg_itempointer(&arg2);
     Ok(if item_pointer_compare(&a1, &a2) <= 0 {
         arg1
     } else {
@@ -312,16 +312,16 @@ pub fn tidsmaller(arg1: Datum, arg2: Datum) -> PgResult<Datum> {
 /// itself (`hash_any`) lives in `common/hashfn`, not yet a dependency of this
 /// carrier crate, so the byte image is built here and the hash crossing is the
 /// seam-and-panic boundary.
-pub fn hashtid(key: Datum) -> PgResult<u32> {
-    let key = unported::getarg_itempointer(key);
+pub fn hashtid(key: Datum<'_>) -> PgResult<u32> {
+    let key = unported::getarg_itempointer(&key);
     let image = itempointer_hash_image(&key);
     Ok(unported::hash_any(&image))
 }
 
 /// `hashtidextended(key, seed)` —
 /// `hash_any_extended(key, sizeof(BlockIdData) + sizeof(OffsetNumber), seed)`.
-pub fn hashtidextended(key: Datum, seed: u64) -> PgResult<u64> {
-    let key = unported::getarg_itempointer(key);
+pub fn hashtidextended(key: Datum<'_>, seed: u64) -> PgResult<u64> {
+    let key = unported::getarg_itempointer(&key);
     let image = itempointer_hash_image(&key);
     Ok(unported::hash_any_extended(&image, seed))
 }
@@ -353,8 +353,8 @@ fn itempointer_hash_image(ptr: &ItemPointer) -> [u8; 6] {
 pub fn currtid_byrelname<'mcx>(
     _mcx: Mcx<'mcx>,
     _relname: &str,
-    _tid: Datum,
-) -> PgResult<Datum> {
+    _tid: Datum<'_>,
+) -> PgResult<Datum<'mcx>> {
     unported::currtid_internal_by_relname()
 }
 
@@ -417,7 +417,7 @@ fn rank_up(winobj: unported::WindowObject) -> bool {
 
 /// `window_row_number(fcinfo)` — just increment up from 1 until current
 /// partition finishes.
-pub fn window_row_number<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_row_number<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let curpos = unported::win::get_current_position(winobj);
 
@@ -427,7 +427,7 @@ pub fn window_row_number<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 
 /// `window_rank(fcinfo)` — rank changes when key columns change; the new rank
 /// number is the current row number.
-pub fn window_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let up = rank_up(winobj);
     let context = unported::win::get_partition_local_memory_rank(winobj);
@@ -438,7 +438,7 @@ pub fn window_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 }
 
 /// `window_dense_rank(fcinfo)` — rank increases by 1 when key columns change.
-pub fn window_dense_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_dense_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let up = rank_up(winobj);
     let context = unported::win::get_partition_local_memory_rank(winobj);
@@ -450,7 +450,7 @@ pub fn window_dense_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 
 /// `window_percent_rank(fcinfo)` — `(RK - 1) / (NR - 1)`, per spec; returns 0 if
 /// there is only one row.
-pub fn window_percent_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_percent_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let totalrows = unported::win::get_partition_row_count(winobj);
 
@@ -474,7 +474,7 @@ pub fn window_percent_rank<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 
 /// `window_cume_dist(fcinfo)` — `NP / NR`, per spec, where NP is the number of
 /// rows preceding or peer to the current row.
-pub fn window_cume_dist<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_cume_dist<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let totalrows = unported::win::get_partition_row_count(winobj);
 
@@ -503,7 +503,7 @@ pub fn window_cume_dist<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 
 /// `window_ntile(fcinfo)` — compute an exact numeric value with scale 0, ranging
 /// from 1 to n, per spec.
-pub fn window_ntile<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_ntile<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let context = unported::win::get_partition_local_memory_ntile(winobj);
 
@@ -577,7 +577,7 @@ pub fn leadlag_common<'mcx>(
     forward: bool,
     with_offset: bool,
     with_default: bool,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let offset: i32;
     let const_offset: bool;
@@ -621,37 +621,37 @@ pub fn leadlag_common<'mcx>(
 }
 
 /// `window_lag(fcinfo)` — value 1 row before the current row.
-pub fn window_lag<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lag<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, false, false, false)
 }
 
 /// `window_lag_with_offset(fcinfo)` — value OFFSET rows before the current row.
-pub fn window_lag_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lag_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, false, true, false)
 }
 
 /// `window_lag_with_offset_and_default(fcinfo)` — as above with a default value.
-pub fn window_lag_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lag_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, false, true, true)
 }
 
 /// `window_lead(fcinfo)` — value 1 row after the current row.
-pub fn window_lead<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lead<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, true, false, false)
 }
 
 /// `window_lead_with_offset(fcinfo)` — value OFFSET rows after the current row.
-pub fn window_lead_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lead_with_offset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, true, true, false)
 }
 
 /// `window_lead_with_offset_and_default(fcinfo)` — as above with a default value.
-pub fn window_lead_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_lead_with_offset_and_default<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     leadlag_common(mcx, true, true, true)
 }
 
 /// `window_first_value(fcinfo)` — value evaluated on the first row of the frame.
-pub fn window_first_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_first_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let mut isnull = false;
     let result = unported::win::get_func_arg_in_frame(
@@ -670,7 +670,7 @@ pub fn window_first_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 }
 
 /// `window_last_value(fcinfo)` — value evaluated on the last row of the frame.
-pub fn window_last_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_last_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let mut isnull = false;
     let result = unported::win::get_func_arg_in_frame(
@@ -690,7 +690,7 @@ pub fn window_last_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 
 /// `window_nth_value(fcinfo)` — value on the n-th row from the first row of the
 /// frame, per spec.
-pub fn window_nth_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn window_nth_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum<'mcx>> {
     let winobj = unported::win::window_object();
     let mut isnull = false;
 
@@ -738,38 +738,38 @@ pub fn window_nth_value<'mcx>(_mcx: Mcx<'mcx>) -> PgResult<Datum> {
 /// `window_row_number_support(rawreq)` — row_number() is monotonically
 /// increasing; optimizes the frame to ROWS BETWEEN UNBOUNDED PRECEDING AND
 /// CURRENT ROW.
-pub fn window_row_number_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_row_number_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
 /// `window_rank_support(rawreq)` — rank() is monotonically increasing; frame set
 /// to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
-pub fn window_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
 /// `window_dense_rank_support(rawreq)` — dense_rank() is monotonically
 /// increasing; frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
-pub fn window_dense_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_dense_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
 /// `window_percent_rank_support(rawreq)` — percent_rank() is monotonically
 /// increasing; frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
-pub fn window_percent_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_percent_rank_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
 /// `window_cume_dist_support(rawreq)` — cume_dist() is monotonically increasing;
 /// frame set to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
-pub fn window_cume_dist_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_cume_dist_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
 /// `window_ntile_support(rawreq)` — ntile() is monotonically increasing (the
 /// bucket count cannot change after the first call); frame set to ROWS BETWEEN
 /// UNBOUNDED PRECEDING AND CURRENT ROW.
-pub fn window_ntile_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum) -> PgResult<Datum> {
+pub fn window_ntile_support<'mcx>(_mcx: Mcx<'mcx>, rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
     unported::window_support(rawreq)
 }
 
@@ -856,7 +856,7 @@ mod unported {
     /// `PG_GETARG_ITEMPOINTER(n)` — the arg datum points at a `palloc`'d
     /// `ItemPointerData`. Detoasting/pointer-deref of pass-by-reference args is
     /// fmgr/varlena plumbing not modeled by the bare `Datum` word.
-    pub fn getarg_itempointer(_datum: Datum) -> ItemPointer {
+    pub fn getarg_itempointer(_datum: &Datum<'_>) -> ItemPointer {
         panic!(
             "unported owner: tid PG_GETARG_ITEMPOINTER (fmgr pass-by-reference \
              arg deref of palloc'd ItemPointerData)"
@@ -865,7 +865,7 @@ mod unported {
 
     /// `PG_RETURN_ITEMPOINTER(result)` — palloc the `ItemPointerData` and return
     /// its pointer as a Datum (mmgr + fmgr).
-    pub fn return_itempointer<'mcx>(_mcx: Mcx<'mcx>, _ptr: ItemPointer) -> PgResult<Datum> {
+    pub fn return_itempointer<'mcx>(_mcx: Mcx<'mcx>, _ptr: ItemPointer) -> PgResult<Datum<'mcx>> {
         panic!(
             "unported owner: tid PG_RETURN_ITEMPOINTER (palloc + pass-by-reference \
              Datum construction)"
@@ -873,12 +873,12 @@ mod unported {
     }
 
     /// `PG_RETURN_CSTRING(pstrdup(buf))` — palloc the result cstring.
-    pub fn return_cstring<'mcx>(_mcx: Mcx<'mcx>, _buf: alloc::string::String) -> PgResult<Datum> {
+    pub fn return_cstring<'mcx>(_mcx: Mcx<'mcx>, _buf: alloc::string::String) -> PgResult<Datum<'mcx>> {
         panic!("unported owner: tidout PG_RETURN_CSTRING (pstrdup + cstring Datum)")
     }
 
     /// `PG_RETURN_BYTEA_P(...)` — palloc the bytea result.
-    pub fn return_bytea<'mcx>(_mcx: Mcx<'mcx>, _bytes: alloc::vec::Vec<u8>) -> PgResult<Datum> {
+    pub fn return_bytea<'mcx>(_mcx: Mcx<'mcx>, _bytes: alloc::vec::Vec<u8>) -> PgResult<Datum<'mcx>> {
         panic!("unported owner: tidsend PG_RETURN_BYTEA_P (bytea Datum construction)")
     }
 
@@ -899,7 +899,7 @@ mod unported {
     /// walk — catalog/namespace + table-AM + snapshot + acl owners, unported.
     /// Returns a typed `feature not supported`-shaped error rather than building
     /// a bogus result.
-    pub fn currtid_internal_by_relname() -> PgResult<Datum> {
+    pub fn currtid_internal_by_relname<'mcx>() -> PgResult<Datum<'mcx>> {
         let _ = ERRCODE_FEATURE_NOT_SUPPORTED;
         let _ = PgError::error("");
         panic!(
@@ -921,7 +921,7 @@ mod unported {
     /// `Node*` (`SupportRequestWFuncMonotonic` / `SupportRequestOptimizeWindowClause`)
     /// and fill its fields. The node kinds and `monotonic`/`frameOptions` enums
     /// are owned by nodes/supportnodes.h + parsenodes.h, not ported.
-    pub fn window_support(_rawreq: Datum) -> PgResult<Datum> {
+    pub fn window_support<'mcx>(_rawreq: Datum<'_>) -> PgResult<Datum<'mcx>> {
         panic!(
             "unported owner: window *_support prosupport (nodes/supportnodes.h \
              SupportRequestWFuncMonotonic / SupportRequestOptimizeWindowClause)"
@@ -986,18 +986,18 @@ mod unported {
         }
 
         /// `WinGetFuncArgCurrent(winobj, argno, &isnull)`.
-        pub fn get_func_arg_current(
+        pub fn get_func_arg_current<'mcx>(
             _winobj: WindowObject,
             _argno: i32,
             _isnull: &mut bool,
-        ) -> Datum {
+        ) -> Datum<'mcx> {
             panic!("unported owner: WinGetFuncArgCurrent (windowapi.h / nodeWindowAgg.c)")
         }
 
         /// `WinGetFuncArgInPartition(winobj, argno, relpos, seektype,
         /// set_mark, &isnull, &isout)`.
         #[allow(clippy::too_many_arguments)]
-        pub fn get_func_arg_in_partition(
+        pub fn get_func_arg_in_partition<'mcx>(
             _winobj: WindowObject,
             _argno: i32,
             _relpos: i32,
@@ -1005,14 +1005,14 @@ mod unported {
             _set_mark: bool,
             _isnull: &mut bool,
             _isout: &mut bool,
-        ) -> Datum {
+        ) -> Datum<'mcx> {
             panic!("unported owner: WinGetFuncArgInPartition (windowapi.h / nodeWindowAgg.c)")
         }
 
         /// `WinGetFuncArgInFrame(winobj, argno, relpos, seektype, set_mark,
         /// &isnull, isout)`.
         #[allow(clippy::too_many_arguments)]
-        pub fn get_func_arg_in_frame(
+        pub fn get_func_arg_in_frame<'mcx>(
             _winobj: WindowObject,
             _argno: i32,
             _relpos: i32,
@@ -1020,7 +1020,7 @@ mod unported {
             _set_mark: bool,
             _isnull: &mut bool,
             _isout: Option<&mut bool>,
-        ) -> Datum {
+        ) -> Datum<'mcx> {
             panic!("unported owner: WinGetFuncArgInFrame (windowapi.h / nodeWindowAgg.c)")
         }
     }

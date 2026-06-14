@@ -48,6 +48,7 @@ libc = "0.2"
 # shared types
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
 types-logical = { path = "../types-logical" }
