@@ -1269,6 +1269,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-syncscan-seams",
  "backend-access-table-tableam-bm-seams",
+ "backend-access-table-tableam-seams",
  "backend-access-transam-xact-seams",
  "backend-executor-execTuples-seams",
  "backend-optimizer-path-costsize-seams",
@@ -1283,6 +1284,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-scan",
  "types-snapshot",
  "types-storage",
  "types-tableam",
@@ -1835,6 +1837,7 @@ dependencies = [
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-more2-seams",
  "backend-utils-mmgr-portalmem-seams",
+ "backend-utils-time-combocid-seams",
  "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",
  "libc",
@@ -3250,6 +3253,7 @@ dependencies = [
  "backend-optimizer-plan-planner-seams",
  "backend-parser-analyze-seams",
  "backend-storage-file-fd-seams",
+ "backend-tcop-dest",
  "backend-tcop-postgres-seams",
  "backend-utils-activity-backend-progress-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -8244,11 +8248,13 @@ dependencies = [
 name = "backend-storage-ipc-shm-toc"
 version = "0.0.0"
 dependencies = [
+ "backend-storage-ipc-shm-toc-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-s-lock",
  "backend-utils-error",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-storage",
 ]
 
@@ -8805,6 +8811,7 @@ dependencies = [
 name = "backend-tcop-dest"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-copyto-seams",
  "backend-tcop-dest-seams",
  "types-dest",
  "types-error",
@@ -11571,6 +11578,7 @@ name = "backend-utils-time-combocid"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xact-seams",
+ "backend-utils-time-combocid-seams",
  "mcx",
  "types-core",
  "types-error",

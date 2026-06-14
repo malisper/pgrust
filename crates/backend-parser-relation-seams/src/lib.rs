@@ -12,6 +12,6 @@ seam_core::seam!(
     /// `perminfoindex`, relid mismatch).
     pub fn get_rte_permission_info(
         rteperminfos: &[types_nodes::RTEPermissionInfo<'_>],
-        rte: &types_nodes::RangeTblEntry,
+        rte: &types_nodes::RangeTblEntry<'_>,
     ) -> types_error::PgResult<usize>
 );

@@ -83,6 +83,57 @@ pub const T_MergeActionState: NodeTag = NodeTag(387);
 /// `T_MergeAction` (nodes/nodetags.h, PostgreSQL 18.3).
 pub const T_MergeAction: NodeTag = NodeTag(54);
 
+// Parse-tree node tags (nodes/nodetags.h, PostgreSQL 18.3 generated order),
+// for the K1-parsetree `Node` variants.
+pub const T_Alias: NodeTag = NodeTag(2);
+pub const T_RangeVar: NodeTag = NodeTag(3);
+pub const T_TargetEntry: NodeTag = NodeTag(62);
+pub const T_RangeTblRef: NodeTag = NodeTag(63);
+pub const T_JoinExpr: NodeTag = NodeTag(64);
+pub const T_FromExpr: NodeTag = NodeTag(65);
+pub const T_OnConflictExpr: NodeTag = NodeTag(66);
+pub const T_Query: NodeTag = NodeTag(67);
+pub const T_TypeName: NodeTag = NodeTag(68);
+pub const T_ColumnRef: NodeTag = NodeTag(69);
+pub const T_ParamRef: NodeTag = NodeTag(70);
+pub const T_A_Expr: NodeTag = NodeTag(71);
+pub const T_A_Const: NodeTag = NodeTag(72);
+pub const T_TypeCast: NodeTag = NodeTag(73);
+pub const T_CollateClause: NodeTag = NodeTag(74);
+pub const T_FuncCall: NodeTag = NodeTag(76);
+pub const T_A_Star: NodeTag = NodeTag(77);
+pub const T_A_Indices: NodeTag = NodeTag(78);
+pub const T_A_Indirection: NodeTag = NodeTag(79);
+pub const T_A_ArrayExpr: NodeTag = NodeTag(80);
+pub const T_ResTarget: NodeTag = NodeTag(81);
+pub const T_MultiAssignRef: NodeTag = NodeTag(82);
+pub const T_SortBy: NodeTag = NodeTag(83);
+pub const T_WindowDef: NodeTag = NodeTag(84);
+pub const T_RangeSubselect: NodeTag = NodeTag(85);
+pub const T_RangeFunction: NodeTag = NodeTag(86);
+pub const T_RangeTableSample: NodeTag = NodeTag(89);
+pub const T_ColumnDef: NodeTag = NodeTag(90);
+pub const T_RangeTblEntry: NodeTag = NodeTag(101);
+pub const T_RTEPermissionInfo: NodeTag = NodeTag(102);
+pub const T_RangeTblFunction: NodeTag = NodeTag(103);
+pub const T_WithCheckOption: NodeTag = NodeTag(105);
+pub const T_SortGroupClause: NodeTag = NodeTag(106);
+pub const T_GroupingSet: NodeTag = NodeTag(107);
+pub const T_WindowClause: NodeTag = NodeTag(108);
+pub const T_RowMarkClause: NodeTag = NodeTag(109);
+pub const T_WithClause: NodeTag = NodeTag(110);
+pub const T_InferClause: NodeTag = NodeTag(111);
+pub const T_OnConflictClause: NodeTag = NodeTag(112);
+pub const T_CommonTableExpr: NodeTag = NodeTag(115);
+pub const T_MergeWhenClause: NodeTag = NodeTag(116);
+pub const T_ReturningClause: NodeTag = NodeTag(118);
+pub const T_InsertStmt: NodeTag = NodeTag(137);
+pub const T_DeleteStmt: NodeTag = NodeTag(138);
+pub const T_UpdateStmt: NodeTag = NodeTag(139);
+pub const T_MergeStmt: NodeTag = NodeTag(140);
+pub const T_SelectStmt: NodeTag = NodeTag(141);
+pub const T_SetOperationStmt: NodeTag = NodeTag(142);
+
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -195,6 +246,110 @@ pub enum Node<'mcx> {
     ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
     /// `T_CustomScan`.
     CustomScan(crate::nodeforeigncustom::CustomScan<'mcx>),
+    // --- Parse-tree statement / producer / raw-grammar nodes (K1-parsetree) ---
+    // Additive arms making the parse vocabulary participate in the `Node`
+    // machinery (`tag`/`clone_in`). `plan_head` panics for these (they have no
+    // embedded `Plan`), exactly as it does for `Expr`.
+    /// `T_Query` — a parse/analyze/rewrite query tree.
+    Query(crate::copy_query::Query<'mcx>),
+    /// `T_RangeTblEntry`.
+    RangeTblEntry(crate::parsenodes::RangeTblEntry<'mcx>),
+    /// `T_RTEPermissionInfo`.
+    RTEPermissionInfo(crate::parsenodes::RTEPermissionInfo<'mcx>),
+    /// `T_RangeTblFunction`.
+    RangeTblFunction(crate::rawnodes::RangeTblFunction<'mcx>),
+    /// `T_TargetEntry`.
+    TargetEntry(crate::primnodes::TargetEntry<'mcx>),
+    /// `T_RangeTblRef`.
+    RangeTblRef(crate::rawnodes::RangeTblRef),
+    /// `T_FromExpr`.
+    FromExpr(crate::rawnodes::FromExpr<'mcx>),
+    /// `T_JoinExpr`.
+    JoinExpr(crate::rawnodes::JoinExpr<'mcx>),
+    /// `T_OnConflictExpr`.
+    OnConflictExpr(crate::rawnodes::OnConflictExpr<'mcx>),
+    /// `T_MergeAction` — the parse-tree MergeAction (cf the executor's
+    /// `MergeActionState`-paired one in `modifytable`).
+    MergeAction(crate::rawnodes::MergeAction<'mcx>),
+    /// `T_SortGroupClause`.
+    SortGroupClause(crate::rawnodes::SortGroupClause),
+    /// `T_GroupingSet`.
+    GroupingSet(crate::rawnodes::GroupingSet<'mcx>),
+    /// `T_WindowClause`.
+    WindowClause(crate::rawnodes::WindowClause<'mcx>),
+    /// `T_RowMarkClause`.
+    RowMarkClause(crate::rawnodes::RowMarkClause),
+    /// `T_WithCheckOption`.
+    WithCheckOption(crate::rawnodes::WithCheckOption<'mcx>),
+    /// `T_CommonTableExpr`.
+    CommonTableExpr(crate::rawnodes::CommonTableExpr<'mcx>),
+    /// `T_SetOperationStmt`.
+    SetOperationStmt(crate::rawnodes::SetOperationStmt<'mcx>),
+    /// `T_Alias`.
+    Alias(crate::rawnodes::Alias<'mcx>),
+    /// `T_RangeVar`.
+    RangeVar(crate::rawnodes::RangeVar<'mcx>),
+    /// `T_TypeName`.
+    TypeName(crate::rawnodes::TypeName<'mcx>),
+    /// `T_ColumnDef`.
+    ColumnDef(crate::rawnodes::ColumnDef<'mcx>),
+    // --- raw-grammar INPUT nodes ---
+    /// `T_SelectStmt`.
+    SelectStmt(crate::rawnodes::SelectStmt<'mcx>),
+    /// `T_InsertStmt`.
+    InsertStmt(crate::rawnodes::InsertStmt<'mcx>),
+    /// `T_UpdateStmt`.
+    UpdateStmt(crate::rawnodes::UpdateStmt<'mcx>),
+    /// `T_DeleteStmt`.
+    DeleteStmt(crate::rawnodes::DeleteStmt<'mcx>),
+    /// `T_MergeStmt`.
+    MergeStmt(crate::rawnodes::MergeStmt<'mcx>),
+    /// `T_A_Expr`.
+    A_Expr(crate::rawnodes::A_Expr<'mcx>),
+    /// `T_ColumnRef`.
+    ColumnRef(crate::rawnodes::ColumnRef<'mcx>),
+    /// `T_ParamRef`.
+    ParamRef(crate::rawnodes::ParamRef),
+    /// `T_A_Const`.
+    A_Const(crate::rawnodes::A_Const<'mcx>),
+    /// `T_FuncCall`.
+    FuncCall(crate::rawnodes::FuncCall<'mcx>),
+    /// `T_A_Star`.
+    A_Star(crate::rawnodes::A_Star),
+    /// `T_A_Indices`.
+    A_Indices(crate::rawnodes::A_Indices<'mcx>),
+    /// `T_A_Indirection`.
+    A_Indirection(crate::rawnodes::A_Indirection<'mcx>),
+    /// `T_A_ArrayExpr`.
+    A_ArrayExpr(crate::rawnodes::A_ArrayExpr<'mcx>),
+    /// `T_ResTarget`.
+    ResTarget(crate::rawnodes::ResTarget<'mcx>),
+    /// `T_MultiAssignRef`.
+    MultiAssignRef(crate::rawnodes::MultiAssignRef<'mcx>),
+    /// `T_TypeCast`.
+    TypeCast(crate::rawnodes::TypeCast<'mcx>),
+    /// `T_CollateClause`.
+    CollateClause(crate::rawnodes::CollateClause<'mcx>),
+    /// `T_SortBy`.
+    SortBy(crate::rawnodes::SortBy<'mcx>),
+    /// `T_WindowDef`.
+    WindowDef(crate::rawnodes::WindowDef<'mcx>),
+    /// `T_RangeSubselect`.
+    RangeSubselect(crate::rawnodes::RangeSubselect<'mcx>),
+    /// `T_RangeFunction`.
+    RangeFunction(crate::rawnodes::RangeFunction<'mcx>),
+    /// `T_RangeTableSample`.
+    RangeTableSample(crate::rawnodes::RangeTableSample<'mcx>),
+    /// `T_WithClause`.
+    WithClause(crate::rawnodes::WithClause<'mcx>),
+    /// `T_InferClause`.
+    InferClause(crate::rawnodes::InferClause<'mcx>),
+    /// `T_OnConflictClause`.
+    OnConflictClause(crate::rawnodes::OnConflictClause<'mcx>),
+    /// `T_MergeWhenClause`.
+    MergeWhenClause(crate::rawnodes::MergeWhenClause<'mcx>),
+    /// `T_ReturningClause`.
+    ReturningClause(crate::rawnodes::ReturningClause<'mcx>),
     /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
     ///
     /// In C, every `Expr`-derived node is a `Node *` via the
@@ -245,6 +400,55 @@ impl<'mcx> Node<'mcx> {
             Node::SubqueryScan(_) => T_SubqueryScan,
             Node::ForeignScan(_) => T_ForeignScan,
             Node::CustomScan(_) => T_CustomScan,
+            Node::Query(_) => T_Query,
+            Node::RangeTblEntry(_) => T_RangeTblEntry,
+            Node::RTEPermissionInfo(_) => T_RTEPermissionInfo,
+            Node::RangeTblFunction(_) => T_RangeTblFunction,
+            Node::TargetEntry(_) => T_TargetEntry,
+            Node::RangeTblRef(_) => T_RangeTblRef,
+            Node::FromExpr(_) => T_FromExpr,
+            Node::JoinExpr(_) => T_JoinExpr,
+            Node::OnConflictExpr(_) => T_OnConflictExpr,
+            Node::MergeAction(_) => T_MergeAction,
+            Node::SortGroupClause(_) => T_SortGroupClause,
+            Node::GroupingSet(_) => T_GroupingSet,
+            Node::WindowClause(_) => T_WindowClause,
+            Node::RowMarkClause(_) => T_RowMarkClause,
+            Node::WithCheckOption(_) => T_WithCheckOption,
+            Node::CommonTableExpr(_) => T_CommonTableExpr,
+            Node::SetOperationStmt(_) => T_SetOperationStmt,
+            Node::Alias(_) => T_Alias,
+            Node::RangeVar(_) => T_RangeVar,
+            Node::TypeName(_) => T_TypeName,
+            Node::ColumnDef(_) => T_ColumnDef,
+            Node::SelectStmt(_) => T_SelectStmt,
+            Node::InsertStmt(_) => T_InsertStmt,
+            Node::UpdateStmt(_) => T_UpdateStmt,
+            Node::DeleteStmt(_) => T_DeleteStmt,
+            Node::MergeStmt(_) => T_MergeStmt,
+            Node::A_Expr(_) => T_A_Expr,
+            Node::ColumnRef(_) => T_ColumnRef,
+            Node::ParamRef(_) => T_ParamRef,
+            Node::A_Const(_) => T_A_Const,
+            Node::FuncCall(_) => T_FuncCall,
+            Node::A_Star(_) => T_A_Star,
+            Node::A_Indices(_) => T_A_Indices,
+            Node::A_Indirection(_) => T_A_Indirection,
+            Node::A_ArrayExpr(_) => T_A_ArrayExpr,
+            Node::ResTarget(_) => T_ResTarget,
+            Node::MultiAssignRef(_) => T_MultiAssignRef,
+            Node::TypeCast(_) => T_TypeCast,
+            Node::CollateClause(_) => T_CollateClause,
+            Node::SortBy(_) => T_SortBy,
+            Node::WindowDef(_) => T_WindowDef,
+            Node::RangeSubselect(_) => T_RangeSubselect,
+            Node::RangeFunction(_) => T_RangeFunction,
+            Node::RangeTableSample(_) => T_RangeTableSample,
+            Node::WithClause(_) => T_WithClause,
+            Node::InferClause(_) => T_InferClause,
+            Node::OnConflictClause(_) => T_OnConflictClause,
+            Node::MergeWhenClause(_) => T_MergeWhenClause,
+            Node::ReturningClause(_) => T_ReturningClause,
             Node::Expr(e) => expr_tag(e),
         }
     }
@@ -289,6 +493,14 @@ impl<'mcx> Node<'mcx> {
             Node::Expr(_) => {
                 panic!("Node::plan_head: called on an expression node, which has no Plan base")
             }
+            // Parse-tree statement / producer / raw-grammar nodes likewise have
+            // no embedded `Plan` (`plan_head` is only ever called on plan nodes;
+            // C's `((Plan *) <parsenode>)` is a type error). Faithful mirror of
+            // the `Expr` arm above — a misuse panic, not a stub.
+            _ => panic!(
+                "Node::plan_head: called on a parse-tree node ({}), which has no Plan base",
+                self.tag()
+            ),
         }
     }
 
@@ -333,6 +545,57 @@ impl<'mcx> Node<'mcx> {
             Node::SubqueryScan(s) => Ok(Node::SubqueryScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
             Node::CustomScan(c) => Ok(Node::CustomScan(c.clone_in(mcx)?)),
+            // Parse-tree statement / producer / raw-grammar nodes — real
+            // per-struct `copyObject` (each `clone_in` re-homes its subtree).
+            Node::Query(q) => Ok(Node::Query(q.clone_in(mcx)?)),
+            Node::RangeTblEntry(r) => Ok(Node::RangeTblEntry(r.clone_in(mcx)?)),
+            Node::RTEPermissionInfo(r) => Ok(Node::RTEPermissionInfo(r.clone_in(mcx)?)),
+            Node::RangeTblFunction(r) => Ok(Node::RangeTblFunction(r.clone_in(mcx)?)),
+            Node::TargetEntry(t) => Ok(Node::TargetEntry(t.clone_in(mcx)?)),
+            Node::RangeTblRef(r) => Ok(Node::RangeTblRef(r.clone_in(mcx)?)),
+            Node::FromExpr(f) => Ok(Node::FromExpr(f.clone_in(mcx)?)),
+            Node::JoinExpr(j) => Ok(Node::JoinExpr(j.clone_in(mcx)?)),
+            Node::OnConflictExpr(o) => Ok(Node::OnConflictExpr(o.clone_in(mcx)?)),
+            Node::MergeAction(m) => Ok(Node::MergeAction(m.clone_in(mcx)?)),
+            Node::SortGroupClause(s) => Ok(Node::SortGroupClause(s.clone_in(mcx)?)),
+            Node::GroupingSet(g) => Ok(Node::GroupingSet(g.clone_in(mcx)?)),
+            Node::WindowClause(w) => Ok(Node::WindowClause(w.clone_in(mcx)?)),
+            Node::RowMarkClause(r) => Ok(Node::RowMarkClause(r.clone_in(mcx)?)),
+            Node::WithCheckOption(w) => Ok(Node::WithCheckOption(w.clone_in(mcx)?)),
+            Node::CommonTableExpr(c) => Ok(Node::CommonTableExpr(c.clone_in(mcx)?)),
+            Node::SetOperationStmt(s) => Ok(Node::SetOperationStmt(s.clone_in(mcx)?)),
+            Node::Alias(a) => Ok(Node::Alias(a.clone_in(mcx)?)),
+            Node::RangeVar(r) => Ok(Node::RangeVar(r.clone_in(mcx)?)),
+            Node::TypeName(t) => Ok(Node::TypeName(t.clone_in(mcx)?)),
+            Node::ColumnDef(c) => Ok(Node::ColumnDef(c.clone_in(mcx)?)),
+            Node::SelectStmt(s) => Ok(Node::SelectStmt(s.clone_in(mcx)?)),
+            Node::InsertStmt(i) => Ok(Node::InsertStmt(i.clone_in(mcx)?)),
+            Node::UpdateStmt(u) => Ok(Node::UpdateStmt(u.clone_in(mcx)?)),
+            Node::DeleteStmt(d) => Ok(Node::DeleteStmt(d.clone_in(mcx)?)),
+            Node::MergeStmt(m) => Ok(Node::MergeStmt(m.clone_in(mcx)?)),
+            Node::A_Expr(a) => Ok(Node::A_Expr(a.clone_in(mcx)?)),
+            Node::ColumnRef(c) => Ok(Node::ColumnRef(c.clone_in(mcx)?)),
+            Node::ParamRef(p) => Ok(Node::ParamRef(p.clone_in(mcx)?)),
+            Node::A_Const(a) => Ok(Node::A_Const(a.clone_in(mcx)?)),
+            Node::FuncCall(f) => Ok(Node::FuncCall(f.clone_in(mcx)?)),
+            Node::A_Star(a) => Ok(Node::A_Star(a.clone_in(mcx)?)),
+            Node::A_Indices(a) => Ok(Node::A_Indices(a.clone_in(mcx)?)),
+            Node::A_Indirection(a) => Ok(Node::A_Indirection(a.clone_in(mcx)?)),
+            Node::A_ArrayExpr(a) => Ok(Node::A_ArrayExpr(a.clone_in(mcx)?)),
+            Node::ResTarget(r) => Ok(Node::ResTarget(r.clone_in(mcx)?)),
+            Node::MultiAssignRef(m) => Ok(Node::MultiAssignRef(m.clone_in(mcx)?)),
+            Node::TypeCast(t) => Ok(Node::TypeCast(t.clone_in(mcx)?)),
+            Node::CollateClause(c) => Ok(Node::CollateClause(c.clone_in(mcx)?)),
+            Node::SortBy(s) => Ok(Node::SortBy(s.clone_in(mcx)?)),
+            Node::WindowDef(w) => Ok(Node::WindowDef(w.clone_in(mcx)?)),
+            Node::RangeSubselect(r) => Ok(Node::RangeSubselect(r.clone_in(mcx)?)),
+            Node::RangeFunction(r) => Ok(Node::RangeFunction(r.clone_in(mcx)?)),
+            Node::RangeTableSample(r) => Ok(Node::RangeTableSample(r.clone_in(mcx)?)),
+            Node::WithClause(w) => Ok(Node::WithClause(w.clone_in(mcx)?)),
+            Node::InferClause(i) => Ok(Node::InferClause(i.clone_in(mcx)?)),
+            Node::OnConflictClause(o) => Ok(Node::OnConflictClause(o.clone_in(mcx)?)),
+            Node::MergeWhenClause(m) => Ok(Node::MergeWhenClause(m.clone_in(mcx)?)),
+            Node::ReturningClause(r) => Ok(Node::ReturningClause(r.clone_in(mcx)?)),
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.
             Node::Expr(e) => Ok(Node::Expr(e.clone())),

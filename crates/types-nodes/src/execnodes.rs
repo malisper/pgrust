@@ -702,7 +702,7 @@ pub struct EStateData<'mcx> {
     /// its `relsubs_*` arrays directly. `None` is the C `NULL`.
     pub es_epq_active: Option<PgBox<'mcx, EPQState<'mcx>>>,
     /// `List *es_range_table` — the query's range table.
-    pub es_range_table: PgVec<'mcx, RangeTblEntry>,
+    pub es_range_table: PgVec<'mcx, RangeTblEntry<'mcx>>,
     /// `Index es_range_table_size` — size of the range table.
     pub es_range_table_size: usize,
     /// `ExecRowMark **es_rowmarks` — per-RTE `ExecRowMark`s (indexed by RT
