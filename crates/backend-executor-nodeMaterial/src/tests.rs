@@ -17,6 +17,7 @@ use types_nodes::Bitmapset;
 
 use super::*;
 use types_nodes::TupleTableSlot;
+use types_nodes::tuptable::SlotData;
 
 /// The fake tuplestore engine behind the opaque carrier: a row count plus the
 /// two read-pointer positions nodeMaterial uses (0 = active, 1 = mark).
@@ -305,7 +306,7 @@ fn init_material_accounting_is_exact() {
     assert_eq!(
         ctx.used(),
         size_of::<MaterialState<'static>>()
-            + estate.es_tupleTable.capacity() * size_of::<TupleTableSlot>()
+            + estate.es_tupleTable.capacity() * size_of::<SlotData<'static>>()
     );
 }
 
@@ -497,10 +498,10 @@ fn estate_slot_pool_is_context_allocated() {
         assert!(estate.slot(id).is_empty());
         assert_eq!(
             ctx.used(),
-            estate.es_tupleTable.capacity() * size_of::<TupleTableSlot>()
+            estate.es_tupleTable.capacity() * size_of::<SlotData<'_>>()
         );
         // PgVec is the proof the pool cannot outlive the context.
-        let _: &PgVec<'_, TupleTableSlot> = &estate.es_tupleTable;
+        let _: &PgVec<'_, SlotData<'_>> = &estate.es_tupleTable;
     }
     assert_eq!(ctx.used(), 0);
 }

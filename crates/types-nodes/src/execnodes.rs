@@ -34,6 +34,7 @@ use types_tuple::tupconvert::TupleConversionMap;
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_slot::{TupleSlotKind, TupleTableSlot};
+use crate::tuptable::{SlotBase, SlotData, VirtualTupleTableSlot};
 use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
@@ -759,8 +760,16 @@ pub struct EStateData<'mcx> {
     /// in, current while nodes init and run).
     pub es_query_cxt: Mcx<'mcx>,
     /// `List *es_tupleTable` — the executor slot pool. Slots are addressed by
-    /// [`SlotId`] (the owned-model `TupleTableSlot *`).
-    pub es_tupleTable: PgVec<'mcx, TupleTableSlot>,
+    /// [`SlotId`] (the owned-model `TupleTableSlot *`). Each entry is a
+    /// payload-bearing [`SlotData`] (the four `Virtual/Heap/Minimal/BufferHeap`
+    /// superstructures with `tts_values`/`tts_isnull`), so the pool carries the
+    /// real per-attribute slot contents, not just the shared header bits.
+    /// The header projection ([`slot`](EStateData::slot) /
+    /// [`slot_mut`](EStateData::slot_mut)) still resolves through
+    /// [`SlotData::base`], so the existing header consumers are unchanged; the
+    /// payload-aware path uses [`slot_data`](EStateData::slot_data) /
+    /// [`slot_data_mut`](EStateData::slot_data_mut).
+    pub es_tupleTable: PgVec<'mcx, SlotData<'mcx>>,
     /// `uint64 es_processed` — # of tuples processed by current command.
     pub es_processed: u64,
     /// `uint64 es_total_processed` — total across all firings.
@@ -902,35 +911,87 @@ impl<'mcx> EStateData<'mcx> {
     /// `ExecAllocTableSlot` — append a slot to the per-query pool
     /// (`es_tupleTable`) and return its id (C: the pointer). Fallible: the
     /// pool grows by `palloc` (OOM is `ereport(ERROR)` in C).
+    ///
+    /// The caller hands in the slot's shared header bits ([`TupleTableSlot`]);
+    /// the pool now stores the payload-bearing [`SlotData`], so the header is
+    /// wrapped in a [`SlotData::Virtual`] with empty per-attribute
+    /// `tts_values`/`tts_isnull` arrays and a `None` descriptor — exactly the
+    /// state a freshly-allocated virtual slot is in before any tuple is stored
+    /// or descriptor assigned. (`ExecSetSlotDescriptor`/the store callbacks fill
+    /// those payload fields.)
     pub fn make_slot(&mut self, slot: TupleTableSlot) -> PgResult<SlotId> {
         let mcx = *self.es_tupleTable.allocator();
         self.es_tupleTable
             .try_reserve(1)
-            .map_err(|_| mcx.oom(core::mem::size_of::<TupleTableSlot>()))?;
+            .map_err(|_| mcx.oom(core::mem::size_of::<SlotData<'_>>()))?;
         let id = SlotId(self.es_tupleTable.len() as u32);
-        self.es_tupleTable.push(slot);
+        self.es_tupleTable.push(SlotData::Virtual(VirtualTupleTableSlot {
+            base: SlotBase {
+                header: slot,
+                tts_nvalid: 0,
+                tts_tupleDescriptor: None,
+                tts_values: PgVec::new_in(mcx),
+                tts_isnull: PgVec::new_in(mcx),
+            },
+            data: PgVec::new_in(mcx),
+        }));
         Ok(id)
     }
 
-    /// Resolve a slot id to the live slot (C: dereference the pointer).
+    /// Resolve a slot id to the live slot's shared header (C: dereference the
+    /// pointer and read its base bits). The header projection bridges through
+    /// [`SlotData::base`]; the payload-aware view is [`slot_data`](Self::slot_data).
     pub fn slot(&self, id: SlotId) -> &TupleTableSlot {
+        &self.es_tupleTable[id.0 as usize].base().header
+    }
+
+    /// Resolve a slot id to its shared header mutably (C: dereference the
+    /// pointer). Mutates only the header bits (`tts_flags`/`tts_tid`/…); the
+    /// payload-aware mutable view is [`slot_data_mut`](Self::slot_data_mut).
+    pub fn slot_mut(&mut self, id: SlotId) -> &mut TupleTableSlot {
+        &mut self.es_tupleTable[id.0 as usize].base_mut().header
+    }
+
+    /// Resolve a slot id to the live payload-bearing [`SlotData`] (the owned
+    /// `TupleTableSlot *` with `tts_values`/`tts_isnull`). This is the view the
+    /// store/clear/copy callbacks and `dest_receive_slot`/`ExecFilterJunk` flow
+    /// through.
+    pub fn slot_data(&self, id: SlotId) -> &SlotData<'mcx> {
         &self.es_tupleTable[id.0 as usize]
     }
 
-    /// Resolve a slot id mutably (C: dereference the pointer).
-    pub fn slot_mut(&mut self, id: SlotId) -> &mut TupleTableSlot {
+    /// Resolve a slot id to the live payload-bearing [`SlotData`] mutably.
+    pub fn slot_data_mut(&mut self, id: SlotId) -> &mut SlotData<'mcx> {
         &mut self.es_tupleTable[id.0 as usize]
     }
 
-    /// Two DISTINCT slots mutably at once (e.g. copy one slot's tuple into
-    /// another). Panics if `a == b` — the slots play distinct roles by
-    /// construction in the C executor too.
+    /// Two DISTINCT slots' shared headers mutably at once (e.g. copy one slot's
+    /// tuple into another). Panics if `a == b` — the slots play distinct roles
+    /// by construction in the C executor too.
     pub fn slot_pair_mut(
         &mut self,
         a: SlotId,
         b: SlotId,
     ) -> (&mut TupleTableSlot, &mut TupleTableSlot) {
         assert_ne!(a, b, "slot_pair_mut: the two slots must be distinct");
+        let (ai, bi) = (a.0 as usize, b.0 as usize);
+        if ai < bi {
+            let (lo, hi) = self.es_tupleTable.split_at_mut(bi);
+            (&mut lo[ai].base_mut().header, &mut hi[0].base_mut().header)
+        } else {
+            let (lo, hi) = self.es_tupleTable.split_at_mut(ai);
+            (&mut hi[0].base_mut().header, &mut lo[bi].base_mut().header)
+        }
+    }
+
+    /// Two DISTINCT slots' payload-bearing [`SlotData`] mutably at once (the
+    /// `ExecCopySlot`-shaped payload flow). Panics if `a == b`.
+    pub fn slot_data_pair_mut(
+        &mut self,
+        a: SlotId,
+        b: SlotId,
+    ) -> (&mut SlotData<'mcx>, &mut SlotData<'mcx>) {
+        assert_ne!(a, b, "slot_data_pair_mut: the two slots must be distinct");
         let (ai, bi) = (a.0 as usize, b.0 as usize);
         if ai < bi {
             let (lo, hi) = self.es_tupleTable.split_at_mut(bi);
