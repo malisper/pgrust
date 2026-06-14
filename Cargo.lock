@@ -3286,6 +3286,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execJunk"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execTuples",
+ "backend-executor-execTuples-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -3450,6 +3464,21 @@ dependencies = [
  "types-core",
  "types-error",
  "types-rel",
+]
+
+[[package]]
+name = "backend-executor-execScan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -3745,6 +3774,24 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeGroup"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4240,6 +4287,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSubqueryscan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeTableFuncscan"
 version = "0.0.0"
 dependencies = [
@@ -4326,6 +4389,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeUnique"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execGrouping-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-nodeValuesscan"
 version = "0.0.0"
 dependencies = [
@@ -4369,6 +4448,25 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-tqueue"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-tqueue-seams",
+ "backend-storage-ipc-shm-mq-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-parallel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7531,10 +7629,12 @@ dependencies = [
 name = "backend-utils-adt-datum-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9969,9 +10069,11 @@ dependencies = [
  "backend-executor-execAmi",
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
+ "backend-executor-execJunk",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
+ "backend-executor-execScan",
  "backend-executor-execTuples",
  "backend-executor-execUtils",
  "backend-executor-instrument",
@@ -9979,6 +10081,7 @@ dependencies = [
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
@@ -9992,7 +10095,10 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
+ "backend-executor-nodeSubqueryscan",
+ "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
+ "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",

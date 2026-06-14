@@ -9,43 +9,229 @@ use mcx::{alloc_in, slice_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
 
 use crate::heaptuple::{HeapTupleData, MinimalTupleData};
-use types_datum::Datum;
+// The bare-word newtype (`types_datum::Datum`) is the transitional payload of
+// the by-value arm. It is imported under an alias so that the canonical value
+// type defined here can take the unqualified name `Datum`.
+use types_core::{Oid, TransactionId};
+use types_datum::Datum as ScalarWord;
 
-// Per-attribute value model (the faithful idiomatic `Datum` substitute).
+// ---------------------------------------------------------------------------
+// The canonical value type (Datum unification — KEYSTONE).
+//
+// TARGET (post-cleanup) shape:
+//     pub enum Datum<'mcx> { ByVal(usize), ByRef(PgVec<'mcx, u8>) }
+//
+// TRANSITIONAL shape (this keystone): the by-value arm carries the bare-word
+// newtype `types_datum::Datum` (here aliased `ScalarWord`) so that the ~200
+// unmigrated `Datum::ByVal(types_datum::Datum::from_i32(..))` construction
+// sites and the `ByVal(d) => d.as_oid()` read sites keep compiling untouched.
+// The newtype is itself a `#[repr(transparent)]`-shaped wrapper over `usize`,
+// so the cleanup that swaps `ByVal(ScalarWord)` -> `ByVal(usize)` is a pure
+// arm-payload change once every consumer has moved to the conversion methods
+// added below.
+// ---------------------------------------------------------------------------
 
-/// A single attribute's value handed to / produced by the tuple
-/// (de)serializers, modelling C's per-attribute `Datum` over the safe byte
-/// representation (see the `backend-access-common-heaptuple` module docs).
+/// The one canonical value type — the faithful idiomatic substitute for C's
+/// `Datum`. A by-value scalar (`att->attbyval`) or a detoasted by-reference
+/// image. (Renamed from the former `TupleValue`; the `TupleValue` alias below
+/// is a transitional shim removed in cleanup.)
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TupleValue<'mcx> {
+pub enum Datum<'mcx> {
     /// Pass-by-value scalar (`att->attbyval`); the machine word itself.
-    ByVal(Datum),
+    /// (Transitional payload: the bare-word newtype; cleanup swaps it to
+    /// `usize`.)
+    ByVal(ScalarWord),
     /// By-reference value (varlena `attlen == -1`, cstring `attlen == -2`, or
     /// fixed-length pass-by-reference `attlen > 0`): the verbatim on-disk
     /// bytes, already detoasted, including any varlena header.
     ByRef(PgVec<'mcx, u8>),
 }
 
-impl TupleValue<'_> {
+/// Transitional compat alias for the renamed enum. Removed in cleanup once all
+/// consumers refer to [`Datum`] directly.
+pub type TupleValue<'mcx> = Datum<'mcx>;
+
+impl Datum<'_> {
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
     /// if this is a by-value scalar (a caller bug — C would have a type/length
     /// mismatch here too).
     #[inline]
     pub fn as_ref_bytes(&self) -> &[u8] {
         match self {
-            TupleValue::ByRef(b) => b,
-            TupleValue::ByVal(_) => {
-                panic!("TupleValue::as_ref_bytes called on a by-value attribute")
+            Datum::ByRef(b) => b,
+            Datum::ByVal(_) => {
+                panic!("Datum::as_ref_bytes called on a by-value attribute")
             }
         }
     }
 
     /// Deep copy into `mcx` (C: `datumCopy` into the caller's context).
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TupleValue<'b>> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Datum<'b>> {
         Ok(match self {
-            TupleValue::ByVal(d) => TupleValue::ByVal(*d),
-            TupleValue::ByRef(b) => TupleValue::ByRef(slice_in(mcx, b)?),
+            Datum::ByVal(d) => Datum::ByVal(*d),
+            Datum::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration-target conversion API.
+    //
+    // The `*GetDatum` / `DatumGet*` codec family as constructors/accessors on
+    // the canonical enum (the by-value arm). These are what migrated consumers
+    // call instead of the deprecated `types_datum::Datum::from_*` free-newtype
+    // codecs. During the transition both spellings coexist; the body just
+    // forwards to the bare-word newtype carried in `ByVal`.
+    //
+    // `as_*` panic on a `ByRef` value — C would equally read garbage by
+    // treating a by-reference image as a scalar word.
+    // -----------------------------------------------------------------------
+
+    #[inline]
+    fn byval_word(&self) -> ScalarWord {
+        match self {
+            Datum::ByVal(d) => *d,
+            Datum::ByRef(_) => panic!("Datum: scalar accessor called on a by-reference value"),
+        }
+    }
+
+    /// A SQL NULL / zero scalar word (`(Datum) 0`).
+    pub fn null() -> Self {
+        Datum::ByVal(ScalarWord::null())
+    }
+
+    /// C: `from_usize` — carry a raw machine word.
+    pub fn from_usize(value: usize) -> Self {
+        Datum::ByVal(ScalarWord::from_usize(value))
+    }
+    /// C: `as_usize` — the raw machine word.
+    pub fn as_usize(&self) -> usize {
+        self.byval_word().as_usize()
+    }
+
+    /// C: `BoolGetDatum(X)`.
+    pub fn from_bool(value: bool) -> Self {
+        Datum::ByVal(ScalarWord::from_bool(value))
+    }
+    /// C: `DatumGetBool(X)`.
+    pub fn as_bool(&self) -> bool {
+        self.byval_word().as_bool()
+    }
+
+    /// C: `CharGetDatum(X)`.
+    pub fn from_char(value: i8) -> Self {
+        Datum::ByVal(ScalarWord::from_char(value))
+    }
+    /// C: `DatumGetChar(X)`.
+    pub fn as_char(&self) -> i8 {
+        self.byval_word().as_char()
+    }
+
+    /// C: `Int8GetDatum(X)` (PG 1-byte signed, not SQL int8).
+    pub fn from_i8(value: i8) -> Self {
+        Datum::ByVal(ScalarWord::from_i8(value))
+    }
+    /// C: `DatumGetInt8(X)`.
+    pub fn as_i8(&self) -> i8 {
+        self.byval_word().as_i8()
+    }
+
+    /// C: `UInt8GetDatum(X)`.
+    pub fn from_u8(value: u8) -> Self {
+        Datum::ByVal(ScalarWord::from_u8(value))
+    }
+    /// C: `DatumGetUInt8(X)`.
+    pub fn as_u8(&self) -> u8 {
+        self.byval_word().as_u8()
+    }
+
+    /// C: `Int16GetDatum(X)`.
+    pub fn from_i16(value: i16) -> Self {
+        Datum::ByVal(ScalarWord::from_i16(value))
+    }
+    /// C: `DatumGetInt16(X)`.
+    pub fn as_i16(&self) -> i16 {
+        self.byval_word().as_i16()
+    }
+
+    /// C: `UInt16GetDatum(X)`.
+    pub fn from_u16(value: u16) -> Self {
+        Datum::ByVal(ScalarWord::from_u16(value))
+    }
+    /// C: `DatumGetUInt16(X)`.
+    pub fn as_u16(&self) -> u16 {
+        self.byval_word().as_u16()
+    }
+
+    /// C: `Int32GetDatum(X)`.
+    pub fn from_i32(value: i32) -> Self {
+        Datum::ByVal(ScalarWord::from_i32(value))
+    }
+    /// C: `DatumGetInt32(X)`.
+    pub fn as_i32(&self) -> i32 {
+        self.byval_word().as_i32()
+    }
+
+    /// C: `UInt32GetDatum(X)`.
+    pub fn from_u32(value: u32) -> Self {
+        Datum::ByVal(ScalarWord::from_u32(value))
+    }
+    /// C: `DatumGetUInt32(X)`.
+    pub fn as_u32(&self) -> u32 {
+        self.byval_word().as_u32()
+    }
+
+    /// C: `Int64GetDatum(X)` (SQL int8/bigint).
+    pub fn from_i64(value: i64) -> Self {
+        Datum::ByVal(ScalarWord::from_i64(value))
+    }
+    /// C: `DatumGetInt64(X)`.
+    pub fn as_i64(&self) -> i64 {
+        self.byval_word().as_i64()
+    }
+
+    /// C: `UInt64GetDatum(X)`.
+    pub fn from_u64(value: u64) -> Self {
+        Datum::ByVal(ScalarWord::from_u64(value))
+    }
+    /// C: `DatumGetUInt64(X)`.
+    pub fn as_u64(&self) -> u64 {
+        self.byval_word().as_u64()
+    }
+
+    /// C: `Float4GetDatum(X)`.
+    pub fn from_f32(value: f32) -> Self {
+        Datum::ByVal(ScalarWord::from_f32(value))
+    }
+    /// C: `DatumGetFloat4(X)`.
+    pub fn as_f32(&self) -> f32 {
+        self.byval_word().as_f32()
+    }
+
+    /// C: `Float8GetDatum(X)`.
+    pub fn from_f64(value: f64) -> Self {
+        Datum::ByVal(ScalarWord::from_f64(value))
+    }
+    /// C: `DatumGetFloat8(X)`.
+    pub fn as_f64(&self) -> f64 {
+        self.byval_word().as_f64()
+    }
+
+    /// C: `ObjectIdGetDatum(X)`.
+    pub fn from_oid(value: Oid) -> Self {
+        Datum::ByVal(ScalarWord::from_oid(value))
+    }
+    /// C: `DatumGetObjectId(X)`.
+    pub fn as_oid(&self) -> Oid {
+        self.byval_word().as_oid()
+    }
+
+    /// C: `TransactionIdGetDatum(X)`.
+    pub fn from_transaction_id(value: TransactionId) -> Self {
+        Datum::ByVal(ScalarWord::from_transaction_id(value))
+    }
+    /// C: `DatumGetTransactionId(X)`.
+    pub fn as_transaction_id(&self) -> TransactionId {
+        self.byval_word().as_transaction_id()
     }
 }
 
