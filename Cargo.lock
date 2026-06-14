@@ -9713,7 +9713,6 @@ dependencies = [
  "types-cache",
  "types-cluster",
  "types-core",
- "types-datum",
  "types-error",
  "types-fmgr",
  "types-format-type",
