@@ -21,6 +21,8 @@ types-storage = { path = "../types-storage" }
 types-array = { path = "../types-array" }
 types-tuple = { path = "../types-tuple" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

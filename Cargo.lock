@@ -2108,8 +2108,10 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-constraint-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-funcapi-seams",
  "mcx",
  "seam-core",
