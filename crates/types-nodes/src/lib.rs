@@ -27,6 +27,7 @@ pub mod list;
 pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
+pub mod nodectescan;
 pub mod nodeforeigncustom;
 pub mod nodegroup;
 pub mod nodehash;
@@ -109,6 +110,7 @@ pub use nodeagg::{
     Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
     AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
+pub use nodectescan::{CteScan, CteScanState, T_CteScan, T_CteScanState};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodegroup::{Group, GroupStateData, T_Group, T_GroupState};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
