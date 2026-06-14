@@ -5603,6 +5603,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-parser-driver"
+version = "0.0.0"
+dependencies = [
+ "backend-parser-gram-seams",
+ "backend-parser-scan-seams",
+ "backend-parser-scansup-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-gram-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-parser-parse-expr-seams"
 version = "0.0.0"
 dependencies = [
@@ -5653,6 +5679,24 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-parser-scan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-parser-scansup-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
