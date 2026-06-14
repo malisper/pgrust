@@ -339,6 +339,13 @@ pub fn init_seams() {
         TransactionIdDidAbort(xid, transaction_xmin)
     });
     seams::transaction_id_precedes::set(|id1, id2| TransactionIdPrecedes(id1, id2));
+    seams::transaction_id_precedes_or_equals::set(|id1, id2| {
+        TransactionIdPrecedesOrEquals(id1, id2)
+    });
+    seams::transaction_id_follows::set(|id1, id2| TransactionIdFollows(id1, id2));
+    seams::transaction_id_follows_or_equals::set(|id1, id2| {
+        TransactionIdFollowsOrEquals(id1, id2)
+    });
     seams::transaction_id_commit_tree::set(|xid, children| TransactionIdCommitTree(xid, children));
     seams::transaction_id_async_commit_tree::set(|xid, children, lsn| {
         TransactionIdAsyncCommitTree(xid, children, lsn)
