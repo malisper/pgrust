@@ -143,9 +143,13 @@ seam_core::seam!(
     /// `pgstat_before_server_shutdown(code, arg)` (pgstat.c): the
     /// before_shmem_exit callback that flushes pending statistics. `Err`
     /// carries its `ereport` surface.
+    ///
+    /// `arg` is the canonical unified `Datum`, the machine word the C `Datum
+    /// arg` carries, pinned to `'static` — matching the `before_shmem_exit`
+    /// registration contract (bare-word datum.c value stored in the exit list).
     pub fn pgstat_before_server_shutdown(
         code: i32,
-        arg: types_datum::Datum,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
