@@ -51,14 +51,18 @@ use types_catalog::catalog_shdepend::{
 };
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_datum::datum::Datum;
+// Migrated onto the canonical `Datum<'mcx>` enum. The bare-word newtype
+// survives only as `ScalarWord` at the external `ScanKeyData.sk_argument` ABI
+// edge (types-scan's `sk_argument` is still a bare word; the scankey crate is
+// unmigrated), reached via the enum's `from_oid`/`from_i32` -> bare-word
+// conversion.
 use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_nodes::parsenodes::DropBehavior;
 use types_rel::{Relation, RelationData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_common_scankey::ScanKeyInit;
@@ -142,7 +146,9 @@ fn oid_key(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData> {
         attno,
         BTEqualStrategyNumber,
         F_OIDEQ,
-        Datum::from_oid(value),
+        // `ScanKeyData.sk_argument` is the unmigrated bare-word ABI edge
+        // (types-scan), so the argument stays a `types_datum::Datum`.
+        types_datum::Datum::from_oid(value),
     )?;
     Ok(key)
 }
@@ -156,7 +162,9 @@ fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
         attno,
         BTEqualStrategyNumber,
         F_INT4EQ,
-        Datum::from_i32(value),
+        // `ScanKeyData.sk_argument` is the unmigrated bare-word ABI edge
+        // (types-scan), so the argument stays a `types_datum::Datum`.
+        types_datum::Datum::from_i32(value),
     )?;
     Ok(key)
 }
@@ -166,7 +174,7 @@ fn int4_key(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData> {
 /// row.
 struct SysScanRow<'a> {
     tid: ItemPointerData,
-    values: &'a [Datum],
+    values: &'a [Datum<'a>],
     isnull: &'a [bool],
 }
 
@@ -196,12 +204,11 @@ fn systable_scan_foreach(
         let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
         let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
         for (value, null) in cols.iter() {
-            values.push(match value {
-                TupleValue::ByVal(d) => *d,
-                TupleValue::ByRef(_) => {
-                    return Err(PgError::error("pg_shdepend column is not by-value"))
-                }
-            });
+            // Every pg_shdepend column is fixed-width and by-value.
+            if let Datum::ByRef(_) = value {
+                return Err(PgError::error("pg_shdepend column is not by-value"));
+            }
+            values.push(value.clone());
             isnull.push(*null);
         }
         let row = SysScanRow {
@@ -242,12 +249,11 @@ fn systable_scan_foreach_recheckable(
         let mut values: PgVec<'_, Datum> = vec_with_capacity_in(smcx, cols.len())?;
         let mut isnull: PgVec<'_, bool> = vec_with_capacity_in(smcx, cols.len())?;
         for (value, null) in cols.iter() {
-            values.push(match value {
-                TupleValue::ByVal(d) => *d,
-                TupleValue::ByRef(_) => {
-                    return Err(PgError::error("pg_shdepend column is not by-value"))
-                }
-            });
+            // Every pg_shdepend column is fixed-width and by-value.
+            if let Datum::ByRef(_) = value {
+                return Err(PgError::error("pg_shdepend column is not by-value"));
+            }
+            values.push(value.clone());
             isnull.push(*null);
         }
         let row = SysScanRow {
@@ -271,7 +277,7 @@ fn systable_scan_foreach_recheckable(
 fn form_pg_shdepend(row: &SysScanRow<'_>) -> FormData_pg_shdepend {
     debug_assert_eq!(row.values.len(), Natts_pg_shdepend);
     debug_assert!(row.isnull.iter().all(|&null| !null));
-    let col = |attno: AttrNumber| row.values[attno as usize - 1];
+    let col = |attno: AttrNumber| &row.values[attno as usize - 1];
     FormData_pg_shdepend {
         dbid: col(Anum_pg_shdepend_dbid).as_oid(),
         classid: col(Anum_pg_shdepend_classid).as_oid(),
