@@ -39,6 +39,7 @@ pub type SnapHandle = Rc<RefCell<SnapshotData>>;
 pub fn new_snapshot_data(snapshot_type: SnapshotType) -> SnapshotData {
     SnapshotData {
         snapshot_type,
+        vistest: types_snapshot::snapshot::GlobalVisStateHandle::new(0),
         xmin: 0,
         xmax: 0,
         xip: Vec::new(),
@@ -49,6 +50,7 @@ pub fn new_snapshot_data(snapshot_type: SnapshotType) -> SnapshotData {
         takenDuringRecovery: false,
         copied: false,
         curcid: 0,
+        speculativeToken: 0,
         active_count: 0,
         regd_count: 0,
         snapXactCompletionCount: 0,

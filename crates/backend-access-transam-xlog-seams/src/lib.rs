@@ -142,6 +142,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogNeedsFlush(lsn)` — true iff `lsn` is past the currently-flushed WAL
+    /// position and would therefore need a flush before being relied upon
+    /// (the hint-bit LSN interlock in `SetHintBits`).
+    pub fn xlog_needs_flush(lsn: XLogRecPtr) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// Read `XactLastRecEnd` (xlog.c per-backend global): end of the last WAL
     /// record this transaction inserted; 0 if none.
     pub fn xact_last_rec_end() -> XLogRecPtr

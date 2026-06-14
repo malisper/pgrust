@@ -3,6 +3,17 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 seam_core::seam!(
+    /// `MultiXactIdIsRunning(multi, isLockOnly)` (multixact.c) — is any member
+    /// of the multixact still running? `isLockOnly` restricts the test to
+    /// lock-only members. `Err` carries the multixact-member-read `ereport`
+    /// surface.
+    pub fn multi_xact_id_is_running(
+        multi: types_core::primitive::TransactionId,
+        is_lock_only: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `multixact_twophase_recover(xid, info, recdata, len)` — restore the
     /// OldestMemberMXactId entry for a prepared transaction at recovery (slot
     /// `TWOPHASE_RM_MULTIXACT_ID` of `twophase_recover_callbacks`).

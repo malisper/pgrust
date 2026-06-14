@@ -44,6 +44,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `HeapTupleGetUpdateXid(htup)` (heapam.c) — resolve a multixact xmax to
+    /// the single update XID it carries (`MultiXactIdGetUpdateXid`), or
+    /// `InvalidTransactionId` if the multixact has no updater. Only the header's
+    /// xmax/infomask are consulted, so a borrowed header suffices. `Err` carries
+    /// the multixact-member-read `ereport` surface.
+    pub fn heap_tuple_get_update_xid(
+        tuple: &types_tuple::heaptuple::HeapTupleHeaderData<'_>,
+    ) -> PgResult<types_core::primitive::TransactionId>
+);
+
+seam_core::seam!(
     /// `table_open(IndexRelationId, AccessShareLock)` +
     /// `ScanKeyInit(indisclustered = true)` + `table_beginscan_catalog` +
     /// `heap_getnext(ForwardScanDirection)` loop + `table_endscan` +

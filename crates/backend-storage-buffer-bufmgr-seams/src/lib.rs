@@ -109,10 +109,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `MarkBufferDirtyHint(buffer, buffer_std = false)` (bufmgr.c): mark a
-    /// buffer dirty for a non-WAL-logged hint-bit-style change (the nbtree
-    /// cycle-id clear passes `buffer_std = false`).
-    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer)
+    /// `MarkBufferDirtyHint(buffer, buffer_std)` (bufmgr.c): mark a buffer
+    /// dirty for a non-WAL-logged hint-bit-style change. `buffer_std` is true
+    /// for standard page-layout buffers (the heap-visibility hint-bit path) and
+    /// false otherwise (e.g. the nbtree cycle-id clear, freespace map).
+    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer, buffer_std: bool)
+);
+
+seam_core::seam!(
+    /// `BufferIsPermanent(buffer)` (bufmgr.c): is the buffer's relation
+    /// WAL-logged (permanent), so hint-bit changes need LSN-interlock care?
+    pub fn buffer_is_permanent(buf: types_storage::storage::Buffer) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `BufferGetLSNAtomic(buffer)` (bufmgr.c): atomically read the page LSN of
+    /// a pinned buffer (takes the buffer header spinlock for shared buffers).
+    pub fn buffer_get_lsn_atomic(
+        buf: types_storage::storage::Buffer,
+    ) -> types_error::PgResult<types_core::primitive::XLogRecPtr>
 );
 
 seam_core::seam!(

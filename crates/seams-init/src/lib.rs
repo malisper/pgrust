@@ -15,6 +15,7 @@ pub fn init_all() {
     backend_access_common_tupdesc::init_seams();
     backend_access_gin_core_probe::init_seams();
     backend_access_hashvalidate::init_seams();
+    backend_access_heap_heapam_visibility::init_seams();
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_index_indexam::init_seams();
@@ -1096,6 +1097,20 @@ mod recurrence_guard {
         ("backend_utils_misc_guc_file", "guc_check_errhint"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
+        // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
+        // seams (backend-utils-time-combocid-seams) consumed by the heap
+        // visibility predicates resolve a combo CID against the *file-scope*
+        // combo-CID state. In this repo combocid.c was ported with that state as
+        // an owned `ComboCidState<'mcx>` threaded from the transaction owner
+        // (xact.c), so the merged/audited combocid owner has no ambient global to
+        // install a parameterless `(&HeapTupleHeaderData) -> CommandId` seam
+        // against — its real bodies take `&ComboCidState`. Wiring these needs the
+        // live per-transaction `ComboCidState` reachable from a static seam (an
+        // ambient-global stash, forbidden) or the visibility callers to thread the
+        // state explicitly (a contract redesign across the scan/executor seam
+        // boundary). Until then they stay seam-and-panic. See DESIGN_DEBT.md.
+        ("backend_utils_time_combocid", "heap_tuple_header_get_cmax"),
+        ("backend_utils_time_combocid", "heap_tuple_header_get_cmin"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
