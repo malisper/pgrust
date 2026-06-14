@@ -539,7 +539,6 @@ mod recurrence_guard {
         ("backend_postmaster_bgworker", "max_worker_processes"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
-        ("backend_replication_logical_origin", "set_replorigin_session_origin_lsn"),
         ("backend_replication_logical_slotsync", "am_logical_slot_sync_worker_process"),
         ("backend_storage_ipc", "before_shmem_exit"),
         ("backend_storage_ipc", "check_on_shmem_exit_lists_are_empty"),

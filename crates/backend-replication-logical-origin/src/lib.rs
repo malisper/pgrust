@@ -1030,6 +1030,11 @@ pub fn replorigin_session_origin_timestamp() -> TimestampTz {
 pub fn set_replorigin_session_origin_timestamp(value: TimestampTz) {
     REPLORIGIN_SESSION_ORIGIN_TIMESTAMP.with(|c| c.set(value));
 }
+/// Write `replorigin_session_origin_lsn` (origin.h external global; recorded
+/// by the parallel-apply worker so streaming restarts at the right place).
+pub fn set_replorigin_session_origin_lsn(value: XLogRecPtr) {
+    REPLORIGIN_SESSION_ORIGIN_LSN.with(|c| c.set(value));
+}
 
 // ===========================================================================
 // SQL functions (fmgr/Datum deferral: args unwrapped, results typed)
@@ -1324,6 +1329,7 @@ pub fn init_seams() {
     s::replorigin_session_origin_lsn::set(replorigin_session_origin_lsn);
     s::replorigin_session_origin_timestamp::set(replorigin_session_origin_timestamp);
     s::set_replorigin_session_origin_timestamp::set(set_replorigin_session_origin_timestamp);
+    s::set_replorigin_session_origin_lsn::set(set_replorigin_session_origin_lsn);
     s::set_replorigin_session_timestamp::set(set_replorigin_session_timestamp_seam);
     s::replorigin_session_advance::set(replorigin_session_advance);
     s::replorigin_advance::set(replorigin_advance);
