@@ -48,6 +48,8 @@ pub fn init_all() {
     backend_catalog_pg_shdepend::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_comment::init_seams();
+    backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
     backend_commands_foreigncmds::init_seams();
@@ -70,6 +72,7 @@ pub fn init_all() {
     backend_executor_nodeBitmapHeapscan::init_seams();
     backend_executor_nodeCtescan::init_seams();
     backend_executor_nodeBitmapOr::init_seams();
+    backend_executor_nodeCustom::init_seams();
     backend_executor_nodeForeignscan::init_seams();
     backend_foreign_foreign::init_seams();
     backend_executor_nodeGroup::init_seams();
@@ -82,6 +85,7 @@ pub fn init_all() {
     backend_executor_nodeMergejoin::init_seams();
     backend_executor_nodeModifyTable::init_seams();
     backend_executor_nodeProjectSet::init_seams();
+    backend_executor_nodeNamedtuplestorescan::init_seams();
     backend_executor_nodeResult::init_seams();
     backend_executor_nodeSamplescan::init_seams();
     backend_executor_nodeSeqscan::init_seams();
@@ -92,7 +96,9 @@ pub fn init_all() {
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
+    backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
+    backend_lib_hyperloglog::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
@@ -141,6 +147,7 @@ pub fn init_all() {
     backend_storage_page_checksum::init_seams();
     backend_storage_sync::init_seams();
     backend_tcop_backend_startup::init_seams();
+    backend_tcop_fastpath::init_seams();
     backend_timezone_localtime::init_seams();
     backend_timezone_strftime::init_seams();
     backend_tsearch_ispell_regis::init_seams();
