@@ -172,6 +172,7 @@ backend-storage-page = { path = "../backend-storage-page" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-storage-sync = { path = "../backend-storage-sync" }
 backend-tcop-backend-startup = { path = "../backend-tcop-backend-startup" }
+backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-fastpath = { path = "../backend-tcop-fastpath" }
 backend-timezone-localtime = { path = "../backend-timezone-localtime" }
 backend-timezone-pgtz = { path = "../backend-timezone-pgtz" }
