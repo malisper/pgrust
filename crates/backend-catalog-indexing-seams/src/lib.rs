@@ -240,6 +240,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
+    /// the metadata tuple from the already-chosen large-object OID, owner, and
+    /// optional default ACL, then insert it with index maintenance. Unlike the
+    /// pg_namespace/pg_am inserts, the OID is assigned by the caller (the C
+    /// `OidIsValid(loid) ? loid : GetNewOidWithIndex(...)` branch runs in
+    /// `LargeObjectCreate` itself), so this seam does no OID allocation; it just
+    /// builds `values[]` (`oid = loid`, `lomowner = lomowner`) and, when
+    /// `lomacl == None`, sets `nulls[Anum_pg_largeobject_metadata_lomacl - 1] =
+    /// true`. The `lomacl` varlena (`Acl *` = `ArrayType`) crosses unchanged.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_largeobject_metadata(
+        rel: &RelationData<'_>,
+        loid: Oid,
+        lomowner: Oid,
+        lomacl: Option<types_array::ArrayType>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid)` +
     /// `namein(amname)` + `heap_form_tuple` + `CatalogTupleInsert` for one
     /// pg_am row (amcmds.c `CreateAccessMethod`): assign the row OID, form the
