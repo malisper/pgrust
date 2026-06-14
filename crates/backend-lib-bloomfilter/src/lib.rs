@@ -6,39 +6,34 @@
 //! negatives are not; a test of membership of the set returns either "possibly
 //! in set" or "definitely not in set".  Elements can be added but not removed.
 //!
-//! ## Port shape: C-faithful raw-pointer
+//! ## Port shape: SAFE owned value (re-ported from the SAFE src-idiomatic)
 //!
-//! This crate owns the `backend-lib-bloomfilter-seams` contract, whose
-//! `bloom_filter` is opaque (`*mut BloomFilter`).  Consumers (`acl.c` role
-//! membership, `brin_bloom.c`) hold and pass that raw pointer and never look
-//! inside, exactly as in C (`opacity-inherited-never-introduced`: a real C
-//! opaque type, not an invented handle).  We therefore mirror the C struct
-//! byte-for-byte:
+//! The C `struct bloom_filter` allocates its control object and its bitset as a
+//! single `palloc0` block using a `FLEXIBLE_ARRAY_MEMBER` (`bitset[]`), and
+//! addresses bits with raw pointer arithmetic.  The previous port of this crate
+//! mirrored that byte-for-byte with a `#[repr(C)]` header + zero-length flexible
+//! array, a manually `alloc_zeroed`/`dealloc`'d block, and an opaque
+//! `*mut BloomFilter` crossing the seam — raw pointers and `unsafe` throughout.
 //!
-//! ```text
-//! struct bloom_filter
-//! {
-//!     int           k_hash_funcs;
-//!     uint64        seed;
-//!     uint64        m;
-//!     unsigned char bitset[FLEXIBLE_ARRAY_MEMBER];
-//! };
-//! ```
+//! This re-port follows the SAFE src-idiomatic version: the filter is the owned
+//! [`BloomFilter`] value (owned by `backend-lib-bloomfilter-seams`) holding the
+//! three control fields (`k_hash_funcs`, `seed`, `m`) as plain scalars and the
+//! bitset as an owned `Vec<u8>`.  There is no `FLEXIBLE_ARRAY_MEMBER`, no raw
+//! pointer, and the whole crate is `#![forbid(unsafe_code)]`.  Bit addressing
+//! (`hash >> 3` byte index, `hash & 7` bit offset) is unchanged from C; it now
+//! indexes a safe slice.
 //!
-//! as a `#[repr(C)]` header with a zero-length `bitset` flexible array member.
-//! The whole object (header + `bitset_bytes` of bitset) is allocated as one
-//! block via the global allocator — the analog of C's single
-//! `palloc0(offsetof(bloom_filter, bitset) + bitset_bytes)` — and freed by
-//! `bloom_free` (the analog of `pfree`).  Bit addressing (`hash >> 3` byte
-//! index, `hash & 7` bit offset) and all arithmetic match the C exactly.
+//! ## Memory: palloc0 → fallible Vec allocation surfacing PgError
 //!
-//! ## Memory: palloc0 → fallible allocation surfacing PgError
-//!
-//! C's `palloc0` reports OOM via `ereport(ERROR, ...)` (a non-local exit).  The
-//! seam contract returns `PgResult<*mut BloomFilter>`, so the single block
-//! allocation is performed with the global allocator and a null result is
-//! turned into a loud [`PgError`] carrying `ERRCODE_OUT_OF_MEMORY`, exactly
-//! where C's `palloc0` would `ereport`.
+//! C's `bloom_create()` builds the filter in the caller's current memory
+//! context with `palloc0`; the recommended way to free it is `bloom_free()` (a
+//! `pfree`), or by destroying the context.  C's `palloc0` reports OOM via
+//! `ereport(ERROR, ...)` (a non-local exit).  This port (matching the rbtree
+//! re-port convention for this repo) drops the memory-context charge model and
+//! uses a plain `Vec<u8>`: the zero-initialised bitset is allocated OOM-safely
+//! (`try_reserve_exact`), and on failure a loud [`PgError`] surfaces carrying
+//! `ERRCODE_OUT_OF_MEMORY`, exactly where C's `palloc0` would `ereport`.  The
+//! filter is freed simply by being dropped (the `bloom_free`/`pfree` analog).
 //!
 //! ## Hashing / popcount
 //!
@@ -49,108 +44,48 @@
 //! takes the `pg_number_of_ones` table path for small buffers or the SIMD path)
 //! is identical to summing each byte's population count.
 
+#![forbid(unsafe_code)]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
+// `clippy::result_large_err`: the allocating constructor `bloom_create` returns
+// the shared `PgResult` (== `Result<_, PgError>`) to model the C
+// `palloc`/`elog(ERROR, ...)` non-local exit faithfully.  `PgError`'s size is
+// fixed by the `types-error` crate and the un-boxed `PgResult` is the
+// project-wide error contract every sibling crate matches.
+#![allow(clippy::result_large_err)]
 
 extern crate alloc;
 
-use core::alloc::Layout;
+use alloc::collections::TryReserveError;
+use alloc::vec::Vec;
 
 use backend_lib_bloomfilter_seams::BloomFilter;
 use common_hashfn_seams as hashfn;
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 /// `MAX_HASH_FUNCS` (bloomfilter.c).
-const MAX_HASH_FUNCS: i32 = 10;
+const MAX_HASH_FUNCS: usize = 10;
 
 /// `BITS_PER_BYTE` (c.h).
 const BITS_PER_BYTE: u64 = 8;
-
-/// `struct bloom_filter` (bloomfilter.c).
-///
-/// Byte-for-byte mirror of the C struct, with the `FLEXIBLE_ARRAY_MEMBER`
-/// `bitset` as a zero-length trailing array.  The allocation backing a
-/// `*mut bloom_filter` is `offsetof(bloom_filter, bitset) + bitset_bytes` bytes
-/// long; the bitset bytes live immediately after the header.
-#[repr(C)]
-struct bloom_filter {
-    /// K hash functions are used, seeded by caller's seed.
-    k_hash_funcs: i32,
-    /// Caller's seed.
-    seed: u64,
-    /// `m` is bitset size, in bits.  Must be a power of two <= 2^32.
-    m: u64,
-    /// `bitset[FLEXIBLE_ARRAY_MEMBER]`.
-    bitset: [u8; 0],
-}
-
-/// `offsetof(bloom_filter, bitset)` — start of the flexible bitset within the
-/// block.
-#[inline]
-fn bitset_offset() -> usize {
-    // memoffset-free: the field offset is the size of the header up to the
-    // (zero-length) flexible array, which `#[repr(C)]` lays out the same way C
-    // does.
-    let dummy = bloom_filter {
-        k_hash_funcs: 0,
-        seed: 0,
-        m: 0,
-        bitset: [],
-    };
-    // SAFETY: both pointers are derived from the same live object `dummy`.
-    let base = &dummy as *const bloom_filter as usize;
-    let field = dummy.bitset.as_ptr() as usize;
-    field - base
-}
-
-/// Allocate (and zero) the single block that backs a `bloom_filter` with
-/// `bitset_bytes` of bitset.  The analog of C's `palloc0(offsetof(...) +
-/// bitset_bytes)`.  Returns the typed header pointer.
-///
-/// On allocation failure surfaces the OOM the C `palloc0` would `ereport`.
-fn alloc_filter(bitset_bytes: usize) -> PgResult<*mut bloom_filter> {
-    let total = bitset_offset() + bitset_bytes;
-    let layout = Layout::from_size_align(total, core::mem::align_of::<bloom_filter>())
-        .expect("bloom_filter layout");
-    // SAFETY: `total` is non-zero (offsetof header > 0), the layout is valid.
-    let raw = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    if raw.is_null() {
-        return Err(PgError::error("out of memory").with_sqlstate(ERRCODE_OUT_OF_MEMORY));
-    }
-    Ok(raw as *mut bloom_filter)
-}
-
-/// Reconstruct the [`Layout`] used to allocate the block backing `filter`, so
-/// `bloom_free` can deallocate it.  `m` bits => `m / BITS_PER_BYTE` bitset
-/// bytes (the same value `bloom_create` allocated, since `m` is a power of two
-/// multiple of 8).
-///
-/// # Safety
-/// `filter` must point at a live block produced by [`alloc_filter`].
-unsafe fn filter_layout(filter: *mut bloom_filter) -> Layout {
-    let bitset_bytes = ((*filter).m / BITS_PER_BYTE) as usize;
-    let total = bitset_offset() + bitset_bytes;
-    Layout::from_size_align(total, core::mem::align_of::<bloom_filter>()).expect("bloom_filter layout")
-}
-
-/// Pointer to the first bitset byte of `filter`.
-///
-/// # Safety
-/// `filter` must point at a live block produced by [`alloc_filter`].
-#[inline]
-unsafe fn bitset_ptr(filter: *mut bloom_filter) -> *mut u8 {
-    (filter as *mut u8).add(bitset_offset())
-}
 
 /// Create Bloom filter in caller's memory context.  We aim for a false positive
 /// rate of between 1% and 2% when bitset size is not constrained by memory
 /// availability.
 ///
-/// `total_elems` is an estimate of the final size of the set.  `bloom_work_mem`
-/// is sized in KB.  The bitset is always sized as a power of two number of
-/// bits, and the largest possible bitset is 512MB (2^32 bits).  The filter is
-/// seeded with `seed`.
-fn bloom_create(total_elems: i64, bloom_work_mem: i32, seed: u64) -> PgResult<*mut bloom_filter> {
+/// `total_elems` is an estimate of the final size of the set.  It should be
+/// approximately correct, but the implementation can cope well with it being
+/// off by perhaps a factor of five or more.
+///
+/// `bloom_work_mem` is sized in KB, in line with the general work_mem
+/// convention.  This determines the size of the underlying bitset (trivial
+/// bookkeeping space isn't counted).  The bitset is always sized as a power of
+/// two number of bits, and the largest possible bitset is 512MB (2^32 bits).
+///
+/// The Bloom filter is seeded with `seed`.
+fn bloom_create(total_elems: i64, bloom_work_mem: i32, seed: u64) -> PgResult<BloomFilter> {
+    let mut bitset_bytes: u64;
+
     /*
      * Aim for two bytes per element; this is sufficient to get a false
      * positive rate below 1%, independent of the size of the bitset or total
@@ -158,7 +93,7 @@ fn bloom_create(total_elems: i64, bloom_work_mem: i32, seed: u64) -> PgResult<*m
      * the next lowest power of two turns out to be a significant drop, the
      * false positive rate still won't exceed 2% in almost all cases.
      */
-    let mut bitset_bytes: u64 = u64::min(
+    bitset_bytes = u64::min(
         (bloom_work_mem as u64).wrapping_mul(1024),
         (total_elems.wrapping_mul(2)) as u64,
     );
@@ -172,45 +107,24 @@ fn bloom_create(total_elems: i64, bloom_work_mem: i32, seed: u64) -> PgResult<*m
     let bitset_bits: u64 = 1u64 << bloom_power;
     bitset_bytes = bitset_bits / BITS_PER_BYTE;
 
-    /* Allocate bloom filter with unset bitset */
-    let filter = alloc_filter(bitset_bytes as usize)?;
-    // SAFETY: `filter` is a freshly allocated, zeroed, correctly sized block.
-    unsafe {
-        (*filter).k_hash_funcs = optimal_k(bitset_bits, total_elems);
-        (*filter).seed = seed;
-        (*filter).m = bitset_bits;
-    }
+    /* Allocate bloom filter with unset (zeroed) bitset */
+    let bitset = zeroed_bitset(bitset_bytes as usize).map_err(oom)?;
 
-    Ok(filter)
-}
-
-/// Free Bloom filter.
-///
-/// # Safety
-/// `filter` must point at a live block produced by [`bloom_create`].
-unsafe fn bloom_free(filter: *mut bloom_filter) {
-    let layout = filter_layout(filter);
-    alloc::alloc::dealloc(filter as *mut u8, layout);
+    Ok(BloomFilter {
+        k_hash_funcs: optimal_k(bitset_bits, total_elems),
+        seed,
+        m: bitset_bits,
+        bitset,
+    })
 }
 
 /// Add element to Bloom filter.
-///
-/// # Safety
-/// `filter` must be live; `elem`/`len` describe a readable byte slice.
-unsafe fn bloom_add_element(filter: *mut bloom_filter, elem: *const u8, len: usize) {
-    let mut hashes = [0u32; MAX_HASH_FUNCS as usize];
+fn bloom_add_element(filter: &mut BloomFilter, elem: &[u8]) {
+    let hashes = k_hashes(filter.k_hash_funcs, filter.seed, filter.m, elem);
 
-    k_hashes(filter, &mut hashes, elem, len);
-
-    let bitset = bitset_ptr(filter);
     /* Map a bit-wise address to a byte-wise address + bit offset */
-    let k = (*filter).k_hash_funcs;
-    let mut i = 0;
-    while i < k {
-        let h = hashes[i as usize];
-        let byte = bitset.add((h >> 3) as usize);
-        *byte |= 1u8 << (h & 7);
-        i += 1;
+    for &hash in hashes.iter().take(filter.k_hash_funcs as usize) {
+        filter.bitset[(hash >> 3) as usize] |= 1 << (hash & 7);
     }
 }
 
@@ -219,25 +133,14 @@ unsafe fn bloom_add_element(filter: *mut bloom_filter, elem: *const u8, len: usi
 /// Returns true if the element is definitely not in the set of elements
 /// observed by [`bloom_add_element`].  Otherwise, returns false, indicating
 /// that element is probably present in set.
-///
-/// # Safety
-/// `filter` must be live; `elem`/`len` describe a readable byte slice.
-unsafe fn bloom_lacks_element(filter: *mut bloom_filter, elem: *const u8, len: usize) -> bool {
-    let mut hashes = [0u32; MAX_HASH_FUNCS as usize];
+fn bloom_lacks_element(filter: &BloomFilter, elem: &[u8]) -> bool {
+    let hashes = k_hashes(filter.k_hash_funcs, filter.seed, filter.m, elem);
 
-    k_hashes(filter, &mut hashes, elem, len);
-
-    let bitset = bitset_ptr(filter);
     /* Map a bit-wise address to a byte-wise address + bit offset */
-    let k = (*filter).k_hash_funcs;
-    let mut i = 0;
-    while i < k {
-        let h = hashes[i as usize];
-        let byte = *bitset.add((h >> 3) as usize);
-        if byte & (1u8 << (h & 7)) == 0 {
+    for &hash in hashes.iter().take(filter.k_hash_funcs as usize) {
+        if filter.bitset[(hash >> 3) as usize] & (1 << (hash & 7)) == 0 {
             return true;
         }
-        i += 1;
     }
 
     false
@@ -246,17 +149,25 @@ unsafe fn bloom_lacks_element(filter: *mut bloom_filter, elem: *const u8, len: u
 /// What proportion of bits are currently set?
 ///
 /// Returns proportion, expressed as a multiplier of filter size.  That should
-/// generally be close to 0.5.
-///
-/// # Safety
-/// `filter` must point at a live block produced by [`bloom_create`].
-unsafe fn bloom_prop_bits_set(filter: *mut bloom_filter) -> f64 {
-    let bitset_bytes = ((*filter).m / BITS_PER_BYTE) as i32;
-    // SAFETY: `bitset_ptr(filter)` is the start of `bitset_bytes` live bytes.
-    let buf = core::slice::from_raw_parts(bitset_ptr(filter), bitset_bytes as usize);
-    let bits_set = pg_popcount(buf);
+/// generally be close to 0.5, even when we have more than enough memory to
+/// ensure a false positive rate within target 1% to 2% band, since more hash
+/// functions are used as more memory is available per element.
+fn bloom_prop_bits_set(filter: &BloomFilter) -> f64 {
+    let bits_set = pg_popcount(&filter.bitset);
 
-    bits_set as f64 / (*filter).m as f64
+    bits_set as f64 / filter.m as f64
+}
+
+/// Allocate a zero-initialised bitset of `bytes` bytes.
+///
+/// The analog of C's `palloc0(offsetof(bloom_filter, bitset) + bitset_bytes)`
+/// for the bitset portion: a contiguous run of zero bytes.  Allocated
+/// OOM-safely (`try_reserve_exact`) and zero-filled.
+fn zeroed_bitset(bytes: usize) -> Result<Vec<u8>, TryReserveError> {
+    let mut zeros: Vec<u8> = Vec::new();
+    zeros.try_reserve_exact(bytes)?;
+    zeros.resize(bytes, 0);
+    Ok(zeros)
 }
 
 /// Which element in the sequence of powers of two is less than or equal to
@@ -281,51 +192,40 @@ fn my_bloom_power(mut target_bitset_bits: u64) -> i32 {
 fn optimal_k(bitset_bits: u64, total_elems: i64) -> i32 {
     // C: `(int) rint(log(2.0) * bitset_bits / total_elems)`.  `rint` rounds to
     // nearest, ties to even (default FP environment).
-    let k = rint(core::f64::consts::LN_2 * bitset_bits as f64 / total_elems as f64) as i32;
+    let k = (core::f64::consts::LN_2 * bitset_bits as f64 / total_elems as f64).round_ties_even()
+        as i32;
 
-    i32::max(1, i32::min(k, MAX_HASH_FUNCS))
+    i32::max(1, i32::min(k, MAX_HASH_FUNCS as i32))
 }
 
 /// Generate k hash values for element.
 ///
-/// Caller passes array, which is filled-in with k values determined by hashing
-/// caller's element.  Only 2 real independent hash functions are actually used;
-/// enhanced double hashing supports up to `MAX_HASH_FUNCS` derived hashes.
-///
-/// # Safety
-/// `filter` must be live; `elem`/`len` describe a readable byte slice;
-/// `hashes` has at least `MAX_HASH_FUNCS` entries.
-unsafe fn k_hashes(
-    filter: *mut bloom_filter,
-    hashes: &mut [u32; MAX_HASH_FUNCS as usize],
-    elem: *const u8,
-    len: usize,
-) {
+/// Returns an array filled-in with k values determined by hashing the element.
+/// Only 2 real independent hash functions are actually used; enhanced double
+/// hashing supports up to `MAX_HASH_FUNCS` derived hashes.
+fn k_hashes(k_hash_funcs: i32, seed: u64, m: u64, elem: &[u8]) -> [u32; MAX_HASH_FUNCS] {
+    let mut hashes = [0u32; MAX_HASH_FUNCS];
+
     /* Use 64-bit hashing to get two independent 32-bit hashes */
-    let elem_slice = if len == 0 {
-        &[][..]
-    } else {
-        core::slice::from_raw_parts(elem, len)
-    };
-    let hash: u64 = hash_any_extended(elem_slice, (*filter).seed);
+    let hash: u64 = hash_any_extended(elem, seed);
     let mut x = hash as u32;
     let mut y = (hash >> 32) as u32;
-    let m = (*filter).m;
 
     x = mod_m(x, m);
     y = mod_m(y, m);
 
     /* Accumulate hashes */
     hashes[0] = x;
-    let k = (*filter).k_hash_funcs;
-    let mut i = 1;
-    while i < k {
+    let mut i: i32 = 1;
+    while i < k_hash_funcs {
         x = mod_m(x.wrapping_add(y), m);
         y = mod_m(y.wrapping_add(i as u32), m);
 
         hashes[i as usize] = x;
         i += 1;
     }
+
+    hashes
 }
 
 /// Calculate "val MOD m" inexpensively.
@@ -357,10 +257,11 @@ fn pg_popcount(buf: &[u8]) -> u64 {
     buf.iter().map(|b| b.count_ones() as u64).sum()
 }
 
-/// `rint(x)` — round to nearest integer, ties to even (libm semantics).
-#[inline]
-fn rint(x: f64) -> f64 {
-    x.round_ties_even()
+/// Translate a `try_reserve` failure into the project's out-of-memory error.
+/// The C code relies on `palloc0`'s `ereport(ERROR, ...)` for OOM; here the
+/// fallible bitset allocation surfaces as a loud [`PgError`] instead.
+fn oom(_e: TryReserveError) -> PgError {
+    PgError::error("out of memory").with_sqlstate(ERRCODE_OUT_OF_MEMORY)
 }
 
 // ===========================================================================
@@ -369,31 +270,16 @@ fn rint(x: f64) -> f64 {
 
 /// Install every seam in `backend-lib-bloomfilter-seams`.
 ///
-/// The seam contract carries the opaque `*mut BloomFilter`; we cast our real
-/// `*mut bloom_filter` block pointer to/from it (the same allocation, just the
-/// opaque view the consumer holds).
+/// The seam contract carries the owned [`BloomFilter`] value (by value on
+/// create, by reference on the operations); the filter is freed by being
+/// dropped, so there is no `bloom_free` seam.
 pub fn init_seams() {
     use backend_lib_bloomfilter_seams as seam;
 
-    seam::bloom_create::set(|total_elems, bloom_work_mem, seed| {
-        bloom_create(total_elems, bloom_work_mem, seed).map(|f| f as *mut BloomFilter)
-    });
-    seam::bloom_free::set(|filter| {
-        // SAFETY: `filter` was produced by `bloom_create` above.
-        unsafe { bloom_free(filter as *mut bloom_filter) }
-    });
-    seam::bloom_add_element::set(|filter, elem, len| {
-        // SAFETY: contract: live filter + readable `elem`/`len`.
-        unsafe { bloom_add_element(filter as *mut bloom_filter, elem, len) }
-    });
-    seam::bloom_lacks_element::set(|filter, elem, len| {
-        // SAFETY: contract: live filter + readable `elem`/`len`.
-        unsafe { bloom_lacks_element(filter as *mut bloom_filter, elem, len) }
-    });
-    seam::bloom_prop_bits_set::set(|filter| {
-        // SAFETY: `filter` was produced by `bloom_create` above.
-        unsafe { bloom_prop_bits_set(filter as *mut bloom_filter) }
-    });
+    seam::bloom_create::set(bloom_create);
+    seam::bloom_add_element::set(bloom_add_element);
+    seam::bloom_lacks_element::set(bloom_lacks_element);
+    seam::bloom_prop_bits_set::set(bloom_prop_bits_set);
 }
 
 #[cfg(test)]
