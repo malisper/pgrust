@@ -106,6 +106,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-indextuple"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-indextuple-seams",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-common-tupdesc",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-indextuple-seams"
 version = "0.0.0"
 dependencies = [
@@ -471,6 +490,31 @@ dependencies = [
  "seam-core",
  "types-datum",
  "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-heap-hio"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-hio-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-heap-hio-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -7611,6 +7655,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-lsn-trigfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-trigger-seams",
+ "backend-utils-adt-numeric",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-numeric",
+ "types-ri-triggers",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
@@ -9837,6 +9896,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
+ "backend-access-common-indextuple",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tidstore",
