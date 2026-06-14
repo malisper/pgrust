@@ -150,6 +150,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_scalar_datum_core::init_seams();
     backend_utils_adt_varlena::init_seams();
     backend_utils_adt_version::init_seams();
     backend_utils_adt_ri_triggers::init_seams();

@@ -7978,6 +7978,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-scalar-datum-core"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-datum-seams",
+ "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-scalar-seams",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-scalar-seams"
 version = "0.0.0"
 dependencies = [
@@ -10033,6 +10048,7 @@ dependencies = [
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
+ "backend-utils-adt-scalar-datum-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-version",
  "backend-utils-cache-attoptcache",
