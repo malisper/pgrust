@@ -23,7 +23,7 @@ use std::cell::RefCell;
 
 use backend_utils_error::ereport;
 use mcx::Mcx;
-use types_datum::datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
 use types_error::{ErrorLocation, PgError, PgResult};
 use types_error::{DEBUG4, ERROR, WARNING};
 use types_error::ERRCODE_SYNTAX_ERROR;
@@ -231,8 +231,11 @@ struct BootstrapState {
     typ: Option<Vec<TypMap>>,
     /// `static struct typmap *Ap` — index into `typ` of the last match.
     ap: Option<usize>,
-    /// `static Datum values[MAXATTR]`.
-    values: [Datum; MAXATTR],
+    /// `static Datum values[MAXATTR]`. Holds the canonical `Datum<'static>`
+    /// (`heap_form_tuple`'s element type) so that by-reference column images
+    /// (`text`/`bytea`/`oidvector`/etc.) carry their actual bytes, exactly as
+    /// C's `Datum values[]` holds pointers to the palloc'd referents.
+    values: [TupleDatum<'static>; MAXATTR],
     /// `static bool Nulls[MAXATTR]`.
     nulls: [bool; MAXATTR],
     /// `static IndexList *ILHead` — the declared-index list. The Vec's *last*
@@ -241,14 +244,16 @@ struct BootstrapState {
 }
 
 impl BootstrapState {
-    const fn new() -> Self {
+    fn new() -> Self {
         BootstrapState {
             boot_reldesc: None,
             attrtypes: [None; MAXATTR],
             numattr: 0,
             typ: None,
             ap: None,
-            values: [Datum::null(); MAXATTR],
+            // Canonical `Datum` is not `Copy` (the by-ref arm owns a `PgVec`),
+            // so build each slot with `(Datum) 0`.
+            values: std::array::from_fn(|_| TupleDatum::null()),
             nulls: [false; MAXATTR],
             il_head: Vec::new(),
         }
@@ -759,7 +764,7 @@ pub fn InsertOneTuple(mcx: Mcx<'static>) -> PgResult<()> {
      * heap_freetuple(tuple);
      */
     let mut attr: Vec<FormData_pg_attribute> = Vec::with_capacity(numattr);
-    let mut vals: Vec<Datum> = Vec::with_capacity(numattr);
+    let mut vals: Vec<TupleDatum<'static>> = Vec::with_capacity(numattr);
     let mut nulls: Vec<bool> = Vec::with_capacity(numattr);
     for i in 0..numattr {
         attr.push(attrtypes(i).ok_or_else(|| {
@@ -803,17 +808,10 @@ pub fn InsertOneValue(mcx: Mcx<'static>, value: &str, i: i32) -> PgResult<()> {
         io.typioparam,
         -1,
     )?;
-    // `static Datum values[MAXATTR]` is bootstrap's bare-word C array (the
-    // audited by-value storage edge); store the canonical value's by-value
-    // machine word into it. A by-reference referent has no bare-word form here
-    // (the registry that once minted one is gone); the `insert_one_tuple` seam
-    // that consumes `values[]` is unimplemented, and by-ref bootstrap columns
-    // do not reach it, so the NULL word is the safe placeholder.
-    let word = match &datum {
-        types_tuple::backend_access_common_heaptuple::Datum::ByVal(_) => datum.as_usize(),
-        types_tuple::backend_access_common_heaptuple::Datum::ByRef(_) => 0,
-    };
-    set_values(i as usize, Datum::from_usize(word));
+    // C: `values[i] = OidInputFunctionCall(...)`. Store the canonical value
+    // verbatim — a by-reference image (`text`/`bytea`/`oidvector`/etc.) keeps
+    // its bytes, exactly as C keeps the pointer to the palloc'd referent.
+    set_values(i as usize, datum.clone());
 
     /*
      * We use ereport not elog here so parameters aren't evaluated unless the
@@ -845,7 +843,7 @@ pub fn InsertOneNull(i: i32) -> PgResult<()> {
             ))
             .finish(loc(700, "InsertOneNull"));
     }
-    set_values(i as usize, Datum::null()); /* PointerGetDatum(NULL) */
+    set_values(i as usize, TupleDatum::null()); /* PointerGetDatum(NULL) */
     set_nulls(i as usize, true);
     Ok(())
 }
@@ -1151,10 +1149,10 @@ fn set_attrtypes(i: usize, v: Option<FormData_pg_attribute>) {
     STATE.with(|s| s.borrow_mut().attrtypes[i] = v);
 }
 
-fn values(i: usize) -> Datum {
-    STATE.with(|s| s.borrow().values[i])
+fn values(i: usize) -> TupleDatum<'static> {
+    STATE.with(|s| s.borrow().values[i].clone())
 }
-fn set_values(i: usize, v: Datum) {
+fn set_values(i: usize, v: TupleDatum<'static>) {
     STATE.with(|s| s.borrow_mut().values[i] = v);
 }
 
