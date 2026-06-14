@@ -320,6 +320,14 @@ pub struct XLogReaderState<'mcx> {
     /// `bool nonblocking` — tell `XLogPageReadCB` not to block waiting for
     /// data.
     pub nonblocking: bool,
+
+    /// Interior-mutable slot for the `RestoreBlockImage` failure message. The
+    /// C `RestoreBlockImage(XLogReaderState *record, ...)` writes
+    /// `record->errormsg_buf` through the shared decoder pointer, but the
+    /// xlogreader seam takes `&XLogReaderState` (the redo consumer holds the
+    /// reader shared), so the message is stashed here via interior mutability
+    /// and read back by `reader_errormsg_buf`. Empty when no restore error.
+    pub restore_errmsg: core::cell::RefCell<alloc::string::String>,
 }
 
 /// `LogicalDecodingContext` (replication/logical.h), trimmed.

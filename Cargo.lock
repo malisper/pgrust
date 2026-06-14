@@ -1717,6 +1717,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogreader"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogreader-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "common-pglz",
+ "mcx",
+ "port-crc32c",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlogreader-seams"
 version = "0.0.0"
 dependencies = [
@@ -11235,6 +11251,7 @@ dependencies = [
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
+ "backend-access-transam-xlogreader",
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-backup-server",
