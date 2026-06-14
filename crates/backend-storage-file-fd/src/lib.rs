@@ -102,6 +102,7 @@ pub fn init_seams() {
 
     // AllocateFile-based reads/writes (snapmgr, timeline).
     fd_seams::allocate_file_write::set(seams::allocate_file_write);
+    fd_seams::create_empty_file::set(seams::create_empty_file);
     fd_seams::allocate_file_read::set(seams::allocate_file_read);
     fd_seams::read_file_or_absent::set(seams::read_file_or_absent);
     fd_seams::file_exists::set(seams::file_exists);
