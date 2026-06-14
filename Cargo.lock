@@ -6808,6 +6808,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-copydir"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-fd"
 version = "0.0.0"
 dependencies = [
@@ -6859,12 +6874,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-fileset"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-tablespace-seams",
+ "backend-storage-file-fd",
+ "backend-storage-file-fileset-seams",
+ "backend-utils-init-small-seams",
+ "common-hashfn",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-file-fileset-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-file-reinit"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-copydir",
+ "backend-storage-file-fd",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -10828,6 +10870,7 @@ dependencies = [
  "backend-rmgrdesc-next",
  "backend-storage-file-buffile",
  "backend-storage-file-fd",
+ "backend-storage-file-fileset",
  "backend-storage-freespace",
  "backend-storage-ipc",
  "backend-storage-ipc-dsm-core",
