@@ -17,8 +17,9 @@
 //! `EPQState` (execMain.c's EvalPlanQual machinery) are re-exported from their
 //! canonical homes (`crate::nodes` / `crate::execnodes`) rather than redefined.
 
-use mcx::{PgBox, PgVec};
+use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Index, Oid};
+use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo};
@@ -32,6 +33,14 @@ use crate::primnodes::{Expr, TargetEntry};
 // `types_nodes::modifytable::OnConflictAction` path it expects.
 pub use crate::nodes::OnConflictAction;
 pub use crate::nodes::OnConflictAction::{ONCONFLICT_NONE, ONCONFLICT_NOTHING, ONCONFLICT_UPDATE};
+
+// `T_ModifyTable` / `T_MergeAction` (nodes/nodetags.h) — the node tags of the
+// two copyObject targets this module owns. `T_MergeAction` is defined
+// canonically in `crate::nodes`; re-export both here where the `Node` arm and
+// `nodeTag` reader consult them.
+pub use crate::nodes::T_MergeAction;
+/// `T_ModifyTable = 333` (nodes/nodetags.h, PostgreSQL 18.3 generated order).
+pub const T_ModifyTable: NodeTag = NodeTag(333);
 
 // The canonical owned `EPQState` lives in `crate::execnodes` and is held by
 // `EStateData::es_epq_active` during a recheck. nodeModifyTable embeds one in
@@ -80,6 +89,48 @@ pub struct MergeAction<'mcx> {
     pub targetList: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *updateColnos` — target attribute numbers for an UPDATE.
     pub updateColnos: Option<PgVec<'mcx, i32>>,
+}
+
+impl MergeAction<'_> {
+    /// `_copyMergeAction` (copyfuncs.funcs.c) — deep copy of the MERGE WHEN
+    /// clause into `mcx` (C: `copyObject` shape). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MergeAction<'b>> {
+        // `COPY_NODE_FIELD(qual)` — the implicit-AND `Expr` list (lifetime-free).
+        let qual = match &self.qual {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(targetList)`.
+        let targetList = match &self.targetList {
+            Some(tlist) => {
+                let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+                for tle in tlist.iter() {
+                    out.push(tle.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(updateColnos)` — an integer `List`.
+        let updateColnos = match &self.updateColnos {
+            Some(cols) => Some(slice_in(mcx, cols)?),
+            None => None,
+        };
+        Ok(MergeAction {
+            matchKind: self.matchKind,
+            commandType: self.commandType,
+            overriding: self.overriding,
+            qual,
+            targetList,
+            updateColnos,
+        })
+    }
 }
 
 /// `ModifyTable` plan node (nodes/plannodes.h).
@@ -143,6 +194,208 @@ pub struct ModifyTable<'mcx> {
     /// Each entry's `joinCondition` is cast `(List *) joinCondition` and fed to
     /// `ExecInitQual`, so modeled as the implicit-AND `List` of `Expr`.
     pub mergeJoinConditions: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>>,
+}
+
+impl ModifyTable<'_> {
+    /// `_copyModifyTable` (copyfuncs.funcs.c) — deep copy of the ModifyTable
+    /// plan node (and its subtrees) into `mcx` (C: `copyObject` shape).
+    /// Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ModifyTable<'b>> {
+        // `COPY_NODE_FIELD(resultRelations)` — integer `List` of RT indexes.
+        let resultRelations = match &self.resultRelations {
+            Some(v) => Some(slice_in(mcx, v)?),
+            None => None,
+        };
+        // `COPY_NODE_FIELD(updateColnosLists)` — a `List` of integer `List`s.
+        let updateColnosLists = match &self.updateColnosLists {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for sub in lists.iter() {
+                    out.push(slice_in(mcx, sub)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(withCheckOptionLists)` — a `List` of `Node` `List`s.
+        let withCheckOptionLists = match &self.withCheckOptionLists {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for sub in lists.iter() {
+                    let mut inner = vec_with_capacity_in(mcx, sub.len())?;
+                    for n in sub.iter() {
+                        inner.push(n.clone_in(mcx)?);
+                    }
+                    out.push(inner);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_STRING_FIELD(returningOldAlias)` / `returningNewAlias`.
+        let returningOldAlias = match &self.returningOldAlias {
+            Some(s) => Some(slice_in(mcx, s)?.into_boxed_slice()),
+            None => None,
+        };
+        let returningNewAlias = match &self.returningNewAlias {
+            Some(s) => Some(slice_in(mcx, s)?.into_boxed_slice()),
+            None => None,
+        };
+        // `COPY_NODE_FIELD(returningLists)` — a `List` of `TargetEntry` `List`s.
+        let returningLists = match &self.returningLists {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for sub in lists.iter() {
+                    let mut inner = vec_with_capacity_in(mcx, sub.len())?;
+                    for tle in sub.iter() {
+                        inner.push(tle.clone_in(mcx)?);
+                    }
+                    out.push(inner);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(fdwPrivLists)` — a `List` of per-target FDW private
+        // `Node` lists; an element is `None` for a target with no FDW data.
+        let fdwPrivLists = match &self.fdwPrivLists {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for entry in lists.iter() {
+                    out.push(match entry {
+                        Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                        None => None,
+                    });
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_BITMAPSET_FIELD(fdwDirectModifyPlans)`.
+        let fdwDirectModifyPlans = match &self.fdwDirectModifyPlans {
+            Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+            None => None,
+        };
+        // `COPY_NODE_FIELD(rowMarks)` — a `List` of `PlanRowMark` nodes.
+        let rowMarks = match &self.rowMarks {
+            Some(marks) => {
+                let mut out = vec_with_capacity_in(mcx, marks.len())?;
+                for m in marks.iter() {
+                    out.push(alloc_in(mcx, m.clone_in(mcx)?)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(arbiterIndexes)` — an OID `List`.
+        let arbiterIndexes = match &self.arbiterIndexes {
+            Some(v) => Some(slice_in(mcx, v)?),
+            None => None,
+        };
+        // `COPY_NODE_FIELD(onConflictSet)` — a `TargetEntry` `List`.
+        let onConflictSet = match &self.onConflictSet {
+            Some(tlist) => {
+                let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+                for tle in tlist.iter() {
+                    out.push(tle.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(onConflictCols)` — an integer `List`.
+        let onConflictCols = match &self.onConflictCols {
+            Some(v) => Some(slice_in(mcx, v)?),
+            None => None,
+        };
+        // `COPY_NODE_FIELD(onConflictWhere)` — the implicit-AND `Expr` list.
+        let onConflictWhere = match &self.onConflictWhere {
+            Some(q) => {
+                let mut out = vec_with_capacity_in(mcx, q.len())?;
+                for e in q.iter() {
+                    out.push(e.clone());
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(exclRelTlist)` — a `TargetEntry` `List`.
+        let exclRelTlist = match &self.exclRelTlist {
+            Some(tlist) => {
+                let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+                for tle in tlist.iter() {
+                    out.push(tle.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(mergeActionLists)` — a `List` of `MergeAction` lists.
+        let mergeActionLists = match &self.mergeActionLists {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for sub in lists.iter() {
+                    let mut inner = vec_with_capacity_in(mcx, sub.len())?;
+                    for action in sub.iter() {
+                        inner.push(action.clone_in(mcx)?);
+                    }
+                    out.push(inner);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        // `COPY_NODE_FIELD(mergeJoinConditions)` — a `List` of per-target join
+        // condition `Expr` lists; an element is `None` for the C `NULL`.
+        let mergeJoinConditions = match &self.mergeJoinConditions {
+            Some(lists) => {
+                let mut out = vec_with_capacity_in(mcx, lists.len())?;
+                for entry in lists.iter() {
+                    out.push(match entry {
+                        Some(cond) => {
+                            let mut inner = vec_with_capacity_in(mcx, cond.len())?;
+                            for e in cond.iter() {
+                                inner.push(e.clone());
+                            }
+                            Some(inner)
+                        }
+                        None => None,
+                    });
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(ModifyTable {
+            // `COPY_SCALAR_FIELD(plan.*)` + `COPY_NODE_FIELD(plan.*)` — the
+            // embedded `Plan` base is deep-copied by `Plan::clone_in`.
+            plan: self.plan.clone_in(mcx)?,
+            operation: self.operation,
+            canSetTag: self.canSetTag,
+            nominalRelation: self.nominalRelation,
+            rootRelation: self.rootRelation,
+            partColsUpdated: self.partColsUpdated,
+            resultRelations,
+            updateColnosLists,
+            withCheckOptionLists,
+            returningOldAlias,
+            returningNewAlias,
+            returningLists,
+            fdwPrivLists,
+            fdwDirectModifyPlans,
+            rowMarks,
+            epqParam: self.epqParam,
+            onConflictAction: self.onConflictAction,
+            arbiterIndexes,
+            onConflictSet,
+            onConflictCols,
+            onConflictWhere,
+            exclRelRTI: self.exclRelRTI,
+            exclRelTlist,
+            mergeActionLists,
+            mergeJoinConditions,
+        })
+    }
 }
 
 /// `MergeActionState` (nodes/execnodes.h) — exec state for one MERGE action.

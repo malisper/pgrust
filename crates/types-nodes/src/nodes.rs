@@ -132,6 +132,8 @@ pub use OnConflictAction::{ONCONFLICT_NONE, ONCONFLICT_NOTHING, ONCONFLICT_UPDAT
 pub enum Node<'mcx> {
     /// `T_Append`.
     Append(crate::nodeappend::Append<'mcx>),
+    /// `T_ModifyTable`.
+    ModifyTable(crate::modifytable::ModifyTable<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_GatherMerge`.
@@ -207,6 +209,7 @@ impl<'mcx> Node<'mcx> {
     pub fn tag(&self) -> NodeTag {
         match self {
             Node::Append(_) => T_Append,
+            Node::ModifyTable(_) => crate::modifytable::T_ModifyTable,
             Node::Material(_) => T_Material,
             Node::GatherMerge(_) => crate::nodegathermerge::T_GatherMerge,
             Node::MergeAppend(_) => T_MergeAppend,
@@ -243,6 +246,7 @@ impl<'mcx> Node<'mcx> {
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
             Node::Append(a) => &a.plan,
+            Node::ModifyTable(m) => &m.plan,
             Node::Material(m) => &m.plan,
             Node::GatherMerge(g) => &g.plan,
             Node::MergeAppend(m) => &m.plan,
@@ -289,6 +293,7 @@ impl<'mcx> Node<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
             Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
+            Node::ModifyTable(m) => Ok(Node::ModifyTable(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::GatherMerge(g) => Ok(Node::GatherMerge(g.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
