@@ -102,6 +102,7 @@ backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
 backend-lib-bloomfilter = { path = "../backend-lib-bloomfilter" }
 backend-lib-dshash = { path = "../backend-lib-dshash" }
+backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }

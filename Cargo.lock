@@ -4959,6 +4959,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-hyperloglog"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-hyperloglog-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-hyperloglog-seams"
 version = "0.0.0"
 dependencies = [
@@ -10528,6 +10538,7 @@ dependencies = [
  "backend-foreign-foreign",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
+ "backend-lib-hyperloglog",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
