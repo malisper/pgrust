@@ -32,17 +32,20 @@
 //!    not yet ported;
 //!  * builtins.h / fmgr — [`cstring_get_text_datum`] (`CStringGetTextDatum`) and
 //!    [`text_datum_get_cstring`] (`TextDatumGetCString`), the project-wide
-//!    Datum/varlena/fmgr deferral.
+//!    `text` varlena/fmgr deferral. The varlena value crosses as the canonical
+//!    by-reference [`TupleValue`] (`'mcx`-owned bytes), not a bare `Datum`
+//!    word.
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
 use seam_core::seam;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_parsenodes::CommentStmt;
 use types_storage::lock::LOCKMODE;
+use types_tuple::backend_access_common_heaptuple::TupleValue;
 
 /// The row identity (`oldtuple->t_self`, the tuple's `ItemPointerData`) of a
 /// matched `pg_description` / `pg_shdescription` tuple, carried opaquely across
@@ -68,10 +71,13 @@ impl ResolvedObject {
 }
 
 /// The description-column read of [`description_get_description`]: the column
-/// `Datum` plus its `isnull` flag (`heap_getattr(tuple, ..., &isnull)`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DescriptionColumn {
-    pub value: Datum,
+/// value (a `text` varlena — by-reference under the canonical
+/// [`TupleValue`] model) plus its `isnull` flag (`heap_getattr(tuple, ...,
+/// &isnull)`). Owns its `'mcx`-allocated bytes, so it is `Clone` but not
+/// `Copy`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DescriptionColumn<'mcx> {
+    pub value: TupleValue<'mcx>,
     pub isnull: bool,
 }
 
@@ -136,14 +142,20 @@ seam!(
 
 seam!(
     /// `CStringGetTextDatum(comment)` (builtins.h) — pack a C string into a
-    /// `text` `Datum` (a varlena palloc), for the description column.
-    pub fn cstring_get_text_datum(comment: &str) -> PgResult<Datum>
+    /// `text` value (a varlena palloc), for the description column. The result
+    /// is a by-reference [`TupleValue`] holding the varlena bytes allocated in
+    /// `mcx` (C's palloc in the current context).
+    pub fn cstring_get_text_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        comment: &str,
+    ) -> PgResult<TupleValue<'mcx>>
 );
 
 seam!(
-    /// `TextDatumGetCString(value)` (builtins.h) — detoast a `text` `Datum` back
-    /// to an owned string (`GetComment`'s description-field read).
-    pub fn text_datum_get_cstring(value: Datum) -> PgResult<String>
+    /// `TextDatumGetCString(value)` (builtins.h) — detoast a `text` value back
+    /// to an owned string (`GetComment`'s description-field read). `value` is
+    /// the by-reference [`TupleValue`] read out of the tuple.
+    pub fn text_datum_get_cstring(value: &TupleValue<'_>) -> PgResult<String>
 );
 
 // --- pg_description catalog primitives (genam.c / heaptuple.c / indexing.c) -
@@ -182,10 +194,10 @@ seam!(
     /// replaces)` + `CatalogTupleUpdate(description, &oldtuple->t_self,
     /// newtuple)` + `heap_freetuple` — replace the found pg_description tuple
     /// from the in-crate `values`/`nulls`/`replaces` arrays.
-    pub fn description_update(
+    pub fn description_update<'mcx>(
         description: Oid,
         tuple: DescriptionTupleId,
-        values: &[Datum],
+        values: &[TupleValue<'mcx>],
         nulls: &[bool],
         replaces: &[bool],
     ) -> PgResult<()>
@@ -195,7 +207,11 @@ seam!(
     /// `heap_form_tuple(RelationGetDescr(description), values, nulls)` +
     /// `CatalogTupleInsert(description, newtuple)` + `heap_freetuple` — insert a
     /// fresh pg_description tuple from the in-crate `values`/`nulls` arrays.
-    pub fn description_insert(description: Oid, values: &[Datum], nulls: &[bool]) -> PgResult<()>
+    pub fn description_insert<'mcx>(
+        description: Oid,
+        values: &[TupleValue<'mcx>],
+        nulls: &[bool],
+    ) -> PgResult<()>
 );
 
 seam!(
@@ -216,12 +232,13 @@ seam!(
     /// Anum_pg_description_description, ..., &isnull)` — the `GetComment` scan
     /// returning the description-column `Datum` of the one match (with its null
     /// flag), or `None` if no row matched.
-    pub fn description_get_description(
+    pub fn description_get_description<'mcx>(
+        mcx: Mcx<'mcx>,
         description: Oid,
         objoid: Oid,
         classoid: Oid,
         objsubid: i32,
-    ) -> PgResult<Option<DescriptionColumn>>
+    ) -> PgResult<Option<DescriptionColumn<'mcx>>>
 );
 
 // --- pg_shdescription catalog primitives -----------------------------------
@@ -255,10 +272,10 @@ seam!(
 seam!(
     /// `heap_modify_tuple` + `CatalogTupleUpdate` + `heap_freetuple` for
     /// pg_shdescription (no objsubid column).
-    pub fn shdescription_update(
+    pub fn shdescription_update<'mcx>(
         shdescription: Oid,
         tuple: DescriptionTupleId,
-        values: &[Datum],
+        values: &[TupleValue<'mcx>],
         nulls: &[bool],
         replaces: &[bool],
     ) -> PgResult<()>
@@ -267,8 +284,11 @@ seam!(
 seam!(
     /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for
     /// pg_shdescription.
-    pub fn shdescription_insert(shdescription: Oid, values: &[Datum], nulls: &[bool])
-        -> PgResult<()>
+    pub fn shdescription_insert<'mcx>(
+        shdescription: Oid,
+        values: &[TupleValue<'mcx>],
+        nulls: &[bool],
+    ) -> PgResult<()>
 );
 
 seam!(
