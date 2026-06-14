@@ -7,7 +7,6 @@
 use mcx::PgString;
 
 use crate::nodes::CmdType;
-use types_tuple::heaptuple::TupleDesc;
 
 /// `CURSOR_OPT_PARALLEL_OK` (`nodes/parsenodes.h`) — parallel mode OK.
 pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
@@ -81,30 +80,12 @@ pub struct Query<'mcx> {
 /// pure type identity (no behavior change).
 pub use crate::parsestmt::RawStmt;
 
-/// `QueryDesc` (`executor/execdesc.h`), trimmed to the fields copyto reads.
-/// The executor unit owns the full structure; copyto holds it as the executable
-/// query handle, reading `tupDesc` after `ExecutorStart` and driving it through
-/// the executor seams. `exec_token` is the executor unit's handle for the
-/// started query state (the owned stand-in for the `QueryDesc *` the executor
-/// keeps its `EState`/`DestReceiver` under).
-///
-/// K1 phase 2 note: `QueryDesc` has several other in-repo views — the canonical
-/// owned [`crate::querydesc::QueryDesc`] (which the portal now embeds by value)
-/// and the opaque `QueryDescHandle` newtypes in `types-matview` /
-/// `types-execparallel` (a bare `usize`/handle into the executor's
-/// not-yet-modeled state). These are *disjoint trimmed views / a different
-/// model* (none subsumes another: this one carries `tupDesc`+`exec_token`, the
-/// handles carry no fields). A canonical-subsumes-trimmed re-export is not
-/// possible without re-modeling them onto one owned executor `QueryDesc`, which
-/// is the executor-ownership keystone (the de-handle the executor onto owned
-/// values task), not a pure type-identity unification. They therefore stay
-/// distinct until that keystone lands.
-pub struct QueryDesc<'mcx> {
-    /// `TupleDesc tupDesc` — result tuple descriptor (set by `ExecutorStart`).
-    pub tupDesc: TupleDesc<'mcx>,
-    /// Opaque executor handle for this started query (set by the executor seam).
-    pub exec_token: u64,
-}
+// NOTE: the trimmed `QueryDesc { tupDesc, exec_token }` view that copyto used to
+// thread (an opaque executor handle + the result tupdesc) has been RETIRED. The
+// QueryDesc de-handle (F1b) re-points both copyto and the portal onto the single
+// canonical owned [`crate::querydesc::QueryDesc`] (lifetime-free; its `work`
+// bundle owns the `EState`/plan-state tree and the result tupdesc is read via
+// `QueryDesc::with_result_tupdesc`). No `exec_token` handle survives.
 
 /// `T_CreateTableAsStmt` (`nodes/nodetags.h`) — value verified against
 /// PostgreSQL 18.3's generated enumeration order. Used by the SELECT-INTO check.

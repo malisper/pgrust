@@ -27,12 +27,11 @@
 //!
 //! This is the single owned model the executor-ownership keystone (#169)
 //! collapses the trimmed views onto. The portal view has been retired onto this
-//! owned value (`PortalData.queryDesc` now holds a `QueryDesc` directly — F1b);
-//! the remaining older views still exist as bridges:
+//! owned value (`PortalData.queryDesc` now holds a `QueryDesc` directly — F1b),
+//! and copyto's old `{tupDesc, exec_token}` view in `copy_query` has likewise
+//! been retired onto this owned value (F1b). The remaining older views still
+//! exist as bridges:
 //!
-//! - [`crate::copy_query::QueryDesc`] — copyto's `{tupDesc, exec_token}` value
-//!   (copyto threads an opaque executor handle; re-pointing it onto this owned
-//!   value is a copyto consumer re-point = F1b);
 //! - the opaque `QueryDescHandle` newtypes in `types-matview` /
 //!   `types-execparallel`.
 
