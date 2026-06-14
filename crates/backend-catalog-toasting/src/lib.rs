@@ -12,7 +12,16 @@
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Oid};
 use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_ID};
-use types_datum::Datum;
+// `reloptions` travels as the canonical unified `Datum<'mcx>` enum: a real
+// reloptions value is a `bytea` varlena (`Datum::ByRef`), absence is
+// `Datum::null()`. This crate only forwards it opaquely into the
+// `heap_create_with_catalog` / `index_create` seams.
+use types_tuple::backend_access_common_heaptuple::Datum;
+// The two consuming seams (`heap.c` / `index.c` owners unported) still take the
+// bare-word shim `types_datum::Datum` for their `reloptions` field — an
+// external/ABI seam edge. We bridge the canonical enum to that word at the call
+// site (see `reloptions_word`), imported here under an unambiguous alias.
+use types_datum::Datum as RelOptionsWord;
 use types_error::{PgError, PgResult};
 use types_nodes::execnodes::IndexInfo;
 use types_nodes::primnodes::OnCommitAction;
@@ -65,20 +74,20 @@ const InvalidCompressionMethod: i8 = b'\0' as i8;
 /// default reloptions. The caller is expected to have verified the relation is
 /// a table and done any necessary permission checks; this function ends with
 /// `CommandCounterIncrement` if it makes any changes. (toasting.c:57)
-pub fn AlterTableCreateToastTable(
-    mcx: Mcx<'_>,
+pub fn AlterTableCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum,
+    reloptions: Datum<'mcx>,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
     CheckAndCreateToastTable(mcx, relOid, reloptions, lockmode, true, InvalidOid)
 }
 
 /// (toasting.c:63)
-pub fn NewHeapCreateToastTable(
-    mcx: Mcx<'_>,
+pub fn NewHeapCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum,
+    reloptions: Datum<'mcx>,
     lockmode: LOCKMODE,
     OIDOldToast: Oid,
 ) -> PgResult<()> {
@@ -86,15 +95,19 @@ pub fn NewHeapCreateToastTable(
 }
 
 /// (toasting.c:70)
-pub fn NewRelationCreateToastTable(mcx: Mcx<'_>, relOid: Oid, reloptions: Datum) -> PgResult<()> {
+pub fn NewRelationCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    relOid: Oid,
+    reloptions: Datum<'mcx>,
+) -> PgResult<()> {
     CheckAndCreateToastTable(mcx, relOid, reloptions, AccessExclusiveLock, false, InvalidOid)
 }
 
 /// (toasting.c:77)
-fn CheckAndCreateToastTable(
-    mcx: Mcx<'_>,
+fn CheckAndCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
     relOid: Oid,
-    reloptions: Datum,
+    reloptions: Datum<'mcx>,
     lockmode: LOCKMODE,
     check: bool,
     OIDOldToast: Oid,
@@ -163,12 +176,12 @@ pub fn BootstrapToastTable(
 /// locked. `toastOid`/`toastIndexOid` are normally `InvalidOid`, but during
 /// bootstrap they can be nonzero to specify hand-assigned OIDs. (toasting.c:126)
 #[allow(clippy::too_many_arguments)]
-fn create_toast_table(
-    mcx: Mcx<'_>,
+fn create_toast_table<'mcx>(
+    mcx: Mcx<'mcx>,
     rel: &Relation<'_>,
     toastOid: Oid,
     toastIndexOid: Oid,
-    reloptions: Datum,
+    reloptions: Datum<'mcx>,
     lockmode: LOCKMODE,
     check: bool,
     OIDOldToast: Oid,
@@ -277,7 +290,7 @@ fn create_toast_table(
         shared_relation,
         mapped_relation,
         oncommit: OnCommitAction::ONCOMMIT_NOOP,
-        reloptions,
+        reloptions: reloptions_word(&reloptions),
         use_user_acl: false,
         allow_system_table_mods: true,
         is_internal: true,
@@ -335,7 +348,7 @@ fn create_toast_table(
             collation_ids: collationIds.to_vec(),
             opclass_ids: opclassIds.to_vec(),
             coloptions: coloptions.to_vec(),
-            reloptions: Datum::null(), // (Datum) 0
+            reloptions: reloptions_word(&Datum::null()), // (Datum) 0
             flags: INDEX_CREATE_IS_PRIMARY,
             constr_flags: 0,
             allow_system_table_mods: true,
@@ -470,6 +483,27 @@ fn snprintf_name(mut s: String) -> String {
         s.truncate(NAMEDATALEN - 1);
     }
     s
+}
+
+/// Bridge the canonical `reloptions` `Datum<'mcx>` down to the bare-word shim
+/// `types_datum::Datum` consumed by the still-unported `heap_create_with_catalog`
+/// / `index_create` seams (their `reloptions` field is `types_datum::Datum`, an
+/// external/ABI seam edge into `catalog/heap.c` / `catalog/index.c`).
+///
+/// `reloptions` is forwarded opaquely; this unit never reads it. In C the value
+/// is a single `Datum` word: `(Datum) 0` when default/unset, otherwise a pointer
+/// to a `bytea` (`text[]`) varlena. We mirror that exactly:
+///
+///   * `Datum::null()` / any by-value word -> that same scalar word (`(Datum) 0`
+///     for the default case);
+///   * a `ByRef` varlena image -> the pointer word into its bytes, the audited
+///     by-reference→bare-word ABI edge (the seam owner re-reads it as a varlena
+///     pointer, exactly as `heap_create_with_catalog` does in C).
+fn reloptions_word(reloptions: &Datum<'_>) -> RelOptionsWord {
+    match reloptions {
+        Datum::ByVal(word) => *word,
+        Datum::ByRef(bytes) => RelOptionsWord::from_usize(bytes.as_ptr() as usize),
+    }
 }
 
 /// Install this crate's seams. This unit declares no inward seams (no ported
