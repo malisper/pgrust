@@ -186,7 +186,7 @@ fn mock_init_qual<'mcx>(
 
 /// `ExecQual`: the HAVING verdict, popped from the QUAL queue (default true).
 fn mock_qual<'mcx>(
-    _state: &types_nodes::execexpr::ExprState,
+    _state: &mut types_nodes::execexpr::ExprState<'mcx>,
     _econtext: types_nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -196,7 +196,7 @@ fn mock_qual<'mcx>(
 /// `ExecQualAndReset`: the group-boundary verdict, popped from the EQRESET
 /// queue (default false => boundary).
 fn mock_qual_and_reset<'mcx>(
-    _state: &types_nodes::execexpr::ExprState,
+    _state: &mut types_nodes::execexpr::ExprState<'mcx>,
     _econtext: types_nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
