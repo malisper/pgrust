@@ -614,7 +614,8 @@ pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> Pg
         &Datum::null(),
         false,
         true,
-        ::core::mem::size_of::<types_datum::Datum>() as i32,
+        // C: `sizeof(Datum)` — the machine word that backs a by-value scalar.
+        ::core::mem::size_of::<usize>() as i32,
     );
     for attnum in 1..nkeyatts {
         // Every skip array must have space to store its scan key's sk_flags.
