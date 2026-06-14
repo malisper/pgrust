@@ -5430,6 +5430,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-copyfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-copyfuncs-seams",
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
+ "mcx",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-copyfuncs-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -5437,6 +5449,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-plancache",
+]
+
+[[package]]
+name = "backend-nodes-copyfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -5518,6 +5540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "backend-nodes-makefuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -5528,6 +5559,14 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-nodes-node-support"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-error",
 ]
 
 [[package]]
@@ -9899,6 +9938,7 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc",
@@ -9916,6 +9956,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
@@ -11229,6 +11270,7 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-main-main",
+ "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
  "backend-port-atomics",
@@ -11726,6 +11768,8 @@ dependencies = [
 name = "types-nodes"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
  "mcx",
  "types-condvar",
  "types-core",

@@ -51,3 +51,34 @@ impl Bitmapset<'_> {
         })
     }
 }
+
+// `Bitmapset` is `pg_node_attr(custom_copy_equal)` in C: `gen_node_support.pl`
+// emits no generated `_copyBitmapset`/`_equalBitmapset` body, and
+// `copyfuncs.c`/`equalfuncs.c` instead delegate to `bms_copy` / `bms_equal` by
+// hand. The owned-tree analogue is these hand-written trait impls (NOT
+// `#[derive(PgNode)]`, which would mis-generate over the raw word array): copy
+// re-homes the word storage onto the target context exactly like `bms_copy`
+// (`palloc` + `memcpy`), and equality is `bms_equal`.
+
+impl<'mcx> backend_nodes_node_support::PgNodeCopy for Bitmapset<'mcx> {
+    type Bound<'dst> = Bitmapset<'dst>;
+    /// `bms_copy(from)` — `_copyBitmapset`. Deep-copy the word storage into the
+    /// target context (fallible: allocates).
+    fn copy_node_in<'dst>(
+        &self,
+        dst: mcx::Mcx<'dst>,
+    ) -> types_error::PgResult<Self::Bound<'dst>> {
+        self.clone_in(dst)
+    }
+}
+
+impl backend_nodes_node_support::PgNodeEqual for Bitmapset<'_> {
+    /// `bms_equal(a, b)` — `_equalBitmapset`. Two bitmapsets are equal iff they
+    /// have identical membership. The trailing-zero-word normalization that
+    /// `bms_equal` performs is preserved by the storage invariant (`bms_*`
+    /// constructors never leave trailing all-zero words), so a flat word-vector
+    /// comparison is faithful.
+    fn equal_node(&self, other: &Self) -> bool {
+        self.words.as_slice() == other.words.as_slice()
+    }
+}
