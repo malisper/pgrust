@@ -18,7 +18,12 @@ pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;
-pub mod executor;
+/// `executor.h` / `tuptable.h` slot vocabulary (`TupleTableSlot`,
+/// `TupleSlotKind`, `TTS_FLAG_*`, `EXEC_FLAG_*`) was relocated into the leaf
+/// `types-slot` crate to break the `types-tableam` → `types-nodes` cycle. This
+/// re-export preserves every existing `types_nodes::executor::…` and
+/// `crate::executor::…` import path unchanged.
+pub use types_slot as executor;
 pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
@@ -155,7 +160,7 @@ pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
 pub use nodeindexscan::{SubqueryScan, SubqueryScanStatus};
 pub use pathnodes::PathNode;
-pub use executor::{TupleSlotKind, TupleTableSlot};
+pub use types_slot::{TupleSlotKind, TupleTableSlot};
 pub use tuptable::{
     AttInMetadata, BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase,
     SlotData, TupOutputState, TupleTableSlotOps, VirtualTupleTableSlot,

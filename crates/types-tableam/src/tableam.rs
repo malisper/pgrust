@@ -11,7 +11,7 @@ use std::vec::Vec;
 use types_core::xact::CommandId;
 use types_core::TransactionId;
 use types_error::PgResult;
-use types_nodes::{TupleSlotKind, TupleTableSlot};
+use types_slot::{TupleSlotKind, TupleTableSlot};
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_tuple::heaptuple::ItemPointerData;
