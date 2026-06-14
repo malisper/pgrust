@@ -10,8 +10,12 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use types_tuple::backend_access_common_heaptuple::Datum;
 use types_sortsupport::SortSupportData;
+// Canonical value type (`Datum<'mcx>`: `ByVal` word / `ByRef` bytes). The
+// comparator-invocation operands of `apply_sort_comparator` carry this canonical
+// carrier with `'mcx` threaded (a by-reference sort key crosses as `ByRef`), not
+// the bare-word shim.
+use types_tuple::Datum;
 
 seam_core::seam!(
     /// `OidFunctionCall1(sortfunc, PointerGetDatum(&ssup))` for a
@@ -42,6 +46,11 @@ seam_core::seam!(
     /// `ssup.comparator`) on two non-null datums, returning `<0`/`0`/`>0`. The
     /// caller has already verified `ssup.comparator.is_some()`. `Err` carries
     /// the comparison function's `ereport(ERROR)`s.
+    ///
+    /// The two operands are the canonical `Datum<'mcx>` carrier (a `ByVal`
+    /// scalar word or a `ByRef` detoasted image) — a by-reference sort key
+    /// (e.g. text) crosses here as `ByRef`, so this is NOT a bare-word edge:
+    /// the carrier is threaded through rather than collapsed to a machine word.
     pub fn apply_sort_comparator(
         datum1: Datum<'_>,
         datum2: Datum<'_>,
