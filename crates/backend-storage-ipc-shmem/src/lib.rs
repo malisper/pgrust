@@ -27,13 +27,15 @@ use backend_utils_fmgr_funcapi_seams::{materialized_srf_putvalues, InitMateriali
 use backend_utils_hash_dynahash_seams as dynahash;
 use mcx::Mcx;
 use types_core::Size;
-// `Datum` is the transitional bare-word shim type (`types_datum::Datum`),
-// retained ONLY at the audited fmgr/SRF edges this crate touches: the SQL
-// function return values (`fmgr` return), and the `values[]` row arrays handed
-// to the `materialized_srf_putvalues` seam and built from the `cstring_to_text`
-// seam — both seam contracts still carry the shim word. No canonical
-// `Datum<'mcx>` value is constructed or consumed here, so every site below is
-// written fully-qualified `types_datum::Datum` at the edge.
+// The SQL functions here return the canonical unified `types_tuple::Datum`
+// (ByVal/ByRef). They only ever return the by-value null (`Datum::null()`) or a
+// by-value bool (`Datum::from_bool`), neither of which borrows from `mcx`, so
+// the PGFunction return type is `types_tuple::Datum<'static>`. The `values[]`
+// row arrays handed to the `materialized_srf_putvalues` seam are likewise
+// canonical (`ByVal` ints / `cstring_to_text` text wrapped in `ByVal`). The
+// bare-word `types_datum::Datum` survives ONLY as the scalar payload carried
+// inside `ByVal(ScalarWord)` (the deferred Cleanup-phase swap), never as a
+// standalone value here.
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
@@ -525,7 +527,7 @@ fn key_str(key: &[u8; SHMEM_INDEX_KEYSIZE]) -> std::borrow::Cow<'_, str> {
 pub fn pg_get_shmem_allocations(
     mcx: Mcx<'_>,
     fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::Datum<'static>> {
     const PG_GET_SHMEM_SIZES_COLS: usize = 4;
 
     InitMaterializedSRF::call(fcinfo, 0)?;
@@ -592,7 +594,7 @@ pub fn pg_get_shmem_allocations(
 
     guard.release()?;
 
-    Ok(types_datum::Datum::null())
+    Ok(types_tuple::Datum::null())
 }
 
 /// `pg_numa_touch_mem_if_required(ptr)` (`port/pg_numa.h` static inline) —
@@ -617,7 +619,7 @@ pub fn pg_get_shmem_allocations_numa(
     mcx: Mcx<'_>,
     fcinfo: &mut FunctionCallInfoBaseData<'_>,
     huge_pages_status: HugePagesStatus,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::Datum<'static>> {
     const PG_GET_SHMEM_NUMA_SIZES_COLS: usize = 3;
 
     if port_pg_numa_seams::pg_numa_init::call() == -1 {
@@ -782,7 +784,7 @@ pub fn pg_get_shmem_allocations_numa(
     guard.release()?;
     FIRST_NUMA_TOUCH.set(false);
 
-    Ok(types_datum::Datum::null())
+    Ok(types_tuple::Datum::null())
 }
 
 /// `pg_get_shmem_pagesize()` — the memory page size used for the shared
@@ -812,8 +814,8 @@ pub fn pg_get_shmem_pagesize(huge_pages_status: HugePagesStatus) -> Size {
 
 /// `pg_numa_available(PG_FUNCTION_ARGS)` — SQL function: whether NUMA
 /// inquiry is supported.
-pub fn pg_numa_available() -> types_datum::Datum {
-    types_datum::Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
+pub fn pg_numa_available() -> types_tuple::Datum<'static> {
+    types_tuple::Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
 }
 
 // ---------------------------------------------------------------------------
