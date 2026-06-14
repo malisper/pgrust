@@ -69,29 +69,19 @@ use core::marker::PhantomData;
 use core::mem::size_of;
 
 use types_core::Size;
-use types_execparallel::SerializeCursor;
-use types_parallel::DsmSegmentHandle;
+// The execParallel-visible `dsm_segment *` handle — the one per-node crates
+// receive from the `pcxt_seg` / `pwcxt_seg` seams. It is value-identical to the
+// parallel-internal `types_parallel::DsmSegmentHandle` (both wrap the same real
+// `DsmSegmentId`); the primitive only uses it to tie the borrow's lifetime to
+// the segment mapping, never to dereference it.
+use types_execparallel::{DsmSegmentHandle, SerializeCursor};
 
-/// Marker trait for a `#[repr(C)]` struct that is sound to map as a shared
-/// `&T` across OS processes: every field the C mutates concurrently after the
-/// launch barrier must be interior-mutable (a `pg_atomic_*`, an in-segment
-/// `Spinlock`, a `Barrier`, or a `ConditionVariable`); every plain scalar field
-/// must be a launch-once leader-write / worker-read field.
-///
-/// # Safety
-///
-/// Implementing this trait is an assertion, audited per-struct, that:
-/// 1. `Self` is `#[repr(C)]` and its layout matches the C struct field-for-field;
-/// 2. every concurrently-mutated field is interior-mutable as above;
-/// 3. `place_and_init`'s `init` closure fully initializes every field (no
-///    padding-relied-on-zero, no uninit field read);
-/// 4. it is sound to form a shared `&Self` over bytes that another process may
-///    also hold a shared `&Self` to (i.e. `Self` contains no plain `&mut`-style
-///    interior mutation and no non-shared `UnsafeCell` write path).
-///
-/// It is implemented ONLY on the audited per-node objects; per-node crates do
-/// NOT get to implement it for arbitrary types.
-pub unsafe trait SharedDsmObject {}
+/// The [`SharedDsmObject`](types_parallel::SharedDsmObject) marker trait —
+/// re-exported from `types-parallel`, where it is defined so the audited
+/// per-node `repr(C)` structs (which live in `types-nodes` /
+/// `types-execparallel`) can implement it next to their definition without
+/// tripping the orphan rule. Callers keep using `shared_dsm_object::SharedDsmObject`.
+pub use types_parallel::SharedDsmObject;
 
 /// The size, in bytes, a chunk for a fixed-size `T` must be requested at for
 /// [`crate::ShmToc::allocate`] — `shm_toc_estimate_chunk(e, sizeof(T))`.
@@ -217,6 +207,43 @@ pub fn place_and_init<'seg, T: SharedDsmObject>(
     }
 }
 
+/// Leader side, mutable-reference variant: placement-init a `T` at a real
+/// `shm_toc_allocate`'d chunk, handing the per-node crate a plain `&mut T` to
+/// run its field initializers (`*p.field = ...`, `BarrierInit(&mut p.barrier,
+/// 0)`, `LWLockInitialize(&mut p.lock, ...)`, `pg_atomic_init_u32(&mut
+/// p.atomic, 0)`, …) with ZERO `unsafe` in the per-node crate.
+///
+/// This is sound for exactly the same reason `place_and_init`'s `SharedView`
+/// path is: pre-launch the leader is the SOLE writer (no worker has attached
+/// and the launch barrier — bgworker fork + `WaitForParallelWorkersToAttach` —
+/// has not released), so a unique `&mut T` over the freshly-`shm_toc_allocate`'d
+/// (un-aliased) chunk bytes is valid. The returned [`SharedRef`] downgrades to a
+/// shared `&T` for the cross-process phase, which is sound because
+/// `T: SharedDsmObject` guarantees every concurrently-mutated field is
+/// interior-mutable. There is never a `&'static mut`.
+///
+/// Mirrors the leader's `pstate = shm_toc_allocate(toc, sizeof(*pstate));
+/// pstate->nbatch = 0; ...; LWLockInitialize(&pstate->lock, ...);
+/// BarrierInit(&pstate->build_barrier, 0); ...`.
+pub fn place_and_init_mut<'seg, T: SharedDsmObject>(
+    _seg: DsmSegmentHandle,
+    chunk: SerializeCursor,
+    init: impl FnOnce(&mut T),
+) -> SharedRef<'seg, T> {
+    let ptr = chunk.0 as *mut T;
+    // SAFETY: `chunk` is a real `shm_toc_allocate`'d (or looked-up) chunk of
+    // `>= size_of::<T>()` writable suitably-aligned in-segment bytes (module
+    // SAFETY contract). Pre-launch the leader is the sole writer, so this
+    // `&mut T` is unique. The closure fully initializes every field (audited via
+    // `T: SharedDsmObject` clause 3) before any worker attaches.
+    let m: &mut T = unsafe { &mut *ptr };
+    init(m);
+    SharedRef {
+        ptr: ptr as *const T,
+        _seg: PhantomData,
+    }
+}
+
 /// Worker side: attach to a `T` that `shm_toc_lookup` already located at its
 /// real in-segment address in this process's mapping. Reinterprets the bytes as
 /// a shared `&T` (no init — the leader already placement-initialized it before
@@ -233,4 +260,38 @@ pub fn attach<'seg, T: SharedDsmObject>(
         ptr: chunk.0 as *const T,
         _seg: PhantomData,
     }
+}
+
+/// Run a closure with a unique `&mut T` over a `shm_toc_lookup`'d in-segment
+/// object, for the phases the C code mutates the object through a plain
+/// `Obj *` while NO other participant is concurrently touching it — namely:
+///
+/// * a worker attaching pre-launch (before the launch barrier releases), and
+/// * the leader resetting shared state between scans (`ReInitializeDSM`), after
+///   all participants have detached from the previous generation.
+///
+/// In both windows the caller is the sole accessor, so a unique `&mut T` over
+/// the in-segment bytes is valid — the same reasoning as
+/// [`place_and_init_mut`], applied to an already-initialized object. This lets
+/// per-node code pass `&mut obj.field` to owner seams whose C prototype is
+/// `Foo(SubObj *sub, ...)` (e.g. `SharedFileSetAttach(&pstate->fileset, seg)`,
+/// `BarrierInit(&pstate->build_barrier, 0)`) with ZERO `unsafe` in the per-node
+/// crate.
+///
+/// # Caller obligation
+///
+/// The caller asserts (mirroring the C call-site's invariant) that no other
+/// process is concurrently accessing `*chunk` for the duration of `f`. This is
+/// guaranteed by the parallel-hash protocol at the two call sites above.
+pub fn with_mut<T: SharedDsmObject, R>(
+    _seg: DsmSegmentHandle,
+    chunk: SerializeCursor,
+    f: impl FnOnce(&mut T) -> R,
+) -> R {
+    // SAFETY: `chunk` is a real in-segment address of an initialized `T`
+    // (module SAFETY contract). The caller guarantees it is the sole accessor
+    // for the duration of `f` (worker pre-launch attach, or leader rescan reset
+    // after all participants detached), so this `&mut T` is unique.
+    let m: &mut T = unsafe { &mut *(chunk.0 as *mut T) };
+    f(m)
 }

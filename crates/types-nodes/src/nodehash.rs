@@ -333,6 +333,27 @@ pub struct ParallelHashJoinState {
     pub fileset: SharedFileSet,
 }
 
+// SAFETY (audited per the `SharedDsmObject` contract):
+//   1. `ParallelHashJoinState` is `#[repr(C)]` and matches `hashjoin.h`'s
+//      `ParallelHashJoinState` field-for-field (the order above is the C order).
+//   2. Every field the C mutates concurrently after the build barrier releases
+//      is interior-mutable: `lock` is the in-segment `LWLock`, `build_barrier` /
+//      `grow_batches_barrier` / `grow_buckets_barrier` are real `Barrier`s
+//      (in-segment `Spinlock` + `ConditionVariable`), `distributor` is a
+//      `pg_atomic_uint32`, and `fileset` carries its own in-segment `Spinlock`.
+//      The remaining scalars (`batches`/`old_batches`/`nbatch`/`old_nbatch`/
+//      `nbuckets`/`growth`/`chunk_work_queue`/`nparticipants`/`space_allowed`/
+//      `total_tuples`) are mutated only under `lock` or by the single elected
+//      participant inside a build-barrier phase, never racily — exactly as in C,
+//      where they are plain ints/dsa_pointers behind the same LWLock + barrier
+//      discipline (the parallel-hash protocol in nodeHash drives the locking).
+//   3. The leader's placement initializer (`ExecHashJoinInitializeDSM`) writes
+//      every field before any worker attaches.
+//   4. A shared `&ParallelHashJoinState` aliasing another process's shared
+//      `&ParallelHashJoinState` is sound: all writes go through the LWLock /
+//      Barrier / atomic / fileset-spinlock interior-mutable accessors.
+unsafe impl types_parallel::SharedDsmObject for ParallelHashJoinState {}
+
 /// `HashJoinTableData` (hashjoin.h) — the per-hashjoin hash table, palloc'd in
 /// the executor's per-query context.
 pub struct HashJoinTableData<'mcx> {

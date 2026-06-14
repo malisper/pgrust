@@ -108,6 +108,10 @@ seam_core::seam!(pub fn make_parallel_worker_context(
 ) -> ParallelWorkerContextHandle);
 /// `pwcxt->toc` — the worker context's `shm_toc *`.
 seam_core::seam!(pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ShmTocHandle);
+/// `pwcxt->seg` — the worker context's `dsm_segment *`. Needed by per-node
+/// `Exec*InitializeWorker` hooks that attach shmem-resident sub-objects to the
+/// segment (e.g. `SharedFileSetAttach(&pstate->fileset, pwcxt->seg)`).
+seam_core::seam!(pub fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> DsmSegmentHandle);
 /// `ParallelWorkerNumber`.
 seam_core::seam!(pub fn parallel_worker_number() -> i32);
 

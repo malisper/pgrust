@@ -3931,6 +3931,8 @@ dependencies = [
 name = "backend-executor-nodeHashjoin"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel",
+ "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execProcnode-seams",
@@ -3939,13 +3941,18 @@ dependencies = [
  "backend-executor-nodeHash-seams",
  "backend-executor-nodeHashjoin-seams",
  "backend-storage-file-buffile-seams",
+ "backend-storage-file-sharedfileset-seams",
+ "backend-storage-ipc-barrier-seams",
+ "backend-storage-lmgr-lwlock-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
  "types-error",
+ "types-execparallel",
  "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -6418,6 +6425,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-file-sharedfileset-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-execparallel",
+ "types-storage",
 ]
 
 [[package]]
@@ -10727,6 +10743,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-opclass",
+ "types-parallel",
  "types-rel",
  "types-scan",
  "types-snapshot",

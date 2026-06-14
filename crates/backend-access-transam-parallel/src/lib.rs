@@ -767,6 +767,13 @@ fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
     // C `pwcxt->toc`.
     toc_handle(pwcxt.0)
 }
+fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
+    // The worker context shares the parallel context's slot identity (its toc,
+    // seg and estimator are all addressed by the same slot — see
+    // `make_parallel_worker_context`), so the segment is the context's `seg`.
+    // Mirrors C `pwcxt->seg`.
+    with_globals(|g| ExecDsmSeg(g.get(ParallelContextHandle(pwcxt.0)).seg.0))
+}
 fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)
 }
@@ -2140,6 +2147,7 @@ pub fn init_seams() {
     seams::pcxt_estimator::set(pcxt_estimator);
     seams::pcxt_toc::set(pcxt_toc);
     seams::pwcxt_toc::set(pwcxt_toc);
+    seams::pwcxt_seg::set(pwcxt_seg);
     seams::pcxt_seg::set(pcxt_seg);
     seams::pcxt_worker_bgwhandle::set(pcxt_worker_bgwhandle);
     seams::make_parallel_worker_context::set(make_parallel_worker_context);
@@ -2495,7 +2503,10 @@ mod dsm_substrate_tests {
         establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
 
         let toc = pcxt_toc(pcxt);
-        let seg = with_globals(|g| g.get(pcxt).seg);
+        // The execParallel-visible `dsm_segment *` handle the primitive ties its
+        // borrow to — exactly what a per-node `Exec*InitializeDSM`/`Worker` hook
+        // receives from the `pcxt_seg`/`pwcxt_seg` seam.
+        let seg = pcxt_seg(pcxt).expect("segment established");
 
         // --- leader: allocate a real chunk, place + init the object in place. ---
         let chunk = shm_toc_allocate(toc, estimate::<DemoShared>());
