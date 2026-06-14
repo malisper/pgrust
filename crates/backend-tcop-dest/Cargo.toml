@@ -9,6 +9,7 @@ name = "backend_tcop_dest"
 path = "src/lib.rs"
 
 [dependencies]
+backend-commands-copyto-seams = { path = "../backend-commands-copyto-seams" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 types-dest = { path = "../types-dest" }
 types-error = { path = "../types-error" }

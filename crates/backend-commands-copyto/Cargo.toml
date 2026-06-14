@@ -27,6 +27,9 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-commands-copyto-seams = { path = "../backend-commands-copyto-seams" }
+# The tcop-dest receiver router: CreateCopyDestReceiver registers copyto's
+# vtable here (no cycle — dest depends only on copyto-*seams*).
+backend-tcop-dest = { path = "../backend-tcop-dest" }
 
 # Outward seams (would cycle as direct deps).
 backend-commands-copy-seams = { path = "../backend-commands-copy-seams" }
