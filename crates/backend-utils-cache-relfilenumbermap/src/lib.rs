@@ -53,7 +53,7 @@ struct RelfilenumberMap<'mcx> {
     /// `static ScanKeyData relfilenumber_skey[2]` — built first time through
     /// in `InitializeRelfilenumberMap`; `sk_func` is resolved eagerly the way
     /// C does (`fmgr_info_cxt(F_OIDEQ, &sk_func, ..)`) through the fmgr seam.
-    relfilenumber_skey: [ScanKeyData; 2],
+    relfilenumber_skey: [ScanKeyData<'mcx>; 2],
     /// `static HTAB *RelfilenumberMapHash` — the entry value is `relid`
     /// (`pg_class.oid`; `InvalidOid` is a negative cache entry).
     hash: PgHashMap<'mcx, RelfilenumberMapKey, Oid>,
@@ -180,15 +180,33 @@ pub fn RelidByRelfilenumber(
         // Not a shared table, could either be a plain relation or a
         // non-shared, nailed one, like e.g. pg_class.
 
-        // copy scankey to local copy and set scan arguments
-        let mut skey = RELFILENUMBER_MAP.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .unwrap()
-                .with(|s| s.relfilenumber_skey.clone())
+        // copy scankey to local copy and set scan arguments. C does a flat
+        // `memcpy(skey, relfilenumber_skey, sizeof(skey))` then overwrites
+        // `sk_argument`. The cached `sk_argument` is always the by-value
+        // `Datum::null()` from `InitializeRelfilenumberMap` and is discarded
+        // here anyway, so we copy out the plain key fields (which carry no
+        // `'mcx` borrow) under the short `with` borrow and rebuild the local
+        // `ScanKeyData<'mcx>` with the fresh by-value arguments — equivalent to
+        // the C memcpy-then-overwrite without escaping the borrowed lifetime.
+        let key_parts = RELFILENUMBER_MAP.with(|cell| {
+            cell.borrow().as_ref().unwrap().with(|s| {
+                let mut parts = [ScanKeyData::empty(), ScanKeyData::empty()];
+                for (dst, src) in parts.iter_mut().zip(s.relfilenumber_skey.iter()) {
+                    dst.sk_flags = src.sk_flags;
+                    dst.sk_attno = src.sk_attno;
+                    dst.sk_strategy = src.sk_strategy;
+                    dst.sk_subtype = src.sk_subtype;
+                    dst.sk_collation = src.sk_collation;
+                    dst.sk_func = src.sk_func.clone();
+                    // src.sk_argument is the cached by-value null; the local
+                    // copy's sk_argument is set below, matching C.
+                }
+                parts
+            })
         });
-        skey[0].sk_argument = ScalarWord::from_oid(reltablespace);
-        skey[1].sk_argument = ScalarWord::from_oid(relfilenumber);
+        let mut skey = key_parts;
+        skey[0].sk_argument = Datum::from_oid(reltablespace);
+        skey[1].sk_argument = Datum::from_oid(relfilenumber);
 
         // check for plain relations by looking in pg_class. The scan
         // temporaries land in a scratch context dropped below.
