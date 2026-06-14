@@ -58,6 +58,35 @@ opaque_handle!(
     PgProcHandle
 );
 
+/// Marker trait for a `#[repr(C)]` struct that is sound to map as a shared
+/// `&T` across OS processes after being placed in a DSM segment by the
+/// typed-shared-DSM-object primitive (`shared_dsm_object` in
+/// `backend-access-transam-parallel`, which re-exports this trait).
+///
+/// The trait is defined here, in the lowest crate that owns
+/// [`DsmSegmentHandle`], so the audited per-node `repr(C)` structs that live in
+/// `types-nodes` / `types-execparallel` (`ParallelHashJoinState`,
+/// `ParallelTableScanDescData`, `ParallelBitmapHeapState`, …) can implement it
+/// directly next to their definition (the orphan rule otherwise forbids the
+/// per-node *node* crates from implementing it for a foreign struct).
+///
+/// # Safety
+///
+/// Implementing this trait is an assertion, audited per-struct, that:
+/// 1. `Self` is `#[repr(C)]` and its layout matches the C struct field-for-field;
+/// 2. every field the C mutates concurrently after the launch barrier is
+///    interior-mutable (a `pg_atomic_*`, an in-segment `Spinlock`, a `Barrier`,
+///    or a `ConditionVariable`);
+/// 3. the leader's placement initializer fully initializes every field (no
+///    padding-relied-on-zero, no uninit field read);
+/// 4. it is sound to form a shared `&Self` over bytes that another process may
+///    also hold a shared `&Self` to (no plain `&mut`-style interior mutation and
+///    no non-shared `UnsafeCell` write path).
+///
+/// It is implemented ONLY on the audited per-node objects; per-node *node*
+/// crates do NOT get to implement it for arbitrary types.
+pub unsafe trait SharedDsmObject {}
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — the integer name of a DSM segment.
 pub type dsm_handle = u32;
 
