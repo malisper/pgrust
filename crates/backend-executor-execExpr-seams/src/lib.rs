@@ -816,19 +816,19 @@ seam_core::seam!(
     /// matching `eqfunctions[i]` under `collations[i]` (NULLs compare equal).
     /// Used by `ExecInitMemoize` to build the non-binary `cache_eq_expr` over the
     /// node's `hashkeydesc`; the inner slot ops are `TTSOpsMinimalTuple` and the
-    /// outer slot ops `TTSOpsVirtual`. The owned model lends the `parent`
-    /// plan-state (for slot descriptors / param context) and the estate. The
-    /// compiled `ExprState` is allocated in the per-query context; fallible on
-    /// OOM / `ereport(ERROR)`.
+    /// outer slot ops `TTSOpsVirtual`. The owned model passes the result
+    /// `desc`/`lops`/`rops` directly (the C `parent` is only used for slot
+    /// descriptors / param context). The compiled `ExprState` is allocated in
+    /// `mcx`; fallible on OOM / `ereport(ERROR)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn exec_build_param_set_equal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
         lops: types_nodes::TupleSlotKind,
         rops: types_nodes::TupleSlotKind,
         eqfunctions: &[types_core::Oid],
         collations: &[types_core::Oid],
         param_exprs: &[types_nodes::primnodes::Expr],
-        parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
 

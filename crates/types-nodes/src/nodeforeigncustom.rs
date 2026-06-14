@@ -242,13 +242,18 @@ impl<'mcx> ForeignScanState<'mcx> {
 }
 
 /// `ParallelContext` (access/parallel.h) — parallel-coordination context for
-/// the parallel-scan entry points, trimmed. The `shm_toc`/`shm_toc_estimator`
-/// it carries are storage-owned (DSM); they are reached through the FDW /
-/// shm_toc seams, so the owned model carries the live object opaquely.
+/// the parallel-scan entry points, trimmed. The `shm_toc *toc` it carries is
+/// storage-owned (DSM), reached through the FDW / shm_toc seams, so it is kept
+/// opaque. The `shm_toc_estimator estimator` is a backend-local sizing
+/// accumulator (not in the segment), so it is carried as a real field that the
+/// `shm_toc_estimate_{chunk,keys}` seams operate on directly.
 #[derive(Debug, Default)]
 pub struct ParallelContext {
-    /// `shm_toc_estimator estimator` + `shm_toc *toc` — the live DSM
-    /// coordination objects (storage-owned, opaque here).
+    /// `shm_toc_estimator estimator` — backend-local DSM-size sizing
+    /// accumulator (`space_for_chunks` / `number_of_keys`).
+    pub estimator: types_storage::storage::shm_toc_estimator,
+    /// `shm_toc *toc` — the live DSM table-of-contents (storage-owned, opaque
+    /// here).
     pub toc: Opaque,
 }
 

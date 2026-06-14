@@ -1846,14 +1846,13 @@ fn build_cache_eq_expr<'mcx>(
     };
     let collations: Vec<Oid> = node.collations.iter().copied().collect();
     let state = execExpr::exec_build_param_set_equal::call(
+        estate.es_query_cxt,
         &desc_box,
         TupleSlotKind::MinimalTuple,
         TupleSlotKind::Virtual,
         eqfuncoids,
         &collations,
         node.param_exprs.as_slice(),
-        &mut mstate.ss.ps,
-        estate,
     )?;
     mstate.cache_eq_expr = Some(state);
     Ok(())
