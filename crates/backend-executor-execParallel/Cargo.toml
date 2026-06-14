@@ -15,6 +15,7 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }
+types-scan = { path = "../types-scan" }
 types-execparallel = { path = "../types-execparallel" }
 
 backend-executor-execParallel-seams = { path = "../backend-executor-execParallel-seams" }
@@ -24,17 +25,19 @@ backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
 backend-executor-tqueue-seams = { path = "../backend-executor-tqueue-seams" }
 
-backend-executor-nodeSeqscan-seams = { path = "../backend-executor-nodeSeqscan-seams" }
-backend-executor-nodeIndexscan-pq-seams = { path = "../backend-executor-nodeIndexscan-pq-seams" }
-backend-executor-nodeIndexonlyscan-seams = { path = "../backend-executor-nodeIndexonlyscan-seams" }
-backend-executor-nodeBitmapIndexscan-seams = { path = "../backend-executor-nodeBitmapIndexscan-seams" }
-backend-executor-nodeForeignscan-seams = { path = "../backend-executor-nodeForeignscan-seams" }
-backend-executor-nodeAppend-seams = { path = "../backend-executor-nodeAppend-seams" }
-backend-executor-nodeCustom-seams = { path = "../backend-executor-nodeCustom-seams" }
-backend-executor-nodeBitmapHeapscan-seams = { path = "../backend-executor-nodeBitmapHeapscan-seams" }
-backend-executor-nodeHashjoin-pq-seams = { path = "../backend-executor-nodeHashjoin-pq-seams" }
-backend-executor-nodeHash-pq-seams = { path = "../backend-executor-nodeHash-pq-seams" }
-backend-executor-nodeSort-seams = { path = "../backend-executor-nodeSort-seams" }
-backend-executor-nodeIncrementalSort-seams = { path = "../backend-executor-nodeIncrementalSort-seams" }
-backend-executor-nodeAgg-pq-seams = { path = "../backend-executor-nodeAgg-pq-seams" }
-backend-executor-nodeMemoize-seams = { path = "../backend-executor-nodeMemoize-seams" }
+# Executor driver + recursive-teardown/tuple-bound (called directly — owned).
+backend-executor-execMain = { path = "../backend-executor-execMain" }
+backend-executor-execProcnode = { path = "../backend-executor-execProcnode" }
+
+# Per-node parallel methods — called directly on the owned node-state structs
+# (the F0a owned parallel fns), mirroring execProcnode's direct ExecEnd* calls.
+backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
+backend-executor-nodeIndexscan = { path = "../backend-executor-nodeIndexscan" }
+backend-executor-nodeIndexonlyscan = { path = "../backend-executor-nodeIndexonlyscan" }
+backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapIndexscan" }
+backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
+backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
+backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
+backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }

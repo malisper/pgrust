@@ -167,10 +167,13 @@ macro_rules! handle {
 
 handle!(
     /// Live `PlanState *` (`nodes/execnodes.h`) — owned by the executor.
+    ///
+    /// RETIRED from the parallel executor itself (#169 de-handle: execParallel
+    /// drives the owned `&mut PlanStateNode` tree by enum match). Still used by
+    /// the per-node parallel `*-seams` declarations / node crates for *other*
+    /// (non-execParallel) handle-addressed plan-state surfaces, so the newtype
+    /// remains until those callers are de-handled in turn.
     PlanStateHandle);
-handle!(
-    /// Live `EState *` (`nodes/execnodes.h`) — per-query executor state.
-    EStateHandle);
 handle!(
     /// Live `ParallelContext *` (`access/parallel.h`).
     ParallelContextHandle);
@@ -330,8 +333,11 @@ impl Default for RestoredParam<'_> {
 /// `palloc`ed into the per-query context, modeled here as `PgVec<'mcx, _>`.
 #[derive(Debug)]
 pub struct ParallelExecutorInfo<'mcx> {
-    /// `PlanState *planstate`.
-    pub planstate: PlanStateHandle,
+    // `PlanState *planstate` — RETIRED in the owned model (#169 de-handle). The
+    // leader's `outerPlanState` is threaded into `ExecParallelCleanup` by `&mut`
+    // (a sibling field borrow of the Gather/GatherMerge node-state) rather than
+    // stored here, since storing it would be a self-borrow (`pei` lives inside
+    // that same node-state). C kept it in the struct; the owned model passes it.
     /// `ParallelContext *pcxt` (`None` after cleanup).
     pub pcxt: Option<ParallelContextHandle>,
     /// `BufferUsage *buffer_usage` — points into the DSM bufusage area.

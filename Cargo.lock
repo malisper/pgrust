@@ -2073,11 +2073,17 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogprefetcher-seams",
+ "backend-access-transam-xlogreader-seams",
  "backend-access-transam-xlogrecovery-seams",
+ "backend-postmaster-startup-seams",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
  "mcx",
  "seam-core",
  "types-condvar",
@@ -4148,22 +4154,20 @@ name = "backend-executor-execParallel"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-seams",
+ "backend-executor-execMain",
  "backend-executor-execParallel-seams",
  "backend-executor-execParallel-support-seams",
- "backend-executor-nodeAgg-pq-seams",
- "backend-executor-nodeAppend-seams",
- "backend-executor-nodeBitmapHeapscan-seams",
- "backend-executor-nodeBitmapIndexscan-seams",
- "backend-executor-nodeCustom-seams",
- "backend-executor-nodeForeignscan-seams",
- "backend-executor-nodeHash-pq-seams",
- "backend-executor-nodeHashjoin-pq-seams",
- "backend-executor-nodeIncrementalSort-seams",
- "backend-executor-nodeIndexonlyscan-seams",
- "backend-executor-nodeIndexscan-pq-seams",
- "backend-executor-nodeMemoize-seams",
- "backend-executor-nodeSeqscan-seams",
- "backend-executor-nodeSort-seams",
+ "backend-executor-execProcnode",
+ "backend-executor-nodeAppend",
+ "backend-executor-nodeBitmapHeapscan",
+ "backend-executor-nodeBitmapIndexscan",
+ "backend-executor-nodeHash",
+ "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIndexonlyscan",
+ "backend-executor-nodeIndexscan",
+ "backend-executor-nodeMemoize",
+ "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSort",
  "backend-executor-tqueue-seams",
  "backend-storage-ipc-shm-mq-seams",
  "backend-utils-mmgr-dsa-seams",
@@ -4173,6 +4177,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-scan",
  "types-storage",
 ]
 
@@ -4191,6 +4196,7 @@ dependencies = [
 name = "backend-executor-execParallel-support-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-datum",

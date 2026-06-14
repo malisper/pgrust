@@ -287,6 +287,7 @@ pub fn ExecGather<'mcx>(
                 execParallel::exec_parallel_reinitialize_owned::call(
                     mcx,
                     outer,
+                    estate,
                     pei,
                     init_param.as_deref(),
                 )?;
@@ -660,11 +661,18 @@ pub fn ExecShutdownGather<'mcx>(node: &mut GatherStateData<'mcx>) -> PgResult<()
 
     // Now destroy the parallel context.
     if node.pei.is_some() {
+        // `pei` (node->pei) and the leader's outerPlanState (node->ps.lefttree)
+        // are disjoint fields, so both can be borrowed mutably at once.
+        let outer = node
+            .ps
+            .lefttree
+            .as_deref_mut()
+            .ok_or_else(|| elog_error("Gather has no outer plan state"))?;
         let pei = node
             .pei
             .as_deref_mut()
             .ok_or_else(|| elog_error("Gather has no parallel info"))?;
-        execParallel::ExecParallelCleanup::call(pei)?;
+        execParallel::ExecParallelCleanup::call(pei, outer)?;
         node.pei = None;
     }
     Ok(())

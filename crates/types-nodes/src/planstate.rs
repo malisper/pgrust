@@ -313,4 +313,131 @@ impl<'mcx> PlanStateNode<'mcx> {
             _ => None,
         }
     }
+
+    /// `node->plan->parallel_aware` — whether this plan node is engineered to
+    /// participate in a parallel scan (read by the parallel-executor tree walks
+    /// to decide whether to invoke a node's `Exec*Estimate`/`*InitializeDSM`
+    /// methods). The C reads `planstate->plan->parallel_aware`; the embedded
+    /// `Plan` head is reached through the node's `PlanState.plan` back-pointer.
+    pub fn parallel_aware(&self) -> bool {
+        self.ps_head()
+            .plan
+            .map(|p| p.plan_head().parallel_aware)
+            .unwrap_or(false)
+    }
+
+    /// `node->plan->plan_node_id` — the plan node's id, the key under which the
+    /// parallel executor accumulates per-node instrumentation in the DSM.
+    pub fn plan_node_id(&self) -> i32 {
+        self.ps_head()
+            .plan
+            .map(|p| p.plan_head().plan_node_id)
+            .unwrap_or(0)
+    }
+
+    /// `planstate_tree_walker(planstate, ...)` — the child `PlanState` nodes,
+    /// in walk order, that `nodeFuncs.c`'s `planstate_tree_walker` descends
+    /// into: the init-plan and regular sub-plan state trees
+    /// (`planstate_walk_subplans` over `initPlan`/`subPlan`), then
+    /// `outerPlanState`/`innerPlanState` (`lefttree`/`righttree`), then the
+    /// per-node child-state lists (`planstate_walk_members`):
+    /// `AppendState.appendplans`, `MergeAppendState.mergeplans`,
+    /// `BitmapAndState`/`BitmapOrState.bitmapplans`, and
+    /// `CustomScanState.custom_ps`. Returns `&mut` to each present child so the
+    /// owned tree walks (e.g. the parallel-executor estimate/init walks) can
+    /// recurse. Child lists for node variants whose state does not yet model its
+    /// children as `PlanStateNode` (`ModifyTableState.mt_plans`,
+    /// `SubqueryScanState.subplan`) are added here as those units land.
+    pub fn planstate_tree_walker_children_mut<'a>(
+        &'a mut self,
+    ) -> alloc::vec::Vec<&'a mut PlanStateNode<'mcx>> {
+        let mut out: alloc::vec::Vec<&'a mut PlanStateNode<'mcx>> = alloc::vec::Vec::new();
+
+        // Reach the embedded `PlanState` head *and* the per-node extra
+        // child-state lists from the same concrete-variant borrow: the head
+        // (`.ps` / `.ss.ps` / `.js.ps`) and a member list (`appendplans`,
+        // `mergeplans`, `bitmapplans`, `custom_ps`) are disjoint fields of the
+        // one struct, so both can be borrowed mutably at once. A single match
+        // (rather than `ps_head_mut()` followed by a second match) keeps `self`
+        // borrowed exactly once for the whole result.
+        let head: &'a mut PlanStateData<'mcx> = match self {
+            PlanStateNode::Append(a) => {
+                // Deref the `PgBox` once so the field split-borrow
+                // (`appendplans` vs `ps`) is visible to the borrow checker.
+                let a: &'a mut AppendStateData<'mcx> = &mut *a;
+                for c in a.appendplans.iter_mut() {
+                    if let Some(c) = c.as_deref_mut() {
+                        out.push(c);
+                    }
+                }
+                &mut a.ps
+            }
+            PlanStateNode::MergeAppend(m) => {
+                let m = &mut **m;
+                for c in m.mergeplans.iter_mut() {
+                    if let Some(c) = c.as_deref_mut() {
+                        out.push(c);
+                    }
+                }
+                &mut m.ps
+            }
+            PlanStateNode::BitmapAnd(b) => {
+                let b = &mut **b;
+                for c in b.bitmapplans.iter_mut() {
+                    if let Some(c) = c.as_deref_mut() {
+                        out.push(c);
+                    }
+                }
+                &mut b.ps
+            }
+            PlanStateNode::BitmapOr(b) => {
+                let b = &mut **b;
+                for c in b.bitmapplans.iter_mut() {
+                    if let Some(c) = c.as_deref_mut() {
+                        out.push(c);
+                    }
+                }
+                &mut b.ps
+            }
+            PlanStateNode::CustomScan(c) => {
+                let c = &mut **c;
+                if let Some(list) = c.custom_ps.as_mut() {
+                    for ps in list.iter_mut() {
+                        out.push(&mut **ps);
+                    }
+                }
+                &mut c.ss.ps
+            }
+            // Every other variant has no extra `PlanStateNode` member list (yet);
+            // its children are entirely the shared-head subplans + left/right.
+            other => other.ps_head_mut(),
+        };
+
+        // planstate_walk_subplans(planstate->initPlan, ...) and
+        // planstate_walk_subplans(planstate->subPlan, ...) — each SubPlanState's
+        // `planstate` subtree.
+        if let Some(init) = head.initPlan.as_mut() {
+            for sps in init.iter_mut() {
+                if let Some(ps) = sps.planstate.as_deref_mut() {
+                    out.push(ps);
+                }
+            }
+        }
+        if let Some(sub) = head.subPlan.as_mut() {
+            for sps in sub.iter_mut() {
+                if let Some(ps) = sps.planstate.as_deref_mut() {
+                    out.push(ps);
+                }
+            }
+        }
+        // outerPlanState / innerPlanState.
+        if let Some(l) = head.lefttree.as_deref_mut() {
+            out.push(l);
+        }
+        if let Some(r) = head.righttree.as_deref_mut() {
+            out.push(r);
+        }
+
+        out
+    }
 }

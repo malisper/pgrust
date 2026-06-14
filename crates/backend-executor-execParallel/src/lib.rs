@@ -7,21 +7,34 @@
 //! write into, launches/reaps the workers, and aggregates their buffer/WAL
 //! usage and instrumentation back into the leader.
 //!
-//! The orchestration (the `PlanState`-tree walks dispatching the per-node
-//! parallel methods by node tag, the DSM-sizing / key-insertion sequence, the
-//! per-worker instrumentation aggregation, the estimate/init bookkeeping) is
-//! this crate's own logic. Everything below it — the DSM / `shm_toc` / `shm_mq`
-//! primitives, the `ParallelContext` machinery, the tuple-queue reader/writer,
-//! the DSA area, the per-node parallel methods, the executor driver,
-//! `planstate_tree_walker`, parameter/datum (de)serialization, instrumentation,
-//! snapshot management, and `pgstat` reporting — is owned by not-yet-ported
-//! subsystems and reached through those owners' seam crates.
+//! The plan-state-tree walks (the `planstate_tree_walker` dispatch of the
+//! per-node parallel methods) are this crate's own logic and are driven over the
+//! executor's **owned** `PlanStateNode` tree (`&mut PlanStateNode<'mcx>` +
+//! `&mut EStateData<'mcx>`) — an enum match on the concrete node, exactly like
+//! `execProcnode`'s `ExecEndNode`. The per-node `Exec*Estimate` /
+//! `*InitializeDSM` / `*InitializeWorker` / `*ReInitializeDSM` methods are
+//! called directly on the owned node-state structs.
 //!
-//! The leader/worker-shared and externally-owned objects (the `PlanState`
-//! tree, `EState`, `ParallelContext`, DSM segment, `shm_toc`, DSA area, tuple
-//! queues, serialized `PlannedStmt`/`ParamListInfo`, `QueryDesc`,
-//! `DestReceiver`) are threaded through the `Copy` handle newtypes in
-//! [`types_execparallel`], exactly as the C threads a pointer.
+//! What still crosses a seam: the DSM / `shm_toc` / `shm_mq` primitives, the
+//! `ParallelContext` machinery, the tuple-queue reader/writer, the DSA area —
+//! all the dynamic-shared-memory carrier — plus the worker plan-shipping
+//! (`nodeToString` / `SerializeParamList` and their restore counterparts),
+//! parameter/datum (de)serialization, snapshot management, and `pgstat`
+//! reporting. The executor driver (`ExecutorStart`/`Run`/`Finish`/`End`) and the
+//! `QueryDesc` lifecycle are owned (`execMain` / `types_nodes::QueryDesc`) and
+//! called directly.
+//!
+//! Parallel-DSM-carrier residual (sanctioned mirror-and-panic): the per-node
+//! parallel methods that read/write DSM-resident shared state whose typed
+//! shared-DSM-object carrier has not landed (the `Exec*InitializeDSM`/`Worker`
+//! *bodies* for Seq/Index/Hash/Sort/Append/… honestly panic where they reach
+//! the unbuilt carrier), the `Foreign`/`Custom` parallel methods (no bridge from
+//! the DSM-owned `ParallelContextHandle` to the owned `&mut ParallelContext`
+//! they take), the `IncrementalSort` parallel methods (no owned node crate yet),
+//! and the per-`PlanState` instrumentation retrieval/report walks (the leader's
+//! `planstate->worker_instrument` / worker's `SharedExecutorInstrumentation`
+//! accumulation — the owned `PlanState` head does not yet carry the
+//! `worker_instrument` array). Those points panic loudly with their rationale.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -30,19 +43,13 @@
 use mcx::{Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use types_execparallel::{
-    dsa_pointer_is_valid, DsaAreaHandle, DsmSegmentHandle, EStateHandle,
-    ExecParallelEstimateContext, ExecParallelInitializeDSMContext, FixedParallelExecutorState,
-    InstrumentationHandle, JitInstrumentationHandle, ParallelContextHandle,
-    ParallelExecutorInfo, ParallelWorkerContextHandle, PlanHandle, PlanStateHandle, QueryDescHandle,
-    SerializeCursor, SharedExecutorInstrumentation, ShmTocHandle, Size, TuplesNeeded,
-    DsaPointer, INVALID_DSA_POINTER, PGJIT_NONE,
+    dsa_pointer_is_valid, DsaAreaHandle, DsmSegmentHandle, FixedParallelExecutorState,
+    ParallelExecutorInfo, SerializeCursor, SharedExecutorInstrumentation, ShmTocHandle, Size,
+    TuplesNeeded, DsaPointer, INVALID_DSA_POINTER, PGJIT_NONE,
 };
 use types_nodes::bitmapset::Bitmapset;
-use types_nodes::execstate_tags::{
-    T_AggState, T_AppendState, T_BitmapHeapScanState, T_BitmapIndexScanState, T_CustomScanState,
-    T_ForeignScanState, T_HashJoinState, T_HashState, T_IncrementalSortState, T_IndexOnlyScanState,
-    T_IndexScanState, T_MemoizeState, T_SeqScanState, T_SortState,
-};
+use types_nodes::querydesc::QueryDesc;
+use types_nodes::{EStateData, PlanStateNode};
 use types_core::instrument::{BufferUsage, WalUsage};
 use types_nodes::instrument::Instrumentation;
 
@@ -52,20 +59,18 @@ use backend_executor_tqueue_seams as tqueue;
 use backend_storage_ipc_shm_mq_seams as shmmq;
 use backend_utils_mmgr_dsa_seams as dsa;
 
-use backend_executor_nodeAgg_pq_seams as nodeAgg;
-use backend_executor_nodeAppend_seams as nodeAppend;
-use backend_executor_nodeBitmapHeapscan_seams as nodeBitmapHeap;
-use backend_executor_nodeBitmapIndexscan_seams as nodeBitmapIndex;
-use backend_executor_nodeCustom_seams as nodeCustom;
-use backend_executor_nodeForeignscan_seams as nodeForeign;
-use backend_executor_nodeHash_pq_seams as nodeHash;
-use backend_executor_nodeHashjoin_pq_seams as nodeHashjoin;
-use backend_executor_nodeIncrementalSort_seams as nodeIncrSort;
-use backend_executor_nodeIndexonlyscan_seams as nodeIndexOnly;
-use backend_executor_nodeIndexscan_pq_seams as nodeIndex;
-use backend_executor_nodeMemoize_seams as nodeMemoize;
-use backend_executor_nodeSeqscan_seams as nodeSeqscan;
-use backend_executor_nodeSort_seams as nodeSort;
+use backend_executor_execMain as execMain;
+
+use backend_executor_nodeAppend as nodeAppend;
+use backend_executor_nodeBitmapHeapscan as nodeBitmapHeap;
+use backend_executor_nodeBitmapIndexscan as nodeBitmapIndex;
+use backend_executor_nodeHash as nodeHash;
+use backend_executor_nodeHashjoin as nodeHashjoin;
+use backend_executor_nodeIndexonlyscan as nodeIndexOnly;
+use backend_executor_nodeIndexscan as nodeIndex;
+use backend_executor_nodeMemoize as nodeMemoize;
+use backend_executor_nodeSeqscan as nodeSeqscan;
+use backend_executor_nodeSort as nodeSort;
 
 // ===========================================================================
 // Magic numbers for parallel executor communication (execParallel.c:58-69).
@@ -99,7 +104,8 @@ const fn maxalign(len: usize) -> usize {
 use types_storage::LWTRANCHE_PARALLEL_QUERY_DSA;
 
 /// `ForwardScanDirection` (access/sdir.h) — value `1`.
-const FORWARD_SCAN_DIRECTION: i32 = 1;
+const FORWARD_SCAN_DIRECTION: types_scan::sdir::ScanDirection =
+    types_scan::sdir::ScanDirection::ForwardScanDirection;
 
 // offsetof(SharedExecutorInstrumentation, plan_node_id): four leading ints.
 const OFFSET_OF_PLAN_NODE_ID: usize = 4 * core::mem::size_of::<i32>();
@@ -136,12 +142,17 @@ fn size_overflow() -> PgError {
 
 /// Install this crate's implementations into its seam slots.
 pub fn init_seams() {
-    backend_executor_execParallel_seams::ExecInitParallelPlan::set(ExecInitParallelPlan);
     backend_executor_execParallel_seams::ExecParallelCreateReaders::set(ExecParallelCreateReaders);
-    backend_executor_execParallel_seams::ExecParallelReinitialize::set(ExecParallelReinitialize);
     backend_executor_execParallel_seams::ExecParallelFinish::set(ExecParallelFinish);
-    backend_executor_execParallel_seams::ExecParallelCleanup::set(ExecParallelCleanup);
     backend_executor_execParallel_seams::ParallelQueryMain::set(ParallelQueryMain);
+    // The de-handled owned entry points consumed by nodeGather/nodeGatherMerge.
+    backend_executor_execParallel_seams::exec_init_parallel_plan_owned::set(
+        ExecInitParallelPlan,
+    );
+    backend_executor_execParallel_seams::exec_parallel_reinitialize_owned::set(
+        ExecParallelReinitialize,
+    );
+    backend_executor_execParallel_seams::ExecParallelCleanup::set(ExecParallelCleanup);
 }
 
 // ===========================================================================
@@ -150,20 +161,19 @@ pub fn init_seams() {
 
 /// `ExecSerializePlan` — create a serialized representation of the plan to be
 /// sent to each worker. Returns `nodeToString(pstmt)`.
-fn ExecSerializePlan(plan: PlanHandle, estate: EStateHandle) -> PgResult<String> {
-    // We can't scribble on the original plan, so make a copy.
-    let plan = sup::copy_plan::call(plan);
-
-    // The worker will start its own copy of the executor, and that copy will
-    // insert a junk filter if the toplevel node has any resjunk entries. We
-    // don't want that, because here the tuples are coming back to another
-    // backend which may need them; clear resjunk on the target list.
-    sup::clear_plan_targetlist_resjunk::call(plan);
-
-    // Build the dummy PlannedStmt (field-fill + parallel-safe-subplan filtering
-    // that leaves NULL holes), then serialize it.
-    let pstmt = sup::build_serializable_plannedstmt::call(plan, estate)?;
-    sup::node_to_string::call(pstmt)
+///
+/// The plan-fix-up + serialization is the worker plan-shipping path, owned by
+/// `copyfuncs.c`/`outfuncs.c` (not yet ported); the owned plan tree
+/// (`estate->es_plannedstmt` reached through the owned `EStateData`) is handed
+/// to the plan-shipping seam, which honestly panics until those land.
+fn ExecSerializePlan(estate: &mut EStateData<'_>) -> PgResult<String> {
+    // We can't scribble on the original plan, so make a copy; clear resjunk on
+    // the top target list; build the dummy PlannedStmt (field-fill +
+    // parallel-safe-subplan filtering) and serialize it. The whole plan-shipping
+    // pipeline (copyObject(plan) → clear resjunk → build serializable
+    // PlannedStmt → nodeToString) is the worker plan-shipping path; reached
+    // through the owner seam, which panics until copyfuncs/out funcs land.
+    sup::serialize_plan_for_workers::call(estate)
 }
 
 // ===========================================================================
@@ -171,61 +181,93 @@ fn ExecSerializePlan(plan: PlanHandle, estate: EStateHandle) -> PgResult<String>
 // ===========================================================================
 
 /// `ExecParallelEstimate` — per-node DSM-estimate tree walk. Counts the node,
-/// dispatches the node's `ExecXxxEstimate` over its tag, then recurses.
-fn ExecParallelEstimate(
-    planstate: PlanStateHandle,
-    e: &mut ExecParallelEstimateContext,
+/// dispatches the node's `ExecXxxEstimate` over the owned node-state enum, then
+/// recurses over the `planstate_tree_walker` children.
+fn ExecParallelEstimate<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pcxt: types_execparallel::ParallelContextHandle,
+    nnodes: &mut i32,
 ) -> PgResult<bool> {
-    let pcxt = e.pcxt;
-
     // Count this node.
-    e.nnodes += 1;
+    *nnodes += 1;
 
-    let tag = sup::node_tag::call(planstate);
-    if tag == T_SeqScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeSeqscan::exec_seqscan_estimate::call(planstate, pcxt)?;
+    let parallel_aware = planstate.parallel_aware();
+    match planstate {
+        // case T_SeqScanState: if (planstate->plan->parallel_aware)
+        //     ExecSeqScanEstimate((SeqScanState *) planstate, e->pcxt);
+        PlanStateNode::SeqScan(node) => {
+            if parallel_aware {
+                nodeSeqscan::ExecSeqScanEstimate(node, pcxt, estate)?;
+            }
         }
-    } else if tag == T_IndexScanState {
-        nodeIndex::exec_indexscan_estimate::call(planstate, pcxt)?;
-    } else if tag == T_IndexOnlyScanState {
-        nodeIndexOnly::exec_indexonlyscan_estimate::call(planstate, pcxt)?;
-    } else if tag == T_BitmapIndexScanState {
-        nodeBitmapIndex::exec_bitmapindexscan_estimate::call(planstate, pcxt)?;
-    } else if tag == T_ForeignScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeForeign::exec_foreignscan_estimate::call(planstate, pcxt)?;
+        // case T_IndexScanState: ExecIndexScanEstimate(...);
+        PlanStateNode::IndexScan(node) => {
+            nodeIndex::ExecIndexScanEstimate(node, pcxt, estate)?;
         }
-    } else if tag == T_AppendState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeAppend::exec_append_estimate::call(planstate, pcxt)?;
+        // case T_IndexOnlyScanState: ExecIndexOnlyScanEstimate(...);
+        PlanStateNode::IndexOnlyScan(node) => {
+            nodeIndexOnly::ExecIndexOnlyScanEstimate(node, pcxt, estate)?;
         }
-    } else if tag == T_CustomScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeCustom::exec_customscan_estimate::call(planstate, pcxt)?;
+        // case T_BitmapIndexScanState: ExecBitmapIndexScanEstimate(...);
+        PlanStateNode::BitmapIndexScan(node) => {
+            nodeBitmapIndex::ExecBitmapIndexScanEstimate(node, pcxt)?;
         }
-    } else if tag == T_BitmapHeapScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeBitmapHeap::exec_bitmapheap_estimate::call(planstate, pcxt)?;
+        // case T_ForeignScanState: if (parallel_aware) ExecForeignScanEstimate(..);
+        PlanStateNode::ForeignScan(node) => {
+            if parallel_aware {
+                foreignscan_no_owned_pcxt("ExecForeignScanEstimate", node);
+            }
         }
-    } else if tag == T_HashJoinState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeHashjoin::exec_hashjoin_estimate::call(planstate, pcxt)?;
+        // case T_AppendState: if (parallel_aware) ExecAppendEstimate(..);
+        PlanStateNode::Append(node) => {
+            if parallel_aware {
+                nodeAppend::ExecAppendEstimate(node, pcxt)?;
+            }
         }
-    } else if tag == T_HashState {
-        nodeHash::exec_hash_estimate::call(planstate, pcxt)?;
-    } else if tag == T_SortState {
-        nodeSort::exec_sort_estimate::call(planstate, pcxt)?;
-    } else if tag == T_IncrementalSortState {
-        nodeIncrSort::exec_incrementalsort_estimate::call(planstate, pcxt)?;
-    } else if tag == T_AggState {
-        nodeAgg::exec_agg_estimate::call(planstate, pcxt)?;
-    } else if tag == T_MemoizeState {
-        nodeMemoize::exec_memoize_estimate::call(planstate, pcxt)?;
+        // case T_CustomScanState: if (parallel_aware) ExecCustomScanEstimate(..);
+        PlanStateNode::CustomScan(node) => {
+            if parallel_aware {
+                customscan_no_owned_pcxt("ExecCustomScanEstimate", node);
+            }
+        }
+        // case T_BitmapHeapScanState: if (parallel_aware) ExecBitmapHeapEstimate(..);
+        PlanStateNode::BitmapHeapScan(node) => {
+            if parallel_aware {
+                nodeBitmapHeap::ExecBitmapHeapEstimate(node, pcxt)?;
+            }
+        }
+        // case T_HashJoinState: if (parallel_aware) ExecHashJoinEstimate(..);
+        PlanStateNode::HashJoin(node) => {
+            if parallel_aware {
+                nodeHashjoin::ExecHashJoinEstimate(node, pcxt)?;
+            }
+        }
+        // case T_HashState: ExecHashEstimate(..);
+        PlanStateNode::Hash(node) => {
+            nodeHash::instrument::ExecHashEstimate(node, pcxt)?;
+        }
+        // case T_SortState: ExecSortEstimate(..);
+        PlanStateNode::Sort(node) => {
+            nodeSort::ExecSortEstimate(node, pcxt)?;
+        }
+        // case T_MemoizeState: ExecMemoizeEstimate(..);
+        PlanStateNode::Memoize(node) => {
+            nodeMemoize::ExecMemoizeEstimate(node, pcxt)?;
+        }
+        // case T_IncrementalSortState: ExecIncrementalSortEstimate(..); and
+        // case T_AggState: ExecAggEstimate(..) — the IncrementalSortState and
+        // AggState variants are not present in the `#[non_exhaustive]`
+        // `PlanStateNode` enum yet (no owned nodeIncrementalSort crate; nodeAgg
+        // does not thread its AggState into the enum), so those tags cannot
+        // occur. They add their arm here as those units thread their state in.
+        // No DSM-estimate method for any other node tag (C `default: break`).
+        _ => {}
     }
 
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelEstimate(child, e)? {
+    // return planstate_tree_walker(planstate, ExecParallelEstimate, e);
+    for child in planstate.planstate_tree_walker_children_mut() {
+        if ExecParallelEstimate(child, estate, pcxt, nnodes)? {
             return Ok(true);
         }
     }
@@ -238,7 +280,7 @@ fn ExecParallelEstimate(
 
 /// `EstimateParamExecSpace` — estimate the space required to serialize the
 /// indicated PARAM_EXEC params.
-fn EstimateParamExecSpace(estate: EStateHandle, params: &Bitmapset) -> PgResult<Size> {
+fn EstimateParamExecSpace(estate: &mut EStateData<'_>, params: &Bitmapset) -> PgResult<Size> {
     let mut sz: Size = core::mem::size_of::<i32>();
 
     let mut paramid: i32 = -1;
@@ -248,9 +290,9 @@ fn EstimateParamExecSpace(estate: EStateHandle, params: &Bitmapset) -> PgResult<
             break;
         }
 
-        // value/isnull + resolved (typByVal, typLen): the C
-        // `get_typlenbyval` / no-OID-by-value fallback folded into one read.
-        let prm = sup::param_exec_value::call(estate, paramid);
+        // value/isnull + resolved (typByVal, typLen): the C `get_typlenbyval` /
+        // no-OID-by-value fallback folded into one read out of the owned EState.
+        let prm = sup::param_exec_value_owned::call(estate, paramid);
 
         sz = add_size(sz, core::mem::size_of::<i32>())?; // space for paramid
         sz = add_size(sz, sup::datum_estimate_space::call(prm))?; // datum/isnull
@@ -265,7 +307,7 @@ fn EstimateParamExecSpace(estate: EStateHandle, params: &Bitmapset) -> PgResult<
 /// `SerializeParamExecParams` — serialize PARAM_EXEC parameters into DSA
 /// storage; returns the DSA handle.
 fn SerializeParamExecParams(
-    estate: EStateHandle,
+    estate: &mut EStateData<'_>,
     params: &Bitmapset,
     area: DsaAreaHandle,
 ) -> PgResult<DsaPointer> {
@@ -285,7 +327,7 @@ fn SerializeParamExecParams(
             break;
         }
 
-        let prm = sup::param_exec_value::call(estate, paramid);
+        let prm = sup::param_exec_value_owned::call(estate, paramid);
 
         // Write paramid, then datum/isnull.
         cursor = sup::datum_serialize_i32::call(cursor, paramid);
@@ -301,7 +343,7 @@ fn SerializeParamExecParams(
 
 /// `RestoreParamExecParams` — restore PARAM_EXEC parameters from a serialized
 /// buffer.
-fn RestoreParamExecParams(cursor: SerializeCursor, estate: EStateHandle) {
+fn RestoreParamExecParams(cursor: SerializeCursor, estate: &mut EStateData<'_>) {
     let (nparams, mut cursor) = sup::datum_restore_i32::call(cursor);
 
     for _ in 0..nparams {
@@ -312,7 +354,7 @@ fn RestoreParamExecParams(cursor: SerializeCursor, estate: EStateHandle) {
         cursor = next;
 
         // prm->value/isnull = ...; prm->execPlan = NULL;
-        sup::set_param_exec_value::call(estate, paramid, restored);
+        sup::set_param_exec_value_owned::call(estate, paramid, restored);
     }
 }
 
@@ -320,66 +362,78 @@ fn RestoreParamExecParams(cursor: SerializeCursor, estate: EStateHandle) {
 // 6. ExecParallelInitializeDSM (execParallel.c:446-540)
 // ===========================================================================
 
-/// `ExecParallelInitializeDSM` — per-node DSM-initialize tree walk.
-fn ExecParallelInitializeDSM(
-    planstate: PlanStateHandle,
-    d: &mut ExecParallelInitializeDSMContext,
+/// `ExecParallelInitializeDSM` — per-node DSM-initialize tree walk over the
+/// owned node-state enum.
+fn ExecParallelInitializeDSM<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pcxt: types_execparallel::ParallelContextHandle,
+    instrumentation: Option<types_execparallel::InstrumentationHandle>,
+    nnodes: &mut i32,
 ) -> PgResult<bool> {
-    let pcxt = d.pcxt;
-
     // If instrumentation is enabled, initialize slot for this node.
-    if let Some(sei) = d.instrumentation {
-        parallel::set_sei_plan_node_id::call(sei, d.nnodes, sup::plan_node_id::call(planstate));
+    if let Some(sei) = instrumentation {
+        parallel::set_sei_plan_node_id::call(sei, *nnodes, planstate.plan_node_id());
     }
 
     // Count this node.
-    d.nnodes += 1;
+    *nnodes += 1;
 
-    let tag = sup::node_tag::call(planstate);
-    if tag == T_SeqScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeSeqscan::exec_seqscan_initialize_dsm::call(planstate, pcxt)?;
+    let parallel_aware = planstate.parallel_aware();
+    match planstate {
+        PlanStateNode::SeqScan(node) => {
+            if parallel_aware {
+                nodeSeqscan::ExecSeqScanInitializeDSM(node, pcxt, estate)?;
+            }
         }
-    } else if tag == T_IndexScanState {
-        nodeIndex::exec_indexscan_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_IndexOnlyScanState {
-        nodeIndexOnly::exec_indexonlyscan_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_BitmapIndexScanState {
-        nodeBitmapIndex::exec_bitmapindexscan_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_ForeignScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeForeign::exec_foreignscan_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::IndexScan(node) => {
+            nodeIndex::ExecIndexScanInitializeDSM(node, pcxt, estate)?;
         }
-    } else if tag == T_AppendState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeAppend::exec_append_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::IndexOnlyScan(node) => {
+            nodeIndexOnly::ExecIndexOnlyScanInitializeDSM(node, pcxt, estate)?;
         }
-    } else if tag == T_CustomScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeCustom::exec_customscan_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::BitmapIndexScan(node) => {
+            nodeBitmapIndex::ExecBitmapIndexScanInitializeDSM(node, pcxt, estate)?;
         }
-    } else if tag == T_BitmapHeapScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeBitmapHeap::exec_bitmapheap_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::ForeignScan(node) => {
+            if parallel_aware {
+                foreignscan_no_owned_pcxt("ExecForeignScanInitializeDSM", node);
+            }
         }
-    } else if tag == T_HashJoinState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeHashjoin::exec_hashjoin_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::Append(node) => {
+            if parallel_aware {
+                nodeAppend::ExecAppendInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_HashState {
-        nodeHash::exec_hash_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_SortState {
-        nodeSort::exec_sort_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_IncrementalSortState {
-        nodeIncrSort::exec_incrementalsort_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_AggState {
-        nodeAgg::exec_agg_initialize_dsm::call(planstate, pcxt)?;
-    } else if tag == T_MemoizeState {
-        nodeMemoize::exec_memoize_initialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::CustomScan(node) => {
+            if parallel_aware {
+                customscan_no_owned_pcxt("ExecCustomScanInitializeDSM", node);
+            }
+        }
+        PlanStateNode::BitmapHeapScan(node) => {
+            if parallel_aware {
+                nodeBitmapHeap::ExecBitmapHeapInitializeDSM(node, pcxt, estate)?;
+            }
+        }
+        PlanStateNode::HashJoin(node) => {
+            if parallel_aware {
+                nodeHashjoin::ExecHashJoinInitializeDSM(node, pcxt)?;
+            }
+        }
+        PlanStateNode::Hash(node) => {
+            nodeHash::instrument::ExecHashInitializeDSM(node, pcxt)?;
+        }
+        PlanStateNode::Sort(node) => {
+            nodeSort::ExecSortInitializeDSM(node, pcxt)?;
+        }
+        PlanStateNode::Memoize(node) => {
+            nodeMemoize::ExecMemoizeInitializeDSM(node, pcxt)?;
+        }
+        _ => {}
     }
 
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelInitializeDSM(child, d)? {
+    for child in planstate.planstate_tree_walker_children_mut() {
+        if ExecParallelInitializeDSM(child, estate, pcxt, instrumentation, nnodes)? {
             return Ok(true);
         }
     }
@@ -395,7 +449,7 @@ fn ExecParallelInitializeDSM(
 /// `shm_mq_handle **` array (empty when there are no workers).
 fn ExecParallelSetupTupleQueues<'mcx>(
     mcx: Mcx<'mcx>,
-    pcxt: ParallelContextHandle,
+    pcxt: types_execparallel::ParallelContextHandle,
     reinitialize: bool,
 ) -> PgResult<PgVec<'mcx, types_execparallel::ShmMqAttachHandle>> {
     let nworkers = parallel::pcxt_nworkers::call(pcxt);
@@ -445,26 +499,38 @@ fn ExecParallelSetupTupleQueues<'mcx>(
 /// and return results. Builds the [`ParallelExecutorInfo`], sizes + populates
 /// the DSM, sets up tuple queues and (optionally) instrumentation, and creates
 /// the DSA area.
+///
+/// Owned form (`exec_init_parallel_plan_owned`): `planstate` is the leader's
+/// `outerPlanState` and `estate` the per-query `EState`, both threaded by `&mut`
+/// (the executor owns the tree), exactly as C threads the two pointers.
 pub fn ExecInitParallelPlan<'mcx>(
     mcx: Mcx<'mcx>,
-    planstate: PlanStateHandle,
-    estate: EStateHandle,
-    send_params: &Bitmapset,
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    send_params: Option<&Bitmapset>,
     nworkers: i32,
     tuples_needed: TuplesNeeded,
 ) -> PgResult<ParallelExecutorInfo<'mcx>> {
+    let empty_bms;
+    let send_params: &Bitmapset = match send_params {
+        Some(b) => b,
+        None => {
+            empty_bms = Bitmapset { words: PgVec::new_in(mcx) };
+            &empty_bms
+        }
+    };
+
     let mut instrumentation_len: i32 = 0;
     let mut jit_instrumentation_len: i32 = 0;
     let mut instrument_offset: i32 = 0;
     let dsa_minsize: Size = dsa::dsa_minimum_size::call();
 
     // Force any initplan outputs to be evaluated, if they weren't already.
-    let per_tuple_econtext = sup::get_per_tuple_expr_context::call(estate)?;
+    let per_tuple_econtext = sup::get_per_tuple_expr_context_owned::call(estate)?;
     sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
 
     // Allocate object for return value (palloc0 defaults).
     let mut pei = ParallelExecutorInfo {
-        planstate,
         pcxt: None,
         buffer_usage: SerializeCursor(0),
         wal_usage: SerializeCursor(0),
@@ -478,7 +544,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     };
 
     // Fix up and serialize plan to be sent to workers.
-    let pstmt_data = ExecSerializePlan(sup::planstate_plan::call(planstate), estate)?;
+    let pstmt_data = ExecSerializePlan(estate)?;
 
     // Create a parallel context.
     let pcxt = parallel::create_parallel_context::call(
@@ -497,7 +563,11 @@ pub fn ExecInitParallelPlan<'mcx>(
     parallel::shm_toc_estimate_keys::call(estimator, 1);
 
     // Estimate space for query text.
-    let query_text = sup::es_source_text::call(estate)?;
+    let query_text = estate
+        .es_sourceText
+        .as_ref()
+        .map(|s| s.as_str().to_string())
+        .ok_or_else(|| PgError::error("ExecInitParallelPlan: estate->es_sourceText is NULL"))?;
     let query_len: i32 = query_text.len() as i32;
     parallel::shm_toc_estimate_chunk::call(estimator, query_len as Size + 1);
     parallel::shm_toc_estimate_keys::call(estimator, 1);
@@ -508,7 +578,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     parallel::shm_toc_estimate_keys::call(estimator, 1);
 
     // Estimate space for serialized ParamListInfo.
-    let param_li = sup::es_param_list_info::call(estate);
+    let param_li = estate.es_param_list_info;
     let paramlistinfo_len: i32 = sup::estimate_param_list_space::call(param_li) as i32;
     parallel::shm_toc_estimate_chunk::call(estimator, paramlistinfo_len as Size);
     parallel::shm_toc_estimate_keys::call(estimator, 1);
@@ -533,20 +603,20 @@ pub fn ExecInitParallelPlan<'mcx>(
 
     // Give parallel-aware nodes a chance to add to the estimates, and count
     // how many PlanState nodes there are.
-    let mut e = ExecParallelEstimateContext { pcxt, nnodes: 0 };
-    ExecParallelEstimate(planstate, &mut e)?;
+    let mut nnodes_estimate: i32 = 0;
+    ExecParallelEstimate(planstate, estate, pcxt, &mut nnodes_estimate)?;
 
     // Estimate space for instrumentation, if required.
-    let es_instrument = sup::es_instrument::call(estate);
-    let es_jit_flags = sup::es_jit_flags::call(estate);
+    let es_instrument = estate.es_instrument;
+    let es_jit_flags = estate.es_jit_flags;
     if es_instrument != 0 {
         instrumentation_len =
-            OFFSET_OF_PLAN_NODE_ID as i32 + core::mem::size_of::<i32>() as i32 * e.nnodes;
+            OFFSET_OF_PLAN_NODE_ID as i32 + core::mem::size_of::<i32>() as i32 * nnodes_estimate;
         instrumentation_len = maxalign(instrumentation_len as usize) as i32;
         instrument_offset = instrumentation_len;
         instrumentation_len += mul_size(
             SIZEOF_INSTRUMENTATION,
-            mul_size(e.nnodes as usize, nworkers as usize)?,
+            mul_size(nnodes_estimate as usize, nworkers as usize)?,
         )? as i32;
         parallel::shm_toc_estimate_chunk::call(estimator, instrumentation_len as Size);
         parallel::shm_toc_estimate_keys::call(estimator, 1);
@@ -564,11 +634,6 @@ pub fn ExecInitParallelPlan<'mcx>(
     parallel::shm_toc_estimate_chunk::call(estimator, dsa_minsize);
     parallel::shm_toc_estimate_keys::call(estimator, 1);
 
-    // InitializeParallelDSM passes the active snapshot to the worker, which
-    // uses it to set es_snapshot. Make sure we don't set es_snapshot
-    // differently in the child.
-    debug_assert!(sup::es_snapshot::call(estate) == Some(sup::get_active_snapshot::call()));
-
     // Everyone's had a chance to ask for space, so now create the DSM.
     parallel::initialize_parallel_dsm::call(mcx, pcxt)?;
 
@@ -582,7 +647,7 @@ pub fn ExecInitParallelPlan<'mcx>(
         FixedParallelExecutorState {
             tuples_needed,
             param_exec: INVALID_DSA_POINTER,
-            eflags: sup::es_top_eflags::call(estate),
+            eflags: estate.es_top_eflags,
             jit_flags: es_jit_flags,
         },
     );
@@ -630,10 +695,10 @@ pub fn ExecInitParallelPlan<'mcx>(
                 instrument_options: es_instrument,
                 instrument_offset,
                 num_workers: nworkers,
-                num_plan_nodes: e.nnodes,
+                num_plan_nodes: nnodes_estimate,
             },
         );
-        for i in 0..(nworkers * e.nnodes) {
+        for i in 0..(nworkers * nnodes_estimate) {
             sup::instr_init_slot::call(instrumentation, i, es_instrument);
         }
         parallel::shm_toc_insert::call(toc, PARALLEL_KEY_INSTRUMENTATION, instr_chunk);
@@ -665,19 +730,16 @@ pub fn ExecInitParallelPlan<'mcx>(
     }
 
     // Give parallel-aware nodes a chance to initialize their shared data.
-    let mut d = ExecParallelInitializeDSMContext {
-        pcxt,
-        instrumentation: pei.instrumentation,
-        nnodes: 0,
-    };
+    let instrumentation = pei.instrumentation;
+    let mut nnodes_init: i32 = 0;
 
     // Install our DSA area while initializing the plan.
-    sup::set_es_query_dsa::call(estate, pei.area);
-    ExecParallelInitializeDSM(planstate, &mut d)?;
-    sup::set_es_query_dsa::call(estate, None);
+    estate.es_query_dsa = pei.area;
+    ExecParallelInitializeDSM(planstate, estate, pcxt, instrumentation, &mut nnodes_init)?;
+    estate.es_query_dsa = None;
 
     // Make sure that the world hasn't shifted under our feet.
-    if e.nnodes != d.nnodes {
+    if nnodes_estimate != nnodes_init {
         return Err(PgError::error("inconsistent count of PlanState nodes")
             .with_sqlstate(ERRCODE_INTERNAL_ERROR));
     }
@@ -722,22 +784,32 @@ pub fn ExecParallelCreateReaders<'mcx>(
 /// memory state before launching a fresh batch of workers.
 pub fn ExecParallelReinitialize<'mcx>(
     mcx: Mcx<'mcx>,
-    planstate: PlanStateHandle,
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
-    send_params: &Bitmapset,
+    send_params: Option<&Bitmapset>,
 ) -> PgResult<()> {
-    let estate = sup::planstate_estate::call(planstate);
+    let empty_bms;
+    let send_params: &Bitmapset = match send_params {
+        Some(b) => b,
+        None => {
+            empty_bms = Bitmapset { words: PgVec::new_in(mcx) };
+            &empty_bms
+        }
+    };
 
     // Old workers must already be shut down.
     debug_assert!(pei.finished);
 
-    // Force any initplan outputs to be evaluated, if they weren't already.
-    let per_tuple_econtext = sup::get_per_tuple_expr_context::call(estate)?;
-    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
-
     let pcxt = pei
         .pcxt
         .ok_or_else(|| PgError::error("ExecParallelReinitialize: pei->pcxt is live"))?;
+
+    // Force any initplan outputs to be evaluated, if they weren't already.
+    //   EState *estate = planstate->state;  (threaded in by the caller)
+    let per_tuple_econtext = sup::get_per_tuple_expr_context_owned::call(estate)?;
+    sup::exec_set_param_plan_multi::call(send_params, per_tuple_econtext)?;
+
     parallel::reinitialize_parallel_dsm::call(pcxt)?;
     pei.tqueue = ExecParallelSetupTupleQueues(mcx, pcxt, true)?;
     pei.reader = PgVec::new_in(mcx);
@@ -767,9 +839,9 @@ pub fn ExecParallelReinitialize<'mcx>(
     }
 
     // Traverse plan tree and let each child node reset associated state.
-    sup::set_es_query_dsa::call(estate, pei.area);
-    ExecParallelReInitializeDSM(planstate, pcxt)?;
-    sup::set_es_query_dsa::call(estate, None);
+    estate.es_query_dsa = pei.area;
+    ExecParallelReInitializeDSM(planstate, estate, pcxt)?;
+    estate.es_query_dsa = None;
     Ok(())
 }
 
@@ -777,55 +849,67 @@ pub fn ExecParallelReinitialize<'mcx>(
 // 11. ExecParallelReInitializeDSM (execParallel.c:964-1028)
 // ===========================================================================
 
-/// `ExecParallelReInitializeDSM` — per-node DSM-reinitialize tree walk.
-fn ExecParallelReInitializeDSM(
-    planstate: PlanStateHandle,
-    pcxt: ParallelContextHandle,
+/// `ExecParallelReInitializeDSM` — per-node DSM-reinitialize tree walk over the
+/// owned node-state enum.
+fn ExecParallelReInitializeDSM<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pcxt: types_execparallel::ParallelContextHandle,
 ) -> PgResult<bool> {
-    let tag = sup::node_tag::call(planstate);
-    if tag == T_SeqScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeSeqscan::exec_seqscan_reinitialize_dsm::call(planstate, pcxt)?;
+    let parallel_aware = planstate.parallel_aware();
+    match planstate {
+        PlanStateNode::SeqScan(node) => {
+            if parallel_aware {
+                nodeSeqscan::ExecSeqScanReInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_IndexScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeIndex::exec_indexscan_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::IndexScan(node) => {
+            if parallel_aware {
+                nodeIndex::ExecIndexScanReInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_IndexOnlyScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeIndexOnly::exec_indexonlyscan_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::IndexOnlyScan(node) => {
+            if parallel_aware {
+                nodeIndexOnly::ExecIndexOnlyScanReInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_ForeignScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeForeign::exec_foreignscan_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::ForeignScan(node) => {
+            if parallel_aware {
+                foreignscan_no_owned_pcxt("ExecForeignScanReInitializeDSM", node);
+            }
         }
-    } else if tag == T_AppendState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeAppend::exec_append_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::Append(node) => {
+            if parallel_aware {
+                nodeAppend::ExecAppendReInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_CustomScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeCustom::exec_customscan_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::CustomScan(node) => {
+            if parallel_aware {
+                customscan_no_owned_pcxt("ExecCustomScanReInitializeDSM", node);
+            }
         }
-    } else if tag == T_BitmapHeapScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeBitmapHeap::exec_bitmapheap_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::BitmapHeapScan(node) => {
+            if parallel_aware {
+                nodeBitmapHeap::ExecBitmapHeapReInitializeDSM(node, pcxt, estate)?;
+            }
         }
-    } else if tag == T_HashJoinState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeHashjoin::exec_hashjoin_reinitialize_dsm::call(planstate, pcxt)?;
+        PlanStateNode::HashJoin(node) => {
+            if parallel_aware {
+                nodeHashjoin::ExecHashJoinReInitializeDSM(node, pcxt)?;
+            }
         }
-    } else if tag == T_BitmapIndexScanState
-        || tag == T_HashState
-        || tag == T_SortState
-        || tag == T_IncrementalSortState
-        || tag == T_MemoizeState
-    {
-        // these nodes have DSM state, but no reinitialization is required
+        // these nodes have DSM state, but no reinitialization is required:
+        // T_BitmapIndexScanState / T_HashState / T_SortState /
+        // T_IncrementalSortState / T_MemoizeState.
+        PlanStateNode::BitmapIndexScan(_)
+        | PlanStateNode::Hash(_)
+        | PlanStateNode::Sort(_)
+        | PlanStateNode::Memoize(_) => {}
+        _ => {}
     }
 
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelReInitializeDSM(child, pcxt)? {
+    for child in planstate.planstate_tree_walker_children_mut() {
+        if ExecParallelReInitializeDSM(child, estate, pcxt)? {
             return Ok(true);
         }
     }
@@ -834,99 +918,13 @@ fn ExecParallelReInitializeDSM(
 
 // ===========================================================================
 // 12. ExecParallelRetrieveInstrumentation (execParallel.c:1034-1110)
-// ===========================================================================
-
-/// `ExecParallelRetrieveInstrumentation` — copy instrumentation about this node
-/// and its descendants from DSM into the leader's `PlanState`.
-fn ExecParallelRetrieveInstrumentation<'mcx>(
-    mcx: Mcx<'mcx>,
-    planstate: PlanStateHandle,
-    instrumentation: InstrumentationHandle,
-) -> PgResult<bool> {
-    let plan_node_id = sup::plan_node_id::call(planstate);
-
-    // Find the instrumentation for this node.
-    let num_plan_nodes = parallel::sei_num_plan_nodes::call(instrumentation);
-    let num_workers = parallel::sei_num_workers::call(instrumentation);
-    let mut i: i32 = 0;
-    while i < num_plan_nodes {
-        if parallel::sei_plan_node_id::call(instrumentation, i) == plan_node_id {
-            break;
-        }
-        i += 1;
-    }
-    if i >= num_plan_nodes {
-        return Err(PgError::error(format!("plan node {plan_node_id} not found"))
-            .with_sqlstate(ERRCODE_INTERNAL_ERROR));
-    }
-
-    // Accumulate the statistics from all workers.
-    let base = i * num_workers;
-    let worker_slots = sup::sei_instrument_slots::call(instrumentation, base, num_workers);
-    for slot in &worker_slots {
-        sup::instr_agg_into_node::call(planstate, *slot);
-    }
-
-    // Also store the per-worker detail (allocated in per-query context).
-    sup::set_worker_instrument::call(planstate, num_workers, &worker_slots);
-
-    // Perform any node-type-specific work that needs to be done.
-    let tag = sup::node_tag::call(planstate);
-    if tag == T_IndexScanState {
-        nodeIndex::exec_indexscan_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_IndexOnlyScanState {
-        nodeIndexOnly::exec_indexonlyscan_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_BitmapIndexScanState {
-        nodeBitmapIndex::exec_bitmapindexscan_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_SortState {
-        nodeSort::exec_sort_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_IncrementalSortState {
-        nodeIncrSort::exec_incrementalsort_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_HashState {
-        nodeHash::exec_hash_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_AggState {
-        nodeAgg::exec_agg_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_MemoizeState {
-        nodeMemoize::exec_memoize_retrieve_instrumentation::call(planstate)?;
-    } else if tag == T_BitmapHeapScanState {
-        nodeBitmapHeap::exec_bitmapheap_retrieve_instrumentation::call(planstate)?;
-    }
-
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelRetrieveInstrumentation(mcx, child, instrumentation)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-// ===========================================================================
 // 13. ExecParallelRetrieveJitInstrumentation (execParallel.c:1115-1149)
+// — parallel-DSM-carrier residual (see crate docs). The per-`PlanState`
+//   `worker_instrument` / `worker_jit_instrument` arrays are not yet modeled on
+//   the owned `PlanState` head, and the generic per-node slot accumulation
+//   reads/writes the DSM-resident `SharedExecutorInstrumentation`. Honest
+//   panic until that carrier lands.
 // ===========================================================================
-
-/// `ExecParallelRetrieveJitInstrumentation` — add up the workers' JIT
-/// instrumentation from DSM.
-fn ExecParallelRetrieveJitInstrumentation<'mcx>(
-    mcx: Mcx<'mcx>,
-    planstate: PlanStateHandle,
-    shared_jit: JitInstrumentationHandle,
-) -> PgResult<()> {
-    let estate = sup::planstate_estate::call(planstate);
-
-    // Accumulate worker JIT instrumentation into the combined JIT
-    // instrumentation, allocating it if required, folding each worker in; build
-    // the per-worker detail array in per-query context.
-    let shared_jit_num_workers = parallel::shared_jit_num_workers::call(shared_jit);
-    let mut detail = mcx::vec_with_capacity_in(mcx, shared_jit_num_workers as usize)?;
-    for n in 0..shared_jit_num_workers {
-        let w = sup::shared_jit_instr::call(shared_jit, n);
-        sup::accum_es_jit_worker_instr::call(estate, w);
-        detail.push(w);
-    }
-
-    sup::set_worker_jit_instrument::call(planstate, shared_jit_num_workers, &detail);
-    Ok(())
-}
 
 // ===========================================================================
 // 14. ExecParallelFinish (execParallel.c:1155-1200)
@@ -981,19 +979,36 @@ pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<'mcx>) -> PgResul
 
 /// `ExecParallelCleanup` — accumulate instrumentation and clean up any
 /// remaining [`ParallelExecutorInfo`] resources after [`ExecParallelFinish`].
-pub fn ExecParallelCleanup<'mcx>(pei: &mut ParallelExecutorInfo<'mcx>) -> PgResult<()> {
-    // The instrumentation retrieval allocates per-worker detail in the
-    // per-query context; use a transient context for the build buffers.
-    let cleanup_ctx = mcx::MemoryContext::new("ExecParallelCleanup");
-
-    // Accumulate instrumentation, if any.
-    if let Some(instrumentation) = pei.instrumentation {
-        ExecParallelRetrieveInstrumentation(cleanup_ctx.mcx(), pei.planstate, instrumentation)?;
+///
+/// `planstate` (the leader's `outerPlanState`) is threaded in by `&mut` rather
+/// than carried inside the `pei` struct: in the owned model `pei` lives inside
+/// the Gather/GatherMerge node-state and the planstate is a *sibling field*
+/// (`node.pei` and `node.ps.lefttree`), so storing a self-reference in `pei`
+/// would be a self-borrow. The caller hands both disjoint field borrows.
+pub fn ExecParallelCleanup<'mcx>(
+    pei: &mut ParallelExecutorInfo<'mcx>,
+    planstate: &mut PlanStateNode<'mcx>,
+) -> PgResult<()> {
+    // Accumulate instrumentation, if any. (Parallel-DSM-carrier residual: the
+    // leader's per-PlanState `worker_instrument`/`worker_jit_instrument` arrays
+    // are not yet modeled on the owned PlanState head, and the per-node slot
+    // accumulation reads the DSM-resident SharedExecutorInstrumentation; honest
+    // panic until that carrier lands.)
+    if pei.instrumentation.is_some() {
+        let _ = &planstate;
+        panic!(
+            "ExecParallelRetrieveInstrumentation: the leader-side per-PlanState \
+             worker_instrument accumulation from the DSM SharedExecutorInstrumentation \
+             is not yet modeled (owned PlanState head carries no worker_instrument array; \
+             parallel-DSM-carrier keystone pending)"
+        );
     }
-
-    // Accumulate JIT instrumentation, if any.
-    if let Some(jit_instrumentation) = pei.jit_instrumentation {
-        ExecParallelRetrieveJitInstrumentation(cleanup_ctx.mcx(), pei.planstate, jit_instrumentation)?;
+    if pei.jit_instrumentation.is_some() {
+        panic!(
+            "ExecParallelRetrieveJitInstrumentation: the leader-side per-PlanState \
+             worker_jit_instrument accumulation from the DSM SharedJitInstrumentation \
+             is not yet modeled (parallel-DSM-carrier keystone pending)"
+        );
     }
 
     // Free any serialized parameters.
@@ -1043,11 +1058,12 @@ fn ExecParallelGetReceiver(
 
 /// `ExecParallelGetQueryDesc` — create a `QueryDesc` for the `PlannedStmt` we
 /// are to execute.
-fn ExecParallelGetQueryDesc(
+fn ExecParallelGetQueryDesc<'mcx>(
+    mcx: Mcx<'mcx>,
     toc: ShmTocHandle,
     receiver: types_execparallel::DestReceiverHandle,
     instrument_options: i32,
-) -> PgResult<QueryDescHandle> {
+) -> PgResult<QueryDesc> {
     // Get the query string from shared memory.
     let query_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_QUERY_TEXT, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_QUERY_TEXT present"))?;
@@ -1056,19 +1072,22 @@ fn ExecParallelGetQueryDesc(
     // Reconstruct leader-supplied PlannedStmt.
     let pstmt_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_PLANNEDSTMT, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_PLANNEDSTMT present"))?;
-    let pstmt = sup::string_to_plannedstmt::call(parallel::cursor_cstring::call(pstmt_chunk)?)?;
+    let pstmt = parallel::cursor_cstring::call(pstmt_chunk)?;
 
     // Reconstruct ParamListInfo.
     let param_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_PARAMLISTINFO, false)
         .ok_or_else(|| PgError::error("ExecParallelGetQueryDesc: PARALLEL_KEY_PARAMLISTINFO present"))?;
     let param_li = sup::restore_param_list::call(param_chunk);
 
-    // Create a QueryDesc for the query (GetActiveSnapshot(), InvalidSnapshot).
-    sup::create_query_desc::call(
+    // Create a QueryDesc for the query (stringToNode(pstmt) + CreateQueryDesc
+    // with GetActiveSnapshot()/InvalidSnapshot). The plan reconstruction
+    // (`stringToNode`) is the worker plan-shipping path, owned by readfuncs.c;
+    // reached through the owner seam, which returns the owned `QueryDesc` (or
+    // honestly panics until plan-shipping lands).
+    sup::create_parallel_query_desc::call(
+        mcx,
         pstmt,
         query_string,
-        Some(sup::get_active_snapshot::call()),
-        None,
         receiver,
         param_li,
         instrument_options,
@@ -1077,109 +1096,76 @@ fn ExecParallelGetQueryDesc(
 
 // ===========================================================================
 // 18. ExecParallelReportInstrumentation (execParallel.c:1292-1326)
+// — parallel-DSM-carrier residual (see crate docs); honest panic at the call
+//   site in ParallelQueryMain.
 // ===========================================================================
-
-/// `ExecParallelReportInstrumentation` — copy instrumentation from this node and
-/// its descendants into DSM so the leader can retrieve it. Runs in the worker.
-fn ExecParallelReportInstrumentation(
-    planstate: PlanStateHandle,
-    instrumentation: InstrumentationHandle,
-) -> PgResult<bool> {
-    let plan_node_id = sup::plan_node_id::call(planstate);
-
-    sup::instr_end_loop::call(planstate);
-
-    // Find this node's slot (linear search, matching C).
-    let num_plan_nodes = parallel::sei_num_plan_nodes::call(instrumentation);
-    let num_workers = parallel::sei_num_workers::call(instrumentation);
-    let mut i: i32 = 0;
-    while i < num_plan_nodes {
-        if parallel::sei_plan_node_id::call(instrumentation, i) == plan_node_id {
-            break;
-        }
-        i += 1;
-    }
-    if i >= num_plan_nodes {
-        return Err(PgError::error(format!("plan node {plan_node_id} not found"))
-            .with_sqlstate(ERRCODE_INTERNAL_ERROR));
-    }
-
-    // Add our statistics to the per-node, per-worker totals.
-    let base = i * num_workers;
-    let parallel_worker_number = parallel::parallel_worker_number::call();
-    // Assert(IsParallelWorker()) == (ParallelWorkerNumber >= 0)
-    debug_assert!(parallel_worker_number >= 0);
-    debug_assert!(parallel_worker_number < num_workers);
-    let slot = sup::sei_instrument_slots::call(instrumentation, base + parallel_worker_number, 1)
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    let aggregated = sup::instr_agg_node_value::call(slot, planstate);
-    sup::sei_agg_into_slot::call(instrumentation, base + parallel_worker_number, aggregated);
-
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelReportInstrumentation(child, instrumentation)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 // ===========================================================================
 // 19. ExecParallelInitializeWorker (execParallel.c:1333-1410)
 // ===========================================================================
 
 /// `ExecParallelInitializeWorker` — initialize the `PlanState` tree in the
-/// worker with info from shared memory.
-fn ExecParallelInitializeWorker(
-    planstate: PlanStateHandle,
-    pwcxt: ParallelWorkerContextHandle,
+/// worker with info from shared memory, over the owned node-state enum.
+fn ExecParallelInitializeWorker<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pwcxt: types_execparallel::ParallelWorkerContextHandle,
 ) -> PgResult<bool> {
-    let tag = sup::node_tag::call(planstate);
-    if tag == T_SeqScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeSeqscan::exec_seqscan_initialize_worker::call(planstate, pwcxt)?;
+    let parallel_aware = planstate.parallel_aware();
+    match planstate {
+        PlanStateNode::SeqScan(node) => {
+            if parallel_aware {
+                nodeSeqscan::ExecSeqScanInitializeWorker(node, pwcxt)?;
+            }
         }
-    } else if tag == T_IndexScanState {
-        nodeIndex::exec_indexscan_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_IndexOnlyScanState {
-        nodeIndexOnly::exec_indexonlyscan_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_BitmapIndexScanState {
-        nodeBitmapIndex::exec_bitmapindexscan_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_ForeignScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeForeign::exec_foreignscan_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::IndexScan(node) => {
+            nodeIndex::ExecIndexScanInitializeWorker(node, pwcxt, estate)?;
         }
-    } else if tag == T_AppendState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeAppend::exec_append_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::IndexOnlyScan(node) => {
+            nodeIndexOnly::ExecIndexOnlyScanInitializeWorker(node, pwcxt, estate)?;
         }
-    } else if tag == T_CustomScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeCustom::exec_customscan_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::BitmapIndexScan(node) => {
+            nodeBitmapIndex::ExecBitmapIndexScanInitializeWorker(node, pwcxt, estate)?;
         }
-    } else if tag == T_BitmapHeapScanState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeBitmapHeap::exec_bitmapheap_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::ForeignScan(node) => {
+            if parallel_aware {
+                foreignscan_no_owned_pcxt("ExecForeignScanInitializeWorker", node);
+            }
         }
-    } else if tag == T_HashJoinState {
-        if sup::plan_parallel_aware::call(planstate) {
-            nodeHashjoin::exec_hashjoin_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::Append(node) => {
+            if parallel_aware {
+                nodeAppend::ExecAppendInitializeWorker(node, pwcxt)?;
+            }
         }
-    } else if tag == T_HashState {
-        nodeHash::exec_hash_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_SortState {
-        nodeSort::exec_sort_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_IncrementalSortState {
-        nodeIncrSort::exec_incrementalsort_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_AggState {
-        nodeAgg::exec_agg_initialize_worker::call(planstate, pwcxt)?;
-    } else if tag == T_MemoizeState {
-        nodeMemoize::exec_memoize_initialize_worker::call(planstate, pwcxt)?;
+        PlanStateNode::CustomScan(node) => {
+            if parallel_aware {
+                customscan_no_owned_pcxt("ExecCustomScanInitializeWorker", node);
+            }
+        }
+        PlanStateNode::BitmapHeapScan(node) => {
+            if parallel_aware {
+                nodeBitmapHeap::ExecBitmapHeapInitializeWorker(node, pwcxt, estate)?;
+            }
+        }
+        PlanStateNode::HashJoin(node) => {
+            if parallel_aware {
+                nodeHashjoin::ExecHashJoinInitializeWorker(node, pwcxt)?;
+            }
+        }
+        PlanStateNode::Hash(node) => {
+            nodeHash::instrument::ExecHashInitializeWorker(node, pwcxt)?;
+        }
+        PlanStateNode::Sort(node) => {
+            nodeSort::ExecSortInitializeWorker(node, pwcxt)?;
+        }
+        PlanStateNode::Memoize(node) => {
+            nodeMemoize::ExecMemoizeInitializeWorker(node, pwcxt)?;
+        }
+        _ => {}
     }
 
-    for child in sup::planstate_children::call(planstate)? {
-        if ExecParallelInitializeWorker(child, pwcxt)? {
+    for child in planstate.planstate_tree_walker_children_mut() {
+        if ExecParallelInitializeWorker(child, estate, pwcxt)? {
             return Ok(true);
         }
     }
@@ -1192,7 +1178,7 @@ fn ExecParallelInitializeWorker(
 
 /// `ParallelQueryMain` — main entry point for parallel query worker processes.
 /// Sets up the receiver/queryDesc, runs the plan, reports usage +
-/// instrumentation, cleans up.
+/// instrumentation, cleans up. Drives the owned `QueryDesc` + executor driver.
 pub fn ParallelQueryMain<'mcx>(
     mcx: Mcx<'mcx>,
     seg: DsmSegmentHandle,
@@ -1214,13 +1200,14 @@ pub fn ParallelQueryMain<'mcx>(
     }
     let jit_instrumentation = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_JIT_INSTRUMENTATION, true)
         .map(parallel::jit_instrumentation_from_chunk::call);
-    let query_desc = ExecParallelGetQueryDesc(toc, receiver, instrument_options)?;
+    let mut query_desc = ExecParallelGetQueryDesc(mcx, toc, receiver, instrument_options)?;
 
     // Setting debug_query_string for individual workers.
-    sup::set_debug_query_string::call(sup::query_desc_source_text::call(query_desc)?);
+    let source_text = sup::query_desc_source_text_owned::call(&query_desc)?;
+    sup::set_debug_query_string::call(source_text.clone());
 
     // Report workers' query for monitoring purposes.
-    sup::pgstat_report_activity_running::call(sup::query_desc_source_text::call(query_desc)?);
+    sup::pgstat_report_activity_running::call(source_text);
 
     // Attach to the dynamic shared memory area.
     let area_chunk = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_DSA, false)
@@ -1228,37 +1215,52 @@ pub fn ParallelQueryMain<'mcx>(
     let area = dsa::dsa_attach_in_place::call(area_chunk, seg);
 
     // Start up the executor.
-    sup::set_query_desc_jit_flags::call(query_desc, parallel::fixed_jit_flags::call(fpes));
-    sup::executor_start::call(query_desc, parallel::fixed_eflags::call(fpes))?;
+    sup::set_query_desc_jit_flags_owned::call(&mut query_desc, parallel::fixed_jit_flags::call(fpes));
+    execMain::ExecutorStart(&mut query_desc, parallel::fixed_eflags::call(fpes))?;
 
-    // Special executor initialization steps for parallel workers.
-    let query_desc_estate = sup::query_desc_estate::call(query_desc);
-    let query_desc_planstate = sup::query_desc_planstate::call(query_desc);
-    sup::set_es_query_dsa::call(query_desc_estate, Some(area));
-    if dsa_pointer_is_valid(parallel::fixed_param_exec::call(fpes)) {
-        let paramexec_cursor = dsa::dsa_get_address::call(area, parallel::fixed_param_exec::call(fpes));
-        RestoreParamExecParams(paramexec_cursor, query_desc_estate);
-    }
+    // Special executor initialization steps for parallel workers:
+    //   estate->es_query_dsa = area;
+    //   if (DsaPointerIsValid(fpes->param_exec))
+    //       RestoreParamExecParams(start_address, queryDesc->estate);
+    //   ExecParallelInitializeWorker(queryDesc->planstate, &pwcxt);
     let pwcxt = parallel::make_parallel_worker_context::call(seg, toc);
-    ExecParallelInitializeWorker(query_desc_planstate, pwcxt)?;
-
-    // Pass down any tuple bound.
+    let fixed_param_exec = parallel::fixed_param_exec::call(fpes);
+    let paramexec_cursor = if dsa_pointer_is_valid(fixed_param_exec) {
+        Some(dsa::dsa_get_address::call(area, fixed_param_exec))
+    } else {
+        None
+    };
     let tuples_needed = parallel::fixed_tuples_needed::call(fpes);
-    sup::exec_set_tuple_bound::call(tuples_needed, query_desc_planstate)?;
+
+    query_desc.with_plan_and_estate_mut(|_plan, _pstmt, estate, planstate_slot| -> PgResult<()> {
+        estate.es_query_dsa = Some(area);
+        if let Some(cursor) = paramexec_cursor {
+            RestoreParamExecParams(cursor, estate);
+        }
+        let planstate = planstate_slot
+            .as_deref_mut()
+            .ok_or_else(|| PgError::error("ParallelQueryMain: queryDesc->planstate is NULL"))?;
+        ExecParallelInitializeWorker(planstate, estate, pwcxt)?;
+
+        // Pass down any tuple bound.
+        backend_executor_execProcnode::execProcnode_run_end::exec_set_tuple_bound(
+            tuples_needed,
+            planstate,
+            estate,
+        )?;
+        Ok(())
+    })?;
 
     // Prepare to track buffer/WAL usage during query execution.
     sup::instr_start_parallel_query::call();
 
     // Run the plan. If we specified a tuple bound, be careful not to demand more
     // tuples than that.
-    sup::executor_run::call(
-        query_desc,
-        FORWARD_SCAN_DIRECTION,
-        if tuples_needed < 0 { 0 } else { tuples_needed },
-    )?;
+    let count: u64 = if tuples_needed < 0 { 0 } else { tuples_needed as u64 };
+    execMain::ExecutorRun(&mut query_desc, FORWARD_SCAN_DIRECTION, count)?;
 
     // Shut down the executor.
-    sup::executor_finish::call(query_desc)?;
+    execMain::ExecutorFinish(&mut query_desc)?;
 
     // Report buffer/WAL usage during parallel execution.
     let buffer_usage = parallel::shm_toc_lookup::call(toc, PARALLEL_KEY_BUFFER_USAGE, false)
@@ -1269,29 +1271,72 @@ pub fn ParallelQueryMain<'mcx>(
     sup::instr_end_parallel_query::call(buffer_usage, wal_usage, parallel_worker_number);
 
     // Report instrumentation data if any instrumentation options are set.
-    if let Some(sei) = instrumentation {
-        ExecParallelReportInstrumentation(query_desc_planstate, sei)?;
+    // (Parallel-DSM-carrier residual — the worker-side per-PlanState slot
+    // accumulation into the DSM SharedExecutorInstrumentation is not yet
+    // modeled; honest panic when instrumentation is present.)
+    if instrumentation.is_some() {
+        panic!(
+            "ExecParallelReportInstrumentation: the worker-side per-PlanState slot \
+             accumulation into the DSM SharedExecutorInstrumentation is not yet modeled \
+             (parallel-DSM-carrier keystone pending)"
+        );
     }
 
     // Report JIT instrumentation data if any.
-    if sup::es_has_jit::call(query_desc_estate) {
-        if let Some(jit) = jit_instrumentation {
-            debug_assert!(parallel_worker_number < parallel::shared_jit_num_workers::call(jit));
-            sup::set_shared_jit_instr::call(
-                jit,
-                parallel_worker_number,
-                sup::es_jit_instr::call(query_desc_estate),
+    if sup::query_desc_estate_has_jit_owned::call(&query_desc) {
+        if jit_instrumentation.is_some() {
+            panic!(
+                "ParallelQueryMain: worker JIT instrumentation report into the DSM \
+                 SharedJitInstrumentation is not yet modeled (parallel-DSM-carrier \
+                 keystone pending)"
             );
         }
     }
 
     // Must do this after capturing instrumentation.
-    sup::executor_end::call(query_desc)?;
+    execMain::ExecutorEnd(&mut query_desc)?;
 
     // Cleanup.
     dsa::dsa_detach::call(area);
-    sup::free_query_desc::call(query_desc);
+    // C `FreeQueryDesc(queryDesc)` — the owned `QueryDesc` is dropped here.
+    drop(query_desc);
     tqueue::receiver_destroy::call(receiver);
-    let _ = mcx;
     Ok(())
+}
+
+// ===========================================================================
+// Foreign/Custom parallel-method dispatch: no owned-ParallelContext bridge.
+//
+// `ExecForeignScan*`/`ExecCustomScan*` take an owned `&mut ParallelContext`
+// (nodeForeigncustom's owned type), but the parallel-executor tree walk holds a
+// `ParallelContextHandle` — the DSM-owned coordination object reached through
+// `backend-access-transam-parallel-seams`. No bridge from that handle to the
+// owned `ParallelContext` value exists (the owned `ParallelContext` carries the
+// `shm_toc` opaquely and has no producer from the handle), so the FDW /
+// custom-scan parallel methods cannot be invoked from here yet. Honest panic
+// with the rationale, mirroring the C dispatch reaching these arms.
+// ===========================================================================
+
+fn foreignscan_no_owned_pcxt(
+    which: &str,
+    _node: &mut mcx::PgBox<'_, types_nodes::nodeforeigncustom::ForeignScanState<'_>>,
+) -> ! {
+    panic!(
+        "{which}: the owned per-node ForeignScan parallel method takes &mut ParallelContext, \
+         but the parallel-executor walk holds the DSM-owned ParallelContextHandle and no \
+         bridge from the handle to the owned ParallelContext value exists yet \
+         (parallel-DSM-carrier keystone pending)"
+    )
+}
+
+fn customscan_no_owned_pcxt(
+    which: &str,
+    _node: &mut mcx::PgBox<'_, types_nodes::nodeforeigncustom::CustomScanState<'_>>,
+) -> ! {
+    panic!(
+        "{which}: the owned per-node CustomScan parallel method takes &mut ParallelContext, \
+         but the parallel-executor walk holds the DSM-owned ParallelContextHandle and no \
+         bridge from the handle to the owned ParallelContext value exists yet \
+         (parallel-DSM-carrier keystone pending)"
+    )
 }
