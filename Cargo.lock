@@ -1765,6 +1765,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-server"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-backup-sink",
+ "backend-storage-file-fd",
+ "backend-storage-file-fd-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "common-pgcheckdir-seams",
+ "libc",
+ "mcx",
+ "port-path-seams",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-backup-sink"
 version = "0.0.0"
 dependencies = [
@@ -9620,6 +9641,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-pgcheckdir-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-pglz"
 version = "0.0.0"
 dependencies = [
@@ -9918,6 +9946,7 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
+ "backend-backup-server",
  "backend-backup-sink",
  "backend-bootstrap-bootstrap",
  "backend-catalog-catalog",

@@ -41,6 +41,7 @@ backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
+backend-backup-server = { path = "../backend-backup-server" }
 backend-backup-sink = { path = "../backend-backup-sink" }
 backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
