@@ -5401,15 +5401,10 @@ dependencies = [
 name = "backend-nodes-extensible"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-xact-seams",
  "backend-nodes-extensible-seams",
  "backend-utils-error",
- "backend-utils-hash-dynahash",
- "common-hashfn-seams",
- "types-core",
  "types-error",
  "types-extensible",
- "types-hash",
 ]
 
 [[package]]
