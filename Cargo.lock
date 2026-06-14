@@ -10427,6 +10427,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-prng-base64"
+version = "0.0.0"
+dependencies = [
+ "pg-prng",
+]
+
+[[package]]
 name = "common-relpath-seams"
 version = "0.0.0"
 dependencies = [
@@ -10888,6 +10895,7 @@ dependencies = [
  "common-hashfn",
  "common-ip",
  "common-pglz",
+ "common-prng-base64",
  "common-string",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",
