@@ -186,7 +186,8 @@ const TCFLAGS_OPERATOR_FLAGS: i32 = !(TCFLAGS_HAVE_PG_TYPE_DATA
 /// (re-looked-up in the cache), not handles — see the crate docs. The
 /// composite `tup_desc` is owned plain data held INLINE on the entry in the
 /// cache context (the C `tupDesc`); callers receive owned `clone_in` copies.
-/// `domain_data` / `enum_data` are tokens into the side tables.
+/// `domain_data` is a token into the (shared, refcounted) `dcc_table`;
+/// `enum_data` is the 1:1-owned enum cache held inline (the C `enumData`).
 struct TypeCacheEntry<'mcx> {
     type_id: Oid,
     type_id_hash: u32,
@@ -231,8 +232,10 @@ struct TypeCacheEntry<'mcx> {
     /// Token into [`TypCacheState::dcc_table`], or `None` (the C `domainData`).
     domain_data: Option<u64>,
     flags: i32,
-    /// Token into [`TypCacheState::enum_table`], or `None` (the C `enumData`).
-    enum_data: Option<u64>,
+    /// The entry's enum sort cache (the C `enumData` pointer, owned 1:1 by the
+    /// entry). `None` until `load_enum_cache_data` populates it; freed/replaced
+    /// in place on reload (C's `pfree(tcache->enumData); tcache->enumData = ..`).
+    enum_data: Option<TypeCacheEnumData<'mcx>>,
     /// Next domain entry's OID (the C `nextDomain`), or `None`.
     next_domain: Option<Oid>,
 }
@@ -390,9 +393,9 @@ struct TypCacheState<'mcx> {
     /// `firstDomainTypeEntry` — head OID of the domain-entry chain threaded via
     /// `TypeCacheEntry.next_domain`.
     first_domain_type_entry: Option<Oid>,
-    /// Side tables owning the `DomainConstraintCache` / `TypeCacheEnumData`.
+    /// Side table owning the (shared, refcounted) `DomainConstraintCache`s.
+    /// (Enum cache data is owned 1:1 inline on each entry, no side table.)
     dcc_table: HashMap<u64, DomainConstraintCache>,
-    enum_table: HashMap<u64, TypeCacheEnumData<'mcx>>,
     next_token: u64,
     /// `RecordCacheHash` — structural row type → stored descriptor ids.
     record_cache: HashMap<u32, PgVec<'mcx, u64>>,
@@ -424,7 +427,6 @@ impl<'mcx> TypCacheState<'mcx> {
             rel_id_to_type_id: HashMap::new(),
             first_domain_type_entry: None,
             dcc_table: HashMap::new(),
-            enum_table: HashMap::new(),
             next_token: 1,
             record_cache: HashMap::new(),
             record_cache_array: PgVec::new_in(mcx),
@@ -2269,8 +2271,11 @@ pub fn compare_values_of_enum(type_id: Oid, arg1: Oid, arg2: Oid) -> PgResult<i3
 /// Run `f` with a borrow of the entry's `TypeCacheEnumData`.
 fn with_enumdata<R>(type_id: Oid, f: impl FnOnce(&TypeCacheEnumData<'_>) -> R) -> R {
     with_state(|st| {
-        let token = st.entry(type_id).enum_data.expect("enum data must exist after load");
-        let ed = st.enum_table.get(&token).expect("enum data must exist after load");
+        let ed = st
+            .entry(type_id)
+            .enum_data
+            .as_ref()
+            .expect("enum data must exist after load");
         f(ed)
     })
 }
@@ -2306,9 +2311,8 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
     items.sort_by(|a, b| a.enum_oid.cmp(&b.enum_oid));
 
     // Build the bitmap and the finished, cache-context-charged enumdata, then
-    // link it in (freeing any prior enumdata).
-    let old_token = with_state(|st| st.entry(type_id).enum_data);
-    let token = with_state(|st| -> PgResult<u64> {
+    // link it in (replacing any prior enumdata in place).
+    with_state(|st| -> PgResult<()> {
         let mcx = st.mcx;
         // Build a bitmap of a subset of OIDs known to be in order.
         let mut bitmap_base = INVALID_OID;
@@ -2357,15 +2361,11 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
             enum_values,
         };
 
-        // Link the finished cache struct in, freeing the old's charged spines.
-        if let Some(old) = old_token {
-            st.enum_table.remove(&old);
-        }
-        let token = st.fresh_token();
-        st.enum_table.insert(token, enumdata);
-        Ok(token)
+        // Link the finished cache struct in, dropping the old's charged spines
+        // (C's `pfree(tcache->enumData)`; the prior `Some` is replaced/dropped).
+        st.entry_mut(type_id).enum_data = Some(enumdata);
+        Ok(())
     })?;
-    with_state(|st| st.entry_mut(type_id).enum_data = Some(token));
     Ok(())
 }
 
