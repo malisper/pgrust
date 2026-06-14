@@ -220,9 +220,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-reloptions",
+ "types-tuple",
 ]
 
 [[package]]
@@ -231,7 +231,6 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-fmgr-fmgr-seams",
  "types-core",
- "types-datum",
  "types-error",
  "types-scan",
  "types-tuple",
@@ -579,7 +578,6 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-scan",
@@ -1340,6 +1338,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -1955,6 +1954,7 @@ dependencies = [
  "types-scan",
  "types-snapshot",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -5524,10 +5524,10 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6383,6 +6383,7 @@ dependencies = [
  "types-rel",
  "types-replication",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7523,6 +7524,7 @@ dependencies = [
  "types-hash",
  "types-nodes",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8709,9 +8711,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-json",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9445,6 +9447,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-selfuncs",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9951,6 +9954,7 @@ dependencies = [
  "types-error",
  "types-namespace",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
