@@ -46,7 +46,15 @@ use std::cell::{Cell, RefCell};
 
 use mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
 use types_cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// The callback `arg` is C's opaque `Datum arg` registration cookie: inval.c
+// stores it verbatim and hands it back to the user callback untouched, never
+// deforming it. It therefore stays the audited bare word rather than the
+// canonical `types_tuple::Datum<'mcx>` enum — matching the `SyscacheCallback`
+// / `RelcacheCallbackFunction` signatures in `types-cache`, whose `arg` is this
+// same bare word. (Datum unification: opaque-passthrough cookies keep the
+// scalar word; only deformed tuple values move to the canonical enum.)
+use types_datum::Datum as ScalarWord;
 
 // Outward seams to other owners.
 use backend_catalog_catalog_seams as catalog_seams;
@@ -72,7 +80,7 @@ pub mod registration;
 /// the logical-decoding RelationSyncCache invalidation callback. (Unlike the
 /// syscache/relcache callback types, this one is not yet in `types-cache`, so
 /// inval.c — its owner — defines it here.)
-pub type RelSyncCallbackFunction = fn(arg: Datum, relid: types_core::Oid);
+pub type RelSyncCallbackFunction = fn(arg: ScalarWord, relid: types_core::Oid);
 
 /* ------------------------------------------------------------------------
  *  Subgroup indices (inval.c: CatCacheMsgs / RelCacheMsgs)
@@ -104,19 +112,19 @@ pub(crate) struct SyscacheCallbackItem {
     pub(crate) id: i16,
     pub(crate) link: i16,
     pub(crate) function: SyscacheCallbackFunction,
-    pub(crate) arg: Datum,
+    pub(crate) arg: ScalarWord,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct RelcacheCallbackItem {
     pub(crate) function: RelcacheCallbackFunction,
-    pub(crate) arg: Datum,
+    pub(crate) arg: ScalarWord,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct RelsyncCallbackItem {
     pub(crate) function: RelSyncCallbackFunction,
-    pub(crate) arg: Datum,
+    pub(crate) arg: ScalarWord,
 }
 
 /* ------------------------------------------------------------------------
