@@ -113,10 +113,6 @@ seam!(
     pub fn check_rolespec_name(role: RoleSpec, detail_msg: String) -> PgResult<()>
 );
 seam!(
-    /// `IsReservedName(name)`.
-    pub fn is_reserved_name(name: String) -> PgResult<bool>
-);
-seam!(
     /// `get_database_oid(dbname, missing_ok)`.
     pub fn get_database_oid(dbname: String, missing_ok: bool) -> PgResult<Oid>
 );

@@ -1,13 +1,13 @@
 [package]
-name = "types-parallel"
+name = "types-slot"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "types_parallel"
+name = "types_slot"
 path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
-types-execparallel = { path = "../types-execparallel" }
+types-tuple = { path = "../types-tuple" }

@@ -100,3 +100,12 @@ seam_core::seam!(
     /// pinned. Takes `OidGenLock`.
     pub fn stop_generating_pinned_object_ids() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TransamVariables->xactCompletionCount = 1;` performed by
+    /// `ProcArrayShmemInit()` (procarray.c) on first shared-memory
+    /// initialization. `xactCompletionCount` is a `ProcArrayLock`-protected
+    /// field of the `TransamVariables` shared singleton, owned here in varsup;
+    /// procarray reaches it through this owner seam.
+    pub fn init_xact_completion_count()
+);

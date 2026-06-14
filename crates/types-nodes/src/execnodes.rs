@@ -33,7 +33,7 @@ use types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
-use crate::executor::{TupleSlotKind, TupleTableSlot};
+use types_slot::{TupleSlotKind, TupleTableSlot};
 use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};

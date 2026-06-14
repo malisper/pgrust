@@ -667,7 +667,7 @@ pub fn check_rolespec_name(role: Option<&RoleSpec<'_>>, detail_msg: Option<&str>
         .as_deref()
         .expect("ROLESPEC_CSTRING requires rolename");
 
-    if backend_commands_user_seams::is_reserved_name::call(rolename.to_string())? {
+    if backend_catalog_catalog_seams::is_reserved_name::call(rolename.to_string())? {
         let err = PgError::new(ERROR, format!("role name \"{rolename}\" is reserved"))
             .with_sqlstate(ERRCODE_RESERVED_NAME);
         let err = match detail_msg {

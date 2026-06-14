@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
+use types_core::{FullTransactionId, Oid, ProcNumber, TransactionId, XLogRecPtr};
 use types_error::PgResult;
 use types_snapshot::SnapshotData;
 use types_storage::{
@@ -14,6 +14,7 @@ use types_storage::{
     ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
 
 };
+use types_vacuum::vacuumlazy::GlobalVisStateHandle;
 
 seam_core::seam!(
     /// `GetSnapshotData(snapshot)` (procarray.c) — fill an MVCC snapshot's
@@ -234,6 +235,39 @@ seam_core::seam!(
     /// `ProcGlobal`; cannot `ereport`, but the scan crosses shmem so the seam
     /// returns `PgResult` for the wider procarray failure surface consistency.
     pub fn count_user_backends(roleid: Oid) -> PgResult<i32>
+);
+
+// --- NEW: GlobalVisState machinery (owned by this unit, installed in F3).
+// Consumed by backend-access-heap-vacuumlazy + heapam visibility, which today
+// only hold a `GlobalVisStateHandle` (types_vacuum) with no installed resolver.
+// `global_vis_test_for` was previously mis-declared in
+// backend-access-heap-vacuumlazy-seams; the owner-homed copy lives here. ---
+
+seam_core::seam!(
+    /// `GlobalVisTestFor(Relation rel)` (procarray.c) — return the
+    /// `GlobalVisState *` (as the whole-tree `GlobalVisStateHandle`) appropriate
+    /// for `rel`'s visibility horizon class (shared/catalog/data/temp).
+    /// `rel == InvalidOid` selects the most conservative shared state. May
+    /// recompute the horizons (`ereport(ERROR)` surface on `Err`).
+    pub fn global_vis_test_for(rel: Oid) -> PgResult<GlobalVisStateHandle>
+);
+
+seam_core::seam!(
+    /// `GlobalVisTestIsRemovableFullXid(GlobalVisState *state,
+    /// FullTransactionId fxid)` (procarray.c) — the `FullTransactionId` variant
+    /// of the removability test.
+    pub fn global_vis_test_is_removable_fullxid(
+        state: GlobalVisStateHandle,
+        fxid: FullTransactionId,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GetOldestNonRemovableTransactionId(Relation rel)` (procarray.c) — the
+    /// oldest xid whose tuples `rel` must not have removed (the VACUUM cutoff
+    /// for `rel`'s visibility class). `rel == InvalidOid` uses the shared
+    /// horizon. May recompute horizons (`ereport(ERROR)` surface on `Err`).
+    pub fn get_oldest_non_removable_transaction_id(rel: Oid) -> PgResult<TransactionId>
 );
 
 // --- Subset consumed by logical decoding ---
