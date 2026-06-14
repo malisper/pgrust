@@ -9,7 +9,7 @@ use super::*;
 
 use std::sync::{Mutex, OnceLock};
 
-use backend_utils_misc_guc_file_seams as guc_seam;
+use backend_utils_misc_guc_seams as guc_seam;
 
 /// Last detail/hint captured by the installed GUC check-error seams.
 static CAPTURED: Mutex<(Option<String>, Option<String>)> = Mutex::new((None, None));

@@ -945,7 +945,7 @@ pub fn init_seams() {
         |newval, _extra, _source| {
             let (ok, detail) = check_commit_ts_buffers(*newval);
             if let Some(detail) = detail {
-                backend_utils_misc_guc_file_seams::guc_check_errdetail::call(detail);
+                backend_utils_misc_guc_seams::guc_check_errdetail::call(detail);
             }
             Ok(ok)
         },

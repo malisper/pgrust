@@ -579,7 +579,7 @@ fn CommitTransaction() -> PgResult<()> {
     async_seams::at_commit_notify::call()?;
 
     // Everything after this is purely internal-to-this-backend cleanup.
-    guc_seams::at_eoxact_guc::call(true, 1)?;
+    guc_core_seams::at_eoxact_guc::call(true, 1)?;
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
     tablecmds_seams::at_eoxact_on_commit_actions::call(true);
@@ -796,7 +796,7 @@ fn PrepareTransaction() -> PgResult<()> {
     twophase_seams::post_prepare_twophase::call();
 
     // PREPARE acts the same as COMMIT as far as GUC is concerned.
-    guc_seams::at_eoxact_guc::call(true, 1)?;
+    guc_core_seams::at_eoxact_guc::call(true, 1)?;
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
     tablecmds_seams::at_eoxact_on_commit_actions::call(true);
@@ -964,7 +964,7 @@ fn AbortTransaction() -> PgResult<()> {
         // ResourceOwnerRelease(LOCKS / AFTER_LOCKS) dissolve.
         storage_seams::smgr_do_pending_deletes::call(false)?;
 
-        guc_seams::at_eoxact_guc::call(false, 1)?;
+        guc_core_seams::at_eoxact_guc::call(false, 1)?;
         spi_seams::at_eoxact_spi::call(false)?;
         pg_enum_seams::at_eoxact_enum::call();
         tablecmds_seams::at_eoxact_on_commit_actions::call(false);
@@ -2169,7 +2169,7 @@ fn CommitSubTransaction() -> PgResult<()> {
 
     let (guc_nest_level, nesting_level) =
         xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
-    guc_seams::at_eoxact_guc::call(true, guc_nest_level)?;
+    guc_core_seams::at_eoxact_guc::call(true, guc_nest_level)?;
     spi_seams::at_eosubxact_spi::call(true, my)?;
     tablecmds_seams::at_eosubxact_on_commit_actions::call(true, my, parent);
     namespace_seams::at_eosubxact_namespace::call(true, my, parent);
@@ -2288,7 +2288,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
         let (guc_nest_level, nesting_level) =
             xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
-        guc_seams::at_eoxact_guc::call(false, guc_nest_level)?;
+        guc_core_seams::at_eoxact_guc::call(false, guc_nest_level)?;
         spi_seams::at_eosubxact_spi::call(false, my)?;
         tablecmds_seams::at_eosubxact_on_commit_actions::call(false, my, parent);
         namespace_seams::at_eosubxact_namespace::call(false, my, parent);
@@ -2350,7 +2350,7 @@ fn PushTransaction() -> PgResult<()> {
             .finish(xact_location("PushTransaction"));
     }
 
-    let guc_nest_level = guc_seams::new_guc_nest_level::call();
+    let guc_nest_level = guc_core_seams::new_guc_nest_level::call();
     let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
 
     // We can now stack a minimally valid subtransaction without fear of

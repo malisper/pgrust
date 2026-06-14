@@ -104,6 +104,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GUC_check_errdetail(fmt, ...)` (guc.h): record errdetail for the
+    /// in-progress GUC check-hook failure (`GUC_check_errdetail_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errdetail(detail: String)
+);
+
+seam_core::seam!(
+    /// `GUC_check_errhint(fmt, ...)` (guc.h): record errhint for the
+    /// in-progress GUC check-hook failure (`GUC_check_errhint_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errhint(hint: String)
+);
+
+seam_core::seam!(
+    /// `set_config_with_handle(name, get_config_handle(name), value, context,
+    /// PGC_S_SESSION, srole, GUC_ACTION_SAVE, true, 0, false)` as called by
+    /// `fmgr_security_definer` for each of a function's `proconfig` SET items.
+    /// The handle lookup (`get_config_handle`) is folded in (owner-side). C
+    /// varies only `context` (`PGC_SUSET` when the current user is superuser,
+    /// else `PGC_USERSET`) and `srole` (`GetUserId()`); source / action /
+    /// changeVal / elevel / is_reload are fixed for this caller. Apply paths
+    /// allocate and can `ereport(ERROR)`, carried on `Err`.
+    pub fn set_config_with_handle(
+        name: &str,
+        value: &str,
+        context: types_guc::GucContext,
+        srole: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `maintenance_work_mem` (guc.c global, KB): the value `ri_triggers.c`
     /// installs as `work_mem` for its validation query.
     pub fn maintenance_work_mem() -> i32

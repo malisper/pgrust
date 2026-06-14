@@ -1390,7 +1390,6 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
- "backend-utils-misc-guc-file-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "libc",
@@ -1833,6 +1832,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "backend-utils-misc-more2-seams",
  "backend-utils-mmgr-portalmem-seams",
  "backend-utils-time-snapmgr-pc-seams",
@@ -2073,11 +2073,17 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-timeline-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogprefetcher-seams",
+ "backend-access-transam-xlogreader-seams",
  "backend-access-transam-xlogrecovery-seams",
+ "backend-postmaster-startup-seams",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
  "mcx",
  "seam-core",
  "types-condvar",
@@ -2412,7 +2418,7 @@ dependencies = [
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-mb-mbutils-seams",
- "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-acl",
@@ -2667,6 +2673,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-pg-db-role-setting-seams",
  "backend-commands-functioncmds-seams",
+ "backend-utils-misc-guc-funcs-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -3063,7 +3070,7 @@ dependencies = [
  "backend-utils-error-elog-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-misc-clean-seams",
- "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
@@ -3504,6 +3511,7 @@ dependencies = [
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-syscache",
  "backend-utils-error",
+ "backend-utils-misc-guc-funcs-seams",
  "mcx",
  "seam-core",
  "types-acl",
@@ -10653,7 +10661,7 @@ dependencies = [
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
- "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "mcx",
  "types-acl",
  "types-cache",
@@ -10939,7 +10947,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
- "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
@@ -11071,7 +11079,6 @@ name = "backend-utils-misc-guc-file-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
  "types-error",
  "types-guc",
 ]
@@ -11081,7 +11088,6 @@ name = "backend-utils-misc-guc-funcs"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
- "backend-commands-functioncmds-seams",
  "backend-utils-error",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-funcs-seams",
@@ -11104,6 +11110,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -11112,6 +11119,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-guc",
 ]
@@ -11232,7 +11240,7 @@ name = "backend-utils-misc-stack-depth"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
- "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-stack-depth-seams",
  "libc",

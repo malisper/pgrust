@@ -774,15 +774,13 @@ mod recurrence_guard {
         // mis-homed onto backend-commands-functioncmds-seams because functioncmds
         // was the first consumer; their decls' dir-owner resolves to functioncmds,
         // which does NOT install them.
-        //   * extract_set_variable_args (guc_funcs.c, ExtractSetVariableArgs) is
-        //     now genuinely INSTALLED by its real owner backend-utils-misc-guc-funcs
-        //     (task #163 W2) via that crate's init_seams() — a cross-crate re-home
-        //     install the dir-owner guard cannot see, so the allowlist entry stays
-        //     to suppress the false "functioncmds didn't install it" flag.
+        //   * extract_set_variable_args (guc_funcs.c, ExtractSetVariableArgs): its
+        //     seam decl has been RE-HOMED to guc_funcs.c's own -seams crate
+        //     (backend-utils-misc-guc-funcs-seams), where the merged owner installs
+        //     it — dir-owner-attributable now, so the allowlist entry is retired.
         //   * GUCArrayAdd/Delete/Reset (guc.c) still have NO impl: the GUC array
         //     helpers live in guc.c, not yet ported. Consumed by functioncmds
         //     (ddl_core) + pg-db-role-setting.
-        ("backend_commands_functioncmds", "extract_set_variable_args"),
         ("backend_commands_functioncmds", "guc_array_add"),
         ("backend_commands_functioncmds", "guc_array_delete"),
         ("backend_commands_functioncmds", "guc_array_reset"),
@@ -999,11 +997,15 @@ mod recurrence_guard {
         // after which the owner installs these directly. Provider-unported / K-gated.
         ("backend_storage_ipc_shm_toc", "shm_toc_estimate_chunk"),
         ("backend_storage_ipc_shm_toc", "shm_toc_estimate_keys"),
-        // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
+        // DESIGN_DEBT: these proc.c seams are declared + consumed but the owner
         // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
         // cross-unit PGPROC/ProcGlobal-arena wiring (procarray add/remove + clog.c
         // TransactionGroupUpdateXidStatus group-commit machinery + lock.c fast-path
-        // locks) that has not landed yet. The clog_group_* / *_clog_group_* set is
+        // locks) that has not landed yet. (The shmem-sizing/one-time-setup trio
+        // ProcGlobalSemas / ProcGlobalShmemSize / InitProcGlobal — which depend
+        // only on this unit's own state plus already-merged globals/lwlock seams —
+        // are now installed for real in inward_seams and no longer listed here.)
+        // The clog_group_* / *_clog_group_* set is
         // the XID-status group-update batch (clog.c clogGroupFirst CAS list + the
         // per-PGPROC clogGroupMember/Next/MemberXid/Page/Status fields); the
         // my_proc_{xmin,xid,vxid,subxids}/proc_subxids/store_{top,sub}xid_in_proc
@@ -1012,7 +1014,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "clog_group_first_compare_exchange"),
         ("backend_storage_lmgr_proc", "clog_group_first_exchange"),
         ("backend_storage_lmgr_proc", "clog_group_first_read"),
-        ("backend_storage_lmgr_proc", "init_proc_global"),
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "my_proc_clog_group_next"),
@@ -1022,8 +1023,6 @@ mod recurrence_guard {
         ("backend_storage_lmgr_proc", "proc_clog_group_member_page"),
         ("backend_storage_lmgr_proc", "proc_clog_group_member_update"),
         ("backend_storage_lmgr_proc", "proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "proc_global_semas"),
-        ("backend_storage_lmgr_proc", "proc_global_shmem_size"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member_data"),
         ("backend_storage_lmgr_proc", "set_my_proc_clog_group_next"),
@@ -1155,11 +1154,6 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        ("backend_utils_misc_guc_file", "at_eoxact_guc"),
-        ("backend_utils_misc_guc_file", "guc_check_errdetail"),
-        ("backend_utils_misc_guc_file", "guc_check_errhint"),
-        ("backend_utils_misc_guc_file", "new_guc_nest_level"),
-        ("backend_utils_misc_guc_file", "set_config_with_handle"),
         // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
         // seams (backend-utils-time-combocid-seams) consumed by the heap
         // visibility predicates resolve a combo CID against the *file-scope*

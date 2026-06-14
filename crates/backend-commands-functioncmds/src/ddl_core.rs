@@ -617,7 +617,8 @@ fn update_proconfig_value(
             a = None;
         } else {
             let name = sstmt.name.clone().unwrap_or_default();
-            let valuestr = seam::extract_set_variable_args::call(sstmt)?;
+            let valuestr =
+                backend_utils_misc_guc_funcs_seams::extract_set_variable_args::call(sstmt)?;
 
             if let Some(valuestr) = valuestr {
                 a = Some(seam::guc_array_add::call(a, name, valuestr)?);

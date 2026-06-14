@@ -25,6 +25,21 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_parsenodes::VariableSetStmt;
+
+// --- INWARD seam: guc_funcs.c's own ExtractSetVariableArgs --------------------
+//
+// `ExtractSetVariableArgs(sstmt)` (guc_funcs.c) — the SET arg string, or `None`
+// for a RESET; owns the `A_Const` arg-list flattening. Unlike the outward seams
+// below, this one's real body lives in THIS unit (guc_funcs.c), so the owner
+// crate installs it from its own `init_seams()`. Consumers (functioncmds
+// ddl_core, pg-db-role-setting) `::call` it.
+
+seam_core::seam!(
+    /// `ExtractSetVariableArgs(sstmt)` (utils/misc/guc_funcs.c) — the SET arg
+    /// string, or `None` for a RESET. Owns the `A_Const` arg-list flattening.
+    pub fn extract_set_variable_args(sstmt: VariableSetStmt) -> PgResult<Option<String>>
+);
 
 // --- process / permission / transaction state -----------------------------
 

@@ -186,11 +186,11 @@ pub fn check_max_stack_depth(newval: i32, _source: GucSource) -> bool {
     let stack_rlimit = get_stack_depth_rlimit();
 
     if stack_rlimit > 0 && newval_bytes > stack_rlimit - STACK_DEPTH_SLOP {
-        backend_utils_misc_guc_file_seams::guc_check_errdetail::call(format!(
+        backend_utils_misc_guc_seams::guc_check_errdetail::call(format!(
             "\"max_stack_depth\" must not exceed {}kB.",
             (stack_rlimit - STACK_DEPTH_SLOP) / 1024
         ));
-        backend_utils_misc_guc_file_seams::guc_check_errhint::call(
+        backend_utils_misc_guc_seams::guc_check_errhint::call(
             "Increase the platform's stack depth limit via \"ulimit -s\" or local equivalent."
                 .to_string(),
         );

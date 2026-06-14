@@ -17,7 +17,7 @@ use types_acl::{AclMode, AclResult};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
-use types_parsenodes::{DefElem, InlineCodeBlock, Node, TypeName, VariableSetStmt};
+use types_parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
 
 // ---------------------------------------------------------------------------
 // Signature carriers
@@ -287,11 +287,10 @@ seam_core::seam!(
     pub fn extension_file_exists(ext_name: String) -> PgResult<bool>
 );
 
-seam_core::seam!(
-    /// `ExtractSetVariableArgs(sstmt)` (utils/misc/guc.c) — the SET arg string,
-    /// or `None` for a RESET. Owns the `A_Const` arg-list flattening.
-    pub fn extract_set_variable_args(sstmt: VariableSetStmt) -> PgResult<Option<String>>
-);
+// NOTE: `ExtractSetVariableArgs` (guc_funcs.c) was mis-homed here because
+// functioncmds was its first consumer; its decl now lives on guc_funcs.c's own
+// `-seams` crate (`backend-utils-misc-guc-funcs-seams`), where its real owner
+// installs it (CONTRACT_RECONCILE_PENDING retired). Consumers call it there.
 
 seam_core::seam!(
     /// `GUCArrayAdd(array, name, value)` (utils/misc/guc.c) — append/replace the

@@ -169,7 +169,7 @@ fn install_seams() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        fseam::extract_set_variable_args::set(fake_extract);
+        backend_utils_misc_guc_funcs_seams::extract_set_variable_args::set(fake_extract);
         fseam::guc_array_reset::set(fake_guc_array_reset);
         fseam::guc_array_add::set(fake_guc_array_add);
         fseam::guc_array_delete::set(fake_guc_array_delete);

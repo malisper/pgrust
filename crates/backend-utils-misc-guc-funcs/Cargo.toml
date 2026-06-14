@@ -22,8 +22,5 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
-# Inward seam this crate OWNS + installs (mis-homed onto functioncmds-seams
-# because functioncmds was the first consumer; re-homed at install time here):
-backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 
 [dev-dependencies]

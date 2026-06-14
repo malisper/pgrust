@@ -13,7 +13,7 @@ backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
-backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
