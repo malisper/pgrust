@@ -922,6 +922,16 @@ mod recurrence_guard {
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
+        // DESIGN_DEBT: provider-unported. `setup_signal_handlers` is the
+        // slot-sync worker's `pqsignal(SIGHUP, SignalHandlerForConfigReload)`
+        // ... block (slotsync.c:1515-1522). Its handler bodies
+        // (SignalHandlerForConfigReload / StatementCancelHandler / die /
+        // FloatExceptionHandler / procsignal_sigusr1_handler) live in
+        // interrupt.c / postgres.c / procsignal.c, none of which is ported, so
+        // there is no real body to install. (The other 8 slot-sync bootstrap
+        // seams declared alongside it ARE installed in miscinit's init_seams by
+        // delegating to their now-ported owners.)
+        ("backend_utils_init_miscinit", "setup_signal_handlers"),
         ("backend_utils_init_small", "init_process_globals"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
