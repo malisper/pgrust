@@ -873,7 +873,7 @@ pub fn ExecBitmapHeapInitializeWorker<'mcx>(
     // The keystone uses the segment handle only as the `'seg` lifetime carrier
     // (it never dereferences it); the worker's looked-up chunk address is the
     // real in-segment address.
-    let seg = types_parallel::DsmSegmentHandle::NULL;
+    let seg = types_execparallel::DsmSegmentHandle(0);
     node.pstate = Some(shared_dsm_object::attach::<ParallelBitmapHeapState>(seg, ptr));
     if node.ss.ps.instrument.is_some() {
         let sinstr_cursor =
@@ -942,16 +942,16 @@ pub fn ExecBitmapHeapRetrieveInstrumentation(node: &mut BitmapHeapScanState) -> 
 // sizing, `shm_toc_allocate`/`shm_toc_insert`/`shm_toc_lookup` calls around
 // them are this node's real logic.
 
-/// The `pcxt->seg` handle as the `types_parallel::DsmSegmentHandle` the keystone
-/// `shared_dsm_object` uses as its `'seg` lifetime carrier. `None` (private
-/// memory, `seg == NULL`) maps to the NULL handle; the keystone never
+/// The `pcxt->seg` handle as the `types_execparallel::DsmSegmentHandle` the
+/// keystone `shared_dsm_object` uses as its `'seg` lifetime carrier. `None`
+/// (private memory, `seg == NULL`) maps to the NULL handle; the keystone never
 /// dereferences it — the real chunk address comes from `shm_toc_allocate`.
 fn pcxt_seg_handle(
     pcxt: types_execparallel::ParallelContextHandle,
-) -> types_parallel::DsmSegmentHandle {
+) -> types_execparallel::DsmSegmentHandle {
     match backend_access_transam_parallel_seams::pcxt_seg::call(pcxt) {
-        Some(seg) => types_parallel::DsmSegmentHandle(seg.0),
-        None => types_parallel::DsmSegmentHandle::NULL,
+        Some(seg) => seg,
+        None => types_execparallel::DsmSegmentHandle(0),
     }
 }
 
