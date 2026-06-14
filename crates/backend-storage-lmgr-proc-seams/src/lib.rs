@@ -373,6 +373,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetPGProcByNumber(procno)->isRegularBackend` — true for a regular client
+    /// backend (read by `CountDBConnections`/`CountUserBackends`).
+    pub fn proc_is_regular_backend(procno: ProcNumber) -> bool
+);
+
+seam_core::seam!(
     /// `&MyProc->procLatch` (`storage/proc.c`) — this backend's PGPROC shared
     /// latch, the latch `SwitchToSharedLatch` points `MyLatch` at.
     pub fn my_proc_latch() -> types_storage::latch::LatchHandle
@@ -752,4 +758,20 @@ seam_core::seam!(
     /// `overflowed` flag when `PGPROC_MAX_CACHED_SUBXIDS` is exceeded. proc.c
     /// owns the PGPROC/ProcGlobal subxid-cache layout.
     pub fn store_subxid_in_proc(xid: TransactionId)
+);
+
+seam_core::seam!(
+    /// `XidCacheRemoveRunningXids`'s subxid-cache mutation (procarray.c): remove
+    /// each of `children` (and `xid`) from `MyProc->subxids.xids[]` using the C
+    /// find-and-swap-with-last logic, decrementing both
+    /// `MyProc->subxidStatus.count` and the `ProcGlobal->subxidStates[pgxactoff]`
+    /// mirror (with the `pg_write_barrier()`). Returns the xids that were *not*
+    /// found while the cache had not overflowed, so the caller can emit the
+    /// `did not find subXID %u in MyProc` WARNING. proc.c owns the PGPROC/
+    /// ProcGlobal subxid-cache layout; the caller holds `ProcArrayLock`
+    /// exclusively.
+    pub fn remove_running_subxids_from_proc(
+        children: Vec<TransactionId>,
+        xid: TransactionId,
+    ) -> Vec<TransactionId>
 );

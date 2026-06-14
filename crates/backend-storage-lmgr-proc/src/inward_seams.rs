@@ -408,6 +408,76 @@ fn proc_pid(procno: ProcNumber) -> i32 {
     with_proc_by_number(procno, |p| p.pid)
 }
 
+fn proc_is_regular_backend(procno: ProcNumber) -> bool {
+    with_proc_by_number(procno, |p| p.isRegularBackend)
+}
+
+/// `XidCacheRemoveRunningXids`'s MyProc subxid-cache mutation (procarray.c).
+/// Removes each of `children` (then `xid`) from `MyProc->subxids.xids[]` via the
+/// C find-and-swap-with-last scan, decrementing both `MyProc->subxidStatus.count`
+/// and the `ProcGlobal->subxidStates[pgxactoff]` mirror. Returns the xids that
+/// were searched for but not found while the cache had not overflowed; the
+/// caller emits the `did not find subXID %u in MyProc` WARNING for each.
+fn remove_running_subxids_from_proc(
+    children: Vec<TransactionId>,
+    xid: TransactionId,
+) -> Vec<TransactionId> {
+    let mut not_found = Vec::new();
+
+    // mysubxidstat = &ProcGlobal->subxidStates[MyProc->pgxactoff];
+    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+
+    with_my_proc(|proc| {
+        // Scan children backwards (C: for i = nxids-1; i >= 0; i--).
+        for &anxid in children.iter().rev() {
+            let mut found = false;
+            let mut j = proc.subxidStatus.count as i32 - 1;
+            while j >= 0 {
+                if proc.subxids.xids[j as usize] == anxid {
+                    let last = proc.subxidStatus.count as usize - 1;
+                    proc.subxids.xids[j as usize] = proc.subxids.xids[last];
+                    // pg_write_barrier(); — write ordering is implicit here.
+                    proc.subxidStatus.count -= 1;
+                    found = true;
+                    break;
+                }
+                j -= 1;
+            }
+            // Ordinarily found, unless the cache overflowed; mirror C's WARNING.
+            if !found && !proc.subxidStatus.overflowed {
+                not_found.push(anxid);
+            }
+        }
+
+        // Then remove the parent xid itself.
+        {
+            let mut found = false;
+            let mut j = proc.subxidStatus.count as i32 - 1;
+            while j >= 0 {
+                if proc.subxids.xids[j as usize] == xid {
+                    let last = proc.subxidStatus.count as usize - 1;
+                    proc.subxids.xids[j as usize] = proc.subxids.xids[last];
+                    proc.subxidStatus.count -= 1;
+                    found = true;
+                    break;
+                }
+                j -= 1;
+            }
+            if !found && !proc.subxidStatus.overflowed {
+                not_found.push(xid);
+            }
+        }
+    });
+
+    // Keep the ProcGlobal->subxidStates[pgxactoff].count mirror in sync with
+    // MyProc->subxidStatus.count (mysubxidstat->count-- in C).
+    let new_count = with_my_proc_ref(|p| p.subxidStatus.count as i32);
+    let overflowed = with_my_proc_ref(|p| p.subxidStatus.overflowed);
+    crate::proc_shmem::set_proc_array_subxid_state(pgxactoff, new_count, overflowed);
+
+    not_found
+}
+
 // --- dense ProcGlobal array + PGPROC xact-field accessors (procarray.c) ------
 
 fn proc_array_xid(idx: i32) -> TransactionId {
@@ -651,6 +721,8 @@ pub(crate) fn install() {
     seams::proc_pgxactoff::set(proc_pgxactoff);
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
+    seams::proc_is_regular_backend::set(proc_is_regular_backend);
+    seams::remove_running_subxids_from_proc::set(remove_running_subxids_from_proc);
 
     // dense ProcGlobal array + PGPROC xact-field accessors (procarray.c
     // membership family)
