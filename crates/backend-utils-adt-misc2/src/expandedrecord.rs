@@ -240,12 +240,12 @@ fn assign_record_type_typmod(tupdesc: &mut TupleDescData<'_>) -> PgResult<()> {
 /// thin `(void) domain_check_internal(..., escontext = NULL)` that re-runs the
 /// typcache-resident `domain_check_input` engine. We route through that same
 /// engine seam directly (the owned model carries no `extra` memoization handle).
-fn domain_check(value: types_datum::Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
-    backend_utils_cache_typcache_seams::domain_check_input::call(
-        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
-        isnull,
-        domain_type,
-    )
+fn domain_check(
+    value: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    isnull: bool,
+    domain_type: Oid,
+) -> PgResult<()> {
+    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
 /// `detoast_external_attr(attr)` (access/common/detoast.c). Owner not yet ported
@@ -1190,7 +1190,7 @@ pub fn expanded_record_set_fields<'mcx>(
     // Domain constraints checked as the final step.
     if (erh.flags & ER_FLAG_IS_DOMAIN) != 0 {
         let ro = expanded_record_get_ro_datum(erh);
-        domain_check(ro, false, erh.er_decltypeid)?;
+        domain_check(&ro, false, erh.er_decltypeid)?;
     }
 
     Ok(())
@@ -1435,7 +1435,7 @@ fn check_domain_for_new_field<'mcx>(
 
     // Apply the check, using the main header's domain cache space.
     let ro = expanded_record_get_ro_datum(erh.er_dummy_header.as_ref().expect("dummy"));
-    domain_check(ro, false, erh.er_decltypeid)?;
+    domain_check(&ro, false, erh.er_decltypeid)?;
 
     // Clean up cruft immediately.
     if let Some(cxt) = erh.er_short_term_cxt.as_mut() {
@@ -1453,7 +1453,11 @@ fn check_domain_for_new_tuple<'mcx>(
     // If we're being told to set record to empty, just see if NULL is OK.
     let Some(tuple) = tuple else {
         ensure_short_term_cxt(erh);
-        domain_check(types_datum::Datum::null(), true, erh.er_decltypeid)?;
+        domain_check(
+            &types_tuple::backend_access_common_heaptuple::Datum::null(),
+            true,
+            erh.er_decltypeid,
+        )?;
         if let Some(cxt) = erh.er_short_term_cxt.as_mut() {
             cxt.reset();
         }
@@ -1477,7 +1481,7 @@ fn check_domain_for_new_tuple<'mcx>(
 
     // Apply the check.
     let ro = expanded_record_get_ro_datum(erh.er_dummy_header.as_ref().expect("dummy"));
-    domain_check(ro, false, erh.er_decltypeid)?;
+    domain_check(&ro, false, erh.er_decltypeid)?;
 
     if let Some(cxt) = erh.er_short_term_cxt.as_mut() {
         cxt.reset();
@@ -1499,6 +1503,8 @@ fn tuple_has_external(tup: &FormedTuple<'_>) -> bool {
 /// model the dummy header IS the value, so we cross the placeholder datum word
 /// (the C `EOHPGetRODatum` pointer). The unported `domain_check` owner will be
 /// the consumer; until then this is a structural placeholder, never read here.
-fn expanded_record_get_ro_datum(_erh: &ExpandedRecordHeader<'_>) -> types_datum::Datum {
-    types_datum::Datum::null()
+fn expanded_record_get_ro_datum<'mcx>(
+    _erh: &ExpandedRecordHeader<'_>,
+) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
+    types_tuple::backend_access_common_heaptuple::Datum::null()
 }

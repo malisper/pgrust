@@ -31,7 +31,6 @@ use mcx::Mcx;
 // The canonical unified value (Datum-unification keystone); these SQL-callable
 // builtins return / assemble the unified `Datum<'mcx>`. The varlena owner still
 // hands back the bare scalar word, bridged at `text_datum`/`bytes_to_varlena`.
-use types_datum::Datum as DatumWord;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERRCODE_INVALID_PARAMETER_VALUE,
