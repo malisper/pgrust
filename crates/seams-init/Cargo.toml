@@ -72,6 +72,7 @@ backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeAppend = { path = "../backend-executor-nodeAppend" }
 backend-executor-nodeBitmapAnd = { path = "../backend-executor-nodeBitmapAnd" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
+backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }

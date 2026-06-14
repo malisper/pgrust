@@ -69,6 +69,7 @@ pub fn init_all() {
     backend_executor_nodeBitmapAnd::init_seams();
     backend_executor_nodeBitmapHeapscan::init_seams();
     backend_executor_nodeCtescan::init_seams();
+    backend_executor_nodeBitmapOr::init_seams();
     backend_executor_nodeForeignscan::init_seams();
     backend_foreign_foreign::init_seams();
     backend_executor_nodeGroup::init_seams();
