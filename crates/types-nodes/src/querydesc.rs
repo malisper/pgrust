@@ -46,6 +46,7 @@ use crate::nodes::CmdType;
 use crate::parsestmt::{DestReceiverHandle, ParamListInfoHandle};
 use crate::planstate::PlanStateNode;
 use types_error::PgResult;
+use types_tuple::heaptuple::TupleDescData;
 
 /// The executor working state a started query owns, all living in the one
 /// per-query "ExecutorState" context.
@@ -152,6 +153,63 @@ impl QueryDesc {
             already_executed: false,
             work,
         })
+    }
+
+    // =======================================================================
+    // Consumer-facing accessors (QueryDesc de-handle F1b).
+    //
+    // These let the executor's consumers (portalcmds / copyto / matview /
+    // execParallel) read or mutate the owned `QueryDesc` *without* reaching
+    // into the executor's internals (execMain's `EState`/plan-state layout):
+    // the historical `snapshot`/`dest` views become plain field reads, and the
+    // bundle-interior views (`result_tupdesc` / `es_processed` / the
+    // `EState`/plan-state mutators) go through these helpers, which open the
+    // `McxOwned` bundle internally so no `'mcx` borrow escapes.
+    // =======================================================================
+
+    /// `ExecGetResultType(queryDesc->planstate)` (execMain.c, via execUtils):
+    /// the top plan node's result `TupleDesc` (`planstate->ps_ResultTupleDesc`),
+    /// which is copyto's `tupDesc`. Runs `f` against the borrowed descriptor
+    /// (`None` before `ExecutorStart` builds the plan-state tree, or when the
+    /// node carries no result tupdesc); the closure returns an owned `R` so no
+    /// `'mcx` borrow leaves the bundle.
+    pub fn with_result_tupdesc<R>(&self, f: impl FnOnce(Option<&TupleDescData<'_>>) -> R) -> R {
+        self.work.with(|w| {
+            let td = w
+                .planstate
+                .as_ref()
+                .and_then(|ps| ps.ps_head().ps_ResultTupleDesc.as_deref());
+            f(td)
+        })
+    }
+
+    /// `queryDesc->estate->es_processed` (execMain.c) — the number of tuples
+    /// processed by the current command, the value matview's
+    /// `refresh_matview_datafill` reads off the finished query.
+    pub fn es_processed(&self) -> u64 {
+        self.work.with(|w| w.estate.es_processed)
+    }
+
+    /// Mutable access to the owned `EState` (`queryDesc->estate`) through the
+    /// bundle. `execParallel` reaches the `EState` interior this way
+    /// (`ExecParallelCreateReaders` / `ExecInitParallelPlan` thread the live
+    /// `EState`); the closure must typecheck for an arbitrary `'mcx`
+    /// (`McxOwned::with_mut`), so no borrow escapes.
+    pub fn with_estate_mut<R>(&mut self, f: impl for<'mcx> FnOnce(&mut EStateData<'mcx>) -> R) -> R {
+        self.work.with_mut(|w| f(&mut w.estate))
+    }
+
+    /// Mutable access to the owned top plan-state tree
+    /// (`queryDesc->planstate`) through the bundle. `None` before
+    /// `ExecutorStart` builds it. `execParallel` reaches the plan-state interior
+    /// this way; the closure must typecheck for an arbitrary `'mcx`, so no
+    /// borrow escapes.
+    pub fn with_planstate_mut<R>(
+        &mut self,
+        f: impl for<'mcx> FnOnce(Option<&mut PlanStateNode<'mcx>>) -> R,
+    ) -> R {
+        self.work
+            .with_mut(|w| f(w.planstate.as_deref_mut()))
     }
 }
 

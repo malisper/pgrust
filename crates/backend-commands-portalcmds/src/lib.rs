@@ -461,7 +461,7 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
     //   SetTuplestoreDestReceiverParams(queryDesc->dest, portal->holdStore,
     //                                   portal->holdContext, true, NULL, NULL);
     let dest = tstore::create_dest_receiver_tuplestore::call()?;
-    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = Some(dest.clone());
+    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = Some(dest);
     tstore::set_tuplestore_dest_receiver_params::call(dest, portal, true)?;
 
     // Fetch the result set into the tuplestore.
@@ -472,7 +472,7 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
     }
 
     //   queryDesc->dest->rDestroy(queryDesc->dest);  queryDesc->dest = NULL;
-    let dest = portal.borrow().queryDesc.as_ref().unwrap().dest.clone();
+    let dest = portal.borrow().queryDesc.as_ref().unwrap().dest;
     if let Some(dest) = dest {
         tstore::dest_destroy::call(dest)?;
     }

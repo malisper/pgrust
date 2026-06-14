@@ -1706,6 +1706,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogarchive"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogarchive-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-postmaster-pgarch-seams",
+ "backend-postmaster-startup-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "common-archive-seams",
+ "common-percentrepl",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlogarchive-seams"
 version = "0.0.0"
 dependencies = [
@@ -1807,6 +1834,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
 ]
 
 [[package]]
@@ -2042,7 +2070,6 @@ dependencies = [
 name = "backend-catalog-dependency-seams"
 version = "0.0.0"
 dependencies = [
- "backend-catalog-objectaddress-seams",
  "seam-core",
  "types-catalog",
  "types-core",
@@ -2298,7 +2325,6 @@ dependencies = [
  "backend-catalog-dependency-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess-seams",
- "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-constraint-seams",
  "backend-catalog-pg-depend-seams",
  "backend-commands-indexcmds-seams",
@@ -3774,6 +3800,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execMain"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-executor-execMain-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-snapshot",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -5235,6 +5280,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-nodes",
  "types-portal",
 ]
 
@@ -8246,6 +8292,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-dest"
+version = "0.0.0"
+dependencies = [
+ "backend-tcop-dest-seams",
+ "types-dest",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-tcop-dest-seams"
 version = "0.0.0"
 dependencies = [
@@ -11068,6 +11125,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "common-archive-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "common-blkreftable-seams"
 version = "0.0.0"
 dependencies = [
@@ -11280,6 +11346,13 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-error",
+]
+
+[[package]]
+name = "common-wait-error-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -11564,6 +11637,7 @@ dependencies = [
  "backend-access-transam-varsup",
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
+ "backend-access-transam-xlogarchive",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogreader",
  "backend-access-transam-xlogstats",
@@ -11598,6 +11672,7 @@ dependencies = [
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execJunk",
+ "backend-executor-execMain",
  "backend-executor-execParallel",
  "backend-executor-execPartition",
  "backend-executor-execProcnode",
@@ -11697,6 +11772,7 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
+ "backend-tcop-dest",
  "backend-tcop-fastpath",
  "backend-timezone-localtime",
  "backend-timezone-pgtz",

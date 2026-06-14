@@ -163,7 +163,11 @@ pub struct QueryDesc {
     /// `Snapshot snapshot` — snapshot to use for query (`None` = C NULL).
     pub snapshot: Option<Rc<SnapshotData>>,
     /// `DestReceiver *dest` — destination for tuple output (`None` = C NULL).
-    pub dest: Option<DestReceiver>,
+    /// Carried as the router-keyed [`DestReceiverHandle`]
+    /// (`types_nodes::parsestmt`): `tcop/dest.c`'s `CreateDestReceiver` mints it
+    /// through the unified receiver-value router, so portalcmds swaps a handle in
+    /// (not a by-value `DestReceiver`) — QueryDesc de-handle F1b.
+    pub dest: Option<types_nodes::parsestmt::DestReceiverHandle>,
 }
 
 /// `DestReceiver` (`tcop/dest.h`) — opaque output sink, owned by the receiver
