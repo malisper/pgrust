@@ -1657,9 +1657,29 @@ fn out_varlena(
     }
 }
 
+/// `OidInputFunctionCall` over the Option-4 typed boundary, returning the typed
+/// [`FmgrOut`] (`ByVal` word or owned by-reference [`RefPayload`]). This is the
+/// migration-clean inner form: the by-reference referent stays an owned payload,
+/// never a per-backend registry token. Callers that must hand a single
+/// bare-word `Datum` across the fmgr-return ABI edge fold a `Ref` into the
+/// registry themselves (the `_typed` wrapper below); callers that build the
+/// canonical `Datum<'mcx>` enum map it straight onto `ByVal`/`ByRef`.
+fn oid_input_function_call_out(
+    mcx: Mcx<'_>,
+    function_id: Oid,
+    input: Option<&str>,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<FmgrOut> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    input_function_call_typed(mcx, &resolved.resolution, resolved.finfo, input, typioparam, typmod)
+}
+
 /// `OidInputFunctionCall` over the Option-4 typed boundary, returning the value
-/// as a bare `Datum` word (a by-reference result is minted into the per-backend
-/// [`datum_ref_registry`] — the owned-model `PointerGetDatum(palloc'd result)`).
+/// as a bare `Datum` word. A by-reference result is minted into the per-backend
+/// [`datum_ref_registry`] (the owned-model `PointerGetDatum(palloc'd result)`) so
+/// it can ride through the fmgr-return ABI edge as a single word — the audited
+/// edge where a by-reference value is a plain pointer-shaped `Datum`.
 pub fn oid_input_function_call_typed(
     mcx: Mcx<'_>,
     function_id: Oid,
@@ -1667,10 +1687,7 @@ pub fn oid_input_function_call_typed(
     typioparam: Oid,
     typmod: i32,
 ) -> PgResult<Datum> {
-    let resolved = fmgr_info(mcx, function_id)?;
-    let out =
-        input_function_call_typed(mcx, &resolved.resolution, resolved.finfo, input, typioparam, typmod)?;
-    Ok(match out {
+    Ok(match oid_input_function_call_out(mcx, function_id, input, typioparam, typmod)? {
         FmgrOut::ByVal(d) => d,
         FmgrOut::Ref(payload) => datum_ref_registry::register(payload),
     })
@@ -2212,13 +2229,26 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     attbyval: bool,
 ) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>> {
     use types_tuple::backend_access_common_heaptuple::TupleValue;
-    let datum = oid_input_function_call_typed(mcx, fn_oid, str_, typioparam, typmod)?;
-    if attbyval {
-        return Ok(TupleValue::ByVal(datum));
+    // The seam contract is the canonical `Datum<'mcx>` enum, so the input
+    // function's result maps straight onto it — no per-backend registry token
+    // round-trip. A by-value result is `ByVal` (the bare word); a by-reference
+    // result is an owned `ByRef` over the input function's flattened payload
+    // bytes (C's `PointerGetDatum(palloc'd result)`).
+    match oid_input_function_call_out(mcx, fn_oid, str_, typioparam, typmod)? {
+        // A strict NULL / by-value scalar: keep the bare ABI word.
+        FmgrOut::ByVal(d) => Ok(TupleValue::ByVal(d)),
+        // C classifies by `attbyval`: a by-value type with a by-reference-shaped
+        // result still reads its word back; otherwise materialize the payload.
+        FmgrOut::Ref(payload) if attbyval => {
+            // attbyval but the input function produced a referent — fold it into
+            // a bare word at this audited edge (mirrors the registry-token path).
+            Ok(TupleValue::ByVal(datum_ref_registry::register(payload)))
+        }
+        FmgrOut::Ref(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(TupleValue::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
     }
-    // By-reference: materialize the registry payload's verbatim bytes.
-    let bytes: Vec<u8> = datum_ref_registry::fetch(datum)?.flatten();
-    Ok(TupleValue::ByRef(mcx::slice_in(mcx, &bytes)?))
 }
 
 /// `OidOutputFunctionCall(functionId, val)` seam over a bare `Datum` (bootstrap's
