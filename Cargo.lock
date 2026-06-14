@@ -9227,6 +9227,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
