@@ -199,7 +199,7 @@ pub fn BTreeTupleGetHeapTIDCareful<'mcx>(
 pub fn bt_mkscankey_pivotsearch<'mcx>(
     rel: &Relation<'mcx>,
     itup: Option<&IndexTuple<'mcx>>,
-) -> PgResult<BTScanInsert> {
+) -> PgResult<BTScanInsert<'mcx>> {
     let _ = (rel, itup);
     panic!("decomp: bt_mkscankey_pivotsearch not yet filled")
 }

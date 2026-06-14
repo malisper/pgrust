@@ -729,7 +729,7 @@ pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult
 pub fn bt_right_page_check_scankey<'mcx>(
     state: &mut BtreeCheckState<'mcx>,
     rightfirstoffset: &mut OffsetNumber,
-) -> PgResult<BTScanInsert> {
+) -> PgResult<BTScanInsert<'mcx>> {
     // Determine target's next block number.
     let target = state
         .target
@@ -815,7 +815,7 @@ pub fn bt_posting_plain_tuple<'mcx>(itup: &IndexTuple<'mcx>, n: i32) -> PgResult
 /// less than the target item at `upperbound`? Verifies the line pointer first.
 pub fn invariant_l_offset<'mcx>(
     state: &BtreeCheckState<'mcx>,
-    key: &BTScanInsert,
+    key: &BTScanInsert<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
     let _ = (state, key, upperbound);
@@ -826,7 +826,7 @@ pub fn invariant_l_offset<'mcx>(
 /// or-equal to the target item at `upperbound`?
 pub fn invariant_leq_offset<'mcx>(
     state: &BtreeCheckState<'mcx>,
-    key: &BTScanInsert,
+    key: &BTScanInsert<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
     let _ = (state, key, upperbound);
@@ -837,7 +837,7 @@ pub fn invariant_leq_offset<'mcx>(
 /// greater than the target item at `lowerbound` (or `>=` for !heapkeyspace)?
 pub fn invariant_g_offset<'mcx>(
     state: &BtreeCheckState<'mcx>,
-    key: &BTScanInsert,
+    key: &BTScanInsert<'mcx>,
     lowerbound: OffsetNumber,
 ) -> PgResult<bool> {
     let _ = (state, key, lowerbound);
@@ -850,7 +850,7 @@ pub fn invariant_g_offset<'mcx>(
 /// line pointer first.
 pub fn invariant_l_nontarget_offset<'mcx>(
     state: &BtreeCheckState<'mcx>,
-    key: &BTScanInsert,
+    key: &BTScanInsert<'mcx>,
     nontargetblock: types_core::primitive::BlockNumber,
     nontarget: &Page<'mcx>,
     upperbound: OffsetNumber,

@@ -336,7 +336,7 @@ seam_core::seam!(
     /// `_bt_mkscankey(rel, itup)` (nbtutils.c): build an insertion scankey
     /// (`BTScanInsert`) from an index tuple (or with `itup == NULL`, from the
     /// index's leftmost-key template). `Err` carries opclass-lookup ereports.
-    pub fn bt_mkscankey<'mcx>(rel: &Relation<'mcx>, itup: Option<&[u8]>) -> PgResult<BTScanInsert>
+    pub fn bt_mkscankey<'mcx>(rel: &Relation<'mcx>, itup: Option<&[u8]>) -> PgResult<BTScanInsert<'mcx>>
 );
 
 seam_core::seam!(
@@ -346,7 +346,7 @@ seam_core::seam!(
     /// support-function ereports.
     pub fn bt_compare<'mcx>(
         rel: &Relation<'mcx>,
-        key: &BTScanInsert,
+        key: &BTScanInsert<'mcx>,
         page: &[u8],
         offnum: OffsetNumber,
     ) -> PgResult<i32>
@@ -360,7 +360,7 @@ seam_core::seam!(
     pub fn bt_search<'mcx>(
         rel: &Relation<'mcx>,
         heaprel: &Relation<'mcx>,
-        key: &BTScanInsert,
+        key: &BTScanInsert<'mcx>,
         access_write: bool,
     ) -> PgResult<(BTStack, Buffer)>
 );
@@ -373,7 +373,7 @@ seam_core::seam!(
     pub fn bt_moveright<'mcx>(
         rel: &Relation<'mcx>,
         heaprel: &Relation<'mcx>,
-        key: &BTScanInsert,
+        key: &BTScanInsert<'mcx>,
         buf: Buffer,
         forupdate: bool,
         access_write: bool,
@@ -386,7 +386,7 @@ seam_core::seam!(
     /// variant). `Err` carries comparison-support ereports.
     pub fn bt_binsrch<'mcx>(
         rel: &Relation<'mcx>,
-        key: &BTScanInsert,
+        key: &BTScanInsert<'mcx>,
         buf: Buffer,
     ) -> PgResult<OffsetNumber>
 );

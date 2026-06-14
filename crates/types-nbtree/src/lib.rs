@@ -607,7 +607,7 @@ pub type BTStack = Option<Box<BTStackData>>;
 /// (sized to `keysz` at alloc time); here it is a heap [`Vec`], so `keysz`
 /// equals `scankeys.len()`.
 #[derive(Clone, Debug)]
-pub struct BTScanInsertData {
+pub struct BTScanInsertData<'mcx> {
     /// `heapkeyspace` — do we expect all keys in the index to be physically
     /// unique because heap TID is used as a tiebreaker (index version >= 4)?
     pub heapkeyspace: bool,
@@ -628,11 +628,11 @@ pub struct BTScanInsertData {
     pub keysz: i32,
     /// `scankeys[]` — scan key entries for attributes compared before
     /// `scantid` (user-visible attributes). Flexible array member in C.
-    pub scankeys: Vec<ScanKeyData>,
+    pub scankeys: Vec<ScanKeyData<'mcx>>,
 }
 
 /// `BTScanInsertData *` (`access/nbtree.h`).
-pub type BTScanInsert = Option<Box<BTScanInsertData>>;
+pub type BTScanInsert<'mcx> = Option<Box<BTScanInsertData<'mcx>>>;
 
 /// `BTInsertStateData` (`access/nbtree.h`) — a working area used during
 /// insertion, filled in after descending the tree to the first leaf page the
@@ -645,7 +645,7 @@ pub struct BTInsertStateData<'mcx> {
     /// `itemsz` — size of `itup`, should be `MAXALIGN()`'d.
     pub itemsz: Size,
     /// `itup_key` — insertion scankey.
-    pub itup_key: BTScanInsert,
+    pub itup_key: BTScanInsert<'mcx>,
     /// `buf` — buffer containing the leaf page we're likely to insert on.
     pub buf: Buffer,
     /// `bounds_valid` — is the cached `low`/`stricthigh` bound within `buf`

@@ -25,7 +25,7 @@ use crate::{BtreeCheckState, Page};
 /// at/above the downlink's lower bound.
 pub fn bt_child_check<'mcx>(
     state: &mut BtreeCheckState<'mcx>,
-    targetkey: &BTScanInsert,
+    targetkey: &BTScanInsert<'mcx>,
     downlinkoffnum: OffsetNumber,
 ) -> PgResult<()> {
     let _ = (state, targetkey, downlinkoffnum);
