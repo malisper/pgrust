@@ -7251,9 +7251,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11572,7 +11572,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
- "types-datum",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11989,7 +11989,6 @@ name = "types-tableam"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",

@@ -52,9 +52,15 @@ seam_core::seam!(
     /// callback to run inside `proc_exit`. The `Err` is the C
     /// `ereport(FATAL)` past `MAX_ON_EXITS`. Callbacks carry the same
     /// `PgResult` failure surface (the C callbacks may `ereport`).
+    ///
+    /// `arg` is the canonical unified `Datum` (Datum-unification). It is the
+    /// machine word the C `Datum arg` carries (a pointer or scalar registered
+    /// for the process lifetime); its lifetime is unconstrained at this seam
+    /// boundary, so it is pinned to `'static` (the bare-word datum.c contract,
+    /// as the registration list stores it by value).
     pub fn on_proc_exit(
-        function: fn(i32, types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        function: fn(i32, types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
@@ -64,9 +70,13 @@ seam_core::seam!(
     /// `shmem_exit`. The `Err` is the C `ereport(FATAL)` past
     /// `MAX_ON_EXITS`. Callbacks carry the same `PgResult` failure surface
     /// (the C callbacks may `ereport`).
+    ///
+    /// `arg` is the canonical unified `Datum`, the machine word the C `Datum
+    /// arg` carries, pinned to `'static` (unconstrained at the seam, stored by
+    /// value in the registration list — the bare-word datum.c contract).
     pub fn on_shmem_exit(
-        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        callback: fn(code: i32, arg: types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
@@ -75,9 +85,13 @@ seam_core::seam!(
     /// early in shmem exit. C `ereport(FATAL)`s when the callback table is
     /// full, carried on `Err`. The callback's `PgResult` mirrors a C callback
     /// that can `ereport(ERROR)`.
+    ///
+    /// `arg` is the canonical unified `Datum`, the machine word the C `Datum
+    /// arg` carries, pinned to `'static` (unconstrained at the seam, stored by
+    /// value in the registration list — the bare-word datum.c contract).
     pub fn before_shmem_exit(
-        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        callback: fn(code: i32, arg: types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
