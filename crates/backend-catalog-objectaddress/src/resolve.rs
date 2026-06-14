@@ -3,9 +3,21 @@
 //! string↔objtype maps, and `get_catalog_object_by_oid[_extended]`
 //! (objectaddress.c 923-2864, 2391-2727, 6186).
 //!
-//! All bodies are scaffolded as mirror-and-panic; they resolve against real
-//! [`Node`], [`Relation`], [`ObjectAddress`] and [`ObjectType`] (no invented
-//! node-demux model) and are filled in the F0 keystone fill stage.
+//! Fill status (F0 keystone): `get_object_namespace`,
+//! `read_objtype_from_string`, `get_relkind_objtype`, and
+//! `get_catalog_object_by_oid[_extended]` are filled with faithful C logic
+//! (syscache/indexing-seam scans + total maps). The resolution ENGINE —
+//! `get_object_address[_rv]`, the 13 `get_object_address_*` helpers,
+//! `check_object_ownership`, and `object_ownercheck` — remains a sanctioned
+//! mirror-and-panic: faithfully porting it fans out to ~40 cross-crate lookup
+//! callees, ~25 of which need NEW seam declarations and 6 NEW `-seams` crates
+//! that do not yet exist (pg-cast/-transform/-statistic-ext/-parameter-acl/
+//! rewritesupport/-amop/amproc/publication), plus several EXISTING owner seams
+//! whose signatures diverge from what objectaddress.c needs. That coordinated
+//! cross-crate seam-contract pass is out of scope for the F0 fill (it overlaps
+//! the active seam-reconcile lane); the bodies resolve against real [`Node`],
+//! [`Relation`], [`ObjectAddress`], [`ObjectType`] (no invented node-demux
+//! model) and panic loudly until that contract pass lands.
 
 use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
