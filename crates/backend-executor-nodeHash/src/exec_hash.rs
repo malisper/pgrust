@@ -562,10 +562,10 @@ pub fn ExecShutdownHash<'mcx>(mcx: Mcx<'mcx>, node: &mut HashState<'mcx>) -> PgR
     //   if (node->ps.instrument && !node->hinstrument)
     //       node->hinstrument = palloc0_object(HashInstrumentation);
     if node.ps.instrument.is_some() && node.hinstrument.is_none() {
-        node.hinstrument = Some(alloc_in(
+        node.hinstrument = Some(types_nodes::nodehash::HashInstrumentSlot::Local(alloc_in(
             mcx,
             types_nodes::nodehash::HashInstrumentation::default(),
-        )?);
+        )?));
     }
 
     // Now accumulate data for the current (final) hash table
@@ -573,8 +573,10 @@ pub fn ExecShutdownHash<'mcx>(mcx: Mcx<'mcx>, node: &mut HashState<'mcx>) -> PgR
     //       ExecHashAccumInstrumentation(node->hinstrument, node->hashtable);
     if node.hinstrument.is_some() && node.hashtable.is_some() {
         let hashtable = node.hashtable.as_deref().unwrap();
-        let instrument = node.hinstrument.as_deref_mut().unwrap();
-        crate::instrument::ExecHashAccumInstrumentation(instrument, hashtable);
+        let slot = node.hinstrument.as_mut().unwrap();
+        crate::instrument::with_hinstrument_mut(slot, |instrument| {
+            crate::instrument::ExecHashAccumInstrumentation(instrument, hashtable);
+        });
     }
 
     Ok(())

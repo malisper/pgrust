@@ -4769,6 +4769,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-parallel",
  "types-storage",
  "types-tuple",
 ]
