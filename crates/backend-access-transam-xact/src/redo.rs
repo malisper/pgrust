@@ -320,14 +320,14 @@ fn xact_redo_commit(
         // As-yet-unobserved subtransactions need bookkeeping again here
         // (RecordKnownAssignedTransactionIds in the main loop doesn't cover
         // this case — easy to think this call is irrelevant; it isn't).
-        standby_seams::record_known_assigned_transaction_ids::call(max_xid)?;
+        procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
 
         // Mark committed using the async protocol during recovery: hint bits
         // must not be set until minRecoveryPoint passes this commit record.
         transam_seams::transaction_id_async_commit_tree::call(xid, &parsed.subxacts, lsn)?;
 
         // We must mark clog before we update the ProcArray.
-        standby_seams::expire_tree_known_assigned_transaction_ids::call(
+        procarray_seams::expire_tree_known_assigned_transaction_ids::call(
             xid,
             &parsed.subxacts,
             max_xid,
@@ -408,13 +408,13 @@ fn xact_redo_abort(
         transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
     } else {
         // See xact_redo_commit about this call.
-        standby_seams::record_known_assigned_transaction_ids::call(max_xid)?;
+        procarray_seams::record_known_assigned_transaction_ids::call(max_xid)?;
 
         // Mark the transaction aborted in pg_xact, no need for async stuff.
         transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;
 
         // We must update the ProcArray after we have marked clog.
-        standby_seams::expire_tree_known_assigned_transaction_ids::call(
+        procarray_seams::expire_tree_known_assigned_transaction_ids::call(
             xid,
             &parsed.subxacts,
             max_xid,
