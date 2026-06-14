@@ -43,6 +43,9 @@ use types_storage::storage::LWLockMode;
 use types_scan::sdir::ScanDirection;
 use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
 use types_tuple::heaptuple::ItemPointerData;
+// The canonical unified value type (Datum-unification keystone). Used for
+// own-logic scalar construction at the value-consuming `datum_*_v` seams.
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_common_indextuple_seams::index_form_tuple;
 use backend_access_index_indexam_seams as parallel;
@@ -607,8 +610,8 @@ pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> Pg
 
     // Pessimistically assume that all attributes prior to the least significant
     // attribute require a skip array (and an associated key).
-    let genericattrspace = datumser::datum_estimate_space::call(
-        types_datum::Datum::null(),
+    let genericattrspace = datumser::datum_estimate_space_v::call(
+        &Datum::null(),
         false,
         true,
         ::core::mem::size_of::<types_datum::Datum>() as i32,
@@ -624,7 +627,7 @@ pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> Pg
         if attr.attbyval {
             // This index attribute stores pass-by-value datums.
             let estfixed =
-                datumser::datum_estimate_space::call(types_datum::Datum::null(), false, true, attr.attlen as i32);
+                datumser::datum_estimate_space_v::call(&Datum::null(), false, true, attr.attlen as i32);
             estnbtreeshared = add_size(estnbtreeshared, estfixed)?;
             continue;
         }
