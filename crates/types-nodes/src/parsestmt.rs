@@ -11,8 +11,9 @@
 //! the C pointer to the owner-defined struct. These resolve to the real type
 //! when their owning unit lands.
 
-use mcx::PgBox;
+use mcx::{Mcx, PgBox};
 use types_core::primitive::TimestampTz;
+use types_error::PgResult;
 use types_opclass::TypeName;
 
 use crate::nodes::Node;
@@ -132,6 +133,18 @@ pub struct RawStmt<'mcx> {
     pub stmt_len: i32,
 }
 
+impl RawStmt<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `RawStmt`). The contained raw
+    /// parse tree is copied via `Node::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RawStmt<'b>> {
+        Ok(RawStmt {
+            stmt: mcx::alloc_in(mcx, self.stmt.clone_in(mcx)?)?,
+            stmt_location: self.stmt_location,
+            stmt_len: self.stmt_len,
+        })
+    }
+}
+
 /// `PrepareStmt` (`nodes/parsenodes.h`) — the parsed `PREPARE` statement.
 #[derive(Debug)]
 pub struct PrepareStmt<'mcx> {
@@ -147,6 +160,29 @@ pub struct PrepareStmt<'mcx> {
     pub query: Option<PgBox<'mcx, Node<'mcx>>>,
 }
 
+impl PrepareStmt<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `PrepareStmt`). `name` is a
+    /// `char *`, `argtypes` a `List *` of `TypeName` (lifetime-free, plain
+    /// clone), and `query` the raw parse tree (`Node::clone_in`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PrepareStmt<'b>> {
+        let mut argtypes = mcx::vec_with_capacity_in(mcx, self.argtypes.len())?;
+        for t in self.argtypes.iter() {
+            argtypes.push(t.clone());
+        }
+        Ok(PrepareStmt {
+            name: match &self.name {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            argtypes,
+            query: match &self.query {
+                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                None => None,
+            },
+        })
+    }
+}
+
 /// `ExecuteStmt` (`nodes/parsenodes.h`) — the parsed `EXECUTE` statement.
 #[derive(Debug)]
 pub struct ExecuteStmt<'mcx> {
@@ -154,6 +190,25 @@ pub struct ExecuteStmt<'mcx> {
     pub name: Option<mcx::PgString<'mcx>>,
     /// `List *params` — values to assign to parameters (raw parser output).
     pub params: mcx::PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+}
+
+impl ExecuteStmt<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `ExecuteStmt`). `name` is a
+    /// `char *`; `params` is a `List *` of raw parse trees, each copied via
+    /// `Node::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ExecuteStmt<'b>> {
+        let mut params = mcx::vec_with_capacity_in(mcx, self.params.len())?;
+        for p in self.params.iter() {
+            params.push(mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
+        }
+        Ok(ExecuteStmt {
+            name: match &self.name {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            params,
+        })
+    }
 }
 
 /// `DeallocateStmt` (`nodes/parsenodes.h`) — the parsed `DEALLOCATE` statement.
@@ -167,6 +222,20 @@ pub struct DeallocateStmt<'mcx> {
     pub isall: bool,
 }
 
+impl DeallocateStmt<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `DeallocateStmt`). `name` is a
+    /// `char *`; `isall` a scalar flag.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DeallocateStmt<'b>> {
+        Ok(DeallocateStmt {
+            name: match &self.name {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            isall: self.isall,
+        })
+    }
+}
+
 /// `IntoClause` (`nodes/primnodes.h`) — target-relation spec for CREATE TABLE
 /// AS / SELECT INTO. The EXECUTE/EXPLAIN drivers thread it through
 /// `GetIntoRelEFlags` and read `skipData`; the rest is owned by createas.
@@ -177,6 +246,18 @@ pub struct IntoClause<'mcx> {
     /// The remaining IntoClause fields the createas unit owns, threaded as the
     /// opaque parser node payload.
     pub node: PgBox<'mcx, Node<'mcx>>,
+}
+
+impl IntoClause<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `IntoClause`). `skipData` is a
+    /// scalar; the remaining createas-owned fields cross as the opaque parser
+    /// node payload, copied via `Node::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IntoClause<'b>> {
+        Ok(IntoClause {
+            skipData: self.skipData,
+            node: mcx::alloc_in(mcx, self.node.clone_in(mcx)?)?,
+        })
+    }
 }
 
 /// `ExplainState *` (`commands/explain_state.h`), trimmed to the flags the
