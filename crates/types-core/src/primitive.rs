@@ -157,3 +157,22 @@ pub const USE_ISO_DATES: i32 = 1;
 pub const DATEORDER_MDY: i32 = 2;
 /// `INTSTYLE_POSTGRES` (`miscadmin.h`).
 pub const INTSTYLE_POSTGRES: i32 = 0;
+
+/// A `GlobalVisState` (snapshot-visibility test). `id == 0` is `NULL`.
+///
+/// Homed in `types-core` (rather than `types-vacuum`) so that both
+/// `types-snapshot` (`SnapshotData.vistest`) and `types-vacuum` can reference it
+/// without forming a `types-storage -> types-snapshot -> types-vacuum ->
+/// types-storage` dependency cycle. `types-vacuum::vacuumlazy` re-exports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
+pub struct GlobalVisStateHandle {
+    pub id: u64,
+}
+impl GlobalVisStateHandle {
+    pub const fn new(id: u64) -> Self {
+        Self { id }
+    }
+    pub const fn is_none(self) -> bool {
+        self.id == 0
+    }
+}

@@ -10,8 +10,6 @@ extern crate alloc;
 
 use super::*;
 use alloc::vec;
-use alloc::vec::Vec;
-use alloc::vec;
 use mcx::MemoryContext;
 use types_snapshot::snapshot::{GlobalVisStateHandle, SnapshotData, SnapshotType};
 use types_tuple::heaptuple::{

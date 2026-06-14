@@ -12682,7 +12682,6 @@ name = "types-snapshot"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-vacuum",
 ]
 
 [[package]]
