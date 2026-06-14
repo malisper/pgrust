@@ -6,6 +6,7 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
+    contrib_amcheck_verify_nbtree::init_seams();
     backend_access_common_detoast::init_seams();
     backend_access_common_heaptuple::init_seams();
     backend_access_common_indextuple::init_seams();
@@ -36,6 +37,7 @@ pub fn init_all() {
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
+    backend_access_transam_xlogreader::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_access_transam_xlogutils::init_seams();
     backend_backup_server::init_seams();

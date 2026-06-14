@@ -562,6 +562,28 @@ pub fn transient_read(fd: i32, buf: &mut [u8]) -> isize {
     }
 }
 
+/// `pg_pread(fd, buf, offset)` — positioned read against a bare kernel fd (the
+/// `BasicOpenFile` return value). Bytes read (`>= 0`) or `-errno`. Mirrors the
+/// C `pg_pread` used by `xlogreader.c`'s `WALRead`, which `pread(2)`s the WAL
+/// segment fd held in `state->seg.ws_file`.
+pub fn pg_pread(fd: i32, buf: &mut [u8], offset: i64) -> isize {
+    // SAFETY: `fd` is a live bare kernel fd owned by the caller (a WAL segment
+    // opened via BasicOpenFile); pread(2) into the caller's buffer at `offset`.
+    let r = unsafe {
+        libc::pread(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            offset as libc::off_t,
+        )
+    };
+    if r < 0 {
+        -(errno_now() as isize)
+    } else {
+        r
+    }
+}
+
 /// `transient_write` — `write(fd, buf, len)` against a transient fd. Bytes
 /// written (`>= 0`) or `-errno`.
 pub fn transient_write(fd: i32, buf: &[u8]) -> isize {

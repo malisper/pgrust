@@ -5,6 +5,7 @@ Cargo.lock.orig
 .DS_Store
 .claude/worktrees/
 
+.amcheck-target/
 /target-iso/
 /.isolated-target/
 .iso-target/
