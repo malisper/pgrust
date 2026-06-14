@@ -18,11 +18,11 @@ use super::*;
 /// `check_stack_depth` both succeed (never an interrupt / never too deep),
 /// matching a quiescent backend. Single-threaded; idempotent across tests.
 fn install_seam_mocks() {
-    if !backend_utils_init_miscinit_seams::check_for_interrupts::is_installed() {
-        backend_utils_init_miscinit_seams::check_for_interrupts::set(|| Ok(()));
+    if !backend_tcop_postgres_seams::check_for_interrupts::is_installed() {
+        backend_tcop_postgres_seams::check_for_interrupts::set(|| Ok(()));
     }
-    if !backend_utils_misc_stack_depth_seams::check_stack_depth::is_installed() {
-        backend_utils_misc_stack_depth_seams::check_stack_depth::set(|| Ok(()));
+    if !backend_tcop_postgres_seams::check_stack_depth::is_installed() {
+        backend_tcop_postgres_seams::check_stack_depth::set(|| Ok(()));
     }
 }
 

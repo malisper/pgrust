@@ -12,7 +12,6 @@ crate-type = ["rlib"]
 [dependencies]
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
-backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
-backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 
 [dev-dependencies]

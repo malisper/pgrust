@@ -62,9 +62,11 @@
 //!
 //! # Seams (genuinely external)
 //!
-//! `check_stack_depth` (`utils/misc/stack_depth.c`) and `CHECK_FOR_INTERRUPTS`
-//! (`miscadmin.h`) are real cross-crate calls, consumed from the owning seam
-//! crates at the exact C call sites and propagated with `?`.
+//! `CHECK_FOR_INTERRUPTS` (`miscadmin.h` → `ProcessInterrupts`, `tcop/postgres.c`)
+//! and `check_stack_depth` (`tcop/postgres.c`) are real cross-crate calls,
+//! consumed from `backend-tcop-postgres-seams` (the canonical install target,
+//! shared with the executor scan nodes / parallel runtime) at the exact C call
+//! sites and propagated with `?`.
 //!
 //! ZERO `extern "C"`; soft errors via `types_error`.
 
@@ -201,7 +203,7 @@ fn drive(
         }
 
         // CHECK_FOR_INTERRUPTS(); /* just in case */
-        backend_utils_init_miscinit_seams::check_for_interrupts::call()?;
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
     }
 
     Ok(())
@@ -281,7 +283,7 @@ fn hk_depth_search(
     let nextdist = scratch.distance[u] + 1;
 
     // check_stack_depth();
-    backend_utils_misc_stack_depth_seams::check_stack_depth::call()?;
+    backend_tcop_postgres_seams::check_stack_depth::call()?;
 
     // Snapshot the row so the recursive call (which borrows `scratch`/`state`
     // mutably) does not alias the live edge iterator. C re-reads
