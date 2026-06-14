@@ -14,6 +14,10 @@ pub const T_SeqScanState: NodeTag = NodeTag(403);
 pub const T_IndexScanState: NodeTag = NodeTag(405);
 /// `T_IndexOnlyScanState`.
 pub const T_IndexOnlyScanState: NodeTag = NodeTag(406);
+/// `T_BitmapAndState`.
+pub const T_BitmapAndState: NodeTag = NodeTag(400);
+/// `T_BitmapOrState`.
+pub const T_BitmapOrState: NodeTag = NodeTag(401);
 /// `T_BitmapIndexScanState`.
 pub const T_BitmapIndexScanState: NodeTag = NodeTag(407);
 /// `T_BitmapHeapScanState`.

@@ -135,6 +135,57 @@ impl Scan<'_> {
     }
 }
 
+/// `SubqueryScanStatus` (nodes/plannodes.h) — caches the trivial-subqueryscan
+/// property of the node; `SUBQUERY_SCAN_UNKNOWN` means not yet determined (only
+/// used during planning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum SubqueryScanStatus {
+    /// `SUBQUERY_SCAN_UNKNOWN`.
+    #[default]
+    Unknown = 0,
+    /// `SUBQUERY_SCAN_TRIVIAL`.
+    Trivial = 1,
+    /// `SUBQUERY_SCAN_NONTRIVIAL`.
+    Nontrivial = 2,
+}
+
+/// `SubqueryScan` plan node (nodes/plannodes.h):
+///
+/// ```c
+/// typedef struct SubqueryScan {
+///     Scan        scan;
+///     Plan       *subplan;
+///     SubqueryScanStatus scanstatus;
+/// } SubqueryScan;
+/// ```
+#[derive(Debug, Default)]
+pub struct SubqueryScan<'mcx> {
+    /// `Scan scan` — the abstract scan base (embeds `Plan plan` first).
+    pub scan: Scan<'mcx>,
+    /// `Plan *subplan` — the child plan producing the subquery's rows. Stored
+    /// on the plan node (not in the generic `lefttree`), so plan-tree walkers do
+    /// not recurse into it.
+    pub subplan: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `SubqueryScanStatus scanstatus`.
+    pub scanstatus: SubqueryScanStatus,
+}
+
+impl SubqueryScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SubqueryScan<'b>> {
+        Ok(SubqueryScan {
+            scan: self.scan.clone_in(mcx)?,
+            subplan: match &self.subplan {
+                Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                None => None,
+            },
+            scanstatus: self.scanstatus,
+        })
+    }
+}
+
 /// `TidScan` plan node (nodes/plannodes.h):
 ///
 /// ```c

@@ -27,7 +27,10 @@ pub mod list;
 pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
+pub mod nodectescan;
+pub mod nodebitmapand;
 pub mod nodeforeigncustom;
+pub mod nodegroup;
 pub mod nodehash;
 pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
@@ -37,14 +40,20 @@ pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod noderecursiveunion;
+pub mod nodeprojectset;
+pub mod nodenamedtuplestorescan;
 pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
 pub mod nodes;
+pub mod nodesamplescan;
 pub mod nodeseqscan;
 pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
+pub mod nodeunique;
+pub mod nodevaluesscan;
+pub mod nodeworktablescan;
 pub mod params;
 pub mod parsenodes;
 pub mod parsestmt;
@@ -61,10 +70,11 @@ pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
     CurrentOfTid, EPQState, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
-    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, Opaque,
+    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, JunkFilter, Opaque,
     ParamExecData,
     PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
-    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, SubqueryScanState,
+    T_MaterialState,
 };
 pub use primnodes::CurrentOfExpr;
 pub use modifytable::{
@@ -100,16 +110,19 @@ pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
 };
+pub use nodebitmapand::{BitmapAnd, BitmapAndState, T_BitmapAnd, T_BitmapAndState};
 pub use nodeagg::{
     Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
     AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
     Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
     AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
+pub use nodectescan::{CteScan, CteScanState, T_CteScan, T_CteScanState};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use noderecursiveunion::{
     RecursiveUnion, RecursiveUnionStateData, T_RecursiveUnion, T_RecursiveUnionState,
 };
+pub use nodegroup::{Group, GroupStateData, T_Group, T_GroupState};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
 pub use nodesetop::{
     SetOp, SetOpCmd, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SetOpStrategy,
@@ -123,6 +136,7 @@ pub use nodesort::{
 };
 pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
+pub use nodeindexscan::{SubqueryScan, SubqueryScanStatus};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use tuptable::{
@@ -131,8 +145,8 @@ pub use tuptable::{
 };
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{
-    AsyncRequest, FdwRoutine, ForeignScan, ForeignScanState, Material, MaterialState,
-    ParallelContext, ParallelWorkerContext,
+    AsyncRequest, CustomExecMethods, CustomScan, CustomScanState, FdwRoutine, ForeignScan,
+    ForeignScanState, Material, MaterialState, ParallelContext, ParallelWorkerContext,
 };
 pub use nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
