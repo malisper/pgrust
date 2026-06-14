@@ -1068,6 +1068,7 @@ pub fn init_seams() {
     clog_seams::clogsyncfiletag::set(clogsyncfiletag);
     clog_seams::clog_shmem_size::set(clog_shmem_size_seam);
     clog_seams::clog_shmem_init::set(clog_shmem_init_seam);
+    clog_seams::extend_clog::set(ExtendCLOG);
 }
 
 /// `CLOGShmemSize()` wrapper for the `clog_shmem_size` seam (`PgResult<Size>`:
