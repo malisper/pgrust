@@ -961,6 +961,40 @@ mod recurrence_guard {
         // delegating to their now-ported owners.)
         ("backend_utils_init_miscinit", "setup_signal_handlers"),
         ("backend_utils_init_small", "init_process_globals"),
+        // DESIGN_DEBT (TD-PORTAL-HANDLE): PREPARE/EXECUTE's `-pre-seams` slice of
+        // portalmem.c is written against the parsestmt opaque handle newtypes
+        // (`PortalHandle(String)`, `MemoryContextHandle(u64)`), while the owner's
+        // real bodies (CreateNewPortal / PortalDefineQuery / PortalSetVisible /
+        // GetPortalContext) work on the value-typed `types_portal::Portal`
+        // (`Rc<RefCell<PortalData>>`) and a real `MemoryContext`. Installing the
+        // handle seams needs a PortalHandle/MemoryContextHandle -> value registry
+        // (forbidden token-registry hack / opacity-introduced) or migrating
+        // PREPARE/EXECUTE off the opaque parsestmt handles onto owned portal
+        // values (the K1 de-handle work, #159/#169). Handle-divergent.
+        ("backend_utils_mmgr_portalmem", "copy_param_list_into_portal"),
+        // DESIGN_DEBT (TD-PORTAL-COPYIN): the deep-copy-into-portal-context seams
+        // copy foreign objects (param lists / tuple descriptors / planned stmts)
+        // into the portal's `'static`-lifetime owned arenas. That copy
+        // infrastructure (copyParamList / CreateTupleDescCopy into a portal/hold
+        // context that outlives the source transaction) lands with the
+        // tuplestore/tupdesc copy owners; until then these stay seam-and-panic
+        // (matching the pre-port `todo` state) rather than being wrongly stubbed.
+        ("backend_utils_mmgr_portalmem", "copy_tup_desc_into_hold_context"),
+        // TD-PORTAL-HANDLE, see the handle-divergent note above.
+        ("backend_utils_mmgr_portalmem", "create_new_portal"),
+        ("backend_utils_mmgr_portalmem", "portal_define_query"),
+        // TD-PORTAL-COPYIN, see the deep-copy note above.
+        ("backend_utils_mmgr_portalmem", "portal_define_query_select"),
+        // TD-PORTAL-HANDLE, see the handle-divergent note above.
+        ("backend_utils_mmgr_portalmem", "portal_get_portal_context"),
+        ("backend_utils_mmgr_portalmem", "portal_set_visible"),
+        // DESIGN_DEBT (TD-PORTAL-CURSOR): `with_running_cursor` lends borrows of
+        // the running `EStateData`/`PlanStateNode` tree (RunningCursorState) for
+        // execCurrentOf. Those carrier types are the executor de-handle keystone
+        // (#167 EState/Plan ownership, #169 consolidated de-handle); the portal's
+        // `queryDesc->estate` borrow cannot be lent until that lands.
+        // Keystone-blocked.
+        ("backend_utils_mmgr_portalmem", "with_running_cursor"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
         ("backend_utils_misc_guc_file", "guc_check_errhint"),
