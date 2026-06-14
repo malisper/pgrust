@@ -39,6 +39,21 @@ backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
+backend-executor-nodeResult = { path = "../backend-executor-nodeResult" }
+backend-executor-nodeProjectSet = { path = "../backend-executor-nodeProjectSet" }
+backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
+backend-executor-nodeRecursiveunion = { path = "../backend-executor-nodeRecursiveunion" }
+backend-executor-nodeBitmapAnd = { path = "../backend-executor-nodeBitmapAnd" }
+backend-executor-nodeIndexscan = { path = "../backend-executor-nodeIndexscan" }
+backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapIndexscan" }
+backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
+backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
+backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
+backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
+backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
+backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
+backend-executor-nodeGatherMerge = { path = "../backend-executor-nodeGatherMerge" }
+backend-executor-nodeSetOp = { path = "../backend-executor-nodeSetOp" }
 # Per-owner seam crates for the unported neighbours this dispatch routes through
 # (loud panic until each owner wires its init_seams()).
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

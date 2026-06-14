@@ -58,11 +58,23 @@ pub fn exec_init_node<'mcx>(
         // control nodes
         // ------------------------------------------------------------------
         // case T_Result: ExecInitResult((Result *) node, estate, eflags)
-        // (nodeResult.c — no Result variant / seam yet)
+        Node::Result(_) => {
+            let s = backend_executor_nodeResult::ExecInitResult(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Result(s))?
+        }
 
         // case T_ProjectSet: ExecInitProjectSet(...) (nodeProjectSet.c)
+        Node::ProjectSet(_) => {
+            let s = backend_executor_nodeProjectSet::ExecInitProjectSet(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::ProjectSet(s))?
+        }
 
         // case T_ModifyTable: ExecInitModifyTable(...) (nodeModifyTable.c)
+        Node::ModifyTable(m) => {
+            let s =
+                backend_executor_nodeModifyTable::init::ExecInitModifyTable(mcx, m, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::ModifyTable(s))?
+        }
 
         // case T_Append: ExecInitAppend((Append *) node, estate, eflags)
         Node::Append(append) => {
@@ -77,10 +89,32 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_RecursiveUnion: ExecInitRecursiveUnion(...) (nodeRecursiveunion.c)
+        Node::RecursiveUnion(_) => {
+            let s = backend_executor_nodeRecursiveunion::ExecInitRecursiveUnion(
+                node, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::RecursiveUnion(s))?
+        }
 
         // case T_BitmapAnd: ExecInitBitmapAnd(...) (nodeBitmapAnd.c)
+        //
+        // `ExecInitBitmapAnd` already returns a `PgBox<PlanStateNode>` (its
+        // makeNode wraps the result in the enum), so this arm passes it through
+        // directly rather than re-wrapping a concrete state struct.
+        Node::BitmapAnd(bitmap_and) => {
+            backend_executor_nodeBitmapAnd::ExecInitBitmapAnd(
+                mcx, node, bitmap_and, estate, eflags,
+            )?
+        }
 
         // case T_BitmapOr: ExecInitBitmapOr(...) (nodeBitmapOr.c)
+        //
+        // The trimmed central `Plan` (`Node`) enum has no `BitmapOr` variant
+        // yet, so no `Node::BitmapOr` arm exists to route here. Adding the
+        // `BitmapOr` Plan variant is the central-node keystone (K1 follow-on),
+        // out of scope for this executor-driver dispatch; the owner
+        // `ExecInitBitmapOr` is ported and ready. A plain `DestNone` SELECT
+        // never reaches this (BitmapOr only appears under a BitmapHeapScan).
 
         // ------------------------------------------------------------------
         // scan nodes
@@ -92,8 +126,18 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_SampleScan: ExecInitSampleScan(...) (nodeSamplescan.c)
+        //
+        // No `SampleScan` Plan variant on the trimmed central `Node` enum (and
+        // `SampleScanState` lives in `types-samplescan`, which depends on
+        // `types-nodes`, so it cannot become a `PlanStateNode` variant without
+        // first relocating it — the central-node keystone). The owner
+        // `ExecInitSampleScan` is ported; a plain SELECT does not use TABLESAMPLE.
 
         // case T_IndexScan: ExecInitIndexScan(...) (nodeIndexscan.c)
+        Node::IndexScan(_) => {
+            let s = backend_executor_nodeIndexscan::ExecInitIndexScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::IndexScan(s))?
+        }
 
         // case T_IndexOnlyScan: ExecInitIndexOnlyScan((IndexOnlyScan *) node, estate, eflags)
         Node::IndexOnlyScan(_) => {
@@ -102,10 +146,25 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_BitmapIndexScan: ExecInitBitmapIndexScan(...) (nodeBitmapIndexscan.c)
+        Node::BitmapIndexScan(_) => {
+            let s = backend_executor_nodeBitmapIndexscan::ExecInitBitmapIndexScan(
+                node, estate, eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::BitmapIndexScan(s))?
+        }
 
         // case T_BitmapHeapScan: ExecInitBitmapHeapScan(...) (nodeBitmapHeapscan.c)
+        //
+        // No `BitmapHeapScan` Plan variant on the trimmed central `Node` enum
+        // (central-node keystone, K1 follow-on). The owner
+        // `ExecInitBitmapHeapScan` is ported; a plain seqscan/indexscan SELECT
+        // does not produce a bitmap heap scan.
 
         // case T_TidScan: ExecInitTidScan(...) (nodeTidscan.c)
+        //
+        // No `TidScan` Plan variant on the trimmed central `Node` enum
+        // (central-node keystone, K1 follow-on). The owner `ExecInitTidScan`
+        // is ported.
 
         // case T_TidRangeScan: ExecInitTidRangeScan((TidRangeScan *) node, estate, eflags)
         Node::TidRangeScan(_) => panic!(
@@ -114,6 +173,15 @@ pub fn exec_init_node<'mcx>(
         ),
 
         // case T_SubqueryScan: ExecInitSubqueryScan(...) (nodeSubqueryscan.c)
+        Node::SubqueryScan(subqueryscan) => {
+            let s = backend_executor_nodeSubqueryscan::ExecInitSubqueryScan(
+                subqueryscan,
+                node,
+                estate,
+                eflags,
+            )?;
+            alloc_in(mcx, PlanStateNode::SubqueryScan(s))?
+        }
 
         // case T_FunctionScan: ExecInitFunctionScan(...) (nodeFunctionscan.c)
 
@@ -124,13 +192,34 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_ValuesScan: ExecInitValuesScan(...) (nodeValuesscan.c)
+        Node::ValuesScan(_) => {
+            let s = backend_executor_nodeValuesscan::ExecInitValuesScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::ValuesScan(s))?
+        }
 
         // case T_CteScan: ExecInitCteScan(...) (nodeCtescan.c)
+        Node::CteScan(_) => {
+            let s = backend_executor_nodeCtescan::ExecInitCteScan(node, eflags, estate)?;
+            alloc_in(mcx, PlanStateNode::CteScan(s))?
+        }
 
         // case T_NamedTuplestoreScan: ExecInitNamedTuplestoreScan(...)
         //   (nodeNamedtuplestorescan.c)
+        //
+        // The owner `ExecInitNamedTuplestoreScan` takes a real
+        // `&mut QueryEnvironment` (the C `estate->es_queryEnv`), but the
+        // `EState.es_queryEnv` field is still modeled as `Opaque` — the
+        // QueryEnvironment / ENR value model is not built. There is no real
+        // `&mut QueryEnvironment` to pass, so this arm cannot be wired
+        // faithfully yet. A plain SELECT never scans an ephemeral named
+        // relation (only trigger transition tables / WITH-tuplestores do).
 
         // case T_WorkTableScan: ExecInitWorkTableScan(...) (nodeWorktablescan.c)
+        //
+        // No `WorkTableScan` Plan variant on the trimmed central `Node` enum
+        // (central-node keystone, K1 follow-on). The owner
+        // `ExecInitWorkTableScan` is ported; WorkTableScan only appears inside
+        // a RecursiveUnion (WITH RECURSIVE).
 
         // case T_ForeignScan: ExecInitForeignScan((ForeignScan *) node, estate, eflags)
         Node::ForeignScan(_) => {
@@ -139,6 +228,10 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_CustomScan: ExecInitCustomScan(...) (nodeCustom.c)
+        Node::CustomScan(_) => {
+            let s = backend_executor_nodeCustom::ExecInitCustomScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::CustomScan(s))?
+        }
 
         // ------------------------------------------------------------------
         // join nodes
@@ -193,12 +286,29 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_Group: ExecInitGroup(...) (nodeGroup.c)
+        Node::Group(_) => {
+            let s = backend_executor_nodeGroup::ExecInitGroup(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Group(s))?
+        }
 
         // case T_Agg: ExecInitAgg(...) (nodeAgg.c)
+        //
+        // No `Agg` Plan variant on the trimmed central `Node` enum, and no
+        // `Agg` `PlanStateNode` variant carrying the owner's `AggStateData`
+        // either — both require the central-node keystone (K1 follow-on).
+        // The owner `ExecInitAgg` is ported and ready; once the `Agg` Plan
+        // and `AggState` plan-state variants land, this arm becomes
+        // `ExecInitAgg(a, estate, eflags, mcx)` + `PlanStateNode::Agg`, and
+        // `PlanStateNode::as_agg_state` (read by `EEOP_GROUPING_FUNC`) starts
+        // returning the real `AggState`.
 
         // case T_WindowAgg: ExecInitWindowAgg(...) (nodeWindowAgg.c)
 
         // case T_Unique: ExecInitUnique(...) (nodeUnique.c)
+        Node::Unique(_) => {
+            let s = backend_executor_nodeUnique::ExecInitUnique(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Unique(s))?
+        }
 
         // case T_Gather: ExecInitGather((Gather *) node, estate, eflags)
         Node::Gather(_) => {
@@ -207,6 +317,10 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_GatherMerge: ExecInitGatherMerge(...) (nodeGatherMerge.c)
+        Node::GatherMerge(_) => {
+            let s = backend_executor_nodeGatherMerge::ExecInitGatherMerge(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::GatherMerge(s))?
+        }
 
         // case T_Hash: ExecInitHash((Hash *) node, estate, eflags)
         Node::Hash(hash) => {
@@ -215,6 +329,10 @@ pub fn exec_init_node<'mcx>(
         }
 
         // case T_SetOp: ExecInitSetOp(...) (nodeSetop.c)
+        Node::SetOp(_) => {
+            let s = backend_executor_nodeSetOp::ExecInitSetOp(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::SetOp(s))?
+        }
 
         // case T_LockRows: ExecInitLockRows(...) (nodeLockRows.c)
 

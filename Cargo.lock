@@ -1949,6 +1949,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xloginsert"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-replication-logical-origin-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "common-pglz",
+ "mcx",
+ "port-crc32c",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xloginsert-seams"
 version = "0.0.0"
 dependencies = [
@@ -4188,20 +4209,35 @@ dependencies = [
  "backend-executor-execProcnode-seams",
  "backend-executor-instrument-seams",
  "backend-executor-nodeAppend",
+ "backend-executor-nodeBitmapAnd",
+ "backend-executor-nodeBitmapIndexscan",
+ "backend-executor-nodeCtescan",
+ "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeGather",
+ "backend-executor-nodeGatherMerge",
+ "backend-executor-nodeGroup",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
+ "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergeAppend",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeModifyTable",
  "backend-executor-nodeNestloop",
+ "backend-executor-nodeProjectSet",
+ "backend-executor-nodeRecursiveunion",
+ "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
+ "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
+ "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeTableFuncscan",
+ "backend-executor-nodeUnique",
+ "backend-executor-nodeValuesscan",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-misc-stack-depth-seams",
@@ -4436,7 +4472,6 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execAsync-seams",
- "backend-executor-execParallel-support-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
@@ -4993,7 +5028,6 @@ dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
- "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
@@ -7970,15 +8004,18 @@ dependencies = [
 name = "backend-storage-ipc-procarray"
 version = "0.0.0"
 dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
  "backend-access-transam-transam-seams",
  "backend-access-transam-varsup-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
+ "backend-catalog-catalog-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-utils-activity-waitevent-seams",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
@@ -7988,8 +8025,10 @@ dependencies = [
  "types-core",
  "types-error",
  "types-pgstat",
+ "types-rel",
  "types-snapshot",
  "types-storage",
+ "types-tuple",
  "types-vacuum",
 ]
 
@@ -12013,6 +12052,7 @@ dependencies = [
  "backend-access-transam-xact",
  "backend-access-transam-xlog",
  "backend-access-transam-xlogarchive",
+ "backend-access-transam-xloginsert",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogreader",
  "backend-access-transam-xlogstats",
