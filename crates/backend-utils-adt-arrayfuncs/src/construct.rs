@@ -1281,6 +1281,207 @@ pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Da
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `construct_int4_array` — `construct_array_builtin(datums, n, INT4OID)`
+/// (arrayfuncs.c). The `pg_blocking_pids` / `pg_safe_snapshot_blocking_pids`
+/// callers pass an `int32[]` slice; an empty input still yields a valid empty
+/// array (the C behaviour — `construct_array_builtin` over zero elements).
+pub fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, elems: &[i32]) -> PgResult<Datum> {
+    // datums[i] = Int32GetDatum(elems[i]); construct_array_builtin(datums, n, INT4OID).
+    let mut datums = mcx::vec_with_capacity_in::<Datum>(mcx, elems.len())?;
+    for &e in elems {
+        // Int32GetDatum: the i32 value held in the low word of the Datum, exactly
+        // as a pass-by-value int4 element is stored.
+        datums.push(Datum::from_usize(e as u32 as usize));
+    }
+    construct_array_builtin(mcx, &datums, foundation::INT4OID)
+}
+
+/// Seam `array_get_ndim` — `ARR_NDIM(DatumGetArrayTypeP(arraydatum))`
+/// (array.h). Detoast the array varlena, then read the `ndim` header field.
+pub fn array_get_ndim<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<i32> {
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    Ok(foundation::arr_ndim(&arr))
+}
+
+/// Seam `array_get_elemtype` — `ARR_ELEMTYPE(DatumGetArrayTypeP(arraydatum))`
+/// (array.h). Detoast the array varlena, then read the `elemtype` header field.
+pub fn array_get_elemtype<'mcx>(mcx: Mcx<'mcx>, arraydatum: Datum) -> PgResult<Oid> {
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    Ok(foundation::arr_elemtype(&arr))
+}
+
+/// Project the `ArrayType` header fields (`ndim`/`dim0`/`hasnull`/`elemtype`)
+/// out of a detoasted array buffer. Shared by the funcapi `*_array_datum`
+/// seams. The shape-validity checks (and the `elog(ERROR)`) stay on the funcapi
+/// caller; this only projects, exactly as the C `DatumGetArrayTypeP` + header
+/// reads.
+fn project_array_header(arr: &mcx::PgVec<'_, u8>) -> (i32, i32, bool, Oid) {
+    let ndim = foundation::arr_ndim(arr);
+    // ARR_DIMS(arr)[0] is meaningful only for ndim >= 1; 0 otherwise.
+    let dim0 = if ndim >= 1 { foundation::arr_dim(arr, 0) } else { 0 };
+    let hasnull = foundation::arr_hasnull(arr);
+    let elemtype = foundation::arr_elemtype(arr);
+    (ndim, dim0, hasnull, elemtype)
+}
+
+/// Seam `oid_array_datum` — `DatumGetArrayTypeP(arraydatum)` (detoast) then
+/// project the header + read `ARR_DATA_PTR` as a C `Oid[]` (the funcapi
+/// `build_function_result_*` path reads OID arrays directly, not via
+/// `deconstruct_array`).
+pub fn oid_array_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+) -> PgResult<types_namespace::OidArrayDatum<'mcx>> {
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    let (ndim, dim0, hasnull, elemtype) = project_array_header(&arr);
+
+    // values = ARR_DATA_PTR(arr) read as `dim0` Oids — only for a valid 1-D
+    // non-null OID array (the consumer validates the shape and elog(ERROR)s
+    // otherwise; here we project only the read shape, mirroring the C).
+    let values = if ndim == 1 && !hasnull && dim0 >= 0 && elemtype == foundation::OIDOID {
+        read_fixed4_oid_array(mcx, &arr, dim0)?
+    } else {
+        mcx::vec_with_capacity_in::<Oid>(mcx, 0)?
+    };
+
+    Ok(types_namespace::OidArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    })
+}
+
+/// Seam `char_array_datum` — `DatumGetArrayTypeP(arraydatum)` (detoast) then
+/// project the header + read `ARR_DATA_PTR` as a C `"char"[]` (the funcapi path
+/// reads `proargmodes` directly as `char[]`).
+pub fn char_array_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+) -> PgResult<types_namespace::CharArrayDatum<'mcx>> {
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    let (ndim, dim0, hasnull, elemtype) = project_array_header(&arr);
+
+    // "char" is a 1-byte pass-by-value type; read `dim0` raw bytes from
+    // ARR_DATA_PTR for a valid 1-D non-null CHAR array.
+    let values = if ndim == 1 && !hasnull && dim0 >= 0 && elemtype == foundation::CHAROID {
+        let start = foundation::arr_data_ptr_off(&arr);
+        let n = dim0 as usize;
+        let mut v = mcx::vec_with_capacity_in::<u8>(mcx, n)?;
+        for i in 0..n {
+            v.push(*arr.get(start + i).ok_or_else(|| {
+                PgError::error("malformed char[] array (truncated data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?);
+        }
+        v
+    } else {
+        mcx::vec_with_capacity_in::<u8>(mcx, 0)?
+    };
+
+    Ok(types_namespace::CharArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    })
+}
+
+/// Seam `text_array_datum` — `DatumGetArrayTypeP(arraydatum)` (detoast) then
+/// project the header + deconstruct the elements via
+/// `deconstruct_array_builtin(arr, TEXTOID, ...)` and run each through
+/// `TextDatumGetCString`.
+pub fn text_array_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+) -> PgResult<types_namespace::TextArrayDatum<'mcx>> {
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    let (ndim, dim0, hasnull, elemtype) = project_array_header(&arr);
+
+    // The element strings come from deconstruct_array_builtin + TextDatumGetCString,
+    // but only for a valid 1-D non-null TEXT array (the consumer validates the
+    // shape and elog(ERROR)s otherwise; here we project only the read shape).
+    let values = if ndim == 1 && !hasnull && dim0 >= 0 && elemtype == foundation::TEXTOID {
+        deconstruct_text_array(mcx, &arr)?
+    } else {
+        mcx::vec_with_capacity_in::<PgString<'mcx>>(mcx, 0)?
+    };
+
+    Ok(types_namespace::TextArrayDatum {
+        ndim,
+        dim0,
+        hasnull,
+        elemtype,
+        values,
+    })
+}
+
+/// Seam `array_get_float4_values` — the `stanumbers` extraction of
+/// `get_attstatsslot` (lsyscache.c): detoast + copy the `Datum`
+/// (`DatumGetArrayTypePCopy`), verify it is a 1-D no-NULLs `float4` array, and
+/// return its element values (`ARR_DATA_PTR` viewed as `float4[narrayelem]`)
+/// copied into `mcx`.
+pub fn array_get_float4_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    arraydatum: Datum,
+) -> PgResult<mcx::PgVec<'mcx, f32>> {
+    // statarray = DatumGetArrayTypePCopy(val);
+    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+
+    // narrayelem = ARR_DIMS(statarray)[0];
+    let ndim = foundation::arr_ndim(&arr);
+    let narrayelem = if ndim >= 1 { foundation::arr_dim(&arr, 0) } else { 0 };
+
+    // if (ARR_NDIM(statarray) != 1 || narrayelem <= 0 ||
+    //     ARR_HASNULL(statarray) || ARR_ELEMTYPE(statarray) != FLOAT4OID)
+    //     elog(ERROR, "stanumbers is not a 1-D float4 array");
+    if ndim != 1
+        || narrayelem <= 0
+        || foundation::arr_hasnull(&arr)
+        || foundation::arr_elemtype(&arr) != foundation::FLOAT4OID
+    {
+        return Err(PgError::error("stanumbers is not a 1-D float4 array"));
+    }
+
+    // sslot->numbers = (float4 *) ARR_DATA_PTR(statarray); sslot->nnumbers = narrayelem;
+    let start = foundation::arr_data_ptr_off(&arr);
+    let n = narrayelem as usize;
+    let mut out = mcx::vec_with_capacity_in::<f32>(mcx, n)?;
+    for i in 0..n {
+        let off = start + i * 4;
+        let bytes = arr
+            .get(off..off + 4)
+            .ok_or_else(|| PgError::error("stanumbers is not a 1-D float4 array"))?;
+        out.push(f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    }
+    Ok(out)
+}
+
+/// Read a fixed-width 4-byte pass-by-value `Oid` element region from
+/// `ARR_DATA_PTR(arr)` as `count` native-endian words. The C reads
+/// `ARR_DATA_PTR` as an `Oid[]` directly (no per-element alignment padding for a
+/// 4-byte int-aligned type).
+fn read_fixed4_oid_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr: &mcx::PgVec<'mcx, u8>,
+    count: i32,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let start = foundation::arr_data_ptr_off(arr);
+    let n = count.max(0) as usize;
+    let mut v = mcx::vec_with_capacity_in::<Oid>(mcx, n)?;
+    for i in 0..n {
+        let off = start + i * 4;
+        let bytes = arr.get(off..off + 4).ok_or_else(|| {
+            PgError::error("malformed array (truncated element data)")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        })?;
+        v.push(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    }
+    Ok(v)
+}
+
 // ---------------------------------------------------------------------------
 // Datum / payload bridges for the byref element model. The text / tid
 // projection of element bytes is the text/tableam owner's surface; route it
