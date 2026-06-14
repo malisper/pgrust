@@ -728,7 +728,19 @@ mod recurrence_guard {
         ("backend_commands_functioncmds", "guc_array_add"),
         ("backend_commands_functioncmds", "guc_array_delete"),
         ("backend_commands_functioncmds", "guc_array_reset"),
-        ("backend_commands_user", "is_reserved_name"),
+        // DESIGN_DEBT (TD-EXECEXPR-PARAMSETEQ): `exec_build_param_set_equal`'s seam
+        // decl (backend-executor-execExpr-seams) still carries the pre-owned-model
+        // shape — trailing `parent: &mut PlanStateData` + `estate: &mut EStateData`
+        // and NO `mcx` — and nodeMemoize calls it with that shape, while the owner's
+        // real ExecBuildParamSetEqual body follows the crate's owned model
+        // (`mcx`-first, result `desc`/`ops` passed directly, no parent/estate — the
+        // same reconciliation the installed sibling `exec_build_hash32_expr` already
+        // received). Installing it requires reconciling decl + call-site onto the
+        // owned shape, which is the executor de-handle / contract-reconcile work
+        // (#112, #167/#169), not pure seam wiring. Until then it stays
+        // declared-but-uninstalled (would panic only on the nodeMemoize non-binary
+        // key-equality path). See DESIGN_DEBT.md.
+        ("backend_executor_execExpr", "exec_build_param_set_equal"),
         // DESIGN_DEBT: the `_owned` variants take owned `&mut PlanStateNode` /
         // `&mut EStateData` trees, but the owner's real ExecInitParallelPlan /
         // ExecParallelReinitialize bodies (and every `sup::*::call`) operate over
