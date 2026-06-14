@@ -924,8 +924,6 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
-        ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
-        ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
         // resolve another backend's PGPROC-embedded `procLatch` to a
         // `LatchHandle` and set it. The owner (backend-storage-ipc-latch) names
