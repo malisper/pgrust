@@ -46,6 +46,7 @@ use std::cell::{Cell, RefCell};
 
 use mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
 use types_cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
+use types_core::Oid;
 use types_datum::Datum;
 
 // Outward seams to other owners.
@@ -99,18 +100,62 @@ pub(crate) const SYS_CACHE_SIZE: usize = 85;
  *  Dynamically-registered callback tables (inval.c)
  * ------------------------------------------------------------------------ */
 
+/// A registered syscache callback. C stores a single `void (*)(Datum, int,
+/// uint32)` plus its `arg`. Plancache registers through the cycle-breaking
+/// `*-pc-seams` crate with the projected `fn(cacheid, hashvalue)` shape (its
+/// `Datum arg` is always 0 and so dropped at the seam boundary); both kinds
+/// invoke identically, so we keep one item type with a tagged callback.
+#[derive(Clone, Copy)]
+pub(crate) enum SyscacheCallback {
+    /// `void (*)(Datum arg, int cacheid, uint32 hashvalue)` — the full C shape.
+    Full(SyscacheCallbackFunction),
+    /// Plancache's projected `void (*)(int cacheid, uint32 hashvalue)`.
+    Plancache(types_plancache::SyscacheCallbackFn),
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SyscacheCallbackItem {
     pub(crate) id: i16,
     pub(crate) link: i16,
-    pub(crate) function: SyscacheCallbackFunction,
+    pub(crate) function: SyscacheCallback,
     pub(crate) arg: Datum,
+}
+
+impl SyscacheCallbackItem {
+    /// Invoke the callback exactly as C does: `ccitem->function(ccitem->arg,
+    /// cacheid, hashvalue)`. The plancache projection drops the unused arg.
+    pub(crate) fn invoke(&self, cacheid: i32, hashvalue: u32) {
+        match self.function {
+            SyscacheCallback::Full(f) => f(self.arg, cacheid, hashvalue),
+            SyscacheCallback::Plancache(f) => f(cacheid, hashvalue),
+        }
+    }
+}
+
+/// A registered relcache callback (see [`SyscacheCallback`] for the
+/// full-vs-plancache split).
+#[derive(Clone, Copy)]
+pub(crate) enum RelcacheCallback {
+    /// `void (*)(Datum arg, Oid relid)` — the full C shape.
+    Full(RelcacheCallbackFunction),
+    /// Plancache's projected `void (*)(Oid relid)`.
+    Plancache(types_plancache::RelcacheCallbackFn),
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct RelcacheCallbackItem {
-    pub(crate) function: RelcacheCallbackFunction,
+    pub(crate) function: RelcacheCallback,
     pub(crate) arg: Datum,
+}
+
+impl RelcacheCallbackItem {
+    /// Invoke as C does: `ccitem->function(ccitem->arg, relid)`.
+    pub(crate) fn invoke(&self, relid: Oid) {
+        match self.function {
+            RelcacheCallback::Full(f) => f(self.arg, relid),
+            RelcacheCallback::Plancache(f) => f(relid),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -226,6 +271,7 @@ pub fn debug_discard_caches() -> i32 {
 /// Install this unit's inward seams (the public API siblings call across the
 /// cycle-breaking `backend-utils-cache-inval-seams` crate).
 pub fn init_seams() {
+    use backend_utils_cache_inval_pc_seams as pc_seams;
     use backend_utils_cache_inval_seams as seams;
 
     seams::cache_register_syscache_callback::set(cache_invalidate::CacheRegisterSyscacheCallback);
@@ -244,6 +290,29 @@ pub fn init_seams() {
     // signatures match the seam exactly, so they wire directly.
     seams::cache_invalidate_catalog::set(cache_invalidate::CacheInvalidateCatalog);
     seams::cache_invalidate_relmap::set(cache_invalidate::CacheInvalidateRelmap);
+
+    // Relcache invalidation by OID (relcache initfile path) and by an
+    // already-deformed pg_class row (CLUSTER swap_relation_files). The by-pg-
+    // class seam carries `(relid, &PgClassForm)`; the impl mirrors
+    // CacheInvalidateRelcacheByTuple.
+    seams::cache_invalidate_relcache::set(cache_invalidate::CacheInvalidateRelcacheByRelid);
+    seams::cache_invalidate_relcache_by_pg_class::set(
+        cache_invalidate::CacheInvalidateRelcacheByPgClass,
+    );
+
+    // twophase's FinishPreparedTransaction replays the 2PC state file's raw
+    // serialized SharedInvalidationMessage[] buffer; this owner decodes it and
+    // forwards to sinval (C: `SendSharedInvalidMessages((SI *) buf, nmsgs)`).
+    seams::send_shared_invalid_messages::set(cache_invalidate::SendSharedInvalidMessagesRaw);
+
+    // plancache's InitPlanCache registers its relcache/syscache callbacks via
+    // the cycle-breaking *-pc-seams crate; the owner installs them here.
+    pc_seams::register_relcache_callback::set(
+        cache_invalidate::CacheRegisterRelcacheCallbackPlanCache,
+    );
+    pc_seams::register_syscache_callback::set(
+        cache_invalidate::CacheRegisterSyscacheCallbackPlanCache,
+    );
 
     // These two seams' installed signatures differ from at_eoxact's native
     // shape (the seam folds C's `nmsgs` out-param into the slice / returns a
@@ -271,11 +340,14 @@ pub fn init_seams() {
         Ok((out, relcache_init_file_inval))
     });
 
-    // Seams installed by other owners (relcache.c, sinval.c) — referenced here
-    // only so the cross-cycle linkage is documented; not this unit's to wire.
-    let _ = (
-        seams::relcache_init_file_pre_invalidate::is_installed(),
-        seams::relcache_init_file_post_invalidate::is_installed(),
-        seams::send_shared_invalid_messages::is_installed(),
-    );
+    // `RelationCacheInitFilePre/PostInvalidate` (relcache.c) re-exposed through
+    // the inval dispatcher's seam crate so twophase's FinishPreparedTransaction
+    // can bracket its SI replay (C calls the relcache routines directly). The
+    // bodies live in relcache; forward to its seams.
+    seams::relcache_init_file_pre_invalidate::set(|| {
+        relcache_seams::relation_cache_init_file_pre_invalidate::call()
+    });
+    seams::relcache_init_file_post_invalidate::set(|| {
+        relcache_seams::relation_cache_init_file_post_invalidate::call()
+    });
 }
