@@ -39,7 +39,7 @@ use types_error::PgResult;
 
 // ===========================================================================
 // XLogRecoveryCtlData — shared-memory state for WAL recovery
-// (xlogrecovery.c:311). Named `XLogRecoveryState` here, but laid out
+// (xlogrecovery.c:311). Named `XLogRecoveryShared` here, but laid out
 // `#[repr(C)]` field-for-field with the C struct.
 // ===========================================================================
 
@@ -48,7 +48,7 @@ use types_error::PgResult;
 /// process via [`XLogRecoveryShmemInit`] and reached by every backend through
 /// the [`XLOG_RECOVERY_CTL`] pointer.
 #[repr(C)]
-pub struct XLogRecoveryState {
+pub struct XLogRecoveryShared {
     /// `SharedHotStandbyActive` — whether hot-standby queries are allowed.
     /// Protected by `info_lck`.
     pub SharedHotStandbyActive: bool,
@@ -108,13 +108,13 @@ pub struct XLogRecoveryState {
 
 std::thread_local! {
     /// `static XLogRecoveryCtlData *XLogRecoveryCtl = NULL` (xlogrecovery.c:371).
-    static XLOG_RECOVERY_CTL: Cell<*mut XLogRecoveryState> =
+    static XLOG_RECOVERY_CTL: Cell<*mut XLogRecoveryShared> =
         const { Cell::new(core::ptr::null_mut()) };
 }
 
 /// The live `XLogRecoveryCtl` pointer, or null before `XLogRecoveryShmemInit`.
 #[inline]
-fn ctl_ptr() -> *mut XLogRecoveryState {
+fn ctl_ptr() -> *mut XLogRecoveryShared {
     XLOG_RECOVERY_CTL.with(Cell::get)
 }
 
@@ -122,7 +122,7 @@ fn ctl_ptr() -> *mut XLogRecoveryState {
 /// shmem region has not been initialized yet (the C code would dereference a
 /// NULL pointer); callers run only after `XLogRecoveryShmemInit`.
 #[inline]
-pub(crate) fn ctl() -> &'static XLogRecoveryState {
+pub(crate) fn ctl() -> &'static XLogRecoveryShared {
     let p = ctl_ptr();
     debug_assert!(!p.is_null(), "XLogRecoveryCtl accessed before XLogRecoveryShmemInit");
     // SAFETY: `p` points at the live `ShmemInitStruct` region, which outlives
@@ -136,7 +136,7 @@ pub(crate) fn ctl() -> &'static XLogRecoveryState {
 /// by `info_lck` at the call site).
 #[inline]
 #[allow(clippy::mut_from_ref)]
-pub(crate) fn ctl_mut() -> &'static mut XLogRecoveryState {
+pub(crate) fn ctl_mut() -> &'static mut XLogRecoveryShared {
     let p = ctl_ptr();
     debug_assert!(!p.is_null(), "XLogRecoveryCtl accessed before XLogRecoveryShmemInit");
     // SAFETY: see `ctl`. The startup process is the sole writer; cross-backend
@@ -172,7 +172,7 @@ fn spin_lock_init(lock: &Spinlock) {
 /// bytes this subsystem needs.
 pub fn XLogRecoveryShmemSize() -> PgResult<Size> {
     // XLogRecoveryCtl
-    let size: Size = size_of::<XLogRecoveryState>();
+    let size: Size = size_of::<XLogRecoveryShared>();
 
     Ok(size)
 }
@@ -183,7 +183,7 @@ pub fn XLogRecoveryShmemInit() -> PgResult<()> {
     // XLogRecoveryCtl = ShmemInitStruct("XLOG Recovery Ctl",
     //                                   XLogRecoveryShmemSize(), &found);
     let (raw, found) = shmem::shmem_init_struct::call("XLOG Recovery Ctl", XLogRecoveryShmemSize()?)?;
-    let ctl_ptr = raw as *mut XLogRecoveryState;
+    let ctl_ptr = raw as *mut XLogRecoveryShared;
     XLOG_RECOVERY_CTL.with(|c| c.set(ctl_ptr));
 
     if found {
@@ -199,7 +199,7 @@ pub fn XLogRecoveryShmemInit() -> PgResult<()> {
         // is `NotPaused` (RECOVERY_NOT_PAUSED == 0); zeroing the rest matches
         // the C memset, but we write the typed default to keep the enum
         // discriminant well-formed rather than relying on a raw zero write.
-        core::ptr::write_bytes(raw, 0, size_of::<XLogRecoveryState>());
+        core::ptr::write_bytes(raw, 0, size_of::<XLogRecoveryShared>());
         core::ptr::write(
             &mut (*ctl_ptr).recoveryPauseState,
             RecoveryPauseState::NotPaused,

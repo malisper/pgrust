@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-acl = { path = "../types-acl" }
 types-error = { path = "../types-error" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }

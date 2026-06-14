@@ -20,7 +20,7 @@ use backend_storage_lmgr_condition_variable_seams as condvar_seam;
 fn shmem_size_is_one_ctl_struct() {
     assert_eq!(
         XLogRecoveryShmemSize().unwrap(),
-        size_of::<XLogRecoveryState>()
+        size_of::<XLogRecoveryShared>()
     );
 }
 
@@ -33,7 +33,7 @@ fn shmem_init_then_accessors_roundtrip() {
     // memset).
     shmem_seam::shmem_init_struct::set(|_name, size| {
         let layout =
-            std::alloc::Layout::from_size_align(size, align_of::<XLogRecoveryState>()).unwrap();
+            std::alloc::Layout::from_size_align(size, align_of::<XLogRecoveryShared>()).unwrap();
         // SAFETY: non-zero size; alignment is a valid power of two.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null());

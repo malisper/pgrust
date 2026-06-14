@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox};
+use types_acl::AclMode;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 use types_storage::lock::LOCKMODE;
@@ -67,13 +68,19 @@ impl RangeTblEntry {
     }
 }
 
-/// `RTEPermissionInfo` (nodes/parsenodes.h), trimmed.
+/// `RTEPermissionInfo` (nodes/parsenodes.h).
 #[derive(Debug, Default)]
 pub struct RTEPermissionInfo<'mcx> {
     /// `Oid relid` — relation the permissions apply to.
     pub relid: Oid,
-    /// `Oid checkAsUser` — user to check access as, or 0 for current user.
+    /// `bool inh` — separately check inheritance children?
+    pub inh: bool,
+    /// `AclMode requiredPerms` — bitmask of required access permissions.
+    pub requiredPerms: AclMode,
+    /// `Oid checkAsUser` — if valid, check access as this role.
     pub checkAsUser: Oid,
+    /// `Bitmapset *selectedCols` — columns needing SELECT permission.
+    pub selectedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `Bitmapset *insertedCols` — columns needing INSERT permission.
     pub insertedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `Bitmapset *updatedCols` — columns needing UPDATE permission.
@@ -81,12 +88,18 @@ pub struct RTEPermissionInfo<'mcx> {
 }
 
 impl RTEPermissionInfo<'_> {
-    /// Deep copy into `mcx` (C: `copyObject` over `RTEPermissionInfo`). The two
+    /// Deep copy into `mcx` (C: `copyObject` over `RTEPermissionInfo`). The
     /// `Bitmapset *` columns are copied through `Bitmapset::clone_in`.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RTEPermissionInfo<'b>> {
         Ok(RTEPermissionInfo {
             relid: self.relid,
+            inh: self.inh,
+            requiredPerms: self.requiredPerms,
             checkAsUser: self.checkAsUser,
+            selectedCols: match &self.selectedCols {
+                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
             insertedCols: match &self.insertedCols {
                 Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,

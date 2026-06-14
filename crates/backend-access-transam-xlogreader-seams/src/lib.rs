@@ -413,3 +413,38 @@ seam_core::seam!(
         block_id: i32,
     ) -> Option<BlockTag>
 );
+
+// ===========================================================================
+// Record-field accessors consumed by `access/transam/xlogrecovery.c` during
+// WAL replay, keyed by the recovery crate's decoded-record handle
+// (`types_wal::xlogrecovery_carriers::RecordRef`). These mirror the
+// `XLogRecGetRmid` / `XLogRecGetInfo` / `XLogRecGetTotalLen` macros over the
+// recovery driver's current `XLogReaderState *`. Declared here (the xlogreader
+// owns the decoded record) but NOT installed: the recovery crate stays
+// `needs-decomp` and the page-read driver that holds the live reader is not yet
+// ported, so a call panics loudly until the owner lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `XLogRecGetRmid(record)` — the resource-manager id of the record the
+    /// recovery driver is currently replaying.
+    pub fn xlog_rec_rmid(
+        record: types_wal::xlogrecovery_carriers::RecordRef,
+    ) -> u8
+);
+
+seam_core::seam!(
+    /// `XLogRecGetInfo(record)` — the `xl_info` byte of the record the recovery
+    /// driver is currently replaying.
+    pub fn xlog_rec_info(
+        record: types_wal::xlogrecovery_carriers::RecordRef,
+    ) -> u8
+);
+
+seam_core::seam!(
+    /// `XLogRecGetTotalLen(record)` — the total on-disk length of the record the
+    /// recovery driver is currently replaying.
+    pub fn xlog_rec_total_len(
+        record: types_wal::xlogrecovery_carriers::RecordRef,
+    ) -> u32
+);
