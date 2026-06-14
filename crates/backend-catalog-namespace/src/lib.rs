@@ -59,12 +59,15 @@ use types_core::{
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
 };
 // Residual bare-word `Datum` (the `types_datum` newtype) survives ONLY at the
-// callback-registration ABI edge: `before_shmem_exit` and
-// `cache_register_syscache_callback` both take the opaque callback token by the
-// bare-word seam contract (`fn(i32, types_datum::Datum)` / `arg: types_datum::Datum`).
-// This crate's own logic constructs/reads no scalars, so there is nothing to move
-// onto the canonical `types_tuple::backend_access_common_heaptuple::Datum<'mcx>`
-// enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
+// `CacheRegisterSyscacheCallback` ABI edge: the `cache_register_syscache_callback`
+// seam takes its opaque callback token by the bare-word contract
+// (`arg: ScalarWord`, where `ScalarWord = types_datum::Datum`), owned by the
+// out-of-batch `backend-utils-cache-inval-seams` crate, so it stays on the shim
+// until that contract migrates. The `before_shmem_exit` edge already rides the
+// canonical `types_tuple::Datum<'static>`. This crate's own logic constructs/reads
+// no scalars, so there is nothing else to move onto the canonical
+// `types_tuple::backend_access_common_heaptuple::Datum<'mcx>` enum; the token here
+// is `(Datum) 0` in C, i.e. `Datum::null()`.
 use types_datum::Datum;
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
