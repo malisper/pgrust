@@ -33,6 +33,9 @@ use types_core::{Oid, OidIsValid};
 // owns the bytes; the word stays at this audited fmgr-call ABI edge until those
 // owners migrate.
 use types_datum::Datum as ScalarWord;
+// The canonical unified value type (Datum-unification keystone) — what
+// `ExtractedVariadicArgs.values` carries.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
@@ -210,7 +213,10 @@ pub fn extract_variadic_args<'mcx>(
 
     // *args = NULL; *types = NULL; *nulls = NULL; (no-op in the owned model).
 
-    let mut args_res: mcx::PgVec<'mcx, ScalarWord>;
+    // The extracted argument values are returned as the canonical unified
+    // value type (`ExtractedVariadicArgs.values`); the per-element words from
+    // deconstruct_array / PG_GETARG cross into its by-value arm.
+    let mut args_res: mcx::PgVec<'mcx, DatumV<'mcx>>;
     let mut nulls_res: mcx::PgVec<'mcx, bool>;
     let mut types_res: mcx::PgVec<'mcx, Oid>;
 
@@ -260,7 +266,7 @@ pub fn extract_variadic_args<'mcx>(
         types_res = vec_with_capacity_in(mcx, elems.len())?;
 
         for (value, isnull) in elems.iter().copied() {
-            args_res.push(value);
+            args_res.push(DatumV::ByVal(value));
             nulls_res.push(isnull);
             // All the elements of the array have the same type.
             types_res.push(element_type);
@@ -329,7 +335,7 @@ pub fn extract_variadic_args<'mcx>(
                     .into_error());
             }
 
-            args_res.push(value);
+            args_res.push(DatumV::ByVal(value));
             nulls_res.push(isnull);
             types_res.push(argtype);
         }
