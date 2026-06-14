@@ -1,0 +1,7 @@
+/Users/malisper/workspace/work/pgrust/.claude/worktrees/wf_8622c870-9bb-19/target-iso/debug/deps/backend_catalog_pg_namespace_seams-8c7cdedd1fee82b8.d: crates/backend-catalog-pg-namespace-seams/src/lib.rs
+
+/Users/malisper/workspace/work/pgrust/.claude/worktrees/wf_8622c870-9bb-19/target-iso/debug/deps/libbackend_catalog_pg_namespace_seams-8c7cdedd1fee82b8.rlib: crates/backend-catalog-pg-namespace-seams/src/lib.rs
+
+/Users/malisper/workspace/work/pgrust/.claude/worktrees/wf_8622c870-9bb-19/target-iso/debug/deps/libbackend_catalog_pg_namespace_seams-8c7cdedd1fee82b8.rmeta: crates/backend-catalog-pg-namespace-seams/src/lib.rs
+
+crates/backend-catalog-pg-namespace-seams/src/lib.rs:

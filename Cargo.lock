@@ -1024,6 +1024,8 @@ dependencies = [
  "backend-access-common-relation-seams",
  "backend-access-table-table-seams",
  "backend-catalog-pg-class-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-relcache-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -3014,7 +3016,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-commands-functioncmds-seams",
  "backend-executor-execMain-seams",
- "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-core-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-syscache",
  "backend-utils-error",
@@ -3462,6 +3464,7 @@ dependencies = [
 name = "backend-executor-execCurrent"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execCurrent-seams",
  "backend-executor-execMain-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -3926,6 +3929,7 @@ dependencies = [
 name = "backend-executor-instrument-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -5503,6 +5507,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
  "types-pathnodes",
  "types-tuple",
 ]
@@ -5573,14 +5578,11 @@ dependencies = [
 name = "backend-nodes-nodeFuncs-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-fmgr",
  "types-nodes",
- "types-parsenodes",
- "types-tuple",
 ]
 
 [[package]]
@@ -6785,6 +6787,7 @@ dependencies = [
 name = "backend-replication-syncrep-scanner"
 version = "0.0.0"
 dependencies = [
+ "backend-replication-syncrep-scanner-seams",
  "mcx",
  "types-error",
 ]
@@ -9397,6 +9400,7 @@ dependencies = [
  "backend-storage-ipc-sinval-seams",
  "backend-storage-smgr-seams",
  "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-pc-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-relmapper-seams",
@@ -9406,9 +9410,11 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-cache",
+ "types-cluster",
  "types-core",
  "types-datum",
  "types-error",
+ "types-plancache",
  "types-rel",
  "types-storage",
  "types-syscache",
@@ -9500,6 +9506,7 @@ dependencies = [
  "backend-partitioning-partbounds-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-fmgr-seams",
@@ -9962,6 +9969,7 @@ dependencies = [
  "backend-access-common-tupdesc-seams",
  "backend-catalog-namespace-seams",
  "backend-commands-functioncmds-seams",
+ "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
@@ -10293,6 +10301,7 @@ dependencies = [
 name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-misc-guc-tables-seams",
  "types-error",
  "types-guc",
 ]
@@ -11236,6 +11245,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-portalcmds",
  "backend-executor-execAmi",
+ "backend-executor-execCurrent",
  "backend-executor-execExpr",
  "backend-executor-execExprInterp",
  "backend-executor-execJunk",
@@ -11331,6 +11341,7 @@ dependencies = [
  "backend-storage-lmgr-deadlock",
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page",
  "backend-storage-page-checksum",
@@ -11370,6 +11381,7 @@ dependencies = [
  "backend-utils-cache-evtcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-partcache",
  "backend-utils-cache-plancache",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
@@ -11390,6 +11402,7 @@ dependencies = [
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
