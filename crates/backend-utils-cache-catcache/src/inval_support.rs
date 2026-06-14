@@ -16,7 +16,12 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::primitive::InvalidOid;
 use types_core::Oid;
 use types_cache::backend_utils_cache_catcache::{CCFastKind, CacheIdx};
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// `CatalogCacheComputeHashValue` consumes the by-value scalar key word (and the
+// `PointerGetDatum` of a detoasted by-reference payload). Pass-by-value scalar
+// keys stay the audited bare word, not the canonical `types_tuple::Datum<'mcx>`
+// enum (which carries deformed tuple values).
+use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_storage::PrepareToInvalidateCacheTuple;
@@ -70,7 +75,7 @@ fn heap_getattr<'mcx>(
         return getmissingattr(mcx, tupdesc, attnum);
     }
     if heap_attisnull(tuple, attnum, Some(tupdesc)) {
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((TupleValue::ByVal(ScalarWord::null()), true));
     }
     Ok((nocachegetattr(mcx, tuple, attnum, tupdesc, data)?, false))
 }
@@ -92,7 +97,7 @@ fn catalog_cache_compute_tuple_hash_value(
 
     // The C reads of `v1..v4` start zeroed and the `case 4..1` fall-through
     // fills only the used slots.
-    let mut v: [Datum; 4] = [Datum::null(); 4];
+    let mut v: [ScalarWord; 4] = [ScalarWord::null(); 4];
 
     // Borrow the cache's tuple descriptor (lives in CacheMemoryContext) and
     // deform the key columns against it, exactly as the C reads
@@ -146,10 +151,10 @@ fn tuple_data_area<'a>(_tuple: &'a HeapTupleData<'_>) -> &'a [u8] {
 /// `PointerGetDatum(bytes)` — the pointer to the detoasted bytes, exactly as C's
 /// `fastgetattr` hands `CatalogCacheComputeHashValue` a `char *` Datum for the
 /// `name`/`text`/`oidvector` key types.
-fn tuple_value_as_datum(value: &TupleValue<'_>) -> Datum {
+fn tuple_value_as_datum(value: &TupleValue<'_>) -> ScalarWord {
     match value {
         TupleValue::ByVal(d) => *d,
-        TupleValue::ByRef(b) => Datum::from_usize(b.as_ptr() as usize),
+        TupleValue::ByRef(b) => ScalarWord::from_usize(b.as_ptr() as usize),
     }
 }
 

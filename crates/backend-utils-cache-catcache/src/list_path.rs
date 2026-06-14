@@ -17,9 +17,13 @@ use types_cache::backend_utils_cache_catcache::{
     CL_MAGIC,
 };
 use types_cache::SysCacheKey;
-// The bare-word newtype: the per-search catalog key arguments cross in as
-// scalar words (the C `cur_skey[i].sk_argument = vN`).
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// the per-search catalog key arguments cross in as scalar words (the C
+// `cur_skey[i].sk_argument = vN`). Pass-by-value scalar keys stay the audited
+// bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which carries
+// deformed tuple values; it is imported below as `DatumV` for the
+// `ScanKeyData.sk_argument = DatumV::ByVal(word)` construction).
+use types_datum::Datum as ScalarWord;
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ScanKeyData.sk_argument` carries.
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
@@ -50,9 +54,9 @@ pub(crate) enum ListProbe {
 /// bytes (whose word the fast functions re-resolve from the cached tuple, as
 /// `CatalogCacheCompareTuple` does). The owned key model materializes the
 /// by-reference payload elsewhere; here the word is the by-value scalar and the
-/// `UNUSED` placeholder is `Datum::null()` — matching `SysCacheKey::UNUSED`.
+/// `UNUSED` placeholder is `ScalarWord::null()` — matching `SysCacheKey::UNUSED`.
 #[inline]
-fn key_datum(k: SysCacheKey<'_>) -> Datum {
+fn key_datum(k: SysCacheKey<'_>) -> ScalarWord {
     match k {
         SysCacheKey::Value(d) => d,
         // By-reference key payloads cannot inhabit a bare `Datum` word; the
@@ -60,7 +64,7 @@ fn key_datum(k: SysCacheKey<'_>) -> Datum {
         // the carried word is the placeholder the owned model uses for a
         // by-reference search key (consistent with how the cache entry stores
         // its own by-reference `keys[]`).
-        SysCacheKey::Str(_) | SysCacheKey::Bytes(_) => Datum::null(),
+        SysCacheKey::Str(_) | SysCacheKey::Bytes(_) => ScalarWord::null(),
     }
 }
 
@@ -75,11 +79,11 @@ pub fn search_cat_cache_list<'mcx>(
     v3: SysCacheKey<'_>,
 ) -> PgResult<PgVec<'mcx, FormedTuple<'mcx>>> {
     // Datum arguments[CATCACHE_MAXKEYS];  arguments[0..2] = v1..v3, rest unused.
-    let arguments: [Datum; CATCACHE_MAXKEYS] = [
+    let arguments: [ScalarWord; CATCACHE_MAXKEYS] = [
         key_datum(v1),
         key_datum(v2),
         key_datum(v3),
-        Datum::null(),
+        ScalarWord::null(),
     ];
 
     // Find the cache, run phase-2 init if needed, validate nkeys, and compute
@@ -202,7 +206,7 @@ pub(crate) fn search_cat_cache_list_miss<'mcx>(
     nkeys: i32,
     l_hash_value: u32,
     l_hash_index: usize,
-    arguments: [Datum; 4],
+    arguments: [ScalarWord; 4],
 ) -> PgResult<PgVec<'mcx, FormedTuple<'mcx>>> {
     // Read the per-cache scan inputs (reloid, indexoid, scankeys, nbuckets,
     // nkeys) out of the arena up front.
@@ -295,7 +299,7 @@ fn build_list_body(
     cc_nkeys: i32,
     cc_nbuckets: i32,
     cur_skey: &mut [ScanKeyData<'static>; CATCACHE_MAXKEYS],
-    arguments: [Datum; 4],
+    arguments: [ScalarWord; 4],
 ) -> Result<ClIdx, (Vec<CtIdx>, types_error::PgError)> {
     // ctlist = NIL; nmembers = 0; ordered = false;
     let mut ctlist: Vec<CtIdx> = Vec::new();
@@ -433,7 +437,7 @@ fn scan_members(
     cc_indexoid: types_core::Oid,
     cc_nbuckets: i32,
     cur_skey: &mut [ScanKeyData<'static>; CATCACHE_MAXKEYS],
-    arguments: [Datum; 4],
+    arguments: [ScalarWord; 4],
     ctlist: &mut Vec<CtIdx>,
     ordered: &mut bool,
 ) -> PgResult<()> {
@@ -534,7 +538,7 @@ fn build_fetched(
         (cache.id, cache.cc_keyno, cache.cc_nkeys)
     });
 
-    let mut keys = [Datum::null(); CATCACHE_MAXKEYS];
+    let mut keys = [ScalarWord::null(); CATCACHE_MAXKEYS];
 
     // heap_deform_tuple(tuple, cc_tupdesc, values, isnull); then for each key
     // column i (0..cc_nkeys), keys[i] = values[cc_keyno[i] - 1].
@@ -559,7 +563,7 @@ fn build_fetched(
                         // Datum word; the comparison core re-resolves it from
                         // the cached bytes, so the stored word is the owned
                         // model's by-reference placeholder.
-                        TupleValue::ByRef(_) => Datum::null(),
+                        TupleValue::ByRef(_) => ScalarWord::null(),
                     };
                 }
             }
