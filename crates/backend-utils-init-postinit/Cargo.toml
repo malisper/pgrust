@@ -77,6 +77,7 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+port-pgsleep-seams = { path = "../port-pgsleep-seams" }
 backend-utils-misc-more2-seams = { path = "../backend-utils-misc-more2-seams" }
 backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }

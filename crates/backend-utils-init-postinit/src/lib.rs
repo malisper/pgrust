@@ -786,6 +786,7 @@ pub fn InitPostgres(
             am_superuser = true;
         } else {
             backend_utils_init_miscinit_seams::initialize_session_user_id::call(
+                mcx,
                 username,
                 useroid,
                 (flags & INIT_PG_OVERRIDE_ROLE_LOGIN) != 0,
@@ -795,14 +796,14 @@ pub fn InitPostgres(
     } else {
         // normal multiuser case
         PerformAuthentication(mcx)?;
-        backend_utils_init_miscinit_seams::initialize_session_user_id::call(username, useroid, false)?;
+        backend_utils_init_miscinit_seams::initialize_session_user_id::call(mcx, username, useroid, false)?;
         // ensure that auth_method is actually valid, aka authn_id is not NULL
         if let Some(authn_id) = backend_libpq_auth_seams::client_authn_id::call(mcx)? {
             let auth_method = backend_libpq_hba_seams::hba_authname::call(mcx)?;
             backend_utils_init_miscinit_seams::initialize_system_user::call(
                 authn_id.as_str(),
                 auth_method.as_str(),
-            )?;
+            );
         }
         am_superuser = backend_utils_misc_superuser_seams::superuser::call()?;
     }
@@ -888,7 +889,7 @@ pub fn InitPostgres(
         // Apply PostAuthDelay as soon as we've read all options.
         let post_auth_delay = backend_tcop_postgres_seams::post_auth_delay::call();
         if post_auth_delay > 0 {
-            backend_utils_init_miscinit_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
+            port_pgsleep_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
         }
 
         // initialize client encoding
@@ -1029,7 +1030,7 @@ pub fn InitPostgres(
         backend_utils_init_miscinit_seams::validate_pg_version::call(fullpath.as_str())?;
     }
 
-    backend_utils_init_miscinit_seams::set_database_path_once::call(fullpath.as_str())?;
+    backend_utils_init_miscinit_seams::set_database_path_once::call(fullpath.as_str());
 
     // It's now possible to do real access to the system catalogs.
     backend_utils_cache_relcache_seams::relation_cache_initialize_phase3::call()?;
@@ -1060,7 +1061,7 @@ pub fn InitPostgres(
     // Apply PostAuthDelay as soon as we've read all options.
     let post_auth_delay = backend_tcop_postgres_seams::post_auth_delay::call();
     if post_auth_delay > 0 {
-        backend_utils_init_miscinit_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
+        port_pgsleep_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
     }
 
     // Initialize various default states.
@@ -1076,7 +1077,7 @@ pub fn InitPostgres(
 
     // If this is an interactive session, load any preloaded libraries.
     if (flags & INIT_PG_LOAD_SESSION_LIBS) != 0 {
-        backend_utils_init_miscinit_seams::process_session_preload_libraries::call()?;
+        backend_utils_init_miscinit_seams::process_session_preload_libraries::call(mcx)?;
     }
 
     // fill in the remainder of this entry in the PgBackendStatus array

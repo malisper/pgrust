@@ -9718,6 +9718,7 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "libc",
  "mcx",
+ "port-pgsleep-seams",
  "types-acl",
  "types-catalog",
  "types-core",

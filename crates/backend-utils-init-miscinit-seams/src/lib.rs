@@ -282,6 +282,7 @@ seam_core::seam!(
     /// (miscinit.c): set the session user from name or OID, checking
     /// rolcanlogin/rolconnlimit. `Err` carries its `ereport(FATAL)` surface.
     pub fn initialize_session_user_id(
+        mcx: Mcx<'_>,
         rolename: Option<&str>,
         roleid: types_core::Oid,
         bypass_login_check: bool,
@@ -295,7 +296,7 @@ seam_core::seam!(
     pub fn initialize_system_user(
         authn_id: &str,
         auth_method: &str,
-    ) -> types_error::PgResult<()>
+    )
 );
 
 seam_core::seam!(
@@ -312,20 +313,14 @@ seam_core::seam!(
     /// distinct from [`set_database_path`]/[`clear_database_path`], which are
     /// the inval.c recovery quick-hack that pokes `DatabasePath` directly.
     /// `Err` carries its OOM surface (the `MemoryContextStrdup`).
-    pub fn set_database_path_once(path: &str) -> types_error::PgResult<()>
+    pub fn set_database_path_once(path: &str)
 );
 
 seam_core::seam!(
     /// `process_session_preload_libraries()` (miscinit.c): load the libraries
     /// named by `session_preload_libraries`/`local_preload_libraries`. `Err`
     /// carries the loader's `ereport` surface.
-    pub fn process_session_preload_libraries() -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    /// `pg_usleep(microsec)` (port; PostAuthDelay application): sleep the given
-    /// number of microseconds.
-    pub fn pg_usleep(microsec: i64)
+    pub fn process_session_preload_libraries(mcx: Mcx<'_>) -> types_error::PgResult<()>
 );
 
 // ---------------------------------------------------------------------------
