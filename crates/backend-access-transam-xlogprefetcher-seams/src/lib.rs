@@ -18,3 +18,25 @@ seam_core::seam!(
     /// Scaffolded slot.
     pub fn xlog_prefetch_shmem_init() -> types_error::PgResult<()>
 );
+
+// ===========================================================================
+// The prefetcher read-record entry points consumed by
+// `access/transam/xlogrecovery.c`'s `ReadRecord` retry loop. Declared here (the
+// xlogprefetcher owns the `XLogPrefetcher` + its `XLogReaderState`) but NOT
+// installed: the recovery crate stays `needs-decomp` and the page-read driver is
+// not yet ported, so a call panics loudly until the owner lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `XLogPrefetcherBeginRead(prefetcher, RecPtr)` (xlogprefetcher.c) —
+    /// position the prefetcher/reader to begin reading at `rec_ptr`.
+    pub fn prefetcher_begin_read(rec_ptr: types_core::XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `XLogPrefetcherReadRecord(prefetcher, &errormsg)` (xlogprefetcher.c) —
+    /// read and decode the next record, returning the decoded-record handle plus
+    /// the reader-state fields the `ReadRecord` loop inspects (or an error
+    /// message). `record == RecordRef(0)` is end-of-WAL / no record decoded.
+    pub fn prefetcher_read_record() -> types_wal::xlogrecovery_carriers::ReadRecordResult
+);

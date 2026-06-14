@@ -2034,6 +2034,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
 ]
 
 [[package]]
