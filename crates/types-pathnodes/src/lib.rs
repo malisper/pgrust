@@ -42,6 +42,30 @@ use types_core::primitive::{
 };
 pub use types_core::primitive::Oid;
 pub use types_nodes::nodes::NodeTag;
+pub use types_hash::hsearch::HTAB;
+
+/* ==========================================================================
+ * Custom join-search private state + the planner's saved-context token.
+ * ======================================================================== */
+
+/// `void *join_search_private` (`pathnodes.h`) — the callback-supplied private
+/// context a custom join-search hook (e.g. GEQO) stashes in
+/// [`PlannerInfo::join_search_private`]. There is no PG struct: it is an opaque
+/// `void *`. The GEQO port threads its real state explicitly and only ever
+/// nulls this field, so the value carries nothing here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinSearchPrivate {}
+
+/// `MemoryContext` (`utils/palloc.h`) — an opaque handle to a memory context,
+/// the analogue of the C `MemoryContextData *`. Used by the GEQO private temp
+/// context seams to carry the saved "old" context across the planner boundary;
+/// the value is opaque here (this repo has no ambient current context, so the
+/// owning planner-memory unit defines its contents).
+#[derive(Debug, Default)]
+pub struct MemoryContextData {}
+
+/// `MemoryContext` — `MemoryContextData *`.
+pub type PathnodesMemoryContext = Option<Box<MemoryContextData>>;
 
 /* ==========================================================================
  * Relids — a planner relation-id set (`Bitmapset *`).
@@ -518,6 +542,22 @@ pub struct PlannerInfo {
     pub hasLateralRTEs: bool,
     /// list of PlaceHolderInfos — handles into `ph_info_arena`.
     pub placeholder_list: Vec<PhInfoId>,
+
+    /// `List *join_rel_list` — list of join-relation RelOptInfos. GEQO appends
+    /// candidate joinrels here while building a tour and truncates back to the
+    /// saved length afterward.
+    pub join_rel_list: Vec<RelId>,
+    /// `struct HTAB *join_rel_hash` — optional hashtable for faster lookup of
+    /// join-relation RelOptInfos. GEQO nulls this for the duration of an
+    /// evaluation so a fresh local hash is built and restores it afterward.
+    pub join_rel_hash: Option<Box<HTAB>>,
+    /// `List **join_rel_level` — lists of join-relation RelOptInfos at each
+    /// level (`standard_join_search`); should be unused (empty) while GEQO runs.
+    pub join_rel_level: Vec<Vec<RelId>>,
+    /// `void *join_search_private` — private state for a custom join-search
+    /// hook (GEQO stores its [`JoinSearchPrivate`] here in C; the port threads
+    /// the state explicitly and only nulls this field).
+    pub join_search_private: Option<Box<JoinSearchPrivate>>,
 
     /* Arenas (owned-tree arena + handle model — not in the C struct). */
     /// Backing store for every [`RelOptInfo`]; a [`RelId`] indexes here.

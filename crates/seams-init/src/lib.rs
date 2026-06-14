@@ -102,6 +102,7 @@ pub fn init_all() {
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
+    backend_geqo_all::init_seams();
     backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
     backend_lib_hyperloglog::init_seams();
