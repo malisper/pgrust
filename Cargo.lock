@@ -6489,6 +6489,8 @@ dependencies = [
 name = "backend-postmaster-interrupt"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqsignal",
+ "backend-postmaster-interrupt-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procsignal-seams",
@@ -6496,8 +6498,10 @@ dependencies = [
  "backend-utils-misc-guc-file-seams",
  "backend-utils-mmgr-mcxt-seams",
  "libc",
+ "port-pqsignal-seams",
  "types-error",
  "types-guc",
+ "types-signal",
 ]
 
 [[package]]

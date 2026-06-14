@@ -343,6 +343,52 @@ pub fn init_seams() {
         )
     });
 
+    // --- guc.c bodies whose seam decls live in the sibling
+    //     `backend-utils-misc-guc-file-seams` crate (mis-homed there because
+    //     guc-file.l consumers — fmgr.c, miscinit, the stack-depth check hooks —
+    //     reached them first). guc.c is their real owner; install them here so the
+    //     guard re-asserts the contract (retires CONTRACT_RECONCILE_PENDING). The
+    //     `process_config_file` decl in that crate stays uninstalled here — it is
+    //     genuinely guc-file.l's (the lexer/reader unit), not guc.c's. ---
+    {
+        use backend_utils_misc_guc_file_seams as gf;
+
+        // NewGUCNestLevel / AtEOXact_GUC: same bodies as the guc-seams variants.
+        gf::new_guc_nest_level::set(NewGUCNestLevel);
+        gf::at_eoxact_guc::set(|_is_commit, _nest_level| {
+            panic!(
+                "AtEOXact_GUC: the transactional GUC stack (guc_stack.c) is a separate unit not \
+                 yet ported"
+            )
+        });
+
+        // GUC_check_errdetail / GUC_check_errhint (guc.c): record check-hook
+        // failure detail/hint into the backend-local check-error state.
+        gf::guc_check_errdetail::set(GUC_check_errdetail);
+        gf::guc_check_errhint::set(GUC_check_errhint);
+
+        // set_config_with_handle(name, handle, value, context, PGC_S_SESSION,
+        // srole, GUC_ACTION_SAVE, true, 0, false) as called by
+        // fmgr_security_definer (fmgr.c:723) for each proconfig SET item. The
+        // get_config_handle lookup is folded into set_config_option_global's
+        // by-name dispatch; C varies only `context` and `srole` (passed through),
+        // with source/action/changeVal/elevel/is_reload fixed for this caller.
+        gf::set_config_with_handle::set(|name, value, context, srole| {
+            set_config_option_global(
+                name,
+                Some(value),
+                context,
+                types_guc::PGC_S_SESSION,
+                srole,
+                GUC_ACTION_SAVE,
+                true,
+                types_error::ErrorLevel(0),
+                false,
+            )
+            .map(|_| ())
+        });
+    }
+
     // postgresql.conf parsing orchestration (config_file.c / guc-file.l).
     s::parse_long_option::set(|_mcx, _string| {
         panic!(

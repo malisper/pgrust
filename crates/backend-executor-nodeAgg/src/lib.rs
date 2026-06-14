@@ -1,8 +1,9 @@
 //! Port of `src/backend/executor/nodeAgg.c` — the Agg executor node.
 //!
-//! Scaffold only: every C function has a real, C-faithful signature with a
-//! `todo!("decomp")` body. The body phase fills the family modules in
-//! parallel.
+//! Decomposed into the family modules below, each fully filled with the
+//! C-faithful body (the residual `panic!`s are honest seam-and-panic into the
+//! still-unported plan-node / nodeFuncs expression vocabulary, not scaffold
+//! stubs).
 //!
 //! Function families (one module file each, see the module docs):
 //!
