@@ -156,6 +156,7 @@ backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+backend-storage-lmgr-proc = { path = "../backend-storage-lmgr-proc" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page = { path = "../backend-storage-page" }

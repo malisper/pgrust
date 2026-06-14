@@ -152,6 +152,7 @@ pub fn init_all() {
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lmgr::init_seams();
+    backend_storage_lmgr_proc::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page::init_seams();
@@ -618,6 +619,41 @@ mod recurrence_guard {
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
+        // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
+        // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
+        // cross-unit PGPROC/ProcGlobal-arena wiring (procarray add/remove + clog.c
+        // TransactionGroupUpdateXidStatus group-commit machinery + lock.c fast-path
+        // locks) that has not landed yet. The clog_group_* / *_clog_group_* set is
+        // the XID-status group-update batch (clog.c clogGroupFirst CAS list + the
+        // per-PGPROC clogGroupMember/Next/MemberXid/Page/Status fields); the
+        // my_proc_{xmin,xid,vxid,subxids}/proc_subxids/store_{top,sub}xid_in_proc
+        // accessors read/write live PGPROC xact state that procarray owns. Pay down
+        // when procarray (task #121) + clog group-update land. See DESIGN_DEBT.md.
+        ("backend_storage_lmgr_proc", "clog_group_first_compare_exchange"),
+        ("backend_storage_lmgr_proc", "clog_group_first_exchange"),
+        ("backend_storage_lmgr_proc", "clog_group_first_read"),
+        ("backend_storage_lmgr_proc", "init_proc_global"),
+        ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
+        ("backend_storage_lmgr_proc", "my_proc_clog_group_member"),
+        ("backend_storage_lmgr_proc", "my_proc_clog_group_next"),
+        ("backend_storage_lmgr_proc", "my_proc_subxids"),
+        ("backend_storage_lmgr_proc", "my_proc_vxid"),
+        ("backend_storage_lmgr_proc", "my_proc_xid"),
+        ("backend_storage_lmgr_proc", "my_proc_xmin"),
+        ("backend_storage_lmgr_proc", "proc_clog_group_member_page"),
+        ("backend_storage_lmgr_proc", "proc_clog_group_member_update"),
+        ("backend_storage_lmgr_proc", "proc_clog_group_next"),
+        ("backend_storage_lmgr_proc", "proc_global_semas"),
+        ("backend_storage_lmgr_proc", "proc_global_shmem_size"),
+        ("backend_storage_lmgr_proc", "proc_subxids"),
+        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member"),
+        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member_data"),
+        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_next"),
+        ("backend_storage_lmgr_proc", "set_my_proc_xmin"),
+        ("backend_storage_lmgr_proc", "set_proc_clog_group_member"),
+        ("backend_storage_lmgr_proc", "set_proc_clog_group_next"),
+        ("backend_storage_lmgr_proc", "store_subxid_in_proc"),
+        ("backend_storage_lmgr_proc", "store_top_xid_in_proc"),
         // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
         // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
         // It is correctly installed at runtime by backend-timezone-localtime's
