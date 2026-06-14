@@ -1399,6 +1399,30 @@ pub fn exec_init_expr_list<'mcx>(
     Ok(result)
 }
 
+/// `ExecInitExprList(nodes, NULL)` (execExpr.c) — the parentless variant,
+/// used by `ValuesNext` for the single-use per-row VALUES expressions. Same as
+/// [`exec_init_expr_list`] but compiles each element with no parent
+/// `PlanState` (the C `ExecInitExprList(exprlist, NULL)`), so nothing in the
+/// transient eval state links into the permanent plan tree and JIT is disabled.
+pub fn exec_init_expr_list_no_parent<'mcx>(
+    nodes: &[Option<&Expr>],
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<PgVec<'mcx, Option<ExprState<'mcx>>>> {
+    let mcx = estate.es_query_cxt;
+    let mut result: PgVec<'mcx, Option<ExprState<'mcx>>> =
+        mcx::vec_with_capacity_in(mcx, nodes.len())?;
+    for e in nodes {
+        match e {
+            None => result.push(None),
+            Some(node) => {
+                let state = exec_init_expr_no_parent(node, estate)?;
+                result.push(Some(PgBox::into_inner(state)));
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// `ExecPrepareExpr(node, estate)` (execExpr.c) — compile a single expression
 /// for use outside a normal executor node (parent = NULL).
 ///

@@ -71,7 +71,7 @@ use types_nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
 use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::MinimalTuple;
+use types_tuple::heaptuple::{MinimalTuple, MinimalTupleData};
 
 /// `SlotNumber` (nodeGatherMerge.c) — `typedef int32 SlotNumber;`. A slot /
 /// participant index stored in the heap. Provides no formal type-safety; it
@@ -1043,15 +1043,33 @@ fn gm_readnext_tuple<'mcx>(
     let reader = *gm_state.reader.get((nreader - 1) as usize).ok_or_else(|| {
         elog_error("gm_readnext_tuple: active reader must be present for a launched worker")
     })?;
+    // The landed tqueue contract returns the next tuple's on-wire minimal-tuple
+    // byte image (`None` once exhausted / would-block) plus the C `*done`
+    // out-parameter (true once the queue is detached). Mirror the C
+    // `TupleQueueReaderNext(reader, nowait, done)` call, propagating `*done`.
+    let (bytes, reader_done) = tqueue::tuple_queue_reader_next::call(reader, nowait)?;
+    *done = reader_done;
+
     // Since we'll be buffering these across multiple calls, we need to make a
     // copy.
     //   return tup ? heap_copy_minimal_tuple(tup, 0) : NULL;
     //
-    // The C copies the queue-memory pointer with heap_copy_minimal_tuple before
-    // buffering it; in the owned model the tqueue owner returns that copy into
-    // `mcx` directly (the queue tuple never escapes the owner), so the copy and
-    // the NULL passthrough both live behind the seam.
-    tqueue::tuple_queue_reader_next::call(mcx, reader, nowait, done)
+    // The C copies the queue-memory pointer with `heap_copy_minimal_tuple`
+    // before buffering it. Here the owner returns a copy of the wire bytes; we
+    // reassemble the owned `MinimalTuple` (leading `t_len` word + body) into
+    // `mcx`, which is the buffer-lived copy the C makes. `None` (no tuple)
+    // passes through as the NULL return.
+    match bytes {
+        None => Ok(None),
+        Some(image) => {
+            // image == MinimalTupleData::to_minimal_bytes(): the leading 4-byte
+            // `t_len` word followed by the body the reader re-stores.
+            let t_len = u32::from_ne_bytes([image[0], image[1], image[2], image[3]]);
+            let body = &image[core::mem::size_of::<u32>()..];
+            let mtup = MinimalTupleData::from_minimal_parts(mcx, t_len, body)?;
+            Ok(Some(alloc_in(mcx, mtup)?))
+        }
+    }
 }
 
 /// `heap_compare_slots(a, b, arg)` — compare the tuples in the two given slots,

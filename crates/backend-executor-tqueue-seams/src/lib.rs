@@ -5,6 +5,9 @@
 //! call panics loudly.
 
 #![allow(unused_doc_comments)]
+extern crate alloc;
+
+use types_error::PgResult;
 use types_execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
 
 /// `CreateTupleQueueReader(handle)`.
@@ -15,17 +18,11 @@ seam_core::seam!(pub fn destroy_tuple_queue_reader(reader: TupleQueueReaderHandl
 seam_core::seam!(pub fn create_tuple_queue_dest_receiver(handle: ShmMqAttachHandle) -> DestReceiverHandle);
 /// `receiver->rDestroy(receiver)`.
 seam_core::seam!(pub fn receiver_destroy(receiver: DestReceiverHandle));
-
-/// `TupleQueueReaderNext(reader, nowait, &done)` (tqueue.c) — read the next
-/// tuple from the worker's shared-memory queue. Returns `Ok(None)` when the
-/// queue would block (`SHM_MQ_WOULD_BLOCK`) or is detached (`SHM_MQ_DETACHED`);
-/// sets `done = true` only on detach. The C returns a pointer directly into
-/// queue memory; since the caller buffers tuples across calls (and must make a
-/// copy anyway), the owned model returns a copy of the `MinimalTuple` into
-/// `mcx` so the result outlives the queue read. Fallible on OOM.
-seam_core::seam!(pub fn tuple_queue_reader_next<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    reader: TupleQueueReaderHandle,
-    nowait: bool,
-    done: &mut bool,
-) -> types_error::PgResult<types_tuple::heaptuple::MinimalTuple<'mcx>>);
+/// `TupleQueueReaderNext(reader, nowait, &done)` (`tqueue.c`) — fetch the next
+/// tuple from the reader's queue. Returns the next minimal tuple as its on-wire
+/// byte image (`None` when no tuple is available — queue detached or
+/// `WouldBlock`) and the C `*done` out-parameter (`true` once the queue is
+/// detached, otherwise `false`). The bytes are the canonical minimal-tuple wire
+/// image the consumer re-stores into a slot. Fallible: `shm_mq_receive` can
+/// `ereport`.
+seam_core::seam!(pub fn tuple_queue_reader_next(reader: TupleQueueReaderHandle, nowait: bool) -> PgResult<(Option<alloc::vec::Vec<u8>>, bool)>);

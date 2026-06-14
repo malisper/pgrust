@@ -174,3 +174,25 @@ seam_core::seam!(
     /// `CheckClientConnectionPending = value` (postgres.c flag).
     pub fn set_check_client_connection_pending(value: bool)
 );
+
+seam_core::seam!(
+    /// `log_statement == LOGSTMT_ALL` (postgres.c GUC `log_statement`): whether
+    /// statement logging is set to log all statements. `tcop/fastpath.c`'s
+    /// `HandleFunctionRequest` reads this to decide whether to emit the
+    /// "fastpath function call" `LOG` line. Pure read of the postgres.c-owned
+    /// GUC.
+    pub fn log_statement_is_all() -> bool
+);
+
+seam_core::seam!(
+    /// `check_log_duration(msec_str, was_logged)` (postgres.c): decide whether
+    /// to log the statement duration. Returns the C result code (`0` = don't
+    /// log, `1` = log duration only, `2` = log duration + statement) together
+    /// with the formatted milliseconds string the C writes into its
+    /// `msec_str[32]` buffer (allocated in `mcx`; only meaningful for a nonzero
+    /// code). Reads the duration GUCs / statement timing owned by postgres.c.
+    pub fn check_log_duration<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        was_logged: bool,
+    ) -> types_error::PgResult<(i32, mcx::PgString<'mcx>)>
+);
