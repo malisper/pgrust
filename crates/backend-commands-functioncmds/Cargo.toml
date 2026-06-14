@@ -17,7 +17,7 @@ backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
-backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-acl = { path = "../types-acl" }

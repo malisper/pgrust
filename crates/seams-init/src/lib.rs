@@ -747,6 +747,15 @@ mod recurrence_guard {
         // alongside the `resolve_rustate` recovery channel.
         ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
         ("backend_executor_execTuples", "store_virtual_values"),
+        // nodes-core re-homes these two cross-unit DESIGN_DEBT seams onto its own
+        // -seams crate so the guard can track them (see DESIGN_DEBT.md). Both
+        // read the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/
+        // Const) and fold into funcapi's `internal_get_result_type` /
+        // `build_function_result_tupdesc_t` tupdesc spine — neither the node
+        // model nor a funcapi callback seam exists yet, so the body stays
+        // seam-and-panic (mirror-pg-and-panic) until those owners land.
+        ("backend_nodes_core", "call_stmt_result_desc"),
+        ("backend_nodes_core", "get_expr_result_type_node"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
