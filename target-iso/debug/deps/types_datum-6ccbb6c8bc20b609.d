@@ -1,0 +1,9 @@
+/Users/malisper/workspace/work/pgrust/.claude/worktrees/wf_a5cb6064-0bd-124/target-iso/debug/deps/types_datum-6ccbb6c8bc20b609.d: crates/types-datum/src/lib.rs crates/types-datum/src/array_build.rs crates/types-datum/src/datum.rs crates/types-datum/src/expandeddatum.rs crates/types-datum/src/varlena.rs
+
+/Users/malisper/workspace/work/pgrust/.claude/worktrees/wf_a5cb6064-0bd-124/target-iso/debug/deps/libtypes_datum-6ccbb6c8bc20b609.rmeta: crates/types-datum/src/lib.rs crates/types-datum/src/array_build.rs crates/types-datum/src/datum.rs crates/types-datum/src/expandeddatum.rs crates/types-datum/src/varlena.rs
+
+crates/types-datum/src/lib.rs:
+crates/types-datum/src/array_build.rs:
+crates/types-datum/src/datum.rs:
+crates/types-datum/src/expandeddatum.rs:
+crates/types-datum/src/varlena.rs:
