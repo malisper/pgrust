@@ -492,6 +492,7 @@ pub fn init_seams() {
         invoke_object_post_alter_hook(class_id, object_id, sub_id, InvalidOid, false)
     });
     s::invoke_object_post_alter_hook_arg::set(invoke_object_post_alter_hook);
+    s::invoke_function_execute_hook::set(invoke_function_execute_hook);
 }
 
 use types_core::primitive::InvalidOid;

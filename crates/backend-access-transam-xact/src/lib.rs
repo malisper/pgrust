@@ -1663,6 +1663,9 @@ pub fn init_seams() {
     seams::is_transaction_block::set(IsTransactionBlock);
     seams::isolation_uses_xact_snapshot::set(IsolationUsesXactSnapshot);
     seams::set_current_statement_start_timestamp::set(SetCurrentStatementStartTimestamp);
+    // `PreventInTransactionBlock(isTopLevel, stmtType)` — signature matches the
+    // owner body exactly.
+    seams::prevent_in_transaction_block::set(PreventInTransactionBlock);
 }
 
 #[cfg(test)]
