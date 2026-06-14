@@ -16,6 +16,8 @@ types-error = { path = "../types-error" }
 types-hash = { path = "../types-hash" }
 types-namespace = { path = "../types-namespace" }
 types-cache = { path = "../types-cache" }
+types-catalog = { path = "../types-catalog" }
+types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-selfuncs = { path = "../types-selfuncs" }

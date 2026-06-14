@@ -9,6 +9,7 @@
 
 pub mod catalog;
 pub mod catalog_dependency;
+pub mod pg_constraint;
 pub mod object_access;
 pub mod catalog_shdepend;
 pub mod opclasscmds_catalog;

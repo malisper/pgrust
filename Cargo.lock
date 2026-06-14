@@ -2000,6 +2000,7 @@ dependencies = [
 name = "backend-catalog-dependency-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-objectaddress-seams",
  "seam-core",
  "types-catalog",
  "types-core",
@@ -2242,6 +2243,41 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-constraint"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaccess-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-pg-constraint-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-commands-indexcmds-seams",
+ "backend-nodes-core",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-ri-triggers-seams",
+ "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "mcx",
+ "types-amapi",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-ri-triggers",
+ "types-scan",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3135,6 +3171,16 @@ dependencies = [
  "types-error",
  "types-parsenodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-indexcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-amapi",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -9865,6 +9911,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cache",
+ "types-catalog",
  "types-cluster",
  "types-core",
  "types-error",
@@ -9873,6 +9920,7 @@ dependencies = [
  "types-hash",
  "types-namespace",
  "types-partition",
+ "types-rel",
  "types-selfuncs",
  "types-storage",
  "types-tuple",
@@ -11440,6 +11488,7 @@ dependencies = [
  "backend-catalog-objectaccess",
  "backend-catalog-objectaddress",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-constraint",
  "backend-catalog-pg-db-role-setting",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-largeobject",
@@ -11765,6 +11814,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-tuple",
 ]
 
 [[package]]
