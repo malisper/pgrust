@@ -679,6 +679,18 @@ mod recurrence_guard {
         ("backend_access_table_tableam", "table_relation_toast_am"),
         ("backend_access_table_tableam", "table_scan_getnextslot"),
         ("backend_access_table_tableam", "table_scan_getnextslot_direction"),
+        // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
+        // is `common/relpath.c`'s function, not catalog.c's — the seam was
+        // mis-homed onto backend-catalog-catalog-seams (this owner's stable
+        // contract, `(db_oid, spc_oid) -> PgResult<String>`, owned String, no
+        // mcx). Its genuine owner crate `backend-common-relpath` (relpath.c) is
+        // unported; the canonical seam already has a value-shaped home in
+        // `backend-common-relpath-seams` (mcx -> PgString). Installing the path
+        // arithmetic here would re-home relpath.c's logic into the wrong TU
+        // (and the two seam contracts diverge: owned String vs Mcx/PgString).
+        // Install once relpath.c lands as its own owner; consumers (inval.c
+        // at_eoxact, relmapper relmap_redo) then move to the relpath seam.
+        ("backend_catalog_catalog", "get_database_path"),
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the
