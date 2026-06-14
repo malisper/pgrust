@@ -135,7 +135,9 @@ pub fn pg_main(mcx: Mcx<'static>, argv: &[&str]) -> PgResult<MainOutcome> {
     set_stack_base::call();
 
     // Set up locale information.
-    set_pglocale_pgservice::call(argv.first().copied().unwrap_or(""), "postgres");
+    // PG_TEXTDOMAIN("postgres") expands to "postgres" "-" PG_MAJORVERSION,
+    // i.e. "postgres-18" — the gettext message domain.
+    set_pglocale_pgservice::call(argv.first().copied().unwrap_or(""), "postgres-18");
 
     // In the postmaster, absorb the environment values for LC_COLLATE and
     // LC_CTYPE. Individual backends change these later from pg_database, but
