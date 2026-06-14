@@ -5,6 +5,22 @@
 //! then a call panics loudly.
 
 seam_core::seam!(
+    /// `InstrAlloc(n, instrument_options, async_mode)` (instrument.c): allocate
+    /// `n` zeroed [`Instrumentation`](types_nodes::Instrumentation) structures
+    /// in the caller's current memory context, filling the `need_timer` /
+    /// `need_bufusage` / `need_walusage` / `async_mode` flags from the option
+    /// bits. `instrument_options` is the C `int` `InstrumentOption` bitmask. A
+    /// negative `n` sign-extends to a huge request that palloc's MaxAllocSize
+    /// gate rejects with a recoverable error.
+    pub fn instr_alloc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        n: i32,
+        instrument_options: i32,
+        async_mode: bool,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::Instrumentation>>
+);
+
+seam_core::seam!(
     /// `InstrStartNode(instr)` (instrument.c): mark the start of a node
     /// execution — read the start timestamp (when `need_timer`) and snapshot
     /// the buffer/WAL usage totals. Errors with the C `elog(ERROR,

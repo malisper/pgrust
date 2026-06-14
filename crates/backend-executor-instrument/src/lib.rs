@@ -351,6 +351,7 @@ pub fn WalUsageAccumDiff(dst: &mut WalUsage, add: &WalUsage, sub: &WalUsage) {
 
 /// Install this unit's outward seams.
 pub fn init_seams() {
+    backend_executor_instrument_seams::instr_alloc::set(InstrAlloc);
     backend_executor_instrument_seams::instr_start_node::set(InstrStartNode);
     backend_executor_instrument_seams::instr_stop_node::set(InstrStopNode);
     backend_executor_instrument_seams::instr_end_loop::set(InstrEndLoop);
