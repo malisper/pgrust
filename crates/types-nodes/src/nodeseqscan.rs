@@ -7,6 +7,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
+use types_tableam::relscan::TableScanDesc;
 
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Scan;
@@ -40,15 +41,37 @@ impl SeqScan<'_> {
 /// } SeqScanState;
 /// ```
 ///
-/// The embedded [`ScanStateData`] carries `ss_currentRelation` and
-/// `ss_currentScanDesc` (the active table scan descriptor, opaque to the
-/// executor).
-#[derive(Debug, Default)]
+/// The embedded [`ScanStateData`] carries `ss_currentRelation`. The active
+/// table scan descriptor `ss_currentScanDesc` (the C `ScanState.ss_currentScan
+/// Desc`) lives here as the C-faithful value [`TableScanDesc`], not in the
+/// shared `ScanStateData` (its type sits above the shared executor-node knot;
+/// same placement rule as [`crate::nodetidscan::TidScanState`]).
+#[derive(Default)]
 pub struct SeqScanState<'mcx> {
     /// `ScanState ss` — its first field is `NodeTag`.
     pub ss: ScanStateData<'mcx>,
+    /// `TableScanDesc ss_currentScanDesc` — the active table scan descriptor;
+    /// `None` is the C `NULL` (no scan started yet).
+    pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
     /// `Size pscan_len` — size of the parallel heap scan descriptor.
     pub pscan_len: usize,
+}
+
+// Manual `Debug` (not `derive`): `ss_currentScanDesc`'s
+// [`TableScanDescData`](types_tableam::relscan::TableScanDescData) carries the
+// AM's opaque `dyn Any` tail (`am_private`), which is not `Debug`. (Same as
+// [`crate::nodetidscan::TidScanState`].)
+impl core::fmt::Debug for SeqScanState<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SeqScanState")
+            .field("ss", &self.ss)
+            .field(
+                "ss_currentScanDesc",
+                &self.ss_currentScanDesc.as_ref().map(|_| "<TableScanDesc>"),
+            )
+            .field("pscan_len", &self.pscan_len)
+            .finish()
+    }
 }
 
 impl<'mcx> SeqScanState<'mcx> {

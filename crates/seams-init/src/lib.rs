@@ -688,25 +688,21 @@ mod recurrence_guard {
         // relation_toast_am / relation_needs_toast_table vtable callbacks
         // (heapam_handler.c). table_parallelscan_reinitialize likewise dispatches a
         // vtable callback (relation_parallelscan_reinitialize) with no in-unit body.
-        // Separately, the COPY/seqscan scan seams model the AM-owned scan state as
-        // an opaque `ScanToken(u64)`, but tableam.c was ported with the C-faithful
-        // value-typed `TableScanDesc<'mcx>` (no ScanToken->descriptor registry
-        // exists, and inventing one would forge opacity). So the ScanToken-shaped
-        // table_beginscan / table_scan_getnextslot{,_direction} and
-        // table_relation_set_new_filelocator have no matching body either. The
-        // bitmap-scan table_endscan / table_rescan are VALUE-typed (bm-seams) and
-        // DO match the ported bodies — those ARE installed (not listed here). Pay
-        // down by porting heapam_handler.c + tableamapi.c (the provider seams) and
-        // unifying the COPY/seqscan scan model onto the value descriptor (the
-        // ScanToken seams). See DESIGN_DEBT.md.
+        // Pay down by porting heapam_handler.c + tableamapi.c (the provider seams).
+        //
+        // RETIRED (was the ScanToken contract divergence): the COPY/seqscan scan
+        // seams table_beginscan / table_scan_getnextslot{,_direction} /
+        // table_rescan / table_endscan / table_relation_set_new_filelocator have
+        // been re-signed off the invented opaque `ScanToken(u64)` onto the
+        // C-faithful value-typed `TableScanDesc<'mcx>` the tableam.c owner was
+        // ported with, INSTALLED in its init_seams (dispatching through
+        // rd_tableam, panicking at the unported provider exactly like the
+        // bitmap-scan bm-seams), and the consumers (nodeSeqscan / copyto /
+        // relcache) migrated onto the value descriptor. See DESIGN_DEBT.md.
         ("backend_access_table_tableam", "get_table_am_routine"),
-        ("backend_access_table_tableam", "table_beginscan"),
         ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
         ("backend_access_table_tableam", "table_relation_needs_toast_table"),
-        ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
         ("backend_access_table_tableam", "table_relation_toast_am"),
-        ("backend_access_table_tableam", "table_scan_getnextslot"),
-        ("backend_access_table_tableam", "table_scan_getnextslot_direction"),
         // DESIGN_DEBT (TD-GETDATABASEPATH): provider-unported. `GetDatabasePath`
         // is `common/relpath.c`'s function, not catalog.c's — the seam was
         // mis-homed onto backend-catalog-catalog-seams (this owner's stable

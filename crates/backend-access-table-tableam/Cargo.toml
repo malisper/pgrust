@@ -15,9 +15,11 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
+backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam-bm-seams = { path = "../backend-access-table-tableam-bm-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-common-syncscan-seams = { path = "../backend-access-common-syncscan-seams" }
