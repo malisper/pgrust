@@ -41,8 +41,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_core::Oid;
-use types_datum::Datum;
 use types_scan::scankey::ScanKeyData;
+
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// A catcache key slot is C's bare `Datum keys[CATCACHE_MAXKEYS]`: scalar words
+// hashed/compared by `cc_hashfunc`/`cc_fastequal`. By-reference keys never
+// occupy the word in this owned model (they travel as `SysCacheKey::Str`/
+// `Bytes`), so the slot stays the audited bare word, not the canonical
+// `Datum<'mcx>` enum.
+use types_datum::Datum as ScalarWord;
 
 /// Which hard-coded hash/equality pair a catcache key uses. Mirrors the
 /// `(CCHashFN, CCFastEqualFN)` pair `GetCCHashEqFuncs` assigns for a key type
@@ -171,7 +178,7 @@ pub struct ArenaCatCTup {
     /// `hash_value` — hash of the tuple's keys (selects the bucket).
     pub hash_value: u32,
     /// `keys[CATCACHE_MAXKEYS]` — the entry's key datums.
-    pub keys: [Datum; CATCACHE_MAXKEYS],
+    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
     /// `refcount` — number of active references (callers + lists).
     pub refcount: i32,
     /// `dead` — set when invalidated while still referenced.
@@ -207,7 +214,7 @@ pub struct ArenaCatCList {
     /// `hash_value` — hash of the partial key.
     pub hash_value: u32,
     /// `keys[CATCACHE_MAXKEYS]` — the partial key datums.
-    pub keys: [Datum; CATCACHE_MAXKEYS],
+    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
     /// `refcount`.
     pub refcount: i32,
     /// `dead`.
@@ -300,7 +307,7 @@ pub struct FetchedCatalogTuple {
     /// The flattened tuple data bytes (post-detoast).
     pub t_data: Vec<u8>,
     /// The tuple's key datums, extracted via the cache's `cc_keyno` + tupdesc.
-    pub keys: [Datum; CATCACHE_MAXKEYS],
+    pub keys: [ScalarWord; CATCACHE_MAXKEYS],
 }
 
 /* ===========================================================================
@@ -343,7 +350,7 @@ impl Default for ArenaCatCTup {
         ArenaCatCTup {
             ct_magic: CT_MAGIC,
             hash_value: 0,
-            keys: [Datum::null(); CATCACHE_MAXKEYS],
+            keys: [ScalarWord::null(); CATCACHE_MAXKEYS],
             refcount: 0,
             dead: false,
             negative: false,
@@ -362,7 +369,7 @@ impl Default for ArenaCatCList {
         ArenaCatCList {
             cl_magic: CL_MAGIC,
             hash_value: 0,
-            keys: [Datum::null(); CATCACHE_MAXKEYS],
+            keys: [ScalarWord::null(); CATCACHE_MAXKEYS],
             refcount: 0,
             dead: false,
             ordered: false,
