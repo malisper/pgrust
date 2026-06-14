@@ -43,7 +43,6 @@ dependencies = [
  "mcx",
  "types-brin",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-storage",
@@ -235,6 +234,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-scan",
+ "types-tuple",
 ]
 
 [[package]]
@@ -329,7 +329,6 @@ dependencies = [
  "common-hashfn-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -488,7 +487,6 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-datum",
  "types-error",
  "types-tuple",
 ]
@@ -1706,6 +1704,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-storage",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -4518,6 +4517,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -5093,6 +5093,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8537,10 +8538,12 @@ dependencies = [
 name = "backend-utils-adt-datum-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -9196,6 +9199,7 @@ dependencies = [
  "types-regex",
  "types-sortsupport",
  "types-stringinfo",
+ "types-tuple",
  "types-wchar",
 ]
 
@@ -9769,7 +9773,6 @@ dependencies = [
  "seam-core",
  "types-cache",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-tuple",
@@ -10485,11 +10488,11 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-portal",
  "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10917,7 +10920,7 @@ name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-datum",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11430,7 +11433,6 @@ name = "types-bgworker"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-datum",
 ]
 
 [[package]]
@@ -11443,7 +11445,6 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-tuple",
@@ -11918,7 +11919,6 @@ name = "types-scan"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-datum",
  "types-snapshot",
  "types-tuple",
 ]
