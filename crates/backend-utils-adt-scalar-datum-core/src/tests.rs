@@ -170,28 +170,12 @@ fn estimate_serialize_v_varlena() {
 // ---- Residual bare-word ABI edge (ScalarWord) -----------------------------
 
 // The bare-word `datum_copy_word` / `datum_transfer` deep-copy tests were
-// removed with those functions: their by-reference deep copy forged a pointer
-// word (`leak_bytes_as_datum`). The canonical by-reference copy is covered by
-// `copy_varlena_verbatim` / `copy_fixed_byref` above, which exercise the
-// byte-model `datum_copy` returning `Datum::ByRef`.
-
-#[test]
-fn word_image_eq_varlena() {
-    let a = varlena_4b(b"same");
-    let b = varlena_4b(b"same");
-    let c = varlena_4b(b"diff");
-    let da = ScalarWord::from_usize(a.as_ptr() as usize);
-    let db = ScalarWord::from_usize(b.as_ptr() as usize);
-    let dc = ScalarWord::from_usize(c.as_ptr() as usize);
-    assert!(datum_image_eq_word(da, db, false, -1).unwrap());
-    assert!(!datum_image_eq_word(da, dc, false, -1).unwrap());
-}
-
-#[test]
-fn word_image_eq_byval() {
-    assert!(datum_image_eq_word(ScalarWord::from_i64(5), ScalarWord::from_i64(5), true, 8).unwrap());
-    assert!(!datum_image_eq_word(ScalarWord::from_i64(5), ScalarWord::from_i64(6), true, 8).unwrap());
-}
+// removed with those functions, and the `word_image_eq_*` tests were removed
+// with `datum_image_eq_word`: their by-reference legs forged / dereferenced a
+// pointer word (`leak_bytes_as_datum` / `datum_ptr_slice`). The canonical
+// by-reference copy and image-equality are covered by `copy_varlena_verbatim` /
+// `copy_fixed_byref` and the `image_eq_*` tests above, which exercise the
+// byte-model `datum_copy` / `datum_image_eq_bytes` over `Datum::ByRef`.
 
 // ---- Serialize / restore round-trip (bare-word cursor lane) ---------------
 

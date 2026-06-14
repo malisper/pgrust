@@ -47,11 +47,10 @@ use types_core::primitive::Size;
 // `ExpandedObjectRef` is the `&[u8]`-over-a-varlena-image handle (NOT the Datum
 // shim); the canonical value enum is `types_tuple::…::Datum`. The bare-word
 // newtype `types_datum::Datum` is imported under the alias `ScalarWord` solely
-// for the audited DSM-cursor / fmgr-return ABI edges (`datum_restore`,
-// `datum_serialize`, `datum_image_eq_word`) whose seam contracts still carry a
-// bare machine word for not-yet-migrated callers (nbtree array (de)serialize,
-// misc2 rowtypes); every value-model operation uses the `Datum` enum and its
-// `from_*`/`as_*` codec.
+// for the audited DSM-cursor ABI edge (`datum_restore` / `datum_serialize`)
+// whose seam contract still carries a bare machine word for the not-yet-migrated
+// nbtree array (de)serialize and params.c restore callers; every value-model
+// operation uses the `Datum` enum and its `from_*`/`as_*` codec.
 use types_datum::{Datum as ScalarWord, ExpandedObjectRef};
 use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -369,12 +368,10 @@ fn byval_words(
 // These functions are the audited bare-machine-word edge the prompt sanctions
 // (fmgr-return / DSM-cursor): the seam contract carries a `ScalarWord`
 // (`types_datum::Datum`, C's plain `usize` machine word) for callers that have
-// not yet migrated to the `Datum` enum — nbtree array (de)serialize
-// (`datum_serialize` /
-// `datum_restore`, a `*mut u8` DSM cursor), and misc2 `rowtypes`
-// (`datum_image_eq_word`, via its `tuple_value_as_datum` pointer bridge). The
-// value-model lane above and the `*_v` enum seams below are the migration
-// target; these stay until their cross-crate consumers move over.
+// not yet migrated to the `Datum` enum — nbtree array (de)serialize and
+// params.c restore (`datum_serialize` / `datum_restore`, a `*mut u8` DSM
+// cursor). The value-model lane above and the `*_v` enum seams below are the
+// migration target; these stay until their cross-crate consumers move over.
 //
 // A by-reference `ScalarWord` is C's machine word == a raw pointer into bytes
 // the caller keeps alive in `mcx`. We recover the length from the pointed-at
@@ -441,46 +438,14 @@ unsafe fn cstring_len_at(value: ScalarWord) -> usize {
 // expanded-RW `TransferExpandedObject` leg `datumTransfer` carried has no live
 // caller and no seam, so it is dropped with the lane.
 
-/// `datum_image_eq(value1, value2, typByVal, typLen)` (datum.c) — bare-`Datum`
-/// form. Consumed by misc2 rowtypes' `tuple_value_as_datum` pointer bridge.
-/// SAFETY: by-ref Datums point at live, already-detoasted images.
-pub fn datum_image_eq_word(
-    value1: ScalarWord,
-    value2: ScalarWord,
-    typ_byval: bool,
-    typ_len: i16,
-) -> PgResult<bool> {
-    let typ_len = typ_len as i32;
-    if typ_byval {
-        return Ok(value1 == value2);
-    }
-    unsafe {
-        if typ_len > 0 {
-            let n = typ_len as usize;
-            let b1 = datum_ptr_slice(value1, n);
-            let b2 = datum_ptr_slice(value2, n);
-            Ok(b1 == b2)
-        } else if typ_len == -1 {
-            let (data1, len1) = varlena_payload(varlena_image(value1));
-            let (data2, len2) = varlena_payload(varlena_image(value2));
-            if len1 != len2 {
-                return Ok(false);
-            }
-            Ok(data1 == data2)
-        } else if typ_len == -2 {
-            let len1 = cstring_len_at(value1) + 1;
-            let len2 = cstring_len_at(value2) + 1;
-            if len1 != len2 {
-                return Ok(false);
-            }
-            let s1 = datum_ptr_slice(value1, len1);
-            let s2 = datum_ptr_slice(value2, len2);
-            Ok(s1 == s2)
-        } else {
-            Err(PgError::error(format!("unexpected typLen: {typ_len}")))
-        }
-    }
-}
+// `datum_image_eq` over the bare-machine-word `Datum` lane — removed in the
+// Datum-unification cleanup. Its by-reference legs read through raw pointer
+// words (`datum_ptr_slice` / `varlena_image` / `cstring_len_at`), the unsafe
+// byte-window the unification retires. Its only consumer (misc2 rowtypes'
+// `tuple_value_as_datum` pointer bridge) migrated to the canonical value-enum
+// `datum_image_eq_v` (see below, which forwards to the byte-model
+// [`datum_image_eq_bytes`]); the bare-word `datum_image_eq` seam now has zero
+// callers, so it is dropped with the lane.
 
 /// `datumSerialize(value, isnull, typByVal, typLen, &cursor)` (datum.c): flatten
 /// one datum into `cursor` (a `*mut u8` modelling C's `char **start_address`),
@@ -751,17 +716,17 @@ pub fn init_seams() {
     backend_utils_adt_datum_seams::datum_image_hash_v::set(datum_image_hash_v);
     backend_utils_adt_datum_seams::datum_image_eq_v::set(datum_image_eq_v);
 
-    // Residual bare-machine-word ABI edge for not-yet-migrated cross-crate
-    // consumers (nbtree array (de)serialize over a DSM cursor; misc2 rowtypes
-    // pointer bridge). Removed when those migrate; the superseded
-    // `datum_estimate_space` / `datum_image_hash` are not installed. The
-    // bare-word `datum_copy` is no longer installed either: its last consumer
-    // (params.c `copyParamList`) migrated to `datum_copy_v`, so the forged
-    // `leak_bytes_as_datum` / `datum_copy_word` / `datum_transfer` lane has been
-    // removed in favour of the canonical `Datum<'mcx>::ByRef` `datum_copy_v`.
+    // Residual bare-machine-word ABI edge: the last two transitional word seams,
+    // the nbtree/params.c array (de)serialize over a `*mut u8` DSM cursor. Their
+    // consumers (nbtree, params.c, execParallel via its own support seams) still
+    // carry a `ScalarWord` through the cursor and have no `*_v` form yet; removed
+    // when they migrate. The superseded bare-word `datum_copy` / `datum_image_eq`
+    // / `datum_estimate_space` / `datum_image_hash` are NOT installed: their
+    // consumers moved to the canonical byte-model `datum_copy` and the `*_v`
+    // value-enum lane, so the forged `leak_bytes_as_datum` / `datum_copy_word` /
+    // `datum_transfer` / `datum_image_eq_word` word-codec has been retired.
     backend_utils_adt_datum_seams::datum_serialize::set(datum_serialize);
     backend_utils_adt_datum_seams::datum_restore::set(datum_restore);
-    backend_utils_adt_datum_seams::datum_image_eq::set(datum_image_eq_word);
 }
 
 #[cfg(test)]
