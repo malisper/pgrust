@@ -18,6 +18,7 @@ pub fn init_all() {
     backend_access_heap_heaptoast::init_seams();
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_index_indexam::init_seams();
+    backend_access_nbt_dedup::init_seams();
     backend_access_nbtree_nbtree::init_seams();
     backend_access_rmgrdesc_small::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();

@@ -10144,6 +10144,7 @@ dependencies = [
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",
  "backend-access-index-indexam",
+ "backend-access-nbt-dedup",
  "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
  "backend-access-rmgrdesc-xactdesc",
