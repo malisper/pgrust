@@ -91,6 +91,7 @@ pub fn init_seams() {
     fd_seams::close_transient_file::set(seams::close_transient_file_i32);
     fd_seams::transient_read::set(seams::transient_read);
     fd_seams::transient_write::set(seams::transient_write);
+    fd_seams::pg_pread::set(seams::pg_pread);
 
     // Directory / tree helpers (decls owned here; logic in `seams`).
     fd_seams::rmtree::set(seams::rmtree);
