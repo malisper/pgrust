@@ -100,6 +100,12 @@ pub const ANUM_PG_LARGEOBJECT_METADATA_OID: types_core::primitive::AttrNumber = 
 /// `Anum_pg_largeobject_loid` — `pg_largeobject.loid` column number
 /// (`pg_largeobject_d.h`).
 pub const ANUM_PG_LARGEOBJECT_LOID: types_core::primitive::AttrNumber = 1;
+/// `Anum_pg_largeobject_pageno` — `pg_largeobject.pageno` column number
+/// (`pg_largeobject_d.h`).
+pub const ANUM_PG_LARGEOBJECT_PAGENO: types_core::primitive::AttrNumber = 2;
+/// `Anum_pg_largeobject_data` — `pg_largeobject.data` column number
+/// (`pg_largeobject_d.h`).
+pub const ANUM_PG_LARGEOBJECT_DATA: types_core::primitive::AttrNumber = 3;
 /// `OperatorFamilyRelationId` — `pg_opfamily` (`pg_opfamily_d.h`).
 pub const OPERATOR_FAMILY_RELATION_ID: Oid = 2753;
 /// `OperatorClassRelationId` — `pg_opclass` (`pg_opclass_d.h`).

@@ -16,6 +16,7 @@ pub mod file;
 pub mod fileset;
 pub mod ilist;
 pub mod inval;
+pub mod large_object;
 pub mod latch;
 pub mod lock;
 pub mod relfilelocator;

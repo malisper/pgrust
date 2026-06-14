@@ -159,6 +159,7 @@ backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
 backend-storage-ipc-sinval = { path = "../backend-storage-ipc-sinval" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
+backend-storage-large-object = { path = "../backend-storage-large-object" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
