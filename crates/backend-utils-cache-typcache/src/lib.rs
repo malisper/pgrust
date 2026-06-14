@@ -51,6 +51,13 @@ use types_error::{
 };
 use types_tuple::heaptuple::{TupleDescData, RECORDOID};
 
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// Kept only at the cache-callback registration ABI edge: the syscache/relcache
+// callback `arg` is a plain machine word that C passes as `(Datum) 0`. The
+// value-carrying canonical enum is `types_tuple::backend_access_common_heaptuple::Datum`,
+// which typcache does not traffic in (it returns typed entries, not Datums).
+use types_datum::Datum as ScalarWord;
+
 use backend_access_common_session_seams as session_seams;
 use backend_access_common_tupdesc_seams as tupdesc_seams;
 use backend_catalog_pg_enum_seams as pg_enum_seams;
@@ -533,22 +540,22 @@ pub fn lookup_type_cache(type_id: Oid, flags: i32) -> PgResult<()> {
     if need_init {
         inval_seams::cache_register_relcache_callback::call(
             type_cache_rel_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             TYPEOID,
             type_cache_typ_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CLAOID,
             type_cache_opc_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         inval_seams::cache_register_syscache_callback::call(
             CONSTROID,
             type_cache_constr_callback,
-            types_datum::Datum::null(),
+            ScalarWord::null(),
         )?;
         with_state(|st| -> PgResult<()> {
             st.initialized = true;
@@ -2047,7 +2054,7 @@ fn invalidate_composite_type_cache_entry(type_id: Oid) {
 }
 
 /// `TypeCacheRelCallback` — relcache invalidation hook.
-fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
+fn type_cache_rel_callback(_arg: ScalarWord, relid: Oid) {
     if oid_is_valid(relid) {
         // Find a RelIdToTypeIdCacheHash entry.
         let composite_typid = with_state(|st| st.rel_id_to_type_id.get(&relid).copied());
@@ -2094,7 +2101,7 @@ fn type_cache_rel_callback(_arg: types_datum::Datum, relid: Oid) {
 }
 
 /// `TypeCacheTypCallback` — pg_type syscache invalidation hook.
-fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u32) {
+fn type_cache_typ_callback(_arg: ScalarWord, _cacheid: i32, hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| {
         st.type_cache
             .values()
@@ -2117,7 +2124,7 @@ fn type_cache_typ_callback(_arg: types_datum::Datum, _cacheid: i32, hashvalue: u
 }
 
 /// `TypeCacheOpcCallback` — pg_opclass syscache invalidation hook.
-fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_opc_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let entries: Vec<Oid> = with_state(|st| st.type_cache.keys().copied().collect());
     for oid in entries {
         let had_opclass = with_state(|st| {
@@ -2133,7 +2140,7 @@ fn type_cache_opc_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: 
 }
 
 /// `TypeCacheConstrCallback` — pg_constraint syscache invalidation hook.
-fn type_cache_constr_callback(_arg: types_datum::Datum, _cacheid: i32, _hashvalue: u32) {
+fn type_cache_constr_callback(_arg: ScalarWord, _cacheid: i32, _hashvalue: u32) {
     let mut typentry = with_state(|st| st.first_domain_type_entry);
     while let Some(oid) = typentry {
         with_state(|st| st.entry_mut(oid).flags &= !TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
