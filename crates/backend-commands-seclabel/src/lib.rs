@@ -240,7 +240,7 @@ pub fn ExecSecLabelStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &SecLabelStmt) -> PgResult<O
      */
     let object = object_node(stmt);
     let ResolvedObjectAddress { address, relation } =
-        get_object_address::call(mcx, stmt.objtype, object, ShareUpdateExclusiveLock)?;
+        get_object_address::call(mcx, stmt.objtype, object, ShareUpdateExclusiveLock, false)?;
 
     /* Require ownership of the target object (seclabel.c:171-173). */
     check_object_ownership::call(

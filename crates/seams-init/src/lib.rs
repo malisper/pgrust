@@ -38,6 +38,7 @@ pub fn init_all() {
     backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_access_transam_xlogutils::init_seams();
+    backend_backup_server::init_seams();
     backend_backup_sink::init_seams();
     backend_bootstrap_bootstrap::init_seams();
     backend_catalog_catalog::init_seams();
@@ -53,6 +54,7 @@ pub fn init_all() {
     backend_commands_conversioncmds::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
+    backend_commands_dropcmds::init_seams();
     backend_commands_foreigncmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();
@@ -76,15 +78,18 @@ pub fn init_all() {
     backend_executor_nodeCustom::init_seams();
     backend_executor_nodeForeignscan::init_seams();
     backend_foreign_foreign::init_seams();
+    backend_executor_nodeGatherMerge::init_seams();
     backend_executor_nodeGroup::init_seams();
     backend_executor_nodeHash::init_seams();
     backend_executor_nodeHashjoin::init_seams();
+    backend_executor_nodeBitmapIndexscan::init_seams();
     backend_executor_nodeIndexonlyscan::init_seams();
     backend_executor_nodeLimit::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMemoize::init_seams();
     backend_executor_nodeMergejoin::init_seams();
     backend_executor_nodeModifyTable::init_seams();
+    backend_executor_nodeRecursiveunion::init_seams();
     backend_executor_nodeProjectSet::init_seams();
     backend_executor_nodeNamedtuplestorescan::init_seams();
     backend_executor_nodeResult::init_seams();
@@ -97,7 +102,9 @@ pub fn init_all() {
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
+    backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
+    backend_lib_hyperloglog::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();

@@ -93,6 +93,12 @@ seam_core::seam!(pub fn destroy_parallel_context(pcxt: ParallelContextHandle) ->
 seam_core::seam!(pub fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32);
 /// `pcxt->nworkers_launched`.
 seam_core::seam!(pub fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32);
+/// `pcxt->nworkers_to_launch`.
+seam_core::seam!(pub fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32);
+/// `LaunchParallelWorkers(pcxt)` (parallel.c) — register and start the parallel
+/// workers described by `pcxt`, setting `pcxt->nworkers_launched`. Allocates /
+/// can `ereport(ERROR)`.
+seam_core::seam!(pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> types_error::PgResult<()>);
 /// `&pcxt->estimator`.
 seam_core::seam!(pub fn pcxt_estimator(pcxt: ParallelContextHandle) -> ShmTocEstimatorHandle);
 /// `pcxt->toc`.

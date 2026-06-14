@@ -51,3 +51,30 @@ seam_core::seam!(pub fn ParallelQueryMain<'mcx>(
     seg: DsmSegmentHandle,
     toc: ShmTocHandle,
 ) -> PgResult<()>);
+
+/// `ExecInitParallelPlan(planstate, estate, sendParams, nworkers, tuples_needed)`
+/// over the executor's **owned** plan-state tree (`&mut PlanStateNode`) rather
+/// than a `PlanStateHandle`. The handle-space [`ExecInitParallelPlan`]
+/// declaration above is the bridge used once a parallel-planstate registry
+/// exists; the owned executor nodes (nodeGather / nodeGatherMerge) thread their
+/// `outerPlanState` directly, so they call this variant. The owner serializes
+/// the plan, sets up the DSM, and returns the leader's
+/// [`ParallelExecutorInfo`]. Allocates / can `ereport(ERROR)`.
+seam_core::seam!(pub fn exec_init_parallel_plan_owned<'mcx>(
+    mcx: Mcx<'mcx>,
+    planstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    send_params: Option<&Bitmapset>,
+    nworkers: i32,
+    tuples_needed: TuplesNeeded,
+) -> PgResult<ParallelExecutorInfo<'mcx>>);
+
+/// `ExecParallelReinitialize(planstate, pei, sendParams)` over the owned
+/// plan-state tree (re-initialize the DSM for a rescan). Owned-space companion
+/// of [`ExecParallelReinitialize`]; see [`exec_init_parallel_plan_owned`].
+seam_core::seam!(pub fn exec_parallel_reinitialize_owned<'mcx>(
+    mcx: Mcx<'mcx>,
+    planstate: &mut types_nodes::PlanStateNode<'mcx>,
+    pei: &mut ParallelExecutorInfo<'mcx>,
+    send_params: Option<&Bitmapset>,
+) -> PgResult<()>);
