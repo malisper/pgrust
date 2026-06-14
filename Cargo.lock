@@ -3773,6 +3773,7 @@ dependencies = [
 name = "backend-commands-user"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-catalog-seams",
  "backend-commands-user-seams",
  "backend-utils-error",
  "mcx",
@@ -9020,12 +9021,12 @@ name = "backend-utils-adt-acl"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-pg-largeobject-seams",
  "backend-commands-dbcommands-seams",
  "backend-commands-proclang-seams",
  "backend-commands-tablespace-seams",
- "backend-commands-user-seams",
  "backend-foreign-foreign-seams",
  "backend-lib-bloomfilter-seams",
  "backend-utils-adt-acl-seams",

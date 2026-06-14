@@ -43,6 +43,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsReservedName(name)` (catalog/catalog.c): true iff `name` starts with
+    /// the `pg_` prefix (reserved for system object names). Pure prefix check;
+    /// the `PgResult` wrapper mirrors the seam-call surface (infallible body).
+    pub fn is_reserved_name(name: String) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `IsCatalogNamespace(namespaceId)` (catalog/catalog.c): true iff the
     /// namespace is `pg_catalog` (`namespaceId == PG_CATALOG_NAMESPACE`). No
     /// catalog access — infallible.
