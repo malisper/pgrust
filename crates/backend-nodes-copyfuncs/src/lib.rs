@@ -66,3 +66,173 @@ pub fn copyObject<'dst>(obj: &Node<'_>, dst: Mcx<'dst>) -> PgResult<Node<'dst>> 
 pub fn init_seams() {
     backend_nodes_copyfuncs_seams::copy_object::set(|dst, n| n.copy_node_in(dst));
 }
+
+// The tests need `std` (memory-context construction, `MemoryContext`, the seam
+// `static mut` serialization mutex); the crate proper is `#![no_std]`.
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Mutex;
+
+    use mcx::{MemoryContext, PgString};
+    use types_nodes::node_tree::Node;
+    use types_nodes::value::Float;
+
+    // Installing the process-global seam mutates a `static mut`; serialize the
+    // tests that touch it so they cannot race.
+    static SEAM_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Build a small CONVERTED-leaf node tree in context `mcx`: a `T_Float`
+    /// value node whose `fval` is a context-allocated string. `Float` carries a
+    /// `PgString` payload (`char *fval`, `COPY_STRING_FIELD`), so a deep copy of
+    /// this node must actually re-home a heap allocation onto the destination
+    /// context — exactly the property that makes copy fallible and context-
+    /// threaded. (The `pgrust` reference builds `OpExpr(Var, CaseExpr)` from the
+    /// primnode families; those have not converted yet in this repo, so the tree
+    /// is adapted to the converted Value/Bitmapset/List subset — the deep-copy /
+    /// equal / fallible-copy contract under test is identical.)
+    fn sample_tree(mcx: mcx::Mcx<'_>) -> Node<'_> {
+        Node::Float(Float {
+            fval: PgString::from_str_in("12345", mcx).unwrap(),
+        })
+    }
+
+    #[test]
+    fn copy_object_round_trips_across_contexts_and_is_equal() {
+        // Source context A and destination context B are independent memory
+        // contexts — the owned-tree analogue of copying a node tree out of one
+        // `CurrentMemoryContext` into another.
+        let ctx_a = MemoryContext::new("copyfuncs-src-A");
+        let ctx_b = MemoryContext::new("copyfuncs-dst-B");
+
+        let original = sample_tree(ctx_a.mcx());
+
+        // `copyObject` deep-copies into B.
+        let copied = copyObject(&original, ctx_b.mcx()).expect("copy into B must succeed");
+
+        // The deep copy is structurally equal to the source.
+        assert!(
+            copied.equal_node(&original),
+            "copyObject result must be deep-equal to the source"
+        );
+
+        // `copyObjectImpl` is the same operation.
+        let copied2 = copyObjectImpl(&original, ctx_b.mcx()).expect("copy into B must succeed");
+        assert!(copied2.equal_node(&original));
+
+        // The copy genuinely lives in B (it charged bytes there): the `char
+        // *fval` string was re-homed onto B's allocator.
+        assert!(
+            ctx_b.subtree_used() > 0,
+            "the deep copy must have charged its string allocation to B"
+        );
+    }
+
+    #[test]
+    fn copy_survives_dropping_the_source_context() {
+        // The mcx deep-copy property: a copy made into B outlives the source
+        // context A. Build in A, copy into B, then DROP A — the copy must remain
+        // valid and equal to a reference value rebuilt independently in B.
+        let ctx_b = MemoryContext::new("copyfuncs-dst-B");
+
+        let copied = {
+            let ctx_a = MemoryContext::new("copyfuncs-src-A");
+            let original = sample_tree(ctx_a.mcx());
+            let copied = copyObject(&original, ctx_b.mcx()).expect("copy into B must succeed");
+            // `ctx_a` (and `original`, borrowing it) are dropped at the end of
+            // this block; `copied` borrows only B and so escapes.
+            copied
+        };
+
+        // A is gone. The copy still reads correctly out of B.
+        let reference = sample_tree(ctx_b.mcx());
+        assert!(
+            copied.equal_node(&reference),
+            "the copy must survive dropping the source context (it lives in B)"
+        );
+        if let Node::Float(f) = &copied {
+            assert_eq!(f.fval.as_str(), "12345");
+        } else {
+            panic!("expected a T_Float node");
+        }
+    }
+
+    /// A small derived node struct carrying a plain scalar field and a
+    /// parse-location field, to exercise the `#[derive(PgNode)]` macro's
+    /// `COMPARE_SCALAR_FIELD` (compared) vs `COMPARE_LOCATION_FIELD` (no-op)
+    /// generation — the analogue of the primnode `location` field the `pgrust`
+    /// reference relies on (no converted leaf carries one yet).
+    #[derive(Debug, backend_nodes_macros::PgNode)]
+    struct LocNode {
+        /// `COMPARE_SCALAR_FIELD` — participates in equality.
+        value: i32,
+        /// `ParseLoc location` — `COMPARE_LOCATION_FIELD` is a no-op, so a diff
+        /// here must NOT make two nodes unequal.
+        #[pg_node(location)]
+        location: i32,
+    }
+
+    #[test]
+    fn equal_distinguishes_a_scalar_but_ignores_location() {
+        use backend_nodes_node_support::PgNodeEqual;
+
+        let base = LocNode { value: 7, location: 10 };
+
+        // Same scalar, different location -> still equal (location ignored).
+        let loc_only = LocNode { value: 7, location: 999 };
+        assert!(
+            base.equal_node(&loc_only),
+            "equal_node must ignore a location-only difference (COMPARE_LOCATION_FIELD)"
+        );
+
+        // Different scalar -> not equal (location identical, to isolate the
+        // scalar as the sole difference).
+        let scalar_diff = LocNode { value: 8, location: 10 };
+        assert!(
+            !base.equal_node(&scalar_diff),
+            "equal_node must detect a changed scalar field (COMPARE_SCALAR_FIELD)"
+        );
+    }
+
+    #[test]
+    fn copy_into_a_tiny_limit_context_returns_err_not_panic() {
+        // The fallible-copy contract: copying allocates against the destination
+        // context, so a context whose limit is too small to hold the copy must
+        // surface an `Err` (the C `ereport(ERROR)` on OOM) rather than panic.
+        let ctx_src = MemoryContext::new("copyfuncs-src");
+        let original = sample_tree(ctx_src.mcx());
+
+        // A destination capped at 1 byte cannot hold the re-homed `fval` string.
+        let tiny = MemoryContext::new("copyfuncs-tiny").with_limit(1);
+        let result = copyObject(&original, tiny.mcx());
+        assert!(
+            result.is_err(),
+            "copying into an over-limit context must return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn install_routes_the_seam_to_this_impl() {
+        let _guard = SEAM_LOCK.lock().unwrap();
+
+        // Wire the centralized seam to this crate's implementation.
+        init_seams();
+
+        let ctx_src = MemoryContext::new("copyfuncs-src");
+        let ctx_dst = MemoryContext::new("copyfuncs-dst");
+        let original = sample_tree(ctx_src.mcx());
+
+        // Reach the implementation purely through the centralized seam.
+        let via_seam = backend_nodes_copyfuncs_seams::copy_object::call(ctx_dst.mcx(), &original)
+            .expect("seam copy must succeed");
+
+        // The seam must produce a deep copy identical to a direct copy.
+        let direct = copyObject(&original, ctx_dst.mcx()).expect("direct copy must succeed");
+        assert!(via_seam.equal_node(&direct));
+        assert!(via_seam.equal_node(&original));
+    }
+}

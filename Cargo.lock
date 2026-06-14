@@ -5431,6 +5431,8 @@ name = "backend-nodes-copyfuncs"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-copyfuncs-seams",
+ "backend-nodes-macros",
+ "backend-nodes-node-support",
  "mcx",
  "types-error",
  "types-nodes",

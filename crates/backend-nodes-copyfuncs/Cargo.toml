@@ -13,3 +13,10 @@ mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 backend-nodes-copyfuncs-seams = { path = "../backend-nodes-copyfuncs-seams" }
+
+[dev-dependencies]
+# The node-tree runtime traits + the `#[derive(PgNode)]` proc-macro, so the
+# location-vs-scalar equality test can stand up a small derived node struct and
+# exercise the macro's `COMPARE_LOCATION_FIELD` (no-op) generation directly.
+backend-nodes-node-support = { path = "../backend-nodes-node-support" }
+backend-nodes-macros = { path = "../backend-nodes-macros" }
