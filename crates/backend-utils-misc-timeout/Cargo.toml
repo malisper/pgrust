@@ -20,3 +20,11 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+# conffiles.c / injection_point.c / pg_config.c / tzparser.c support
+backend-utils-error = { path = "../backend-utils-error" }
+types-misc-more2 = { path = "../types-misc-more2" }
+backend-utils-misc-conffiles-seams = { path = "../backend-utils-misc-conffiles-seams" }
+backend-storage-ipc-injection-point-seams = { path = "../backend-storage-ipc-injection-point-seams" }
+port-path-seams = { path = "../port-path-seams" }
+backend-utils-adt-datetime-seams = { path = "../backend-utils-adt-datetime-seams" }
+common-config-info-seams = { path = "../common-config-info-seams" }
