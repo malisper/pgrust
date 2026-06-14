@@ -324,15 +324,10 @@ pub fn JsonEncodeDateTime<'mcx>(
     typid: Oid,
     tzp: Option<i32>,
 ) -> PgResult<String> {
-    // The actual datetime field-conversion owner (`timestamp.c`) is unported and
-    // its `json_encode_datetime` seam still carries the bare-word
-    // `types_datum::Datum` ABI. A datetime is a by-value word (`ByVal`), so we
-    // forward the canonical value's machine word unchanged.
-    backend_utils_adt_timestamp_seams::json_encode_datetime::call(
-        ScalarWord::from_usize(value.as_usize()),
-        typid,
-        tzp,
-    )
+    // The actual datetime field-conversion owner (`timestamp.c`) is unported;
+    // its `json_encode_datetime` seam now carries the canonical
+    // `types_tuple::Datum<'mcx>` (by reference), so forward the value unchanged.
+    backend_utils_adt_timestamp_seams::json_encode_datetime::call(value, typid, tzp)
 }
 
 /// C: `array_dim_to_json(StringInfo result, int dim, int ndims, int *dims,
