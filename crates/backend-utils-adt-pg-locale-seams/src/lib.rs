@@ -4,9 +4,21 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
+use types_cash::CashLconv;
 use types_core::{Oid, PgWChar};
 use types_error::PgResult;
 use types_locale::PgLocale;
+
+seam_core::seam!(
+    /// `PGLC_localeconv()` (pg_locale.c): snapshot the monetary subset of
+    /// libc's `struct lconv` for the current `lc_monetary` locale. Consulted at
+    /// the top of every `cash.c` text/numeric entry point. The real provider
+    /// drives libc `setlocale`/`localeconv`, caches, and re-encodes the string
+    /// members into the database encoding; until `pg_locale` is wired the seam
+    /// panics loudly. (Under `lc_monetary = 'C'` the snapshot is
+    /// `CashLconv::c_locale`.) Owner: `backend-utils-adt-pg-locale`.
+    pub fn pglc_localeconv() -> CashLconv
+);
 
 /// The `pg_wc_is*` probe family selector (`regc_pg_locale.c`). Identifies which
 /// libc/ICU/builtin-Unicode ctype predicate the locale owner must evaluate for a
