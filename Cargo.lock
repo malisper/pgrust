@@ -445,6 +445,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-heapam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-heap-heapam-visibility",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-transam",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-rmgrdesc-next",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-page",
+ "backend-utils-time-combocid-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-vacuum",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-heap-heapam-seams"
 version = "0.0.0"
 dependencies = [
@@ -1279,11 +1310,13 @@ dependencies = [
 name = "backend-access-transam-multixact-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
  "types-storage",
  "types-wal",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -1780,6 +1813,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "common-pglz",
  "mcx",
  "port-crc32c",
@@ -1789,6 +1823,7 @@ dependencies = [
  "types-logical",
  "types-storage",
  "types-wal",
+ "types-walsummarizer",
 ]
 
 [[package]]
@@ -11464,6 +11499,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-hashvalidate",
+ "backend-access-heap-heapam",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",
