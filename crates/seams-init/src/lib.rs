@@ -615,6 +615,7 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "slot_getattr"),
         ("backend_executor_execTuples", "slot_getattr_by_id"),
         ("backend_executor_execTuples", "slot_natts"),
+        ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),

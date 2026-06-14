@@ -1460,7 +1460,6 @@ mod seam_layer {
     use core::cell::RefCell;
     use core::ptr::NonNull;
 
-    use backend_postmaster_bgworker_seams::background_worker_handle_from_token;
     use backend_storage_ipc_dsm_core::dsm::DsmSegmentId;
     use backend_utils_mmgr_mcxt_seams::top_memory_context;
     use mcx::PgBox;
@@ -1609,7 +1608,8 @@ mod seam_layer {
     }
 
     fn shm_mq_set_handle(mqh: ShmMqAttachHandle, handle: ExecBgwHandle) {
-        let real = background_worker_handle_from_token::call(handle);
+        let real =
+            backend_postmaster_bgworker_seams::background_worker_handle_from_token::call(handle);
         with_registry(|r| real_set_handle(r.get_mut(mqh), real));
     }
 
