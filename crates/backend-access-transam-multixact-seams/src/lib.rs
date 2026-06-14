@@ -43,6 +43,53 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MultiXactIdCreate(xid1, status1, xid2, status2)` (multixact.c) — create
+    /// a brand-new MultiXactId with exactly the two given (xid, status) members,
+    /// returning its id. Used by `compute_new_xmax_infomask` when an existing
+    /// regular (non-multi) xmax must be combined with the new locker/updater.
+    /// `Err` carries the SLRU/extend `ereport(ERROR)` surface.
+    pub fn multi_xact_id_create(
+        xid1: types_core::primitive::TransactionId,
+        status1: types_xlog_records::multixact::MultiXactStatus,
+        xid2: types_core::primitive::TransactionId,
+        status2: types_xlog_records::multixact::MultiXactStatus,
+    ) -> types_error::PgResult<types_core::primitive::MultiXactId>
+);
+
+seam_core::seam!(
+    /// `MultiXactIdExpand(multi, xid, status)` (multixact.c) — add `(xid,
+    /// status)` to the membership of an existing multixact, creating a fresh
+    /// multixact that carries the surviving members plus the new one. Used by
+    /// `compute_new_xmax_infomask` when the existing xmax is already a multi.
+    /// `Err` carries the SLRU/extend `ereport(ERROR)` surface.
+    pub fn multi_xact_id_expand(
+        multi: types_core::primitive::MultiXactId,
+        xid: types_core::primitive::TransactionId,
+        status: types_xlog_records::multixact::MultiXactStatus,
+    ) -> types_error::PgResult<types_core::primitive::MultiXactId>
+);
+
+seam_core::seam!(
+    /// `MultiXactIdGetUpdateXid(xmax, t_infomask)` (multixact.c) — the update
+    /// XID carried by a multixact xmax (the single member with an update
+    /// status), or `InvalidTransactionId` if there is none. Used by
+    /// `compute_new_xmax_infomask`. `Err` carries the SLRU-read `ereport`
+    /// surface.
+    pub fn multi_xact_id_get_update_xid(
+        xmax: types_core::primitive::TransactionId,
+        t_infomask: u16,
+    ) -> types_error::PgResult<types_core::primitive::TransactionId>
+);
+
+seam_core::seam!(
+    /// `MultiXactIdSetOldestMember()` (multixact.c) — record this backend's
+    /// `OldestMemberMXactId` the first time it does a possibly-multixact-able
+    /// operation in the current transaction. Idempotent within a transaction.
+    /// `Err` carries the `ereport(ERROR)` surface.
+    pub fn multi_xact_id_set_oldest_member() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `multixact_twophase_recover(xid, info, recdata, len)` — restore the
     /// OldestMemberMXactId entry for a prepared transaction at recovery (slot
     /// `TWOPHASE_RM_MULTIXACT_ID` of `twophase_recover_callbacks`).

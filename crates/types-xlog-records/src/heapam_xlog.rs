@@ -108,7 +108,37 @@ impl xl_heap_delete {
             flags: u8_at(rec, 7),
         }
     }
+
+    /// Serialize into the `SizeOfHeapDelete`-byte on-disk layout, matching the
+    /// C struct field order (`xmax`@0, `offnum`@4, `infobits_set`@6,
+    /// `flags`@7).
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapDelete] {
+        let mut out = [0u8; SizeOfHeapDelete];
+        out[0..4].copy_from_slice(&self.xmax.to_ne_bytes());
+        out[4..6].copy_from_slice(&self.offnum.to_ne_bytes());
+        out[6] = self.infobits_set;
+        out[7] = self.flags;
+        out
+    }
 }
+
+/// `SizeOfHeapDelete` (`access/heapam_xlog.h`): `offsetof(xl_heap_delete,
+/// flags) + sizeof(uint8)` == 8.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapDelete: usize = 8;
+
+// `XLH_DELETE_*` flags (access/heapam_xlog.h) — the `flags` field of
+// `xl_heap_delete`.
+/// `XLH_DELETE_ALL_VISIBLE_CLEARED` (`access/heapam_xlog.h`).
+pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+/// `XLH_DELETE_CONTAINS_OLD_TUPLE` (`access/heapam_xlog.h`).
+pub const XLH_DELETE_CONTAINS_OLD_TUPLE: u8 = 1 << 1;
+/// `XLH_DELETE_CONTAINS_OLD_KEY` (`access/heapam_xlog.h`).
+pub const XLH_DELETE_CONTAINS_OLD_KEY: u8 = 1 << 2;
+/// `XLH_DELETE_IS_SUPER` (`access/heapam_xlog.h`).
+pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
+/// `XLH_DELETE_IS_PARTITION_MOVE` (`access/heapam_xlog.h`).
+pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 
 /// `xl_heap_update`: old/new xmax, offsets, infomask bits, flags.
 #[derive(Clone, Copy, Debug)]

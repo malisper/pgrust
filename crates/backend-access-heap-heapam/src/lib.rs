@@ -28,6 +28,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod delete;
 pub mod freeze;
 pub mod index_delete;
 pub mod insert;
@@ -238,7 +239,7 @@ fn xact_seam_transaction_id_did_commit(xid: TransactionId) -> PgResult<bool> {
 
 /// `TUPLOCK_from_mxstatus(status)` (heapam.c) — the `LockTupleMode` a multixact
 /// member's status holds (`MultiXactStatusLock[]`).
-fn TUPLOCK_from_mxstatus(status: MultiXactStatus) -> LockTupleMode {
+pub(crate) fn TUPLOCK_from_mxstatus(status: MultiXactStatus) -> LockTupleMode {
     match status {
         MultiXactStatus::ForKeyShare => LockTupleMode::LockTupleKeyShare,
         MultiXactStatus::ForShare => LockTupleMode::LockTupleShare,
@@ -463,6 +464,16 @@ pub fn init_seams() {
     });
     heapam_seam::simple_heap_insert::set(|mcx, rel, tup| {
         insert::simple_heap_insert(mcx, rel, tup)
+    });
+
+    // F3 DELETE — the cross-family heap-delete entry points.
+    heapam_seam::heap_delete::set(
+        |mcx, rel, tid, cid, crosscheck, wait, tmfd, changing_part| {
+            delete::heap_delete(mcx, rel, tid, cid, crosscheck, wait, tmfd, changing_part)
+        },
+    );
+    heapam_seam::simple_heap_delete::set(|mcx, rel, tid| {
+        delete::simple_heap_delete(mcx, rel, tid)
     });
     // NB: the `insert_one_tuple` seam (bootstrap.c `InsertOneTuple` batch) stays
     // uninstalled here, exactly as F0 left it: forming the tuple requires

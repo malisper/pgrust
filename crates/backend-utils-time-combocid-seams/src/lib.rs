@@ -12,7 +12,23 @@
 #![allow(non_snake_case)]
 
 use types_core::CommandId;
+use types_error::PgResult;
 use types_tuple::heaptuple::HeapTupleHeaderData;
+
+seam_core::seam!(
+    /// `HeapTupleHeaderAdjustCmax(tup, &cmax, &iscombo)` (combocid.c) — given a
+    /// tuple we are about to delete/update, determine the command id to store
+    /// into its `t_cid`: `(cmax, false)` if no combo CID is needed, or
+    /// `(combo_cid, true)` if the tuple was inserted by (a subtransaction of)
+    /// our own transaction. Resolves against the current transaction's combo-CID
+    /// state. Returns C's `(*cmax, *iscombo)`. `Err` carries the OOM
+    /// `ereport(ERROR)` surface (it runs before the critical section for that
+    /// reason).
+    pub fn heap_tuple_header_adjust_cmax(
+        tuple: &HeapTupleHeaderData<'_>,
+        cmax: CommandId,
+    ) -> PgResult<(CommandId, bool)>
+);
 
 seam_core::seam!(
     /// `HeapTupleHeaderGetCmin(tup)` (combocid.c) — the command id that

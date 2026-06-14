@@ -143,6 +143,33 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+/// `IndexAttrBitmapKind` (relcache.h) — which attribute bitmap
+/// `RelationGetIndexAttrBitmap` should return. Mirrors the owner's enum (kept
+/// here so cross-crate callers can name the kind without depending on the
+/// relcache crate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexAttrBitmapKind {
+    Keys,
+    PrimaryKey,
+    Identity,
+    HotBlocking,
+    Summarized,
+}
+
+seam_core::seam!(
+    /// `RelationGetIndexAttrBitmap(relation, attrKind)` (relcache.c): the set of
+    /// table column numbers (offset by `FirstLowInvalidHeapAttributeNumber`)
+    /// indexed under the requested `attrKind`, or `None` when the relation has
+    /// no indexes contributing to that bitmap (the C NULL). Built once and
+    /// cached on the entry; the returned set is `bms_copy`d into `mcx`. Opens
+    /// the relation's indexes, so it can `ereport(ERROR)`, carried on `Err`.
+    pub fn relation_get_index_attr_bitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::RelationData<'_>,
+        attr_kind: IndexAttrBitmapKind,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
 seam_core::seam!(
     /// `RelationGetIdentityKeyBitmap(relation)` (relcache.c): the bitmap of
     /// replica-identity-index key columns, offset by

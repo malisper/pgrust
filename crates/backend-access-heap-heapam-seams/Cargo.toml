@@ -20,3 +20,4 @@ types-tuple = { path = "../types-tuple" }
 types-nbtree = { path = "../types-nbtree" }
 types-snapshot = { path = "../types-snapshot" }
 types-tableam = { path = "../types-tableam" }
+types-xlog-records = { path = "../types-xlog-records" }

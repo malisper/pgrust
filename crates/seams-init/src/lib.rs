@@ -1124,6 +1124,11 @@ mod recurrence_guard {
         // boundary). Until then they stay seam-and-panic. See DESIGN_DEBT.md.
         ("backend_utils_time_combocid", "heap_tuple_header_get_cmax"),
         ("backend_utils_time_combocid", "heap_tuple_header_get_cmin"),
+        // Same TD-COMBOCID-STATE: `HeapTupleHeaderAdjustCmax` (consumed by
+        // heap_delete/heap_update) resolves a combo CID against the file-scope
+        // combo-CID state; its real body takes `&mut ComboCidState`, which the
+        // owner can't reach from a static seam until the xact-owner threads it.
+        ("backend_utils_time_combocid", "heap_tuple_header_adjust_cmax"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its

@@ -50,6 +50,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_heap_delete(rel)` (pgstat.h macro): bump the relation's
+    /// pending `tuples_deleted` counter (only when `rel->pgstat_info` is set).
+    /// Keyed by the relation OID; the per-relation pending stats live in
+    /// pgstat; the macro never errors.
+    pub fn pgstat_count_heap_delete(relid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
     /// Run `f` on `&pgStatLocal.shmem->archiver`.
     pub fn with_shmem_archiver(f: &mut dyn FnMut(&mut PgStatShared_Archiver))
 );

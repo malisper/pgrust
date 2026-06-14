@@ -18,6 +18,10 @@ use types_nbtree::TmIndexDeleteOp;
 use types_snapshot::SnapshotData;
 use types_storage::Buffer;
 use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+use types_core::xact::CommandId;
+use types_tableam::tableam::{LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result};
+use types_xlog_records::multixact::MultiXactStatus;
+use types_storage::lock::XLTW_Oper;
 
 seam_core::seam!(
     /// The bootstrap-mode tuple-insert sequence, batched at the heap owner
@@ -172,6 +176,135 @@ seam_core::seam!(
         want_all_dead: bool,
         first_call: bool,
     ) -> PgResult<HotSearchResult<'mcx>>
+);
+
+// ===========================================================================
+// F3 — UPDATE/DELETE.  `heap_delete` / `simple_heap_delete` are the heap-AM's
+// own entry points (installed by `backend-access-heap-heapam`).  The lock-wait
+// primitives they lean on (`heap_acquire_tuplock` / `DoesMultiXactIdConflict` /
+// `MultiXactIdWait` / `UnlockTupleTuplock`) live in the *not-yet-ported* heapam
+// LOCK family (heapam.c); they are declared here and stay uninstalled — and
+// panic — until that family lands.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `heap_delete(relation, tid, cid, crosscheck, wait, tmfd, changingPart)`
+    /// (heapam.c) — delete the tuple addressed by `tid`. Stamps the on-page
+    /// tuple's xmax/cmax/infomask, clears its HOT-updated flag, points its ctid
+    /// at itself (a partition-move sets the moved-partitions ctid), emits the
+    /// `XLOG_HEAP_DELETE` WAL record, and (for a logically-decoded rel) logs the
+    /// replica-identity old key. `crosscheck` is the optional transaction-snapshot
+    /// RI snapshot (`None` == `InvalidSnapshot`). On a non-`TM_Ok` outcome `tmfd`
+    /// is filled (ctid/xmax/cmax). `Err` carries the delete `ereport(ERROR)`
+    /// surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_delete<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+        cid: CommandId,
+        crosscheck: Option<&SnapshotData>,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        changing_part: bool,
+    ) -> PgResult<TM_Result>
+);
+
+seam_core::seam!(
+    /// `simple_heap_delete(relation, tid)` (heapam.c) — delete the tuple
+    /// addressed by `tid` when no concurrent update is expected, reporting any
+    /// non-`TM_Ok` outcome via `ereport(ERROR)`. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn simple_heap_delete<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_acquire_tuplock(relation, tid, mode, wait_policy, have_tuple_lock)`
+    /// (heapam.c) — acquire the lmgr tuple lock that establishes our priority on
+    /// the tuple before sleeping on a concurrent locker. Returns the updated
+    /// `*have_tuple_lock` (C's `bool` out param + `bool` return; C returns false
+    /// only when a conditional/skip-locked acquire fails, which the blocking
+    /// callers in delete never use). `Err` carries the lmgr `ereport(ERROR)`
+    /// surface. **Owned by the heapam LOCK family (heapam.c); uninstalled — and
+    /// panics — until that family lands.**
+    pub fn heap_acquire_tuplock<'mcx>(
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+        mode: LockTupleMode,
+        wait_policy: LockWaitPolicy,
+        have_tuple_lock: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `UnlockTupleTuplock(relation, tid, mode)` (heapam.c macro over
+    /// `UnlockTuple`) — release the lmgr tuple lock acquired by
+    /// `heap_acquire_tuplock`. `Err` carries the lmgr `ereport(ERROR)` surface.
+    /// **Owned by the heapam LOCK family (heapam.c); uninstalled — and panics —
+    /// until that family lands.**
+    pub fn unlock_tuple_tuplock<'mcx>(
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+        mode: LockTupleMode,
+    ) -> PgResult<()>
+);
+
+/// The result of [`does_multi_xact_id_conflict`] — C's `bool` return plus the
+/// `*current_is_member` out param.
+#[derive(Clone, Copy, Debug)]
+pub struct MultiXactConflict {
+    /// C's `bool` return: does the multixact conflict with the wanted mode?
+    pub conflict: bool,
+    /// C's `*current_is_member`: is the current backend already a member?
+    pub current_is_member: bool,
+}
+
+seam_core::seam!(
+    /// `DoesMultiXactIdConflict(multi, infomask, lockmode, &current_is_member)`
+    /// (heapam.c) — does any member of `multi` hold a lock that conflicts with
+    /// the wanted `lockmode`, and is the current backend a member? `Err` carries
+    /// the multixact-member-read `ereport(ERROR)` surface. **Owned by the heapam
+    /// LOCK family (heapam.c); uninstalled — and panics — until that family
+    /// lands.**
+    pub fn does_multi_xact_id_conflict(
+        multi: types_core::primitive::MultiXactId,
+        infomask: u16,
+        lockmode: LockTupleMode,
+    ) -> PgResult<MultiXactConflict>
+);
+
+seam_core::seam!(
+    /// `XactLockTableWait(xwait, rel, tid, XLTW_Delete)` (lmgr.c) — wait for a
+    /// regular transaction `xwait` to commit or abort. Reached only from the
+    /// heap-AM lock-wait path; declared with the rest of the F4 lock primitives.
+    /// `Err` carries the wait `ereport(ERROR)` surface. **Owned by the heapam
+    /// LOCK family (heapam.c calls lmgr); uninstalled — and panics — until that
+    /// family lands.**
+    pub fn xact_lock_table_wait<'mcx>(
+        xwait: TransactionId,
+        rel: &Relation<'mcx>,
+        tid: ItemPointerData,
+        oper: XLTW_Oper,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MultiXactIdWait(multi, status, infomask, rel, tid, oper, NULL)`
+    /// (heapam.c) — wait for the members of `multi` whose status conflicts with
+    /// `status` to finish. `Err` carries the wait `ereport(ERROR)` surface.
+    /// **Owned by the heapam LOCK family (heapam.c); uninstalled — and panics —
+    /// until that family lands.**
+    pub fn multi_xact_id_wait<'mcx>(
+        multi: types_core::primitive::MultiXactId,
+        status: MultiXactStatus,
+        infomask: u16,
+        rel: &Relation<'mcx>,
+        tid: ItemPointerData,
+        oper: XLTW_Oper,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
