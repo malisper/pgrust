@@ -40,7 +40,6 @@
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, BITMAPLEN, RECORDOID};
@@ -265,7 +264,7 @@ fn assign_record_type_typmod(_tupdesc: &mut TupleDescData<'_>) -> i32 {
 /// thin `(void) domain_check_internal(..., escontext = NULL)` that re-runs the
 /// typcache-resident `domain_check_input` engine. We route through that same
 /// engine seam directly (the owned model carries no `extra` memoization handle).
-fn domain_check(value: Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
+fn domain_check(value: types_datum::Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
     backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
 }
 
@@ -933,7 +932,7 @@ pub fn deconstruct_expanded_record<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(TupleValue::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -1002,13 +1001,13 @@ pub fn expanded_record_fetch_field<'mcx>(
     if fnumber > 0 {
         // Empty record has null fields.
         if erh.is_empty() {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         }
         // Make sure we have deconstructed form.
         deconstruct_expanded_record(mcx, erh)?;
         // Out-of-range field number reads as null.
         if fnumber > erh.nfields {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         }
         let isnull = erh.dnulls[(fnumber - 1) as usize];
         let value = erh.dvalues[(fnumber - 1) as usize].clone_in(mcx)?;
@@ -1016,7 +1015,7 @@ pub fn expanded_record_fetch_field<'mcx>(
     } else {
         // System columns read as null if we haven't got a flat tuple.
         let Some(fv) = erh.fvalue.as_ref() else {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         };
         // heap_getsysattr doesn't actually use tupdesc.
         heaptuple::heap_getsysattr(mcx, &fv.tuple, fnumber)
@@ -1408,7 +1407,7 @@ fn check_domain_for_new_field<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(TupleValue::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -1466,7 +1465,7 @@ fn check_domain_for_new_tuple<'mcx>(
     // If we're being told to set record to empty, just see if NULL is OK.
     let Some(tuple) = tuple else {
         ensure_short_term_cxt(erh);
-        domain_check(Datum::null(), true, erh.er_decltypeid)?;
+        domain_check(types_datum::Datum::null(), true, erh.er_decltypeid)?;
         if let Some(cxt) = erh.er_short_term_cxt.as_mut() {
             cxt.reset();
         }
@@ -1512,6 +1511,6 @@ fn tuple_has_external(tup: &FormedTuple<'_>) -> bool {
 /// model the dummy header IS the value, so we cross the placeholder datum word
 /// (the C `EOHPGetRODatum` pointer). The unported `domain_check` owner will be
 /// the consumer; until then this is a structural placeholder, never read here.
-fn expanded_record_get_ro_datum(_erh: &ExpandedRecordHeader<'_>) -> Datum {
-    Datum::null()
+fn expanded_record_get_ro_datum(_erh: &ExpandedRecordHeader<'_>) -> types_datum::Datum {
+    types_datum::Datum::null()
 }
