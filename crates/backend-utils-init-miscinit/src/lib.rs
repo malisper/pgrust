@@ -887,6 +887,60 @@ pub fn init_seams() {
     s::initialize_system_user::set(InitializeSystemUser);
     s::set_database_path_once::set(SetDatabasePath);
     s::process_session_preload_libraries::set(process_session_preload_libraries);
+
+    // ---- mis-homed slot-sync worker bootstrap group -----------------------
+    //
+    // These seams were declared on miscinit's seam crate by the slot-sync
+    // worker consumer (`ReplSlotSyncWorkerMain`, slotsync.c), but none are
+    // miscinit.c's own functions — each mirrors a step whose real body lives
+    // in another (now-ported) owner. We install them here by delegating to the
+    // real owner's seam, exactly as the WAL-summarizer / `my_proc_pid` lines
+    // above delegate to globals. (slotsync is the *only* consumer of these
+    // miscinit-homed copies; every other consumer already calls the real
+    // owner's seam crate directly.)
+
+    // `MyBackendType = B_SLOTSYNC_WORKER;` (slotsync.c:1464; globals.c) — the
+    // exact analog of the installed WAL-summarizer setter above.
+    s::set_my_backend_type_slotsync::set(|| {
+        SetMyBackendType(BackendType::SlotsyncWorker);
+        Ok(())
+    });
+    // `init_ps_display(NULL)` (slotsync.c:1466) — ps_status.c owner.
+    s::init_ps_display::set(|| {
+        backend_utils_misc_more_seams::init_ps_display::call(None);
+        Ok(())
+    });
+    // `InitProcess()` (slotsync.c:1474) — proc.c owner.
+    s::init_process::set(|| backend_storage_lmgr_proc_seams::init_process::call());
+    // `BaseInit()` (slotsync.c:1479) — postinit.c owner.
+    s::base_init::set(|| backend_utils_init_postinit_seams::base_init::call());
+    // `InitializeTimeouts()` (slotsync.c:1535) — timeout.c owner.
+    s::initialize_timeouts::set(|| {
+        backend_utils_misc_timeout_seams::initialize_timeouts::call();
+        Ok(())
+    });
+    // `sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)` (slotsync.c:1543) —
+    // the pqsignal owner's `unblock_signals` is the real primitive (also used
+    // by bgworker).
+    s::unblock_signals::set(|| {
+        backend_libpq_pqsignal_seams::unblock_signals::call();
+        Ok(())
+    });
+    // `InitPostgres(dbname, InvalidOid, NULL, InvalidOid, 0, NULL)`
+    // (slotsync.c:1568) — postinit.c owner; dbname only, default username,
+    // init_flags = 0.
+    s::init_postgres::set(|dbname| {
+        backend_utils_init_postinit_seams::init_postgres_by_name::call(Some(dbname), None, 0)
+    });
+    // `CHECK_FOR_INTERRUPTS()` (slotsync.c) — postgres.c / interrupt owner.
+    s::check_for_interrupts::set(|| backend_tcop_postgres_seams::check_for_interrupts::call());
+
+    // NOTE: `setup_signal_handlers` (the slotsync.c:1515-1522 `pqsignal(SIGHUP,
+    // SignalHandlerForConfigReload)` ... block) is intentionally NOT installed
+    // here — its handler bodies (SignalHandlerForConfigReload, die,
+    // StatementCancelHandler, FloatExceptionHandler, procsignal_sigusr1_handler)
+    // live in interrupt.c / postgres.c / procsignal.c, none of which is ported.
+    // It is tracked in CONTRACT_RECONCILE_PENDING + DESIGN_DEBT (provider-unported).
 }
 
 #[cfg(test)]
