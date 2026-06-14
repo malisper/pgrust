@@ -113,3 +113,33 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn xlog_recovery_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ArchiveRecoveryRequested` (xlogrecovery.c global bool): true when a
+    /// `recovery.signal`/`standby.signal` was present at startup, i.e. we are
+    /// performing archive recovery (not crash recovery). Pure read.
+    pub fn archive_recovery_requested() -> bool
+);
+
+seam_core::seam!(
+    /// `recoveryRestoreCommand` (xlogrecovery.c global) — the configured
+    /// `restore_command`, or `None`/empty when unset (standby mode may omit it).
+    /// Returned charged to `mcx` (the `pstrdup` analog).
+    pub fn recovery_restore_command<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> Option<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
+    /// `GetOldestRestartPoint(*lastCheckPointRecPtr, *lastCheckPointTLI)`
+    /// (xlogrecovery.c) — the redo pointer and timeline of the oldest restart
+    /// point still needed. Reads `ControlFile` under a spinlock.
+    pub fn get_oldest_restart_point() -> types_error::PgResult<(XLogRecPtr, TimeLineID)>
+);
+
+seam_core::seam!(
+    /// `GetRecoveryState()` (xlogrecovery.c) — the server's current recovery
+    /// state (`Crash`/`Archive`/`Done`). Reads `XLogRecoveryCtl` under a
+    /// spinlock.
+    pub fn get_recovery_state() -> types_error::PgResult<types_wal::RecoveryState>
+);

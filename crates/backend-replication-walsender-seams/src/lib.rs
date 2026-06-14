@@ -111,3 +111,16 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn wal_snd_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `WalSndRqstFileReload()` (walsender.c) — set `needreload` on every active
+    /// walsender so each reopens its currently-open WAL segment (used after a
+    /// segment is replaced from the archive). Touches shared memory.
+    pub fn wal_snd_rqst_file_reload() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `WalSndWakeup(physical, logical)` (walsender.c) — set the latch of every
+    /// walsender of the requested kind so they notice newly-arrived WAL.
+    pub fn wal_snd_wakeup(physical: bool, logical: bool) -> types_error::PgResult<()>
+);

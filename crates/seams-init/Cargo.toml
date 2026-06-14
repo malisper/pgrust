@@ -42,6 +42,7 @@ backend-access-transam-twophase = { path = "../backend-access-transam-twophase" 
 backend-access-transam-varsup = { path = "../backend-access-transam-varsup" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
+backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
 backend-access-transam-xlogreader = { path = "../backend-access-transam-xlogreader" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
