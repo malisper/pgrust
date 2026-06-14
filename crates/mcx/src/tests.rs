@@ -337,6 +337,40 @@ mod owned {
         assert_eq!(cache_root.subtree_used(), 0, "dropping the bundle returns every byte");
     }
 
+    // The leak-projection the executor's `InitPlan` needs (execMain B1): a
+    // bundle owns a `PgBox` (here `plan_tree`); a `for<'mcx>`-universal accessor
+    // leaks it into an honest `&'mcx` borrow that the closure reads but cannot
+    // smuggle out, and the leaked value lives until the bundle's context drops
+    // (faithful to C's "plan node freed with its context").
+    struct Tree<'mcx> {
+        plan_tree: Option<PgBox<'mcx, u64>>,
+    }
+    crate::bind!(TreeTy => Tree<'mcx>);
+
+    #[test]
+    fn leak_projection_yields_honest_borrow_reclaimed_by_context_drop() {
+        let root = MemoryContext::new("root");
+        let mut bundle = McxOwned::<TreeTy>::try_new(root.new_child("ExecutorState"), |mcx| {
+            Ok(Tree { plan_tree: Some(alloc_in(mcx, 42u64)?) })
+        })
+        .unwrap();
+
+        // Mirror QueryDesc::with_plan_and_estate_mut: inside the bundle, leak the
+        // owned PgBox into an honest &'mcx, run a for<'mcx> closure over it. The
+        // closure returns an owned value so no borrow escapes.
+        let seen = bundle.with_mut(|t| {
+            let leaked: Option<&u64> = t.plan_tree.take().map(|b| &*crate::leak_in(b));
+            // The leak consumed the box; the value still lives in the context.
+            leaked.copied()
+        });
+        assert_eq!(seen, Some(42));
+
+        // The per-context drop reclaims the leaked allocation; accounting tolerates
+        // the leaked (never-individually-freed) bytes and returns them to ancestors.
+        drop(bundle);
+        assert_eq!(root.subtree_used(), 0, "context drop reclaims the leaked plan node");
+    }
+
     #[test]
     fn build_failure_passes_through_and_drops_context() {
         let root = MemoryContext::new("root");
