@@ -717,6 +717,16 @@ pub fn init_seams() {
 
     inward::get_foreign_server_by_name::set(GetForeignServerByName);
 
+    inward::foreign_data_wrapper_name::set(|mcx, fdwid, missing_ok| {
+        let flags = if missing_ok { FDW_MISSING_OK } else { 0 };
+        Ok(GetForeignDataWrapperExtended(mcx, fdwid, flags)?.map(|fdw| fdw.fdwname))
+    });
+
+    inward::foreign_server_name::set(|mcx, serverid, missing_ok| {
+        let flags = if missing_ok { FSV_MISSING_OK } else { 0 };
+        Ok(GetForeignServerExtended(mcx, serverid, flags)?.map(|srv| srv.servername))
+    });
+
     inward::get_foreign_server_oid::set(get_foreign_server_oid);
 
     inward::get_foreign_data_wrapper_oid::set(get_foreign_data_wrapper_oid);

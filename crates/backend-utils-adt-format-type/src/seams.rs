@@ -12,4 +12,5 @@ pub fn init_seams() {
         crate::format_type_be_qualified,
     );
     backend_utils_adt_format_type_seams::type_maximum_size::set(crate::type_maximum_size);
+    backend_utils_adt_format_type_seams::format_type_extended::set(crate::format_type_extended);
 }
