@@ -5,10 +5,9 @@
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_cache::SysCacheKey;
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 
 use crate::{
     ReleaseSysCache, SearchSysCache1, SearchSysCacheList1, SysCacheGetAttrNotNull, AMOPSTRATEGY,
@@ -38,10 +37,10 @@ const Anum_pg_amproc_amprocrighttype: i32 = 4;
 const Anum_pg_amproc_amprocnum: i32 = 5;
 const Anum_pg_amproc_amproc: i32 = 6;
 
-fn byval(value: TupleValue<'_>) -> PgResult<Datum> {
+fn byval<'mcx>(value: Datum<'mcx>) -> PgResult<Datum<'mcx>> {
     match value {
-        TupleValue::ByVal(d) => Ok(d),
-        TupleValue::ByRef(_) => Err(PgError::error(
+        Datum::ByVal(_) => Ok(value),
+        Datum::ByRef(_) => Err(PgError::error(
             "syscache projection: expected a by-value attribute",
         )),
     }
@@ -68,8 +67,8 @@ fn getattr_name<'mcx>(
 ) -> PgResult<PgString<'mcx>> {
     let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
     let bytes = match &value {
-        TupleValue::ByRef(b) => &b[..],
-        TupleValue::ByVal(_) => {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_) => {
             return Err(PgError::error("syscache projection: name attribute is by-value"))
         }
     };
@@ -85,7 +84,7 @@ fn getattr_name<'mcx>(
 pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let scratch = MemoryContext::new("syscache relam projection");
     let mcx = scratch.mcx();
-    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(Datum::from_oid(relid)))?;
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(types_datum::Datum::from_oid(relid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
@@ -101,7 +100,7 @@ pub(crate) fn search_opclass<'mcx>(
     mcx: Mcx<'mcx>,
     opclassoid: Oid,
 ) -> PgResult<Option<OpclassForm<'mcx>>> {
-    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(Datum::from_oid(opclassoid)))?;
+    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(types_datum::Datum::from_oid(opclassoid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
@@ -124,7 +123,7 @@ pub(crate) fn search_amop_list<'mcx>(
     let members = SearchSysCacheList1(
         mcx,
         AMOPSTRATEGY,
-        SysCacheKey::Value(Datum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(types_datum::Datum::from_oid(opfamilyoid)),
     )?;
     let mut rows = vec_with_capacity_in(mcx, members.len())?;
     for tup in &members {
@@ -149,7 +148,7 @@ pub(crate) fn search_amproc_list<'mcx>(
     let members = SearchSysCacheList1(
         mcx,
         AMPROCNUM,
-        SysCacheKey::Value(Datum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(types_datum::Datum::from_oid(opfamilyoid)),
     )?;
     let mut rows = vec_with_capacity_in(mcx, members.len())?;
     for tup in &members {
