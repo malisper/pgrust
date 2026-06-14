@@ -314,6 +314,77 @@ mod recurrence_guard {
         }
     }
 
+    /// True for a file that holds only test code (a `tests.rs` module or a file
+    /// under a `tests/` dir). Such files commonly `::set(` seams to stub
+    /// dependencies for unit tests — those are NOT real installs and must not be
+    /// counted as an owner installing its seam.
+    fn is_test_file(p: &Path) -> bool {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "tests.rs" || name.ends_with("_tests.rs") {
+            return true;
+        }
+        p.components().any(|c| c.as_os_str() == "tests")
+    }
+
+    /// Map a `*-seams` crate dir name to the dir name of its OWNER crate.
+    ///
+    /// BLIND-SPOT FIX (infix-tag seam dirs): most seam crates are
+    /// `<owner>-seams`, but some carry an infix split-tag before `-seams`
+    /// (`<owner>-pc-seams`, `<owner>-pq-seams`, `<owner>-elog-seams`,
+    /// `<owner>-pre-seams`) used when a unit's seams were split out in a
+    /// post-/pre-/elog/pquery pass. A naive `strip_suffix("-seams")` yields a
+    /// nonexistent dir (`<owner>-pc`) so the whole crate was silently skipped.
+    /// Returns the first candidate that exists as a real crate dir.
+    fn seam_owner_dir(crates: &Path, seam_dir_name: &str) -> Option<String> {
+        let base = seam_dir_name.strip_suffix("-seams")?;
+        // 1) plain `<owner>-seams`.
+        if crates.join(base).join("src").is_dir() {
+            return Some(base.to_string());
+        }
+        // 2) `<owner>-<tag>-seams` for a known infix split-tag.
+        for tag in ["-pc", "-pq", "-elog", "-pre", "-post"] {
+            if let Some(owner) = base.strip_suffix(tag) {
+                if crates.join(owner).join("src").is_dir() {
+                    return Some(owner.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse `use <path> as <alias>;` lines and return the alias->final-segment
+    /// map, where the final segment is the crate ident (e.g.
+    /// `use backend_x_seams as x;` -> `x` => `backend_x_seams`). This lets the
+    /// call-site collector resolve aliased seam calls back to the real crate.
+    fn alias_map(src: &str) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for line in src.lines() {
+            let t = line.trim();
+            let rest = match t.strip_prefix("use ") {
+                Some(r) => r,
+                None => continue,
+            };
+            let rest = rest.trim_end_matches(';').trim();
+            // split on " as "
+            let pos = match rest.find(" as ") {
+                Some(p) => p,
+                None => continue,
+            };
+            let path = rest[..pos].trim();
+            let alias = rest[pos + 4..].trim();
+            if alias.is_empty() || alias.contains(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                continue;
+            }
+            // final path segment is the crate/module ident.
+            let last = path.rsplit("::").next().unwrap_or(path).trim();
+            if last.is_empty() {
+                continue;
+            }
+            map.insert(alias.to_string(), last.to_string());
+        }
+        map
+    }
+
     /// The lib crate identifier (`[lib] name`, else package name with `-`->`_`).
     fn lib_name(cargo_toml: &str) -> Option<String> {
         // Look for [lib] section name first.
@@ -376,16 +447,27 @@ mod recurrence_guard {
             let mut files = Vec::new();
             rs_files(&src, &mut files);
 
+            // BLIND-SPOT FIX (delegated install): an owner's `init_seams()` may
+            // not contain the `::set(` calls directly — it can delegate to a
+            // helper (`wire::install_*()`, `inward_seams::install()`,
+            // `seam_layer::install()`). Counting only the init_seams body misses
+            // those crates. Count `::set(` anywhere in the crate's NON-TEST src,
+            // and separately require that an `init_seams()` entry point exists
+            // (that is the symbol init_all() calls).
             let mut set_count = 0usize;
+            let mut has_init_seams = false;
             for f in &files {
-                let txt = fs::read_to_string(f).unwrap_or_default();
-                if let Some(body) = init_seams_body(&txt) {
-                    set_count += body.matches("::set(").count()
-                        + body.matches("::set (").count();
+                if is_test_file(f) {
+                    continue;
                 }
+                let txt = strip_cfg_test(&fs::read_to_string(f).unwrap_or_default());
+                if init_seams_body(&txt).is_some() {
+                    has_init_seams = true;
+                }
+                set_count += txt.matches("::set(").count() + txt.matches("::set (").count();
             }
-            if set_count == 0 {
-                continue; // empty or no init_seams -> nothing to wire
+            if set_count == 0 || !has_init_seams {
+                continue; // installs nothing, or has no init_seams entry point
             }
 
             let cargo = match fs::read_to_string(cpath.join("Cargo.toml")) {
@@ -653,15 +735,28 @@ mod recurrence_guard {
             let mut files = Vec::new();
             rs_files(&src, &mut files);
             for f in &files {
-                let txt = strip_cfg_test(&fs::read_to_string(f).unwrap_or_default());
-                collect_call_sites(&txt, &mut called);
+                if is_test_file(f) {
+                    continue; // whole-file test modules: stub `::set`/`::call` only
+                }
+                let raw = fs::read_to_string(f).unwrap_or_default();
+                // BLIND-SPOT FIX (aliased call sites): resolve `x::foo::call()`
+                // where `use backend_x_seams as x;` was declared, so the call is
+                // attributed to the real seam crate, not the alias.
+                let aliases = alias_map(&raw);
+                let txt = strip_cfg_test(&raw);
+                collect_call_sites(&txt, &aliases, &mut called);
             }
         }
         called
     }
 
-    /// Parse `ident::ident::call(` triples out of one source string.
-    fn collect_call_sites(src: &str, out: &mut std::collections::HashSet<(String, String)>) {
+    /// Parse `ident::ident::call(` triples out of one source string, resolving
+    /// the leading crate ident through `aliases` (`use ... as <alias>;`).
+    fn collect_call_sites(
+        src: &str,
+        aliases: &std::collections::HashMap<String, String>,
+        out: &mut std::collections::HashSet<(String, String)>,
+    ) {
         let bytes = src.as_bytes();
         let needle = b"::call";
         let mut i = 0;
@@ -696,7 +791,10 @@ mod recurrence_guard {
             }
             let lib = &src[t..s - 2];
             if !lib.is_empty() && !fn_name.is_empty() {
-                out.insert((lib.to_string(), fn_name.to_string()));
+                // Resolve an alias (`use backend_x_seams as lib;`) to the real
+                // seam-crate ident; non-aliased idents pass through unchanged.
+                let resolved = aliases.get(lib).map(|s| s.as_str()).unwrap_or(lib);
+                out.insert((resolved.to_string(), fn_name.to_string()));
             }
             i += needle.len();
         }
@@ -741,16 +839,18 @@ mod recurrence_guard {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            let owner_dir_name = match dir_name.strip_suffix("-seams") {
-                Some(o) => o.to_string(),
-                None => continue, // not a seams crate
-            };
+            if !dir_name.ends_with("-seams") {
+                continue; // not a seams crate
+            }
 
             // (a) OWNER must exist under crates/ — else genuinely unported.
+            // BLIND-SPOT FIX (infix-tag seam dirs): resolve `<owner>-pc-seams`
+            // etc. to the real owner dir, not the nonexistent `<owner>-pc`.
+            let owner_dir_name = match seam_owner_dir(&crates, &dir_name) {
+                Some(o) => o,
+                None => continue,
+            };
             let owner_path = crates.join(&owner_dir_name);
-            if !owner_path.join("src").is_dir() {
-                continue;
-            }
 
             // (b) OWNER unit must be COMPLETE (merged/audited) in CATALOG.tsv.
             // A `todo`/scaffold/in-progress owner legitimately seam-and-panics
@@ -780,11 +880,26 @@ mod recurrence_guard {
             rs_files(&owner_path.join("src"), &mut owner_files);
             let mut owner_src = String::new();
             let mut has_init_seams = false;
+            // Seams the OWNER itself `::call`s (alias-resolved). A seam crate
+            // `<X>-seams` bundles BOTH X's INWARD seams (X installs, others call)
+            // AND X's OUTWARD seams (X calls, the dependency owner installs).
+            // An outward seam is legitimately uninstalled until its *real* owner
+            // (often still unported) lands — that's mirror-pg-and-panic, NOT a
+            // regression — so it must NOT be attributed to X. The discriminator:
+            // X calls an OUTWARD seam; X never calls its own INWARD seams.
+            let mut owner_calls: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
             for f in &owner_files {
-                let txt = fs::read_to_string(f).unwrap_or_default();
+                if is_test_file(f) {
+                    continue; // test stubs `::set()` deps; not a real install
+                }
+                let raw = fs::read_to_string(f).unwrap_or_default();
+                let aliases = alias_map(&raw);
+                let txt = strip_cfg_test(&raw);
                 if init_seams_body(&txt).is_some() {
                     has_init_seams = true;
                 }
+                collect_call_sites(&txt, &aliases, &mut owner_calls);
                 owner_src.push('\n');
                 owner_src.push_str(&txt);
             }
@@ -798,6 +913,13 @@ mod recurrence_guard {
                 let installed = has_init_seams
                     && (owner_src.contains(&pat1) || owner_src.contains(&pat2));
                 if installed {
+                    continue;
+                }
+
+                // OUTWARD-seam exclusion: if the dir-owner itself calls this
+                // seam, it is an outward dependency seam (real owner elsewhere,
+                // often unported) — not the dir-owner's inward contract. Skip.
+                if owner_calls.contains(&(seams_lib.clone(), fname.clone())) {
                     continue;
                 }
 
