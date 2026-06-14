@@ -20,9 +20,9 @@ use std::cell::RefCell;
 use mcx::Mcx;
 use port_pgstrcasecmp::pg_strcasecmp;
 use types_core::RmgrId;
-use types_datum::Datum;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
+use types_tuple::Datum;
 use types_wal::rmgr::{
     RmgrData, RmgrIdIsBuiltin, RmgrIdIsCustom, RM_MAX_CUSTOM_ID, RM_MIN_CUSTOM_ID,
     RM_N_BUILTIN_IDS, RM_N_IDS,
@@ -528,7 +528,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
 pub fn pg_get_wal_resource_managers<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     const PG_GET_RESOURCE_MANAGERS_COLS: usize = 3;
 
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
@@ -548,17 +548,16 @@ pub fn pg_get_wal_resource_managers<'mcx>(
             .rm_name
             .expect("RmgrIdExists guarantees rm_name");
         // Datum values[3]; bool nulls[3] = {0};  (stack arrays in C)
-        // `materialized_srf_putvalues` now takes the canonical unified value
-        // (the Datum-unification keystone flipped this edge); the varlena owner
+        // `materialized_srf_putvalues` takes the canonical unified value (the
+        // Datum-unification keystone flipped this edge); the varlena owner
         // still hands back the bare word, carried in the by-value arm.
-        use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
-        let values: [DatumV<'mcx>; PG_GET_RESOURCE_MANAGERS_COLS] = [
+        let values: [Datum<'mcx>; PG_GET_RESOURCE_MANAGERS_COLS] = [
             // values[0] = Int32GetDatum(rmid)
-            DatumV::from_i32(rmid as i32),
+            Datum::from_i32(rmid as i32),
             // values[1] = CStringGetTextDatum(GetRmgr(rmid).rm_name)
-            DatumV::ByVal(varlena::cstring_to_text::call(mcx, name)?),
+            Datum::ByVal(varlena::cstring_to_text::call(mcx, name)?),
             // values[2] = BoolGetDatum(RmgrIdIsBuiltin(rmid))
-            DatumV::from_bool(RmgrIdIsBuiltin(rmid as i32)),
+            Datum::from_bool(RmgrIdIsBuiltin(rmid as i32)),
         ];
         let nulls = [false; PG_GET_RESOURCE_MANAGERS_COLS];
 

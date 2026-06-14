@@ -10,7 +10,12 @@ thread_local! {
     static STARTUPS: Cell<u32> = const { Cell::new(0) };
     static CLEANUPS: Cell<u32> = const { Cell::new(0) };
     static SRF_INITS: Cell<u32> = const { Cell::new(0) };
-    static ROWS: RefCell<Vec<(Vec<Datum>, Vec<bool>)>> = const { RefCell::new(Vec::new()) };
+    // The SRF hands canonical `Datum<'mcx>` values whose lifetime is tied to
+    // the per-query context; this `'static` thread_local cannot hold a borrow,
+    // so we capture the by-value scalar word (`types_datum::Datum`, the `ByVal`
+    // payload) — every emitted column is a by-value scalar here.
+    static ROWS: RefCell<Vec<(Vec<types_datum::Datum>, Vec<bool>)>> =
+        const { RefCell::new(Vec::new()) };
     static LOGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -58,12 +63,24 @@ fn setup() {
             Ok(())
         });
         funcapi::materialized_srf_putvalues::set(|_rsinfo, values, nulls| {
-            ROWS.with(|r| r.borrow_mut().push((values.to_vec(), nulls.to_vec())));
+            let words: Vec<types_datum::Datum> = values
+                .iter()
+                .map(|d| match d {
+                    Datum::ByVal(w) => *w,
+                    Datum::ByRef(_) => {
+                        panic!("rmgr SRF emits only by-value columns")
+                    }
+                })
+                .collect();
+            ROWS.with(|r| r.borrow_mut().push((words, nulls.to_vec())));
             Ok(())
         });
         // Stand-in text Datum: encode the name length so tests can assert it
         // ran.
-        varlena::cstring_to_text::set(|_mcx, s| Ok(Datum::from_usize(s.len())));
+        // `cstring_to_text` still hands back the bare scalar word
+        // (`types_datum::Datum`, the `ByVal` payload during coexistence); the
+        // SRF wraps it in `Datum::ByVal(..)`.
+        varlena::cstring_to_text::set(|_mcx, s| Ok(types_datum::Datum::from_usize(s.len())));
     });
     IN_PRELOAD.with(|c| c.set(false));
     STARTUPS.with(|c| c.set(0));
@@ -272,16 +289,16 @@ fn pg_get_wal_resource_managers_emits_one_row_per_existing_rmgr() {
         assert_eq!(values.len(), 3);
         assert_eq!(nulls, &vec![false, false, false]);
         // col0 = Int32GetDatum(0)
-        assert_eq!(values[0], Datum::from_i32(0));
+        assert_eq!(values[0], types_datum::Datum::from_i32(0));
         // col1 = CStringGetTextDatum("XLOG") -> stub encodes len("XLOG") = 4
-        assert_eq!(values[1], Datum::from_usize(4));
+        assert_eq!(values[1], types_datum::Datum::from_usize(4));
         // col2 = BoolGetDatum(RmgrIdIsBuiltin(0)) = true
-        assert_eq!(values[2], Datum::from_bool(true));
+        assert_eq!(values[2], types_datum::Datum::from_bool(true));
 
         // Last row is LogicalMessage (id 21), still builtin.
         let (values, _) = &rows[21];
-        assert_eq!(values[0], Datum::from_i32(21));
-        assert_eq!(values[1], Datum::from_usize("LogicalMessage".len()));
-        assert_eq!(values[2], Datum::from_bool(true));
+        assert_eq!(values[0], types_datum::Datum::from_i32(21));
+        assert_eq!(values[1], types_datum::Datum::from_usize("LogicalMessage".len()));
+        assert_eq!(values[2], types_datum::Datum::from_bool(true));
     });
 }
