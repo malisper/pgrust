@@ -62,6 +62,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-brin-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-brin-xlog-seams",
+ "backend-access-common-bufmask-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "seams-init",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-brin-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -1733,6 +1753,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlogreader-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-file-fd-seams",
  "common-pglz",
  "mcx",
  "port-crc32c",
@@ -1742,6 +1763,7 @@ dependencies = [
  "types-logical",
  "types-storage",
  "types-wal",
+ "types-walsummarizer",
 ]
 
 [[package]]
@@ -11491,6 +11513,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-xlog",
  "backend-access-common-detoast",
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
