@@ -13,9 +13,9 @@
 #![allow(non_snake_case)]
 
 use types_core::{AttrNumber, Oid};
-use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::{TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
@@ -76,7 +76,7 @@ seam_core::seam!(
     /// Datum to a Datum sort. Allocates (copies pass-by-ref data), fallible.
     pub fn tuplesort_putdatum<'mcx>(
         state: &mut Tuplesortstate<'mcx>,
-        val: Datum,
+        val: Datum<'mcx>,
         is_null: bool,
     ) -> PgResult<()>
 );
@@ -108,7 +108,7 @@ seam_core::seam!(
         state: &mut Tuplesortstate<'mcx>,
         forward: bool,
         copy: bool,
-    ) -> PgResult<(bool, Datum, bool)>
+    ) -> PgResult<(bool, Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
