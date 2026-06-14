@@ -3242,7 +3242,6 @@ dependencies = [
  "mcx",
  "types-catalog",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-parsenodes",
@@ -3258,7 +3257,6 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-storage",
@@ -3517,7 +3515,6 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -4647,6 +4644,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4831,9 +4829,9 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -4920,6 +4918,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
@@ -5018,9 +5017,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
