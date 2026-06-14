@@ -62,7 +62,7 @@ use backend_catalog_aclchk_seams::object_ownercheck;
 use backend_catalog_dependency_seams::perform_multiple_deletions;
 use backend_catalog_namespace_seams::is_temp_namespace;
 use backend_catalog_objectaddress_seams::{
-    check_object_ownership, get_object_address, get_object_namespace,
+    check_object_ownership, get_object_address, get_object_namespace, ResolvedObjectAddress,
 };
 use backend_parser_parse_type_seams::{
     lookup_type_name_oid, type_name_list_to_string, typename_to_string_node,
@@ -124,7 +124,7 @@ pub fn remove_objects(stmt: &DropStmt) -> PgResult<()> {
     // foreach(cell1, stmt->objects)
     for object in &stmt.objects {
         /* Get an ObjectAddress for the object. */
-        let (address, relation) = get_object_address::call(
+        let ResolvedObjectAddress { address, relation } = get_object_address::call(
             mcx,
             stmt.removeType,
             object,

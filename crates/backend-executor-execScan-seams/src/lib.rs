@@ -34,9 +34,9 @@ seam_core::seam!(
     /// generic scan loop — fetch via `access`, qual-filter, project — for a
     /// table-func-scan node. Returns the result slot id, or `None` at end of
     /// scan. `Err` carries qual/projection `ereport(ERROR)`s and OOM.
-    pub fn exec_scan(
-        node: &mut TableFuncScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan<'mcx>(
+        node: &mut TableFuncScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: TableFuncScanAccessMtd,
         recheck: TableFuncScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>
@@ -56,9 +56,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
     /// (rescan EPQ, clear the result slot) at the start of a rescan.
-    pub fn exec_scan_rescan(
-        node: &mut TableFuncScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_rescan<'mcx>(
+        node: &mut TableFuncScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -87,9 +87,9 @@ seam_core::seam!(
     /// node's result/scan slot, `false` at end of scan. `Err` carries the
     /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
     /// execScan.c; this node passes its `IndexOnlyNext`/`IndexOnlyRecheck`.
-    pub fn exec_scan_indexonly(
-        node: &mut IndexOnlyScanState<'_>,
-        estate: &mut EStateData<'_>,
+    pub fn exec_scan_indexonly<'mcx>(
+        node: &mut IndexOnlyScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
         access: IndexOnlyScanAccessMtd,
         recheck: IndexOnlyScanRecheckMtd,
     ) -> PgResult<bool>
@@ -104,4 +104,121 @@ seam_core::seam!(
         node: &mut types_nodes::execnodes::ScanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
+);
+
+// --- Subquery-scan-specialized entry point --------------------------------
+// Same `execScan.c` driver, specialized to the subquery scan node (its own
+// in-crate `SubqueryNext`/`SubqueryRecheck` access/recheck functions).
+//
+// Unlike the relation-scan nodes, `SubqueryNext` returns the *subplan's* own
+// result slot directly (the C avoids `ExecCopySlot`; the node's own
+// `ss_ScanTupleSlot` is used only for EvalPlanQual rechecks), so the access
+// method yields the produced `SlotId` rather than a `bool`-into-scan-slot.
+
+use types_nodes::SubqueryScanState;
+
+/// `ExecScanAccessMtd`, specialized to a subquery scan node — returns the
+/// produced tuple's `SlotId` (the subplan's result slot), `None` at
+/// end-of-scan (the C `TupleTableSlot *` / `NULL`).
+pub type SubqueryScanAccessMtd =
+    for<'mcx> fn(&mut SubqueryScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<Option<SlotId>>;
+
+/// `ExecScanRecheckMtd`, specialized to a subquery scan node.
+pub type SubqueryScanRecheckMtd =
+    for<'mcx> fn(&mut SubqueryScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — fetch via `access`, qual-filter, project, with EPQ
+    /// handling — for a subquery scan node. Returns the result slot id, or
+    /// `None` at end of scan. `Err` carries qual/projection `ereport(ERROR)`s
+    /// and OOM. The node passes its own `SubqueryNext`/`SubqueryRecheck`.
+    pub fn exec_scan_subquery(
+        node: &mut SubqueryScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: SubqueryScanAccessMtd,
+        recheck: SubqueryScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);
+
+// --- CteScan-specialized entry points --------------------------------------
+// Same `execScan.c` driver, specialized to the CTE scan node (its own in-crate
+// `CteScanNext`/`CteScanRecheck` access/recheck functions). When execScan.c
+// lands it installs one generic implementation; each per-node entry point
+// marshals to it.
+
+use types_nodes::nodectescan::CteScanState;
+
+/// `ExecScanAccessMtd`, specialized to a CTE scan node — returns `true` when a
+/// tuple sits in the node's scan slot, `false` at end-of-scan.
+pub type CteScanAccessMtd =
+    for<'mcx> fn(&mut CteScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd`, specialized to a CTE scan node.
+pub type CteScanRecheckMtd =
+    for<'mcx> fn(&mut CteScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — fetch via `access`, qual-filter, project — for a CTE
+    /// scan node. Returns the result slot id, or `None` at end of scan. `Err`
+    /// carries qual/projection `ereport(ERROR)`s and OOM. This node passes its
+    /// `CteScanNext`/`CteScanRecheck`.
+    pub fn exec_scan_cte(
+        node: &mut CteScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: CteScanAccessMtd,
+        recheck: CteScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
+    /// (rescan EPQ, clear the result slot) at the start of a CTE-scan rescan.
+    pub fn exec_scan_rescan_cte(
+        node: &mut CteScanState<'_>,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecAssignScanProjectionInfo(&node->ss)` (execScan.c): set up the CTE
+    /// scan node's projection, comparing the scan tuple type to the result type.
+    pub fn exec_assign_scan_projection_info_cte(
+        node: &mut CteScanState<'_>,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<()>
+);
+// --- NamedTuplestoreScan-specialized entry point ---------------------------
+// Same `execScan.c` driver, specialized to the named-tuplestore-scan node (its
+// own in-crate `NamedTuplestoreScanNext`/`NamedTuplestoreScanRecheck`). When
+// execScan.c lands it installs one generic implementation; this per-node entry
+// point marshals to it.
+
+use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
+
+/// `ExecScanAccessMtd`, specialized to a named-tuplestore-scan node — returns
+/// `true` when a tuple sits in the node's scan slot, `false` at end-of-scan.
+pub type NamedTuplestoreScanAccessMtd =
+    for<'mcx> fn(&mut NamedTuplestoreScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd`, specialized to a named-tuplestore-scan node.
+pub type NamedTuplestoreScanRecheckMtd =
+    for<'mcx> fn(&mut NamedTuplestoreScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — `ExecScanFetch` (interrupts + the EvalPlanQual
+    /// replacement-tuple decision tree), qual-filter, project — for a
+    /// named-tuplestore-scan node. Returns the result slot id of the produced
+    /// (possibly projected) tuple, or `None` at end of scan. `Err` carries the
+    /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
+    /// execScan.c; this node passes its `NamedTuplestoreScanNext` /
+    /// `NamedTuplestoreScanRecheck`.
+    pub fn exec_scan_namedtuplestore(
+        node: &mut NamedTuplestoreScanState<'_>,
+        estate: &mut EStateData<'_>,
+        access: NamedTuplestoreScanAccessMtd,
+        recheck: NamedTuplestoreScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
 );

@@ -13,27 +13,38 @@ use types_parsenodes::Node;
 use types_rel::Relation;
 use types_storage::lock::LOCKMODE;
 
+/// `get_object_address(objtype, object, &relation, lockmode, missing_ok)`
+/// (objectaddress.c) result: the resolved [`ObjectAddress`] plus, for the
+/// relation-based object kinds, the relation it opened (`relation` out-param;
+/// `None` for non-relation objects, where C leaves `relation == NULL`). The
+/// caller closes the relation (`relation_close(rel, NoLock)`) once done.
+pub struct ResolvedObjectAddress<'mcx> {
+    pub address: ObjectAddress,
+    pub relation: Option<Relation<'mcx>>,
+}
+
 seam_core::seam!(
     /// `get_object_address(objtype, object, &relp, lockmode, missing_ok)`
-    /// (objectaddress.c): resolve a (possibly schema-qualified) object
-    /// reference to its [`ObjectAddress`], taking `lockmode` on it (and on any
-    /// containing relation). For relation-member objects the containing
-    /// relation is opened and returned (the C `*relp` out-parameter) so the
-    /// caller can release the relcache reference while keeping the lock; for
-    /// other object types it is `None`.
+    /// (objectaddress.c) — resolve the parser representation behind `object`
+    /// to an [`ObjectAddress`], taking `lockmode` on the target to guard
+    /// against concurrent modification, and returning whatever relation it
+    /// opened (the C `*relp` out-parameter): for relation-member objects the
+    /// containing relation is opened so the caller can release the relcache
+    /// reference while keeping the lock; for other object types it is `None`.
     ///
-    /// With `missing_ok = true` a missing object yields an [`ObjectAddress`]
-    /// whose `objectId` is `InvalidOid` rather than an error; with
-    /// `missing_ok = false` (or any other catalog failure) the error is
-    /// carried on `Err`. `mcx` anchors the lifetime of the opened relation
-    /// (the relcache arena the caller can later release).
-    pub fn get_object_address<'r>(
-        mcx: Mcx<'r>,
-        object_type: ObjectType,
+    /// `missing_ok` mirrors the C `bool missing_ok`: when `true` a missing
+    /// object yields a [`ResolvedObjectAddress`] whose `address.objectId` is
+    /// `InvalidOid` rather than an error; when `false` (the default for most
+    /// callers) a vanished object raises (`Err`). Any other catalog failure is
+    /// carried on `Err` regardless. `mcx` anchors the lifetime of the opened
+    /// relation (the relcache arena the caller can later release).
+    pub fn get_object_address<'mcx>(
+        mcx: Mcx<'mcx>,
+        objtype: ObjectType,
         object: &Node,
         lockmode: LOCKMODE,
         missing_ok: bool,
-    ) -> PgResult<(ObjectAddress, Option<Relation<'r>>)>
+    ) -> PgResult<ResolvedObjectAddress<'mcx>>
 );
 
 seam_core::seam!(
@@ -47,15 +58,16 @@ seam_core::seam!(
 seam_core::seam!(
     /// `check_object_ownership(roleid, objtype, address, object, relation)`
     /// (objectaddress.c): verify that `roleid` owns (or otherwise may drop)
-    /// the object, raising `ERRCODE_INSUFFICIENT_PRIVILEGE` otherwise (carried
-    /// on `Err`). `relation` is the open relation alias for relation-member
-    /// objects, else `None`.
-    pub fn check_object_ownership<'r>(
-        roleid: Oid,
+    /// the object, raising `ERRCODE_INSUFFICIENT_PRIVILEGE` /
+    /// `ACLCHECK_NOT_OWNER` → `ereport(ERROR)` otherwise (carried on `Err`).
+    /// `relation` is the open relation alias for relation-member objects, else
+    /// `None`.
+    pub fn check_object_ownership<'mcx>(
+        roleid: types_core::Oid,
         objtype: ObjectType,
         address: ObjectAddress,
         object: &Node,
-        relation: Option<&Relation<'r>>,
+        relation: Option<&Relation<'mcx>>,
     ) -> PgResult<()>
 );
 

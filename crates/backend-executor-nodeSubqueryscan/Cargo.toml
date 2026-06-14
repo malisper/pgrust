@@ -1,0 +1,21 @@
+[package]
+name = "backend-executor-nodeSubqueryscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_nodeSubqueryscan"
+path = "src/lib.rs"
+
+[dependencies]
+backend-executor-execAmi-seams = { path = "../backend-executor-execAmi-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+backend-executor-execScan-seams = { path = "../backend-executor-execScan-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }

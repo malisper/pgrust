@@ -16,7 +16,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
-use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
+use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use types_partition::PartrelTupleData;
@@ -1552,4 +1552,17 @@ seam_core::seam!(
         relid: Oid,
         attnum: i16,
     ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(func_id))` + `GETSTRUCT`
+    /// projected to the `pg_proc` fields `fetch_fp_info` (`tcop/fastpath.c`)
+    /// loads into its `struct fp_info`. `Ok(None)` is the C
+    /// `!HeapTupleIsValid(func_htp)` cache miss (the caller raises
+    /// `"function with OID %u does not exist"`); the installer owns the
+    /// `ReleaseSysCache`. The projected row is copied into `mcx`.
+    pub fn search_pg_proc_fastpath<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_id: Oid,
+    ) -> PgResult<Option<FastpathProcRow<'mcx>>>
 );

@@ -244,6 +244,22 @@ pub struct AlterFunctionStmt {
     pub actions: Vec<Node>,
 }
 
+/// `typedef struct CommentStmt` (`nodes/parsenodes.h`) — `COMMENT ON`.
+///
+/// `objtype` is the `ObjectType` of the commented object; `object` is the raw
+/// parser node naming it (a `String` value node for DATABASE/SCHEMA/ROLE/…, a
+/// `List *` for a qualified or per-column name, etc.) — opaque to this crate,
+/// handed to `get_object_address`/`check_object_ownership`. `comment` is the
+/// `NULL`-or-string comment text (`COMMENT ... IS NULL` drops the comment).
+#[derive(Clone, Debug)]
+pub struct CommentStmt {
+    pub objtype: types_nodes::parsenodes::ObjectType,
+    /// `Node *object` — the parser representation of the object to comment on.
+    pub object: Option<Box<Node>>,
+    /// `char *comment` — the comment text, or `None` for `IS NULL`.
+    pub comment: Option<String>,
+}
+
 /// `typedef struct DoStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug)]
 pub struct DoStmt {
@@ -390,6 +406,24 @@ pub struct DropStmt {
     pub concurrent: bool,
 }
 
+/// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — verified against
+/// PostgreSQL 18.3 (`DISCARD { ALL | PLANS | SEQUENCES | TEMP }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardMode {
+    DISCARD_ALL,
+    DISCARD_PLANS,
+    DISCARD_SEQUENCES,
+    DISCARD_TEMP,
+}
+
+/// `typedef struct DiscardStmt` (`nodes/parsenodes.h`). The C `NodeTag type`
+/// header field carries no information for the dispatcher (it switches solely
+/// on `target`) and there is no `NodeTag` enum in this tree, so it is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscardStmt {
+    pub target: DiscardMode,
+}
+
 /// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropRoleStmt {
@@ -428,6 +462,23 @@ pub struct DropOwnedStmt {
 pub struct ReassignOwnedStmt {
     pub roles: Vec<Node>,
     pub newrole: Option<Box<Node>>,
+}
+
+/// `typedef struct SecLabelStmt` (`nodes/parsenodes.h`) — the SECURITY LABEL
+/// command parse node. `object` is the opaque parser representation of the
+/// target object (a qualified-name `List *` / typename / etc.), passed through
+/// to `get_object_address`/`check_object_ownership`. `provider` and `label` are
+/// `NULL` in C when omitted (`SECURITY LABEL ... IS NULL` removes the label).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecLabelStmt {
+    /// Object's type.
+    pub objtype: types_nodes::parsenodes::ObjectType,
+    /// Qualified name of the object.
+    pub object: Option<Box<Node>>,
+    /// Label provider (or `None`).
+    pub provider: Option<String>,
+    /// New security label to be assigned (or `None` to remove).
+    pub label: Option<String>,
 }
 
 /// `typedef struct ParseState` (`parser/parse_node.h`), trimmed. user.c only
@@ -605,6 +656,16 @@ pub const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
 pub const PROPARALLEL_SAFE: i8 = b's' as i8;
 pub const PROPARALLEL_RESTRICTED: i8 = b'r' as i8;
 pub const PROPARALLEL_UNSAFE: i8 = b'u' as i8;
+
+// pg_aggregate.aggkind values (`catalog/pg_aggregate.h`).
+pub const AGGKIND_NORMAL: i8 = b'n' as i8;
+pub const AGGKIND_ORDERED_SET: i8 = b'o' as i8;
+pub const AGGKIND_HYPOTHETICAL: i8 = b'h' as i8;
+
+// pg_aggregate.aggfinalmodify / aggmfinalmodify values (`catalog/pg_aggregate.h`).
+pub const AGGMODIFY_READ_ONLY: i8 = b'r' as i8;
+pub const AGGMODIFY_SHAREABLE: i8 = b's' as i8;
+pub const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
 
 // pg_cast.castmethod values (`catalog/pg_cast.h`).
 pub const COERCION_METHOD_FUNCTION: i8 = b'f' as i8;

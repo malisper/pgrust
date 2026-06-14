@@ -159,6 +159,12 @@ pub fn init_seams() {
         Ok(())
     });
 
+    // `ReScanExprContext(econtext)` (execUtils.c): fire shutdown callbacks then
+    // reset per-tuple memory — addressed by the econtext's EState-pool id.
+    backend_executor_execUtils_seams::re_scan_expr_context::set(|estate, econtext| {
+        ReScanExprContext(estate.ecxt_mut(econtext))
+    });
+
     // `GetPerTupleExprContext(estate)` / `MakePerTupleExprContext(estate)`
     // (executor.h): the EState's per-output-tuple ExprContext, created on first
     // use.
