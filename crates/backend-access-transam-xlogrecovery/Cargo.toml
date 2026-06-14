@@ -1,0 +1,25 @@
+[package]
+name = "backend-access-transam-xlogrecovery"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_transam_xlogrecovery"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-wal = { path = "../types-wal" }
+types-storage = { path = "../types-storage" }
+types-condvar = { path = "../types-condvar" }
+types-error = { path = "../types-error" }
+mcx = { path = "../mcx" }
+
+backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }

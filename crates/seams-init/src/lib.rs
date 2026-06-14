@@ -47,6 +47,7 @@ pub fn init_all() {
     backend_access_transam_xloginsert::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogreader::init_seams();
+    backend_access_transam_xlogrecovery::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_access_transam_xlogutils::init_seams();
     backend_backup_server::init_seams();

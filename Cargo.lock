@@ -2069,6 +2069,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogrecovery"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-storage-ipc-latch",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-s-lock",
+ "mcx",
+ "seam-core",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xlogrecovery-seams"
 version = "0.0.0"
 dependencies = [
@@ -12095,6 +12113,7 @@ dependencies = [
  "backend-access-transam-xloginsert",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogreader",
+ "backend-access-transam-xlogrecovery",
  "backend-access-transam-xlogstats",
  "backend-access-transam-xlogutils",
  "backend-backup-server",
