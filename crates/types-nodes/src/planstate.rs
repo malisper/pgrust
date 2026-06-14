@@ -37,6 +37,8 @@ pub enum PlanStateNode<'mcx> {
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_GroupState`.
+    Group(PgBox<'mcx, crate::nodegroup::GroupStateData<'mcx>>),
     /// `T_ResultState`.
     Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
     /// `T_SetOpState`.
@@ -71,6 +73,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
@@ -94,6 +97,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::Group(g) => &g.ss.ps,
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
@@ -116,6 +120,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::Group(g) => &mut g.ss.ps,
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
@@ -138,6 +143,8 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// here as their executor units land.
     pub fn as_scan_state(&self) -> Option<&ScanStateData<'mcx>> {
         match self {
+            // `GroupState` begins with a `ScanState`.
+            PlanStateNode::Group(g) => Some(&g.ss),
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
