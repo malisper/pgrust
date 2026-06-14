@@ -6569,6 +6569,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-syncrep-gram"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-syncrep-scanner-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
+name = "backend-replication-syncrep-scanner-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-replication-syncrep-seams"
 version = "0.0.0"
 dependencies = [
