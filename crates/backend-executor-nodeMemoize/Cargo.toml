@@ -19,7 +19,6 @@ types-execparallel = { path = "../types-execparallel" }
 backend-executor-nodeMemoize-seams = { path = "../backend-executor-nodeMemoize-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
-backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
