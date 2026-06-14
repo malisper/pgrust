@@ -218,6 +218,7 @@ pub fn init_all() {
     common_hashfn::init_seams();
     common_ip::init_seams();
     common_pglz::init_seams();
+    common_prng_base64::init_seams();
     common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();
