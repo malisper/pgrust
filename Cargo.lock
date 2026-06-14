@@ -2075,17 +2075,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-catalog-pg-aggregate-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-catalog",
- "types-core",
- "types-error",
- "types-parsenodes",
-]
-
-[[package]]
 name = "backend-catalog-pg-authid-seams"
 version = "0.0.0"
 dependencies = [
@@ -2379,32 +2368,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-commands-aggregatecmds"
-version = "0.0.0"
-dependencies = [
- "backend-catalog-aclchk-seams",
- "backend-catalog-namespace",
- "backend-catalog-pg-aggregate-seams",
- "backend-commands-define",
- "backend-commands-functioncmds",
- "backend-parser-parse-type-seams",
- "backend-utils-adt-format-type-seams",
- "backend-utils-cache-lsyscache-seams",
- "backend-utils-error",
- "backend-utils-fmgr-fmgr-seams",
- "backend-utils-init-miscinit-seams",
- "mcx",
- "types-acl",
- "types-catalog",
- "types-core",
- "types-error",
- "types-nodes",
- "types-opclass",
- "types-parsenodes",
- "types-tuple",
-]
-
-[[package]]
 name = "backend-commands-alter-seams"
 version = "0.0.0"
 dependencies = [
@@ -2524,39 +2487,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-commands-collationcmds"
+name = "backend-commands-comment"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-xact-seams",
- "backend-catalog-aclchk-seams",
- "backend-catalog-namespace",
- "backend-commands-collationcmds-seams",
- "backend-commands-define-seams",
- "backend-utils-adt-pg-locale-seams",
+ "backend-catalog-pg-class",
+ "backend-commands-comment-seams",
+ "backend-commands-dbcommands-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit-seams",
- "backend-utils-mb-mbutils-seams",
- "common-string",
- "mcx",
- "types-acl",
  "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
- "types-locale",
  "types-nodes",
  "types-parsenodes",
+ "types-storage",
  "types-tuple",
- "types-wchar",
 ]
 
 [[package]]
-name = "backend-commands-collationcmds-seams"
+name = "backend-commands-comment-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
+ "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-parsenodes",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3780,23 +3740,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-executor-nodeCustom"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execExpr-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-executor-nodeCustom-seams",
- "backend-nodes-extensible-seams",
- "backend-storage-ipc-shm-toc-seams",
- "backend-tcop-postgres-seams",
- "mcx",
- "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
 name = "backend-executor-nodeCustom-seams"
 version = "0.0.0"
 dependencies = [
@@ -4169,22 +4112,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-nodeNamedtuplestorescan"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execExpr-seams",
- "backend-executor-execScan-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-utils-misc-queryenvironment",
- "backend-utils-sort-storage-seams",
- "mcx",
- "types-error",
- "types-nodes",
- "types-tuple",
 ]
 
 [[package]]
@@ -4797,11 +4724,9 @@ dependencies = [
 name = "backend-nodes-extensible-seams"
 version = "0.0.0"
 dependencies = [
- "mcx",
  "seam-core",
  "types-error",
  "types-extensible",
- "types-nodes",
 ]
 
 [[package]]
@@ -7124,31 +7049,6 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-tcop-fastpath"
-version = "0.0.0"
-dependencies = [
- "backend-access-transam-xact-seams",
- "backend-catalog-aclchk-seams",
- "backend-catalog-objectaccess-seams",
- "backend-libpq-pqformat",
- "backend-tcop-postgres-seams",
- "backend-utils-cache-lsyscache-seams",
- "backend-utils-cache-syscache-seams",
- "backend-utils-error",
- "backend-utils-fmgr-fmgr-seams",
- "backend-utils-init-miscinit-seams",
- "backend-utils-mb-mbutils-seams",
- "backend-utils-time-snapmgr-seams",
- "mcx",
- "types-acl",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-stringinfo",
 ]
 
 [[package]]
@@ -10062,6 +9962,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-amcmds",
  "backend-commands-cluster",
+ "backend-commands-comment",
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-foreigncmds",
@@ -10079,7 +9980,6 @@ dependencies = [
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
- "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
@@ -10089,7 +9989,6 @@ dependencies = [
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
- "backend-executor-nodeNamedtuplestorescan",
  "backend-executor-nodeResult",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
@@ -10145,7 +10044,6 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-storage-sync",
  "backend-tcop-backend-startup",
- "backend-tcop-fastpath",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
  "backend-tsearch-ispell-regis",

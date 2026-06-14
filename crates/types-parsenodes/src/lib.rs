@@ -244,6 +244,22 @@ pub struct AlterFunctionStmt {
     pub actions: Vec<Node>,
 }
 
+/// `typedef struct CommentStmt` (`nodes/parsenodes.h`) — `COMMENT ON`.
+///
+/// `objtype` is the `ObjectType` of the commented object; `object` is the raw
+/// parser node naming it (a `String` value node for DATABASE/SCHEMA/ROLE/…, a
+/// `List *` for a qualified or per-column name, etc.) — opaque to this crate,
+/// handed to `get_object_address`/`check_object_ownership`. `comment` is the
+/// `NULL`-or-string comment text (`COMMENT ... IS NULL` drops the comment).
+#[derive(Clone, Debug)]
+pub struct CommentStmt {
+    pub objtype: types_nodes::parsenodes::ObjectType,
+    /// `Node *object` — the parser representation of the object to comment on.
+    pub object: Option<Box<Node>>,
+    /// `char *comment` — the comment text, or `None` for `IS NULL`.
+    pub comment: Option<String>,
+}
+
 /// `typedef struct DoStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug)]
 pub struct DoStmt {
