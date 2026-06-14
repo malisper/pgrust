@@ -22,14 +22,20 @@
 //!
 //! ### Guard-and-panic frontier
 //!
-//! The branches a plain `DestNone` `SELECT` does not exercise — `EXPLAIN`-only
-//! read-only/parallel gating, the per-rel write-permission classification (the
-//! trimmed `RTEPermissionInfo` carries no `requiredPerms`/`selectedCols`),
-//! `parallelModeNeeded`, `rowMarks`, `subplans`, partition pruning, RETURNING,
-//! and non-`SELECT` command types — `panic!` with a precise message
-//! (mirror-pg-and-panic on a live frontier); the unit stays CATALOG
-//! `needs-decomp` so the seam-install recurrence guard exempts the still-open
-//! surface.
+//! `InitPlan` now runs the full `ExecCheckPermissions` / `ExecCheckOneRelPerms`
+//! per-rel classification (`RTEPermissionInfo` carries the
+//! `requiredPerms`/`selectedCols`/`insertedCols`/`updatedCols` fields), so a real
+//! table query no longer panics on the permission leg (the ACL checks seam into
+//! the still-unported `catalog/aclchk.c` owner; with the planner that populates
+//! `RTEPermissionInfo` also unported, a plain SELECT's `permInfos` is empty and
+//! the check is a no-op).
+//!
+//! The remaining branches a plain `DestNone` `SELECT` does not exercise —
+//! `EXPLAIN`-only read-only/parallel gating, `parallelModeNeeded`, `rowMarks`,
+//! `subplans`, partition pruning, RETURNING, and non-`SELECT` command types —
+//! `panic!` with a precise message (mirror-pg-and-panic on a live frontier); the
+//! unit stays CATALOG `needs-decomp` so the seam-install recurrence guard
+//! exempts the still-open surface.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -42,7 +48,11 @@ extern crate alloc;
 use alloc::string::ToString;
 
 use mcx::MemoryContext;
-use types_acl::acl::{AclResult, ACL_SELECT};
+use types_acl::acl::{
+    AclMaskHow, AclMode, AclResult, ACL_INSERT, ACL_SELECT, ACL_UPDATE,
+};
+use types_nodes::bitmapset::{Bitmapset, BITS_PER_BITMAPWORD};
+use types_nodes::parsenodes::RTEPermissionInfo;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::nodeindexscan::PlannedStmt;
@@ -205,18 +215,10 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
 
     query_desc.with_plan_and_estate_mut(|plan, plannedstmt, estate, planstate_slot| {
         // Do permissions checks: ExecCheckPermissions(rangeTable, permInfos, true).
-        // The full per-rel classification needs the trimmed RTEPermissionInfo's
-        // requiredPerms/selectedCols (not carried); guard-and-panic when there
-        // are perm infos to classify (the plain SELECT test path uses none).
-        if plannedstmt
-            .permInfos
-            .as_ref()
-            .is_some_and(|p| !p.is_empty())
-        {
-            panic!(
-                "execMain InitPlan: ExecCheckPermissions per-rel classification needs \
-                 RTEPermissionInfo.requiredPerms/selectedCols (trimmed) — #167 F0d"
-            );
+        // ExecCheckPermissions ereports (ACLCHECK) on a violation; the rangeTable
+        // is unused (it survives only for the un-modeled ExecutorCheckPerms_hook).
+        if let Some(perm_infos) = plannedstmt.permInfos.as_ref() {
+            exec_check_permissions(perm_infos.as_slice(), true)?;
         }
 
         // ExecInitRangeTable(estate, rangeTable, permInfos, bms_copy(unprunableRelids)).
@@ -622,7 +624,9 @@ pub fn ExecCheckXactReadOnly(plannedstmt: &PlannedStmt<'_>) {
     let _ = plannedstmt.commandType;
 }
 
-/// `ExecCheckOneRelPerms` for the SELECT-on-columns case (execMain.c).
+/// `ExecCheckOneRelPerms` for the SELECT-on-columns case (execMain.c), used by
+/// the `exec_check_permissions_select` seam (`RI_Initial_Check`'s SELECT probe,
+/// which passes column attnums as a slice rather than a `Bitmapset`).
 fn exec_check_one_rel_perms_select(
     relid: Oid,
     selected_cols: &[i16],
@@ -637,7 +641,7 @@ fn exec_check_one_rel_perms_select(
             relid,
             userid,
             ACL_SELECT,
-            types_acl::acl::AclMaskHow::AclmaskAny,
+            AclMaskHow::AclmaskAny,
         )? != AclResult::AclcheckOk
         {
             return Ok(false);
@@ -652,7 +656,7 @@ fn exec_check_one_rel_perms_select(
                 relid,
                 userid,
                 ACL_SELECT,
-                types_acl::acl::AclMaskHow::AclmaskAll,
+                AclMaskHow::AclmaskAll,
             )? != AclResult::AclcheckOk
             {
                 return Ok(false);
@@ -681,6 +685,206 @@ pub fn exec_check_permissions_select(
             if ereport_on_violation {
                 let objtype = objaddr::get_relkind_objtype::call(relkind);
                 let name = lsyscache_get_rel_name(relid)?;
+                aclchk::aclcheck_error::call(AclResult::AclcheckNoPriv, objtype, name)?;
+            }
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `bms_is_empty(a)` (nodes/bitmapset.c) over the owned word storage: a set is
+/// empty iff it is absent (C `NULL`) or every word is zero. The `bms_*`
+/// constructors never leave trailing all-zero words, so this is faithful.
+fn bms_is_empty(cols: &Option<mcx::PgBox<'_, Bitmapset<'_>>>) -> bool {
+    match cols {
+        None => true,
+        Some(b) => b.words.as_slice().iter().all(|&w| w == 0),
+    }
+}
+
+/// Iterate the members of a `Bitmapset *` in ascending order, mirroring the C
+/// `while ((col = bms_next_member(cols, col)) >= 0)` loop. `f` receives each
+/// member's bit number; `Bitmapset` bit `k` lives in word `k / BITS_PER_BITMAPWORD`
+/// at position `k % BITS_PER_BITMAPWORD` (nodes/bitmapset.c numbering).
+fn bms_for_each_member(
+    cols: &Option<mcx::PgBox<'_, Bitmapset<'_>>>,
+    mut f: impl FnMut(i32) -> PgResult<core::ops::ControlFlow<bool>>,
+) -> PgResult<Option<bool>> {
+    let Some(b) = cols else {
+        return Ok(None);
+    };
+    for (wordnum, &word) in b.words.as_slice().iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let bitnum = w.trailing_zeros() as usize;
+            w &= w - 1;
+            let member = (wordnum * BITS_PER_BITMAPWORD + bitnum) as i32;
+            if let core::ops::ControlFlow::Break(early) = f(member)? {
+                return Ok(Some(early));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `ExecCheckPermissionsModified(relOid, userid, modifiedCols, requiredPerms)`
+/// (execMain.c) — INSERT/UPDATE column-permission check (processed uniformly).
+fn exec_check_permissions_modified(
+    rel_oid: Oid,
+    userid: Oid,
+    modified_cols: &Option<mcx::PgBox<'_, Bitmapset<'_>>>,
+    required_perms: AclMode,
+) -> PgResult<bool> {
+    // When the query doesn't explicitly update any columns, allow the query if
+    // we have permission on any column of the rel.
+    if bms_is_empty(modified_cols) {
+        if aclchk::pg_attribute_aclcheck_all::call(
+            rel_oid,
+            userid,
+            required_perms,
+            AclMaskHow::AclmaskAny,
+        )? != AclResult::AclcheckOk
+        {
+            return Ok(false);
+        }
+    }
+
+    if let Some(early) = bms_for_each_member(modified_cols, |col| {
+        // bit #s are offset by FirstLowInvalidHeapAttributeNumber.
+        let attno = col + FirstLowInvalidHeapAttributeNumber as i32;
+        if attno == 0 {
+            // whole-row reference can't happen here (C: elog(ERROR)).
+            panic!("execMain ExecCheckPermissionsModified: whole-row update is not implemented");
+        }
+        if aclchk::pg_attribute_aclcheck::call(rel_oid, attno as i16, userid, required_perms)?
+            != AclResult::AclcheckOk
+        {
+            return Ok(core::ops::ControlFlow::Break(false));
+        }
+        Ok(core::ops::ControlFlow::Continue(()))
+    })? {
+        return Ok(early);
+    }
+    Ok(true)
+}
+
+/// `ExecCheckOneRelPerms(perminfo)` (execMain.c) — check access permissions for
+/// a single relation.
+fn exec_check_one_rel_perms(perminfo: &RTEPermissionInfo<'_>) -> PgResult<bool> {
+    let rel_oid = perminfo.relid;
+    let required_perms = perminfo.requiredPerms;
+    debug_assert!(required_perms != 0);
+
+    // userid to check as: current user unless we have a setuid indication.
+    let userid = if types_core::primitive::OidIsValid(perminfo.checkAsUser) {
+        perminfo.checkAsUser
+    } else {
+        miscinit::get_user_id::call()
+    };
+
+    // We must have *all* the requiredPerms bits, but some of the bits can be
+    // satisfied from column-level rather than relation-level permissions.
+    let rel_perms =
+        aclchk::pg_class_aclmask::call(rel_oid, userid, required_perms, AclMaskHow::AclmaskAll)?;
+    let remaining_perms = required_perms & !rel_perms;
+    if remaining_perms != 0 {
+        // If we lack any permissions that exist only as relation permissions,
+        // we can fail straight away.
+        if remaining_perms & !(ACL_SELECT | ACL_INSERT | ACL_UPDATE) != 0 {
+            return Ok(false);
+        }
+
+        if remaining_perms & ACL_SELECT != 0 {
+            // When the query doesn't explicitly reference any columns (e.g.
+            // SELECT COUNT(*) FROM table), allow it if we have SELECT on any
+            // column of the rel, as per SQL spec.
+            if bms_is_empty(&perminfo.selectedCols)
+                && aclchk::pg_attribute_aclcheck_all::call(
+                    rel_oid,
+                    userid,
+                    ACL_SELECT,
+                    AclMaskHow::AclmaskAny,
+                )? != AclResult::AclcheckOk
+            {
+                return Ok(false);
+            }
+
+            if let Some(early) = bms_for_each_member(&perminfo.selectedCols, |col| {
+                // bit #s are offset by FirstLowInvalidHeapAttributeNumber.
+                let attno = col + FirstLowInvalidHeapAttributeNumber as i32;
+                if attno == 0 {
+                    // Whole-row reference, must have priv on all cols.
+                    if aclchk::pg_attribute_aclcheck_all::call(
+                        rel_oid,
+                        userid,
+                        ACL_SELECT,
+                        AclMaskHow::AclmaskAll,
+                    )? != AclResult::AclcheckOk
+                    {
+                        return Ok(core::ops::ControlFlow::Break(false));
+                    }
+                } else if aclchk::pg_attribute_aclcheck::call(
+                    rel_oid,
+                    attno as i16,
+                    userid,
+                    ACL_SELECT,
+                )? != AclResult::AclcheckOk
+                {
+                    return Ok(core::ops::ControlFlow::Break(false));
+                }
+                Ok(core::ops::ControlFlow::Continue(()))
+            })? {
+                return Ok(early);
+            }
+        }
+
+        // Basically the same for the mod columns, for both INSERT and UPDATE
+        // privilege as specified by remainingPerms.
+        if remaining_perms & ACL_INSERT != 0
+            && !exec_check_permissions_modified(
+                rel_oid,
+                userid,
+                &perminfo.insertedCols,
+                ACL_INSERT,
+            )?
+        {
+            return Ok(false);
+        }
+
+        if remaining_perms & ACL_UPDATE != 0
+            && !exec_check_permissions_modified(
+                rel_oid,
+                userid,
+                &perminfo.updatedCols,
+                ACL_UPDATE,
+            )?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `ExecCheckPermissions(rangeTable, rteperminfos, ereport_on_violation)`
+/// (execMain.c) — check access permissions of relations mentioned in a query.
+///
+/// `rangeTable` is no longer used by us, but kept around for hooks (the trimmed
+/// model carries it on the EState; the `ExecutorCheckPerms_hook` is not modeled
+/// in the owned port, so the hook leg is omitted — faithful: with no hook
+/// installed C returns `result` unchanged).
+pub fn exec_check_permissions(
+    rteperminfos: &[RTEPermissionInfo<'_>],
+    ereport_on_violation: bool,
+) -> PgResult<bool> {
+    for perminfo in rteperminfos {
+        debug_assert!(types_core::primitive::OidIsValid(perminfo.relid));
+        let result = exec_check_one_rel_perms(perminfo)?;
+        if !result {
+            if ereport_on_violation {
+                let relkind = lsyscache::get_rel_relkind::call(perminfo.relid)?;
+                let objtype = objaddr::get_relkind_objtype::call(relkind);
+                let name = lsyscache_get_rel_name(perminfo.relid)?;
                 aclchk::aclcheck_error::call(AclResult::AclcheckNoPriv, objtype, name)?;
             }
             return Ok(false);

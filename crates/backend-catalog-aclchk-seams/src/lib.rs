@@ -36,6 +36,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_class_aclmask(table_oid, roleid, mask, how)` (aclchk.c): return the
+    /// subset of `mask` privilege bits that `roleid` holds on the relation,
+    /// combining per `how`. Used by `ExecCheckOneRelPerms` to compute the
+    /// relation-level permissions actually held. Can `ereport(ERROR)` on cache
+    /// lookup failure, carried on `Err`.
+    pub fn pg_class_aclmask(
+        table_oid: Oid,
+        roleid: Oid,
+        mask: AclMode,
+        how: AclMaskHow,
+    ) -> PgResult<AclMode>
+);
+
+seam_core::seam!(
     /// `pg_class_aclcheck(table_oid, roleid, mode)` (aclchk.c): check
     /// privilege bits on a relation. Can `ereport(ERROR)` on cache lookup
     /// failure, carried on `Err`.
