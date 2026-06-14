@@ -31,8 +31,13 @@ seam_core::seam!(
     /// for `timestamptz`. The cycle partner `jsonb` calls this when rendering a
     /// datetime value. `Err` carries the datetime `ereport(ERROR, "... out of
     /// range")`.
-    pub fn json_encode_datetime(
-        value: types_datum::Datum,
+    ///
+    /// Datum-unification: `value` is the canonical unified value
+    /// (`types_tuple::Datum<'mcx>`), passed by reference. A datetime is a
+    /// by-value word (`ByVal`), so the owner reads it via the `Datum`
+    /// conversion methods.
+    pub fn json_encode_datetime<'mcx>(
+        value: &types_tuple::Datum<'mcx>,
         typid: types_core::Oid,
         tzp: Option<i32>,
     ) -> types_error::PgResult<String>
