@@ -20,11 +20,13 @@ pub fn init_all() {
     backend_access_heap_vacuumlazy::init_seams();
     backend_access_index_indexam::init_seams();
     backend_access_nbt_dedup::init_seams();
+    backend_access_nbt_xlog::init_seams();
     backend_access_nbtree_nbtree::init_seams();
     backend_access_rmgrdesc_small::init_seams();
     backend_access_rmgrdesc_xactdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_brin_xlog::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
@@ -36,6 +38,7 @@ pub fn init_all() {
     backend_access_transam_varsup::init_seams();
     backend_access_transam_xact::init_seams();
     backend_access_transam_xlog::init_seams();
+    backend_access_transam_xlogarchive::init_seams();
     backend_access_transam_xlogprefetcher::init_seams();
     backend_access_transam_xlogreader::init_seams();
     backend_access_transam_xlogstats::init_seams();
@@ -159,6 +162,7 @@ pub fn init_all() {
     backend_storage_ipc_shmem::init_seams();
     backend_storage_ipc_sinval::init_seams();
     backend_storage_ipc_standby::init_seams();
+    backend_storage_large_object::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lmgr::init_seams();

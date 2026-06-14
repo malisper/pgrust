@@ -55,6 +55,29 @@ seam_core::seam!(
     pub fn allocate_file_write(path: &str, bytes: &[u8]) -> PgResult<()>
 );
 
+/// The outcome of [`create_empty_file`] — which of the two C steps failed (if
+/// any), carrying `errno` so the non-throwing caller can build its own
+/// `ereport(LOG)` message. Mirrors xlogarchive.c's `AllocateFile`-then-`FreeFile`
+/// pair, where a `NULL` open and a non-zero `FreeFile` are reported separately.
+#[derive(Clone, Copy, Debug)]
+pub enum CreateEmptyFileOutcome {
+    /// Both the open and the close (flush) succeeded.
+    Ok,
+    /// `AllocateFile` returned `NULL`; carries the saved `errno`.
+    CreateFailed(i32),
+    /// `FreeFile` returned non-zero (deferred write error); carries `errno`.
+    WriteFailed(i32),
+}
+
+seam_core::seam!(
+    /// `AllocateFile(path, "w")` immediately followed by `FreeFile` (fd.c) —
+    /// create an otherwise-empty file (the archive `.ready`/`.done` status-file
+    /// idiom in xlogarchive.c). Unlike [`allocate_file_write`] this never
+    /// throws: failures are returned as [`CreateEmptyFileOutcome`] so the caller
+    /// can emit its own non-throwing `ereport(LOG)` and continue.
+    pub fn create_empty_file(path: &str) -> CreateEmptyFileOutcome
+);
+
 seam_core::seam!(
     /// `AllocateFile(path, PG_BINARY_R)` + `fstat` + `fread` + `FreeFile`
     /// (fd.c) — read the whole file into a byte buffer. Returns `Ok(None)` when

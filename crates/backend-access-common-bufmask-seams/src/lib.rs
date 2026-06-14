@@ -14,9 +14,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `mask_page_hint_bits(page)` (bufmask.c) — mask the page-level hint bits
+    /// that may differ between primary and standby without WAL logging: the
+    /// `pd_prune_xid` and the `pd_flags`
+    /// `PD_PAGE_FULL`/`PD_HAS_FREE_LINES`/`PD_ALL_VISIBLE` hint bits, all set
+    /// to `MASK_MARKER`. Infallible (fixed-offset writes).
+    pub fn mask_page_hint_bits(page: &mut [u8])
+);
+
+seam_core::seam!(
     /// `mask_unused_space(page)` (bufmask.c) — memset the hole between
     /// `pd_lower` and `pd_upper` to `MASK_MARKER` (0), after a sanity check
     /// that `elog(ERROR)`s on invalid `pd_lower`/`pd_upper`/`pd_special`
     /// (carried on `Err`).
     pub fn mask_unused_space(page: &mut [u8]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `mask_lp_flags(page)` (bufmask.c) — mask each line pointer's `lp_flags`
+    /// (which may be changed without WAL on btree/heap leaf pages) to
+    /// `MASK_MARKER`. Infallible (fixed-offset writes).
+    pub fn mask_lp_flags(page: &mut [u8])
 );

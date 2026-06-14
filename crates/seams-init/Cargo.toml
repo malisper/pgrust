@@ -24,9 +24,11 @@ backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 backend-access-nbt-dedup = { path = "../backend-access-nbt-dedup" }
+backend-access-nbt-xlog = { path = "../backend-access-nbt-xlog" }
 backend-access-nbtree-nbtree = { path = "../backend-access-nbtree-nbtree" }
 backend-access-rmgrdesc-small = { path = "../backend-access-rmgrdesc-small" }
 backend-access-rmgrdesc-xactdesc = { path = "../backend-access-rmgrdesc-xactdesc" }
+backend-access-brin-xlog = { path = "../backend-access-brin-xlog" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-transam-clog = { path = "../backend-access-transam-clog" }
@@ -40,6 +42,7 @@ backend-access-transam-twophase = { path = "../backend-access-transam-twophase" 
 backend-access-transam-varsup = { path = "../backend-access-transam-varsup" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
+backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
 backend-access-transam-xlogreader = { path = "../backend-access-transam-xlogreader" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
@@ -163,6 +166,7 @@ backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
 backend-storage-ipc-sinval = { path = "../backend-storage-ipc-sinval" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
+backend-storage-large-object = { path = "../backend-storage-large-object" }
 backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-deadlock = { path = "../backend-storage-lmgr-deadlock" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }

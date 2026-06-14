@@ -11,6 +11,7 @@
 
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
 
 use mcx::PgVec;
 use types_core::primitive::{
@@ -110,12 +111,198 @@ pub const BT_PIVOT_HEAP_TID_ATTR: uint16 = 0x1000;
 /// to indicate a posting-list tuple.
 pub const BT_IS_POSTING: uint16 = 0x2000;
 
-/// `XLOG_BTREE_DEDUP` (`access/nbtxlog.h`) — WAL info bits for a dedup record.
+// ===========================================================================
+// WAL record info-bit op codes (`access/nbtxlog.h`).
+// ===========================================================================
+
+/// add index tuple without split
+pub const XLOG_BTREE_INSERT_LEAF: u8 = 0x00;
+/// same, on a non-leaf page
+pub const XLOG_BTREE_INSERT_UPPER: u8 = 0x10;
+/// same, plus update metapage
+pub const XLOG_BTREE_INSERT_META: u8 = 0x20;
+/// add index tuple with split
+pub const XLOG_BTREE_SPLIT_L: u8 = 0x30;
+/// as above, new item on right
+pub const XLOG_BTREE_SPLIT_R: u8 = 0x40;
+/// add index tuple with posting split
+pub const XLOG_BTREE_INSERT_POST: u8 = 0x50;
+/// `XLOG_BTREE_DEDUP` (`access/nbtxlog.h`) — deduplicate tuples for a page.
 pub const XLOG_BTREE_DEDUP: u8 = 0x60;
+/// delete leaf index tuples for a page
+pub const XLOG_BTREE_DELETE: u8 = 0x70;
+/// delete a half-dead page
+pub const XLOG_BTREE_UNLINK_PAGE: u8 = 0x80;
+/// same, and update metapage
+pub const XLOG_BTREE_UNLINK_PAGE_META: u8 = 0x90;
+/// new root page
+pub const XLOG_BTREE_NEWROOT: u8 = 0xA0;
+/// mark a leaf as half-dead
+pub const XLOG_BTREE_MARK_PAGE_HALFDEAD: u8 = 0xB0;
+/// delete entries on a page during vacuum
+pub const XLOG_BTREE_VACUUM: u8 = 0xC0;
+/// old page is about to be reused from FSM
+pub const XLOG_BTREE_REUSE_PAGE: u8 = 0xD0;
+/// update cleanup-related data in the metapage
+pub const XLOG_BTREE_META_CLEANUP: u8 = 0xE0;
 
 /// `SizeOfBtreeDedup` (`access/nbtxlog.h`) — `offsetof(xl_btree_dedup,`
 /// `nintervals) + sizeof(uint16)` = 2 (the record is a single `uint16`).
 pub const SizeOfBtreeDedup: usize = 2;
+
+/// `SizeOfBtreeUpdate` (`access/nbtxlog.h`) — `offsetof(xl_btree_update,`
+/// `ndeletedtids) + sizeof(uint16)` = 2 (just the `ndeletedtids` count; the
+/// posting-list deleted-TID offsets follow in the block data).
+pub const SizeOfBtreeUpdate: usize = 2;
+
+// ===========================================================================
+// Metapage layout (`access/nbtree.h`).
+// ===========================================================================
+
+/// `BTREE_METADATA_MAGIC` (`access/nbtree.h`) — magic number identifying a
+/// btree metapage.
+pub const BTREE_MAGIC: u32 = 0x053162;
+/// `BTREE_VERSION` (`access/nbtree.h`) — current version number.
+pub const BTREE_VERSION: u32 = 4;
+/// `BTREE_MIN_VERSION` (`access/nbtree.h`) — minimal supported version number.
+pub const BTREE_MIN_VERSION: u32 = 2;
+/// `BTREE_NOVAC_VERSION` (`access/nbtree.h`) — minimal version with support for
+/// `btpo_level` in `last_cleanup_num_delpages`.
+pub const BTREE_NOVAC_VERSION: u32 = 3;
+
+/// `BTMetaPageData` (`access/nbtree.h`) — the contents of a btree metapage,
+/// stored at `PageGetContents` of block [`BTREE_METAPAGE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BTMetaPageData {
+    /// should contain `BTREE_MAGIC`
+    pub btm_magic: u32,
+    /// should contain `BTREE_VERSION`
+    pub btm_version: u32,
+    /// current root location
+    pub btm_root: BlockNumber,
+    /// tree level of the root page
+    pub btm_level: u32,
+    /// current "fast" root location
+    pub btm_fastroot: BlockNumber,
+    /// tree level of the "fast" root page
+    pub btm_fastlevel: u32,
+    /// number of deleted, non-recyclable pages during last cleanup
+    pub btm_last_cleanup_num_delpages: u32,
+    /// number of heap tuples during last cleanup (deprecated)
+    pub btm_last_cleanup_num_heap_tuples: f64,
+    /// are all columns "equalimage"?
+    pub btm_allequalimage: bool,
+}
+
+// ===========================================================================
+// WAL record on-disk structs (`access/nbtxlog.h`). The redo path decodes
+// these field-by-field out of the (possibly unaligned) WAL byte buffers, so
+// they carry no `#[repr(C)]` ABI contract here.
+// ===========================================================================
+
+/// `xl_btree_metadata` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_metadata {
+    pub version: u32,
+    pub root: BlockNumber,
+    pub level: u32,
+    pub fastroot: BlockNumber,
+    pub fastlevel: u32,
+    pub last_cleanup_num_delpages: u32,
+    pub allequalimage: bool,
+}
+
+/// `xl_btree_insert` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_insert {
+    pub offnum: OffsetNumber,
+}
+
+/// `xl_btree_split` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_split {
+    /// tree level of page being split
+    pub level: u32,
+    /// first origpage item on rightpage
+    pub firstrightoff: OffsetNumber,
+    /// new item's offset
+    pub newitemoff: OffsetNumber,
+    /// offset inside orig posting tuple
+    pub postingoff: uint16,
+}
+
+/// `xl_btree_dedup` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_dedup {
+    pub nintervals: uint16,
+}
+
+/// `xl_btree_reuse_page` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_reuse_page {
+    pub locator: types_storage::RelFileLocator,
+    pub block: BlockNumber,
+    pub snapshotConflictHorizon: FullTransactionId,
+    pub isCatalogRel: bool,
+}
+
+/// `xl_btree_vacuum` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_vacuum {
+    pub ndeleted: uint16,
+    pub nupdated: uint16,
+}
+
+/// `xl_btree_delete` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_delete {
+    pub snapshotConflictHorizon: types_core::primitive::TransactionId,
+    pub ndeleted: uint16,
+    pub nupdated: uint16,
+    pub isCatalogRel: bool,
+}
+
+/// `xl_btree_mark_page_halfdead` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_mark_page_halfdead {
+    /// deleted tuple id in parent page
+    pub poffset: OffsetNumber,
+    /// leaf block ultimately being deleted
+    pub leafblk: BlockNumber,
+    /// leaf block's left sibling, if any
+    pub leftblk: BlockNumber,
+    /// leaf block's right sibling
+    pub rightblk: BlockNumber,
+    /// topmost internal page in the subtree
+    pub topparent: BlockNumber,
+}
+
+/// `xl_btree_unlink_page` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_unlink_page {
+    /// target block's left sibling, if any
+    pub leftsib: BlockNumber,
+    /// target block's right sibling
+    pub rightsib: BlockNumber,
+    /// target block's level
+    pub level: u32,
+    /// target block's `BTPageSetDeleted()` XID
+    pub safexid: FullTransactionId,
+    /// last child of the to-be-deleted subtree's leftmost leaf-level sibling
+    pub leafleftsib: BlockNumber,
+    /// next child of the to-be-deleted subtree
+    pub leafrightsib: BlockNumber,
+    /// next remaining child in to-be-deleted subtree
+    pub leaftopparent: BlockNumber,
+}
+
+/// `xl_btree_newroot` (`access/nbtxlog.h`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct xl_btree_newroot {
+    pub rootblk: BlockNumber,
+    pub level: u32,
+}
 
 /// `BTPageOpaqueData` (`access/nbtree.h`) — the btree-specific special-area
 /// header at the end of every btree page (16 bytes, `#[repr(C)]`).

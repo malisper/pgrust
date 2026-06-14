@@ -55,6 +55,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogReadBufferForRedoExtended(record, block_id, mode, get_cleanup_lock,
+    /// &buf)` (xlogutils.c) — the general form of [`xlog_read_buffer_for_redo`],
+    /// allowing a non-`RBM_NORMAL` read mode and a cleanup (rather than
+    /// exclusive) lock. Returns the [`XLogRedoAction`] and the buffer. Can
+    /// `ereport(ERROR)` on a read failure, carried on `Err`.
+    pub fn xlog_read_buffer_for_redo_extended(
+        record: &XLogReaderState<'_>,
+        block_id: u8,
+        mode: types_storage::storage::ReadBufferMode,
+        get_cleanup_lock: bool,
+    ) -> types_error::PgResult<(XLogRedoAction, Buffer)>
+);
+
+seam_core::seam!(
+    /// `XLogInitBufferForRedo(record, block_id)` (xlogutils.c) — pin and lock a
+    /// buffer referenced by a WAL record, for re-initializing it from scratch
+    /// (`RBM_ZERO_AND_LOCK`). Returns the locked buffer. Can `ereport(ERROR)`
+    /// on a read failure, carried on `Err`.
+    pub fn xlog_init_buffer_for_redo(
+        record: &XLogReaderState<'_>,
+        block_id: u8,
+    ) -> types_error::PgResult<Buffer>
+);
+
+seam_core::seam!(
     /// `XLogReadBufferExtended(rlocator, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR,
     /// InvalidBuffer)` (xlogutils.c) — read (extending/creating the FSM fork if
     /// the page is past EOF, per the redo extension rules) and pin a block of
