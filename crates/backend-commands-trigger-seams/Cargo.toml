@@ -13,7 +13,6 @@ mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-datum = { path = "../types-datum" }
 types-ri-triggers = { path = "../types-ri-triggers" }
 types-nodes = { path = "../types-nodes" }
 types-tableam = { path = "../types-tableam" }
