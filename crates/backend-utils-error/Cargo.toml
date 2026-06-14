@@ -17,7 +17,7 @@ types-dest = { path = "../types-dest" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }
 backend-utils-error-small-seams = { path = "../backend-utils-error-small-seams" }
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
 libc = "0.2"

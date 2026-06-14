@@ -23,7 +23,7 @@ backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress
 backend-catalog-pg-namespace-seams = { path = "../backend-catalog-pg-namespace-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }

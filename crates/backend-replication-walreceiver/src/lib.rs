@@ -49,7 +49,7 @@ use backend_replication_walreceiverfuncs_seams as walrcvfuncs;
 use backend_replication_walsender_seams as walsender;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_procarray_seams as procarray;
-use backend_storage_ipc_seams as ipc;
+use backend_storage_ipc_dsm_core_seams as ipc;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_activity_pgstat_io_seams as pgstat_io;
 use backend_utils_activity_pgstat_wal_seams as pgstat_wal;

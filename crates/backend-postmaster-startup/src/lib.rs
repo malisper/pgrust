@@ -105,7 +105,7 @@ fn StartupProcSigHupHandler(_postgres_signal_arg: i32) {
 /// SIGTERM: set flag to abort redo and exit (`StartupProcShutdownHandler`).
 fn StartupProcShutdownHandler(_postgres_signal_arg: i32) {
     if IN_RESTORE_COMMAND.get() {
-        backend_storage_ipc_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
+        backend_storage_ipc_dsm_core_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
     } else {
         SHUTDOWN_REQUESTED.set(true);
     }
@@ -178,7 +178,7 @@ pub fn ProcessStartupProcInterrupts(mcx: Mcx<'_>) -> PgResult<()> {
 
     // Check if we were requested to exit without finishing recovery.
     if SHUTDOWN_REQUESTED.get() {
-        backend_storage_ipc_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
+        backend_storage_ipc_dsm_core_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
     }
 
     // Emergency bailout if postmaster has died. This is to avoid the
@@ -237,7 +237,7 @@ pub fn StartupProcessMain(startup_data: &[u8]) -> PgResult<()> {
     backend_postmaster_auxprocess_seams::auxiliary_process_main_common::call()?;
 
     // Arrange to clean up at startup process exit.
-    backend_storage_ipc_seams::on_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         StartupProcExit,
         types_datum::Datum::null(),
     )?;
@@ -296,7 +296,7 @@ pub fn StartupProcessMain(startup_data: &[u8]) -> PgResult<()> {
 
     // Exit normally. Exit code 0 tells postmaster that we completed recovery
     // successfully.
-    backend_storage_ipc_seams::proc_exit::call(0, backend_utils_init_small_seams::my_proc_pid::call())
+    backend_storage_ipc_dsm_core_seams::proc_exit::call(0, backend_utils_init_small_seams::my_proc_pid::call())
 }
 
 /// `PreRestoreCommand()`.
@@ -307,7 +307,7 @@ pub fn PreRestoreCommand() {
     // shutdown request received just before this.
     IN_RESTORE_COMMAND.set(true);
     if SHUTDOWN_REQUESTED.get() {
-        backend_storage_ipc_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
+        backend_storage_ipc_dsm_core_seams::proc_exit::call(1, backend_utils_init_small_seams::my_proc_pid::call());
     }
 }
 

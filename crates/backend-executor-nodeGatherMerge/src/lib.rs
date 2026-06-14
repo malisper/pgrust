@@ -186,7 +186,7 @@ pub fn ExecInitGatherMerge<'mcx>(
     // Initialize result type and projection.
     //   ExecInitResultTypeTL(&gm_state->ps);
     //   ExecConditionalAssignProjectionInfo(&gm_state->ps, tupDesc, OUTER_VAR);
-    execUtils_seams::exec_init_result_type_tl::call(&mut ps, estate)?;
+    execTuples::exec_init_result_type_tl::call(&mut ps, estate)?;
     {
         let input_desc = tup_desc
             .as_deref()

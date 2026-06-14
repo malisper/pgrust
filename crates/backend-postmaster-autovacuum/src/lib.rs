@@ -70,10 +70,31 @@ fn auto_vac_worker_main_entry(_startup_data: &StartupData) -> ! {
     }
 }
 
+/// `AmAutoVacuumLauncherProcess()` (miscadmin.h) — `MyBackendType ==
+/// B_AUTOVAC_LAUNCHER`. A pure macro over the `MyBackendType` global read
+/// through the init-small owner's seam (mirrors proc seam.rs).
+pub fn am_autovacuum_launcher_process() -> bool {
+    backend_utils_init_small_seams::my_backend_type::call()
+        == types_core::init::BackendType::AutovacLauncher
+}
+
+/// `AmAutoVacuumWorkerProcess()` (miscadmin.h) — `MyBackendType ==
+/// B_AUTOVAC_WORKER`.
+pub fn am_autovacuum_worker_process() -> bool {
+    backend_utils_init_small_seams::my_backend_type::call()
+        == types_core::init::BackendType::AutovacWorker
+}
+
 /// Install this crate's implementations into its seam crate.
 pub fn init_seams() {
     backend_postmaster_autovacuum_seams::auto_vac_launcher_main::set(auto_vac_launcher_main_entry);
     backend_postmaster_autovacuum_seams::auto_vac_worker_main::set(auto_vac_worker_main_entry);
+    backend_postmaster_autovacuum_seams::am_autovacuum_launcher_process::set(
+        am_autovacuum_launcher_process,
+    );
+    backend_postmaster_autovacuum_seams::am_autovacuum_worker_process::set(
+        am_autovacuum_worker_process,
+    );
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match.
     backend_postmaster_autovacuum_seams::autovacuum_worker_slots::set(core::autovacuum_worker_slots);
     backend_postmaster_autovacuum_seams::auto_vacuum_shmem_init::set(shmem::AutoVacuumShmemInit);

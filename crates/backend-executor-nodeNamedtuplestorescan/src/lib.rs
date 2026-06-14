@@ -261,7 +261,7 @@ pub fn ExecInitNamedTuplestoreScan<'mcx>(
     // Initialize result type and projection.
     //   ExecInitResultTypeTL(&scanstate->ss.ps);
     //   ExecAssignScanProjectionInfo(&scanstate->ss);
-    execUtils::exec_init_result_type_tl::call(&mut scanstate.ss.ps, estate)?;
+    execTuples::exec_init_result_type_tl::call(&mut scanstate.ss.ps, estate)?;
     execScan::exec_assign_scan_projection_info::call(&mut scanstate.ss, estate)?;
 
     // initialize child expressions

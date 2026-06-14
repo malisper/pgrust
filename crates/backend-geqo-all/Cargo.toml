@@ -1,0 +1,15 @@
+[package]
+name = "backend-geqo-all"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_geqo_all"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-pathnodes = { path = "../types-pathnodes" }
+pg-prng = { path = "../pg-prng" }
+backend-geqo-all-seams = { path = "../backend-geqo-all-seams" }

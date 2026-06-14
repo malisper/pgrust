@@ -148,7 +148,7 @@ fn mock_init_expr<'mcx>(
 
 /// `ExecEvalExprSwitchContext`: pop a scripted `(datum, isnull)` result.
 fn mock_eval_expr<'mcx>(
-    _state: &ExprState,
+    _state: &mut ExprState,
     _econtext: types_nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum, bool)> {

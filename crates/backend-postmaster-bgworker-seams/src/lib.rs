@@ -75,18 +75,6 @@ seam_core::seam!(
     pub fn background_worker_unblock_signals()
 );
 
-// --- backend-utils-init-postinit consumers (bgworker.c) ---
-
-seam_core::seam!(
-    /// `AmBackgroundWorkerProcess()` (miscadmin.h): is this a background worker?
-    pub fn am_background_worker_process() -> bool
-);
-
-seam_core::seam!(
-    /// `max_worker_processes` (bgworker.c GUC).
-    pub fn max_worker_processes() -> i32
-);
-
 seam_core::seam!(
     /// `BackgroundWorkerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
     /// shared-memory bytes this subsystem needs. Infallible in C, so the seam

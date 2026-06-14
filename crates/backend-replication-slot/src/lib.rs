@@ -409,7 +409,7 @@ pub fn ReplicationSlotInitialize() -> PgResult<()> {
     // own logic constructs/reads no scalars, so there is nothing to move onto
     // the canonical `types_tuple::backend_access_common_heaptuple::Datum<'mcx>`
     // enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
-    backend_storage_ipc_seams::before_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
         types_datum::Datum::null(),
     )

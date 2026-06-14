@@ -33,7 +33,7 @@ backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" 
 backend-utils-fmgr-dfmgr-seams = { path = "../backend-utils-fmgr-dfmgr-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }
 backend-storage-file-fileperm-seams = { path = "../backend-storage-file-fileperm-seams" }

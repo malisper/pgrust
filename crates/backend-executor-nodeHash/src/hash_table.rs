@@ -1099,9 +1099,9 @@ pub fn ExecScanHashBucket<'mcx>(
     // hashclauses ExprState (the per-node compiled hash-join clause qual).
     let hashclauses = hjstate
         .hashclauses
-        .as_deref()
+        .as_deref_mut()
         .expect("ExecScanHashBucket: hashclauses must be compiled by init")
-        as *const types_nodes::execexpr::ExprState;
+        as *mut types_nodes::execexpr::ExprState;
 
     // Helper: next-link of an arena tuple (serial mode only follows Unshared).
     fn tuple_next(ht: &HashJoinTableData<'_>, idx: HashTupleIdx) -> Option<HashTupleIdx> {
@@ -1168,7 +1168,7 @@ pub fn ExecScanHashBucket<'mcx>(
             // if (ExecQualAndReset(hjclauses, econtext)) {
             //     hjstate->hj_CurTuple = hashTuple; return true; }
             let pass = backend_executor_execExpr_seams::exec_qual_and_reset::call(
-                unsafe { &*hashclauses },
+                unsafe { &mut *hashclauses },
                 econtext_id,
                 estate,
             )?;

@@ -267,7 +267,7 @@ fn IndexOnlyNext<'mcx>(
         if node.ioss_ScanDesc.as_ref().unwrap().xs_recheck {
             // econtext->ecxt_scantuple = slot;
             // if (!ExecQualAndReset(node->recheckqual, econtext))
-            let passed = match &node.recheckqual {
+            let passed = match &mut node.recheckqual {
                 Some(rq) => {
                     let r = execExpr::exec_qual::call(rq, econtext, estate)?;
                     execUtils::reset_expr_context::call(estate, econtext)?;
@@ -602,7 +602,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
 
     // Initialize result type and projection info. The targetlist's Vars use
     // varno = INDEX_VAR.
-    execUtils::exec_init_result_type_tl::call(&mut indexstate.ss.ps, estate)?;
+    execTuples::exec_init_result_type_tl::call(&mut indexstate.ss.ps, estate)?;
     execUtils::exec_assign_scan_projection_info_with_varno::call(
         &mut indexstate.ss,
         estate,

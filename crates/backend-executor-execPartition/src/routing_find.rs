@@ -440,11 +440,11 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
                 ));
             }
             let (d, n) = {
-                let exprstate = &proute.partition_dispatch_info[dispatch].keystate[partexpr_item];
-                // Borrow ends before the &mut estate call: copy the pointer out
-                // via a raw read is unsafe; instead evaluate inline by cloning
-                // the borrow boundary. The ExprState is owned by the dispatch,
-                // which is not the estate, so the borrows do not alias.
+                let exprstate =
+                    &mut proute.partition_dispatch_info[dispatch].keystate[partexpr_item];
+                // Borrow ends before the &mut estate call. The ExprState is owned
+                // by the dispatch, which is not the estate, so the borrows do not
+                // alias.
                 backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
                     exprstate, ecxt, estate,
                 )?

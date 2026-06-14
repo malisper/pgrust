@@ -14,7 +14,7 @@ backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }
 backend-libpq-pqcomm-seams = { path = "../backend-libpq-pqcomm-seams" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

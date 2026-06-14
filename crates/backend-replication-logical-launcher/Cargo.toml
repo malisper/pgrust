@@ -34,7 +34,7 @@ backend-replication-logical-launcher-seams = { path = "../backend-replication-lo
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

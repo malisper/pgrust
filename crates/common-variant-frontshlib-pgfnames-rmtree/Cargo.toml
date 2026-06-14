@@ -1,0 +1,13 @@
+[package]
+name = "common-variant-frontshlib-pgfnames-rmtree"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_variant_frontshlib_pgfnames_rmtree"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }

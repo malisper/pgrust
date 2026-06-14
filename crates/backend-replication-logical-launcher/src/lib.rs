@@ -79,7 +79,7 @@ use backend_replication_logical_worker_seams as worker;
 use backend_replication_walreceiver_seams as walrcv;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_procarray_seams as procarray;
-use backend_storage_ipc_seams as ipc;
+use backend_storage_ipc_dsm_core_seams as ipc;
 use backend_storage_lmgr_lock_seams as lockmgr;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_tcop_postgres_seams as tcop;

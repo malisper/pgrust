@@ -101,7 +101,7 @@ use backend_catalog_pg_namespace_seams as pg_namespace_seams;
 use backend_commands_dbcommands_seams as dbcommands_seams;
 use backend_catalog_pg_conversion_seams as pg_conversion_seams;
 use backend_storage_ipc_procarray_seams as procarray_seams;
-use backend_storage_ipc_seams as ipc_seams;
+use backend_storage_ipc_dsm_core_seams as ipc_seams;
 use backend_storage_ipc_sinval_seams as sinval_seams;
 use backend_storage_lmgr_lmgr_seams as lmgr_seams;
 use backend_storage_lmgr_proc_seams as proc_seams;

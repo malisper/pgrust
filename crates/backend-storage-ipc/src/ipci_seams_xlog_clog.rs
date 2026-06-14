@@ -31,7 +31,7 @@ pub fn xlog_shmem_init() -> PgResult<()> {
     backend_access_transam_xlog_seams::xlog_shmem_init::call()
 }
 
-pub fn xlog_prefetch_shmem_size() -> PgResult<Size> {
+pub fn xlog_prefetch_shmem_size() -> Size {
     backend_access_transam_xlogprefetcher_seams::xlog_prefetch_shmem_size::call()
 }
 pub fn xlog_prefetch_shmem_init() -> PgResult<()> {

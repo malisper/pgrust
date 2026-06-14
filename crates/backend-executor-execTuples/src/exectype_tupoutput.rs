@@ -62,6 +62,41 @@ pub fn ExecCleanTypeFromTL<'mcx>(
     ExecTypeFromTLInternal(mcx, target_list, true)
 }
 
+/// `ExecInitResultTypeTL(planstate)` (execTuples.c): initialize the node's
+/// result type, using the plan node's target list.
+///
+/// ```c
+/// void
+/// ExecInitResultTypeTL(PlanState *planstate)
+/// {
+///     TupleDesc tupDesc = ExecTypeFromTL(planstate->plan->targetlist);
+///     planstate->ps_ResultTupleDesc = tupDesc;
+/// }
+/// ```
+///
+/// The descriptor is allocated in the executor's per-query context
+/// (`estate.es_query_cxt`, the C `CurrentMemoryContext` during plan init).
+pub fn ExecInitResultTypeTL<'mcx>(
+    planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    // `planstate->plan->targetlist` — the plan node lives in the per-query
+    // arena (`&'mcx Node`), so reading the tlist reference releases the
+    // `&mut planstate` borrow before the store below.
+    let plan: &'mcx types_nodes::nodes::Node<'mcx> = planstate
+        .plan
+        .expect("ExecInitResultTypeTL: PlanState has no plan");
+    let targetlist: &'mcx [TargetEntry<'mcx>] = plan
+        .plan_head()
+        .targetlist
+        .as_deref()
+        .unwrap_or(&[]);
+    let tup_desc = ExecTypeFromTL(mcx, targetlist)?;
+    planstate.ps_ResultTupleDesc = tup_desc;
+    Ok(())
+}
+
 /// `ExecTypeFromTLInternal(targetList, skipjunk)` (execTuples.c).
 fn ExecTypeFromTLInternal<'mcx>(
     mcx: Mcx<'mcx>,

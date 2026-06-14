@@ -122,6 +122,20 @@ fn testexpr_carrier<'a, 'mcx>(slot: &'a Opaque) -> &'a TestExprCarrier<'mcx> {
     unsafe { core::mem::transmute::<&TestExprCarrier<'static>, &TestExprCarrier<'mcx>>(erased) }
 }
 
+/// Mutably borrow the `TestExprCarrier` out of the `testexpr` `Opaque` slot.
+fn testexpr_carrier_mut<'a, 'mcx>(slot: &'a mut Opaque) -> &'a mut TestExprCarrier<'mcx> {
+    let any = slot
+        .0
+        .as_mut()
+        .expect("SubPlanState testexpr not built");
+    let erased = any
+        .downcast_mut::<TestExprCarrier<'static>>()
+        .expect("SubPlanState testexpr is not a TestExprCarrier");
+    unsafe {
+        core::mem::transmute::<&mut TestExprCarrier<'static>, &mut TestExprCarrier<'mcx>>(erased)
+    }
+}
+
 /// Pick the named projection's `Opaque` slot off the node.
 fn proj_slot<'a, 'mcx>(node: &'a SubPlanState<'mcx>, which: ProjectionKind) -> &'a Opaque {
     match which {
@@ -289,16 +303,16 @@ pub fn proj_left_slot_getattr<'mcx>(
 /// `ExecEvalExprSwitchContext(node->testexpr, econtext, &rownull)`
 /// (nodeSubplan.c:399).
 pub fn eval_testexpr_switch_context<'mcx>(
-    node: &SubPlanState<'mcx>,
+    node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
 ) -> PgResult<(Datum, bool)> {
     // C: rowresult = ExecEvalExprSwitchContext(node->testexpr, econtext,
     //                                          &rownull);
-    let carrier = testexpr_carrier(&node.testexpr);
+    let carrier = testexpr_carrier_mut(&mut node.testexpr);
     // `ExecEvalExprSwitchContext` is owned by execExpr-core; route through its
     // seam over the compiled combining ExprState.
-    crate::execExpr_core::exec_eval_expr_switch_context(&carrier.state, econtext, estate)
+    crate::execExpr_core::exec_eval_expr_switch_context(&mut carrier.state, econtext, estate)
 }
 
 // ===========================================================================

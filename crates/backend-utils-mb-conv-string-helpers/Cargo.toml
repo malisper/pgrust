@@ -1,0 +1,21 @@
+[package]
+name = "backend-utils-mb-conv-string-helpers"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_mb_conv_string_helpers"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
+types-wchar = { path = "../types-wchar" }
+types-stringinfo = { path = "../types-stringinfo" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+common-wchar = { path = "../common-wchar" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
+backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }

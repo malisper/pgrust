@@ -48,7 +48,7 @@ backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-postmaster-autovacuum-ext-seams = { path = "../backend-postmaster-autovacuum-ext-seams" }
 backend-storage-ipc-pmsignal-seams = { path = "../backend-storage-ipc-pmsignal-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
 backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }

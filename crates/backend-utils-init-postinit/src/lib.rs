@@ -522,7 +522,7 @@ pub fn InitializeMaxBackends() -> PgResult<()> {
     // Note that this does not include "auxiliary" processes.
     let max_connections = backend_utils_init_small_seams::max_connections::call();
     let av_worker_slots = backend_postmaster_autovacuum_seams::autovacuum_worker_slots::call();
-    let max_worker_processes = backend_postmaster_bgworker_seams::max_worker_processes::call();
+    let max_worker_processes = backend_utils_init_small_seams::max_worker_processes::call();
     let max_wal_senders = backend_replication_walsender_seams::max_wal_senders::call();
 
     let max_backends =
@@ -657,8 +657,8 @@ pub fn InitPostgres(
 
     // ProcSignalInit(MyCancelKey, MyCancelKeyLength). The ported owner reads
     // MyProcNumber/MyProcPid explicitly; the cancel-key bytes come from the
-    // backend-startup owner (MyCancelKey/MyCancelKeyLength globals).
-    let cancel_key = backend_tcop_backend_startup_seams::my_cancel_key::call(mcx)?;
+    // globals.c owner (MyCancelKey/MyCancelKeyLength globals).
+    let cancel_key = backend_utils_init_small_seams::my_cancel_key::call(mcx)?;
     backend_storage_ipc_procsignal::ProcSignalInit(
         backend_utils_init_small_seams::my_proc_number::call(),
         backend_utils_init_small_seams::my_proc_pid::call(),
@@ -714,11 +714,11 @@ pub fn InitPostgres(
         backend_utils_resowner_resowner_seams::reset_current_resource_owner::call();
 
         // Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM segments.
-        backend_storage_ipc_seams::before_shmem_exit::call(
+        backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             pgstat_before_server_shutdown_cb,
             types_datum::Datum::null(),
         )?;
-        backend_storage_ipc_seams::before_shmem_exit::call(
+        backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
             shutdown_xlog_cb,
             types_datum::Datum::null(),
         )?;
@@ -737,7 +737,7 @@ pub fn InitPostgres(
     backend_utils_cache_relcache_seams::relation_cache_initialize_phase2::call()?;
 
     // Set up process-exit callback to do pre-shutdown cleanup.
-    backend_storage_ipc_seams::before_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         shutdown_postgres_cb,
         types_datum::Datum::null(),
     )?;
@@ -763,7 +763,7 @@ pub fn InitPostgres(
     // user ID, and see if we are a superuser.
     if bootstrap
         || backend_postmaster_autovacuum_seams::am_autovacuum_worker_process::call()
-        || backend_replication_logical_slotsync_seams::am_logical_slot_sync_worker_process::call()
+        || backend_utils_init_miscinit_seams::am_logical_slot_sync_worker_process::call()
     {
         backend_utils_init_miscinit_seams::initialize_session_user_id_standalone::call()?;
         am_superuser = true;
@@ -780,12 +780,15 @@ pub fn InitPostgres(
                 ))
                 .finish(loc(876, "InitPostgres"));
         }
-    } else if backend_postmaster_bgworker_seams::am_background_worker_process::call() {
+    } else if backend_utils_init_small_seams::my_backend_type::call()
+        == types_core::init::BackendType::BgWorker
+    {
         if username.is_none() && !OidIsValid(useroid) {
             backend_utils_init_miscinit_seams::initialize_session_user_id_standalone::call()?;
             am_superuser = true;
         } else {
             backend_utils_init_miscinit_seams::initialize_session_user_id::call(
+                mcx,
                 username,
                 useroid,
                 (flags & INIT_PG_OVERRIDE_ROLE_LOGIN) != 0,
@@ -795,14 +798,14 @@ pub fn InitPostgres(
     } else {
         // normal multiuser case
         PerformAuthentication(mcx)?;
-        backend_utils_init_miscinit_seams::initialize_session_user_id::call(username, useroid, false)?;
+        backend_utils_init_miscinit_seams::initialize_session_user_id::call(mcx, username, useroid, false)?;
         // ensure that auth_method is actually valid, aka authn_id is not NULL
         if let Some(authn_id) = backend_libpq_auth_seams::client_authn_id::call(mcx)? {
             let auth_method = backend_libpq_hba_seams::hba_authname::call(mcx)?;
             backend_utils_init_miscinit_seams::initialize_system_user::call(
                 authn_id.as_str(),
                 auth_method.as_str(),
-            )?;
+            );
         }
         am_superuser = backend_utils_misc_superuser_seams::superuser::call()?;
     }
@@ -888,7 +891,7 @@ pub fn InitPostgres(
         // Apply PostAuthDelay as soon as we've read all options.
         let post_auth_delay = backend_tcop_postgres_seams::post_auth_delay::call();
         if post_auth_delay > 0 {
-            backend_utils_init_miscinit_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
+            port_pgsleep_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
         }
 
         // initialize client encoding
@@ -1029,7 +1032,7 @@ pub fn InitPostgres(
         backend_utils_init_miscinit_seams::validate_pg_version::call(fullpath.as_str())?;
     }
 
-    backend_utils_init_miscinit_seams::set_database_path_once::call(fullpath.as_str())?;
+    backend_utils_init_miscinit_seams::set_database_path_once::call(fullpath.as_str());
 
     // It's now possible to do real access to the system catalogs.
     backend_utils_cache_relcache_seams::relation_cache_initialize_phase3::call()?;
@@ -1060,7 +1063,7 @@ pub fn InitPostgres(
     // Apply PostAuthDelay as soon as we've read all options.
     let post_auth_delay = backend_tcop_postgres_seams::post_auth_delay::call();
     if post_auth_delay > 0 {
-        backend_utils_init_miscinit_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
+        port_pgsleep_seams::pg_usleep::call(post_auth_delay as i64 * 1_000_000);
     }
 
     // Initialize various default states.
@@ -1076,7 +1079,7 @@ pub fn InitPostgres(
 
     // If this is an interactive session, load any preloaded libraries.
     if (flags & INIT_PG_LOAD_SESSION_LIBS) != 0 {
-        backend_utils_init_miscinit_seams::process_session_preload_libraries::call()?;
+        backend_utils_init_miscinit_seams::process_session_preload_libraries::call(mcx)?;
     }
 
     // fill in the remainder of this entry in the PgBackendStatus array

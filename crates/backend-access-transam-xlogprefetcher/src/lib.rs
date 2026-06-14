@@ -1253,15 +1253,15 @@ pub fn assign_recovery_prefetch(new_value: i32) {
 // Seam installation.
 // ---------------------------------------------------------------------------
 
-/// Installs this unit's declared seams. `XLogPrefetchShmemInit` is reached by
-/// the (cyclic) ipci shmem-bringup path via `xlogprefetcher-seams`, so it is
-/// installed here. (`XLogPrefetchShmemSize` diverges from its seam decl —
-/// owner returns bare `usize`, seam wants `PgResult<Size>` — and is tracked in
-/// DESIGN_DEBT as a contract reconcile rather than force-wired.)
+/// Installs this unit's declared seams. Both are reached by the (cyclic) ipci
+/// shmem-bringup path via `xlogprefetcher-seams`, so they are installed here.
 pub fn init_seams() {
-    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches the
-    // declared seam exactly; the owner's xlogprefetcher-seams crate is acyclic
+    // Pure-wiring install (assemble/seam-wiring-guard): owner bodies match the
+    // declared seams exactly; the owner's xlogprefetcher-seams crate is acyclic
     // (leaf types deps only), so installing it here introduces no cycle.
+    backend_access_transam_xlogprefetcher_seams::xlog_prefetch_shmem_size::set(
+        XLogPrefetchShmemSize,
+    );
     backend_access_transam_xlogprefetcher_seams::xlog_prefetch_shmem_init::set(
         XLogPrefetchShmemInit,
     );

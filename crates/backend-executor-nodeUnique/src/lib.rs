@@ -211,7 +211,7 @@ fn exec_qual_and_reset<'mcx>(
         .ps_ExprContext
         .expect("ExecUnique: ps_ExprContext must be set");
 
-    match node.eqfunction.as_deref() {
+    match node.eqfunction.as_deref_mut() {
         // ExecQualAndReset(state, econtext): evaluate then reset in one call.
         Some(state) => execExpr::exec_qual_and_reset::call(state, econtext, estate),
         // ExecQual(NULL, econtext) is always-true; ResetExprContext still runs.

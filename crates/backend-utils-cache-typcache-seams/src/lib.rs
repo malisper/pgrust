@@ -48,6 +48,71 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 
+/// The subset of `lookup_type_cache(type_id, TYPECACHE_TUPDESC |
+/// TYPECACHE_DOMAIN_BASE_INFO)` that `expandedrecord.c`'s builders read out of
+/// the returned `TypeCacheEntry`: the `typtype`, the `domainBaseType` (the
+/// resolved base of a domain over composite), the resolved composite tuple
+/// descriptor (`tupDesc`, `None` if the type is not composite — the caller then
+/// raises "type is not composite"), and the `tupDesc_identifier`. C reads these
+/// straight off the long-lived cache entry; the safe port copies the descriptor
+/// into `mcx` and hands back the scalar fields by value.
+pub struct ExpandedRecordTypeCacheView<'mcx> {
+    /// `typentry->typtype`.
+    pub typtype: i8,
+    /// `typentry->domainBaseType`.
+    pub domain_base_type: types_core::primitive::Oid,
+    /// `typentry->tupDesc`, cloned into `mcx`; `None` when the type is not
+    /// composite (the caller raises ERRCODE_WRONG_OBJECT_TYPE).
+    pub tup_desc: Option<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>,
+    /// `typentry->tupDesc_identifier`.
+    pub tup_desc_identifier: u64,
+    /// Whether the cache's `tupDesc->tdrefcount >= 0` (the C path acquires its
+    /// own refcount via a memory-context callback). The safe port holds its own
+    /// deep copy; this records the flag the builder mirrors into
+    /// `er_tupdesc_refcounted`.
+    pub tup_desc_refcounted: bool,
+}
+
+seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)`
+    /// then, if the result is a domain, the chained
+    /// `lookup_type_cache(domainBaseType, TYPECACHE_TUPDESC)`
+    /// (expandedrecord.c:84-101) — the composite/domain-over-composite resolution
+    /// `make_expanded_record_from_typeid` performs. Returns the
+    /// [`ExpandedRecordTypeCacheView`] (typtype of the *original* type, the
+    /// domain base OID, the resolved composite `tupDesc` cloned into `mcx`, and
+    /// its `tupDesc_identifier`). `Err` carries the typcache lookup surface;
+    /// `tup_desc == None` signals the not-composite case the caller turns into
+    /// `ERRCODE_WRONG_OBJECT_TYPE`.
+    pub fn lookup_type_cache_expanded_record<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<ExpandedRecordTypeCacheView<'mcx>>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_TUPDESC)` reading `tupDesc` and
+    /// `tupDesc_identifier` (expandedrecord.c:226-236) — the named-composite
+    /// path of `make_expanded_record_from_tupdesc`. Returns the resolved
+    /// composite `tupDesc` cloned into `mcx` (`None` when not composite) plus
+    /// its identifier. `Err` carries the typcache lookup surface.
+    pub fn lookup_type_cache_tupdesc_view<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<ExpandedRecordTypeCacheView<'mcx>>
+);
+
+seam_core::seam!(
+    /// `assign_record_type_identifier(type_id, typmod)` (typcache.c): return a
+    /// unique identifier for the (possibly anonymous) RECORD type/typmod pair,
+    /// assigning a fresh one if necessary. `Err` carries the cache-insert /
+    /// allocation surface.
+    pub fn assign_record_type_identifier(
+        type_id: types_core::primitive::Oid,
+        typmod: i32,
+    ) -> types_error::PgResult<u64>
+);
+
 seam_core::seam!(
     /// `assign_record_type_typmod(tupDesc)` (typcache.c): for an anonymous
     /// RECORD `TupleDesc`, find or create the matching entry in the record-type

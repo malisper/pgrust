@@ -470,6 +470,23 @@ fn wait_latch_seam(
     WaitLatch(Some(latch), wake_events, timeout, wait_event_info).map(|v| v as i32)
 }
 
+/// `WaitLatch(NULL, WL_EXIT_ON_PM_DEATH | WL_TIMEOUT, 10,
+/// WAIT_EVENT_REGISTER_SYNC_REQUEST)` (`storage/ipc/latch.c`, called from
+/// `RegisterSyncRequest` in sync.c): the no-latch ~10 ms sleep performed
+/// before retrying a full checkpointer request queue. C passes `NULL` for the
+/// latch (so it waits only on the timeout / postmaster death); the flags,
+/// timeout, and wait-event are fixed. Discards the returned event bitmask to
+/// match the seam's `PgResult<()>` shape.
+fn wait_latch_register_sync_request_seam() -> PgResult<()> {
+    WaitLatch(
+        None,
+        WL_EXIT_ON_PM_DEATH | WL_TIMEOUT,
+        10,
+        types_pgstat::wait_event::WAIT_EVENT_REGISTER_SYNC_REQUEST,
+    )
+    .map(|_| ())
+}
+
 /// Install this unit's seams (`backend-storage-ipc-latch-seams`).
 pub fn init_seams() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::set(set_latch_my_latch);
@@ -483,6 +500,9 @@ pub fn init_seams() {
     // NULL `MyLatch` would crash the C, so surface it loudly, matching the
     // `set_latch_my_latch`/`reset_latch_my_latch` convention above.
     backend_storage_ipc_latch_seams::my_latch::set(|| my_latch().expect("MyLatch is not set"));
+    backend_storage_ipc_latch_seams::wait_latch_register_sync_request::set(
+        wait_latch_register_sync_request_seam,
+    );
 }
 
 #[cfg(test)]

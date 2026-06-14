@@ -196,11 +196,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `format_type_be(type_oid)`.
-    pub fn format_type_be(type_oid: Oid) -> PgResult<String>
-);
-
-seam_core::seam!(
     /// `get_namespace_name(nspid)` — `None` when it no longer exists.
     pub fn get_namespace_name(nspid: Oid) -> PgResult<Option<String>>
 );
@@ -302,6 +297,15 @@ seam_core::seam!(
         a: Option<Vec<String>>,
         name: String,
     ) -> PgResult<Option<Vec<String>>>
+);
+
+seam_core::seam!(
+    /// `GUCArrayReset(array)` (utils/misc/guc.c) — for a superuser, reset
+    /// (drop) all GUC entries, returning `None`; for a non-superuser, drop only
+    /// the entries that user may reset, returning the surviving `text[]`
+    /// (`None` if it becomes empty). `Err` carries the value-parse error
+    /// surface.
+    pub fn guc_array_reset(a: Vec<String>) -> PgResult<Option<Vec<String>>>
 );
 
 seam_core::seam!(

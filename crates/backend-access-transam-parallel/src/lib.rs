@@ -788,6 +788,12 @@ pub fn is_parallel_worker() -> bool {
     with_globals(|g| g.parallel_worker_number) >= 0
 }
 
+/// `InitializingParallelWorker` (access/parallel.c) — true while a parallel
+/// worker is in `ParallelWorkerMain` initialization.
+pub fn initializing_parallel_worker() -> bool {
+    with_globals(|g| g.initializing_parallel_worker)
+}
+
 /// Assign `ParallelWorkerNumber`.
 fn set_parallel_worker_number(value: i32) {
     with_globals(|g| g.parallel_worker_number = value);
@@ -2132,6 +2138,7 @@ pub fn init_seams() {
     use backend_access_transam_parallel_seams as seams;
 
     seams::is_parallel_worker::set(is_parallel_worker);
+    seams::initializing_parallel_worker::set(initializing_parallel_worker);
     seams::handle_parallel_message_interrupt::set(handle_parallel_message_interrupt);
     seams::at_eoxact_parallel::set(at_eoxact_parallel);
     seams::at_eosubxact_parallel::set(at_eosubxact_parallel);

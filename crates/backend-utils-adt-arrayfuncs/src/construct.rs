@@ -1183,6 +1183,30 @@ pub fn construct_array_builtin<'mcx>(
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `decode_text_array_to_strings` — the array half of evtcache.c's
+/// `DecodeTextArrayToBitmapset`: `DatumGetArrayTypeP` (detoast) + the
+/// `ARR_NDIM != 1 || ARR_HASNULL || ARR_ELEMTYPE != TEXTOID` validity check
+/// (`elog(ERROR, "expected 1-D text array")`) + `deconstruct_array_builtin`.
+pub fn decode_text_array_to_strings<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    // arr = DatumGetArrayTypeP(array);
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
+
+    // if (ARR_NDIM(arr) != 1 || ARR_HASNULL(arr) || ARR_ELEMTYPE(arr) != TEXTOID)
+    //     elog(ERROR, "expected 1-D text array");
+    if foundation::arr_ndim(&arr) != 1
+        || foundation::arr_hasnull(&arr)
+        || foundation::arr_elemtype(&arr) != foundation::TEXTOID
+    {
+        return Err(PgError::error("expected 1-D text array"));
+    }
+
+    // deconstruct_array_builtin(arr, TEXTOID, &elems, NULL, &nelems);
+    deconstruct_text_array(mcx, &arr)
+}
+
 /// Seam `deconstruct_text_array` — `deconstruct_array_builtin(..., TEXTOID)`.
 pub fn deconstruct_text_array<'mcx>(
     mcx: Mcx<'mcx>,

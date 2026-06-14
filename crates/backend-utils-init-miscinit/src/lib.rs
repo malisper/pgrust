@@ -874,6 +874,7 @@ pub fn init_seams() {
         SetMyBackendType(BackendType::WalSummarizer)
     });
     s::am_wal_summarizer_process::set(|| GetMyBackendType() == BackendType::WalSummarizer);
+    s::am_logical_slot_sync_worker_process::set(|| GetMyBackendType() == BackendType::SlotsyncWorker);
 
     // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies match the
     // declared seam signatures exactly; the remaining miscinit seams either
@@ -882,6 +883,10 @@ pub fn init_seams() {
     s::get_session_user_id::set(GetSessionUserId);
     s::initialize_session_user_id_standalone::set(InitializeSessionUserIdStandalone);
     s::validate_pg_version::set(ValidatePgVersion);
+    s::initialize_session_user_id::set(InitializeSessionUserId);
+    s::initialize_system_user::set(InitializeSystemUser);
+    s::set_database_path_once::set(SetDatabasePath);
+    s::process_session_preload_libraries::set(process_session_preload_libraries);
 }
 
 #[cfg(test)]

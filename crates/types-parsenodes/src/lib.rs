@@ -22,6 +22,28 @@ use types_nodes::parsenodes::{DropBehavior, ObjectType};
 /// `int ParseLoc` (`nodes/parsenodes.h`) — token location, `-1` if unknown.
 pub type ParseLoc = i32;
 
+/// `typedef enum RawParseMode` (`parser/parser.h`) — selects the form of the
+/// string that `raw_parser()` accepts. Values verified against PostgreSQL 18.3
+/// `parser/parser.h`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(i32)]
+pub enum RawParseMode {
+    /// Parse a semicolon-separated list of SQL commands, returning a `List` of
+    /// `RawStmt` nodes.
+    #[default]
+    RAW_PARSE_DEFAULT = 0,
+    /// Parse a type name, returning a one-element `List` of a `TypeName` node.
+    RAW_PARSE_TYPE_NAME = 1,
+    /// Parse a PL/pgSQL expression, returning a one-element `List` of a `RawStmt`.
+    RAW_PARSE_PLPGSQL_EXPR = 2,
+    /// Parse a PL/pgSQL assignment with one dotted name in the target ColumnRef.
+    RAW_PARSE_PLPGSQL_ASSIGN1 = 3,
+    /// Parse a PL/pgSQL assignment with two dotted names.
+    RAW_PARSE_PLPGSQL_ASSIGN2 = 4,
+    /// Parse a PL/pgSQL assignment with three dotted names.
+    RAW_PARSE_PLPGSQL_ASSIGN3 = 5,
+}
+
 // ---------------------------------------------------------------------------
 // Value nodes (nodes/value.h)
 // ---------------------------------------------------------------------------

@@ -25,6 +25,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyCancelKey` / `MyCancelKeyLength` (globals.c globals): the backend's
+    /// cancel key bytes (`MyCancelKey[..MyCancelKeyLength]`), copied into `mcx`.
+    /// Passed to `ProcSignalInit`. `Err` carries OOM from the copy.
+    pub fn my_cancel_key<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `IsUnderPostmaster` (globals.c) — false in the postmaster itself, true
     /// in a forked backend.
     pub fn is_under_postmaster() -> bool
@@ -330,4 +339,13 @@ seam_core::seam!(
     pub fn my_proc_port_application_name<'mcx>(
         mcx: mcx::Mcx<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `char *DataDir` (`globals.c` global): the absolute path to the top
+    /// level of the data directory, or `None` when unset. Pure read of
+    /// process-startup state; used by `AbsoluteConfigLocation`
+    /// (`utils/misc/conffiles.c`) to resolve a relative config location at the
+    /// top level.
+    pub fn data_dir() -> Option<String>
 );

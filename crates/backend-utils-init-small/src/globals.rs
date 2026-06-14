@@ -603,3 +603,117 @@ pub fn with_my_proc_port_seam(f: &mut dyn FnMut(Option<&mut types_net::Port>)) {
         f(None);
     }
 }
+
+// --- GUC-backed integer globals (declared in globals.c, defined as GUCs in
+// guc_tables.c). The single store lives in the GUC-table slot; the C-named
+// accessor reads it there, mirroring the way the elog-shared globals above
+// delegate to `backend_utils_error::config`. ---
+
+/// `int PostAuthDelay = 0;` (globals.c) — seconds to sleep after
+/// authentication. Read of the `PostAuthDelay` GUC slot.
+#[inline]
+pub fn post_auth_delay() -> i32 {
+    backend_utils_misc_guc_tables::vars::PostAuthDelay.read()
+}
+
+/// `int ReservedConnections = 0;` (globals.c) — the `reserved_connections`
+/// GUC: connection slots reserved for non-superuser roles with the
+/// `pg_use_reserved_connections` privilege.
+#[inline]
+pub fn reserved_connections() -> i32 {
+    backend_utils_misc_guc_tables::vars::ReservedConnections.read()
+}
+
+/// `int SuperuserReservedConnections = 3;` (globals.c) — the
+/// `superuser_reserved_connections` GUC: connection slots reserved for
+/// superusers.
+#[inline]
+pub fn superuser_reserved_connections() -> i32 {
+    backend_utils_misc_guc_tables::vars::SuperuserReservedConnections.read()
+}
+
+// --- `MyProcPort->...` field accessors copied into an `mcx` context (the C
+// idiom of reading the per-connection `Port` string fields). Each returns the
+// OOM surface of the copy; the C `MyProcPort == NULL` surface is reported as
+// an error, since these are only reached once a client `Port` is established
+// (`PerformAuthentication`/`process_startup_options` in postinit.c). ---
+
+/// The `MyProcPort == NULL` surface of the `Port`-field accessors. In C these
+/// fields are read by direct pointer dereference once a client `Port` exists
+/// (`PerformAuthentication`/`process_startup_options` in postinit.c); a NULL
+/// `MyProcPort` would be a programming error, reported here as an internal
+/// ERROR rather than a segfault.
+fn no_proc_port<T>() -> types_error::PgResult<T> {
+    backend_utils_error::ereport(types_error::ERROR)
+        .errmsg_internal("MyProcPort is NULL")
+        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "MyProcPort"))?;
+    unreachable!("ereport(ERROR) does not return Ok")
+}
+
+/// `MyProcPort->user_name` (globals.c `Port`), copied into `mcx`.
+pub fn my_proc_port_user_name<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<mcx::PgString<'mcx>> {
+    let name = match WithMyProcPort(|p| p.user_name.clone()) {
+        Some(n) => n,
+        None => return no_proc_port(),
+    };
+    mcx::PgString::from_str_in(name.as_deref().unwrap_or(""), mcx)
+}
+
+/// `MyProcPort->database_name` (globals.c `Port`), copied into `mcx`.
+pub fn my_proc_port_database_name<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<mcx::PgString<'mcx>> {
+    let name = match WithMyProcPort(|p| p.database_name.clone()) {
+        Some(n) => n,
+        None => return no_proc_port(),
+    };
+    mcx::PgString::from_str_in(name.as_deref().unwrap_or(""), mcx)
+}
+
+/// `MyProcPort->application_name` (globals.c `Port`), copied into `mcx`, or
+/// `None` if not set.
+pub fn my_proc_port_application_name<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<Option<mcx::PgString<'mcx>>> {
+    let app = match WithMyProcPort(|p| p.application_name.clone()) {
+        Some(a) => a,
+        None => return no_proc_port(),
+    };
+    match app {
+        Some(s) => Ok(Some(mcx::PgString::from_str_in(&s, mcx)?)),
+        None => Ok(None),
+    }
+}
+
+/// `MyProcPort->cmdline_options` (globals.c `Port`), copied into `mcx`, or
+/// `None` if absent.
+pub fn my_proc_port_cmdline_options<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<Option<mcx::PgString<'mcx>>> {
+    let opts = match WithMyProcPort(|p| p.cmdline_options.clone()) {
+        Some(o) => o,
+        None => return no_proc_port(),
+    };
+    match opts {
+        Some(s) => Ok(Some(mcx::PgString::from_str_in(&s, mcx)?)),
+        None => Ok(None),
+    }
+}
+
+/// `MyProcPort->guc_options` (globals.c `Port`): the alternating name/value
+/// GUC settings, copied into `mcx`.
+pub fn my_proc_port_guc_options<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> types_error::PgResult<mcx::PgVec<'mcx, mcx::PgString<'mcx>>> {
+    let opts = match WithMyProcPort(|p| p.guc_options.clone()) {
+        Some(o) => o,
+        None => return no_proc_port(),
+    };
+    let mut out = mcx::vec_with_capacity_in(mcx, opts.len())?;
+    for s in &opts {
+        out.push(mcx::PgString::from_str_in(s, mcx)?);
+    }
+    Ok(out)
+}

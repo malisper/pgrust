@@ -45,6 +45,7 @@ pub fn init_all() {
     backend_catalog_namespace::init_seams();
     backend_catalog_objectaccess::init_seams();
     backend_catalog_pg_class::init_seams();
+    backend_catalog_pg_db_role_setting::init_seams();
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
@@ -102,9 +103,11 @@ pub fn init_all() {
     backend_executor_tqueue::init_seams();
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
+    backend_geqo_all::init_seams();
     backend_lib_bloomfilter::init_seams();
     backend_lib_dshash::init_seams();
     backend_lib_hyperloglog::init_seams();
+    backend_main_main::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
@@ -127,12 +130,14 @@ pub fn init_all() {
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_slotsync::init_seams();
+    backend_replication_syncrep_scanner::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
     backend_replication_walreceiverfuncs::init_seams();
     backend_rmgrdesc_next::init_seams();
     backend_storage_file_buffile::init_seams();
     backend_storage_file_fd::init_seams();
+    backend_storage_file_fileset::init_seams();
     backend_storage_freespace::init_seams();
     backend_storage_ipc::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
@@ -155,6 +160,7 @@ pub fn init_all() {
     backend_tcop_backend_startup::init_seams();
     backend_tcop_fastpath::init_seams();
     backend_timezone_localtime::init_seams();
+    backend_timezone_pgtz::init_seams();
     backend_timezone_strftime::init_seams();
     backend_tsearch_ispell_regis::init_seams();
     backend_tsearch_spell::init_seams();
@@ -165,6 +171,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
+    backend_utils_adt_char::init_seams();
     backend_utils_adt_format_type::init_seams();
     backend_utils_adt_json::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
@@ -181,6 +188,7 @@ pub fn init_all() {
     backend_utils_adt_ri_triggers::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_catcache::init_seams();
+    backend_utils_cache_evtcache::init_seams();
     backend_utils_cache_inval::init_seams();
     backend_utils_cache_lsyscache::init_seams();
     backend_utils_cache_plancache::init_seams();
@@ -199,6 +207,7 @@ pub fn init_all() {
     backend_utils_init_miscinit::init_seams();
     backend_utils_init_postinit::init_seams();
     backend_utils_init_small::init_seams();
+    backend_utils_mb_conv_string_helpers::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_guc_file::init_seams();
@@ -206,6 +215,7 @@ pub fn init_all() {
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
+    backend_utils_misc_stack_depth::init_seams();
     backend_utils_misc_timeout::init_seams();
     backend_utils_mmgr_dsa::init_seams();
     backend_utils_mmgr_freepage::init_seams();
@@ -217,6 +227,7 @@ pub fn init_all() {
     common_hashfn::init_seams();
     common_ip::init_seams();
     common_pglz::init_seams();
+    common_prng_base64::init_seams();
     common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
     port_crc32c::init_seams();
@@ -504,24 +515,17 @@ mod recurrence_guard {
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
         ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
         ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
-        ("backend_access_transam_parallel", "initializing_parallel_worker"),
-        ("backend_access_transam_xact", "define_savepoint"),
-        ("backend_access_transam_xact", "set_xact_iso_level_read_committed"),
         // xlog reconciled out: CATALOG status corrected merged->needs-decomp
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
-        ("backend_access_transam_xlogprefetcher", "xlog_prefetch_shmem_size"),
-        ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
-        ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
         ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_force_store_minimal_tuple"),
-        ("backend_executor_execTuples", "exec_init_result_type_tl"),
         ("backend_executor_execTuples", "exec_materialize_slot"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
@@ -529,52 +533,27 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "slot_getattr"),
         ("backend_executor_execTuples", "slot_getattr_by_id"),
         ("backend_executor_execTuples", "slot_natts"),
-        ("backend_executor_execUtils", "exec_find_junk_attribute_in_tlist"),
-        ("backend_executor_execUtils", "exec_get_root_to_child_map"),
-        ("backend_executor_execUtils", "exec_get_updated_cols"),
-        ("backend_executor_execUtils", "exec_init_result_type_tl"),
-        ("backend_postmaster_autovacuum", "am_autovacuum_launcher_process"),
-        ("backend_postmaster_autovacuum", "am_autovacuum_worker_process"),
-        ("backend_postmaster_bgworker", "am_background_worker_process"),
-        ("backend_postmaster_bgworker", "max_worker_processes"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
-        ("backend_replication_logical_origin", "set_replorigin_session_origin_lsn"),
-        ("backend_replication_logical_slotsync", "am_logical_slot_sync_worker_process"),
-        ("backend_storage_ipc", "before_shmem_exit"),
-        ("backend_storage_ipc", "check_on_shmem_exit_lists_are_empty"),
-        ("backend_storage_ipc", "on_exit_reset"),
-        ("backend_storage_ipc", "on_proc_exit"),
-        ("backend_storage_ipc", "on_shmem_exit"),
-        ("backend_storage_ipc", "proc_exit"),
-        ("backend_storage_ipc_latch", "wait_latch_register_sync_request"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
-        ("backend_storage_lmgr_proc", "am_regular_backend_process"),
-        ("backend_storage_lmgr_proc", "my_proc_latch"),
-        ("backend_tcop_backend_startup", "my_cancel_key"),
+        // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
+        // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
+        // It is correctly installed at runtime by backend-timezone-localtime's
+        // init_seams() (wired into init_all), so the call path never panics; only
+        // the guard's name-prefix attribution flags it because the pgtz owner
+        // crate landed and flipped pgtz-seams into "complete owner" status. Pay
+        // down by relocating the decl to a backend-timezone-localtime-seams crate.
+        ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
-        ("backend_utils_fmgr_dfmgr", "load_file"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
-        ("backend_utils_init_miscinit", "initialize_session_user_id"),
-        ("backend_utils_init_miscinit", "initialize_system_user"),
-        ("backend_utils_init_miscinit", "pg_usleep"),
-        ("backend_utils_init_miscinit", "process_session_preload_libraries"),
-        ("backend_utils_init_miscinit", "set_database_path_once"),
         ("backend_utils_init_small", "init_process_globals"),
-        ("backend_utils_init_small", "my_proc_port_application_name"),
-        ("backend_utils_init_small", "my_proc_port_cmdline_options"),
-        ("backend_utils_init_small", "my_proc_port_database_name"),
-        ("backend_utils_init_small", "my_proc_port_guc_options"),
-        ("backend_utils_init_small", "my_proc_port_user_name"),
-        ("backend_utils_init_small", "post_auth_delay"),
-        ("backend_utils_init_small", "reserved_connections"),
-        ("backend_utils_init_small", "superuser_reserved_connections"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
+        ("backend_utils_misc_guc_file", "guc_check_errhint"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
     ];

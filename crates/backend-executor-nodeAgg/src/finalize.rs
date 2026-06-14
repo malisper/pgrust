@@ -623,7 +623,7 @@ pub fn project_aggregates<'mcx>(
 
     // ExecQual(aggstate->ss.ps.qual, econtext) — a NULL qual is always true,
     // handled by the seam owner; the owned NULL is `qual = None`.
-    let passed = match aggstate.ss.ps.qual.as_ref() {
+    let passed = match aggstate.ss.ps.qual.as_mut() {
         Some(qual) => {
             backend_executor_execExpr_seams::exec_qual::call(qual, econtext_id, estate)?
         }

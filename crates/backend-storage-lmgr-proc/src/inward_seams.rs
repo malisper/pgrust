@@ -150,6 +150,13 @@ fn my_proc_set_delay_chkpt_start(on: bool) {
 
 // ---- latch handle (own: a PGPROC slot's procLatch named by its proc number) ----
 
+fn my_proc_latch() -> LatchHandle {
+    // `&MyProc->procLatch` as a `LatchHandle`: the procLatch of this backend's
+    // own PGPROC slot, named by `MyProcNumber`. Both the slot identity and the
+    // handle-minting convention are this unit's own state.
+    crate::proc_shmem::proc_latch_handle(crate::proc_shmem::my_proc_number())
+}
+
 fn proc_latch(procno: ProcNumber) -> LatchHandle {
     // `&GetPGProcByNumber(procno)->procLatch` as a `LatchHandle`. The latch
     // unit identifies a per-PGPROC latch by the owning slot's proc number; the
@@ -489,4 +496,11 @@ pub(crate) fn install() {
     seams::have_n_free_procs::set(have_n_free_procs);
     seams::set_my_proc_role_id::set(set_my_proc_role_id);
     seams::set_my_proc_database_id::set(set_my_proc_database_id);
+
+    // Contract-reconciled installs over this unit's own state: the
+    // `AmRegularBackendProcess()` predicate (the owner's `crate::seam` body,
+    // exact `() -> bool`) and `&MyProc->procLatch` read-side handle mint
+    // (`() -> LatchHandle` over this unit's PGPROC slot).
+    seams::am_regular_backend_process::set(crate::seam::am_regular_backend_process);
+    seams::my_proc_latch::set(my_proc_latch);
 }
