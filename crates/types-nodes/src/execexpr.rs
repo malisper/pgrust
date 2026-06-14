@@ -24,7 +24,7 @@ use types_tuple::heaptuple::HeapTuple;
 use types_tuple::heaptuple::TupleDescData;
 
 use crate::execnodes::{EcxtId, Opaque};
-use crate::executor::{TupleSlotKind, TupleTableSlot};
+use types_slot::{TupleSlotKind, TupleTableSlot};
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodes::NodeTag;
 use crate::planstate::PlanStateNode;

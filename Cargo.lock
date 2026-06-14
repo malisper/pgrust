@@ -12521,6 +12521,7 @@ dependencies = [
  "types-parallel",
  "types-rel",
  "types-scan",
+ "types-slot",
  "types-snapshot",
  "types-sortsupport",
  "types-storage",
@@ -12745,6 +12746,14 @@ name = "types-signal"
 version = "0.0.0"
 
 [[package]]
+name = "types-slot"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
 name = "types-snapshot"
 version = "0.0.0"
 dependencies = [
@@ -12795,9 +12804,9 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-error",
- "types-nodes",
  "types-rel",
  "types-scan",
+ "types-slot",
  "types-snapshot",
  "types-storage",
  "types-tidbitmap",
