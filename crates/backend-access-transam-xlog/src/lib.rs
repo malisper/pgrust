@@ -48,7 +48,7 @@ use types_core::{
     pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, Size, TimeLineID,
     TransactionId, XLogRecPtr, XLogSegNo,
 };
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_wal::xlog_consts::{
     ArchiveMode, RecoveryState, WALAvailability, WalCompression, WalLevel, WalSyncMethod,
     DEFAULT_XLOG_SEG_SIZE, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, WAL_SEG_MAX_SIZE,
@@ -617,7 +617,7 @@ xlog_driver_deferred! {
     /// `StartupXLOG()` — the recovery + WAL-engine startup driver.
     pub fn StartupXLOG();
     /// `ShutdownXLOG(code, arg)` — the WAL-engine shutdown driver.
-    pub fn ShutdownXLOG(code: i32, arg: Datum);
+    pub fn ShutdownXLOG(code: i32, arg: Datum<'static>);
     /// `XLogPutNextOid(nextOid)` — log the next-OID checkpoint hint.
     pub fn XLogPutNextOid(next_oid: Oid);
     /// `RequestXLogSwitch(mark_unimportant)` — force a WAL segment switch.
