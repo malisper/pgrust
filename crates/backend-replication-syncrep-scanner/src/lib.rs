@@ -24,6 +24,8 @@
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
 
+use backend_replication_syncrep_scanner_seams as seams;
+
 /// Bison token codes for `syncrep_gram.y`, generated into `syncrep_gram.h`.
 ///
 /// These are the values `syncrep_yylex` returns; single-character tokens
@@ -110,13 +112,18 @@ impl SyncrepToken<'_> {
 /// `'mcx` is the parser's working memory context (the C parse
 /// `CurrentMemoryContext`): the lifetime token under which `yylval->str`
 /// strings are `palloc`'d.
-pub struct SyncrepScanner<'mcx> {
+///
+/// `'i` is the input buffer's lifetime, kept distinct from `'mcx` (the parse
+/// memory context) so the handle-registry adapter can drive the scanner over an
+/// input copy it owns for just the duration of one seam call while still
+/// `palloc`ing token strings into a longer-lived caller `mcx`.
+pub struct SyncrepScanner<'i, 'mcx> {
     mcx: Mcx<'mcx>,
-    input: &'mcx [u8],
+    input: &'i [u8],
     /// Current scan offset into `input` (the flex `yy_c_buf_p` cursor).
     pos: usize,
     /// `yytext` of the most-recently matched rule (the flex `yytext` macro).
-    yytext: &'mcx [u8],
+    yytext: &'i [u8],
     /// `*syncrep_parse_error_msg_p`: the first collected error message, if any.
     parse_error_msg: Option<PgString<'mcx>>,
 }
@@ -130,7 +137,7 @@ pub struct SyncrepScanner<'mcx> {
 ///
 /// `input` must outlive the scanner (it is the GUC string the caller already
 /// holds), matching `yy_scan_string`, which scans the caller's buffer in place.
-pub fn syncrep_scanner_init<'mcx>(input: &'mcx str, mcx: Mcx<'mcx>) -> SyncrepScanner<'mcx> {
+pub fn syncrep_scanner_init<'i, 'mcx>(input: &'i str, mcx: Mcx<'mcx>) -> SyncrepScanner<'i, 'mcx> {
     SyncrepScanner {
         mcx,
         input: input.as_bytes(),
@@ -145,15 +152,39 @@ pub fn syncrep_scanner_init<'mcx>(input: &'mcx str, mcx: Mcx<'mcx>) -> SyncrepSc
 /// The C function `pfree`s the extra-type and `yylex_destroy`s the scanner.
 /// In safe Rust the scanner owns all its state and is dropped here; the
 /// `mcx`-allocated strings are reclaimed when the parse context is reset.
-pub fn syncrep_scanner_finish(scanner: SyncrepScanner<'_>) {
+pub fn syncrep_scanner_finish(scanner: SyncrepScanner<'_, '_>) {
     drop(scanner);
 }
 
-impl<'mcx> SyncrepScanner<'mcx> {
+impl<'i, 'mcx> SyncrepScanner<'i, 'mcx> {
     /// `*syncrep_parse_error_msg_p` after the parse: the first collected error
     /// message, or `None` if no error was recorded.
     pub fn parse_error_msg(&self) -> Option<&str> {
         self.parse_error_msg.as_ref().map(PgString::as_str)
+    }
+
+    /// Current scan cursor (`yy_c_buf_p`) as a byte offset into the input —
+    /// the persistent reentrant state the handle-based seam carries across
+    /// `syncrep_yylex` calls.
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// `yytext` of the last matched rule expressed as a `start..end` byte range
+    /// into the input, so the registry adapter can re-derive the live slice on
+    /// the next reconstructed scanner (the C `yyscan_t` keeps `yytext` alive).
+    pub(crate) fn yytext_range(&self) -> (usize, usize) {
+        // SAFETY of arithmetic: `yytext` is always a sub-slice of `input`.
+        let base = self.input.as_ptr() as usize;
+        let start = self.yytext.as_ptr() as usize - base;
+        (start, start + self.yytext.len())
+    }
+
+    /// Restore the persistent cursor + `yytext` window saved by a prior
+    /// `syncrep_yylex`/`syncrep_yyerror` step on the same logical scanner.
+    pub(crate) fn restore(&mut self, pos: usize, yytext: (usize, usize)) {
+        self.pos = pos;
+        self.yytext = &self.input[yytext.0..yytext.1];
     }
 
     /// The flex `yytext` of the last matched rule.
@@ -379,6 +410,20 @@ impl<'mcx> SyncrepScanner<'mcx> {
         self.parse_error_msg = Some(buf);
         Ok(())
     }
+
+    /// Restore the already-formatted first-error message saved by a prior step
+    /// on the same logical (handle-based) scanner, so the C "first error wins"
+    /// guard (`*syncrep_parse_error_msg_p`) carries across `syncrep_yylex` /
+    /// `syncrep_yyerror` calls. The message is already qualified (it was
+    /// produced by `syncrep_yyerror`), so it is stored verbatim.
+    pub(crate) fn seed_error(&mut self, message: &str) {
+        if self.parse_error_msg.is_some() {
+            return;
+        }
+        if let Ok(buf) = PgString::from_str_in(message, self.mcx) {
+            self.parse_error_msg = Some(buf);
+        }
+    }
 }
 
 /// `space  [ \t\n\r\f\v]` — the flex space character class.
@@ -418,11 +463,214 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-/// Wire this crate's seams. The scanner owns no inward seams — the grammar
-/// drives the lexer (Bison calls `syncrep_yylex`), so nothing here is exposed
-/// as a `seam!` slot installed for another crate. Kept (empty) so `seams-init`
-/// can list it uniformly.
-pub fn init_seams() {}
+// ---------------------------------------------------------------------------
+// Handle-registry adapter: bridge the handle-based seam contract to the
+// value-typed `SyncrepScanner` impl above.
+//
+// The cycle-partner grammar (`backend-replication-syncrep-gram`) drives this
+// lexer through the `backend-replication-syncrep-scanner-seams` contract, which
+// models the reentrant flex `yyscan_t` as an opaque `SyncrepScannerHandle(u64)`
+// (a `void *` in C). The scanner OWNS those inward seams; the grammar only
+// `::call`s them. So this crate installs all five from `init_seams()`.
+//
+// flex's `yyscan_t` is heap state that outlives any single `syncrep_yylex`
+// call, so the handle must too. We keep a backend-local registry of live
+// scanners, exactly mirroring `syncrep_scanner_init`'s `palloc0` /
+// `syncrep_scanner_finish`'s `pfree`. The persistent reentrant state is: the
+// input (the C `yy_scan_string` copy), the scan cursor, the last `yytext`
+// window, and the first recorded parse-error message. The `NAME`/`NUM`
+// `yylval->str` payloads are `pstrdup`'d into the caller's `mcx` on each
+// `syncrep_yylex`, so they are NOT held in the registry.
+//
+// The DFA itself is not re-implemented here: each step reconstructs a
+// `SyncrepScanner` over the owned input, restores the saved cursor/`yytext`,
+// runs exactly one rule, then saves the advanced state back — keeping a single
+// source of truth for the scanner logic.
+mod registry {
+    extern crate std;
+    use super::{seams, syncrep_scanner_init, SyncrepScanner};
+    use mcx::{Mcx, PgString};
+    use std::cell::RefCell;
+    use std::string::String;
+    use std::vec::Vec;
+    use types_error::PgResult;
+
+    /// One live scanner's persistent (cross-call) reentrant state.
+    struct Entry {
+        /// The C `yy_scan_string` input copy.
+        input: String,
+        /// `yy_c_buf_p` cursor.
+        pos: usize,
+        /// `yytext` window (`start..end`) into `input`.
+        yytext: (usize, usize),
+        /// `*syncrep_parse_error_msg_p` (owned in scanner memory; copied into
+        /// the caller `mcx` only when read back).
+        error_msg: Option<String>,
+    }
+
+    std::thread_local! {
+        /// Slot table; a `None` slot is a finished/freed scanner. The handle is
+        /// the slot index, matching the C `yyscan_t` pointer identity.
+        static SCANNERS: RefCell<Vec<Option<Entry>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn idx(handle: seams::SyncrepScannerHandle) -> usize {
+        handle.0 as usize
+    }
+
+    /// `syncrep_scanner_init`: copy `input`, allocate a registry slot, return
+    /// its handle.
+    fn init(_mcx: Mcx<'_>, input: &str) -> PgResult<seams::SyncrepScannerHandle> {
+        let entry = Entry {
+            input: String::from(input),
+            pos: 0,
+            yytext: (0, 0),
+            error_msg: None,
+        };
+        let handle = SCANNERS.with(|s| {
+            let mut s = s.borrow_mut();
+            // Reuse a freed slot if one exists, else push.
+            if let Some(i) = s.iter().position(|e| e.is_none()) {
+                s[i] = Some(entry);
+                i as u64
+            } else {
+                s.push(Some(entry));
+                (s.len() - 1) as u64
+            }
+        });
+        Ok(seams::SyncrepScannerHandle(handle))
+    }
+
+    /// Reconstruct a borrowed `SyncrepScanner` over the slot's owned state,
+    /// restore the cursor/`yytext`/error, run `f`, then save the advanced
+    /// persistent state back into the slot.
+    fn with_scanner<'mcx, R>(
+        mcx: Mcx<'mcx>,
+        handle: seams::SyncrepScannerHandle,
+        f: impl FnOnce(&mut SyncrepScanner<'_, 'mcx>) -> PgResult<R>,
+    ) -> PgResult<R> {
+        // The input string must outlive the borrowed scanner. We pull the saved
+        // state out of the slot (leaving it parked), build the scanner over a
+        // local copy of the input held for the duration of the call, run the
+        // step, then write the new persistent state back.
+        let (input, pos, yytext, prev_err) = SCANNERS.with(|s| {
+            let s = s.borrow();
+            let e = s[idx(handle)].as_ref().expect("live scanner handle");
+            (e.input.clone(), e.pos, e.yytext, e.error_msg.clone())
+        });
+
+        let mut scanner = syncrep_scanner_init(input.as_str(), mcx);
+        scanner.restore(pos, yytext);
+        if let Some(msg) = &prev_err {
+            // Pre-seed the first-error guard so a second error is dropped and a
+            // re-read of `yytext` after `f` still reflects this step.
+            scanner.seed_error(msg);
+        }
+
+        let out = f(&mut scanner);
+
+        // Persist advanced cursor / yytext / first-error message.
+        let new_pos = scanner.pos();
+        let new_yytext = scanner.yytext_range();
+        let new_err = scanner.parse_error_msg().map(String::from);
+        SCANNERS.with(|s| {
+            let mut s = s.borrow_mut();
+            if let Some(e) = s[idx(handle)].as_mut() {
+                e.pos = new_pos;
+                e.yytext = new_yytext;
+                e.error_msg = new_err;
+            }
+        });
+
+        out
+    }
+
+    /// `syncrep_yylex`: one token, with the `yylval->str` payload `pstrdup`'d
+    /// into the caller `mcx`.
+    fn yylex<'mcx>(
+        mcx: Mcx<'mcx>,
+        handle: seams::SyncrepScannerHandle,
+    ) -> PgResult<seams::SyncrepLexeme<'mcx>> {
+        with_scanner(mcx, handle, |scanner| {
+            let tok = scanner.syncrep_yylex()?;
+            // The lexeme string was allocated into `mcx` inside `syncrep_yylex`;
+            // re-materialize it under `mcx` for the seam's `SyncrepLexeme`.
+            let value = match tok.str_value() {
+                Some(s) => Some(PgString::from_str_in(s, mcx)?),
+                None => None,
+            };
+            Ok(seams::SyncrepLexeme {
+                token: tok.token_code(),
+                value,
+            })
+        })
+    }
+
+    /// `syncrep_yyerror`: record `message` against the scanner (first error
+    /// wins). The OOM `PgResult` of the underlying format step is dropped here
+    /// because the seam decl is infallible, matching the C `void` signature.
+    fn yyerror(handle: seams::SyncrepScannerHandle, message: &str) {
+        // `mcx` is only needed for the `psprintf` buffer; the result is held in
+        // scanner-owned memory, so a throwaway context is fine and is discarded
+        // with the borrowed scanner.
+        let _ = with_scanner_no_mcx(handle, |scanner| scanner.syncrep_yyerror(message));
+    }
+
+    /// `syncrep_scanner_error_msg`: copy the first recorded message into `mcx`.
+    fn error_msg<'mcx>(
+        mcx: Mcx<'mcx>,
+        handle: seams::SyncrepScannerHandle,
+    ) -> PgResult<Option<PgString<'mcx>>> {
+        let msg = SCANNERS.with(|s| {
+            let s = s.borrow();
+            s[idx(handle)]
+                .as_ref()
+                .expect("live scanner handle")
+                .error_msg
+                .clone()
+        });
+        match msg {
+            Some(m) => Ok(Some(PgString::from_str_in(&m, mcx)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `syncrep_scanner_finish`: free the slot (the C `pfree` + `yylex_destroy`).
+    fn finish(handle: seams::SyncrepScannerHandle) {
+        SCANNERS.with(|s| {
+            s.borrow_mut()[idx(handle)] = None;
+        });
+    }
+
+    /// `syncrep_yyerror` runs against persistent scanner state and the live
+    /// `yytext`, but needs no `mcx` of its own (the error string is owned).
+    /// Build a transient context just to host the borrowed `SyncrepScanner`.
+    fn with_scanner_no_mcx<R>(
+        handle: seams::SyncrepScannerHandle,
+        f: impl FnOnce(&mut SyncrepScanner<'_, '_>) -> PgResult<R>,
+    ) -> PgResult<R> {
+        let ctx = mcx::MemoryContext::new("syncrep_yyerror");
+        with_scanner(ctx.mcx(), handle, f)
+    }
+
+    /// Install all five inward seams of `backend-replication-syncrep-scanner`.
+    pub(super) fn install() {
+        seams::syncrep_scanner_init::set(init);
+        seams::syncrep_yylex::set(yylex);
+        seams::syncrep_yyerror::set(yyerror);
+        seams::syncrep_scanner_error_msg::set(error_msg);
+        seams::syncrep_scanner_finish::set(finish);
+    }
+}
+
+/// Wire this crate's inward seams. The grammar (`syncrep_gram.y`) drives this
+/// lexer through the handle-based scanner-seams contract; the scanner owns and
+/// installs those five seams here via a backend-local handle registry that
+/// bridges the opaque `SyncrepScannerHandle` (C's reentrant `yyscan_t`) to the
+/// value-typed `SyncrepScanner` impl above.
+pub fn init_seams() {
+    registry::install();
+}
 
 #[cfg(test)]
 mod tests {
