@@ -93,3 +93,44 @@ seam_core::seam!(
     /// (unknown relkinds return `OBJECT_TABLE`); cannot `ereport`.
     pub fn get_relkind_objtype(relkind: u8) -> ObjectType
 );
+
+/// `ObjectAddresses *` — the opaque runtime accumulator
+/// (`new_object_addresses()` / `add_exact_object_address` /
+/// `object_address_present` / `record_object_address_dependencies` /
+/// `free_object_addresses`). Its payload (the growable `ObjectAddress` array
+/// with its hashtable) is owned by objectaddress.c; callers (pg_constraint.c)
+/// only thread the handle between these seams. Inherited opacity — a foreign
+/// runtime handle, not a modeled value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectAddressesHandle(pub u64);
+
+seam_core::seam!(
+    /// `new_object_addresses()` (objectaddress.c): allocate a fresh
+    /// `ObjectAddresses` accumulator and return its handle. `Err` carries OOM.
+    pub fn new_object_addresses() -> PgResult<ObjectAddressesHandle>
+);
+
+seam_core::seam!(
+    /// `add_exact_object_address(&object, addrs)` (objectaddress.c): append
+    /// `object` to the accumulator (growing it as needed). `Err` carries OOM.
+    pub fn add_exact_object_address(
+        object: ObjectAddress,
+        addrs: ObjectAddressesHandle,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `object_address_present(&object, addrs)` (objectaddress.c): is `object`
+    /// (matching class/object, and subid present or whole-object) already in
+    /// the accumulator?
+    pub fn object_address_present(
+        object: ObjectAddress,
+        addrs: ObjectAddressesHandle,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `free_object_addresses(addrs)` (objectaddress.c): release the
+    /// accumulator and its hashtable.
+    pub fn free_object_addresses(addrs: ObjectAddressesHandle) -> PgResult<()>
+);

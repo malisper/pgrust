@@ -1577,3 +1577,410 @@ seam_core::seam!(
         func_id: Oid,
     ) -> PgResult<Option<FastpathProcRow<'mcx>>>
 );
+
+// ===========================================================================
+// objectaddress.c per-class catalog-row projections (getObjectDescription F1
+// + getObjectIdentityParts F3). Each is the `table_open + systable_beginscan(
+// <oid index>) + GETSTRUCT` (no-syscache catalogs) or `SearchSysCache1 +
+// GETSTRUCT` (cached catalogs) of objectaddress.c, projected to the fixed-width
+// fields the description/identity arm interpolates. `Ok(None)` is the C
+// `!HeapTupleIsValid(tup)` "row vanished" (the caller raises its own error when
+// `!missing_ok`); the installer owns the scan/`ReleaseSysCache` teardown. They
+// panic loudly until the syscache/catalog owner installs them.
+// ===========================================================================
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(pg_cast, Anum_pg_cast_oid, castid)` +
+    /// `GETSTRUCT` projected to `(castsource, casttarget)`
+    /// (`Form_pg_cast`). `Ok(None)` on a scan miss.
+    pub fn cast_source_target(castid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `table_open(AccessMethodOperatorRelationId) +
+    /// systable_beginscan(AccessMethodOperatorOidIndexId, oid = amopid) +
+    /// GETSTRUCT(Form_pg_amop)` projected to
+    /// `(amopfamily, amopstrategy, amoplefttype, amoprighttype, amopopr)`.
+    /// `Ok(None)` on a vanished row.
+    pub fn amop_description_row(amopid: Oid) -> PgResult<Option<AmopDescriptionRow>>
+);
+
+seam_core::seam!(
+    /// `table_open(AccessMethodProcedureRelationId) +
+    /// systable_beginscan(AccessMethodProcedureOidIndexId, oid = amprocid) +
+    /// GETSTRUCT(Form_pg_amproc)` projected to
+    /// `(amprocfamily, amprocnum, amproclefttype, amprocrighttype, amproc)`.
+    /// `Ok(None)` on a vanished row.
+    pub fn amproc_description_row(amprocid: Oid) -> PgResult<Option<AmprocDescriptionRow>>
+);
+
+seam_core::seam!(
+    /// `table_open(RewriteRelationId) + systable_beginscan(RewriteOidIndexId,
+    /// oid = ruleid) + GETSTRUCT(Form_pg_rewrite)` projected to
+    /// `(ev_class, NameStr(rulename))`. `Ok(None)` on a vanished row; the name
+    /// is copied into `mcx`.
+    pub fn rewrite_class_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        ruleid: Oid,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `table_open(TriggerRelationId) + systable_beginscan(TriggerOidIndexId,
+    /// oid = trigid) + GETSTRUCT(Form_pg_trigger)` projected to
+    /// `(tgrelid, NameStr(tgname))`. `Ok(None)` on a vanished row; the name is
+    /// copied into `mcx`.
+    pub fn trigger_relid_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigid: Oid,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `table_open(AuthMemRelationId) + systable_beginscan(AuthMemOidIndexId,
+    /// oid = authmemid) + GETSTRUCT(Form_pg_auth_members)` projected to
+    /// `(member, roleid)`. `Ok(None)` on a vanished row.
+    pub fn auth_member_member_role(authmemid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `table_open(DefaultAclRelationId) +
+    /// systable_beginscan(DefaultAclOidIndexId, oid = defaclid) +
+    /// GETSTRUCT(Form_pg_default_acl)` projected to
+    /// `(defaclrole, defaclnamespace, defaclobjtype)`. `Ok(None)` on a vanished
+    /// row.
+    pub fn default_acl_row(defaclid: Oid) -> PgResult<Option<DefaultAclDescRow>>
+);
+
+seam_core::seam!(
+    /// `table_open(PolicyRelationId) + systable_beginscan(PolicyOidIndexId,
+    /// oid = polid) + GETSTRUCT(Form_pg_policy)` projected to
+    /// `(polrelid, NameStr(polname))`. `Ok(None)` on a vanished row; the name
+    /// is copied into `mcx`.
+    pub fn policy_relid_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        polid: Oid,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(STATEXTOID, statextid)` +
+    /// `GETSTRUCT(Form_pg_statistic_ext)` projected to `stxnamespace` for the
+    /// statistics-object description (the name comes via
+    /// [`statext_namespace_and_name`]). Unused by F1 directly; kept for parity.
+    /// `Ok(None)` on a cache miss.
+    pub fn statext_namespace(statextid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(USERMAPPINGOID, umid)` +
+    /// `GETSTRUCT(Form_pg_user_mapping)` projected to `(umuser, umserver)`
+    /// (the user-mapping description arm). `Ok(None)` on a cache miss.
+    pub fn user_mapping_user_server(umid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PARAMETERACLOID, paramaclid)` +
+    /// `SysCacheGetAttrNotNull(Anum_pg_parameter_acl_parname)` +
+    /// `TextDatumGetCString` (the parameter-ACL description arm): the GUC
+    /// parameter name copied into `mcx`. `Ok(None)` on a cache miss.
+    pub fn parameter_acl_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        paramaclid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `systable_beginscan(pg_amop, AccessMethodOperatorOidIndexId, oid=amopid)`
+    /// + `GETSTRUCT` projected to `(amopfamily, amoplefttype, amoprighttype,
+    /// amopstrategy)` (`Form_pg_amop`). `Ok(None)` on a scan miss.
+    pub fn amop_identity(amopid: Oid) -> PgResult<Option<(Oid, Oid, Oid, i16)>>
+);
+
+seam_core::seam!(
+    /// `systable_beginscan(pg_amproc, AccessMethodProcedureOidIndexId,
+    /// oid=amprocid)` + `GETSTRUCT` projected to `(amprocfamily,
+    /// amproclefttype, amprocrighttype, amprocnum)` (`Form_pg_amproc`).
+    /// `Ok(None)` on a scan miss.
+    pub fn amproc_identity(amprocid: Oid) -> PgResult<Option<(Oid, Oid, Oid, i16)>>
+);
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(pg_rewrite, Anum_pg_rewrite_oid, ruleid)` +
+    /// `GETSTRUCT` projected to `(rulename, ev_class)` (`Form_pg_rewrite`).
+    /// `Ok(None)` on a scan miss.
+    pub fn rewrite_name_evclass<'mcx>(
+        mcx: Mcx<'mcx>,
+        ruleid: Oid,
+    ) -> PgResult<Option<(PgString<'mcx>, Oid)>>
+);
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(pg_trigger, Anum_pg_trigger_oid, trigid)` +
+    /// `GETSTRUCT` projected to `(tgname, tgrelid)` (`Form_pg_trigger`).
+    /// `Ok(None)` on a scan miss.
+    pub fn trigger_name_relid<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigid: Oid,
+    ) -> PgResult<Option<(PgString<'mcx>, Oid)>>
+);
+
+seam_core::seam!(
+    /// `systable_beginscan(pg_default_acl, DefaultAclOidIndexId, oid=daclid)` +
+    /// `GETSTRUCT` projected to `(defaclrole, defaclnamespace, defaclobjtype)`
+    /// (`Form_pg_default_acl`; `defaclobjtype` is the raw `DEFACLOBJ_*` char).
+    /// `Ok(None)` on a scan miss.
+    pub fn default_acl_identity(daclid: Oid) -> PgResult<Option<(Oid, Oid, i8)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(TRFOID, transformid)` +
+    /// `GETSTRUCT(Form_pg_transform)` projected to `(trftype, trflang)` (the
+    /// transform description arm). `Ok(None)` on a cache miss.
+    pub fn transform_type_lang(transformid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(pg_policy, Anum_pg_policy_oid, polid)` +
+    /// `GETSTRUCT` projected to `(polname, polrelid)` (`Form_pg_policy`).
+    /// `Ok(None)` on a scan miss.
+    pub fn policy_name_relid<'mcx>(
+        mcx: Mcx<'mcx>,
+        polid: Oid,
+    ) -> PgResult<Option<(PgString<'mcx>, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(EVENTTRIGGEROID, evtid)` +
+    /// `NameStr(GETSTRUCT(Form_pg_event_trigger)->evtname)` copied into `mcx`
+    /// (the event-trigger description arm). `Ok(None)` on a cache miss.
+    pub fn event_trigger_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        evtid: Oid,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PUBLICATIONREL, pubrelid)` +
+    /// `GETSTRUCT(Form_pg_publication_rel)` projected to `(prpubid, prrelid)`
+    /// (the publication-table description arm). `Ok(None)` on a cache miss.
+    pub fn publication_rel_pub_rel(pubrelid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AMOID, amid)` +
+    /// `NameStr(GETSTRUCT(Form_pg_am)->amname)` copied into `mcx` (the
+    /// access-method description arm and the opclass arm's access-method name).
+    /// `Ok(None)` on a cache miss; the caller raises `cache lookup failed for
+    /// access method %u` when `!missing_ok`.
+    pub fn am_name<'mcx>(mcx: Mcx<'mcx>, amid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+/// `((Form_pg_amop) GETSTRUCT(tup))` fields the `getObjectDescription` amop arm
+/// interpolates (objectaddress.c 3229-3292).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AmopDescriptionRow {
+    /// `amopfamily`.
+    pub amopfamily: Oid,
+    /// `amopstrategy`.
+    pub amopstrategy: i16,
+    /// `amoplefttype`.
+    pub amoplefttype: Oid,
+    /// `amoprighttype`.
+    pub amoprighttype: Oid,
+    /// `amopopr`.
+    pub amopopr: Oid,
+}
+
+/// `((Form_pg_amproc) GETSTRUCT(tup))` fields the `getObjectDescription` amproc
+/// arm interpolates (objectaddress.c 3294-3357).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AmprocDescriptionRow {
+    /// `amprocfamily`.
+    pub amprocfamily: Oid,
+    /// `amprocnum`.
+    pub amprocnum: i16,
+    /// `amproclefttype`.
+    pub amproclefttype: Oid,
+    /// `amprocrighttype`.
+    pub amprocrighttype: Oid,
+    /// `amproc`.
+    pub amproc: Oid,
+}
+
+/// `((Form_pg_default_acl) GETSTRUCT(tup))` fields the `getObjectDescription`
+/// default-ACL arm interpolates (objectaddress.c 3761-3873).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultAclDescRow {
+    /// `defaclrole`.
+    pub defaclrole: Oid,
+    /// `defaclnamespace` (`InvalidOid` for a non-schema-scoped default ACL).
+    pub defaclnamespace: Oid,
+    /// `defaclobjtype` — the `DEFACLOBJ_*` discriminant char.
+    pub defaclobjtype: i8,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, conoid)` +
+    /// `GETSTRUCT(Form_pg_constraint)->conrelid` (the `getObjectDescription`
+    /// constraint arm: a constraint with an owning relation prints
+    /// "constraint %s on %s"). `Ok(None)` on a cache miss; `InvalidOid` for a
+    /// non-relation-scoped constraint.
+    pub fn constraint_relid(conoid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PUBLICATIONNAMESPACE, pubschemaid)` +
+    /// `GETSTRUCT(Form_pg_publication_namespace)` projected to
+    /// `(pnpubid, pnnspid)` (objectaddress.c `getPublicationSchemaInfo`).
+    /// `Ok(None)` on a cache miss.
+    pub fn publication_namespace_pub_nsp(pubschemaid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `GetAttrDefaultColumnAddress(attrdefoid)` (pg_attrdef.c):
+    /// `table_open(AttrDefaultRelationId) +
+    /// systable_beginscan(AttrDefaultOidIndexId, oid = attrdefoid) +
+    /// GETSTRUCT(Form_pg_attrdef)` projected to the owning column's
+    /// `(adrelid, adnum)`. `Ok(None)` is the C `InvalidObjectAddress` return
+    /// (no such pg_attrdef entry).
+    pub fn attr_default_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>>
+);
+
+seam_core::seam!(
+    /// `getObjectIdentityParts` `ConstraintRelationId` arm:
+    /// `SearchSysCache1(CONSTROID, conid)` + `GETSTRUCT` projected to
+    /// `(conname, conrelid, contypid)` (`Form_pg_constraint`). `Ok(None)` on a
+    /// cache miss.
+    pub fn constraint_identity<'mcx>(
+        mcx: Mcx<'mcx>,
+        conid: Oid,
+    ) -> PgResult<Option<(PgString<'mcx>, Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PUBLICATIONNAMESPACE, pubnspid)` + `GETSTRUCT`
+    /// projected to `(pnpubid, pnnspid)` (`Form_pg_publication_namespace`),
+    /// feeding objectaddress.c's `getPublicationSchemaInfo`. `Ok(None)` on a
+    /// cache miss.
+    pub fn publication_namespace_ids(pubnspid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PUBLICATIONREL, pubrelid)` + `GETSTRUCT` projected to
+    /// `(prpubid, prrelid)` (`Form_pg_publication_rel`). `Ok(None)` on a cache
+    /// miss.
+    pub fn publication_rel_ids(pubrelid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `GetAttrDefaultColumnAddress(attrdefoid)` (pg_attrdef.c): scan
+    /// `pg_attrdef` by OID and project `GETSTRUCT`'s `(adrelid, adnum)`
+    /// (`Form_pg_attrdef`), from which the caller rebuilds the column
+    /// `ObjectAddress` (`RelationRelationId`, `adrelid`, `adnum`). `Ok(None)`
+    /// when no such attrdef row exists (the C `InvalidObjectAddress`).
+    pub fn attrdef_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>>
+);
+
+/* ------------------------------------------------------------------------
+ *  pg_constraint reads/writes for backend-catalog-pg-constraint
+ *  (SearchSysCache1(CONSTROID) + pg_class relchecks read/decrement, plus the
+ *  conkey/FK array-column detoast reads). Owned by backend-utils-cache-syscache
+ *  (and heaptuple for the array reads); panic until they land.
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `GetSysCacheHashValue1(CONSTROID, ObjectIdGetDatum(oid))` (syscache.c) —
+    /// the catcache hash value for a `pg_constraint` row, used by
+    /// `ri_LoadConstraintInfo`'s `oid_hash_value` / hash-of-root. `Err` carries
+    /// the catcache-path `ereport(ERROR)`s.
+    pub fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` + `GETSTRUCT`
+    /// projected to the scalar `Form_pg_constraint` columns plus the `conkey`
+    /// array column, copied into `mcx`, then `ReleaseSysCache`. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); the caller raises `cache lookup failed
+    /// for constraint %u`. `Err` carries OOM / catcache `ereport(ERROR)`s.
+    pub fn search_constraint_form_by_oid(
+        conoid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_constraint::ConstraintFormCopy>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` + `heap_copytuple`
+    /// — the full `pg_constraint` tuple (for `DeconstructFkConstraintRow`),
+    /// copied into `mcx`, then `ReleaseSysCache`. `Ok(None)` on a cache miss.
+    /// `Err` carries OOM / catcache `ereport(ERROR)`s.
+    pub fn search_constraint_tuple_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))` +
+    /// `GETSTRUCT(Form_pg_class)->relchecks` (RemoveConstraintById): the
+    /// relation's check-constraint count. `Ok(None)` on a cache miss; the
+    /// caller raises `cache lookup failed for relation %u`.
+    pub fn fetch_relchecks(relid: Oid) -> PgResult<Option<i16>>
+);
+
+seam_core::seam!(
+    /// RemoveConstraintById's relchecks update: `table_open(RelationRelationId,
+    /// RowExclusiveLock)` + `SearchSysCacheCopy1(RELOID)` + `classForm->relchecks--`
+    /// + `CatalogTupleUpdate` + `heap_freetuple` + `table_close`. The
+    /// `relchecks == 0` guard is the caller's (it has already read the value via
+    /// [`fetch_relchecks`]); this seam performs the decrement-and-store. `Err`
+    /// carries the heap-mutation `ereport(ERROR)`s.
+    pub fn decrement_relchecks(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SysCacheGetAttrNotNull(CONSTROID, constrTup, Anum_pg_constraint_conkey)`
+    /// + `DatumGetArrayTypeP` (heaptuple/array detoast): the `conkey` 1-D
+    /// smallint array of a not-null constraint tuple, with the validated
+    /// `ARR_*` fields. The caller performs the 1-D/elemtype/hasnull/dim
+    /// validation + error message. `Err` carries the detoast `ereport(ERROR)`s.
+    pub fn get_conkey_array(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::ConKeyArray>
+);
+
+seam_core::seam!(
+    /// `DeconstructFkConstraintRow`'s `SysCacheGetAttrNotNull` /
+    /// `SysCacheGetAttr` reads of `conkey` / `confkey` / `conpfeqop` /
+    /// `conppeqop` / `conffeqop` / `confdelsetcols` + `DatumGetArrayTypeP`
+    /// (heaptuple/array detoast). Returns all six array columns; the caller
+    /// performs every dimension/elemtype/null validation + the FK error
+    /// messages. `confdelsetcols` is `None` when the column is SQL NULL.
+    pub fn deconstruct_fk_arrays(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::FkArrayProjection>
+);
+
+seam_core::seam!(
+    /// `heap_getattr(tuple, Anum_pg_constraint_conkey,
+    /// RelationGetDescr(pg_constraint), &isNull)` + `DatumGetArrayTypeP`
+    /// (get_primary_key_attnos): the `conkey` array column of a scanned
+    /// `pg_constraint` tuple, against the open relation's descriptor.
+    /// `Ok(None)` when the column is SQL NULL (the C `isNull` branch → the
+    /// caller's `null conkey for constraint %u`). `Err` carries the detoast
+    /// `ereport(ERROR)`s.
+    pub fn heap_get_conkey(
+        rel: &types_rel::RelationData<'_>,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<Option<types_catalog::pg_constraint::ConKeyArray>>
+);
+
+seam_core::seam!(
+    /// `(Form_pg_constraint) GETSTRUCT(tup)` of a held `pg_constraint` tuple
+    /// (AdjustNotNullInheritance reads the form off the tuple returned by
+    /// `findNotNullConstraintAttnum`). Projects the fixed-width scalar columns.
+    /// Owned by the heaptuple/syscache layer (GETSTRUCT decode). `Err` carries
+    /// any decode `ereport(ERROR)`.
+    pub fn read_constraint_form(
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    ) -> PgResult<types_catalog::pg_constraint::FormData_pg_constraint>
+);

@@ -75,3 +75,30 @@ seam_core::seam!(
         flags: i32,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `record_object_address_dependencies(&depender, refs, behavior)`
+    /// (dependency.c): record a dependency of `behavior` from `depender` on
+    /// every object accumulated in `refs` (the `ObjectAddresses *`). `Err`
+    /// carries the pg_depend-insert `ereport(ERROR)`s.
+    pub fn record_object_address_dependencies(
+        depender: ObjectAddress,
+        refs: backend_catalog_objectaddress_seams::ObjectAddressesHandle,
+        behavior: types_catalog::catalog_dependency::DependencyType,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `recordDependencyOnSingleRelExpr(&depender, expr, relId, self_behavior,
+    /// other_behavior, reverse_self)` (dependency.c): scan a single-relation
+    /// expression (a CHECK expression `Node *`) for object references and record
+    /// the dependencies. `Err` carries the `ereport(ERROR)`s.
+    pub fn record_dependency_on_single_rel_expr<'mcx>(
+        depender: ObjectAddress,
+        expr: &types_nodes::nodes::Node<'mcx>,
+        rel_id: Oid,
+        self_behavior: types_catalog::catalog_dependency::DependencyType,
+        other_behavior: types_catalog::catalog_dependency::DependencyType,
+        reverse_self: bool,
+    ) -> PgResult<()>
+);
