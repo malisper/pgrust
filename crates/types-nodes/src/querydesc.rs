@@ -240,6 +240,7 @@ impl QueryDesc {
         &mut self,
         f: impl for<'mcx> FnOnce(
             Option<&'mcx Node<'mcx>>,
+            &mut PlannedStmt<'mcx>,
             &mut EStateData<'mcx>,
             &mut Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
         ) -> R,
@@ -255,8 +256,27 @@ impl QueryDesc {
                 .planTree
                 .take()
                 .map(|tree| &*mcx::leak_in(tree));
-            f(plan, &mut w.estate, &mut w.planstate)
+            // The remaining `plannedstmt` fields stay reachable so `InitPlan`
+            // can move the range table / permInfos / unprunableRelids out of the
+            // bundle into the `EState` (`ExecInitRangeTable`) and read the
+            // `commandType` / `rowMarks` / `subplans` / `partPruneInfos` guards.
+            f(plan, &mut w.plannedstmt, &mut w.estate, &mut w.planstate)
         })
+    }
+
+    /// Mutable access to the owned `EState` *and* the built top plan-state tree
+    /// together (`queryDesc->estate` + `queryDesc->planstate`), through the
+    /// bundle. `ExecutePlan` / `ExecEndPlan` drive both at once (the per-tuple
+    /// `ExecProcNode(planstate)` and the teardown `ExecEndNode(planstate)` both
+    /// take `estate` too). `None` planstate is the C "plan never started"
+    /// (degenerate `planTree == NULL`); the closure typechecks for an arbitrary
+    /// `'mcx`, so no borrow escapes the bundle.
+    pub fn with_estate_and_planstate_mut<R>(
+        &mut self,
+        f: impl for<'mcx> FnOnce(&mut EStateData<'mcx>, Option<&mut PlanStateNode<'mcx>>) -> R,
+    ) -> R {
+        self.work
+            .with_mut(|w| f(&mut w.estate, w.planstate.as_deref_mut()))
     }
 }
 

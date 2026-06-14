@@ -16,7 +16,18 @@ types-nodes = { path = "../types-nodes" }
 types-acl = { path = "../types-acl" }
 types-tuple = { path = "../types-tuple" }
 types-snapshot = { path = "../types-snapshot" }
+types-scan = { path = "../types-scan" }
 mcx = { path = "../mcx" }
+
+# Driver-loop dependencies: the node-dispatch seams (ExecInitNode / ExecProcNode
+# / ExecEndNode / ExecShutdownNode), the EState helpers (ExecInitRangeTable /
+# ExecResetTupleTable / ExecClose*Relations + ResetExprContext), the junk filter
+# (ExecInitJunkFilter / ExecFilterJunk), and the DestReceiver dispatch.
+backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execJunk = { path = "../backend-executor-execJunk" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 
 # Seam crate this unit OWNS (the executor-driver / EvalPlanQual / constraint /
 # CteScan-leader surface). F0a installs only the self-contained
