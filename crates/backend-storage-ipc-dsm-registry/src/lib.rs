@@ -172,6 +172,22 @@ pub fn DSMRegistryShmemInit() -> PgResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Seam installation.
+// ---------------------------------------------------------------------------
+
+/// Install this crate's inward seams (`ipci.c` reaches the registry's sizing
+/// and shmem-init through them). Wired into `seams-init::init_all`.
+pub fn init_seams() {
+    // `DSMRegistryShmemSize()` never fails (pure `MAXALIGN(sizeof(..))`); the
+    // seam's `PgResult<Size>` is just an `Ok` wrapper, so install a thin shim.
+    backend_storage_ipc_dsm_registry_seams::dsm_registry_shmem_size::set(|| {
+        Ok(DSMRegistryShmemSize())
+    });
+    // `DSMRegistryShmemInit` already returns `PgResult<()>` matching the seam.
+    backend_storage_ipc_dsm_registry_seams::dsm_registry_shmem_init::set(DSMRegistryShmemInit);
+}
+
+// ---------------------------------------------------------------------------
 // init_dsm_registry (static).
 // ---------------------------------------------------------------------------
 
