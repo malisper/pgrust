@@ -998,6 +998,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-spg-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-spg-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -8335,6 +8344,25 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-geo-ops-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-geo-spgist-only"
+version = "0.0.0"
+dependencies = [
+ "backend-access-spg-proc-seams",
+ "backend-utils-adt-geo-ops-seams",
  "types-core",
  "types-error",
 ]
