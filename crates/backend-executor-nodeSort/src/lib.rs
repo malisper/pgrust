@@ -258,11 +258,11 @@ pub fn ExecSort<'mcx>(
         let (found, val, is_null) =
             tuplesort::tuplesort_getdatum::call(ts, forward, false)?;
         if found {
-            // The sorted datum is a scalar machine word (`slot->tts_values[0]`);
-            // carry it into the canonical value's by-value arm for the store.
-            let val = types_tuple::backend_access_common_heaptuple::Datum::from_usize(
-                val.as_usize(),
-            );
+            // `tuplesort_getdatum` already returns the canonical `Datum<'mcx>`
+            // (by-value or by-reference), and `exec_store_first_datum` consumes
+            // the same canonical type, so the sorted column value flows through
+            // unchanged — no shim round-trip (the old `from_usize(as_usize())`
+            // hop would have panicked on a by-reference value).
             execTuples::exec_store_first_datum::call(estate, slot, val, is_null)?;
             Ok(true)
         } else {
