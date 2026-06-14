@@ -2,7 +2,7 @@ use super::*;
 
 use std::sync::Once;
 
-use mcx::MemoryContext;
+use mcx::{MemoryContext, Mcx, PgVec};
 use types_core::TransactionId;
 use types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, ItemPointerData, HEAP_XMIN_COMMITTED,
@@ -44,7 +44,7 @@ fn make_header<'mcx>(
 fn get_cmin_cmax_without_combocid_returns_raw() {
     install_fake_xact_seam();
     let top = MemoryContext::new("TopTransactionContext");
-    let state = ComboCidState::new(top.mcx());
+    let state = ComboCidState::new();
     let tup = make_header(top.mcx(), MY_XID, 0, 42);
     assert_eq!(HeapTupleHeaderGetCmin(&state, &tup), 42);
     assert_eq!(HeapTupleHeaderGetCmax(&state, &tup), 42);
@@ -54,7 +54,7 @@ fn get_cmin_cmax_without_combocid_returns_raw() {
 fn adjust_cmax_for_current_xact_allocates_combo() {
     install_fake_xact_seam();
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
 
     // Inserted by the current transaction at cmin 7, deleted at cmax 9: must
     // produce a combo id that decodes back to (7, 9).
@@ -77,7 +77,7 @@ fn adjust_cmax_for_current_xact_allocates_combo() {
 fn adjust_cmax_for_other_xact_is_not_combo() {
     install_fake_xact_seam();
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
 
     // xmin committed: cheaper test short-circuits, cmax passes through.
     let tup = make_header(top.mcx(), MY_XID, HEAP_XMIN_COMMITTED, 7);
@@ -97,7 +97,7 @@ fn adjust_cmax_for_other_xact_is_not_combo() {
 #[test]
 fn at_eoxact_resets_state() {
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
     GetComboCommandId(&mut state, 1, 2).unwrap();
     assert_eq!(state.combo_cids.len(), 1);
 
@@ -112,7 +112,7 @@ fn at_eoxact_resets_state() {
 #[test]
 fn serialize_restore_roundtrip() {
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
     GetComboCommandId(&mut state, 1, 2).unwrap();
     GetComboCommandId(&mut state, 3, 4).unwrap();
     GetComboCommandId(&mut state, 5, 6).unwrap();
@@ -122,8 +122,7 @@ fn serialize_restore_roundtrip() {
     let mut buf = vec![0u8; size];
     SerializeComboCIDState(&state, &mut buf).unwrap();
 
-    let worker = MemoryContext::new("TopTransactionContext");
-    let mut restored = ComboCidState::new(worker.mcx());
+    let mut restored = ComboCidState::new();
     RestoreComboCIDState(&mut restored, &buf).unwrap();
     assert_eq!(restored.combo_cids.len(), 3);
     assert_eq!(GetRealCmin(&restored, 1), 3);
@@ -133,7 +132,7 @@ fn serialize_restore_roundtrip() {
 #[test]
 fn serialize_into_too_small_buffer_errors() {
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
     GetComboCommandId(&mut state, 1, 2).unwrap();
 
     let mut buf = vec![0u8; 4];
@@ -141,10 +140,50 @@ fn serialize_into_too_small_buffer_errors() {
     assert_eq!(err.message(), "not enough space to serialize ComboCID state");
 }
 
+/// The installed seams reach the backend-local `thread_local!` state, and the
+/// `at_eoxact_combocid` seam resets it. Run on a dedicated thread so the
+/// `thread_local!` starts empty regardless of other tests.
+#[test]
+fn installed_seams_use_thread_local_state_and_reset_at_eoxact() {
+    std::thread::spawn(|| {
+        install_fake_xact_seam();
+        init_seams();
+        let top = MemoryContext::new("TopTransactionContext");
+
+        // Insert+delete by current xact: AdjustCmax allocates a combo id that
+        // GetCmin/GetCmax decode back to (5, 8), all via the installed seams
+        // over the thread_local state.
+        let tup = make_header(top.mcx(), MY_XID, 0, 5);
+        let (combo, iscombo) =
+            backend_utils_time_combocid_seams::heap_tuple_header_adjust_cmax::call(&tup, 8).unwrap();
+        assert!(iscombo);
+
+        let combo_tup = make_header(top.mcx(), MY_XID, HEAP_COMBOCID, combo);
+        assert_eq!(
+            backend_utils_time_combocid_seams::heap_tuple_header_get_cmin::call(&combo_tup),
+            5
+        );
+        assert_eq!(
+            backend_utils_time_combocid_seams::heap_tuple_header_get_cmax::call(&combo_tup),
+            8
+        );
+
+        // End of transaction discards the state; the next combo id restarts at 0.
+        backend_utils_time_combocid_seams::at_eoxact_combocid::call();
+        let tup2 = make_header(top.mcx(), MY_XID, 0, 1);
+        let (combo2, _) =
+            backend_utils_time_combocid_seams::heap_tuple_header_adjust_cmax::call(&tup2, 2)
+                .unwrap();
+        assert_eq!(combo2, 0);
+    })
+    .join()
+    .unwrap();
+}
+
 #[test]
 fn restore_with_corrupt_state_errors() {
     let top = MemoryContext::new("TopTransactionContext");
-    let mut state = ComboCidState::new(top.mcx());
+    let mut state = ComboCidState::new();
 
     // Claims 2 elements but supplies bytes for only one.
     let mut buf = vec![0u8; 4 + 8];

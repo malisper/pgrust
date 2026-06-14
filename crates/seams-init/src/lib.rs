@@ -1116,25 +1116,6 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
-        // seams (backend-utils-time-combocid-seams) consumed by the heap
-        // visibility predicates resolve a combo CID against the *file-scope*
-        // combo-CID state. In this repo combocid.c was ported with that state as
-        // an owned `ComboCidState<'mcx>` threaded from the transaction owner
-        // (xact.c), so the merged/audited combocid owner has no ambient global to
-        // install a parameterless `(&HeapTupleHeaderData) -> CommandId` seam
-        // against — its real bodies take `&ComboCidState`. Wiring these needs the
-        // live per-transaction `ComboCidState` reachable from a static seam (an
-        // ambient-global stash, forbidden) or the visibility callers to thread the
-        // state explicitly (a contract redesign across the scan/executor seam
-        // boundary). Until then they stay seam-and-panic. See DESIGN_DEBT.md.
-        ("backend_utils_time_combocid", "heap_tuple_header_get_cmax"),
-        ("backend_utils_time_combocid", "heap_tuple_header_get_cmin"),
-        // Same TD-COMBOCID-STATE: `HeapTupleHeaderAdjustCmax` (consumed by
-        // heap_delete/heap_update) resolves a combo CID against the file-scope
-        // combo-CID state; its real body takes `&mut ComboCidState`, which the
-        // owner can't reach from a static seam until the xact-owner threads it.
-        ("backend_utils_time_combocid", "heap_tuple_header_adjust_cmax"),
         // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
         // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
         // WAL page-read driver solely through the prefetcher read-record seams,
