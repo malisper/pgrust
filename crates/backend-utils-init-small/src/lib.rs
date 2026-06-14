@@ -61,6 +61,7 @@ pub fn init_seams() {
         globals::SetMyDatabaseHasLoginEventTriggers,
     );
     backend_utils_init_small_seams::has_my_proc_port::set(globals::MyProcPortIsSet);
+    backend_utils_init_small_seams::data_dir::set(globals::DataDir);
 }
 
 #[cfg(test)]
