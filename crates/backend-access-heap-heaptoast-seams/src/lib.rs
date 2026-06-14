@@ -15,10 +15,17 @@ seam_core::seam!(
     /// token from a tuple is the heap/datum owner's concern; the execTuples
     /// caller reaches it through this seam. `Err` carries the detoast
     /// `ereport(ERROR)` surface and OOM.
+    ///
+    /// The composite `Datum` references the returned tuple's bytes, so in the
+    /// canonical model it is a by-reference value:
+    /// [`types_tuple::backend_access_common_heaptuple::Datum::ByRef`].
     pub fn heap_tuple_header_get_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         tuple: types_tuple::heaptuple::HeapTuple<'mcx>,
-    ) -> types_error::PgResult<(types_tuple::heaptuple::HeapTuple<'mcx>, types_datum::Datum)>
+    ) -> types_error::PgResult<(
+        types_tuple::heaptuple::HeapTuple<'mcx>,
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    )>
 );
 
 seam_core::seam!(

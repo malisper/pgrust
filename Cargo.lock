@@ -488,7 +488,6 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
- "types-datum",
  "types-error",
  "types-tuple",
 ]
