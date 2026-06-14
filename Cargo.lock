@@ -2057,12 +2057,8 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
- "types-core",
  "types-error",
  "types-nodes",
- "types-parsenodes",
- "types-rel",
- "types-storage",
 ]
 
 [[package]]
@@ -2120,6 +2116,7 @@ name = "backend-catalog-pg-conversion-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-catalog",
  "types-core",
  "types-error",
 ]
@@ -2491,36 +2488,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-commands-comment"
+name = "backend-commands-conversioncmds"
 version = "0.0.0"
 dependencies = [
- "backend-catalog-pg-class",
- "backend-commands-comment-seams",
- "backend-commands-dbcommands-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-pg-conversion-seams",
+ "backend-parser-parse-func-seams",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit-seams",
+ "common-encnames-seams",
+ "mcx",
+ "seam-core",
+ "types-acl",
  "types-catalog",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
- "types-parsenodes",
- "types-storage",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-commands-comment-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-catalog",
- "types-core",
- "types-datum",
- "types-error",
- "types-parsenodes",
- "types-storage",
- "types-tuple",
+ "types-wchar",
 ]
 
 [[package]]
@@ -3003,41 +2991,6 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
-]
-
-[[package]]
-name = "backend-commands-seclabel"
-version = "0.0.0"
-dependencies = [
- "backend-catalog-catalog",
- "backend-catalog-objectaddress-seams",
- "backend-catalog-pg-class",
- "backend-commands-seclabel-seams",
- "backend-utils-error",
- "mcx",
- "types-catalog",
- "types-core",
- "types-datum",
- "types-error",
- "types-nodes",
- "types-parsenodes",
- "types-rel",
- "types-storage",
- "types-tuple",
-]
-
-[[package]]
-name = "backend-commands-seclabel-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
- "types-core",
- "types-datum",
- "types-error",
- "types-rel",
- "types-storage",
- "types-tuple",
 ]
 
 [[package]]
@@ -9637,6 +9590,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-encnames-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-hashfn"
 version = "0.0.0"
 dependencies = [
@@ -10001,7 +9961,7 @@ dependencies = [
  "backend-catalog-pg-shdepend",
  "backend-commands-amcmds",
  "backend-commands-cluster",
- "backend-commands-comment",
+ "backend-commands-conversioncmds",
  "backend-commands-copyto",
  "backend-commands-define",
  "backend-commands-foreigncmds",
