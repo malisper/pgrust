@@ -8,6 +8,10 @@ use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
+// `types_datum::Datum` (the bare-word shim) survives only at the unmigrated
+// cross-crate contract edge `SysCacheKey::Value`'s search-key word (C:
+// `Datum key1..key4`), audited `types-cache` vocabulary not in this batch.
+use types_datum::Datum as KeyDatum;
 
 use crate::{
     ReleaseSysCache, SearchSysCache1, SearchSysCacheList1, SysCacheGetAttrNotNull, AMOPSTRATEGY,
@@ -84,7 +88,7 @@ fn getattr_name<'mcx>(
 pub(crate) fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>> {
     let scratch = MemoryContext::new("syscache relam projection");
     let mcx = scratch.mcx();
-    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(types_datum::Datum::from_oid(relid)))?;
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
@@ -100,7 +104,7 @@ pub(crate) fn search_opclass<'mcx>(
     mcx: Mcx<'mcx>,
     opclassoid: Oid,
 ) -> PgResult<Option<OpclassForm<'mcx>>> {
-    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(types_datum::Datum::from_oid(opclassoid)))?;
+    let tuple = SearchSysCache1(mcx, CLAOID, SysCacheKey::Value(KeyDatum::from_oid(opclassoid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
@@ -123,7 +127,7 @@ pub(crate) fn search_amop_list<'mcx>(
     let members = SearchSysCacheList1(
         mcx,
         AMOPSTRATEGY,
-        SysCacheKey::Value(types_datum::Datum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
     )?;
     let mut rows = vec_with_capacity_in(mcx, members.len())?;
     for tup in &members {
@@ -148,7 +152,7 @@ pub(crate) fn search_amproc_list<'mcx>(
     let members = SearchSysCacheList1(
         mcx,
         AMPROCNUM,
-        SysCacheKey::Value(types_datum::Datum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
     )?;
     let mut rows = vec_with_capacity_in(mcx, members.len())?;
     for tup in &members {

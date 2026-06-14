@@ -40,6 +40,10 @@ use types_storage::lock::{
     InplaceUpdateTupleLock, DEFAULT_LOCKMETHOD, LOCKMODE, LOCKTAG, LOCKTAG_TUPLE,
 };
 use types_tuple::backend_access_common_heaptuple::{Datum, DeformedColumn, FormedTuple};
+// `types_datum::Datum` (the bare-word shim) survives only at the unmigrated
+// cross-crate contract edge `SysCacheKey::Value`'s search-key word (C:
+// `Datum key1..key4`), audited `types-cache` vocabulary not in this batch.
+use types_datum::Datum as KeyDatum;
 use types_tuple::heaptuple::{
     HeapTupleHeaderGetNatts, ItemPointerData, TupleDescData,
 };
@@ -490,7 +494,7 @@ pub fn SearchSysCacheAttName<'mcx>(
     let tuple = SearchSysCache2(
         mcx,
         ATTNAME,
-        SysCacheKey::Value(types_datum::Datum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
         SysCacheKey::Str(attname),
     )?;
     let Some(tup) = tuple else {
@@ -541,8 +545,8 @@ pub fn SearchSysCacheAttNum<'mcx>(
     let tuple = SearchSysCache2(
         mcx,
         ATTNUM,
-        SysCacheKey::Value(types_datum::Datum::from_oid(relid)),
-        SysCacheKey::Value(types_datum::Datum::from_i16(attnum)),
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
     )?;
     let Some(tup) = tuple else {
         return Ok(None);
