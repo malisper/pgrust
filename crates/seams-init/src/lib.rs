@@ -756,6 +756,7 @@ mod recurrence_guard {
         // seam-and-panic (mirror-pg-and-panic) until those owners land.
         ("backend_nodes_core", "call_stmt_result_desc"),
         ("backend_nodes_core", "get_expr_result_type_node"),
+        ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
