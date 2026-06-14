@@ -3,7 +3,13 @@
 
 use mcx::Mcx;
 use types_core::{uint32, Size};
-use types_datum::Datum;
+// The skew-MCV probe flows through two seam ABI edges that are still bare
+// machine words (`types_datum::Datum`): lsyscache's `get_attstatsslot_mcv`
+// hands back `PgVec<Datum>` MCV values, and fmgr's `function_call1_coll`
+// consumes/returns a bare scalar word. The unified `types_tuple::Datum<'mcx>`
+// value type does not cross these edges until those owners migrate; here the
+// MCV word is fed straight to the hash function, so it stays a bare word.
+use types_datum::Datum as DatumWord;
 use types_error::PgResult;
 use types_nodes::nodehash::{
     Hash, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashSkewBucket, HashState,
@@ -149,7 +155,7 @@ pub fn ExecHashBuildSkewHash<'mcx>(
             .skew_hashfunction
             .as_ref()
             .expect("skew_hashfunction must be set when building skew hashtable");
-        let result: Datum = backend_utils_fmgr_fmgr_seams::function_call1_coll::call(
+        let result: DatumWord = backend_utils_fmgr_fmgr_seams::function_call1_coll::call(
             skew_hashfunction.fn_oid,
             hashstate.skew_collation,
             values[i],
