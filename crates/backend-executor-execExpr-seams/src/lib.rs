@@ -300,6 +300,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitExprList(nodes, NULL)` (execExpr.c) — the parentless variant.
+    /// `ValuesNext` compiles a VALUES row's expression list with `parent =
+    /// NULL` so nothing in the transient per-row eval state links into the
+    /// permanent plan-state tree (and so JIT is disabled for these single-use
+    /// expressions). A `None` element (the C NULL `Expr *`) compiles to a
+    /// `None` cell, preserving positional correspondence. Allocated in the
+    /// per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_init_expr_list_no_parent<'mcx>(
+        nodes: &[Option<&types_nodes::primnodes::Expr>],
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h):
     /// evaluate a compiled `ExprState` in the given expression context (id into
     /// the EState pool), returning the result `Datum` and its is-null flag. The

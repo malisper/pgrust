@@ -1431,6 +1431,9 @@ impl Clone for AlternativeSubPlanExpr {
 pub struct TargetEntry<'mcx> {
     /// `Expr *expr` — expression to evaluate.
     pub expr: Option<PgBox<'mcx, Expr>>,
+    /// `AttrNumber resno` — attribute number (the result attribute's position
+    /// in the result tuple). Consumed by the junk filter's clean-map.
+    pub resno: AttrNumber,
     /// `char *resname` — name of the column (could be NULL).
     pub resname: Option<PgString<'mcx>>,
     /// `bool resjunk` — set to true to eliminate the attribute from the
@@ -1447,6 +1450,7 @@ impl TargetEntry<'_> {
                 Some(e) => Some(alloc_in(mcx, (**e).clone())?),
                 None => None,
             },
+            resno: self.resno,
             resname: match &self.resname {
                 Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
                 None => None,

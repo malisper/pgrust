@@ -1,0 +1,20 @@
+[package]
+name = "backend-executor-execScan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_execScan"
+path = "src/lib.rs"
+
+[dependencies]
+backend-executor-execScan-seams = { path = "../backend-executor-execScan-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+types-nodes = { path = "../types-nodes" }
+types-error = { path = "../types-error" }

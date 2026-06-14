@@ -8,17 +8,30 @@
 
 #![allow(non_snake_case)]
 
+use mcx::{Mcx, PgBox};
 use types_error::PgResult;
 use types_execparallel::DsaAreaHandle;
 use types_tidbitmap::{dsa_pointer, TBMIterator, TIDBitmap};
 
 seam_core::seam!(
-    /// `tbm_create(maxbytes, dsa)` (tidbitmap.c): create a new, initially-empty
-    /// bitmap that will use at most `maxbytes` of work memory. When `dsa` is
-    /// `Some` the bitmap is shared (created in the given DSA area, e.g. the
-    /// executor's `es_query_dsa`); `None` is a backend-private bitmap. Allocates,
-    /// so fallible on OOM.
-    pub fn tbm_create(maxbytes: usize, dsa: Option<DsaAreaHandle>) -> PgResult<TIDBitmap>
+    /// `tbm_create(maxbytes, dsa)` (tidbitmap.c): create an initially-empty
+    /// bitmap usable for up to `maxbytes` of memory. A non-`None` `dsa` makes
+    /// the bitmap DSA-shareable (the parallel path; the C passes
+    /// `estate->es_query_dsa` when the `BitmapOr` plan `isshared`). The new
+    /// bitmap is allocated through the supplied query context (the C palloc), so
+    /// the call is boxed into `mcx` and is fallible on OOM.
+    pub fn tbm_create<'mcx>(
+        mcx: Mcx<'mcx>,
+        maxbytes: usize,
+        dsa: Option<DsaAreaHandle>,
+    ) -> PgResult<PgBox<'mcx, TIDBitmap>>
+);
+
+seam_core::seam!(
+    /// `tbm_union(a, b)` (tidbitmap.c): `a = a ∪ b` — fold `b` into `a` in
+    /// place. The caller frees `b` afterwards (`tbm_free`). Fallible (the C
+    /// can `ereport(ERROR)` on a lossy/exact page-table growth allocation).
+    pub fn tbm_union(a: &mut TIDBitmap, b: &TIDBitmap) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -50,6 +63,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `tbm_free(tbm)` (tidbitmap.c): free the bitmap and any buffers it holds.
     pub fn tbm_free(tbm: &mut TIDBitmap)
+);
+
+seam_core::seam!(
+    /// `tbm_intersect(a, b)` (tidbitmap.c): set `a = a ∩ b` (a modified in
+    /// place). Used by `MultiExecBitmapAnd` to AND child subplan bitmaps.
+    pub fn tbm_intersect(a: &TIDBitmap, b: &TIDBitmap) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tbm_is_empty(tbm)` (tidbitmap.c): report whether the bitmap is empty
+    /// (the `MultiExecBitmapAnd` early-out check).
+    pub fn tbm_is_empty(tbm: &TIDBitmap) -> PgResult<bool>
 );
 
 seam_core::seam!(

@@ -12,9 +12,11 @@ use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
 use crate::nodeindexonlyscan::T_IndexOnlyScanState;
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
+use crate::nodeunique::T_UniqueState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::nodeprojectset::T_ProjectSetState;
 use crate::noderesult::T_ResultState;
 use crate::nodesetop::T_SetOpState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
@@ -35,8 +37,14 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeAppendState`.
     MergeAppend(PgBox<'mcx, crate::nodemergeappend::MergeAppendStateData<'mcx>>),
+    /// `T_BitmapAndState`.
+    BitmapAnd(PgBox<'mcx, crate::nodebitmapand::BitmapAndState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_GroupState`.
+    Group(PgBox<'mcx, crate::nodegroup::GroupStateData<'mcx>>),
+    /// `T_ProjectSetState`.
+    ProjectSet(PgBox<'mcx, crate::nodeprojectset::ProjectSetState<'mcx>>),
     /// `T_ResultState`.
     Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
     /// `T_SetOpState`.
@@ -49,18 +57,32 @@ pub enum PlanStateNode<'mcx> {
     BitmapIndexScan(PgBox<'mcx, crate::nodebitmapindexscan::BitmapIndexScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
+    /// `T_UniqueState`.
+    Unique(PgBox<'mcx, crate::nodeunique::UniqueStateData<'mcx>>),
     /// `T_SortState`.
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
     /// `T_TableFuncScanState`.
     TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
+    /// `T_ValuesScanState`.
+    ValuesScan(PgBox<'mcx, crate::nodevaluesscan::ValuesScanState<'mcx>>),
+    /// `T_CteScanState`.
+    CteScan(PgBox<'mcx, crate::nodectescan::CteScanState<'mcx>>),
+    /// `T_NamedTuplestoreScanState`.
+    NamedTuplestoreScan(
+        PgBox<'mcx, crate::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
+    ),
     /// `T_NestLoopState`.
     NestLoop(PgBox<'mcx, crate::nodenestloop::NestLoopStateData<'mcx>>),
     /// `T_HashJoinState`.
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
     /// `T_SeqScanState`.
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
+    /// `T_SubqueryScanState`.
+    SubqueryScan(PgBox<'mcx, crate::execnodes::SubqueryScanState<'mcx>>),
     /// `T_ForeignScanState`.
     ForeignScan(PgBox<'mcx, crate::nodeforeigncustom::ForeignScanState<'mcx>>),
+    /// `T_CustomScanState`.
+    CustomScan(PgBox<'mcx, crate::nodeforeigncustom::CustomScanState<'mcx>>),
     /// `T_HashState` — the inner Hash node of a hash join.
     Hash(PgBox<'mcx, HashState<'mcx>>),
 }
@@ -72,19 +94,30 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
+            PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
+            PlanStateNode::ProjectSet(_) => T_ProjectSetState,
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::BitmapIndexScan(_) => crate::execstate_tags::T_BitmapIndexScanState,
             PlanStateNode::Limit(_) => T_LimitState,
+            PlanStateNode::Unique(_) => T_UniqueState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
+            PlanStateNode::ValuesScan(_) => crate::nodevaluesscan::T_ValuesScanState,
+            PlanStateNode::CteScan(_) => crate::nodectescan::T_CteScanState,
+            PlanStateNode::NamedTuplestoreScan(_) => {
+                crate::nodenamedtuplestorescan::T_NamedTuplestoreScanState
+            }
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
+            PlanStateNode::SubqueryScan(_) => crate::nodes::T_SubqueryScanState,
             PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
+            PlanStateNode::CustomScan(_) => crate::nodes::T_CustomScanState,
             PlanStateNode::Hash(_) => T_HashState,
         }
     }
@@ -96,19 +129,28 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
+            PlanStateNode::BitmapAnd(b) => &b.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::Group(g) => &g.ss.ps,
+            PlanStateNode::ProjectSet(p) => &p.ps,
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
+            PlanStateNode::Unique(u) => &u.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
+            PlanStateNode::ValuesScan(v) => &v.ss.ps,
+            PlanStateNode::CteScan(c) => &c.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &n.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
+            PlanStateNode::SubqueryScan(s) => &s.ss.ps,
             PlanStateNode::ForeignScan(f) => &f.ss.ps,
+            PlanStateNode::CustomScan(c) => &c.ss.ps,
             PlanStateNode::Hash(h) => &h.ps,
         }
     }
@@ -119,19 +161,28 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
+            PlanStateNode::BitmapAnd(b) => &mut b.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::Group(g) => &mut g.ss.ps,
+            PlanStateNode::ProjectSet(p) => &mut p.ps,
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
+            PlanStateNode::Unique(u) => &mut u.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
+            PlanStateNode::ValuesScan(v) => &mut v.ss.ps,
+            PlanStateNode::CteScan(c) => &mut c.ss.ps,
+            PlanStateNode::NamedTuplestoreScan(n) => &mut n.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
+            PlanStateNode::SubqueryScan(s) => &mut s.ss.ps,
             PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
+            PlanStateNode::CustomScan(c) => &mut c.ss.ps,
             PlanStateNode::Hash(h) => &mut h.ps,
         }
     }
@@ -143,12 +194,22 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// here as their executor units land.
     pub fn as_scan_state(&self) -> Option<&ScanStateData<'mcx>> {
         match self {
+            // `GroupState` begins with a `ScanState`.
+            PlanStateNode::Group(g) => Some(&g.ss),
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
             // `BitmapIndexScanState` begins with a `ScanState`.
             PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
+            // `SubqueryScanState` begins with a `ScanState`.
+            PlanStateNode::SubqueryScan(s) => Some(&s.ss),
+            // `ValuesScanState` begins with a `ScanState`.
+            PlanStateNode::ValuesScan(v) => Some(&v.ss),
+            // `NamedTuplestoreScanState` begins with a `ScanState`.
+            PlanStateNode::NamedTuplestoreScan(n) => Some(&n.ss),
+            // `CustomScanState` begins with a `ScanState`.
+            PlanStateNode::CustomScan(c) => Some(&c.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.

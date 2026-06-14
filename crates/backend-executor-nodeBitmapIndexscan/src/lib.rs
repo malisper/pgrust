@@ -126,8 +126,10 @@ pub fn MultiExecBitmapIndexScan<'mcx>(
             } else {
                 None
             };
-            let bitmap = tidbitmap::tbm_create::call(maxbytes, dsa)?;
-            mcx::alloc_in(estate.es_query_cxt, bitmap)?
+            // The C `tbm_create` palloc's the bitmap in CurrentMemoryContext,
+            // which during MultiExec is the per-query context; the landed seam
+            // boxes it into the supplied `mcx` and returns the `PgBox`.
+            tidbitmap::tbm_create::call(estate.es_query_cxt, maxbytes, dsa)?
         }
     };
 
