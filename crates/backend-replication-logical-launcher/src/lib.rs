@@ -38,16 +38,19 @@ use types_core::xact::InvalidXLogRecPtr;
 // `types_tuple::Datum` (the `bgw_main_arg` writes use
 // `types_tuple::Datum::{from_i32,null}().as_usize()` to fill the raw-word
 // `usize` ABI/storage field on `types_bgworker`'s `BackgroundWorker`). The
-// transitional bare-word shim `types_datum::Datum` is kept ONLY at the audited
-// external ABI/seam edges whose contracts have NOT migrated yet: the
-// `backend-storage-ipc-seams` `before_shmem_exit` callback registration (whose
-// `PgOnExitCallback` signature is still `fn(i32, types_datum::Datum)`), and the
+// transitional bare-word shim `types_datum::Datum` is kept ONLY at the one
+// audited external ABI/seam edge whose contract has NOT migrated: the
+// `bgworker_main_type` entry point [`ApplyLauncherMain`], whose `main_arg` is
+// the raw `bgw_main_arg (Datum)` machine word the postmaster's DSM worker slot
+// carries. The `backend-utils-fmgr-fmgr-seams` `call_bgworker_entrypoint` seam
+// that resolves and calls this entry still passes the bare-word
+// `types_datum::Datum` at that storage/ABI edge (the `types-bgworker` model
+// owns the `bgw_main_arg` field and is not part of this migration), so the
+// parameter stays `types_datum::Datum` until that owner migrates. The
+// `before_shmem_exit` callback registration and the
 // `backend-utils-fmgr-funcapi-seams` set-returning-function plumbing
-// (`materialized_srf_putvalues` / `cstring_get_text_datum` and the fmgr return
-// value, all still `types_datum::Datum`). Every such site is qualified
-// `types_datum::Datum` at the edge; those move to the canonical type once their
-// owning seam contracts migrate. Mirrors the convention in
-// `backend-replication-slot` (shmem-exit callback edge).
+// (`materialized_srf_putvalues` / `cstring_get_text_datum` and this function's
+// fmgr return value) are all on the canonical `types_tuple::Datum` now.
 use types_storage::storage::{
     dsa_handle as DsaHandle, dshash_table_handle as DshashTableHandle, DsaArea, DshashKeyKind,
     DshashParameters, DshashTable, DSM_HANDLE_INVALID as DSA_HANDLE_INVALID,
@@ -1376,7 +1379,7 @@ pub fn GetLeaderApplyWorkerPid(pid: i32) -> PgResult<i32> {
 pub fn pg_stat_get_subscription<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::Datum<'mcx>> {
     // Oid subid = PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
     let subid: Oid = funcapi::srf_arg0_oid::call(fcinfo).unwrap_or(InvalidOid);
 
@@ -1486,7 +1489,7 @@ pub fn pg_stat_get_subscription<'mcx>(
 
     worker_lock_release()?;
 
-    Ok(types_datum::Datum::from_usize(0)) // (Datum) 0
+    Ok(types_tuple::Datum::null()) // (Datum) 0
 }
 
 // ===========================================================================
