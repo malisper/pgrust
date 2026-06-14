@@ -32,6 +32,7 @@ backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
