@@ -602,6 +602,16 @@ mod recurrence_guard {
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
         ("backend_commands_user", "is_reserved_name"),
+        // DESIGN_DEBT: the `_owned` variants take owned `&mut PlanStateNode` /
+        // `&mut EStateData` trees, but the owner's real ExecInitParallelPlan /
+        // ExecParallelReinitialize bodies (and every `sup::*::call`) operate over
+        // handle-space (PlanStateHandle / EStateHandle opaque usize newtypes).
+        // Bridging owned-tree -> handle requires a parallel-planstate registry
+        // that does not exist yet (the seam doc comment names it explicitly), or a
+        // crate-wide rewrite of the handle-based body onto owned trees. Blocked on
+        // that registry / contract redesign — do not force-wire a fake handle.
+        ("backend_executor_execParallel", "exec_init_parallel_plan_owned"),
+        ("backend_executor_execParallel", "exec_parallel_reinitialize_owned"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
         ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
