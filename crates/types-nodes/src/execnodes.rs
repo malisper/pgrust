@@ -455,6 +455,10 @@ pub struct PlanStateData<'mcx> {
     pub ExecProcNodeReal: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
+    /// `bool async_capable` — true if node is async-capable. Set by the planner
+    /// / async-aware parent (`ExecInitAppend`); the default `false` is the C
+    /// zero-initialized value for nodes that are not async-capable.
+    pub async_capable: bool,
     /// `ExprState *qual` — boolean qual condition (compiled `plan.qual`).
     /// `None` = the C `NULL` (always-true).
     pub qual: Option<PgBox<'mcx, crate::execexpr::ExprState<'mcx>>>,
