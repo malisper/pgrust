@@ -52,6 +52,32 @@ pub const TIDOID: types_core::Oid = 27;
 /// declares no seams of its own and installs nothing.
 pub fn init_seams() {}
 
+/// Extract the bare machine word from an array `Datum` for a seam ABI edge that
+/// still trades in the bare-word `types_datum::Datum`.
+///
+/// The `deconstruct_tid_array` seam (owned by the out-of-this-wave
+/// backend-utils-adt-arrayfuncs unit) takes the `DatumGetArrayTypeP` argument as
+/// a bare `types_datum::Datum`. C threads the raw `Datum` machine word straight
+/// across this boundary; for a `tid[]` array the word is the varlena pointer.
+/// We forward that word from the canonical carrier rather than forge one. A
+/// `ByRef` image (a detoasted array materialized into bytes) cannot cross this
+/// still-bare-word edge — threading the canonical carrier through is the
+/// execTuples canonical-carrier / arrayfuncs-seam migration follow-on (#113).
+/// On this path the interpreter never produces a `ByRef` array value
+/// (ExecEvalArrayExpr mirror-panics at the `construct_md_array` owner boundary),
+/// so a `ByRef` value here would be a contract violation, matching C.
+#[inline]
+fn array_datum_bare_word(d: &types_tuple::Datum<'_>) -> types_datum::Datum {
+    match d {
+        types_tuple::Datum::ByVal(w) => *w,
+        types_tuple::Datum::ByRef(_) => panic!(
+            "tid[] array value crossed the bare-word deconstruct_tid_array seam \
+             edge as a by-reference image (execTuples canonical-carrier follow-on \
+             #113)"
+        ),
+    }
+}
+
 // ===========================================================================
 // `TidExpr` — one element in `TidScanState::tss_tidexprs`.
 // ===========================================================================
@@ -359,9 +385,22 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             if is_null {
                 continue;
             }
-            // The array Datum is a pointer word at the deconstruct_tid_array
-            // ABI edge; project the canonical value onto the bare-word seam arg.
-            let arraydatum = types_datum::Datum::from_usize(arraydatum.as_usize());
+            // itemarray = DatumGetArrayTypeP(arraydatum);
+            // deconstruct_array_builtin(itemarray, TIDOID, ...);
+            //
+            // The `deconstruct_tid_array` seam is owned by the (out-of-this-wave)
+            // backend-utils-adt-arrayfuncs unit and still trades in the bare-word
+            // `types_datum::Datum` (the `DatumGetArrayTypeP` argument). C threads
+            // the raw `Datum` machine word straight across this boundary; for a
+            // `tid[]` array the word is the varlena pointer. We extract that word
+            // from the canonical carrier here rather than forge one. A `ByRef`
+            // image cannot cross this still-bare-word edge — materializing the
+            // array into ByRef bytes is the execTuples canonical-carrier /
+            // arrayfuncs-seam migration follow-on (#113); on this path the
+            // interpreter never produces one (ExecEvalArrayExpr mirror-panics at
+            // the construct_md_array owner boundary), so a ByRef value here would
+            // be a contract violation, matching C.
+            let arraydatum = array_datum_bare_word(&arraydatum);
             let items = arrayfuncs::deconstruct_tid_array::call(mcx, arraydatum)?;
 
             // for (i = 0; i < ndatums; i++)
