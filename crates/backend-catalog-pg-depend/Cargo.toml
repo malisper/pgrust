@@ -28,7 +28,6 @@ types-storage = { path = "../types-storage" }
 types-rel = { path = "../types-rel" }
 types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }

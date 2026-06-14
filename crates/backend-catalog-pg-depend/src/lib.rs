@@ -38,10 +38,6 @@ use types_catalog::catalog_dependency::{
 };
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-// `ScanKeyData::sk_argument` is the canonical unified `Datum<'mcx>` (the
-// Datum-unification keystone flipped this edge), so scan-key construction
-// carries the canonical value there.
-use types_tuple::backend_access_common_heaptuple::Datum as ScanKeyWord;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,
@@ -87,7 +83,7 @@ fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
         attno,
         BTEqualStrategyNumber,
         F_OIDEQ,
-        ScanKeyWord::from_oid(value),
+        Datum::from_oid(value),
     )?;
     Ok(key)
 }
@@ -101,7 +97,7 @@ fn int4_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx>> 
         attno,
         BTEqualStrategyNumber,
         F_INT4EQ,
-        ScanKeyWord::from_i32(value),
+        Datum::from_i32(value),
     )?;
     Ok(key)
 }
