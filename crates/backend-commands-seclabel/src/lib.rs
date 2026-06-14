@@ -31,7 +31,7 @@ use backend_utils_error::ereport;
 use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
@@ -383,7 +383,7 @@ fn SetSharedSecurityLabel<'mcx>(
     label: Option<&str>,
 ) -> PgResult<()> {
     /* Prepare to form or update a tuple, if necessary (seclabel.c:341-348). */
-    let mut values = [Datum::null(); NATTS_PG_SHSECLABEL];
+    let mut values: [Datum; NATTS_PG_SHSECLABEL] = std::array::from_fn(|_| Datum::null());
     let nulls = [false; NATTS_PG_SHSECLABEL];
     let mut replaces = [false; NATTS_PG_SHSECLABEL];
     values[ANUM_PG_SHSECLABEL_OBJOID - 1] = Datum::from_oid(object.objectId);
@@ -445,7 +445,7 @@ pub fn SetSecurityLabel<'mcx>(
     }
 
     /* Prepare to form or update a tuple, if necessary (seclabel.c:423-431). */
-    let mut values = [Datum::null(); NATTS_PG_SECLABEL];
+    let mut values: [Datum; NATTS_PG_SECLABEL] = std::array::from_fn(|_| Datum::null());
     let nulls = [false; NATTS_PG_SECLABEL];
     let mut replaces = [false; NATTS_PG_SECLABEL];
     values[ANUM_PG_SECLABEL_OBJOID - 1] = Datum::from_oid(object.objectId);

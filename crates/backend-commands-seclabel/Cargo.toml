@@ -17,7 +17,6 @@ backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-commands-seclabel-seams = { path = "../backend-commands-seclabel-seams" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
