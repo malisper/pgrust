@@ -9,8 +9,8 @@
 #![allow(non_snake_case)]
 
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_sortsupport::SortSupportData;
 
 seam_core::seam!(
@@ -42,9 +42,9 @@ seam_core::seam!(
     /// `ssup.comparator`) on two non-null datums, returning `<0`/`0`/`>0`. The
     /// caller has already verified `ssup.comparator.is_some()`. `Err` carries
     /// the comparison function's `ereport(ERROR)`s.
-    pub fn apply_sort_comparator(
-        datum1: Datum,
-        datum2: Datum,
+    pub fn apply_sort_comparator<'mcx>(
+        datum1: Datum<'mcx>,
+        datum2: Datum<'mcx>,
         ssup: &SortSupportData<'_>,
     ) -> PgResult<i32>
 );
