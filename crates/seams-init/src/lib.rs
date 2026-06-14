@@ -650,7 +650,35 @@ mod recurrence_guard {
         ("backend_access_index_indexam", "index_rescan_bis"),
         ("backend_access_index_indexam", "index_restrpos"),
         ("backend_access_index_indexam", "index_scan_resolve_shared_info"),
+        // DESIGN_DEBT: tableam.c's table-AM dispatch wrappers reach the concrete
+        // access method through `rel->rd_tableam` (the TableAmRoutine vtable). The
+        // heap AM provider (access/heap/heapam_handler.c) and the vtable resolver
+        // (access/table/tableamapi.c, GetTableAmRoutine) are BOTH unported (CATALOG
+        // status `todo`: backend-access-heap-heapam-handler / backend-access-small-
+        // core), so the owner has no value-typed body to install for the
+        // provider-facing seams: get_table_am_routine (tableamapi.c) and the
+        // relation_toast_am / relation_needs_toast_table vtable callbacks
+        // (heapam_handler.c). table_parallelscan_reinitialize likewise dispatches a
+        // vtable callback (relation_parallelscan_reinitialize) with no in-unit body.
+        // Separately, the COPY/seqscan scan seams model the AM-owned scan state as
+        // an opaque `ScanToken(u64)`, but tableam.c was ported with the C-faithful
+        // value-typed `TableScanDesc<'mcx>` (no ScanToken->descriptor registry
+        // exists, and inventing one would forge opacity). So the ScanToken-shaped
+        // table_beginscan / table_scan_getnextslot{,_direction} and
+        // table_relation_set_new_filelocator have no matching body either. The
+        // bitmap-scan table_endscan / table_rescan are VALUE-typed (bm-seams) and
+        // DO match the ported bodies — those ARE installed (not listed here). Pay
+        // down by porting heapam_handler.c + tableamapi.c (the provider seams) and
+        // unifying the COPY/seqscan scan model onto the value descriptor (the
+        // ScanToken seams). See DESIGN_DEBT.md.
+        ("backend_access_table_tableam", "get_table_am_routine"),
+        ("backend_access_table_tableam", "table_beginscan"),
+        ("backend_access_table_tableam", "table_parallelscan_reinitialize"),
+        ("backend_access_table_tableam", "table_relation_needs_toast_table"),
         ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
+        ("backend_access_table_tableam", "table_relation_toast_am"),
+        ("backend_access_table_tableam", "table_scan_getnextslot"),
+        ("backend_access_table_tableam", "table_scan_getnextslot_direction"),
         // DESIGN_DEBT: the plancache-facing search-path matcher seams are
         // declared in backend-catalog-namespace-pc-seams with a handle/CtxId
         // contract (opaque SearchPathMatcherHandle, CtxId context) because the
