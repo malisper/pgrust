@@ -23,7 +23,7 @@ use crate::node_lifecycle::select_current_set;
 pub fn initialize_aggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // Start a fresh sort operation for each DISTINCT/ORDER BY aggregate.
@@ -125,7 +125,7 @@ pub fn initialize_aggregate<'mcx>(
     // Note that when the initial value is pass-by-ref, we must copy it (into
     // the aggcontext) since we will pfree the transValue later.
     if pertrans.init_value_is_null {
-        pergroupstate.trans_value = pertrans.init_value;
+        pergroupstate.trans_value = pertrans.init_value.clone();
     } else {
         // oldContext = MemoryContextSwitchTo(
         //   aggstate->curaggcontext->ecxt_per_tuple_memory);
@@ -134,7 +134,7 @@ pub fn initialize_aggregate<'mcx>(
         // MemoryContextSwitchTo(oldContext);
         curaggcontext_assert_built(aggstate);
         pergroupstate.trans_value = datum_copy_into(
-            pertrans.init_value,
+            pertrans.init_value.clone(),
             pertrans.transtype_by_val,
             pertrans.transtype_len,
         )?;
@@ -163,7 +163,7 @@ pub fn initialize_aggregate<'mcx>(
 /// number has to be specified from further up.
 pub fn initialize_aggregates<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    pergroups: &mut [Option<mcx::PgVec<'mcx, AggStatePerGroupData>>],
+    pergroups: &mut [Option<mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>>>],
     num_reset: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -219,7 +219,7 @@ pub fn initialize_aggregates<'mcx>(
 pub fn advance_transition_function<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
     let _ = pertrans.transfn_fcinfo.as_ref();
@@ -356,7 +356,7 @@ pub fn advance_aggregates<'mcx>(
 pub fn process_ordered_aggregate_single<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // Datum oldVal = (Datum) 0; bool oldIsNull = true; bool haveOldVal = false;
     let mut old_val: types_datum::Datum = types_datum::Datum::null();
@@ -486,7 +486,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
 pub fn process_ordered_aggregate_multi<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
-    pergroupstate: &mut AggStatePerGroupData,
+    pergroupstate: &mut AggStatePerGroupData<'mcx>,
 ) -> PgResult<()> {
     // ExprContext *tmpcontext = aggstate->tmpcontext;
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
@@ -669,11 +669,11 @@ fn current_phase_numsets(aggstate: &AggStateData<'_>) -> i32 {
 /// `datumCopy(value, typByVal, typLen)` into the given memory context. Datum
 /// copy is the datum.c surface; for pass-by-value datums it is a plain copy
 /// (no allocation). Pass-by-ref copy is owned by the not-yet-ported datum unit.
-fn datum_copy_into(
-    value: types_datum::Datum,
+fn datum_copy_into<'mcx>(
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     typ_by_val: bool,
     typ_len: i16,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if typ_by_val {
         // datumCopy of a pass-by-value datum is the value itself.
         return Ok(value);
@@ -738,7 +738,10 @@ fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, _i: i32) -> bool {
 }
 
 /// `fcinfo->args[i].value` — the transfn call frame's argument value.
-fn fcinfo_arg_value(pertrans: &AggStatePerTransData<'_>, _i: i32) -> types_datum::Datum {
+fn fcinfo_arg_value<'mcx>(
+    pertrans: &AggStatePerTransData<'mcx>,
+    _i: i32,
+) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
     let _ = pertrans.transfn_fcinfo.as_ref();
     panic!(
         "backend-executor-nodeAgg::advance_transition_function: fcinfo->args[].value is part \
