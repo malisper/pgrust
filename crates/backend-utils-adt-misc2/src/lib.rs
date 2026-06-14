@@ -59,6 +59,8 @@ pub fn init_seams() {
     backend_utils_adt_regproc_seams::format_operator_extended::set(
         regproc::format_operator_extended,
     );
+    backend_utils_adt_misc2_seams::format_procedure_parts::set(regproc::format_procedure_parts);
+    backend_utils_adt_misc2_seams::format_operator_parts::set(regproc::format_operator_parts);
     backend_utils_adt_regproc_seams::regprocedurein::set(seam_regprocedurein);
     backend_utils_adt_regproc_seams::regtypein::set(seam_regtypein);
     backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(

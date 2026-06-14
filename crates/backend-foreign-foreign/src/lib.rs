@@ -725,7 +725,29 @@ pub fn init_seams() {
         }
     });
 
+    inward::get_foreign_data_wrapper_extended::set(|mcx, fdwid, missing_ok| {
+        let flags = if missing_ok { FDW_MISSING_OK } else { 0 };
+        GetForeignDataWrapperExtended(mcx, fdwid, flags)
+    });
+
     inward::get_foreign_data_wrapper_by_name::set(GetForeignDataWrapperByName);
+
+    inward::get_foreign_server::set(|mcx, serverid| {
+        // GetForeignServer raises (Err) on a missing server (flags = 0); the
+        // inward seam returns the descriptor by value, so unwrap the `Some`.
+        match GetForeignServer(mcx, serverid)? {
+            Some(srv) => Ok(srv),
+            None => Err(elog_error(format!(
+                "cache lookup failed for foreign server {}",
+                serverid
+            ))),
+        }
+    });
+
+    inward::get_foreign_server_extended::set(|mcx, serverid, missing_ok| {
+        let flags = if missing_ok { FSV_MISSING_OK } else { 0 };
+        GetForeignServerExtended(mcx, serverid, flags)
+    });
 
     inward::get_foreign_server_by_name::set(GetForeignServerByName);
 

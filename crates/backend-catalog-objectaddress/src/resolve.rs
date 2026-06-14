@@ -31,17 +31,19 @@ use types_parsenodes::Node;
 use types_rel::Relation;
 use types_storage::lock::LOCKMODE;
 
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{Datum as TupleDatum, FormedTuple};
 
 use backend_catalog_objectaddress_seams::ResolvedObjectAddress;
 
 const INVALID_OID: Oid = 0;
 
-/// Extract an `Oid` from a [`TupleValue`] (catalog OID columns are pass-by-value).
-fn tuplevalue_oid(val: &TupleValue<'_>) -> Oid {
+/// Extract an `Oid` from a tuple column value (catalog OID columns are
+/// pass-by-value). The canonical `Datum` codec reads the bare word back as an
+/// `Oid`; a by-reference value is not an OID column, so yield `InvalidOid`.
+fn tuplevalue_oid(val: &TupleDatum<'_>) -> Oid {
     match val {
-        TupleValue::ByVal(d) => d.as_oid(),
-        TupleValue::ByRef(_) => 0,
+        TupleDatum::ByVal(_) => val.as_oid(),
+        TupleDatum::ByRef(_) => 0,
     }
 }
 
