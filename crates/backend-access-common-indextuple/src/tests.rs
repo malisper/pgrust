@@ -16,7 +16,7 @@ use types_tuple::heaptuple::{
 
 use crate::{
     index_deform_tuple, index_form_tuple, index_truncate_tuple, nocache_index_getattr,
-    CopyIndexTuple, TupleValue,
+    CopyIndexTuple,
 };
 
 fn byval(attlen: i16, attalignby: u8) -> CompactAttribute {
@@ -81,8 +81,8 @@ fn tupdesc<'mcx>(mcx: Mcx<'mcx>, attrs: &[CompactAttribute]) -> TupleDescData<'m
     }
 }
 
-fn byref<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> TupleValue<'mcx> {
-    TupleValue::ByRef(slice_in(mcx, bytes).unwrap())
+fn byref<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> Datum<'mcx> {
+    Datum::ByRef(slice_in(mcx, bytes).unwrap())
 }
 
 /// A 4-byte-header varlena carrying `payload` (length word includes the 4-byte
@@ -171,7 +171,7 @@ fn form_deform_varlena_roundtrip() {
     assert_eq!(cols[0], (Datum::from_i32(7), false));
     // The varlena column round-trips as a short varlena (the fill path converts
     // a small 4-byte-header packable varlena to a 1-byte header).
-    let TupleValue::ByRef(bytes) = &cols[1].0 else {
+    let Datum::ByRef(bytes) = &cols[1].0 else {
         panic!("expected ByRef varlena column");
     };
     // short header: low bit set, length = (header >> 1).
