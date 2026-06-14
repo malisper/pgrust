@@ -8679,7 +8679,6 @@ dependencies = [
  "common-hashfn-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-jsonb",
  "types-numeric",
