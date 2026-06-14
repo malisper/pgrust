@@ -58,4 +58,11 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::set(
         srf_support::cstring_get_text_datum,
     );
+    // The value-per-call SRF protocol is funcapi-owned but not yet modeled
+    // (only the materialize-mode tuplestore path is). Install an EXPLICIT honest
+    // seam-and-panic body (mirror-pg-and-panic) so a value-SRF caller gets a
+    // loud, owner-rooted failure naming the missing machinery, rather than an
+    // implicit "uninstalled seam" abort. Replace with the real per-call
+    // FuncCallContext machinery when it lands.
+    backend_utils_fmgr_funcapi_seams::value_srf_unported::set(srf_support::value_srf_unported);
 }
