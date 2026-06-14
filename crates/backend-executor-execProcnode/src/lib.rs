@@ -68,6 +68,7 @@ pub fn init_seams() {
     seams::exec_init_node::set(execProcnode_init::exec_init_node);
     seams::exec_proc_node::set(execProcnode_run_end::exec_proc_node);
     seams::exec_end_node::set(execProcnode_run_end::exec_end_node);
+    seams::exec_shutdown_node::set(execProcnode_run_end::exec_shutdown_node);
     seams::multi_exec_proc_node::set(execProcnode_run_end::multi_exec_proc_node);
     seams::exec_set_tuple_bound::set(execProcnode_run_end::exec_set_tuple_bound);
 }

@@ -46,6 +46,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecShutdownNode(node)` (execProcnode.c): give the plan-state subtree a
+    /// chance to release asynchronous resources (the `planstate_tree_walker`
+    /// drives `ExecShutdown*` over `Gather`/`ForeignScan`/`CustomScan`/
+    /// `GatherMerge`/`Hash`/`HashJoin`). `ExecutePlan` calls it after the scan
+    /// finishes when the plan won't be rescanned backward
+    /// (`!EXEC_FLAG_BACKWARD`). Owner: `backend-executor-execProcnode`.
+    pub fn exec_shutdown_node<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `MultiExecProcNode(node)` (execProcnode.c): run a node that returns a
     /// bulk result rather than a tuple-at-a-time stream — for bitmap-scan
     /// inputs the child `BitmapIndexScan`/`BitmapAnd`/`BitmapOr` returns a
