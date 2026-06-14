@@ -10647,6 +10647,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-error",
  "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-pc-seams",
  "backend-utils-time-snapmgr-seams",
  "types-core",
  "types-error",
