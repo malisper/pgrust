@@ -4,9 +4,8 @@
 //! these types are unported; copyto reaches their functions through seams and
 //! reads only these fields off the returned values.
 
-use mcx::{PgBox, PgString};
+use mcx::PgString;
 
-use crate::execnodes::Opaque;
 use crate::nodes::CmdType;
 use types_tuple::heaptuple::TupleDesc;
 
@@ -40,6 +39,20 @@ pub enum QuerySource {
 
 /// `Query` (`nodes/parsenodes.h`), trimmed to the fields the COPY-(query)-TO
 /// validation reads after rewrite.
+///
+/// Canonical (K1 phase 2) `<'mcx>` trimmed view of `Query`: it carries the
+/// post-rewrite fields the analyze/rewrite consumers read (`commandType`,
+/// `querySource`, `utilityStmt` tag, returning-list presence). The
+/// [`crate::portalcmds::Query`] token is a *distinct* model — a non-`'mcx`
+/// `Rc<RefCell<…>>` pass-through whose only inspected field is `commandType`,
+/// threaded by-value through the portal's jumble/rewrite/plan seams. The two
+/// cannot share one definition: this one is arena-lifetimed and field-bearing,
+/// the portalcmds one is a refcounted owned token with a different field set
+/// and by-value (non-`'mcx`) consumers (`postgres-seams`, `queryjumble-seams`,
+/// `rewritehandler-seams`). Re-exporting either into the other's module would
+/// change those signatures, so the portalcmds token stays distinct and
+/// documented as such. (Both remain trimmed views of the same C `Query`; the
+/// full node model is a later K1 keystone.)
 pub struct Query<'mcx> {
     /// `CmdType commandType`.
     pub commandType: CmdType,
@@ -58,10 +71,15 @@ pub struct Query<'mcx> {
 
 /// `RawStmt` (`nodes/parsenodes.h`) — the raw parse tree handed to analysis.
 /// Opaque to copyto, which only passes it to the analyze-and-rewrite seam.
-pub struct RawStmt<'mcx> {
-    /// `Node *stmt` — opaque parse tree node (owned by the parser unit).
-    pub stmt: PgBox<'mcx, Opaque>,
-}
+///
+/// Canonicalized (K1 phase 2): the COPY-(query)-TO driver's view of `RawStmt`
+/// was a trimmed duplicate (a single opaque `stmt` node). The canonical,
+/// C-faithful `RawStmt<'mcx>` lives in [`crate::parsestmt`] (real
+/// `stmt: PgBox<Node>` plus `stmt_location`/`stmt_len`). It subsumes this view
+/// — copyto only threads the value through to the analyze-and-rewrite seam and
+/// never inspects any field — so this path re-exports the canonical type for
+/// pure type identity (no behavior change).
+pub use crate::parsestmt::RawStmt;
 
 /// `QueryDesc` (`executor/execdesc.h`), trimmed to the fields copyto reads.
 /// The executor unit owns the full structure; copyto holds it as the executable
@@ -69,6 +87,18 @@ pub struct RawStmt<'mcx> {
 /// the executor seams. `exec_token` is the executor unit's handle for the
 /// started query state (the owned stand-in for the `QueryDesc *` the executor
 /// keeps its `EState`/`DestReceiver` under).
+///
+/// K1 phase 2 note: `QueryDesc` has several other in-repo views — the portal's
+/// [`types_portal::QueryDesc`] (a `snapshot`/`dest`-bearing value) and the
+/// opaque `QueryDescHandle` newtypes in `types-matview` / `types-execparallel`
+/// (a bare `usize`/handle into the executor's not-yet-modeled state). These are
+/// *disjoint trimmed views / a different model* (none subsumes another: this
+/// one carries `tupDesc`+`exec_token`, the portal one carries `snapshot`+`dest`,
+/// the handles carry no fields). A canonical-subsumes-trimmed re-export is not
+/// possible without re-modeling them onto one owned executor `QueryDesc`, which
+/// is the executor-ownership keystone (the de-handle the executor onto owned
+/// values task), not a pure type-identity unification. They therefore stay
+/// distinct until that keystone lands.
 pub struct QueryDesc<'mcx> {
     /// `TupleDesc tupDesc` — result tuple descriptor (set by `ExecutorStart`).
     pub tupDesc: TupleDesc<'mcx>,
