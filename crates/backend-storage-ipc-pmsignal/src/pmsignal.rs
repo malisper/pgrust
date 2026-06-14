@@ -256,6 +256,12 @@ pub fn send_postmaster_signal_bgworker_change() {
     SendPostmasterSignal(PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE);
 }
 
+/// `SendPostmasterSignal(PMSIGNAL_START_AUTOVAC_LAUNCHER)` — the single reason
+/// `varsup.c` signals (XID-wraparound pressure), exposed as a narrow seam.
+pub fn send_postmaster_signal_start_autovac() {
+    SendPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_LAUNCHER);
+}
+
 /// `CheckPostmasterSignal` — check whether `reason` was signaled, clearing the
 /// flag if so. Called by the postmaster after receiving `SIGUSR1`.
 ///
