@@ -53,6 +53,104 @@ pub const RM_RELMAP_ID: RmgrId = 7;
 /// `BKPBLOCK_WILL_INIT` (access/xlogrecord.h) — redo will re-init the page.
 pub const BKPBLOCK_WILL_INIT: uint8 = 0x40;
 
+// --- WAL-record on-disk layout vocabulary (access/xlogrecord.h) ------------
+
+/// `SizeOfXLogRecord` (access/xlogrecord.h) — `offsetof(XLogRecord, xl_crc) +
+/// sizeof(pg_crc32c)` == 24 on LP64 (the fixed record header).
+pub const SIZE_OF_XLOG_RECORD: usize = 24;
+
+/// `SizeOfXLogRecordBlockHeader` — `XLogRecordBlockHeader { id:u8,
+/// fork_flags:u8, data_length:u16 }`: `offsetof(data_length) + sizeof(u16)`.
+pub const SIZE_OF_XLOG_RECORD_BLOCK_HEADER: usize = 4;
+
+/// `SizeOfXLogRecordBlockImageHeader` — `XLogRecordBlockImageHeader {
+/// length:u16, hole_offset:u16, bimg_info:u8 }`: `offsetof(bimg_info) +
+/// sizeof(u8)`.
+pub const SIZE_OF_XLOG_RECORD_BLOCK_IMAGE_HEADER: usize = 5;
+
+/// `SizeOfXLogRecordBlockCompressHeader` — `sizeof(XLogRecordBlockCompressHeader
+/// { hole_length:u16 })`.
+pub const SIZE_OF_XLOG_RECORD_BLOCK_COMPRESS_HEADER: usize = 2;
+
+/// `MaxSizeOfXLogRecordBlockHeader` — block header + image header + compress
+/// header + `sizeof(RelFileLocator)` (12) + `sizeof(BlockNumber)` (4).
+pub const MAX_SIZE_OF_XLOG_RECORD_BLOCK_HEADER: usize = SIZE_OF_XLOG_RECORD_BLOCK_HEADER
+    + SIZE_OF_XLOG_RECORD_BLOCK_IMAGE_HEADER
+    + SIZE_OF_XLOG_RECORD_BLOCK_COMPRESS_HEADER
+    + 12
+    + 4;
+
+/// `SizeOfXLogRecordDataHeaderShort` — `sizeof(uint8) * 2`.
+pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 2;
+
+/// `SizeOfXLogRecordDataHeaderLong` — `sizeof(uint8) + sizeof(uint32)`.
+pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_LONG: usize = 5;
+
+/// `XLogRecordMaxSize` (access/xlogrecord.h) — maximum allowed WAL record size.
+pub const XLOG_RECORD_MAX_SIZE: u64 = 1020 * 1024 * 1024;
+
+/// `XLR_RMGR_INFO_MASK` (access/xlogrecord.h) — rmgr-defined bits of `xl_info`.
+pub const XLR_RMGR_INFO_MASK: uint8 = 0xF0;
+
+/// `XLR_CHECK_CONSISTENCY` (access/xlogrecord.h) — record requests WAL
+/// consistency checking (full-page images cross-checked against replay).
+pub const XLR_CHECK_CONSISTENCY: uint8 = 0x02;
+
+/// `BKPBLOCK_HAS_IMAGE` (access/xlogrecord.h) — block data is an
+/// `XLogRecordBlockImage`.
+pub const BKPBLOCK_HAS_IMAGE: uint8 = 0x10;
+/// `BKPBLOCK_HAS_DATA` (access/xlogrecord.h) — block carries block data.
+pub const BKPBLOCK_HAS_DATA: uint8 = 0x20;
+/// `BKPBLOCK_SAME_REL` (access/xlogrecord.h) — RelFileLocator omitted, same as
+/// the previous block reference.
+pub const BKPBLOCK_SAME_REL: uint8 = 0x80;
+
+/// `BKPIMAGE_HAS_HOLE` (access/xlogrecord.h) — the page image has a "hole".
+pub const BKPIMAGE_HAS_HOLE: uint8 = 0x01;
+/// `BKPIMAGE_APPLY` (access/xlogrecord.h) — the image should be restored at
+/// replay (consistency-check images without this are only verified).
+pub const BKPIMAGE_APPLY: uint8 = 0x02;
+/// `BKPIMAGE_COMPRESS_PGLZ` (access/xlogrecord.h).
+pub const BKPIMAGE_COMPRESS_PGLZ: uint8 = 0x04;
+/// `BKPIMAGE_COMPRESS_LZ4` (access/xlogrecord.h).
+pub const BKPIMAGE_COMPRESS_LZ4: uint8 = 0x08;
+/// `BKPIMAGE_COMPRESS_ZSTD` (access/xlogrecord.h).
+pub const BKPIMAGE_COMPRESS_ZSTD: uint8 = 0x10;
+
+/// `XLR_MAX_BLOCK_ID` (access/xlogrecord.h) — max block_id usable in a record.
+pub const XLR_MAX_BLOCK_ID: i32 = 32;
+/// `XLR_BLOCK_ID_DATA_SHORT` (access/xlogrecord.h).
+pub const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
+/// `XLR_BLOCK_ID_DATA_LONG` (access/xlogrecord.h).
+pub const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
+/// `XLR_BLOCK_ID_ORIGIN` (access/xlogrecord.h).
+pub const XLR_BLOCK_ID_ORIGIN: u8 = 253;
+/// `XLR_BLOCK_ID_TOPLEVEL_XID` (access/xlogrecord.h).
+pub const XLR_BLOCK_ID_TOPLEVEL_XID: u8 = 252;
+
+/// `XLR_NORMAL_MAX_BLOCK_ID` (access/xloginsert.h) — default sizing of the
+/// registered-buffer working area.
+pub const XLR_NORMAL_MAX_BLOCK_ID: i32 = 4;
+/// `XLR_NORMAL_RDATAS` (access/xloginsert.h) — default sizing of the rdata
+/// chunk working area.
+pub const XLR_NORMAL_RDATAS: i32 = 20;
+
+/// `XLOG_FPI_FOR_HINT` (catalog/pg_control.h) — XLOG-rmgr opcode for a
+/// full-page image written for a hint-bit update.
+pub const XLOG_FPI_FOR_HINT: uint8 = 0xA0;
+/// `XLOG_FPI` (catalog/pg_control.h) — XLOG-rmgr opcode for a standalone
+/// full-page image record.
+pub const XLOG_FPI: uint8 = 0xB0;
+
+/// `wal_compression` GUC values (`WalCompression`, access/xlog.h:81-86).
+pub const WAL_COMPRESSION_NONE: i32 = 0;
+/// `WAL_COMPRESSION_PGLZ`.
+pub const WAL_COMPRESSION_PGLZ: i32 = 1;
+/// `WAL_COMPRESSION_LZ4`.
+pub const WAL_COMPRESSION_LZ4: i32 = 2;
+/// `WAL_COMPRESSION_ZSTD`.
+pub const WAL_COMPRESSION_ZSTD: i32 = 3;
+
 /// `RelFileLocator` (storage/relfilelocator.h) — the physical identity of a
 /// relation: tablespace, database, relfilenumber.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -225,12 +225,13 @@ pub fn record_in<'mcx>(
                 }
             }
             // The de-quoted column text. C feeds a NUL-terminated cstring; we
-            // pass it as &str (the input function never sees the NUL).
+            // pass it as &str (the input function never sees the NUL). The
+            // record literal is database-encoding text and `record_column_input`
+            // takes `Option<&str>`, so the bytes are always valid UTF-8 here;
+            // the checked decode never fails.
             column_data = Some(
                 alloc::string::String::from_utf8(buf.clone())
-                    .unwrap_or_else(|e| unsafe {
-                        alloc::string::String::from_utf8_unchecked(e.into_bytes())
-                    }),
+                    .expect("record literal column text is valid database-encoding UTF-8"),
             );
             nulls[i] = false;
         }

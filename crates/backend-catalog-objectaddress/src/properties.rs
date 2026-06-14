@@ -93,7 +93,8 @@ pub fn get_object_type(class_id: Oid, object_id: Oid) -> PgResult<ObjectType> {
         // `objtype` is stored raw to preserve the two `-1` rows; for those
         // callers never reach this accessor via a real OBJECT_* code, but the
         // round-trip through the enum is exact for the mapped rows.
-        Ok(objtype_from_raw(prop.objtype))
+        Ok(objtype_from_raw(prop.objtype)
+            .expect("ObjectProperty row reached here carries a valid ObjectType discriminant"))
     }
 }
 
@@ -109,12 +110,66 @@ pub fn is_objectclass_supported(class_id: Oid) -> bool {
 }
 
 /// Reconstruct an [`ObjectType`] from the raw `i32` stored in
-/// [`ObjectPropertyType::objtype`]. The C `ObjectType` is a plain C enum, so
-/// the discriminant round-trips by transmute; we mirror that via the safe
-/// `repr(i32)` conversion.
-fn objtype_from_raw(raw: i32) -> ObjectType {
-    // SAFETY: `ObjectType` is a fieldless `#[repr(i32)]`/C enum and `raw`
-    // originates from a `<variant> as i32` in `tables.rs`, so it is always a
-    // valid discriminant for the non-`-1` rows reached here.
-    unsafe { core::mem::transmute::<i32, ObjectType>(raw) }
+/// [`ObjectPropertyType::objtype`]. The C `ObjectType` is a plain C enum whose
+/// discriminant round-trips through the integer; we mirror that with a safe
+/// total match over the C enum order (`nodes/parsenodes.h`). Returns `None` for
+/// values that are not a valid discriminant (e.g. the two `-1` rows), which the
+/// sole caller treats as unreachable for the OBJECT_* codes it dispatches.
+fn objtype_from_raw(raw: i32) -> Option<ObjectType> {
+    use ObjectType::*;
+    Some(match raw {
+        0 => AccessMethod,
+        1 => Aggregate,
+        2 => Amop,
+        3 => Amproc,
+        4 => Attribute,
+        5 => Cast,
+        6 => Column,
+        7 => Collation,
+        8 => Conversion,
+        9 => Database,
+        10 => Default,
+        11 => Defacl,
+        12 => Domain,
+        13 => Domconstraint,
+        14 => EventTrigger,
+        15 => Extension,
+        16 => Fdw,
+        17 => ForeignServer,
+        18 => ForeignTable,
+        19 => Function,
+        20 => Index,
+        21 => Language,
+        22 => Largeobject,
+        23 => Matview,
+        24 => Opclass,
+        25 => Operator,
+        26 => Opfamily,
+        27 => ParameterAcl,
+        28 => Policy,
+        29 => Procedure,
+        30 => Publication,
+        31 => PublicationNamespace,
+        32 => PublicationRel,
+        33 => Role,
+        34 => Routine,
+        35 => Rule,
+        36 => Schema,
+        37 => Sequence,
+        38 => Subscription,
+        39 => StatisticExt,
+        40 => Tabconstraint,
+        41 => Table,
+        42 => Tablespace,
+        43 => Transform,
+        44 => Trigger,
+        45 => TsConfiguration,
+        46 => TsDictionary,
+        47 => TsParser,
+        48 => TsTemplate,
+        49 => Type,
+        50 => UserMapping,
+        51 => View,
+        _ => return None,
+    })
 }

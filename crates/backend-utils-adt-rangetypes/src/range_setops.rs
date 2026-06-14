@@ -23,7 +23,7 @@ use crate::range_repr_serialize::{make_empty_range, make_range, range_deserializ
 fn range_type_get_oid(r: RangeTypeP<'_>) -> types_core::primitive::Oid {
     // SAFETY: `RangeTypeP` is a live detoasted `RangeType *`; `rangetypid` is a
     // header field, always valid to read.
-    unsafe { (*r.ptr).rangetypid }
+    r.rangetypid()
 }
 
 /// Re-label a caller-owned input handle to the `'mcx` result lifetime. C returns

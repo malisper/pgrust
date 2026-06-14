@@ -233,6 +233,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bool XLogInsertAllowed(void)` (xlog.c) — whether new WAL records may be
+    /// inserted (false during recovery, except for the startup process).
+    pub fn xlog_insert_allowed() -> bool
+);
+
+seam_core::seam!(
+    /// `GetFullPageWriteInfo(*RedoRecPtr_p, *doPageWrites_p)` (xlog.c, shmem
+    /// read) — the values `XLogInsert` needs to decide on full-page writes
+    /// before it holds an insertion lock. Returns `(RedoRecPtr, doPageWrites)`.
+    pub fn get_full_page_write_info() -> (XLogRecPtr, bool)
+);
+
+seam_core::seam!(
+    /// `wal_compression` GUC (xlog.c) — the configured WAL full-page-image
+    /// compression method (`WAL_COMPRESSION_*` / `WalCompression` ordinal).
+    pub fn wal_compression() -> i32
+);
+
+seam_core::seam!(
+    /// `wal_consistency_checking[rmid]` (xlog.c) — whether WAL consistency
+    /// checking is enabled for the given resource manager (the per-rmgr boolean
+    /// array built by `assign_wal_consistency_checking`).
+    pub fn wal_consistency_checking(rmid: types_core::RmgrId) -> bool
+);
+
+seam_core::seam!(
     /// `XLogRecPtr GetXLogInsertRecPtr(void)` (xlog.c) — current insert position.
     pub fn get_xlog_insert_rec_ptr() -> XLogRecPtr
 );

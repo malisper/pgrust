@@ -1053,10 +1053,10 @@ fn capitalize_first(buf: &mut String) {
         return;
     }
     if first.is_ascii() && upper.is_ascii() {
-        // Safe: replacing one ASCII byte with another keeps valid UTF-8.
-        unsafe {
-            buf.as_bytes_mut()[0] = upper;
-        }
+        // The first char is a single ASCII byte; replace just that one char
+        // with its uppercase form. `replace_range` keeps the String valid
+        // without any unsafe byte poking.
+        buf.replace_range(0..1, (upper as char).to_string().as_str());
     }
 }
 
