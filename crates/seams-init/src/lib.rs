@@ -551,7 +551,6 @@ mod recurrence_guard {
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
         ("backend_storage_lmgr_proc", "am_regular_backend_process"),
         ("backend_storage_lmgr_proc", "my_proc_latch"),
-        ("backend_tcop_backend_startup", "my_cancel_key"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_cache_typcache", "domain_check_input"),
