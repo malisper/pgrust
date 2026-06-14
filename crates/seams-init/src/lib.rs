@@ -49,6 +49,7 @@ pub fn init_all() {
     backend_catalog_pg_depend::init_seams();
     backend_catalog_pg_namespace::init_seams();
     backend_catalog_pg_shdepend::init_seams();
+    backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_cluster::init_seams();
     backend_commands_comment::init_seams();
