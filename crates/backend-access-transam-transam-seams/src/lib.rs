@@ -37,6 +37,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TransactionIdPrecedesOrEquals(id1, id2)` — id1 logically <= id2.
+    pub fn transaction_id_precedes_or_equals(id1: TransactionId, id2: TransactionId) -> bool
+);
+
+seam_core::seam!(
+    /// `TransactionIdFollows(id1, id2)` — id1 logically > id2.
+    pub fn transaction_id_follows(id1: TransactionId, id2: TransactionId) -> bool
+);
+
+seam_core::seam!(
+    /// `TransactionIdFollowsOrEquals(id1, id2)` — id1 logically >= id2.
+    pub fn transaction_id_follows_or_equals(id1: TransactionId, id2: TransactionId) -> bool
+);
+
+seam_core::seam!(
     /// `TransactionIdCommitTree(xid, nxids, xids)` — mark a commit tree
     /// committed in pg_xact (synchronous form).
     pub fn transaction_id_commit_tree(xid: TransactionId, children: &[TransactionId]) -> PgResult<()>
