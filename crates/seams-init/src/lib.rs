@@ -646,15 +646,25 @@ mod recurrence_guard {
         ("backend_executor_execProcnode", "link_subplan_planstate"),
         ("backend_executor_execProcnode", "mark_param_execplan_pending"),
         ("backend_executor_execProcnode", "param_execplan_pending"),
+        ("backend_executor_execTuples", "cur_tuple_getattr"),
+        ("backend_executor_execTuples", "exec_copy_slot_minimal_tuple"),
+        ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple"),
         ("backend_executor_execTuples", "exec_fetch_slot_minimal_tuple_copy"),
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         ("backend_executor_execTuples", "exec_force_store_minimal_tuple"),
         ("backend_executor_execTuples", "exec_materialize_slot"),
+        ("backend_executor_execTuples", "exec_scan_slot_descriptor"),
+        ("backend_executor_execTuples", "exec_store_first_datum"),
         ("backend_executor_execTuples", "exec_store_generated_columns"),
+        ("backend_executor_execTuples", "exec_store_minimal_tuple"),
+        ("backend_executor_execTuples", "exec_store_virtual_tuple"),
         ("backend_executor_execTuples", "execute_attr_map_slot"),
         ("backend_executor_execTuples", "execute_attr_map_slot_explicit"),
+        ("backend_executor_execTuples", "pad_name_cstring_columns"),
+        ("backend_executor_execTuples", "replace_cur_tuple_from_slot"),
         ("backend_executor_execTuples", "slot_getattr"),
         ("backend_executor_execTuples", "slot_getattr_by_id"),
+        ("backend_executor_execTuples", "slot_getsomeattr"),
         ("backend_executor_execTuples", "slot_natts"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution, which it installs. The remaining seams in
@@ -726,6 +736,7 @@ mod recurrence_guard {
         // redesign of the cross-node aliasing channel, not a `::set()`. Pay down
         // alongside the `resolve_rustate` recovery channel.
         ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
+        ("backend_executor_execTuples", "store_virtual_values"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
