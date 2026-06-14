@@ -2,8 +2,8 @@
 
 use mcx::PgVec;
 use types_core::{
-    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber,
-    RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
+    pg_crc32c, pg_time_t, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid,
+    RelFileNumber, RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, MAXPGPATH,
 };
 
 // `WAL_LEVEL_MINIMAL`/`WAL_LEVEL_REPLICA`/`WAL_LEVEL_LOGICAL` are the canonical
@@ -477,4 +477,125 @@ pub enum XLogNextRecordResult<'a> {
         /// `*errmsg` (borrowed from the reader's `errormsg_buf`).
         errmsg: Option<&'a str>,
     },
+}
+
+/// `BackupState` (access/xlogbackup.h:20-38) — the snapshot of base-backup
+/// metadata recorded at backup start and end, used to render the
+/// `backup_label` / backup history file contents.
+///
+/// `name` holds the backup label as server-encoding bytes (the C
+/// `char[MAXPGPATH + 1]`), NUL-padded and never UTF-8-validated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupState {
+    /* Fields saved at backup start */
+    name: [u8; MAXPGPATH + 1],
+    startpoint: XLogRecPtr,
+    starttli: TimeLineID,
+    checkpointloc: XLogRecPtr,
+    starttime: pg_time_t,
+    started_in_recovery: bool,
+    istartpoint: XLogRecPtr,
+    istarttli: TimeLineID,
+    /* Fields saved at the end of backup */
+    stoppoint: XLogRecPtr,
+    stoptli: TimeLineID,
+    stoptime: pg_time_t,
+}
+
+impl BackupState {
+    /// Construct a [`BackupState`] from its fields, mirroring the C struct
+    /// layout (access/xlogbackup.h:21-37).
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        name: [u8; MAXPGPATH + 1],
+        startpoint: XLogRecPtr,
+        starttli: TimeLineID,
+        checkpointloc: XLogRecPtr,
+        starttime: pg_time_t,
+        started_in_recovery: bool,
+        istartpoint: XLogRecPtr,
+        istarttli: TimeLineID,
+        stoppoint: XLogRecPtr,
+        stoptli: TimeLineID,
+        stoptime: pg_time_t,
+    ) -> Self {
+        Self {
+            name,
+            startpoint,
+            starttli,
+            checkpointloc,
+            starttime,
+            started_in_recovery,
+            istartpoint,
+            istarttli,
+            stoppoint,
+            stoptli,
+            stoptime,
+        }
+    }
+
+    /// `state->name` — the backup label bytes (server encoding, NUL-padded).
+    pub const fn name(&self) -> &[u8; MAXPGPATH + 1] {
+        &self.name
+    }
+
+    /// `state->startpoint` — backup start WAL location.
+    pub const fn startpoint(&self) -> XLogRecPtr {
+        self.startpoint
+    }
+
+    /// `state->starttli` — backup start TLI.
+    pub const fn starttli(&self) -> TimeLineID {
+        self.starttli
+    }
+
+    /// `state->checkpointloc` — last checkpoint location.
+    pub const fn checkpointloc(&self) -> XLogRecPtr {
+        self.checkpointloc
+    }
+
+    /// `state->starttime` — backup start time.
+    pub const fn starttime(&self) -> pg_time_t {
+        self.starttime
+    }
+
+    /// `state->started_in_recovery` — whether the backup started in recovery.
+    pub const fn started_in_recovery(&self) -> bool {
+        self.started_in_recovery
+    }
+
+    /// `state->istartpoint` — incremental-based-on backup LSN.
+    pub const fn istartpoint(&self) -> XLogRecPtr {
+        self.istartpoint
+    }
+
+    /// `state->istarttli` — incremental-based-on backup TLI.
+    pub const fn istarttli(&self) -> TimeLineID {
+        self.istarttli
+    }
+
+    /// Set `state->istartpoint` (written by `PrepareForIncrementalBackup`).
+    pub fn set_istartpoint(&mut self, istartpoint: XLogRecPtr) {
+        self.istartpoint = istartpoint;
+    }
+
+    /// Set `state->istarttli` (written by `PrepareForIncrementalBackup`).
+    pub fn set_istarttli(&mut self, istarttli: TimeLineID) {
+        self.istarttli = istarttli;
+    }
+
+    /// `state->stoppoint` — backup stop WAL location.
+    pub const fn stoppoint(&self) -> XLogRecPtr {
+        self.stoppoint
+    }
+
+    /// `state->stoptli` — backup stop TLI.
+    pub const fn stoptli(&self) -> TimeLineID {
+        self.stoptli
+    }
+
+    /// `state->stoptime` — backup stop time.
+    pub const fn stoptime(&self) -> pg_time_t {
+        self.stoptime
+    }
 }
