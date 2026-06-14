@@ -122,6 +122,16 @@ fn setup() {
                 Ok(None)
             }
         });
+        backend_utils_cache_relcache_seams::relation_id_get_relation_shared::set(|relid| {
+            record(std::format!("relation_id_get_relation_shared({relid})"));
+            if REL_FOUND.load(Ordering::SeqCst) {
+                let mut entry = types_relcache_entry::RelationData::default();
+                entry.rd_id = relid;
+                Ok(Some(std::rc::Rc::new(std::cell::RefCell::new(entry))))
+            } else {
+                Ok(None)
+            }
+        });
         backend_utils_cache_relcache_seams::relation_close::set(|relid| {
             record(std::format!("relation_close({relid})"));
             Ok(())

@@ -18,6 +18,32 @@ pub use types_relcache_entry::{
     OwnedTupleConstr, OwnedTupleDesc, RelationData,
 };
 
+/// The dual-carry shared relcache cell type: `Rc<RefCell<RelationData>>` — a
+/// CLONE of C's live `RelationData *` into the cache. `types_rel::Relation`
+/// carries this (type-erased to `Rc<dyn Any>` to dodge the crate cycle); these
+/// monomorphized wrappers recover the concrete cell for consumers that cannot
+/// (or would rather not) spell the downcast.
+pub type RelcacheEntryCell = std::rc::Rc<std::cell::RefCell<RelationData>>;
+
+/// The concrete shared relcache cell a [`types_rel::Relation`] carries, if it
+/// was opened from the cache (the dual-carry migration target). `None` for a
+/// cache-less handle (transient/bootstrap/test rels). Monomorphizes
+/// [`types_rel::Relation::entry_as`] over the relcache owner's `RelationData`.
+pub fn relation_entry_cell(rel: &types_rel::Relation<'_>) -> Option<RelcacheEntryCell> {
+    rel.entry_as::<RelationData>()
+}
+
+/// Borrow the shared relcache entry a [`types_rel::Relation`] carries and run
+/// `f` against it (the live entry — sees in-place rebuilds). `None` for a
+/// cache-less handle. Monomorphizes [`types_rel::Relation::with_entry`] over
+/// the relcache owner's `RelationData`; the off-`Deref` migration helper.
+pub fn relation_with_entry<R>(
+    rel: &types_rel::Relation<'_>,
+    f: impl FnOnce(&RelationData) -> R,
+) -> Option<R> {
+    rel.with_entry::<RelationData, R>(f)
+}
+
 seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` (relcache.c): load (or build) the
     /// relcache entry for `relationId`, taking the `rd_refcnt += 1` pin, and

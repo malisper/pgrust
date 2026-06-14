@@ -54,16 +54,44 @@ fn relation_closer(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
     Ok(())
 }
 
+/// Fetch a CLONE of the relcache's shared cell for `relationId` (the
+/// dual-carry handle's pin). This is called right after
+/// `relation_id_get_relation` (the copy) succeeds, so the entry is already
+/// built and pinned in the cache; the shared lookup against the same cache must
+/// find it. A `None` here would mean the entry vanished between the two
+/// lookups, which cannot happen within a single open — treated as the same
+/// `could not open relation` error C raises for the copy path.
+fn relation_id_get_relation_shared(relationId: Oid) -> PgResult<types_rel::RelcacheCell> {
+    match backend_utils_cache_relcache_seams::relation_id_get_relation_shared::call(relationId)? {
+        // Erase the concrete `Rc<RefCell<RelationData>>` to the handle's
+        // type-erased `Rc<dyn Any>` pin (lossless `Rc` unsizing coercion). The
+        // `strong_count` pin rides along; the concrete cell is recovered by
+        // downcast at the typed accessors.
+        Some(cell) => Ok(cell as types_rel::RelcacheCell),
+        None => Err(
+            PgError::error(format!("could not open relation with OID {relationId}"))
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ),
+    }
+}
+
 /// Wrap a freshly built relcache descriptor in a [`Relation`] handle armed with
 /// this unit's close path, and run the post-open bookkeeping shared by
 /// `relation_open` / `try_relation_open`: the lock-held-by-me self-check, the
 /// temp-namespace flag, and `pgstat_init_relation`.
 fn finish_open<'mcx>(
+    cell: types_rel::RelcacheCell,
     data: RelationData<'mcx>,
     lockmode: LOCKMODE,
     check_bootstrap: bool,
 ) -> PgResult<Relation<'mcx>> {
-    let r = Relation::open(data, Some(relation_closer));
+    // DUAL-CARRY (F1): the handle holds a CLONE of the relcache's shared cell
+    // alongside the trimmed projected copy. The clone makes
+    // `Rc::strong_count > 1` for as long as this relation is open, so the
+    // relcache's `strong_count == 1` eviction now gates on open handles
+    // (`relation_close`/`Drop` frees the cell). The `Deref` target stays the
+    // trimmed copy, so consumers are untouched.
+    let r = Relation::open_with_cell(cell, data, Some(relation_closer));
 
     // If we didn't get the lock ourselves, assert that caller holds one
     // (except, for relation_open, in bootstrap mode where no locks are used).
@@ -127,7 +155,12 @@ pub fn relation_open<'mcx>(
         );
     };
 
-    finish_open(data, lockmode, true)
+    // Also obtain a CLONE of the cache's shared cell (C's live `RelationData
+    // *`) for the handle to pin (dual-carry, F1). Same lookup against the same
+    // cache the copy came from; the entry is already built/pinned above.
+    let cell = relation_id_get_relation_shared(relationId)?;
+
+    finish_open(cell, data, lockmode, true)
 }
 
 /// `try_relation_open(Oid relationId, LOCKMODE lockmode)`.
@@ -169,8 +202,11 @@ pub fn try_relation_open<'mcx>(
         );
     };
 
+    // Also obtain a CLONE of the cache's shared cell to pin (dual-carry, F1).
+    let cell = relation_id_get_relation_shared(relationId)?;
+
     // No bootstrap short-circuit in try_relation_open's C Assert.
-    Ok(Some(finish_open(data, lockmode, false)?))
+    Ok(Some(finish_open(cell, data, lockmode, false)?))
 }
 
 /// `relation_openrv(const RangeVar *relation, LOCKMODE lockmode)`.

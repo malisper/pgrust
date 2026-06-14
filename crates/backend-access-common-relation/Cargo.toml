@@ -24,3 +24,8 @@ backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+
+[dev-dependencies]
+# The test fixture builds a shared relcache cell (Rc<RefCell<RelationData>>)
+# for the `relation_id_get_relation_shared` seam.
+types-relcache-entry = { path = "../types-relcache-entry" }
