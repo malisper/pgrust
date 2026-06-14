@@ -162,7 +162,43 @@ impl xl_heap_update {
             new_offnum: u16_at(rec, 12),
         }
     }
+
+    /// Serialize into the `SizeOfHeapUpdate`-byte on-disk layout. C field
+    /// order: `old_xmax`@0, `old_offnum`@4, `old_infobits_set`@6, `flags`@7,
+    /// `new_xmax`@8, `new_offnum`@12.
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapUpdate] {
+        let mut out = [0u8; SizeOfHeapUpdate];
+        out[0..4].copy_from_slice(&self.old_xmax.to_ne_bytes());
+        out[4..6].copy_from_slice(&self.old_offnum.to_ne_bytes());
+        out[6] = self.old_infobits_set;
+        out[7] = self.flags;
+        out[8..12].copy_from_slice(&self.new_xmax.to_ne_bytes());
+        out[12..14].copy_from_slice(&self.new_offnum.to_ne_bytes());
+        out
+    }
 }
+
+/// `SizeOfHeapUpdate` (`access/heapam_xlog.h`): `offsetof(xl_heap_update,
+/// new_offnum) + sizeof(OffsetNumber)` == 14.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapUpdate: usize = 14;
+
+// `XLH_UPDATE_*` flags (access/heapam_xlog.h) — the `flags` field of
+// `xl_heap_update` (8 bits available).
+/// `XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+/// `XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = 1 << 1;
+/// `XLH_UPDATE_CONTAINS_OLD_TUPLE` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_CONTAINS_OLD_TUPLE: u8 = 1 << 2;
+/// `XLH_UPDATE_CONTAINS_OLD_KEY` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_CONTAINS_OLD_KEY: u8 = 1 << 3;
+/// `XLH_UPDATE_CONTAINS_NEW_TUPLE` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_CONTAINS_NEW_TUPLE: u8 = 1 << 4;
+/// `XLH_UPDATE_PREFIX_FROM_OLD` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_PREFIX_FROM_OLD: u8 = 1 << 5;
+/// `XLH_UPDATE_SUFFIX_FROM_OLD` (`access/heapam_xlog.h`).
+pub const XLH_UPDATE_SUFFIX_FROM_OLD: u8 = 1 << 6;
 
 /// `xl_heap_truncate`: `{Oid dbId; uint32 nrelids; uint8 flags;
 /// Oid relids[FLEXIBLE_ARRAY_MEMBER];}` — `relids` 4-aligned at 12.
