@@ -8969,6 +8969,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-evtcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table",
+ "backend-nodes-core-seams",
+ "backend-tcop-cmdtag",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-evtcache-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-syscache",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-evtcache",
+ "types-nodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-evtcache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-evtcache",
+]
+
+[[package]]
 name = "backend-utils-cache-inval"
 version = "0.0.0"
 dependencies = [
@@ -10852,6 +10888,7 @@ dependencies = [
  "backend-utils-adt-version",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-catcache",
+ "backend-utils-cache-evtcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-plancache",
@@ -11096,6 +11133,16 @@ dependencies = [
 [[package]]
 name = "types-error"
 version = "0.0.0"
+
+[[package]]
+name = "types-evtcache"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
 
 [[package]]
 name = "types-execparallel"
