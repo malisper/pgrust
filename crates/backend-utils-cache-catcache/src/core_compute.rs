@@ -17,6 +17,14 @@ use types_core::Oid;
 // audited bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which is
 // for deformed tuple values). By-reference keys (name/text/oidvector) re-resolve
 // their payload bytes elsewhere and never inhabit this word.
+//
+// Datum-unification (Wave 6) note: this is a sanctioned still-bare-word *type*
+// edge, not an internal shim site. The catcache key-storage struct fields
+// (`types_cache::backend_utils_cache_catcache::{CatCacheData,CatCTup,CatCList}.
+// keys: [ScalarWord; CATCACHE_MAXKEYS]`) pin this scalar lane to the bare word;
+// these compute functions feed/compare against those fields verbatim. Migrating
+// to canonical `Datum<'mcx>` here would diverge from that out-of-scope
+// types-cache contract. The crate's deformed-tuple values are already canonical.
 use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 
