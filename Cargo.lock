@@ -4915,6 +4915,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-bloomfilter"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-bloomfilter-seams",
+ "common-hashfn",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-bloomfilter-seams"
 version = "0.0.0"
 dependencies = [
@@ -10515,6 +10526,7 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
+ "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
