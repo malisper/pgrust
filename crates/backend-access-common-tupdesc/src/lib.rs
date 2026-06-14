@@ -14,7 +14,7 @@
 //! `ATTRIBUTE_FIXED_PART_SIZE` flat-copy. Constraint payloads (`TupleConstr`,
 //! `AttrDefault`, `AttrMissing`, `ConstrCheck`) are owned values; the
 //! constraint deep-copy (`CreateTupleDescCopyConstr`) and missing-value
-//! `datumCopy` / `datumIsEqual` reduce to `TupleValue::clone_in` / `PartialEq`.
+//! `datumCopy` / `datumIsEqual` reduce to `Datum::clone_in` / `PartialEq`.
 //!
 //! # Refcount / resource-owner lifecycle (`Incr`/`DecrTupleDescRefCount`,
 //! `FreeTupleDesc`, the `ResOwner*` callbacks)
@@ -236,7 +236,7 @@ pub fn CreateTupleDescTruncatedCopy<'mcx>(
 /// `populate_compact_attribute` recomputes it from `IsCatalogRelationOid`,
 /// which can differ from the source's recorded validity). The constraint
 /// payload — default expressions, missing values (deep-copied via
-/// `datumCopy`/`TupleValue::clone_in`), and CHECK clauses — is deep-copied.
+/// `datumCopy`/`Datum::clone_in`), and CHECK clauses — is deep-copied.
 pub fn CreateTupleDescCopyConstr<'mcx>(
     mcx: Mcx<'mcx>,
     tupdesc: &TupleDescData<'_>,
@@ -266,7 +266,7 @@ pub fn CreateTupleDescCopyConstr<'mcx>(
         for m in constr.missing.iter() {
             // C: copies the whole AttrMissing array, then datumCopy's each
             // present by-reference value. The owned AttrMissing::clone_in does
-            // both (TupleValue::clone_in == datumCopy); a not-present entry
+            // both (Datum::clone_in == datumCopy); a not-present entry
             // carries no live payload to copy.
             missing.push(m.clone_in(mcx)?);
         }
@@ -524,7 +524,7 @@ pub fn equalTupleDescs(tupdesc1: &TupleDescData<'_>, tupdesc2: &TupleDescData<'_
                     }
                     if mv1.am_present {
                         // C: datumIsEqual(.., attbyval, attlen). The owned
-                        // TupleValue's PartialEq is exactly that comparison
+                        // Datum's PartialEq is exactly that comparison
                         // (by-value word equality / by-reference byte identity).
                         if mv1.am_value != mv2.am_value {
                             return false;

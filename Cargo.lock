@@ -328,7 +328,6 @@ dependencies = [
  "common-hashfn-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-tuple",
