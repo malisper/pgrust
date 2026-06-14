@@ -10,15 +10,28 @@
 use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::parsenodes::ObjectType;
+use types_nodes::parsenodes::{
+    OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TABLE, OBJECT_VIEW,
+};
 use types_parsenodes::Node;
 use types_rel::Relation;
 use types_storage::lock::LOCKMODE;
 
-use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 
 use backend_catalog_objectaddress_seams::ResolvedObjectAddress;
+
+const INVALID_OID: Oid = 0;
+
+/// Extract an `Oid` from a [`TupleValue`] (catalog OID columns are pass-by-value).
+fn tuplevalue_oid(val: &TupleValue<'_>) -> Oid {
+    match val {
+        TupleValue::ByVal(d) => d.as_oid(),
+        TupleValue::ByRef(_) => 0,
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * get_object_address + get_object_address_rv (the public resolution entry)
@@ -212,8 +225,40 @@ pub fn object_ownercheck(_classid: Oid, _objectid: Oid, _roleid: Oid) -> PgResul
 
 /// `get_object_namespace(const ObjectAddress *address)` (objectaddress.c
 /// 2573). This is the body the seam install routes to.
-pub fn get_object_namespace(_address: &ObjectAddress) -> PgResult<Oid> {
-    panic!("decomp: get_object_namespace not yet filled")
+pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
+    use backend_utils_cache_syscache::{SearchSysCache1, SysCacheGetAttrNotNull};
+    use types_cache::SysCacheKey;
+    use types_datum::Datum;
+
+    // If not owned by a namespace, just return InvalidOid.
+    let property = crate::properties::get_object_property_data(address.classId)?;
+    if property.attnum_namespace == crate::consts::InvalidAttrNumber {
+        return Ok(INVALID_OID);
+    }
+
+    // Currently, we can only handle object types with system caches.
+    let cache = property.oid_catcache_id;
+    debug_assert!(cache != -1);
+
+    // Fetch tuple from syscache and extract namespace attribute. The C reads
+    // in `CurrentMemoryContext`; the result is a bare `Oid` value (nothing
+    // escapes the context), so a transient local context is the faithful
+    // stand-in for the seam's mcx-less signature.
+    let cx = mcx::MemoryContext::new("get_object_namespace");
+    let mcx = cx.mcx();
+    let tuple = SearchSysCache1(
+        mcx,
+        cache,
+        SysCacheKey::Value(Datum::from_oid(address.objectId)),
+    )?;
+    let Some(tuple) = tuple else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for cache {} oid {}",
+            cache, address.objectId
+        )));
+    };
+    let val = SysCacheGetAttrNotNull(mcx, cache, &tuple, property.attnum_namespace as i32)?;
+    Ok(tuplevalue_oid(&val))
 }
 
 /* ---------------------------------------------------------------------------
@@ -224,16 +269,38 @@ pub fn get_object_namespace(_address: &ObjectAddress) -> PgResult<Oid> {
 /// scan [`crate::tables::OBJECT_TYPE_MAP`] for the matching name, returning
 /// the raw `ObjectType` value; `ereport(ERROR)` for an unrecognized string
 /// (carried on `Err`). The raw `i32` preserves the C `-1` "unmapped" rows.
-pub fn read_objtype_from_string(_objtype: &str) -> PgResult<i32> {
-    panic!("decomp: read_objtype_from_string not yet filled")
+pub fn read_objtype_from_string(objtype: &str) -> PgResult<i32> {
+    for entry in crate::tables::OBJECT_TYPE_MAP {
+        if entry.tm_name == objtype {
+            return Ok(entry.tm_type);
+        }
+    }
+    Err(PgError::error(format!(
+        "unrecognized object type \"{objtype}\""
+    )))
 }
 
 /// `get_relkind_objtype(char relkind)` (objectaddress.c 6186): map a pg_class
 /// relkind to the `ObjectType` used in error messages (unknown ⇒
 /// `OBJECT_TABLE`). Total; cannot `ereport`. This is the body the seam install
 /// routes to. The seam contract pins `relkind: u8`.
-pub fn get_relkind_objtype(_relkind: u8) -> ObjectType {
-    panic!("decomp: get_relkind_objtype not yet filled")
+pub fn get_relkind_objtype(relkind: u8) -> ObjectType {
+    use types_tuple::access::{
+        RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
+        RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+        RELKIND_VIEW,
+    };
+    match relkind {
+        x if x == RELKIND_RELATION || x == RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
+        x if x == RELKIND_INDEX || x == RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
+        x if x == RELKIND_SEQUENCE => OBJECT_SEQUENCE,
+        x if x == RELKIND_VIEW => OBJECT_VIEW,
+        x if x == RELKIND_MATVIEW => OBJECT_MATVIEW,
+        x if x == RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
+        x if x == RELKIND_TOASTVALUE => OBJECT_TABLE,
+        // Per above, don't raise an error.
+        _ => OBJECT_TABLE,
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -248,23 +315,28 @@ pub fn get_relkind_objtype(_relkind: u8) -> ObjectType {
 /// the returned token carries the located tuple for the description/identity
 /// families to deform.
 pub fn get_catalog_object_by_oid<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _catalog: &Relation<'mcx>,
-    _oidcol: i16,
-    _object_id: Oid,
+    mcx: Mcx<'mcx>,
+    catalog: &Relation<'mcx>,
+    oidcol: i16,
+    object_id: Oid,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
-    panic!("decomp: get_catalog_object_by_oid not yet filled")
+    get_catalog_object_by_oid_extended(mcx, catalog, oidcol, object_id, false)
 }
 
 /// `get_catalog_object_by_oid_extended(Relation catalog, AttrNumber oidcol,
 /// Oid objectId, bool locktuple)` (objectaddress.c 2803): the `locktuple`
 /// variant that takes a `LockTuple` on the located row before returning it.
 pub fn get_catalog_object_by_oid_extended<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _catalog: &Relation<'mcx>,
-    _oidcol: i16,
-    _object_id: Oid,
-    _locktuple: bool,
+    mcx: Mcx<'mcx>,
+    catalog: &Relation<'mcx>,
+    oidcol: i16,
+    object_id: Oid,
+    locktuple: bool,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
-    panic!("decomp: get_catalog_object_by_oid_extended not yet filled")
+    // The syscache-first scan + optional `LockTuple` (which itself dispatches on
+    // `get_object_catcache_oid` / `get_object_oid_index`) is the indexing seam's
+    // `get_catalog_object_by_oid` scan primitive.
+    backend_catalog_indexing_seams::get_catalog_object_by_oid::call(
+        mcx, catalog, oidcol, object_id, locktuple,
+    )
 }
