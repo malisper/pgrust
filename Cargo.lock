@@ -1949,6 +1949,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogbackup",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-replication-walreceiverfuncs",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-latch",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-lsn-trigfuncs",
+ "backend-utils-adt-numeric",
+ "backend-utils-adt-varlena",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xloginsert-seams"
 version = "0.0.0"
 dependencies = [
