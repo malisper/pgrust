@@ -279,7 +279,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
 pub fn HeapTupleHeaderGetDatum<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: HeapTuple<'mcx>,
-) -> PgResult<(HeapTuple<'mcx>, Datum)> {
+) -> PgResult<(HeapTuple<'mcx>, TupleValue<'mcx>)> {
     // No work if there are no external TOAST pointers in the tuple. The
     // composite-Datum production (`PointerGetDatum`) and the detoast/flatten
     // path are the heap/datum owner's concern; reach both through its seam.
