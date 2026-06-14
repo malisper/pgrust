@@ -535,8 +535,6 @@ mod recurrence_guard {
         ("backend_executor_execUtils", "exec_init_result_type_tl"),
         ("backend_postmaster_autovacuum", "am_autovacuum_launcher_process"),
         ("backend_postmaster_autovacuum", "am_autovacuum_worker_process"),
-        ("backend_postmaster_bgworker", "am_background_worker_process"),
-        ("backend_postmaster_bgworker", "max_worker_processes"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_replication_logical_origin", "set_replorigin_session_origin_lsn"),
