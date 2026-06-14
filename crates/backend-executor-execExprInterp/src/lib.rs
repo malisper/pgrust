@@ -46,17 +46,16 @@ pub mod saophash;
 /// `exec_ready_interpreted_expr` takes `&mut ExprState` in both the seam and
 /// [`dispatch::ExecReadyInterpretedExpr`], so it is installed directly.
 ///
-/// `exec_eval_expr_switch_context` is a tracked contract divergence: the seam
-/// declares `state: &ExprState` (the C `ExecEvalExprSwitchContext` macro reads
-/// `state->evalfunc`), but the owned dispatch entry
-/// [`dispatch::ExecInterpExprStillValid`] needs `&mut ExprState` because the
-/// still-valid first-call check and the `ExecJust*` / `ExecInterpExpr` evalfuncs
-/// mutate per-eval scratch. Reconciling the shared-vs-mut mismatch is the
-/// seam-contract-reconcile lane's job (DESIGN_DEBT +
-/// `CONTRACT_RECONCILE_PENDING`); until then this seam stays seam-and-panic on
-/// the still-uninstalled `&ExprState` surface.
+/// `exec_eval_expr_switch_context` is installed onto
+/// [`dispatch::ExecInterpExprStillValid`]: the seam declares `state: &mut
+/// ExprState`, matching the owned dispatch entry directly. (The still-valid
+/// first-call check and the `ExecJust*` / `ExecInterpExpr` evalfuncs mutate
+/// per-eval scratch, so the whole call chain threads `&mut ExprState`.)
 pub fn init_seams() {
     backend_executor_execExprInterp_seams::exec_ready_interpreted_expr::set(
         dispatch::ExecReadyInterpretedExpr,
+    );
+    backend_executor_execExprInterp_seams::exec_eval_expr_switch_context::set(
+        dispatch::ExecInterpExprStillValid,
     );
 }

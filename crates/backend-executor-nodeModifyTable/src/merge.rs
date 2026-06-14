@@ -134,7 +134,7 @@ pub fn ExecMergeNotMatched<'mcx>(
         // ExprState pi_state / ProjectionInfo are small trimmed structs; clone
         // the action's whenqual + projection out of the pool so the estate
         // borrow is free for ExecQual / ExecProject / ExecInsert.
-        let (command_type, action_match_kind, action_overriding, whenqual, proj) = {
+        let (command_type, action_match_kind, action_overriding, mut whenqual, proj) = {
             let action = &estate.result_rel(result_rel_info).ri_MergeActions
                 [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
                 .as_ref()
@@ -154,7 +154,7 @@ pub fn ExecMergeNotMatched<'mcx>(
         // Test condition, if any.  In the absence of any condition, we perform
         // the action unconditionally (ExecQual returns true with no conditions).
         //   if (!ExecQual(action->mas_whenqual, econtext)) continue;
-        let passed = match whenqual.as_ref() {
+        let passed = match whenqual.as_mut() {
             Some(state) => {
                 backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)?
             }

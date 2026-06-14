@@ -264,7 +264,7 @@ fn MJEvalOuterValues<'mcx>(
         // clause->ldatum = ExecEvalExpr(clause->lexpr, econtext, &clause->lisnull);
         let lexpr = mergestate.mj_Clauses[i]
             .lexpr
-            .as_deref()
+            .as_deref_mut()
             .expect("MJEvalOuterValues: clause lexpr not compiled");
         let (ldatum, lisnull) =
             execExpr::exec_eval_expr_switch_context::call(lexpr, econtext, estate)?;
@@ -320,7 +320,7 @@ fn MJEvalInnerValues<'mcx>(
         // clause->rdatum = ExecEvalExpr(clause->rexpr, econtext, &clause->risnull);
         let rexpr = mergestate.mj_Clauses[i]
             .rexpr
-            .as_deref()
+            .as_deref_mut()
             .expect("MJEvalInnerValues: clause rexpr not compiled");
         let (rdatum, risnull) =
             execExpr::exec_eval_expr_switch_context::call(rexpr, econtext, estate)?;
@@ -469,7 +469,7 @@ fn MJFillOuter<'mcx>(
     }
 
     // if (ExecQual(otherqual, econtext)) return ExecProject(...);
-    if exec_qual_or_true(node.js.ps.qual.as_deref(), econtext, estate)? {
+    if exec_qual_or_true(node.js.ps.qual.as_deref_mut(), econtext, estate)? {
         exec_project_into_result(&mut node.js.ps, estate)?;
         Ok(true)
     } else {
@@ -502,7 +502,7 @@ fn MJFillInner<'mcx>(
         ec.ecxt_innertuple = node.mj_InnerTupleSlot;
     }
 
-    if exec_qual_or_true(node.js.ps.qual.as_deref(), econtext, estate)? {
+    if exec_qual_or_true(node.js.ps.qual.as_deref_mut(), econtext, estate)? {
         exec_project_into_result(&mut node.js.ps, estate)?;
         Ok(true)
     } else {
@@ -515,7 +515,7 @@ fn MJFillInner<'mcx>(
 /// always-true.
 #[inline]
 fn exec_qual_or_true<'mcx>(
-    state: Option<&types_nodes::execexpr::ExprState<'mcx>>,
+    state: Option<&mut types_nodes::execexpr::ExprState<'mcx>>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -1115,7 +1115,7 @@ fn exec_joinqual<'mcx>(
     let joinqual = node
         .js
         .joinqual
-        .as_deref()
+        .as_deref_mut()
         .expect("exec_joinqual: joinqual present checked by caller");
     execExpr::exec_qual::call(joinqual, econtext, estate)
 }
@@ -1136,7 +1136,7 @@ fn exec_otherqual<'mcx>(
         .js
         .ps
         .qual
-        .as_deref()
+        .as_deref_mut()
         .expect("exec_otherqual: qual present checked by caller");
     execExpr::exec_qual::call(otherqual, econtext, estate)
 }

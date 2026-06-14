@@ -195,17 +195,17 @@ fn ValuesNext<'mcx>(
             // The row's compiled `ExprState` is owned by the node; evaluation is
             // seamed into the expression interpreter (execExpr.c).
             let (value, col_isnull) = {
-                // Re-borrow the state immutably for the call; the seam takes the
-                // state by shared ref and the estate by mut ref (disjoint).
-                let state_ptr: *const types_nodes::execexpr::ExprState<'mcx> = node.exprstatelists[row]
-                    [resind]
-                    .as_ref()
+                // Re-borrow the state mutably for the call; the seam takes the
+                // state by mut ref and the estate by mut ref (disjoint).
+                let state_ptr: *mut types_nodes::execexpr::ExprState<'mcx> = node.exprstatelists
+                    [row][resind]
+                    .as_mut()
                     .expect("ValuesNext: row ExprState cell is NULL after build")
-                    as *const _;
+                    as *mut _;
                 // SAFETY: `state_ptr` points into the node's owned array, which
-                // is not mutated by the eval call (the seam borrows the estate,
+                // is not aliased by the eval call (the seam borrows the estate,
                 // not the node's exprstatelists).
-                let state = unsafe { &*state_ptr };
+                let state = unsafe { &mut *state_ptr };
                 backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
                     state, econtext, estate,
                 )?
@@ -655,7 +655,7 @@ fn ExecScanExtended<'mcx>(
         let passes = if !has_qual {
             true
         } else {
-            match (node.ss.ps.qual.as_deref(), node.ss.ps.ps_ExprContext) {
+            match (node.ss.ps.qual.as_deref_mut(), node.ss.ps.ps_ExprContext) {
                 (Some(state), Some(econtext)) => execExpr::exec_qual::call(state, econtext, estate)?,
                 _ => true,
             }

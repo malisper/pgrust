@@ -267,7 +267,7 @@ fn IndexOnlyNext<'mcx>(
         if node.ioss_ScanDesc.as_ref().unwrap().xs_recheck {
             // econtext->ecxt_scantuple = slot;
             // if (!ExecQualAndReset(node->recheckqual, econtext))
-            let passed = match &node.recheckqual {
+            let passed = match &mut node.recheckqual {
                 Some(rq) => {
                     let r = execExpr::exec_qual::call(rq, econtext, estate)?;
                     execUtils::reset_expr_context::call(estate, econtext)?;

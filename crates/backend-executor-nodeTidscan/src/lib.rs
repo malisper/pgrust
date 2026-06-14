@@ -332,7 +332,7 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             // itemptr = (ItemPointer) DatumGetPointer(
             //     ExecEvalExprSwitchContext(tidexpr->exprstate, econtext, &isNull));
             let (itemptr, is_null) = {
-                let exprstate = tidstate.tss_tidexprs[i].exprstate.as_deref().unwrap();
+                let exprstate = tidstate.tss_tidexprs[i].exprstate.as_deref_mut().unwrap();
                 execExpr::exec_eval_tid_expr_switch_context::call(exprstate, econtext_id, estate)?
             };
             if is_null {
@@ -353,7 +353,7 @@ fn TidListEval<'mcx>(tidstate: &mut TidScanState<'mcx>, estate: &mut EStateData<
             // itemarray = DatumGetArrayTypeP(arraydatum);
             // deconstruct_array_builtin(itemarray, TIDOID, &ipdatums, &ipnulls, &ndatums);
             let (arraydatum, is_null) = {
-                let exprstate = tidstate.tss_tidexprs[i].exprstate.as_deref().unwrap();
+                let exprstate = tidstate.tss_tidexprs[i].exprstate.as_deref_mut().unwrap();
                 execExpr::exec_eval_array_expr_switch_context::call(exprstate, econtext_id, estate)?
             };
             if is_null {
@@ -625,7 +625,7 @@ fn ExecScanExtended<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData
         let passes = if !has_qual {
             true
         } else {
-            let qual = node.ss.ps.qual.as_deref().unwrap();
+            let qual = node.ss.ps.qual.as_deref_mut().unwrap();
             execExpr::exec_qual::call(qual, econtext, estate)?
         };
         if passes {

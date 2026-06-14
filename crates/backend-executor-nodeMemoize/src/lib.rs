@@ -138,7 +138,7 @@ fn prepare_probe_slot<'mcx>(
             for i in 0..num_keys {
                 // pslot->tts_values[i] = ExecEvalExpr(mstate->param_exprs[i],
                 //                                     econtext, &pslot->tts_isnull[i]);
-                let state = mstate.param_exprs[i].as_ref();
+                let state = mstate.param_exprs[i].as_mut();
                 let (value, isnull) =
                     execExpr::exec_eval_expr_switch_context::call(state, econtext, estate)?;
                 mstate.probe_values.push(value);
@@ -290,9 +290,9 @@ fn memoize_hash_equal<'mcx>(
             .ok_or_else(|| elog_internal("Memoize node has no ps_ExprContext"))?;
         let cache_eq_expr = mstate
             .cache_eq_expr
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| elog_internal("Memoize node has no cache_eq_expr"))?
-            .as_ref();
+            .as_mut();
         execExpr::exec_qual::call(cache_eq_expr, econtext, estate)
     }
 }

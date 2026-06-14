@@ -201,7 +201,7 @@ fn BitmapHeapNext<'mcx>(
             // econtext->ecxt_scantuple = slot;
             estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
             // if (!ExecQualAndReset(node->bitmapqualorig, econtext))
-            if !exec_qual_and_reset(node.bitmapqualorig.as_deref(), econtext, estate)? {
+            if !exec_qual_and_reset(node.bitmapqualorig.as_deref_mut(), econtext, estate)? {
                 // Fails recheck, so drop it and loop back for another.
                 InstrCountFiltered2(node, 1);
                 // ExecClearTuple(slot);
@@ -237,14 +237,14 @@ fn BitmapHeapRecheck<'mcx>(
     // econtext->ecxt_scantuple = slot;
     estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
     // return ExecQualAndReset(node->bitmapqualorig, econtext);
-    exec_qual_and_reset(node.bitmapqualorig.as_deref(), econtext, estate)
+    exec_qual_and_reset(node.bitmapqualorig.as_deref_mut(), econtext, estate)
 }
 
 /// `ExecQualAndReset(qual, econtext)` (executor.h): `ExecQual` then
 /// `ResetExprContext(econtext)`. A `NULL` qual is always-true. The reset clears
 /// the per-tuple memory regardless of the qual result.
 fn exec_qual_and_reset<'mcx>(
-    qual: Option<&types_nodes::execexpr::ExprState<'mcx>>,
+    qual: Option<&mut types_nodes::execexpr::ExprState<'mcx>>,
     econtext: types_nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -337,7 +337,7 @@ fn ExecScan<'mcx>(
         // Check that the current tuple satisfies the qual-clause.
         // Check for non-null qual here to avoid a function call to ExecQual()
         // when the qual is null.
-        let passes = match &node.ss.ps.qual {
+        let passes = match &mut node.ss.ps.qual {
             None => true,
             Some(qual) => execExpr::exec_qual::call(qual, econtext, estate)?,
         };

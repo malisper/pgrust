@@ -924,9 +924,9 @@ pub fn ExecParallelScanHashBucket<'mcx>(
         .expect("ExecParallelScanHashBucket: ps_ExprContext");
     let hashclauses = hjstate
         .hashclauses
-        .as_deref()
+        .as_deref_mut()
         .expect("ExecParallelScanHashBucket: hashclauses must be compiled by init")
-        as *const types_nodes::execexpr::ExprState;
+        as *mut types_nodes::execexpr::ExprState;
 
     let hashtable = hjstate
         .hj_HashTable
@@ -959,7 +959,7 @@ pub fn ExecParallelScanHashBucket<'mcx>(
             estate.ecxt_mut(econtext_id).ecxt_innertuple = Some(hash_tuple_slot);
             // if (ExecQualAndReset(hjclauses, econtext)) { hj_CurTuple = ht; return true; }
             let pass = backend_executor_execExpr_seams::exec_qual_and_reset::call(
-                unsafe { &*hashclauses },
+                unsafe { &mut *hashclauses },
                 econtext_id,
                 estate,
             )?;

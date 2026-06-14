@@ -509,7 +509,6 @@ mod recurrence_guard {
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
         ("backend_commands_user", "is_reserved_name"),
-        ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
         ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),

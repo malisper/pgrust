@@ -1899,7 +1899,7 @@ pub fn exec_build_update_projection<'mcx>(
 
 /// `ExecEvalExprSwitchContext(state, econtext, &isnull)` (executor.h).
 pub fn exec_eval_expr_switch_context<'mcx>(
-    state: &ExprState<'mcx>,
+    state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum, bool)> {
@@ -1910,7 +1910,7 @@ pub fn exec_eval_expr_switch_context<'mcx>(
 
 /// `(ItemPointer) DatumGetPointer(ExecEvalExprSwitchContext(...))` (executor.h).
 pub fn exec_eval_tid_expr_switch_context<'mcx>(
-    state: &ExprState<'mcx>,
+    state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(ItemPointerData, bool)> {
@@ -1923,7 +1923,7 @@ pub fn exec_eval_tid_expr_switch_context<'mcx>(
 
 /// `ExecEvalExprSwitchContext(...)` yielding a `tid[]` array `Datum`.
 pub fn exec_eval_array_expr_switch_context<'mcx>(
-    state: &ExprState<'mcx>,
+    state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum, bool)> {
@@ -1934,7 +1934,7 @@ pub fn exec_eval_array_expr_switch_context<'mcx>(
 
 /// `ExecQual(state, econtext)` (executor.h).
 pub fn exec_qual<'mcx>(
-    state: &ExprState<'mcx>,
+    state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -1944,7 +1944,7 @@ pub fn exec_qual<'mcx>(
 
 /// `ExecQualAndReset(state, econtext)` (executor.h).
 pub fn exec_qual_and_reset<'mcx>(
-    state: &ExprState<'mcx>,
+    state: &mut ExprState<'mcx>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {

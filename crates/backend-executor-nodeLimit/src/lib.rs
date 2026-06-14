@@ -394,7 +394,7 @@ fn ties_match<'mcx>(
     // because WITH-TIES always carries uniqNumCols > 0.
     let eqfunction = node
         .eqfunction
-        .as_deref()
+        .as_deref_mut()
         .expect("ExecLimit: WITH-TIES eqfunction must be initialized");
     execExpr::exec_qual_and_reset::call(eqfunction, econtext, estate)
 }
@@ -412,7 +412,7 @@ fn recompute_limits<'mcx>(
         .ps_ExprContext
         .expect("recompute_limits: ps_ExprContext must be set (ExecAssignExprContext ran in init)");
 
-    if let Some(limit_offset) = node.limitOffset.as_deref() {
+    if let Some(limit_offset) = node.limitOffset.as_deref_mut() {
         // val = ExecEvalExprSwitchContext(node->limitOffset, econtext, &isNull);
         let (val, is_null) =
             execExpr::exec_eval_expr_switch_context::call(limit_offset, econtext, estate)?;
@@ -435,7 +435,7 @@ fn recompute_limits<'mcx>(
         node.offset = 0;
     }
 
-    if let Some(limit_count) = node.limitCount.as_deref() {
+    if let Some(limit_count) = node.limitCount.as_deref_mut() {
         // val = ExecEvalExprSwitchContext(node->limitCount, econtext, &isNull);
         let (val, is_null) =
             execExpr::exec_eval_expr_switch_context::call(limit_count, econtext, estate)?;

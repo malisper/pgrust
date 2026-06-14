@@ -32,7 +32,7 @@ seam_core::seam!(
     /// This is the interpreter's main dispatch loop; it is the only thing that
     /// understands the `ExprEvalStep` opcodes. Can `ereport(ERROR)`.
     pub fn exec_eval_expr_switch_context<'mcx>(
-        state: &ExprState<'mcx>,
+        state: &mut ExprState<'mcx>,
         econtext: types_nodes::EcxtId,
         estate: &mut EStateData<'mcx>,
     ) -> types_error::PgResult<(types_datum::Datum, bool)>

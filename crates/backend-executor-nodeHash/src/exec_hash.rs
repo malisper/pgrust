@@ -148,9 +148,9 @@ pub fn MultiExecPrivateHash<'mcx>(
     // The hash_expr ExprState the bucket value is computed from.
     let hash_expr = node
         .hash_expr
-        .as_deref()
+        .as_deref_mut()
         .expect("MultiExecPrivateHash: node->hash_expr is NULL")
-        as *const types_nodes::execexpr::ExprState;
+        as *mut types_nodes::execexpr::ExprState;
 
     // Get all tuples from the node below the Hash node and insert into the
     // hash table (or temp files).
@@ -186,7 +186,7 @@ pub fn MultiExecPrivateHash<'mcx>(
         // SAFETY: hash_expr aliases node->hash_expr (immutable for the call);
         // the seam takes &ExprState and &mut EStateData, disjoint from it.
         let (hashdatum, isnull) = {
-            let expr = unsafe { &*hash_expr };
+            let expr = unsafe { &mut *hash_expr };
             execExpr::exec_eval_expr_switch_context::call(expr, econtext, estate)?
         };
 
@@ -265,9 +265,9 @@ pub fn MultiExecParallelHash<'mcx>(
         .expect("MultiExecParallelHash: node has no ps_ExprContext");
     let hash_expr = node
         .hash_expr
-        .as_deref()
+        .as_deref_mut()
         .expect("MultiExecParallelHash: node->hash_expr is NULL")
-        as *const types_nodes::execexpr::ExprState;
+        as *mut types_nodes::execexpr::ExprState;
 
     // Synchronize the parallel hash table build. ...
     //   pstate = hashtable->parallel_state;
@@ -357,7 +357,7 @@ pub fn MultiExecParallelHash<'mcx>(
             //                                                        econtext, &isnull));
             // SAFETY: hash_expr aliases node->hash_expr (immutable for the call).
             let (hashdatum, isnull) = {
-                let expr = unsafe { &*hash_expr };
+                let expr = unsafe { &mut *hash_expr };
                 execExpr::exec_eval_expr_switch_context::call(expr, econtext, estate)?
             };
             let hashvalue = hashdatum.as_u32();
