@@ -910,8 +910,13 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
-        ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
-        ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
+        // RETIRED (allowlist cleanup): both are miscinit.c child-startup
+        // signal-mask wrappers — install_crash_exit_sigquit_handler composes
+        // interrupt.c's SignalHandlerForCrashExit with `pqsignal()` + the
+        // pqsignal.c BlockSig machinery; pqinitmask_set_blocksig is
+        // `pqinitmask()` + the BlockSig install. The merged interrupt owner now
+        // installs both from its init_seams() (delegating to the merged
+        // backend-libpq-pqsignal masks + the port-pqsignal pqsignal seam).
         // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
         // resolve another backend's PGPROC-embedded `procLatch` to a
         // `LatchHandle` and set it. The owner (backend-storage-ipc-latch) names
@@ -1082,6 +1087,16 @@ mod recurrence_guard {
         // value-per-call SRF machinery. It is therefore no longer an uninstalled
         // contract divergence and must NOT be allowlisted here (the guard would
         // flag a stale entry).
+        // DESIGN_DEBT (provider-unported): `init_process_globals` is
+        // `InitProcessGlobals()` — defined in postmaster.c (status `todo`), NOT
+        // in this unit's globals.c/usercontext.c. The seam is name-attributed to
+        // init-small only because miscinit.c's InitPostmasterChild/
+        // InitStandaloneProcess (its callers) reach it first. The body sets
+        // MyStartTimestamp/MyStartTime (init-small DOES own these setters) but
+        // also seeds pg_global_prng_state via pg_prng_strong_seed / pg_prng_seed
+        // and srandom — postmaster.c's global, not init-small's. Installing it
+        // here would re-home postmaster.c's logic into the wrong TU. Install once
+        // postmaster.c lands (or relocate the decl to a postmaster -seams crate).
         ("backend_utils_init_small", "init_process_globals"),
         // DESIGN_DEBT (TD-PORTAL-HANDLE): PREPARE/EXECUTE's `-pre-seams` slice of
         // portalmem.c is written against the parsestmt opaque handle newtypes
@@ -1117,6 +1132,16 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
+        // CROSS-CRATE RE-HOME (allowlist cleanup): these five seam decls live in
+        // backend-utils-misc-guc-file-seams (so the dir-owner guard attributes
+        // them to backend-utils-misc-guc-file) but their bodies are guc.c's, not
+        // guc-file.l's: NewGUCNestLevel, AtEOXact_GUC (an honest seam-and-panic
+        // into the still-unported guc_stack.c), GUC_check_errdetail/errhint, and
+        // set_config_with_handle. They are now genuinely INSTALLED by the merged
+        // guc owner (backend-utils-misc-guc) from its init_seams() — a cross-crate
+        // install the name-keyed guard cannot see, so the allowlist entries stay
+        // only to suppress the false "guc-file didn't install them" flag (same
+        // pattern as extract_set_variable_args above). NOT a contract divergence.
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
         ("backend_utils_misc_guc_file", "guc_check_errhint"),

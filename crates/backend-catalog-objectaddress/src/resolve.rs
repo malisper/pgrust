@@ -64,7 +64,11 @@ pub fn get_object_address<'mcx>(
     _lockmode: LOCKMODE,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_rv(ObjectType objtype, RangeVar *rel, List *object,
@@ -79,7 +83,11 @@ pub fn get_object_address_rv<'mcx>(
     _lockmode: LOCKMODE,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address_rv not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_rv) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /* ---------------------------------------------------------------------------
@@ -93,7 +101,11 @@ pub fn get_object_address_unqualified(
     _strval: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_unqualified not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_unqualified) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_relation_by_qualified_name(ObjectType objtype, List *object, Relation
@@ -105,7 +117,11 @@ pub fn get_relation_by_qualified_name<'mcx>(
     _lockmode: LOCKMODE,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_relation_by_qualified_name not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_relation_by_qualified_name) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_relobject(ObjectType objtype, List *object, Relation
@@ -116,7 +132,11 @@ pub fn get_object_address_relobject<'mcx>(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address_relobject not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_relobject) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_attribute(ObjectType objtype, List *object, Relation
@@ -128,7 +148,11 @@ pub fn get_object_address_attribute<'mcx>(
     _lockmode: LOCKMODE,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address_attribute not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_attribute) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_attrdef(ObjectType objtype, List *object, Relation
@@ -140,7 +164,11 @@ pub fn get_object_address_attrdef<'mcx>(
     _lockmode: LOCKMODE,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address_attrdef not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_attrdef) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_type(ObjectType objtype, TypeName *typename, bool
@@ -151,7 +179,11 @@ pub fn get_object_address_type(
     _typename: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_type not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_type) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_opcf(ObjectType objtype, List *object, bool
@@ -161,7 +193,11 @@ pub fn get_object_address_opcf(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_opcf not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_opcf) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_opf_member(ObjectType objtype, List *object, bool
@@ -171,7 +207,11 @@ pub fn get_object_address_opf_member(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_opf_member not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_opf_member) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_usermapping(List *object, bool missing_ok)`
@@ -180,7 +220,11 @@ pub fn get_object_address_usermapping(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_usermapping not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_usermapping) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_publication_rel(List *object, Relation *relp, bool
@@ -190,7 +234,11 @@ pub fn get_object_address_publication_rel<'mcx>(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    panic!("decomp: get_object_address_publication_rel not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_publication_rel) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_publication_schema(List *object, bool missing_ok)`
@@ -199,7 +247,11 @@ pub fn get_object_address_publication_schema(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_publication_schema not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_publication_schema) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_address_defacl(List *object, bool missing_ok)`
@@ -208,7 +260,11 @@ pub fn get_object_address_defacl(
     _object: &Node,
     _missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    panic!("decomp: get_object_address_defacl not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (get_object_address_defacl) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /* ---------------------------------------------------------------------------
@@ -226,7 +282,11 @@ pub fn check_object_ownership<'mcx>(
     _object: &Node,
     _relation: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
-    panic!("decomp: check_object_ownership not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (check_object_ownership) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `object_ownercheck(Oid classid, Oid objectid, Oid roleid)` — the
@@ -234,7 +294,11 @@ pub fn check_object_ownership<'mcx>(
 /// but reasoned over here against `ObjectProperty[]`'s owner attnum). Returns
 /// whether `roleid` owns the object.
 pub fn object_ownercheck(_classid: Oid, _objectid: Oid, _roleid: Oid) -> PgResult<bool> {
-    panic!("decomp: object_ownercheck not yet filled")
+    panic!(
+        "backend-catalog-objectaddress: the object-address resolution engine (object_ownercheck) is not yet ported \
+         (objectaddress.c get_object_address family / ownership checks); it fans out to ~40 cross-crate \
+         catalog/parser callees not yet available"
+    )
 }
 
 /// `get_object_namespace(const ObjectAddress *address)` (objectaddress.c
