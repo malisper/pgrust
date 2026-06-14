@@ -18,6 +18,11 @@ backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-sea
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
