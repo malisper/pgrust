@@ -8711,9 +8711,9 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-json",
+ "types-tuple",
 ]
 
 [[package]]
