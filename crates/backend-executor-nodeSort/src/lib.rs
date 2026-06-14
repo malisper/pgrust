@@ -67,11 +67,13 @@ fn sizeof_instrumentation() -> Size {
 /// parallel-instrumentation hooks declared in `backend-executor-nodeSort-seams`
 /// (the parallel executor dispatches to them by node tag).
 pub fn init_seams() {
-    backend_executor_nodeSort_seams::exec_sort_estimate::set(ExecSortEstimate);
-    backend_executor_nodeSort_seams::exec_sort_initialize_dsm::set(ExecSortInitializeDSM);
-    backend_executor_nodeSort_seams::exec_sort_initialize_worker::set(ExecSortInitializeWorker);
+    backend_executor_nodeSort_seams::exec_sort_estimate::set(exec_sort_estimate_shim);
+    backend_executor_nodeSort_seams::exec_sort_initialize_dsm::set(exec_sort_initialize_dsm_shim);
+    backend_executor_nodeSort_seams::exec_sort_initialize_worker::set(
+        exec_sort_initialize_worker_shim,
+    );
     backend_executor_nodeSort_seams::exec_sort_retrieve_instrumentation::set(
-        ExecSortRetrieveInstrumentation,
+        exec_sort_retrieve_instrumentation_shim,
     );
 }
 
@@ -549,15 +551,19 @@ pub fn ExecReScanSort<'mcx>(
 
 /// `ExecSortEstimate(node, pcxt)` — estimate the shared-memory space required
 /// to propagate sort statistics.
-pub fn ExecSortEstimate(
-    node: PlanStateHandle,
+///
+/// The C `(SortState *) node` cast is the owned `&mut SortStateData` borrow; the
+/// node's own fields (`ss.ps.instrument`, the `SharedSortInfo` chunk sizing) are
+/// read directly. Only the orthogonal `ParallelContext`/`shm_toc` estimator
+/// (still an unported subsystem held by handle) goes through the `pcxt_*` support
+/// seams — exactly as nodeHash/nodeMemoize do.
+pub fn ExecSortEstimate<'mcx>(
+    node: &mut SortStateData<'mcx>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if !parallel_sup::sort_instrument_present::call(node)
-        || parallel_sup::pcxt_nworkers::call(pcxt) == 0
-    {
+    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
         return Ok(());
     }
 
@@ -574,15 +580,28 @@ pub fn ExecSortEstimate(
 }
 
 /// `ExecSortInitializeDSM(node, pcxt)` — initialize DSM space for sort stats.
-pub fn ExecSortInitializeDSM(
-    node: PlanStateHandle,
+///
+/// The leader `shm_toc_allocate`s a `SharedSortInfo` chunk in DSM, zeroes it,
+/// sets `num_workers`, and registers it under `node->ss.ps.plan->plan_node_id`,
+/// stashing the DSM pointer in `node->shared_info` so each worker's `ExecSort`
+/// copyback lands in the shared bytes. With the owned node in hand the
+/// instrument/nworkers guard and the chunk sizing run directly. What is genuinely
+/// missing is the **DSM-resident `shared_info` carrier**: the merged
+/// `SortStateData.shared_info` is an in-process `PgBox<SharedSortInfo>`
+/// (types-nodes), which cannot hold the DSM `SharedRef`/chunk cursor, and
+/// `SharedRef` is unstorable in `types-nodes` anyway (it lives in the parallel
+/// keystone crate). Re-typing the carrier is a contract-divergence from the
+/// merged nodeSort port and would force a rewrite of the worker copyback in
+/// `ExecSort`'s `store_worker_stats`. This is the same blocker nodeAgg's
+/// `ExecAggInitializeDSM` hits; mirror-and-panic into the DSM owner until the
+/// carrier surface lands.
+pub fn ExecSortInitializeDSM<'mcx>(
+    node: &mut SortStateData<'mcx>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if !parallel_sup::sort_instrument_present::call(node)
-        || parallel_sup::pcxt_nworkers::call(pcxt) == 0
-    {
+    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
         return Ok(());
     }
 
@@ -590,43 +609,131 @@ pub fn ExecSortInitializeDSM(
     //          + pcxt->nworkers * sizeof(TuplesortInstrumentation);
     let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
     let size = SHARED_SORT_INFO_HEADER + (nworkers as Size) * sizeof_instrumentation();
-    let plan_node_id = parallel_sup::sort_plan_node_id::call(node);
 
     //   node->shared_info = shm_toc_allocate(pcxt->toc, size);
     //   memset(node->shared_info, 0, size);
     //   node->shared_info->num_workers = pcxt->nworkers;
     //   shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
-    parallel_sup::sort_initialize_dsm_shared_info::call(node, pcxt, nworkers, plan_node_id, size)
+    let plan_node_id = sort_plan(node)?.plan.plan_node_id;
+    let _ = (size, plan_node_id, pcxt);
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
+         allocate + place_and_init + carrier handoff (ExecSortInitializeDSM) — \
+         the merged SortStateData.shared_info is an in-process PgBox<SharedSortInfo> \
+         and cannot hold the DSM SharedRef (SharedRef is unstorable in types-nodes); \
+         same blocker as nodeAgg's ExecAggInitializeDSM; unported"
+    );
 }
 
 /// `ExecSortInitializeWorker(node, pwcxt)` — attach a worker to DSM space.
-pub fn ExecSortInitializeWorker(
-    node: PlanStateHandle,
+///
+/// `node->shared_info = shm_toc_lookup(pwcxt->toc, plan_node_id, true);
+/// node->am_worker = true;` — the worker looks up the leader's chunk by
+/// `plan_node_id` and would attach to it. `am_worker` is an owned `bool` that
+/// would be set directly, but the `shm_toc_lookup` result is a DSM `SharedRef`
+/// the in-process `PgBox<SharedSortInfo>` carrier cannot hold (same blocker as
+/// `ExecSortInitializeDSM` / nodeAgg's `ExecAggInitializeWorker`); doing only the
+/// `am_worker` write while skipping the attach would silently diverge from C (the
+/// worker would then have no shared_info to copy its stats into). Mirror-and-panic
+/// into the DSM owner until the carrier surface lands.
+pub fn ExecSortInitializeWorker<'mcx>(
+    node: &mut SortStateData<'mcx>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
-    //   node->shared_info =
-    //       shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
-    //   node->am_worker = true;
-    let plan_node_id = parallel_sup::sort_plan_node_id::call(node);
-    parallel_sup::sort_initialize_worker_shared_info::call(node, pwcxt, plan_node_id)?;
-    parallel_sup::sort_set_am_worker::call(node);
-    Ok(())
+    let plan_node_id = sort_plan(node)?.plan.plan_node_id;
+    let _ = (plan_node_id, pwcxt, &mut node.am_worker);
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
+         attach (ExecSortInitializeWorker) — the in-process PgBox<SharedSortInfo> \
+         carrier cannot hold the shm_toc_lookup SharedRef; same blocker as nodeAgg's \
+         ExecAggInitializeWorker; unported"
+    );
 }
 
 /// `ExecSortRetrieveInstrumentation(node)` — transfer sort statistics from DSM
 /// to private memory.
-pub fn ExecSortRetrieveInstrumentation(node: PlanStateHandle) -> PgResult<()> {
+///
+/// `if (node->shared_info == NULL) return;` runs directly on the owned node. The
+/// C then `palloc`s a private `SharedSortInfo` and `memcpy`s the DSM bytes into
+/// it. With the merged in-process `PgBox<SharedSortInfo>` carrier no DSM
+/// round-trip ever happened (see `ExecSortInitializeDSM`), so there are no
+/// worker-populated DSM slots to copy out; faithfully closing this needs the
+/// DSM-resident carrier the Init paths also need. Same blocker as nodeAgg's
+/// `ExecAggRetrieveInstrumentation`; mirror-and-panic until it lands.
+pub fn ExecSortRetrieveInstrumentation<'mcx>(
+    node: &mut SortStateData<'mcx>,
+) -> PgResult<()> {
     //   if (node->shared_info == NULL) return;
-    if !parallel_sup::sort_shared_info_present::call(node) {
+    if node.shared_info.is_none() {
         return Ok(());
     }
 
     //   size = offsetof(SharedSortInfo, sinstrument)
     //          + node->shared_info->num_workers * sizeof(TuplesortInstrumentation);
     //   si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info = si;
-    let num_workers = parallel_sup::sort_shared_info_num_workers::call(node);
+    let num_workers = node
+        .shared_info
+        .as_deref()
+        .expect("checked is_some above")
+        .num_workers;
     let size = SHARED_SORT_INFO_HEADER + (num_workers as Size) * sizeof_instrumentation();
-    parallel_sup::sort_retrieve_shared_info::call(node, size)
+    let _ = size;
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
+         copy-out (ExecSortRetrieveInstrumentation) — needs the DSM-resident \
+         shared_info carrier the Init paths also need; same blocker as nodeAgg's \
+         ExecAggRetrieveInstrumentation; unported"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Seam shims installed into `backend-executor-nodeSort-seams`.
+//
+// `execParallel` dispatches the per-node parallel hooks generically, holding a
+// `PlanState *` (the opaque [`PlanStateHandle`]); the C `ExecSortEstimate` etc.
+// begin with the `(SortState *) node` cast. Recovering the live `SortStateData`
+// from the handle is the executor's `PlanState` pointer registry — that
+// pointer-table is the unported executor surface (cf. task #165/#169), so each
+// shim performs the C cast through `resolve_sort_state` (which panics until that
+// registry lands) and then runs the real, owned-typed entry point above. This
+// mirrors nodeAgg's `aggapi` shims exactly.
+// ---------------------------------------------------------------------------
+
+/// `(SortState *) node` — recover the live `SortStateData` a `PlanStateHandle`
+/// refers to. The executor's `PlanState` pointer registry that backs this lookup
+/// is not yet ported.
+fn resolve_sort_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut SortStateData<'mcx> {
+    panic!(
+        "backend-executor-nodeSort: resolving a PlanStateHandle to the live SortState needs the \
+         executor PlanState pointer registry (unported); the (SortState *) node cast in the \
+         ExecSort* parallel hooks cannot run yet"
+    );
+}
+
+/// Seam shim for `ExecSortEstimate`.
+fn exec_sort_estimate_shim(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
+    ExecSortEstimate(resolve_sort_state(node), pcxt)
+}
+
+/// Seam shim for `ExecSortInitializeDSM`.
+fn exec_sort_initialize_dsm_shim(
+    node: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    ExecSortInitializeDSM(resolve_sort_state(node), pcxt)
+}
+
+/// Seam shim for `ExecSortInitializeWorker`.
+fn exec_sort_initialize_worker_shim(
+    node: PlanStateHandle,
+    pwcxt: ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    ExecSortInitializeWorker(resolve_sort_state(node), pwcxt)
+}
+
+/// Seam shim for `ExecSortRetrieveInstrumentation`.
+fn exec_sort_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()> {
+    ExecSortRetrieveInstrumentation(resolve_sort_state(node))
 }
 
 // ===========================================================================
