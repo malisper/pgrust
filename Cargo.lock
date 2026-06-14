@@ -4147,6 +4147,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSamplescan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeSamplescan-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-samplescan",
+]
+
+[[package]]
+name = "backend-executor-nodeSamplescan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-samplescan",
+]
+
+[[package]]
 name = "backend-executor-nodeSeqscan"
 version = "0.0.0"
 dependencies = [
@@ -10009,6 +10036,7 @@ dependencies = [
  "backend-executor-nodeModifyTable",
  "backend-executor-nodeProjectSet",
  "backend-executor-nodeResult",
+ "backend-executor-nodeSamplescan",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
@@ -10661,6 +10689,19 @@ dependencies = [
 [[package]]
 name = "types-rusage"
 version = "0.0.0"
+
+[[package]]
+name = "types-samplescan"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-nodes",
+ "types-pathnodes",
+ "types-rel",
+ "types-tableam",
+]
 
 [[package]]
 name = "types-scan"

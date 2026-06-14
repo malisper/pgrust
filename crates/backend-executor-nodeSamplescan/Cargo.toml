@@ -1,0 +1,21 @@
+[package]
+name = "backend-executor-nodeSamplescan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_nodeSamplescan"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-nodes = { path = "../types-nodes" }
+types-samplescan = { path = "../types-samplescan" }
+backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
+
+[dev-dependencies]

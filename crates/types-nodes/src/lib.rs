@@ -43,6 +43,7 @@ pub mod noderesult;
 pub mod nodenestloop;
 pub mod nodesetop;
 pub mod nodes;
+pub mod nodesamplescan;
 pub mod nodeseqscan;
 pub mod nodesort;
 pub mod nodetablefuncscan;
