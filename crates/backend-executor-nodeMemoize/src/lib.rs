@@ -51,7 +51,6 @@ use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 use backend_access_transam_parallel_seams as parallel;
 use backend_executor_nodeMemoize_seams as seam;
-use backend_executor_execParallel_support_seams as sup;
 use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 
 // Owner `-seams` crates this node calls outward through, with the node-side
@@ -1090,21 +1089,25 @@ pub fn ExecEstimateCacheEntryOverheadBytes(ntuples: f64) -> f64 {
 // Parallel Query Support (nodeMemoize.c).
 // ===========================================================================
 
-/// `ExecMemoizeEstimate(node, pcxt)` — estimate DSM space for memoize stats.
-///
-/// nodeMemoize owns the C control flow (the instrument/nworkers guards, the
-/// chunk sizing); the handle-addressed reads of the live `MemoizeState` and the
-/// `ParallelContext`/`shm_toc` go through the parallel-executor support seams.
-fn exec_memoize_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
-    // don't need this if not instrumenting or no workers.
+/// `ExecMemoizeEstimate(node, pcxt)` — estimate the DSM space needed to
+/// propagate the per-worker memoize statistics. Re-keyed onto the owned
+/// `&mut MemoizeScanState<'mcx>` (mirroring the already-owned
+/// `ExecAggEstimate`/`ExecBitmapHeapEstimate`); the DSM chunk-sizing reads of
+/// the `ParallelContext`/`shm_toc` estimator go through the orthogonal owned
+/// shm_toc support seams (which keep the DSM layout behind them).
+pub fn ExecMemoizeEstimate<'mcx>(
+    node: &mut MemoizeScanState<'mcx>,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if !sup::memoize_instrument_present::call(node) || sup::pcxt_nworkers::call(pcxt) == 0 {
+    let nworkers = parallel::pcxt_nworkers::call(pcxt);
+    if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
 
-    // size = mul_size(nworkers, sizeof(MemoizeInstrumentation));
+    // size = mul_size(pcxt->nworkers, sizeof(MemoizeInstrumentation));
     // size = add_size(size, offsetof(SharedMemoizeInfo, sinstrument));
-    let nworkers = sup::pcxt_nworkers::call(pcxt);
     let size = add_size(
         mul_size(nworkers as Size, SIZEOF_MEMOIZE_INSTRUMENTATION)?,
         OFFSETOF_SHARED_MEMOIZE_INFO_SINSTRUMENT,
@@ -1112,64 +1115,176 @@ fn exec_memoize_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> 
 
     //   shm_toc_estimate_chunk(&pcxt->estimator, size);
     //   shm_toc_estimate_keys(&pcxt->estimator, 1);
-    sup::pcxt_estimate_chunk::call(pcxt, size)?;
-    sup::pcxt_estimate_keys::call(pcxt, 1)?;
+    let estimator = parallel::pcxt_estimator::call(pcxt);
+    parallel::shm_toc_estimate_chunk::call(estimator, size);
+    parallel::shm_toc_estimate_keys::call(estimator, 1);
     Ok(())
 }
 
-/// `ExecMemoizeInitializeDSM(node, pcxt)` — initialize DSM space for stats.
-fn exec_memoize_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
-    // don't need this if not instrumenting or no workers.
+/// `ExecMemoizeInitializeDSM(node, pcxt)` — allocate the per-worker memoize
+/// statistics area in DSM and stash its pointer in `node->shared_info`.
+pub fn ExecMemoizeInitializeDSM<'mcx>(
+    node: &mut MemoizeScanState<'mcx>,
+    pcxt: ParallelContextHandle,
+) -> PgResult<()> {
+    // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if !sup::memoize_instrument_present::call(node) || sup::pcxt_nworkers::call(pcxt) == 0 {
+    let nworkers = parallel::pcxt_nworkers::call(pcxt);
+    if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
 
     // size = offsetof(SharedMemoizeInfo, sinstrument)
     //        + pcxt->nworkers * sizeof(MemoizeInstrumentation);
-    let nworkers = sup::pcxt_nworkers::call(pcxt);
     let size = add_size(
         OFFSETOF_SHARED_MEMOIZE_INFO_SINSTRUMENT,
         mul_size(nworkers as Size, SIZEOF_MEMOIZE_INSTRUMENTATION)?,
     )?;
-    let plan_node_id = sup::plan_node_id::call(node);
 
     // node->shared_info = shm_toc_allocate(pcxt->toc, size);
-    // MemSet(node->shared_info, 0, size);
+    // memset(node->shared_info, 0, size);  -> zeroed sinstrument slots
     // node->shared_info->num_workers = pcxt->nworkers;
-    // shm_toc_insert(pcxt->toc, plan_node_id, node->shared_info).
-    sup::memoize_initialize_dsm_shared_info::call(node, pcxt, nworkers, plan_node_id, size)
+    // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
+    //
+    // The leader `shm_toc_allocate`s the chunk (the real owned shm_toc call,
+    // below) and would then place a `repr(C)` flexible-array `SharedMemoizeInfo`
+    // (leader-write `num_workers` scalar + a zeroed `MemoizeInstrumentation
+    // sinstrument[]`) over it and stash the resulting DSM cursor in
+    // `node->shared_info` for the worker copyback / leader retrieve. Two surfaces
+    // are genuinely missing for that handoff — exactly as for the already-owned
+    // `ExecAggInitializeDSM`:
+    //
+    //  1. CARRIER: the live `SharedMemoizeInfo *` lives in DSM, but the owned
+    //     `MemoizeScanState.shared_info` field is an in-process
+    //     `Option<Box<SharedMemoizeInfo>>` (types-nodes), which cannot hold the
+    //     DSM serialize cursor; re-typing it to a DSM carrier is a
+    //     contract-divergence from the merged Memoize node model (and would also
+    //     force a rewrite of the worker copyback in `ExecEndMemoize`).
+    //  2. FAM ACCESSOR: the parallel keystone offers whole-`T` placement + a
+    //     shared `&T` but no sanctioned per-element accessor for a flexible-array
+    //     tail; reaching `sinstrument[i]` from the shared chunk needs the
+    //     keystone's (unbuilt) FAM-slot accessor.
+    //
+    // The chunk allocation itself is a real owned shm_toc call; the placement +
+    // carrier handoff mirror-and-panic into the parallel DSM owner until those
+    // surfaces land.
+    let toc = parallel::pcxt_toc::call(pcxt);
+    let _chunk = parallel::shm_toc_allocate::call(toc, size);
+    let _ = (nworkers, node.plan_node_id);
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
+         place_and_init + carrier handoff (ExecMemoizeInitializeDSM) — needs a \
+         DSM-resident shared_info carrier (the merged Memoize node holds an \
+         in-process Box<SharedMemoizeInfo>) and a keystone flexible-array slot \
+         accessor; unported"
+    );
 }
 
-/// `ExecMemoizeInitializeWorker(node, pwcxt)` — attach the worker to DSM stats.
+/// `ExecMemoizeInitializeWorker(node, pwcxt)` — in a worker, attach to the
+/// shared memoize statistics area.
+pub fn ExecMemoizeInitializeWorker<'mcx>(
+    node: &mut MemoizeScanState<'mcx>,
+    pwcxt: ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    // node->shared_info =
+    //     shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+    //
+    // The worker `shm_toc_lookup`s the leader's chunk by plan_node_id (the real
+    // owned shm_toc call, below) and would attach to it, storing the DSM cursor
+    // in `node->shared_info` so its own `ExecEndMemoize` copyback lands in the
+    // shared DSM bytes. Blocked on the SAME two surfaces as
+    // ExecMemoizeInitializeDSM: the DSM-resident `shared_info` carrier (the
+    // merged Memoize node holds an in-process `Box<SharedMemoizeInfo>`) and the
+    // keystone flexible-array slot accessor. Mirror-and-panic into the parallel
+    // DSM owner until those land.
+    let toc = parallel::pwcxt_toc::call(pwcxt);
+    let _attached = parallel::shm_toc_lookup::call(toc, node.plan_node_id as u64, true);
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
+         attach (ExecMemoizeInitializeWorker) — needs a DSM-resident shared_info \
+         carrier and the keystone flexible-array slot accessor; unported"
+    );
+}
+
+/// `ExecMemoizeRetrieveInstrumentation(node)` — in the leader, transfer the
+/// per-worker memoize statistics out of DSM into private memory.
+pub fn ExecMemoizeRetrieveInstrumentation<'mcx>(
+    node: &mut MemoizeScanState<'mcx>,
+) -> PgResult<()> {
+    // SharedMemoizeInfo *si;
+    // if (node->shared_info == NULL) return;
+    let si = match node.shared_info.as_ref() {
+        None => return Ok(()),
+        Some(si) => si,
+    };
+
+    // size = offsetof(SharedMemoizeInfo, sinstrument)
+    //        + node->shared_info->num_workers * sizeof(MemoizeInstrumentation);
+    // si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info = si;
+    //
+    // In the leader, C re-homes the DSM `SharedMemoizeInfo` into private memory.
+    // With the merged in-process `Box<SharedMemoizeInfo>` carrier,
+    // `node->shared_info` is already private memory (no DSM round-trip happened —
+    // see ExecMemoizeInitializeDSM), so there is nothing real to copy out: the
+    // leader never observed the workers' DSM slots. Faithfully closing this needs
+    // the DSM-resident carrier + keystone flexible-array accessor that
+    // InitializeDSM/Worker also need; mirror-and-panic until they land.
+    let _size = add_size(
+        OFFSETOF_SHARED_MEMOIZE_INFO_SINSTRUMENT,
+        mul_size(si.num_workers as Size, SIZEOF_MEMOIZE_INSTRUMENTATION)?,
+    )?;
+    panic!(
+        "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
+         copy-out (ExecMemoizeRetrieveInstrumentation) — needs the DSM-resident \
+         shared_info carrier and the keystone flexible-array slot accessor; \
+         unported"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Seam shims installed into `backend-executor-nodeMemoize-seams`.
+//
+// `execParallel` dispatches the per-node parallel hooks generically, holding a
+// `PlanState *` (the opaque [`PlanStateHandle`]); the C `ExecMemoizeEstimate`
+// etc. begin with the `(MemoizeState *) node` cast. Recovering the live
+// `MemoizeScanState` from the handle is the executor's `PlanState`-pointer
+// registry — that pointer-table is the unported executor surface, so each shim
+// performs the C cast through `resolve_memoize_state` (which panics until that
+// registry lands) and then runs the real, ported owned entry point above.
+// ---------------------------------------------------------------------------
+
+/// `(MemoizeState *) node` — recover the live `MemoizeScanState` a
+/// `PlanStateHandle` refers to. The executor's `PlanState` pointer registry that
+/// backs this lookup is not yet ported.
+fn resolve_memoize_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut MemoizeScanState<'mcx> {
+    panic!(
+        "backend-executor-nodeMemoize: resolving a PlanStateHandle to the live MemoizeState needs \
+         the executor PlanState pointer registry (unported); the (MemoizeState *) node cast in the \
+         ExecMemoize* parallel hooks cannot run yet"
+    );
+}
+
+/// Seam shim for `ExecMemoizeEstimate`.
+fn exec_memoize_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
+    ExecMemoizeEstimate(resolve_memoize_state(node), pcxt)
+}
+
+/// Seam shim for `ExecMemoizeInitializeDSM`.
+fn exec_memoize_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
+    ExecMemoizeInitializeDSM(resolve_memoize_state(node), pcxt)
+}
+
+/// Seam shim for `ExecMemoizeInitializeWorker`.
 fn exec_memoize_initialize_worker(
     node: PlanStateHandle,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
-    // node->shared_info = shm_toc_lookup(pwcxt->toc, plan_node_id, true).
-    let plan_node_id = sup::plan_node_id::call(node);
-    sup::memoize_initialize_worker_shared_info::call(node, pwcxt, plan_node_id)
+    ExecMemoizeInitializeWorker(resolve_memoize_state(node), pwcxt)
 }
 
-/// `ExecMemoizeRetrieveInstrumentation(node)` — copy DSM stats into local memory.
+/// Seam shim for `ExecMemoizeRetrieveInstrumentation`.
 fn exec_memoize_retrieve_instrumentation(node: PlanStateHandle) -> PgResult<()> {
-    // SharedMemoizeInfo *si;
-    // if (node->shared_info == NULL) return;
-    if !sup::memoize_shared_info_present::call(node) {
-        return Ok(());
-    }
-
-    // size = offsetof(SharedMemoizeInfo, sinstrument)
-    //        + node->shared_info->num_workers * sizeof(MemoizeInstrumentation);
-    // si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info
-    // = si — copy the per-worker stats out of the DSM chunk into local memory so
-    // they survive the parallel context teardown for EXPLAIN.
-    let num_workers = sup::memoize_shared_info_num_workers::call(node);
-    let size = add_size(
-        OFFSETOF_SHARED_MEMOIZE_INFO_SINSTRUMENT,
-        mul_size(num_workers as Size, SIZEOF_MEMOIZE_INSTRUMENTATION)?,
-    )?;
-    sup::memoize_retrieve_shared_info::call(node, size)
+    ExecMemoizeRetrieveInstrumentation(resolve_memoize_state(node))
 }
 
 // ===========================================================================
