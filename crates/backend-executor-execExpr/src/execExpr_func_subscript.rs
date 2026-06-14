@@ -21,7 +21,6 @@
 extern crate alloc;
 
 use types_core::AttrNumber;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use types_nodes::execnodes::Opaque;
