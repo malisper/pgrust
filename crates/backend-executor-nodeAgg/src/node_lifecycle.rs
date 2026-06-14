@@ -5,7 +5,7 @@
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Oid, OidIsValid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
     Aggref, AggStateData, AggStatePerTransData, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
@@ -307,7 +307,7 @@ pub fn build_pertrans_for_aggref<'mcx>(
     aggtranstype: Oid,
     aggserialfn: Oid,
     aggdeserialfn: Oid,
-    init_value: Datum,
+    init_value: Datum<'mcx>,
     init_value_is_null: bool,
     input_types: &[Oid],
     num_arguments: i32,
@@ -722,7 +722,7 @@ fn exec_tuples_match_prepare_owned<'mcx>(
 
 /// `GetAggInitVal(textInitVal, transtype)` — convert the `agginitval` text
 /// Datum into the transition type's internal Datum via its input function.
-pub fn GetAggInitVal(text_init_val: Datum, transtype: Oid) -> PgResult<Datum> {
+pub fn GetAggInitVal<'mcx>(text_init_val: Datum<'mcx>, transtype: Oid) -> PgResult<Datum<'mcx>> {
     // getTypeInputInfo(transtype, &typinput, &typioparam);
     // strInitVal = TextDatumGetCString(textInitVal);
     // initVal = OidInputFunctionCall(typinput, strInitVal, typioparam, -1);
