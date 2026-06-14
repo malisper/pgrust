@@ -43,8 +43,8 @@ seam_core::seam!(
     /// the `Datum` as a `Numeric` pointer), so they ride the by-value arm; the
     /// owner reads each image's varlena bytes off the carried machine word.
     pub fn numeric_subdiff<'mcx>(
-        v1: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-        v2: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        v1: types_tuple::Datum<'mcx>,
+        v2: types_tuple::Datum<'mcx>,
     ) -> types_error::PgResult<f64>
 );
 

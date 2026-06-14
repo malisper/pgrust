@@ -8835,6 +8835,7 @@ dependencies = [
  "types-error",
  "types-numeric",
  "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -8844,6 +8845,7 @@ dependencies = [
  "seam-core",
  "types-datum",
  "types-error",
+ "types-tuple",
 ]
 
 [[package]]
