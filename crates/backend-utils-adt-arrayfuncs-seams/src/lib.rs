@@ -108,6 +108,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The array half of `DecodeTextArrayToBitmapset` (evtcache.c): treat
+    /// `array` as a detoasted `text[]` varlena (`DatumGetArrayTypeP`), enforce
+    /// `ARR_NDIM(arr) != 1 || ARR_HASNULL(arr) || ARR_ELEMTYPE(arr) != TEXTOID`
+    /// (`elog(ERROR, "expected 1-D text array")`, carried on `Err`), then
+    /// `deconstruct_array_builtin(arr, TEXTOID, ...)` into its element strings
+    /// in order (no NULLs after the check). The `bms_add_member` accumulation
+    /// over `GetCommandTagEnum` of each string stays with the evtcache caller.
+    pub fn decode_text_array_to_strings<'mcx>(
+        mcx: Mcx<'mcx>,
+        array: &[u8],
+    ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...)`
     /// (arrayfuncs.c): split a non-null `text[]` varlena (verbatim catalog
     /// bytes) into its element strings, in order. The C result is a palloc'd
