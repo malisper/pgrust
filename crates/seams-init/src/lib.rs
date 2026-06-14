@@ -97,6 +97,7 @@ pub fn init_all() {
     backend_executor_nodeUnique::init_seams();
     backend_executor_nodeValuesscan::init_seams();
     backend_lib_dshash::init_seams();
+    backend_lib_hyperloglog::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
