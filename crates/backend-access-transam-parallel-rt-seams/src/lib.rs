@@ -18,7 +18,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
-use types_datum::Datum;
+use types_tuple::Datum;
 use types_error::PgResult;
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
@@ -67,7 +67,10 @@ seam_core::seam!(pub fn get_session_dsm_handle() -> PgResult<dsm_handle>);
 seam_core::seam!(pub fn dsm_detach(seg: DsmSegmentHandle) -> PgResult<()>);
 seam_core::seam!(pub fn dsm_segment_handle(seg: DsmSegmentHandle) -> PgResult<dsm_handle>);
 seam_core::seam!(pub fn dsm_detach_handle(seg: DsmSegmentHandle) -> PgResult<()>);
-seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum) -> PgResult<DsmSegmentHandle>);
+// `arg` is the canonical unified `Datum` (Datum-unification): the DSM-handle
+// machine word the C `Datum arg` carries (`UInt32GetDatum`), in the `'static`
+// `ByVal` arm — matching the `dsm-core-seams` `on_dsm_detach` convention.
+seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum<'static>) -> PgResult<DsmSegmentHandle>);
 
 // --- shm_mq (storage/ipc/shm_mq.c) -----------------------------------------
 // NOTE (family `shm-mq-leader`): the leader (and worker) error-queue `shm_mq_*`

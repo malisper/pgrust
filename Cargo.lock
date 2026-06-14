@@ -1250,11 +1250,11 @@ dependencies = [
  "backend-utils-mmgr-mcxt-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-error",
  "types-execparallel",
  "types-parallel",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -1264,9 +1264,9 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-parallel",
+ "types-tuple",
 ]
 
 [[package]]
