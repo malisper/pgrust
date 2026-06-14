@@ -768,19 +768,6 @@ mod recurrence_guard {
         // (or are re-homed to their proper -seams crates).
         ("backend_commands_functioncmds", "aclcheck_error_type"),
         ("backend_commands_functioncmds", "get_language_oid"),
-        // DESIGN_DEBT (TD-EXECEXPR-PARAMSETEQ): `exec_build_param_set_equal`'s seam
-        // decl (backend-executor-execExpr-seams) still carries the pre-owned-model
-        // shape — trailing `parent: &mut PlanStateData` + `estate: &mut EStateData`
-        // and NO `mcx` — and nodeMemoize calls it with that shape, while the owner's
-        // real ExecBuildParamSetEqual body follows the crate's owned model
-        // (`mcx`-first, result `desc`/`ops` passed directly, no parent/estate — the
-        // same reconciliation the installed sibling `exec_build_hash32_expr` already
-        // received). Installing it requires reconciling decl + call-site onto the
-        // owned shape, which is the executor de-handle / contract-reconcile work
-        // (#112, #167/#169), not pure seam wiring. Until then it stays
-        // declared-but-uninstalled (would panic only on the nodeMemoize non-binary
-        // key-equality path). See DESIGN_DEBT.md.
-        ("backend_executor_execExpr", "exec_build_param_set_equal"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
         ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
@@ -943,22 +930,6 @@ mod recurrence_guard {
         // init_seams once that owner lands.
         ("backend_replication_walreceiverfuncs", "xlog_request_wal_receiver_reply"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
-        // DESIGN_DEBT: the `backend-storage-ipc-shm-toc-seams` facade declares
-        // `shm_toc_estimate_{chunk,keys}` keyed on `&mut types_nodes::ParallelContext`,
-        // but that owned `ParallelContext` is the TRIMMED model — it carries only an
-        // opaque `toc: Opaque` and has NO real `estimator: shm_toc_estimator` field
-        // (it is "storage-owned, opaque here"). The real estimator lives in
-        // `backend-access-transam-parallel`'s own context store, addressed by
-        // `ShmTocEstimatorHandle`, and the genuine estimate logic IS installed there
-        // via the handle-keyed `backend_access_transam_parallel_seams` facade
-        // (delegating to `backend_storage_ipc_shm_toc::shm_toc_estimate_{chunk,keys}`).
-        // The shm-toc owner cannot install this `&mut ParallelContext` facade with real
-        // logic: there is no in-struct estimator to operate on, and synthesizing one
-        // would diverge from the handle-store model. Pay down with the ParallelContext
-        // de-handle keystone (give the owned ParallelContext a real `estimator` field),
-        // after which the owner installs these directly. Provider-unported / K-gated.
-        ("backend_storage_ipc_shm_toc", "shm_toc_estimate_chunk"),
-        ("backend_storage_ipc_shm_toc", "shm_toc_estimate_keys"),
         // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
         // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
         // cross-unit PGPROC/ProcGlobal-arena wiring (procarray add/remove + clog.c
@@ -1112,25 +1083,6 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        // DESIGN_DEBT (TD-COMBOCID-STATE): the `HeapTupleHeaderGetCmin`/`Cmax`
-        // seams (backend-utils-time-combocid-seams) consumed by the heap
-        // visibility predicates resolve a combo CID against the *file-scope*
-        // combo-CID state. In this repo combocid.c was ported with that state as
-        // an owned `ComboCidState<'mcx>` threaded from the transaction owner
-        // (xact.c), so the merged/audited combocid owner has no ambient global to
-        // install a parameterless `(&HeapTupleHeaderData) -> CommandId` seam
-        // against — its real bodies take `&ComboCidState`. Wiring these needs the
-        // live per-transaction `ComboCidState` reachable from a static seam (an
-        // ambient-global stash, forbidden) or the visibility callers to thread the
-        // state explicitly (a contract redesign across the scan/executor seam
-        // boundary). Until then they stay seam-and-panic. See DESIGN_DEBT.md.
-        ("backend_utils_time_combocid", "heap_tuple_header_get_cmax"),
-        ("backend_utils_time_combocid", "heap_tuple_header_get_cmin"),
-        // Same TD-COMBOCID-STATE: `HeapTupleHeaderAdjustCmax` (consumed by
-        // heap_delete/heap_update) resolves a combo CID against the file-scope
-        // combo-CID state; its real body takes `&mut ComboCidState`, which the
-        // owner can't reach from a static seam until the xact-owner threads it.
-        ("backend_utils_time_combocid", "heap_tuple_header_adjust_cmax"),
         // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
         // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
         // WAL page-read driver solely through the prefetcher read-record seams,

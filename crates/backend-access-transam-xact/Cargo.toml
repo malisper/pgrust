@@ -77,5 +77,6 @@ backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-sea
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-more2-seams = { path = "../backend-utils-misc-more2-seams" }
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
+backend-utils-time-combocid-seams = { path = "../backend-utils-time-combocid-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }

@@ -12,31 +12,46 @@
 //! (`CreateDestReceiver`) and the static `donothingDR` used for `DestNone`.
 //!
 //! The owned model names a receiver by a process-global id
-//! ([`DestReceiverHandle`]) into this crate's registry; each registered receiver
-//! carries a real vtable ([`ReceiverVtable`]) of `rStartup`/`receiveSlot`/
-//! `rShutdown` function pointers, mirroring the C struct's first three slots.
+//! ([`DestReceiverHandle`]) into this crate's *single* router registry. Each
+//! registered receiver carries a real vtable ([`ReceiverVtable`]) of
+//! `rStartup`/`receiveSlot`/`rShutdown` callbacks, mirroring the C struct's
+//! first three slots, plus an owner-supplied `state` token (a `u64`).
+//!
+//! The `state` token is what makes the C `(DR_xxx *) self` downcast work in the
+//! owned model: a stateless C `DestReceiver` (the static `donothingDR`) carries
+//! no per-receiver state, but every stateful receiver (`DR_copy`, `DR_printtup`,
+//! …) reaches its owned state through `self`. Here the owner stores its own
+//! per-receiver state under a private key and hands that key to
+//! [`register_dest_receiver`] as the `state` token; the vtable callbacks receive
+//! that token back on every dispatch and use it to find their state — exactly
+//! the C `(DR_xxx *) self->field` indirection, just keyed instead of cast.
+//!
 //! The three dispatch seams declared in `backend-tcop-dest-seams`
 //! (`dest_rstartup` / `dest_receive_slot` / `dest_rshutdown`, called by
-//! `execTuples.c` tuple output) are installed here and route through that vtable.
+//! `execTuples.c` tuple output) are installed here and route through that vtable,
+//! threading the receiver's `state` token to each callback.
 //!
 //! # What is real here vs. mirror-and-panic
 //!
-//! Only `DestNone`'s receiver lives entirely inside `dest.c` (the static
-//! `donothingDR`: every callback is a no-op). That receiver is built and
-//! dispatched fully here — `ExecutePlan` with a discarding destination and
-//! `SHOW` with no client both run through it end to end.
+//! `DestNone`'s receiver lives entirely inside `dest.c` (the static
+//! `donothingDR`: every callback is a no-op, carrying no state). That receiver
+//! is built and dispatched fully here — `ExecutePlan` with a discarding
+//! destination and `SHOW` with no client both run through it end to end.
+//!
+//! `DestCopyOut`'s receiver is owned by `copyto.c`. Its constructor
+//! (`CreateCopyDestReceiver`) registers a real vtable into *this* router via the
+//! [`backend_commands_copyto_seams::create_copy_dest_receiver`] seam, so
+//! `CreateDestReceiver(DestCopyOut)` delegates to copyto exactly as the C switch
+//! does — one unified registry, no per-owner side registry.
 //!
 //! Every *other* `CommandDest` (`DestRemote*`/`DestSPI`/`DestTuplestore`/
 //! `DestTransientRel`/`DestTupleQueue`/…) has its callbacks owned by another
 //! translation unit (printtup.c / spi.c / tstoreReceiver.c / matview.c /
-//! tqueue.c …), each of which today keeps its *own* per-crate receiver registry
-//! keyed by its *own* handle type. Unifying those into one router — so each
-//! owner registers its vtable here — is the receiver-value keystone (the F0 of
-//! the tcop-dest decomposition) and is out of scope for this dispatch-router
-//! unit. Until that lands, `CreateDestReceiver` for those kinds registers a
-//! vtable whose callbacks `panic!` honestly (mirror-and-panic), so a stray
-//! dispatch through an un-wired kind fails loudly instead of silently dropping
-//! tuples.
+//! tqueue.c …) that has not yet been re-homed onto this router. Until each
+//! owner's constructor registers its vtable here (the same way copyto now does),
+//! `CreateDestReceiver` for those kinds registers a vtable whose callbacks
+//! `panic!` honestly (mirror-and-panic), so a stray dispatch through an un-wired
+//! kind fails loudly instead of silently dropping tuples.
 
 extern crate alloc;
 
@@ -54,21 +69,25 @@ use types_tuple::heaptuple::TupleDescData;
 /// reached through the tuple-output dispatch seams; receiver teardown is the
 /// owner's concern via its own `*_destroy` path.)
 ///
-/// Modeled as plain `fn` pointers — the receiver kinds this router can serve
-/// in-crate (`DestNone`) carry no captured state, exactly like the static
-/// `donothingDR`.
+/// Each callback takes a leading `state: u64` argument — the owner-supplied
+/// token registered alongside the vtable (see [`register_dest_receiver`]). It is
+/// the owned-model stand-in for the C `(DR_xxx *) self` downcast: stateless
+/// receivers (the static `donothingDR`) ignore it; stateful receivers
+/// (`DR_copy`, …) use it to recover their per-receiver state. Modeled as plain
+/// `fn` pointers (the callbacks themselves are stateless code; all per-receiver
+/// state hangs off the token), so the vtable stays `Copy`.
 #[derive(Clone, Copy)]
-struct ReceiverVtable {
+pub struct ReceiverVtable {
     /// `void (*rStartup)(DestReceiver *self, int operation, TupleDesc typeinfo)`.
-    rStartup: fn(operation: CmdType, tupdesc: &TupleDescData<'_>) -> PgResult<()>,
+    pub rStartup: fn(state: u64, operation: CmdType, tupdesc: &TupleDescData<'_>) -> PgResult<()>,
     /// `bool (*receiveSlot)(TupleTableSlot *slot, DestReceiver *self)`.
-    receiveSlot: fn(slot: &SlotData<'_>) -> PgResult<bool>,
+    pub receiveSlot: fn(state: u64, slot: &SlotData<'_>) -> PgResult<bool>,
     /// `void (*rShutdown)(DestReceiver *self)`.
-    rShutdown: fn() -> PgResult<()>,
+    pub rShutdown: fn(state: u64) -> PgResult<()>,
 }
 
-/// One registered receiver: its `mydest` tag plus its vtable. Mirrors the
-/// owned-state head of a C `DestReceiver`.
+/// One registered receiver: its `mydest` tag, its vtable, and the owner-supplied
+/// `state` token. Mirrors the owned-state head of a C `DestReceiver`.
 #[derive(Clone, Copy)]
 struct Receiver {
     /// `CommandDest mydest` — the C `DestReceiver`'s tag field. Carried
@@ -78,6 +97,9 @@ struct Receiver {
     #[allow(dead_code)]
     mydest: CommandDest,
     vtable: ReceiverVtable,
+    /// Owner-supplied per-receiver state token (the `(DR_xxx *) self` stand-in;
+    /// `0` for stateless receivers like `donothingDR`).
+    state: u64,
 }
 
 // ===========================================================================
@@ -85,20 +107,24 @@ struct Receiver {
 // ===========================================================================
 
 /// `donothingStartup(DestReceiver *self, int operation, TupleDesc typeinfo)`
-/// (dest.c) — does nothing.
-fn donothing_startup(_operation: CmdType, _tupdesc: &TupleDescData<'_>) -> PgResult<()> {
+/// (dest.c) — does nothing. Carries no state (the leading token is unused).
+fn donothing_startup(
+    _state: u64,
+    _operation: CmdType,
+    _tupdesc: &TupleDescData<'_>,
+) -> PgResult<()> {
     Ok(())
 }
 
 /// `donothingReceive(TupleTableSlot *slot, DestReceiver *self)` (dest.c) —
 /// returns `true`.
-fn donothing_receive(_slot: &SlotData<'_>) -> PgResult<bool> {
+fn donothing_receive(_state: u64, _slot: &SlotData<'_>) -> PgResult<bool> {
     Ok(true)
 }
 
 /// `donothingCleanup(DestReceiver *self)` (dest.c) — used for both the shutdown
 /// and destroy methods; does nothing.
-fn donothing_cleanup() -> PgResult<()> {
+fn donothing_cleanup(_state: u64) -> PgResult<()> {
     Ok(())
 }
 
@@ -111,6 +137,7 @@ const DONOTHING_DR: Receiver = Receiver {
         receiveSlot: donothing_receive,
         rShutdown: donothing_cleanup,
     },
+    state: 0,
 };
 
 // ===========================================================================
@@ -122,19 +149,20 @@ fn unwired(mydest: CommandDest) -> ! {
     panic!(
         "DestReceiver of kind {mydest:?} is not wired into the tcop-dest router: \
          its callbacks live in another translation unit (printtup/spi/\
-         tstoreReceiver/matview/tqueue/createas/copy/functions/explain_dr) that \
-         must register its vtable here via the receiver-value keystone (F0 of \
-         the tcop-dest decomposition), which has not landed yet"
+         tstoreReceiver/matview/tqueue/createas/functions/explain_dr) whose \
+         constructor must register its vtable here via `register_dest_receiver` \
+         — the way copyto's `CreateCopyDestReceiver` already does — which has \
+         not landed for this kind yet"
     )
 }
 
-fn unwired_startup_remote(_op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
+fn unwired_startup_remote(_state: u64, _op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
     unwired(CommandDest::Remote)
 }
-fn unwired_receive_remote(_slot: &SlotData<'_>) -> PgResult<bool> {
+fn unwired_receive_remote(_state: u64, _slot: &SlotData<'_>) -> PgResult<bool> {
     unwired(CommandDest::Remote)
 }
-fn unwired_shutdown_remote() -> PgResult<()> {
+fn unwired_shutdown_remote(_state: u64) -> PgResult<()> {
     unwired(CommandDest::Remote)
 }
 
@@ -192,6 +220,32 @@ fn lookup(h: DestReceiverHandle) -> Receiver {
     REGISTRY.with(|c| c.borrow().get(h))
 }
 
+/// Register an owner's real receiver vtable into the *one* router registry,
+/// returning the [`DestReceiverHandle`] that names it.
+///
+/// This is the per-owner registration hook (the receiver-value keystone): an
+/// owning translation unit (copyto.c / printtup.c / tstoreReceiver.c / …) builds
+/// its receiver's per-receiver state under its own private key, then calls this
+/// with `mydest`, the callback `vtable`, and that key as the `state` token. The
+/// dispatch seams thread `state` back to the callbacks, so the owner recovers
+/// its state exactly as C does via `(DR_xxx *) self`. The returned handle is the
+/// `DestReceiver *` the rest of the executor carries.
+///
+/// `CreateDestReceiver` serves `DestNone` in-crate and delegates every other
+/// kind to its owner's constructor, which calls this — so all receivers, from
+/// every owner, live in this single registry (no per-owner side registry).
+pub fn register_dest_receiver(
+    mydest: CommandDest,
+    vtable: ReceiverVtable,
+    state: u64,
+) -> DestReceiverHandle {
+    register(Receiver {
+        mydest,
+        vtable,
+        state,
+    })
+}
+
 // ===========================================================================
 // CreateDestReceiver (dest.c) — return the appropriate receiver for `dest`.
 // ===========================================================================
@@ -200,31 +254,38 @@ fn lookup(h: DestReceiverHandle) -> Receiver {
 /// receiver function set for `dest`, parked in the registry and named by the
 /// returned id.
 ///
-/// Only `DestNone` is served with its real (no-op) callbacks here; every other
-/// kind is registered with the honest mirror-and-panic vtable until the
-/// receiver-value keystone routes its owner's callbacks (see the module docs).
-/// C's `pg_unreachable()` tail is unreachable here too — `CommandDest` is a
-/// closed enum, every arm is covered.
+/// `DestNone` is served with its real (no-op) callbacks here. `DestCopyOut`
+/// delegates to copyto's `CreateCopyDestReceiver` through the
+/// `create_copy_dest_receiver` seam, which registers its real vtable into this
+/// same router (mirroring the C switch's `CreateCopyDestReceiver()` call).
+/// Every other kind is registered with the honest mirror-and-panic vtable until
+/// its owner's constructor is likewise routed (see the module docs). C's
+/// `pg_unreachable()` tail is unreachable here too — `CommandDest` is a closed
+/// enum, every arm is covered.
 pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
-    let receiver = match dest {
-        CommandDest::None => DONOTHING_DR,
+    match dest {
+        CommandDest::None => register(DONOTHING_DR),
+
+        // DestCopyOut -> CreateCopyDestReceiver (copyto.c): the owner registers
+        // its real vtable into this router and returns the resulting handle.
+        CommandDest::CopyOut => backend_commands_copyto_seams::create_copy_dest_receiver::call(),
+
         // DestRemote / DestRemoteExecute       -> printtup_create_DR        (printtup.c)
         // DestRemoteSimple                     -> printsimpleDR             (printsimple.c)
         // DestDebug                            -> debugtupDR                (printtup.c)
         // DestSPI                              -> spi_printtupDR            (spi.c)
         // DestTuplestore                       -> CreateTuplestoreDestReceiver  (tstoreReceiver.c)
         // DestIntoRel                          -> CreateIntoRelDestReceiver (createas.c)
-        // DestCopyOut                          -> CreateCopyDestReceiver    (copyto.c)
         // DestSqlFunction                      -> CreateSQLFunctionDestReceiver (functions.c)
         // DestTransientRel                     -> CreateTransientRelDestReceiver (matview.c)
         // DestTupleQueue                       -> CreateTupleQueueDestReceiver  (tqueue.c)
         // DestExplainSerialize                 -> CreateExplainSerializeDestReceiver (explain_dr.c)
-        _ => Receiver {
+        _ => register(Receiver {
             mydest: dest,
             vtable: unwired_vtable(),
-        },
-    };
-    register(receiver)
+            state: 0,
+        }),
+    }
 }
 
 /// `DestReceiver *None_Receiver` (dest.c) — the globally-available receiver for
@@ -240,24 +301,28 @@ pub fn none_receiver() -> DestReceiverHandle {
 // ===========================================================================
 
 /// `dest->rStartup(dest, operation, tupdesc)` — route to the receiver's
-/// `rStartup` callback.
+/// `rStartup` callback, threading its `state` token.
 fn dest_rstartup_impl(
     dest: DestReceiverHandle,
     operation: CmdType,
     tupdesc: &TupleDescData<'_>,
 ) -> PgResult<()> {
-    (lookup(dest).vtable.rStartup)(operation, tupdesc)
+    let r = lookup(dest);
+    (r.vtable.rStartup)(r.state, operation, tupdesc)
 }
 
 /// `dest->receiveSlot(slot, dest)` — route to the receiver's `receiveSlot`
-/// callback.
+/// callback, threading its `state` token.
 fn dest_receive_slot_impl(slot: &SlotData<'_>, dest: DestReceiverHandle) -> PgResult<bool> {
-    (lookup(dest).vtable.receiveSlot)(slot)
+    let r = lookup(dest);
+    (r.vtable.receiveSlot)(r.state, slot)
 }
 
-/// `dest->rShutdown(dest)` — route to the receiver's `rShutdown` callback.
+/// `dest->rShutdown(dest)` — route to the receiver's `rShutdown` callback,
+/// threading its `state` token.
 fn dest_rshutdown_impl(dest: DestReceiverHandle) -> PgResult<()> {
-    (lookup(dest).vtable.rShutdown)()
+    let r = lookup(dest);
+    (r.vtable.rShutdown)(r.state)
 }
 
 /// Install this crate's inward seams. Wired into `seams-init`.

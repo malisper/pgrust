@@ -20,9 +20,12 @@
 //!   `TransactionAbortContext`, per-subxact `CurTransactionContext`) are
 //!   owned by the backend-local state here and created/reset/deleted at the
 //!   same points the C does.
-//! * **`AtEOXact_ComboCid` / `AtEOXact_HashTables` (and sub-xact twins)
-//!   dissolve**: combocid state is an owned `ComboCidState<'mcx>` dropped by
-//!   its owner; dynahash seq-scan tracking does not exist over `PgHashMap`.
+//! * **`AtEOXact_ComboCid`** is called through combocid's
+//!   `at_eoxact_combocid` seam at commit/prepare/abort (mirroring C's
+//!   `xact.c:2473,2767,2991`); the combocid owner resets its own
+//!   backend-local `thread_local!` combo-CID state. **`AtEOXact_HashTables`
+//!   (and the sub-xact twins) dissolve**: dynahash seq-scan tracking does not
+//!   exist over `PgHashMap`.
 //! * Backend-local file statics are `thread_local!` (one backend = one
 //!   thread), never shared statics.
 //! * **Transaction-lifetime collections are std `Vec`/`String`, not
@@ -65,6 +68,7 @@ pub(crate) use backend_utils_cache_inval_seams as inval_seams;
 pub(crate) use backend_utils_cache_relmapper_seams as relmapper_seams;
 pub(crate) use backend_utils_misc_guc_file_seams as guc_seams;
 pub(crate) use backend_utils_misc_guc_seams as guc_core_seams;
+pub(crate) use backend_utils_time_combocid_seams as combocid_seams;
 pub(crate) use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
 mod engine;
