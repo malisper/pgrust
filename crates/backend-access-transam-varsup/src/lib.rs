@@ -812,6 +812,14 @@ pub fn init_seams() {
     seams::get_new_object_id::set(GetNewObjectId);
     seams::stop_generating_pinned_object_ids::set(StopGeneratingPinnedObjectIds);
 
+    // `TransamVariables->xactCompletionCount = 1;` — set once by procarray's
+    // `ProcArrayShmemInit()` on first shared-memory init. `xactCompletionCount`
+    // is a `ProcArrayLock`-protected field of the `TransamVariables` singleton
+    // owned here; procarray reaches it through this owner seam.
+    seams::init_xact_completion_count::set(|| {
+        TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount = 1;
+    });
+
     // `TransamVariables->{oldest,newest}CommitTsXid` (access/transam.h field
     // accessors). commit_ts.c reads/writes these under `CommitTsLock`, which it
     // holds across the call; varsup owns the `TransamVariables` singleton, so
