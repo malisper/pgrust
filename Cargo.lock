@@ -5071,6 +5071,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-geqo-all"
+version = "0.0.0"
+dependencies = [
+ "backend-geqo-all-seams",
+ "pg-prng",
+ "types-core",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-geqo-all-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
@@ -10860,6 +10879,7 @@ dependencies = [
  "backend-executor-nodeValuesscan",
  "backend-executor-tqueue",
  "backend-foreign-foreign",
+ "backend-geqo-all",
  "backend-lib-bloomfilter",
  "backend-lib-dshash",
  "backend-lib-hyperloglog",
@@ -11400,6 +11420,7 @@ name = "types-pathnodes"
 version = "0.0.0"
 dependencies = [
  "types-core",
+ "types-hash",
  "types-nodes",
 ]
 

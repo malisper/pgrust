@@ -105,6 +105,7 @@ pub struct HASHHDR {
 /// `HTAB` (`dynahash.c`) — the per-backend top control struct. In a shared
 /// table each backend has its own copy pointing at the same shared `hctl`/`dir`.
 /// `hash`/`match`/`keycopy`/`alloc` are the C function-pointer slots.
+#[derive(Debug)]
 #[repr(C)]
 pub struct HTAB {
     /// `HASHHDR *hctl` — control information (shared or local).
