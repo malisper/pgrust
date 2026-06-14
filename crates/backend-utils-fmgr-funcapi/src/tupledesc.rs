@@ -25,7 +25,14 @@
 use backend_utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgString};
 use types_core::{Oid, OidIsValid};
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// `extract_variadic_args` collects the raw argument words `pg_getarg_datum` /
+// `deconstruct_array` (fmgr / arrayfuncs seams, both still `types_datum::Datum`)
+// hand back into the `ExtractedVariadicArgs.values` vector — itself a
+// `PgVec<types_datum::Datum>` contract owned by `types-nodes`. funcapi never
+// owns the bytes; the word stays at this audited fmgr-call ABI edge until those
+// owners migrate.
+use types_datum::Datum as ScalarWord;
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
@@ -203,7 +210,7 @@ pub fn extract_variadic_args<'mcx>(
 
     // *args = NULL; *types = NULL; *nulls = NULL; (no-op in the owned model).
 
-    let mut args_res: mcx::PgVec<'mcx, Datum>;
+    let mut args_res: mcx::PgVec<'mcx, ScalarWord>;
     let mut nulls_res: mcx::PgVec<'mcx, bool>;
     let mut types_res: mcx::PgVec<'mcx, Oid>;
 
@@ -279,7 +286,7 @@ pub fn extract_variadic_args<'mcx>(
             // types_res[i] = get_fn_expr_argtype(fcinfo->flinfo, i + variadic_start);
             let mut argtype =
                 backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::call(fcinfo, argnum);
-            let value: Datum;
+            let value: ScalarWord;
 
             // Turn a constant (more or less literal) value that's of unknown
             // type into text if required. Unknowns come in as a cstring
@@ -292,7 +299,7 @@ pub fn extract_variadic_args<'mcx>(
 
                 if backend_utils_fmgr_fmgr_seams::pg_argisnull::call(fcinfo, argnum as usize) {
                     // args_res[i] = (Datum) 0;
-                    value = Datum::null();
+                    value = ScalarWord::null();
                 } else {
                     // args_res[i] = CStringGetTextDatum(PG_GETARG_POINTER(...));
                     // The pointer read is fmgr's; the text construction is the

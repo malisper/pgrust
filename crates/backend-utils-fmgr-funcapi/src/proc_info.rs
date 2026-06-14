@@ -18,7 +18,15 @@
 use mcx::{Mcx, PgString, PgVec};
 use types_core::primitive::AttrNumber;
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
+// The `proargnames` / `proargmodes` / `proallargtypes` parameters are the raw
+// `pg_proc` column words the SQL caller passes in (C: `Datum`), forwarded
+// untouched to the array owner's detoast/project seams (`text_array_datum`,
+// `char_array_datum`, `oid_array_datum` — all still `types_datum::Datum`); the
+// `ScalarWord::null()` checks are the C `PointerGetDatum(NULL)` tests on those raw
+// words. funcapi never owns the bytes, so the word stays at this audited
+// column-input ABI edge until the arrayfuncs seams migrate.
+use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 use types_namespace::{
     CharArrayDatum, FuncArgInfo, FuncProcAttrs, OidArrayDatum, TextArrayDatum,
@@ -211,12 +219,12 @@ pub fn get_func_trftypes<'mcx>(mcx: Mcx<'mcx>, proc_tuple_oid: Oid) -> PgResult<
 /// `None` per unnamed input.
 pub fn get_func_input_arg_names<'mcx>(
     mcx: Mcx<'mcx>,
-    proargnames: Datum,
-    proargmodes: Datum,
+    proargnames: ScalarWord,
+    proargmodes: ScalarWord,
 ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
     /* Do nothing if null proargnames */
     // C: if (proargnames == PointerGetDatum(NULL)) { *arg_names = NULL; return 0; }
-    if proargnames == Datum::null() {
+    if proargnames == ScalarWord::null() {
         return Ok(PgVec::new_in(mcx));
     }
 
@@ -235,7 +243,7 @@ pub fn get_func_input_arg_names<'mcx>(
 
     // C: if (proargmodes != PointerGetDatum(NULL)) { ... argmodes = ARR_DATA_PTR; }
     //    else argmodes = NULL;
-    let argmodes: Option<CharArrayDatum> = if proargmodes != Datum::null() {
+    let argmodes: Option<CharArrayDatum> = if proargmodes != ScalarWord::null() {
         let modes: CharArrayDatum = arrayfuncs::char_array_datum::call(mcx, proargmodes)?;
         if modes.ndim != 1 || modes.dim0 != numargs || modes.hasnull || modes.elemtype != CHAROID {
             return Err(elog_internal(format!(
@@ -409,21 +417,21 @@ pub fn build_function_result_tupdesc_t<'mcx>(
 pub fn build_function_result_tupdesc_d<'mcx>(
     mcx: Mcx<'mcx>,
     prokind: u8,
-    proallargtypes: Datum,
-    proargmodes: Datum,
-    proargnames: Datum,
+    proallargtypes: ScalarWord,
+    proargmodes: ScalarWord,
+    proargnames: ScalarWord,
 ) -> PgResult<TupleDesc<'mcx>> {
     /* Can't have output args if columns are null */
     // C: if (proallargtypes == PointerGetDatum(NULL) ||
     //        proargmodes == PointerGetDatum(NULL)) return NULL;
-    if proallargtypes == Datum::null() || proargmodes == Datum::null() {
+    if proallargtypes == ScalarWord::null() || proargmodes == ScalarWord::null() {
         return Ok(None);
     }
 
     // C: arr = DatumGetArrayTypeP(proallargtypes);  (detoast + project)
     let alltypes: OidArrayDatum = arrayfuncs::oid_array_datum::call(mcx, proallargtypes)?;
     let modes: CharArrayDatum = arrayfuncs::char_array_datum::call(mcx, proargmodes)?;
-    let names: Option<TextArrayDatum> = if proargnames != Datum::null() {
+    let names: Option<TextArrayDatum> = if proargnames != ScalarWord::null() {
         Some(arrayfuncs::text_array_datum::call(mcx, proargnames)?)
     } else {
         None
