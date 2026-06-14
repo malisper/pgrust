@@ -733,6 +733,9 @@ fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32 {
 fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32 {
     with_globals(|g| g.get(pcxt).nworkers_launched)
 }
+fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32 {
+    with_globals(|g| g.get(pcxt).nworkers_to_launch)
+}
 fn pcxt_estimator(pcxt: ParallelContextHandle) -> ShmTocEstimatorHandle {
     // The estimator is part of the context; address it by the same slot.
     ShmTocEstimatorHandle(pcxt.0)
@@ -776,6 +779,20 @@ fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
 }
 fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)
+}
+
+/// Accumulate a finishing parallel worker's local index-scan search count into
+/// its slot of the shared `SharedIndexScanInstrumentation`. Mirrors the
+/// `ExecEndIndex(Only)Scan` parallel-worker path:
+/// `winstrument[ParallelWorkerNumber].nsearches += nsearches`. The slot is
+/// picked here because `ParallelWorkerNumber` is parallel.c's per-backend
+/// global (owned by this crate).
+fn accumulate_shared_index_searches(
+    shared_info: &mut types_nodes::SharedIndexScanInstrumentation,
+    nsearches: u64,
+) {
+    let worker = with_globals(|g| g.parallel_worker_number);
+    shared_info.winstrument[worker as usize].nsearches += nsearches;
 }
 
 // ===========================================================================
@@ -2138,6 +2155,7 @@ pub fn init_seams() {
     use backend_access_transam_parallel_seams as seams;
 
     seams::is_parallel_worker::set(is_parallel_worker);
+    seams::accumulate_shared_index_searches::set(accumulate_shared_index_searches);
     seams::initializing_parallel_worker::set(initializing_parallel_worker);
     seams::handle_parallel_message_interrupt::set(handle_parallel_message_interrupt);
     seams::at_eoxact_parallel::set(at_eoxact_parallel);
@@ -2152,6 +2170,7 @@ pub fn init_seams() {
     seams::destroy_parallel_context::set(destroy_parallel_context);
     seams::pcxt_nworkers::set(pcxt_nworkers);
     seams::pcxt_nworkers_launched::set(pcxt_nworkers_launched);
+    seams::pcxt_nworkers_to_launch::set(pcxt_nworkers_to_launch);
     seams::pcxt_estimator::set(pcxt_estimator);
     seams::pcxt_toc::set(pcxt_toc);
     seams::pwcxt_toc::set(pwcxt_toc);
