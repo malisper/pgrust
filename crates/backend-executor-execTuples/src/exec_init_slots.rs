@@ -23,7 +23,6 @@
 
 use mcx::Mcx;
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
 use types_nodes::executor::{TTS_FLAG_EMPTY, TTS_FLAG_FIXED};
@@ -259,7 +258,7 @@ fn seam_exec_drop_single_tuple_table_slot(slot: TupleTableSlot) -> PgResult<()> 
 fn seam_slot_getsysattr(
     _slot: &TupleTableSlot,
     _attnum: AttrNumber,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     panic!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
 }
 

@@ -29,12 +29,12 @@ use alloc::format;
 
 use mcx::{slice_in, Mcx};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{
     HeapTupleTableSlot, SlotData, TTS_FLAG_SLOW,
 };
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `TupleValue` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum, TupleValue};
 use types_tuple::heaptuple::{CompactAttribute, HeapTupleHeaderGetNatts};
 
 use crate::slot_ops_vtables;
@@ -145,7 +145,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// the scalar from `data[off..]` as a Datum word, sign/zero handling matching
 /// the C `*(intN *)` reads on a little-endian 64-bit build.
 #[inline]
-fn fetch_att_byval(data: &[u8], off: usize, attlen: i16) -> Datum {
+fn fetch_att_byval<'mcx>(data: &[u8], off: usize, attlen: i16) -> TupleValue<'mcx> {
     match attlen {
         1 => Datum::from_usize(data[off] as usize),
         2 => Datum::from_usize(u16::from_ne_bytes([data[off], data[off + 1]]) as usize),
@@ -183,7 +183,7 @@ fn fetchatt<'mcx>(
     off: usize,
 ) -> PgResult<TupleValue<'mcx>> {
     if att.attbyval {
-        Ok(TupleValue::ByVal(fetch_att_byval(data, off, att.attlen)))
+        Ok(fetch_att_byval(data, off, att.attlen))
     } else {
         // C: PointerGetDatum(tp + off). Copy out the exact byte span the field
         // occupies: end == att_addlength_pointer(off, attlen, tp, off), the very
@@ -223,7 +223,7 @@ fn slot_deform_heap_tuple_internal<'mcx>(
         let thisatt = &compact_attrs[attnum as usize];
 
         if hasnulls && att_isnull(attnum as usize, bp) {
-            values[attnum as usize] = TupleValue::ByVal(Datum::null());
+            values[attnum as usize] = Datum::null();
             isnull[attnum as usize] = true;
             if !slow {
                 *slowp = true;
@@ -468,7 +468,7 @@ pub fn slot_getmissingattrs<'mcx>(
         //   memset(tts_values + start, 0, (last - start) * sizeof(Datum));
         //   memset(tts_isnull + start, 1, (last - start) * sizeof(bool));
         for i in start_att_num..last_att_num {
-            base.tts_values[i as usize] = TupleValue::ByVal(Datum::null());
+            base.tts_values[i as usize] = Datum::null();
             base.tts_isnull[i as usize] = true;
         }
     } else {
@@ -578,7 +578,7 @@ pub fn slot_getattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     if attnum > 0 {
         // if (attnum > slot->tts_nvalid)
         //     slot_getsomeattrs(slot, attnum);
