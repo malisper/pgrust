@@ -130,7 +130,6 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
@@ -5816,10 +5815,10 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-tuple",
 ]
 
 [[package]]

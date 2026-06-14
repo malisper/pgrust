@@ -1183,24 +1183,20 @@ fn shutdown_postgres_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult
 
 /// `before_shmem_exit(ShutdownXLOG, 0)` — delegate to xlog.c's exit callback.
 ///
-/// The `before_shmem_exit` seam carries the canonical unified
-/// `types_tuple::Datum<'static>`; the xlog `ShutdownXLOG` seam is still on the
-/// bare-word `types_datum::Datum`, so forward the same machine word across.
+/// Both the `before_shmem_exit` seam and the xlog `ShutdownXLOG` seam now carry
+/// the canonical unified `types_tuple::Datum<'static>`, so the arg forwards
+/// directly.
 fn shutdown_xlog_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
-    backend_access_transam_xlog::ShutdownXLOG(code, types_datum::Datum::from_usize(arg.as_usize()));
+    backend_access_transam_xlog::ShutdownXLOG(code, arg);
     Ok(())
 }
 
 /// `before_shmem_exit(pgstat_before_server_shutdown, 0)` — delegate to pgstat.
 ///
-/// The `before_shmem_exit` seam carries the canonical unified
-/// `types_tuple::Datum<'static>`; the pgstat seam keeps the bare-word
-/// `types_datum::Datum` exit-callback ABI, so forward the same machine word.
+/// Both the `before_shmem_exit` seam and the pgstat seam now carry the canonical
+/// unified `types_tuple::Datum<'static>`, so the arg forwards directly.
 fn pgstat_before_server_shutdown_cb(code: i32, arg: types_tuple::Datum<'static>) -> PgResult<()> {
-    backend_utils_activity_pgstat_seams::pgstat_before_server_shutdown::call(
-        code,
-        types_datum::Datum::from_usize(arg.as_usize()),
-    )
+    backend_utils_activity_pgstat_seams::pgstat_before_server_shutdown::call(code, arg)
 }
 
 // ---------------------------------------------------------------------------

@@ -69,15 +69,6 @@ use backend_access_common_heaptuple::{heap_compute_data_size, heap_fill_tuple};
 use backend_utils_error::ereport;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Size, INDEX_MAX_KEYS};
-// ABI-edge bare scalar word: the `index_form_tuple` seam's `values: &[ScalarWord]`
-// is the C/nbtree call contract (`Datum *values`), an audited external types-nodes
-// ABI edge that stays a plain machine word.  The crate's own model is the
-// canonical `Datum<'mcx>` enum (`types_tuple::backend_access_common_heaptuple`).
-// This bare-word `&[Datum]` ABI variant is the same one the migrated
-// `backend-utils-adt-datum-seams` keeps for `copyParamList` et al — a genuine
-// machine-word array, not a value carrier — so it stays `types_datum::Datum`
-// (the shim) until that whole C-ABI surface is retired in cleanup.
-use types_datum::Datum as ScalarWord;
 use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
@@ -612,24 +603,19 @@ pub fn index_truncate_tuple<'mcx>(
 /// `index_form_tuple(RelationGetDescr(rel), values, isnull)` with
 /// `itup->t_tid = ht_ctid`, returning the formed on-disk bytes.
 ///
-/// The descriptor comes from `rel.rd_att`; the bare `Datum` arrays are bridged
-/// to [`Datum`] via [`tuple_value_from_datum`] (a by-reference column hits
-/// the unresolved slot-payload frontier and panics, mirroring `execTuples`).
+/// The descriptor comes from `rel.rd_att`; the partition-key values now arrive
+/// as the canonical [`Datum`] carrier, so they thread straight into
+/// [`index_form_tuple`].
 pub fn index_form_tuple_seam<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-    values: &[ScalarWord],
+    values: &[Datum<'mcx>],
     isnull: &[bool],
     ht_ctid: ItemPointerData,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let tupdesc = rel.rd_att.as_ref();
-    let natts = tupdesc.natts as usize;
-    let mut tvalues: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
-    for i in 0..natts {
-        tvalues.push(tuple_value_from_datum(tupdesc.compact_attr(i), values[i], isnull[i]));
-    }
 
-    let mut itup = index_form_tuple(mcx, tupdesc, &tvalues, isnull)?;
+    let mut itup = index_form_tuple(mcx, tupdesc, values, isnull)?;
     // itup->t_tid = *ht_ctid;
     itup.header.t_tid = ht_ctid;
     itup.on_disk_image(mcx)
@@ -674,26 +660,6 @@ pub fn init_seams() {
 // ---------------------------------------------------------------------------
 // Bare-word `Datum` <-> canonical `Datum<'mcx>` bridge (the slot-payload frontier)
 // ---------------------------------------------------------------------------
-
-/// Bridge a bare-word `Datum` (`ScalarWord`, + its descriptor entry) to the
-/// owned canonical [`Datum`] value.
-///
-/// A by-value attribute (`attbyval`) or a NULL is `ByVal(datum)`; a
-/// by-reference attribute would need to dereference the `Datum`'s pointer to
-/// copy the on-disk varlena/cstring bytes — which the safe byte model cannot do
-/// from a bare word. That is the unresolved slot-payload frontier (mirrors
-/// `execTuples`), so it panics loudly here.
-fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: ScalarWord, isnull: bool) -> Datum<'mcx> {
-    if isnull || att.attbyval {
-        Datum::ByVal(datum)
-    } else {
-        panic!(
-            "indextuple.c index_form_tuple seam: a by-reference index key Datum needs the \
-             execTuples slot-payload by-reference value carrier to read its on-disk bytes \
-             (not yet landed)"
-        )
-    }
-}
 
 /// Clone a [`Datum`] into `mcx` (its `ByRef` bytes are copied).
 fn clone_tuple_value<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'_>) -> PgResult<Datum<'mcx>> {

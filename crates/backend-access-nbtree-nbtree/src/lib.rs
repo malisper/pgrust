@@ -204,7 +204,7 @@ pub fn btbuildempty(index: &Relation) -> PgResult<()> {
 pub fn btinsert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    values: &[types_datum::Datum],
+    values: &[Datum<'mcx>],
     isnull: &[bool],
     ht_ctid: ItemPointerData,
     heap_rel: &Relation<'mcx>,
