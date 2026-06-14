@@ -18,7 +18,7 @@ use backend_storage_file_fd_seams::{
     CreateEmptyFileOutcome, PgFileStream, RelmapReadOutcome, RelmapWriteOutcome,
 };
 
-use crate::{allocated_desc, sync_cleanup, vfd_core};
+use crate::{allocated_desc, sync_cleanup, vfd_core, vfd_io};
 
 const SRCFILE: &str = "../src/backend/storage/file/fd.c";
 
@@ -602,6 +602,52 @@ pub fn pg_pread(fd: i32, buf: &mut [u8], offset: i64) -> isize {
         -(errno_now() as isize)
     } else {
         r
+    }
+}
+
+/// `pg_pwrite(fd, buf, offset)` — positioned write against a bare kernel fd (a
+/// WAL segment opened via `BasicOpenFile`/`XLogFileInit`). Bytes written
+/// (`>= 0`) or `-errno`. Mirrors the C `pg_pwrite` used by `xlog.c`'s
+/// `XLogWrite` to dump WAL-buffer pages into the segment file.
+pub fn pg_pwrite(fd: i32, buf: &[u8], offset: i64) -> isize {
+    // SAFETY: `fd` is a live bare kernel fd owned by the caller; pwrite(2) from
+    // the caller's buffer at `offset`.
+    let r = unsafe {
+        libc::pwrite(
+            fd,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            offset as libc::off_t,
+        )
+    };
+    if r < 0 {
+        -(errno_now() as isize)
+    } else {
+        r
+    }
+}
+
+/// `pg_pwrite_zeros(fd, size, offset)` (common/file_utils.c) — zero-fill `size`
+/// bytes of a bare kernel fd at `offset`, allocating the file space. Total
+/// bytes written (`>= 0`) or `-errno`. Used by `XLogFileInit` to pre-fill a
+/// fresh WAL segment when `wal_init_zero` is on.
+pub fn pg_pwrite_zeros(fd: i32, size: usize, offset: i64) -> isize {
+    let r = vfd_io::pg_pwrite_zeros(fd, size, offset);
+    if r < 0 {
+        -(errno_now() as isize)
+    } else {
+        r
+    }
+}
+
+/// `BasicOpenFile(path, flags)` — open with arbitrary `open(2)` flags against a
+/// bare kernel fd (the form `xlog.c`'s `XLogFileInit`/`XLogFileOpen` use).
+/// `Ok(fd)` on success; `Err(errno)` carries the errno the caller inspects.
+pub fn basic_open_file_flags(path: &str, flags: i32) -> Result<i32, i32> {
+    match vfd_core::BasicOpenFilePermFd(Path::new(path), flags, vfd_core::pg_file_create_mode()) {
+        Ok(-1) => Err(errno_now()),
+        Ok(fd) => Ok(fd),
+        Err(e) => Err(e.saved_errno().unwrap_or(errno_now())),
     }
 }
 

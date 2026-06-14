@@ -820,6 +820,20 @@ pub fn init_seams() {
         TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount = 1;
     });
 
+    // `TransamVariables->latestCompletedXid` get/set + `xactCompletionCount++` —
+    // the end-of-xact bookkeeping procarray.c's `MaintainLatestCompletedXid*` /
+    // `ProcArray{EndTransactionInternal,Remove,ClearTransaction}` perform under
+    // `ProcArrayLock`. The fields live in the `TransamVariables` singleton owned
+    // here; procarray reaches them through these owner seams (the backing
+    // `Mutex` provides the mutual exclusion the LWLock gives in C).
+    seams::get_latest_completed_xid::set(|| TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid);
+    seams::set_latest_completed_xid::set(|fxid| {
+        TRANSAM_VARIABLES.lock().unwrap().latestCompletedXid = fxid;
+    });
+    seams::increment_xact_completion_count::set(|| {
+        TRANSAM_VARIABLES.lock().unwrap().xactCompletionCount += 1;
+    });
+
     // `TransamVariables->{oldest,newest}CommitTsXid` (access/transam.h field
     // accessors). commit_ts.c reads/writes these under `CommitTsLock`, which it
     // holds across the call; varsup owns the `TransamVariables` singleton, so

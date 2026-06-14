@@ -34,6 +34,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RequestCheckpoint(flags)` (checkpointer.c) — signal the checkpointer to
+    /// start (or, in single-user/bootstrap mode, run inline) a checkpoint with
+    /// the given `CHECKPOINT_*` flag bits. `xlog.c`'s `XLogWrite` calls this with
+    /// `CHECKPOINT_CAUSE_XLOG` when too much WAL has accrued since the last
+    /// checkpoint. Owner unported; scaffolded slot.
+    pub fn request_checkpoint(flags: i32)
+);
+
+seam_core::seam!(
     /// `CheckpointerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.

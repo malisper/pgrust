@@ -278,6 +278,13 @@ pub(crate) fn logwrt_result() -> XLogwrtResult {
     LOGWRT_RESULT.with(Cell::get)
 }
 
+/// Overwrite the backend-local `LogwrtResult` cache (the WAL-write driver
+/// advances `Write`/`Flush` locally as it dumps/fsyncs pages, before publishing
+/// them back into the shared atomics).
+pub(crate) fn set_logwrt_result(v: XLogwrtResult) {
+    LOGWRT_RESULT.with(|c| c.set(v));
+}
+
 /// `RefreshXLogWriteResult(LogwrtResult)` (xlog.c macro) — pull the atomic
 /// write/flush results from shared memory into the backend-local cache.
 ///

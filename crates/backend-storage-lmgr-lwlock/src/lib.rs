@@ -1730,6 +1730,32 @@ fn lwlock_release_proc_array_seam() -> PgResult<()> {
     LWLockRelease(lock)
 }
 
+/// `lwlock_conditional_acquire_proc_array` seam shape:
+/// `LWLockConditionalAcquire(ProcArrayLock, mode)`.
+fn lwlock_conditional_acquire_proc_array_seam(mode: LWLockMode) -> PgResult<bool> {
+    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    LWLockConditionalAcquire(lock, mode)
+}
+
+/// `lwlock_held_by_me_proc_array` seam shape:
+/// `LWLockHeldByMe(ProcArrayLock)`.
+fn lwlock_held_by_me_proc_array_seam() -> bool {
+    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    LWLockHeldByMe(lock)
+}
+
+/// `lwlock_acquire_xid_gen` seam shape: `LWLockAcquire(XidGenLock, mode)`.
+fn lwlock_acquire_xid_gen_seam(mode: LWLockMode) -> PgResult<()> {
+    let lock = main_lock(types_storage::XID_GEN_LOCK);
+    LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `lwlock_release_xid_gen` seam shape: `LWLockRelease(XidGenLock)`.
+fn lwlock_release_xid_gen_seam() -> PgResult<()> {
+    let lock = main_lock(types_storage::XID_GEN_LOCK);
+    LWLockRelease(lock)
+}
+
 /// `lwlock_held_by_me_main` seam shape:
 /// `LWLockHeldByMe(&MainLWLockArray[offset].lock)`.
 fn lwlock_held_by_me_main_seam(offset: usize) -> bool {
@@ -1783,6 +1809,14 @@ pub fn init_seams() {
     backend_storage_lmgr_lwlock_seams::lwlock_release_proc_array::set(
         lwlock_release_proc_array_seam,
     );
+    backend_storage_lmgr_lwlock_seams::lwlock_conditional_acquire_proc_array::set(
+        lwlock_conditional_acquire_proc_array_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_proc_array::set(
+        lwlock_held_by_me_proc_array_seam,
+    );
+    backend_storage_lmgr_lwlock_seams::lwlock_acquire_xid_gen::set(lwlock_acquire_xid_gen_seam);
+    backend_storage_lmgr_lwlock_seams::lwlock_release_xid_gen::set(lwlock_release_xid_gen_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_main::set(lwlock_held_by_me_main_seam);
     backend_storage_lmgr_lwlock_seams::lwlock_held_by_me_in_mode_main::set(
         lwlock_held_by_me_in_mode_main_seam,

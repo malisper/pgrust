@@ -327,6 +327,100 @@ pub(crate) fn status_flags(pgxactoff: i32) -> u8 {
     with_proc_global(|pg| pg.statusFlags[pgxactoff as usize])
 }
 
+// ---- dense ProcGlobal mirror arrays (procarray.c membership) ----
+//
+// `ProcGlobal->{xids,subxidStates,statusFlags}` are owned here; procarray's
+// membership family reads/writes them (under `ProcArrayLock`) through the
+// inward seams, which delegate to these helpers.
+
+/// `ProcGlobal->xids[idx]`.
+pub(crate) fn proc_array_xid(idx: i32) -> TransactionId {
+    with_proc_global(|pg| pg.xids[idx as usize])
+}
+
+/// `ProcGlobal->xids[idx] = xid`.
+pub(crate) fn set_proc_array_xid(idx: i32, xid: TransactionId) {
+    with_proc_global(|pg| pg.xids[idx as usize] = xid);
+}
+
+/// `(ProcGlobal->subxidStates[idx].count, .overflowed)`.
+pub(crate) fn proc_array_subxid_state(idx: i32) -> (i32, bool) {
+    with_proc_global(|pg| {
+        let s = &pg.subxidStates[idx as usize];
+        (s.count as i32, s.overflowed)
+    })
+}
+
+/// `ProcGlobal->subxidStates[idx] = { count, overflowed }`.
+pub(crate) fn set_proc_array_subxid_state(idx: i32, count: i32, overflowed: bool) {
+    with_proc_global(|pg| {
+        let s = &mut pg.subxidStates[idx as usize];
+        s.count = count as u8;
+        s.overflowed = overflowed;
+    });
+}
+
+/// `ProcGlobal->statusFlags[idx] = flags`.
+pub(crate) fn set_proc_array_status_flags(idx: i32, flags: u8) {
+    with_proc_global(|pg| pg.statusFlags[idx as usize] = flags);
+}
+
+/// `memmove(&ProcGlobal->xids[dst], &ProcGlobal->xids[src], count * sizeof)`.
+pub(crate) fn proc_array_xids_memmove(dst: i32, src: i32, count: i32) {
+    with_proc_global(|pg| {
+        pg.xids
+            .copy_within(src as usize..(src + count) as usize, dst as usize)
+    });
+}
+
+/// `memmove(&ProcGlobal->subxidStates[dst], ..[src], count * sizeof)`.
+pub(crate) fn proc_array_subxid_states_memmove(dst: i32, src: i32, count: i32) {
+    with_proc_global(|pg| {
+        pg.subxidStates
+            .copy_within(src as usize..(src + count) as usize, dst as usize)
+    });
+}
+
+/// `memmove(&ProcGlobal->statusFlags[dst], ..[src], count * sizeof)`.
+pub(crate) fn proc_array_status_flags_memmove(dst: i32, src: i32, count: i32) {
+    with_proc_global(|pg| {
+        pg.statusFlags
+            .copy_within(src as usize..(src + count) as usize, dst as usize)
+    });
+}
+
+// ---- ProcGlobal->procArrayGroupFirst atomic (procarray.c group-clear) ----
+
+/// `pg_atomic_read_u32(&ProcGlobal->procArrayGroupFirst)`.
+pub(crate) fn proc_array_group_first_read() -> u32 {
+    with_proc_global(|pg| pg.procArrayGroupFirst.read())
+}
+
+/// `pg_atomic_compare_exchange_u32(&ProcGlobal->procArrayGroupFirst, expected,
+/// newval)` — returns `(succeeded, value_seen)`.
+pub(crate) fn proc_array_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32) {
+    with_proc_global(|pg| {
+        match pg.procArrayGroupFirst.value.compare_exchange(
+            expected,
+            newval,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(prev) => (true, prev),
+            Err(seen) => (false, seen),
+        }
+    })
+}
+
+/// `pg_atomic_exchange_u32(&ProcGlobal->procArrayGroupFirst, newval)`.
+pub(crate) fn proc_array_group_first_exchange(newval: u32) -> u32 {
+    with_proc_global(|pg| {
+        pg.procArrayGroupFirst
+            .value
+            .swap(newval, core::sync::atomic::Ordering::SeqCst)
+    })
+}
+
 // ---- AuxiliaryProcs (= &allProcs[MaxBackends..][..NUM_AUXILIARY_PROCS]) ----
 
 /// `GetNumberFromPGProc(&AuxiliaryProcs[proctype])` — the absolute slot number
