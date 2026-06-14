@@ -30,11 +30,12 @@ use types_core::primitive::{AttrNumber, Index, Oid};
 use types_core::catalog::BOOLOID;
 use types_core::InvalidOid;
 // Datum-unification: the owned `Const` carries the canonical unified value type
-// [`Datum`] (`ByVal`/`ByRef`). [`ScalarWord`] is the canonical `ByVal` arm's
-// payload — the bare machine word the caller already holds — and is the
-// transitional input form of the `makeConst` seam contract; `make_const` wraps
-// the incoming word into the by-value arm (mirroring how `types_tuple` itself
-// aliases `types_datum::Datum as ScalarWord` for the `ByVal` payload).
+// [`Datum`] (`ByVal`/`ByRef`), and `make_const`/`make_const_node_seam` thread it
+// end-to-end. The only residual use of the bare-word [`ScalarWord`] (the canonical
+// `ByVal` arm's payload, `types_datum::Datum`) is the sanctioned varlena-pointer
+// edge in `pg_detoast_datum`: a varlena `Datum` is a bare pointer into a varlena
+// image, and the `detoast_attr` seam returns the fetched bytes through a leaked
+// pointer word (the audited bare-word ABI edge), not a `ByRef` slice.
 use types_datum::Datum as ScalarWord;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
@@ -99,25 +100,47 @@ pub fn make_const<'mcx>(
     consttypmod: i32,
     constcollid: Oid,
     constlen: i32,
-    mut constvalue: ScalarWord,
+    mut constvalue: Datum<'mcx>,
     constisnull: bool,
     _constbyval: bool,
 ) -> PgResult<Const> {
     // if (!constisnull && constlen == -1)
     //     constvalue = PointerGetDatum(PG_DETOAST_DATUM(constvalue));
+    //
+    // The varlena `PG_DETOAST_DATUM` leg operates on the bare pointer word the
+    // value's `ByVal` arm wraps (the sanctioned bare-word edge: a varlena Datum
+    // is a pointer into a varlena image). A by-reference value here is the
+    // execTuples canonical-carrier follow-on (#113): the detoast owner's seam
+    // still takes a byte slice, so a `ByRef` image would already be the flat
+    // bytes — no fetch/decompress would be needed (it cannot be external/
+    // compressed). We therefore detoast only the by-value (pointer-word) form.
     if !constisnull && constlen == -1 {
-        constvalue = pg_detoast_datum(mcx, constvalue)?;
+        if let Datum::ByVal(word) = constvalue {
+            constvalue = Datum::ByVal(pg_detoast_datum(mcx, word)?);
+        }
     }
+
+    // The trimmed `Const.constvalue` field is typed `Datum<'static>` (the node
+    // carries no lifetime parameter), so only the lifetime-free by-value arm
+    // can be stored. The by-value word IS the canonical `ByVal` payload (a bare
+    // machine word, or — for a varlena — a pointer into a varlena image that
+    // outlives `mcx`), exactly C's `Const.constvalue` Datum. A by-reference
+    // value would require a lifetime-carrying `Const`: the execTuples
+    // canonical-carrier follow-on (#113). We record that edge rather than forge
+    // a pointer across the lifetime boundary.
+    let constvalue: Datum<'static> = match constvalue {
+        Datum::ByVal(word) => Datum::ByVal(word),
+        Datum::ByRef(_) => panic!(
+            "make_const: by-reference Const value requires a lifetime-carrying \
+             Const carrier (execTuples canonical-carrier follow-on, #113)"
+        ),
+    };
 
     Ok(Const {
         consttype,
         consttypmod,
         constcollid,
-        // The (possibly detoasted) machine word crosses into the canonical
-        // value's by-value arm. (Transitional: by-reference varlena images are
-        // carried as a forged pointer-word under the same arm until the cleanup
-        // phase moves them to `ByRef` bytes.)
-        constvalue: Datum::ByVal(constvalue),
+        constvalue,
         constisnull,
     })
 }
@@ -594,22 +617,16 @@ pub fn make_const_node_seam<'mcx>(
     constisnull: bool,
     constbyval: bool,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    // The seam carries the canonical unified value; `make_const` builds the
-    // `Const` from the bare scalar word it wraps (a by-value scalar, mirroring
-    // C's `Const.constvalue` Datum word).
-    let constvalue_word = match constvalue {
-        Datum::ByVal(w) => w,
-        Datum::ByRef(_) => {
-            panic!("make_const_node: by-reference Datum requires a pass-by-reference path")
-        }
-    };
+    // The seam carries the canonical unified value, threaded straight into
+    // `make_const` (which mirrors C's `Const.constvalue` Datum word for the
+    // by-value arm and the by-reference image for `ByRef`).
     let c = make_const(
         mcx,
         consttype,
         consttypmod,
         constcollid,
         constlen,
-        constvalue_word,
+        constvalue,
         constisnull,
         constbyval,
     )?;
