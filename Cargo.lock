@@ -513,6 +513,7 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-storage-page",
  "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-scalar-datum-core",
  "backend-utils-cache-inval",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-spccache",

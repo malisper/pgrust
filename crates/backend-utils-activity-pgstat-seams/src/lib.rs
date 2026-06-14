@@ -58,6 +58,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_heap_update(rel, hot, newpage)` (pgstat_relation.c): bump
+    /// the relation's pending `tuples_updated` counter (and the `tuples_hot_updated`
+    /// / `tuples_newpage_updated` sub-counters per the `hot` / `newpage` flags),
+    /// only when `rel->pgstat_info` is set. Keyed by the relation OID; the
+    /// per-relation pending stats live in pgstat; the function never errors.
+    pub fn pgstat_count_heap_update(relid: types_core::primitive::Oid, hot: bool, newpage: bool)
+);
+
+seam_core::seam!(
     /// `pgstat_update_heap_dead_tuples(rel, delta)` (pgstat_relation.c): add
     /// `delta` to the relation's pending dead-tuple counter (on-access pruning
     /// reports tuples it reclaimed this way). Keyed by the relation OID;

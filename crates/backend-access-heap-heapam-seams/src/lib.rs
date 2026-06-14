@@ -19,7 +19,10 @@ use types_snapshot::SnapshotData;
 use types_storage::Buffer;
 use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
 use types_core::xact::CommandId;
-use types_tableam::tableam::{LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result};
+use types_tableam::tableam::{
+    LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
+};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_xlog_records::multixact::MultiXactStatus;
 use types_storage::lock::XLTW_Oper;
 
@@ -339,6 +342,61 @@ seam_core::seam!(
         tid: ItemPointerData,
         oper: XLTW_Oper,
     ) -> PgResult<()>
+);
+
+/// The result of [`heap_update`] — C's `TM_Result` return plus the two
+/// by-pointer outputs `*lockmode` (the tuple-lock mode the update acquired) and
+/// `*update_indexes` (which index updates the caller must perform).
+#[derive(Clone, Copy, Debug)]
+pub struct HeapUpdateResult {
+    /// C's `TM_Result` return value.
+    pub result: TM_Result,
+    /// C's `*lockmode` output — always set (even on a non-`TM_Ok` outcome the
+    /// caller may read it; C writes it before the `l2:` block).
+    pub lockmode: LockTupleMode,
+    /// C's `*update_indexes` output.
+    pub update_indexes: TU_UpdateIndexes,
+}
+
+seam_core::seam!(
+    /// `heap_update(relation, otid, newtup, cid, crosscheck, wait, tmfd,
+    /// lockmode, update_indexes)` (heapam.c) — replace the tuple addressed by
+    /// `otid` with `newtup`. Determines the modified columns (to pick a HOT vs.
+    /// non-HOT update and the lock strength), stamps the old tuple's
+    /// xmax/cmax/infomask and chains its `t_ctid` to the new tuple, inserts the
+    /// (possibly toasted) new tuple on the same or a fresh page, emits the
+    /// `XLOG_HEAP_UPDATE` / `XLOG_HEAP_HOT_UPDATE` WAL record (with old/new
+    /// tuple images and prefix/suffix compression), clears the visibility-map
+    /// bits, and logs the replica-identity old key for a logically-decoded rel.
+    /// `newtup`'s header is stamped in place and `newtup.tuple.t_self` receives
+    /// the stored TID. `crosscheck` is the optional transaction-snapshot RI
+    /// snapshot (`None` == `InvalidSnapshot`). On a non-`TM_Ok` outcome `tmfd`
+    /// is filled (ctid/xmax/cmax). `Err` carries the update `ereport(ERROR)`
+    /// surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_update<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        otid: ItemPointerData,
+        newtup: &mut FormedTuple<'mcx>,
+        cid: CommandId,
+        crosscheck: Option<&SnapshotData>,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+    ) -> PgResult<HeapUpdateResult>
+);
+
+seam_core::seam!(
+    /// `simple_heap_update(relation, otid, tup, update_indexes)` (heapam.c) —
+    /// replace the tuple at `otid` with `tup` when no concurrent update is
+    /// expected, reporting any non-`TM_Ok` outcome via `ereport(ERROR)`. Returns
+    /// C's `*update_indexes` output. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn simple_heap_update<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        otid: ItemPointerData,
+        tup: &mut FormedTuple<'mcx>,
+    ) -> PgResult<TU_UpdateIndexes>
 );
 
 seam_core::seam!(

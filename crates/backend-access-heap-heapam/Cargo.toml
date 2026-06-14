@@ -57,6 +57,9 @@ backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 types-nodes = { path = "../types-nodes" }
 types-datum = { path = "../types-datum" }
+# F3 UPDATE: per-attribute binary equality (datumIsEqual) for
+# HeapDetermineColumnsInfo.
+backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
 # F4 LOCK + SPECULATIVE + INPLACE: lmgr tuple/xact-wait seams, the lock-method
 # conflict table, the log_lock_failures GUC, snapshot invalidation, the
 # bootstrap-mode probe, and the snapmgr-pc TransactionXmin accessor.

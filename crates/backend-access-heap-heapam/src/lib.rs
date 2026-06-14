@@ -34,6 +34,7 @@ pub mod index_delete;
 pub mod inplace;
 pub mod insert;
 pub mod lock;
+pub mod update;
 
 use mcx::Mcx;
 use types_core::primitive::{
@@ -478,6 +479,14 @@ pub fn init_seams() {
     );
     heapam_seam::simple_heap_delete::set(|mcx, rel, tid| {
         delete::simple_heap_delete(mcx, rel, tid)
+    });
+
+    // F3 UPDATE — the cross-family heap-update entry points.
+    heapam_seam::heap_update::set(|mcx, rel, otid, newtup, cid, crosscheck, wait, tmfd| {
+        update::heap_update(mcx, rel, otid, newtup, cid, crosscheck, wait, tmfd)
+    });
+    heapam_seam::simple_heap_update::set(|mcx, rel, otid, tup| {
+        update::simple_heap_update(mcx, rel, otid, tup)
     });
     // NB: the `insert_one_tuple` seam (bootstrap.c `InsertOneTuple` batch) stays
     // uninstalled here, exactly as F0 left it: forming the tuple requires
