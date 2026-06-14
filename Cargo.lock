@@ -4240,6 +4240,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeSubqueryscan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "mcx",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeTableFuncscan"
 version = "0.0.0"
 dependencies = [
@@ -4321,22 +4337,6 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-error",
- "types-nodes",
-]
-
-[[package]]
-name = "backend-executor-nodeUnique"
-version = "0.0.0"
-dependencies = [
- "backend-executor-execAmi-seams",
- "backend-executor-execExpr-seams",
- "backend-executor-execGrouping-seams",
- "backend-executor-execProcnode-seams",
- "backend-executor-execTuples-seams",
- "backend-executor-execUtils-seams",
- "backend-tcop-postgres-seams",
- "mcx",
  "types-error",
  "types-nodes",
 ]
@@ -9976,7 +9976,7 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
- "backend-executor-nodeUnique",
+ "backend-executor-nodeSubqueryscan",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",

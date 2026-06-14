@@ -46,6 +46,7 @@ pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
 pub const T_ForeignScan: NodeTag = NodeTag(354);
+pub const T_SubqueryScan: NodeTag = NodeTag(347);
 pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
@@ -163,6 +164,8 @@ pub enum Node<'mcx> {
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
     /// `T_SeqScan`.
     SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
+    /// `T_SubqueryScan`.
+    SubqueryScan(crate::nodeindexscan::SubqueryScan<'mcx>),
     /// `T_ForeignScan`.
     ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
     /// An expression node (`Const`, `BoolExpr`, `Var`, …) carried as a `Node`.
@@ -201,6 +204,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
             Node::SeqScan(_) => T_SeqScan,
+            Node::SubqueryScan(_) => T_SubqueryScan,
             Node::ForeignScan(_) => T_ForeignScan,
             Node::Expr(e) => expr_tag(e),
         }
@@ -227,6 +231,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
             Node::SeqScan(s) => &s.scan.plan,
+            Node::SubqueryScan(s) => &s.scan.plan,
             Node::ForeignScan(f) => &f.scan.plan,
             // An expression node has no embedded `Plan` (C: `((Plan *) expr)`
             // would be a type error — `plan_head` is only called on plan nodes).
@@ -263,6 +268,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
+            Node::SubqueryScan(s) => Ok(Node::SubqueryScan(s.clone_in(mcx)?)),
             Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
             // The `Expr` subtree is lifetime-free (owned `Box`/`Vec`), so a
             // plain clone reproduces it; `copyObject` over an expression node.

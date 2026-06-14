@@ -65,7 +65,8 @@ pub use execnodes::{
     ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, JunkFilter, Opaque,
     ParamExecData,
     PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
-    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, SubqueryScanState,
+    T_MaterialState,
 };
 pub use primnodes::CurrentOfExpr;
 pub use modifytable::{
@@ -122,6 +123,7 @@ pub use nodesort::{
 };
 pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
+pub use nodeindexscan::{SubqueryScan, SubqueryScanStatus};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use tuptable::{

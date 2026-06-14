@@ -511,6 +511,25 @@ pub struct ScanStateData<'mcx> {
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
 
+/// `SubqueryScanState` (execnodes.h):
+///
+/// ```c
+/// typedef struct SubqueryScanState {
+///     ScanState   ss;             /* its first field is NodeTag */
+///     PlanState  *subplan;
+/// } SubqueryScanState;
+/// ```
+#[derive(Debug, Default)]
+pub struct SubqueryScanState<'mcx> {
+    /// `ScanState ss` — its first field is `NodeTag`.
+    pub ss: ScanStateData<'mcx>,
+    /// `PlanState *subplan` — the sub-query's `PlanState`. The SubqueryScan
+    /// node's single child link, carried as the owned whole-node
+    /// [`crate::planstate::PlanStateNode`] so the executor can recurse into it
+    /// (`ExecProcNode`/`ExecEndNode`/`ExecReScan`) through the central dispatch.
+    pub subplan: Option<PgBox<'mcx, crate::planstate::PlanStateNode<'mcx>>>,
+}
+
 // `ModifyTableState` (execnodes.h) is the full owned struct defined in
 // `crate::modifytable` (landed with the `nodeModifyTable.c` port) and
 // re-exported at `types_nodes::ModifyTableState`. execPartition's tuple-routing
