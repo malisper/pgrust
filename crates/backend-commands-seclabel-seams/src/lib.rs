@@ -21,18 +21,19 @@
 use mcx::Mcx;
 use seam_core::seam;
 use types_core::primitive::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
 use types_rel::Relation;
 use types_storage::lock::LOCKMODE;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
 
 /// The `label` column of a matched `pg_seclabel` / `pg_shseclabel` tuple:
 /// `heap_getattr(tuple, Anum_*_label, ..., &isnull)`. `value` is meaningful
 /// only when `!isnull` (C reads `seclabel = TextDatumGetCString(datum)` only
-/// in the `!isnull` branch).
-pub struct SecLabelColumn {
-    pub value: Datum,
+/// in the `!isnull` branch). The canonical [`Datum<'mcx>`] rides its by-value
+/// arm for a scalar word and its by-reference arm for a detoasted `text` image.
+pub struct SecLabelColumn<'mcx> {
+    pub value: Datum<'mcx>,
     pub isnull: bool,
 }
 
@@ -49,13 +50,13 @@ seam!(
 seam!(
     /// `CStringGetTextDatum(s)` (builtins.h) — pack a C string into a `text`
     /// Datum (a varlena palloc in `mcx`).
-    pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum>
+    pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
 );
 
 seam!(
     /// `TextDatumGetCString(datum)` (builtins.h) — detoast a `text` Datum back
     /// to an owned string.
-    pub fn text_datum_get_cstring(value: Datum) -> PgResult<String>
+    pub fn text_datum_get_cstring<'mcx>(value: Datum<'mcx>) -> PgResult<String>
 );
 
 /* --- pg_seclabel catalog primitives (access/table.h, catalog/indexing.h) --- */
@@ -75,7 +76,7 @@ seam!(
         classoid: Oid,
         objsubid: i32,
         provider: &str,
-    ) -> PgResult<Option<SecLabelColumn>>
+    ) -> PgResult<Option<SecLabelColumn<'mcx>>>
 );
 
 seam!(
@@ -102,7 +103,7 @@ seam!(
     pub fn seclabel_update<'mcx>(
         pg_seclabel: &Relation<'mcx>,
         tuple: ItemPointerData,
-        values: &[Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
         replaces: &[bool],
     ) -> PgResult<()>
@@ -113,7 +114,7 @@ seam!(
     /// fresh pg_seclabel tuple from the in-crate `values`/`nulls` arrays.
     pub fn seclabel_insert<'mcx>(
         pg_seclabel: &Relation<'mcx>,
-        values: &[Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
     ) -> PgResult<()>
 );
@@ -146,7 +147,7 @@ seam!(
         objoid: Oid,
         classoid: Oid,
         provider: &str,
-    ) -> PgResult<Option<SecLabelColumn>>
+    ) -> PgResult<Option<SecLabelColumn<'mcx>>>
 );
 
 seam!(
@@ -176,7 +177,7 @@ seam!(
     pub fn shseclabel_update<'mcx>(
         pg_shseclabel: &Relation<'mcx>,
         tuple: ItemPointerData,
-        values: &[Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
         replaces: &[bool],
     ) -> PgResult<()>
@@ -187,7 +188,7 @@ seam!(
     /// pg_shseclabel.
     pub fn shseclabel_insert<'mcx>(
         pg_shseclabel: &Relation<'mcx>,
-        values: &[Datum],
+        values: &[Datum<'mcx>],
         nulls: &[bool],
     ) -> PgResult<()>
 );
