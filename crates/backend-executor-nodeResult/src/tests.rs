@@ -174,7 +174,7 @@ fn mock_init_qual<'mcx>(
 
 /// `ExecQual`: return the thread-local verdict (the constant qual gate).
 fn mock_qual<'mcx>(
-    _state: &types_nodes::execexpr::ExprState,
+    _state: &mut types_nodes::execexpr::ExprState<'mcx>,
     _econtext: types_nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
