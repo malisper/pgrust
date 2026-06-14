@@ -622,8 +622,21 @@ fn build_index_value_desc<'b, 'mcx>(
     let (values, isnull) =
         catalog_index_seams::form_index_datum::call(&index_info, tableslot, estate)?;
 
-    let index_value =
-        genam_seams::build_index_value_description::call(mcx, &index_desc, &values, &isnull)?;
+    // `form_index_datum` yields the bare scalar words (the AM's raw index input
+    // Datums); `build_index_value_description` now takes the canonical unified
+    // value (the Datum-unification keystone flipped its edge) — carry each word
+    // in the by-value arm.
+    let values_canon: Vec<types_tuple::backend_access_common_heaptuple::Datum> = values
+        .iter()
+        .map(|d| types_tuple::backend_access_common_heaptuple::Datum::ByVal(*d))
+        .collect();
+
+    let index_value = genam_seams::build_index_value_description::call(
+        mcx,
+        &index_desc,
+        &values_canon,
+        &isnull,
+    )?;
 
     // index_close(indexDesc, NoLock); an error above drops the handle (the
     // C abort path releases the relcache reference via the resource owner).

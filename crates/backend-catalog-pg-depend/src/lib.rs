@@ -38,10 +38,10 @@ use types_catalog::catalog_dependency::{
 };
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-// The scan-key `sk_argument` is an external ABI struct-field edge
-// (`ScanKeyData::sk_argument` is still the bare-word `types_datum::Datum`), so
-// scan-key construction carries a plain word there.
-use types_datum::datum::Datum as ScanKeyWord;
+// `ScanKeyData::sk_argument` is the canonical unified `Datum<'mcx>` (the
+// Datum-unification keystone flipped this edge), so scan-key construction
+// carries the canonical value there.
+use types_tuple::backend_access_common_heaptuple::Datum as ScanKeyWord;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,

@@ -545,7 +545,8 @@ pub fn pg_get_shmem_allocations(
 
     let shmem_seg_hdr = SHMEM_SEG_HDR.get();
     let mut named_allocated: Size = 0;
-    let mut values = [types_datum::Datum::null(); PG_GET_SHMEM_SIZES_COLS];
+    let mut values: [types_tuple::Datum; PG_GET_SHMEM_SIZES_COLS] =
+        core::array::from_fn(|_| types_tuple::Datum::null());
     let mut nulls = [false; PG_GET_SHMEM_SIZES_COLS];
 
     // output all allocated entries
@@ -557,10 +558,12 @@ pub fn pg_get_shmem_allocations(
         // SAFETY: `ent` is a live entry in the shared index, held stable by
         // ShmemIndexLock (entries are never freed; shmem is never returned).
         let ent = unsafe { &*ent };
-        values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[1] = types_datum::Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
-        values[2] = types_datum::Datum::from_i64(ent.size as i64);
-        values[3] = types_datum::Datum::from_i64(ent.allocated_size as i64);
+        values[0] = types_tuple::Datum::ByVal(
+            backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?,
+        );
+        values[1] = types_tuple::Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
+        values[2] = types_tuple::Datum::from_i64(ent.size as i64);
+        values[3] = types_tuple::Datum::from_i64(ent.allocated_size as i64);
         named_allocated += ent.allocated_size;
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
@@ -571,18 +574,20 @@ pub fn pg_get_shmem_allocations(
     let (freeoffset, totalsize) = unsafe { ((*shmem_seg_hdr).freeoffset, (*shmem_seg_hdr).totalsize) };
 
     // output shared memory allocated but not counted via the shmem index
-    values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, "<anonymous>")?;
+    values[0] = types_tuple::Datum::ByVal(
+        backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, "<anonymous>")?,
+    );
     nulls[1] = true;
-    values[2] = types_datum::Datum::from_i64((freeoffset - named_allocated) as i64);
-    values[3] = values[2];
+    values[2] = types_tuple::Datum::from_i64((freeoffset - named_allocated) as i64);
+    values[3] = values[2].clone();
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     // output as-of-yet unused shared memory
     nulls[0] = true;
-    values[1] = types_datum::Datum::from_i64(freeoffset as i64);
+    values[1] = types_tuple::Datum::from_i64(freeoffset as i64);
     nulls[1] = false;
-    values[2] = types_datum::Datum::from_i64((totalsize - freeoffset) as i64);
-    values[3] = values[2];
+    values[2] = types_tuple::Datum::from_i64((totalsize - freeoffset) as i64);
+    values[3] = values[2].clone();
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     guard.release()?;
@@ -667,7 +672,8 @@ pub fn pg_get_shmem_allocations_numa(
     let mut hstat = HASH_SEQ_STATUS::new();
     dynahash::hash_seq_init::call(&mut hstat, SHMEM_INDEX.get());
 
-    let mut values = [types_datum::Datum::null(); PG_GET_SHMEM_NUMA_SIZES_COLS];
+    let mut values: [types_tuple::Datum; PG_GET_SHMEM_NUMA_SIZES_COLS] =
+        core::array::from_fn(|_| types_tuple::Datum::null());
 
     // output all allocated entries
     loop {
@@ -753,20 +759,22 @@ pub fn pg_get_shmem_allocations_numa(
         // Add one entry for each NUMA node, including those without
         // allocated memory for this segment.
         for i in 0..=max_nodes {
-            values[0] =
-                backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
+            values[0] = types_tuple::Datum::ByVal(
+                backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?,
+            );
             // C: values[1] = i (a raw int assigned into the Datum word).
-            values[1] = types_datum::Datum::from_i64(i as i64);
-            values[2] = types_datum::Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
+            values[1] = types_tuple::Datum::from_i64(i as i64);
+            values[2] = types_tuple::Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
 
             materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
         }
 
         // The last entry is used for pages without a NUMA node.
         nulls[1] = true;
-        values[0] =
-            backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[2] = types_datum::Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
+        values[0] = types_tuple::Datum::ByVal(
+            backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?,
+        );
+        values[2] = types_tuple::Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }

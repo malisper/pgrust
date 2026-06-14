@@ -314,7 +314,12 @@ pub fn extract_variadic_args<'mcx>(
                         fcinfo,
                         argnum as usize,
                     );
-                    value = backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::call(mcx, s)?;
+                    // The seam now yields the canonical value; take its scalar
+                    // word (the `text *` pointer) to mirror the C `Datum`.
+                    value = ScalarWord::from_usize(
+                        backend_utils_fmgr_funcapi_seams::cstring_get_text_datum::call(mcx, s)?
+                            .as_usize(),
+                    );
                 }
             } else {
                 // no conversion needed, just take the datum as given

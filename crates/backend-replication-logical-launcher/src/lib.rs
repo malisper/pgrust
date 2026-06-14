@@ -1373,9 +1373,9 @@ pub fn GetLeaderApplyWorkerPid(pid: i32) -> PgResult<i32> {
 /// `pg_stat_get_subscription(PG_FUNCTION_ARGS)` (launcher.c). Returns the state
 /// of the subscriptions. `mcx` is the call's memory context (for the text
 /// column and the materialized tuplestore the funcapi seam fills).
-pub fn pg_stat_get_subscription(
-    mcx: mcx::Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
+pub fn pg_stat_get_subscription<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<types_datum::Datum> {
     // Oid subid = PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
     let subid: Oid = funcapi::srf_arg0_oid::call(fcinfo).unwrap_or(InvalidOid);
@@ -1405,24 +1405,27 @@ pub fn pg_stat_get_subscription(
             continue;
         }
 
-        let mut values: [types_datum::Datum; PG_STAT_GET_SUBSCRIPTION_COLS] =
-            [types_datum::Datum::from_usize(0); PG_STAT_GET_SUBSCRIPTION_COLS];
+        // `materialized_srf_putvalues` takes the canonical unified value; build
+        // the row as `types_tuple::Datum` (the scalar columns are by-value words,
+        // the text column is wrapped from the varlena owner's bare word below).
+        let mut values: [types_tuple::Datum<'mcx>; PG_STAT_GET_SUBSCRIPTION_COLS] =
+            core::array::from_fn(|_| types_tuple::Datum::from_usize(0));
         let mut nulls: [bool; PG_STAT_GET_SUBSCRIPTION_COLS] =
             [false; PG_STAT_GET_SUBSCRIPTION_COLS];
 
         // Column 0: subid.
-        values[0] = types_datum::Datum::from_oid(w.subid);
+        values[0] = types_tuple::Datum::from_oid(w.subid);
         // Column 1: relid (only for tablesync workers, else null).
         if w.is_tablesync_worker() {
-            values[1] = types_datum::Datum::from_oid(w.relid);
+            values[1] = types_tuple::Datum::from_oid(w.relid);
         } else {
             nulls[1] = true;
         }
         // Column 2: worker pid (always present).
-        values[2] = types_datum::Datum::from_i32(worker_pid);
+        values[2] = types_tuple::Datum::from_i32(worker_pid);
         // Column 3: leader_pid (only for parallel apply workers, else null).
         if w.is_parallel_apply_worker() {
-            values[3] = types_datum::Datum::from_i32(w.leader_pid);
+            values[3] = types_tuple::Datum::from_i32(w.leader_pid);
         } else {
             nulls[3] = true;
         }
@@ -1430,31 +1433,31 @@ pub fn pg_stat_get_subscription(
         if XLogRecPtrIsInvalid(w.last_lsn) {
             nulls[4] = true;
         } else {
-            values[4] = types_datum::Datum::from_u64(w.last_lsn);
+            values[4] = types_tuple::Datum::from_u64(w.last_lsn);
         }
         // Column 5: last_send_time (null if 0).
         if w.last_send_time == 0 {
             nulls[5] = true;
         } else {
-            values[5] = types_datum::Datum::from_i64(w.last_send_time);
+            values[5] = types_tuple::Datum::from_i64(w.last_send_time);
         }
         // Column 6: last_recv_time (null if 0).
         if w.last_recv_time == 0 {
             nulls[6] = true;
         } else {
-            values[6] = types_datum::Datum::from_i64(w.last_recv_time);
+            values[6] = types_tuple::Datum::from_i64(w.last_recv_time);
         }
         // Column 7: reply_lsn (null if invalid).
         if XLogRecPtrIsInvalid(w.reply_lsn) {
             nulls[7] = true;
         } else {
-            values[7] = types_datum::Datum::from_u64(w.reply_lsn);
+            values[7] = types_tuple::Datum::from_u64(w.reply_lsn);
         }
         // Column 8: reply_time (null if 0).
         if w.reply_time == 0 {
             nulls[8] = true;
         } else {
-            values[8] = types_datum::Datum::from_i64(w.reply_time);
+            values[8] = types_tuple::Datum::from_i64(w.reply_time);
         }
         // Column 9: worker type text.
         let worker_type = match w.wtype {

@@ -525,9 +525,9 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
 /// The tuplestore materialization crosses the funcapi seams (funcapi owns
 /// `InitMaterializedSRF` and the `setResult`/`setDesc` resolution); `mcx` is
 /// the per-query context the C function's `CStringGetTextDatum` pallocs in.
-pub fn pg_get_wal_resource_managers(
-    mcx: Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
+pub fn pg_get_wal_resource_managers<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum> {
     const PG_GET_RESOURCE_MANAGERS_COLS: usize = 3;
 
@@ -548,13 +548,17 @@ pub fn pg_get_wal_resource_managers(
             .rm_name
             .expect("RmgrIdExists guarantees rm_name");
         // Datum values[3]; bool nulls[3] = {0};  (stack arrays in C)
-        let values: [Datum; PG_GET_RESOURCE_MANAGERS_COLS] = [
+        // `materialized_srf_putvalues` now takes the canonical unified value
+        // (the Datum-unification keystone flipped this edge); the varlena owner
+        // still hands back the bare word, carried in the by-value arm.
+        use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+        let values: [DatumV<'mcx>; PG_GET_RESOURCE_MANAGERS_COLS] = [
             // values[0] = Int32GetDatum(rmid)
-            Datum::from_i32(rmid as i32),
+            DatumV::from_i32(rmid as i32),
             // values[1] = CStringGetTextDatum(GetRmgr(rmid).rm_name)
-            varlena::cstring_to_text::call(mcx, name)?,
+            DatumV::ByVal(varlena::cstring_to_text::call(mcx, name)?),
             // values[2] = BoolGetDatum(RmgrIdIsBuiltin(rmid))
-            Datum::from_bool(RmgrIdIsBuiltin(rmid as i32)),
+            DatumV::from_bool(RmgrIdIsBuiltin(rmid as i32)),
         ];
         let nulls = [false; PG_GET_RESOURCE_MANAGERS_COLS];
 

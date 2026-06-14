@@ -587,7 +587,9 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
             Anum_pg_opclass_opcmethod,
             BTEqualStrategyNumber,
             F_OIDEQ,
-            ScanKeyWord::from_oid(amoid),
+            // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+            // (the Datum-unification keystone flipped this edge).
+            Datum::from_oid(amoid),
         )?;
         let keys = [key];
 

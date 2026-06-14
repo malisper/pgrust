@@ -689,7 +689,9 @@ pub fn lookup_ts_config_cache<'mcx>(
             Anum_pg_ts_config_map_mapcfg as i16,
             BTEqualStrategyNumber,
             F_OIDEQ,
-            ScalarWord::from_oid(cfgId),
+            // `ScanKeyData.sk_argument` is the canonical unified `Datum<'mcx>`
+            // (the Datum-unification keystone flipped this edge).
+            Datum::from_oid(cfgId),
         )?;
         let maprel = table_open(smcx, TSConfigMapRelationId, AccessShareLock)?;
         let mapidx =

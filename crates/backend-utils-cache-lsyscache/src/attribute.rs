@@ -13,7 +13,6 @@
 use backend_utils_cache_syscache_seams as syscache_seam;
 use mcx::{Mcx, PgString};
 use types_core::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid};
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 
 /// `elog(ERROR, ...)` — an internal error with the default
@@ -139,7 +138,11 @@ pub fn get_atttypetypmodcoll(relid: Oid, attnum: AttrNumber) -> PgResult<(Oid, i
 /// The seam folds the `SearchSysCache2` + `SysCacheGetAttr` + `datumCopy`; its
 /// outer `Option` is the cache miss (here turned into the C `elog`), its inner
 /// `Option<Datum>` is the `isnull` test.
-pub fn get_attoptions<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: i16) -> PgResult<Option<Datum>> {
+pub fn get_attoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>> {
     match syscache_seam::pg_attribute_attoptions::call(mcx, relid, attnum)? {
         Some(maybe_datum) => Ok(maybe_datum),
         None => Err(elog_error(format!(

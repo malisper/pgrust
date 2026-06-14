@@ -19,6 +19,11 @@ use types_core::Oid;
 // audited bare-word ABI edges, so the word stays here until those owners
 // migrate.
 use types_datum::Datum as ScalarWord;
+// The canonical unified value (Datum-unification keystone): the public funcapi
+// seams (`materialized_srf_putvalues`, `cstring_get_text_datum`) now carry it.
+// The still-bare-word tuplestore/varlena owner seams are bridged at those
+// audited ABI edges below.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_error::{PgResult, ERROR};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
@@ -113,7 +118,7 @@ pub fn InitMaterializedSRF<'mcx>(
 /// resolves `setResult`/`setDesc`; the append delegates to the tuplestore unit.
 pub fn materialized_srf_putvalues<'mcx>(
     rsinfo: &mut ReturnSetInfo<'mcx>,
-    values: &[ScalarWord],
+    values: &[DatumV<'mcx>],
     nulls: &[bool],
 ) -> PgResult<()> {
     // The C SRF callers do, after InitMaterializedSRF(fcinfo, ...):
@@ -124,10 +129,14 @@ pub fn materialized_srf_putvalues<'mcx>(
         .setDesc
         .as_deref()
         .expect("materialized_srf_putvalues: rsinfo->setDesc is NULL (InitMaterializedSRF not run)");
+    // Lower the canonical values to the still-bare-word `tuplestore_putvalues`
+    // seam at this audited ABI edge (the tuplestore owner has not migrated).
+    let words: std::vec::Vec<ScalarWord> =
+        values.iter().map(|d| ScalarWord::from_usize(d.as_usize())).collect();
     backend_utils_sort_storage_seams::tuplestore_putvalues::call(
         &mut rsinfo.setResult,
         setDesc,
-        values,
+        &words,
         nulls,
     )
 }
@@ -284,12 +293,15 @@ pub fn srf_arg0_oid<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Option<Oid
 
 /// `CStringGetTextDatum(s)` — build a `text *` Datum from a string in `mcx`
 /// (the SRF text-column helper the inward seam exposes).
-pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<ScalarWord> {
+pub fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {
     // C builtins.h:
     //   #define CStringGetTextDatum(s) PointerGetDatum(cstring_to_text(s))
     // `cstring_to_text` (varlena.c) builds the `text` varlena in the current
-    // context and is owned by the varlena unit; route through its seam.
-    backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, s)
+    // context and is owned by the varlena unit; route through its seam (still
+    // bare-word) and carry the pointer word in the canonical by-value arm.
+    Ok(DatumV::ByVal(
+        backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, s)?,
+    ))
 }
 
 // `SetFunctionReturnMode::Materialize` is the `rsinfo->returnMode = SFRM_Materialize`

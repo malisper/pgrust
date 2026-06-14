@@ -893,8 +893,13 @@ pub fn index_opclass_options(
     // FunctionCall1(procinfo, PointerGetDatum(&relopts));
     // return build_local_reloptions(&relopts, attoptions, validate).
     let procinfo = index_getprocinfo(indrel, attnum, amoptsprocnum)?;
+    // The reloptions seam now takes the canonical unified value (the
+    // Datum-unification keystone flipped its edge); carry the `text[]` pointer
+    // word in the by-value arm.
     backend_access_common_reloptions_seams::index_build_local_reloptions::call(
-        procinfo, attoptions, validate,
+        procinfo,
+        DatumV::ByVal(attoptions),
+        validate,
     )
 }
 

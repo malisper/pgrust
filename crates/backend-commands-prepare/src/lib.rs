@@ -899,12 +899,9 @@ pub fn pg_prepared_statement<'mcx>(
             );
 
             // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-            // Lower the canonical by-value words to the still-shim-typed seam
-            // contract at this audited tuplestore edge (funcapi/tuplestore have
-            // not advanced off the bare-word newtype).
-            let shim_values: [types_datum::Datum; 8] =
-                std::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
-            funcapi_seam::materialized_srf_putvalues::call(rsinfo, &shim_values, &nulls)?;
+            // The funcapi seam now takes the canonical unified value directly
+            // (the Datum-unification keystone flipped this edge).
+            funcapi_seam::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
         }
     }
 

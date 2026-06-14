@@ -57,7 +57,10 @@ use types_core::catalog::{
     OIDOID, PG_TOAST_NAMESPACE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
-use types_datum::datum::Datum;
+// `ScanKeyData::sk_argument` is the canonical unified `Datum<'mcx>` (the
+// Datum-unification keystone flipped this edge); scan-key construction carries
+// the canonical value.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_rel::{FormData_pg_class, Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_snapshot::snapshot::{SnapshotData, SnapshotType};

@@ -588,17 +588,26 @@ pub fn make_const_node_seam<'mcx>(
     consttypmod: i32,
     constcollid: Oid,
     constlen: i32,
-    constvalue: Datum,
+    constvalue: DatumV<'mcx>,
     constisnull: bool,
     constbyval: bool,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
+    // The seam carries the canonical unified value; `make_const` builds the
+    // `Const` from the bare scalar word it wraps (a by-value scalar, mirroring
+    // C's `Const.constvalue` Datum word).
+    let constvalue_word = match constvalue {
+        DatumV::ByVal(w) => w,
+        DatumV::ByRef(_) => {
+            panic!("make_const_node: by-reference Datum requires a pass-by-reference path")
+        }
+    };
     let c = make_const(
         mcx,
         consttype,
         consttypmod,
         constcollid,
         constlen,
-        constvalue,
+        constvalue_word,
         constisnull,
         constbyval,
     )?;

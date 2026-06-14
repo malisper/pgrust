@@ -885,13 +885,16 @@ pub fn get_typdefault<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<PgBox
         // of the given type, then build a Const node containing it.
         let datum =
             fmgr::oid_input_function_call::call(t.typinput, &str_default_val, t.typioparam, -1)?;
+        // `oid_input_function_call` yields the bare scalar word (C's `Datum`);
+        // `make_const_node` takes the canonical unified value — wrap the word in
+        // the by-value arm (mirroring make_const's `Const.constvalue`).
         let expr = makefuncs::make_const_node::call(
             mcx,
             typid,
             -1,
             t.typcollation,
             t.typlen as i32,
-            datum,
+            types_tuple::backend_access_common_heaptuple::Datum::ByVal(datum),
             false,
             t.typbyval,
         )?;

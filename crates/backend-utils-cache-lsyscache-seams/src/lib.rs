@@ -7,6 +7,9 @@
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
+// Canonical unified value (the Datum-unification keystone) for the by-reference
+// `attoptions` array, which cannot ride the bare scalar word.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
 use types_array::{ArrayElementIoData, ArrayIoFuncSelector};
@@ -672,7 +675,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         relid: Oid,
         attnum: i16,
-    ) -> PgResult<Option<Datum>>
+    ) -> PgResult<Option<DatumV<'mcx>>>
 );
 
 // ---- function (pg_proc) ---------------------------------------------------
