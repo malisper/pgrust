@@ -454,17 +454,16 @@ fn decode_dedup_intervals(ptr: &[u8], nintervals: usize) -> Vec<BTDedupInterval>
 /// The decoded record currently held by the reader. Recovery always has a
 /// decoded record when redo runs (the rmgr dispatcher only calls redo for a
 /// freshly read record).
-fn rec<'a>(record: &'a XLogReaderState<'_>) -> &'a types_wal::wal::DecodedXLogRecord<'a> {
-    // `DecodedXLogRecord<'mcx>` borrows the reader's decode arena; reborrow it
-    // to the reader's own borrow lifetime for the duration of the redo call.
-    let r: &types_wal::wal::DecodedXLogRecord<'_> = record
+fn rec<'a, 'mcx>(
+    record: &'a XLogReaderState<'mcx>,
+) -> &'a types_wal::wal::DecodedXLogRecord<'mcx> {
+    // Borrow the decoded record straight off the reader, preserving its arena
+    // lifetime `'mcx`. Mirrors the hash/brin -xlog siblings' `record.record
+    // .as_ref()`; no lifetime laundering is needed.
+    record
         .record
         .as_ref()
-        .expect("btree_redo: reader has no decoded record");
-    // SAFETY: the decoded record's payload borrows the reader's decode buffer,
-    // which lives at least as long as `record`; narrowing its `'mcx` to `'a`
-    // (the reader borrow) is sound for read-only access during this call.
-    unsafe { core::mem::transmute(r) }
+        .expect("btree_redo: reader has no decoded record")
 }
 
 /// `XLogRecGetInfo(record) & ~XLR_INFO_MASK` — the rmgr info bits.
