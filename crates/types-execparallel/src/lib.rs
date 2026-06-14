@@ -25,7 +25,12 @@
 extern crate alloc;
 
 use types_core::instrument::instr_time;
-use types_datum::Datum;
+// The canonical value type (Datum unification): the `ByVal`/`ByRef` enum that
+// replaces the bare-word shim `types_datum::Datum`. A PARAM_EXEC parameter's
+// serializable value is a real `Datum`, so it carries the allocator lifetime
+// `'mcx` of the context the (de)serialization helpers allocate the by-reference
+// image into.
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `int16` — the C signed 16-bit integer (`c.h`).
 pub type int16 = i16;
@@ -275,10 +280,10 @@ pub struct SerializeCursor(pub usize);
 /// One PARAM_EXEC parameter's serializable value (`ParamExecData` value/isnull
 /// plus the resolved type metadata), read from `es_param_exec_vals` for
 /// serialization.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ParamExecValue {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParamExecValue<'mcx> {
     /// `ParamExecData.value`.
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// `ParamExecData.isnull`.
     pub isnull: bool,
     /// Resolved `typByVal` (or `true` when the param has no type OID).
@@ -287,14 +292,37 @@ pub struct ParamExecValue {
     pub typ_len: int16,
 }
 
+impl Default for ParamExecValue<'_> {
+    fn default() -> Self {
+        // C's zero-initialized `ParamExecData`: a NULL by-value word, not-null
+        // cleared. `Datum::null()` is the `ByVal(0)` machine word.
+        ParamExecValue {
+            value: Datum::null(),
+            isnull: false,
+            typ_byval: false,
+            typ_len: 0,
+        }
+    }
+}
+
 /// A restored PARAM_EXEC parameter, written back into the worker's
 /// `es_param_exec_vals[paramid]` by `RestoreParamExecParams`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RestoredParam {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoredParam<'mcx> {
     /// `prm->value`.
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// `prm->isnull`.
     pub isnull: bool,
+}
+
+impl Default for RestoredParam<'_> {
+    fn default() -> Self {
+        // C's zero-initialized restored parameter: a NULL by-value word.
+        RestoredParam {
+            value: Datum::null(),
+            isnull: false,
+        }
+    }
 }
 
 /// `struct ParallelExecutorInfo` (execParallel.h:22-37) — the leader's handle
