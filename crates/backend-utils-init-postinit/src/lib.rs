@@ -763,7 +763,7 @@ pub fn InitPostgres(
     // user ID, and see if we are a superuser.
     if bootstrap
         || backend_postmaster_autovacuum_seams::am_autovacuum_worker_process::call()
-        || backend_replication_logical_slotsync_seams::am_logical_slot_sync_worker_process::call()
+        || backend_utils_init_miscinit_seams::am_logical_slot_sync_worker_process::call()
     {
         backend_utils_init_miscinit_seams::initialize_session_user_id_standalone::call()?;
         am_superuser = true;
