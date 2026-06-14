@@ -345,6 +345,35 @@ seam_core::seam!(
     ) -> PgResult<Oid>
 );
 
+seam_core::seam!(
+    /// `CreateConstraintEntry`'s tuple build + insert: `GetNewOidWithIndex(rel,
+    /// ConstraintOidIndexId, Anum_pg_constraint_oid)` + `namestrcpy` +
+    /// `construct_array_builtin` of the array columns + `CStringGetTextDatum`
+    /// of `conbin` + `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +
+    /// `CatalogTupleInsert(rel, tup)` (catalog/indexing.c + heap/array). Returns
+    /// the freshly-allocated constraint OID. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_constraint(
+        rel: &RelationData<'_>,
+        row: &types_catalog::pg_constraint::PgConstraintInsertRow,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `CatalogTupleUpdate(rel, &tup->t_self, tup)` for the in-place
+    /// `pg_constraint` mutators: the owner reads the existing tuple addressed by
+    /// `tid`, overwrites the `ConstraintFieldUpdate` columns (the ones the
+    /// AdjustNotNullInheritance / RenameConstraintById / AlterConstraintNamespaces
+    /// / ConstraintSetParentConstraint paths scribble on the copied tuple),
+    /// re-forms, and stores it (catalog/indexing.c). `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_constraint(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        fields: &types_catalog::pg_constraint::ConstraintFieldUpdate,
+    ) -> PgResult<()>
+);
+
 /* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
 
 seam_core::seam!(
