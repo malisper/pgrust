@@ -705,6 +705,17 @@ mod recurrence_guard {
         // (chore/xlog-catalog-honest, task #111). An incomplete owner legitimately
         // seam-and-panics its unported surface (mirror-pg-and-panic), so the guard
         // no longer flags it (condition (b) false) — these entries went stale.
+        // DESIGN_DEBT (TD-GUC-UNPORTED): these four seams are guc.c functions
+        // (utils/misc/guc.c) mis-homed onto backend-commands-functioncmds-seams
+        // because functioncmds was the first consumer. ExtractSetVariableArgs,
+        // GUCArrayAdd, GUCArrayDelete, GUCArrayReset have NO real impl anywhere:
+        // the GUC owner (backend-utils-misc-guc) is unported (task #163). They are
+        // consumed by functioncmds (ddl_core) and pg-db-role-setting. Install once
+        // guc.c lands (re-home onto the guc -seams crate + wire its init_seams).
+        ("backend_commands_functioncmds", "extract_set_variable_args"),
+        ("backend_commands_functioncmds", "guc_array_add"),
+        ("backend_commands_functioncmds", "guc_array_delete"),
+        ("backend_commands_functioncmds", "guc_array_reset"),
         ("backend_commands_user", "is_reserved_name"),
         // DESIGN_DEBT: the `_owned` variants take owned `&mut PlanStateNode` /
         // `&mut EStateData` trees, but the owner's real ExecInitParallelPlan /
