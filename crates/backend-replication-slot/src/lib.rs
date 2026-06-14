@@ -2930,6 +2930,16 @@ fn seam_search_named_replication_slot(
         None => ReplicationSlotHandle::NONE,
     })
 }
+/// Boolean-existence adapter over `SearchNamedReplicationSlot` for the
+/// `SearchNamedReplicationSlot(name, need_lock) -> PgResult<bool>` seam that
+/// `genfile.c::pg_ls_replslotdir` consumes (it only needs "does a slot with
+/// this name exist?", not the slot itself).
+fn seam_search_named_replication_slot_exists(
+    name: &str,
+    need_lock: bool,
+) -> PgResult<bool> {
+    Ok(SearchNamedReplicationSlot(name, need_lock)?.is_some())
+}
 fn seam_replication_slot_set_inactive_since(
     handle: ReplicationSlotHandle,
     now: TimestampTz,
@@ -3061,4 +3071,7 @@ pub fn init_seams() {
     s::slot_data_database::set(seam_slot_data_database);
     s::slot_active_pid::set(seam_slot_active_pid);
     s::slot_data_invalidated::set(seam_slot_data_invalidated);
+
+    // Boolean-existence form consumed by genfile.c::pg_ls_replslotdir.
+    s::SearchNamedReplicationSlot::set(seam_search_named_replication_slot_exists);
 }
