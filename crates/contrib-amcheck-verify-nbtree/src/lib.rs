@@ -38,7 +38,11 @@
 //! * **F3 — [`linkage`]**: parent/child downlink verification, sibling-link
 //!   recheck, root-descend re-find, and the downlink byte-math helpers.
 
-use mcx::{MemoryContext, PgVec};
+use mcx::{MemoryContext, Mcx, PgVec};
+
+/// The verification arena handle (`Mcx<'mcx>`), an alias for clarity at the
+/// [`BtreeCheckState`] field.
+pub type MemoryContextHandle<'mcx> = Mcx<'mcx>;
 use types_core::primitive::{BlockNumber, OffsetNumber, XLogRecPtr};
 use types_nodes::execnodes::IndexInfo;
 use types_rel::Relation;
@@ -60,6 +64,12 @@ pub type Page<'mcx> = PgVec<'mcx, u8>;
 /// the entire B-tree verification. Unchanging fields are set up at the start
 /// of a check; the mutable block is reset per target page.
 pub struct BtreeCheckState<'mcx> {
+    /// The verification arena handle (`state->targetcontext`'s allocator). All
+    /// per-page private copies and scankey allocations are made here, matching
+    /// C's `state->targetcontext`. Carried explicitly so helpers can allocate
+    /// before the first page is read (e.g. the metapage in `palloc_btree_page`).
+    pub mcx: MemoryContextHandle<'mcx>,
+
     // --- Unchanging state, established at start of verification ---
     /// `rel` — the B-tree index relation being verified.
     pub rel: Relation<'mcx>,

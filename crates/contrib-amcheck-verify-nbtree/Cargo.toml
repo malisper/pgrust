@@ -34,3 +34,9 @@ backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
 backend-lib-bloomfilter-seams = { path = "../backend-lib-bloomfilter-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+types-snapshot = { path = "../types-snapshot" }

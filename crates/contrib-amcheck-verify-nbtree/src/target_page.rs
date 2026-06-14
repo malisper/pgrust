@@ -53,45 +53,104 @@ const BT_MAX_ITEM_SIZE_NO_HEAP_TID: types_core::Size = 2712;
 
 /// `OffsetNumberNext(offsetNumber)` (`storage/off.h`).
 #[inline]
-fn offset_number_next(offset: OffsetNumber) -> OffsetNumber {
+pub(crate) fn offset_number_next(offset: OffsetNumber) -> OffsetNumber {
     offset + 1
 }
 
 /// `BTPageGetOpaque(page)->btpo_flags` (nbtree.h), via the owner seam.
 #[inline]
-fn btpo_flags(page: &[u8]) -> u16 {
+pub(crate) fn btpo_flags(page: &[u8]) -> u16 {
     nbtcore::page_opaque::call(page).0
+}
+
+/// `BTPageGetOpaque(page)->btpo_prev` (nbtree.h). The opaque seam reports
+/// `(flags, cycleid, next)`; the left sibling link is read from the on-page
+/// `BTPageOpaqueData.btpo_prev` field, which sits at the start of the special
+/// area. `PageGetSpecialPointer` = `page + (pd_special)`; `pd_special` is the
+/// 16-bit little-endian field at byte offset 16 of the page header.
+#[inline]
+pub(crate) fn btpo_prev(page: &[u8]) -> BlockNumber {
+    let pd_special = u16::from_ne_bytes([page[16], page[17]]) as usize;
+    // BTPageOpaqueData layout: btpo_prev (BlockNumber, 4) then btpo_next (4) ...
+    u32::from_ne_bytes([
+        page[pd_special],
+        page[pd_special + 1],
+        page[pd_special + 2],
+        page[pd_special + 3],
+    ])
 }
 
 /// `BTPageGetOpaque(page)->btpo_next` (nbtree.h), via the owner seam.
 #[inline]
-fn btpo_next(page: &[u8]) -> BlockNumber {
+pub(crate) fn btpo_next(page: &[u8]) -> BlockNumber {
     nbtcore::page_opaque::call(page).2
 }
 
 /// `P_ISLEAF(opaque)` (`access/nbtree.h`).
 #[inline]
-fn p_isleaf(page: &[u8]) -> bool {
+pub(crate) fn p_isleaf(page: &[u8]) -> bool {
     (btpo_flags(page) & BTP_LEAF) != 0
+}
+
+/// `P_ISROOT(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_isroot(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_ROOT) != 0
+}
+
+/// `P_ISDELETED(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_isdeleted(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_DELETED) != 0
+}
+
+/// `P_ISMETA(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_ismeta(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_META) != 0
+}
+
+/// `P_ISHALFDEAD(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_ishalfdead(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_HALF_DEAD) != 0
+}
+
+/// `P_HAS_GARBAGE(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_has_garbage(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_HAS_GARBAGE) != 0
+}
+
+/// `P_INCOMPLETE_SPLIT(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_incomplete_split(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_INCOMPLETE_SPLIT) != 0
+}
+
+/// `P_HAS_FULLXID(opaque)` (`access/nbtree.h`).
+#[inline]
+pub(crate) fn p_has_fullxid(page: &[u8]) -> bool {
+    (btpo_flags(page) & types_nbtree::BTP_HAS_FULLXID) != 0
 }
 
 /// `P_RIGHTMOST(opaque)` (`access/nbtree.h`): `opaque->btpo_next == P_NONE`.
 #[inline]
-fn p_rightmost(page: &[u8]) -> bool {
+pub(crate) fn p_rightmost(page: &[u8]) -> bool {
     btpo_next(page) == P_NONE
 }
 
 /// `P_IGNORE(opaque)` (`access/nbtree.h`):
 /// `((opaque)->btpo_flags & (BTP_DELETED | BTP_HALF_DEAD)) != 0`.
 #[inline]
-fn p_ignore(page: &[u8]) -> bool {
+pub(crate) fn p_ignore(page: &[u8]) -> bool {
     (btpo_flags(page) & (types_nbtree::BTP_DELETED | types_nbtree::BTP_HALF_DEAD)) != 0
 }
 
 /// `P_FIRSTDATAKEY(opaque)` (`access/nbtree.h`):
 /// `(P_RIGHTMOST(opaque) ? P_HIKEY : P_FIRSTKEY)`.
 #[inline]
-fn p_firstdatakey(page: &[u8]) -> OffsetNumber {
+pub(crate) fn p_firstdatakey(page: &[u8]) -> OffsetNumber {
     if p_rightmost(page) {
         P_HIKEY
     } else {
@@ -99,16 +158,37 @@ fn p_firstdatakey(page: &[u8]) -> OffsetNumber {
     }
 }
 
+/// `BTreeTupleGetDownLink(pivot)` (`access/nbtree.h`):
+/// `ItemPointerGetBlockNumberNoCheck(&pivot->t_tid)` — the child block stored
+/// in a pivot tuple's `t_tid`. Pure byte math on the on-page header bytes.
+#[inline]
+pub(crate) fn btree_tuple_get_downlink(item: &[u8]) -> BlockNumber {
+    index_tuple_header(item).t_tid.ip_blkid.block_number()
+}
+
+/// `BTreeTupleGetTopParent(leafhikey)` (`access/nbtree.h`):
+/// `ItemPointerGetBlockNumberNoCheck(&leafhikey->t_tid)`.
+#[inline]
+pub(crate) fn btree_tuple_get_top_parent(item: &[u8]) -> BlockNumber {
+    index_tuple_header(item).t_tid.ip_blkid.block_number()
+}
+
 /// `PageGetMaxOffsetNumber(page)` (`bufpage.h`), via the owner seam.
 #[inline]
-fn page_get_max_offset_number(page: &[u8]) -> OffsetNumber {
+pub(crate) fn page_get_max_offset_number(page: &[u8]) -> OffsetNumber {
     nbtcore::page_get_max_offset_number::call(page)
+}
+
+/// `BTPageGetOpaque(page)->btpo_level` (nbtree.h), via the owner seam.
+#[inline]
+pub(crate) fn page_btpo_level(page: &[u8]) -> u32 {
+    nbtcore::page_btpo_level::call(page)
 }
 
 /// Parse the on-page `IndexTupleData` header (`t_tid` + `t_info`) out of the
 /// raw item byte slice. The verifier reads tuple bytes off a private page copy
 /// and treats the leading 8 bytes as the C `IndexTupleData` header.
-fn index_tuple_header(item: &[u8]) -> IndexTupleData {
+pub(crate) fn index_tuple_header(item: &[u8]) -> IndexTupleData {
     let bi_hi = u16::from_ne_bytes([item[0], item[1]]);
     let bi_lo = u16::from_ne_bytes([item[2], item[3]]);
     let ip_posid = u16::from_ne_bytes([item[4], item[5]]);
@@ -132,7 +212,7 @@ fn index_tuple_header(item: &[u8]) -> IndexTupleData {
 /// The per-page allocations live in the verification's `'mcx` arena; the `mcx`
 /// handle is the one carried by the (already `'mcx`-allocated) page copies in
 /// `BtreeCheckState`, threaded by the caller via [`state_mcx`].
-fn page_get_item<'mcx>(
+pub(crate) fn page_get_item<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     page: &[u8],
     offset: OffsetNumber,
@@ -144,7 +224,7 @@ fn page_get_item<'mcx>(
 /// calls (`bt_mkscankey_pivotsearch`, `bt_entry_unique_check`,
 /// `bt_normalize_tuple`, `bt_child_check`) whose contract takes a parsed
 /// `IndexTuple` rather than the raw bytes.
-fn index_tuple_box<'mcx>(
+pub(crate) fn index_tuple_box<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     item: &[u8],
 ) -> PgResult<IndexTuple<'mcx>> {
@@ -155,18 +235,14 @@ fn index_tuple_box<'mcx>(
 /// already-`'mcx`-allocated page copy held by the state (`Mcx` is `Copy`). All
 /// per-page item / scankey allocations are made in this arena, matching C's
 /// `state->targetcontext`.
-fn state_mcx<'mcx>(state: &BtreeCheckState<'mcx>) -> mcx::Mcx<'mcx> {
-    *state
-        .target
-        .as_ref()
-        .expect("state_mcx: target page must be set")
-        .allocator()
+pub(crate) fn state_mcx<'mcx>(state: &BtreeCheckState<'mcx>) -> mcx::Mcx<'mcx> {
+    state.mcx
 }
 
 /// `ItemPointerCompare(arg1, arg2)` (`storage/itemptr.c`): -1/0/1 ordering of
 /// two heap TIDs, comparing block number then offset (both treated as
 /// unsigned).
-fn item_pointer_compare(a: &ItemPointerData, b: &ItemPointerData) -> i32 {
+pub(crate) fn item_pointer_compare(a: &ItemPointerData, b: &ItemPointerData) -> i32 {
     let ablk = a.ip_blkid.block_number();
     let bblk = b.ip_blkid.block_number();
     if ablk > bblk {
@@ -213,7 +289,7 @@ fn btree_tuple_get_points_to_tid(item: &[u8]) -> ItemPointerData {
 
 /// Render `(block,offset)` exactly as C's `psprintf("(%u,%u)", ...)` for an
 /// `ItemPointer` via the `...NoCheck` accessors.
-fn fmt_tid(tid: &ItemPointerData) -> String {
+pub(crate) fn fmt_tid(tid: &ItemPointerData) -> String {
     format!(
         "({},{})",
         tid.ip_blkid.block_number(),
@@ -222,7 +298,7 @@ fn fmt_tid(tid: &ItemPointerData) -> String {
 }
 
 /// `LSN_FORMAT_ARGS(lsn)` rendered as C's `%X/%X`.
-fn fmt_lsn(lsn: u64) -> String {
+pub(crate) fn fmt_lsn(lsn: u64) -> String {
     format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
 }
 
@@ -803,12 +879,32 @@ pub fn offset_is_negative_infinity(page: &[u8], offset: OffsetNumber) -> bool {
     !is_leaf && offset == firstdatakey
 }
 
+/// `BTreeTupleGetNKeyAtts(itup, rel)` (`access/nbtree.h`):
+/// `Min(IndexRelationGetNumberOfKeyAttributes(rel), BTreeTupleGetNAtts(itup, rel))`.
+pub(crate) fn btree_tuple_get_nkeyatts(item: &[u8], rel: &types_rel::Relation<'_>) -> i32 {
+    let nkeyatts = rel.indnkeyatts();
+    let natts = btree_tuple_get_natts(item, rel) as i32;
+    nkeyatts.min(natts)
+}
+
 /// `bt_posting_plain_tuple(itup, n)` — materialize the `n`th heap TID of a
 /// posting-list tuple as a plain (non-posting) index tuple, via
 /// `_bt_form_posting`. Used to feed posting-list entries to the per-TID checks.
+///
+/// C: `return _bt_form_posting(itup, BTreeTupleGetPostingN(itup, n), 1);`
 pub fn bt_posting_plain_tuple<'mcx>(itup: &IndexTuple<'mcx>, n: i32) -> PgResult<IndexTuple<'mcx>> {
+    // The carrier `IndexTuple` is the trimmed header-only value; `_bt_form_posting`
+    // needs the full on-page tuple bytes (base + posting array). The full posting
+    // payload is not addressable through the header-only `IndexTuple`, so this
+    // path is unreachable until the tuple-payload model lands. The owner seam is
+    // `_bt_form_posting`; the heapallindexed path that calls here also depends on
+    // `bt_normalize_tuple`, which is itself blocked on the same payload model.
     let _ = (itup, n);
-    panic!("decomp: bt_posting_plain_tuple not yet filled")
+    panic!(
+        "not yet ported: bt_posting_plain_tuple needs the full on-page IndexTuple \
+         payload (base bytes + posting list) to call _bt_form_posting; the \
+         header-only IndexTuple carrier does not expose it"
+    )
 }
 
 /// `invariant_l_offset(state, key, upperbound)` — does `key` sort strictly
@@ -818,8 +914,52 @@ pub fn invariant_l_offset<'mcx>(
     key: &BTScanInsert<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
-    let _ = (state, key, upperbound);
-    panic!("decomp: invariant_l_offset not yet filled")
+    // Assert(!key->nextkey && key->backward);
+    let mcx = state_mcx(state);
+    let target = state
+        .target
+        .as_ref()
+        .expect("invariant_l_offset: target page must be set")
+        .as_slice()
+        .to_vec();
+
+    // Verify line pointer before checking tuple.
+    let itemid = PageGetItemIdCareful(state, state.targetblock, state.target.as_ref().unwrap(), upperbound)?;
+
+    let heapkeyspace = key.as_ref().map(|k| k.heapkeyspace).unwrap_or(false);
+    // pg_upgrade'd indexes may legally have equal sibling tuples.
+    if !heapkeyspace {
+        return invariant_leq_offset(state, key, upperbound);
+    }
+
+    let cmp = nbtcore::bt_compare::call(&state.rel, key, &target, upperbound)?;
+
+    // _bt_compare() resolves a scankey with a filled-out attribute as greater
+    // than pivot tuples truncated at the comparison attribute, but cannot resolve
+    // "less than" on the basis of a _scankey_ minus-infinity attribute. Simulate
+    // minus infinity for omitted scankey attribute(s).
+    if cmp == 0 {
+        let ritup = page_get_item(mcx, &target, upperbound)?;
+        let nonpivot = p_isleaf(&target) && upperbound >= p_firstdatakey(&target);
+
+        // Get number of keys + heap TID for item to the right.
+        let uppnkeyatts = btree_tuple_get_nkeyatts(&ritup, &state.rel);
+        let ritup_box = index_tuple_box(mcx, &ritup)?;
+        let rheaptid = crate::entry::BTreeTupleGetHeapTIDCareful(state, &ritup_box, nonpivot)?;
+
+        let keysz = key.as_ref().map(|k| k.keysz).unwrap_or(0);
+        let scantid = key.as_ref().and_then(|k| k.scantid);
+
+        // Heap TID is tiebreaker key attribute.
+        if keysz == uppnkeyatts {
+            return Ok(scantid.is_none() && rheaptid.is_some());
+        }
+
+        return Ok(keysz < uppnkeyatts);
+    }
+
+    let _ = itemid;
+    Ok(cmp < 0)
 }
 
 /// `invariant_leq_offset(state, key, upperbound)` — does `key` sort less-than-
@@ -829,8 +969,15 @@ pub fn invariant_leq_offset<'mcx>(
     key: &BTScanInsert<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
-    let _ = (state, key, upperbound);
-    panic!("decomp: invariant_leq_offset not yet filled")
+    // Assert(!key->nextkey && key->backward);
+    let target = state
+        .target
+        .as_ref()
+        .expect("invariant_leq_offset: target page must be set")
+        .as_slice()
+        .to_vec();
+    let cmp = nbtcore::bt_compare::call(&state.rel, key, &target, upperbound)?;
+    Ok(cmp <= 0)
 }
 
 /// `invariant_g_offset(state, key, lowerbound)` — does `key` sort strictly
@@ -840,8 +987,25 @@ pub fn invariant_g_offset<'mcx>(
     key: &BTScanInsert<'mcx>,
     lowerbound: OffsetNumber,
 ) -> PgResult<bool> {
-    let _ = (state, key, lowerbound);
-    panic!("decomp: invariant_g_offset not yet filled")
+    // Assert(!key->nextkey && key->backward);
+    let target = state
+        .target
+        .as_ref()
+        .expect("invariant_g_offset: target page must be set")
+        .as_slice()
+        .to_vec();
+    let cmp = nbtcore::bt_compare::call(&state.rel, key, &target, lowerbound)?;
+
+    let heapkeyspace = key.as_ref().map(|k| k.heapkeyspace).unwrap_or(false);
+    // pg_upgrade'd indexes may legally have equal sibling tuples.
+    if !heapkeyspace {
+        return Ok(cmp >= 0);
+    }
+
+    // No need to force scankey minus-infinity here: _bt_compare can tell the
+    // scankey is greater than negative infinity, and "==" vs "<" both indicate
+    // corruption.
+    Ok(cmp > 0)
 }
 
 /// `invariant_l_nontarget_offset(state, key, nontargetblock, nontarget,
@@ -855,8 +1019,43 @@ pub fn invariant_l_nontarget_offset<'mcx>(
     nontarget: &Page<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
-    let _ = (state, key, nontargetblock, nontarget, upperbound);
-    panic!("decomp: invariant_l_nontarget_offset not yet filled")
+    // Assert(!key->nextkey && key->backward);
+    let mcx = state_mcx(state);
+    let nontarget_bytes = nontarget.as_slice();
+
+    // Verify line pointer before checking tuple.
+    let itemid = PageGetItemIdCareful(state, nontargetblock, nontarget, upperbound)?;
+    let cmp = nbtcore::bt_compare::call(&state.rel, key, nontarget_bytes, upperbound)?;
+
+    let heapkeyspace = key.as_ref().map(|k| k.heapkeyspace).unwrap_or(false);
+    // pg_upgrade'd indexes may legally have equal sibling tuples.
+    if !heapkeyspace {
+        return Ok(cmp <= 0);
+    }
+
+    // See invariant_l_offset() for an explanation of this extra step.
+    if cmp == 0 {
+        let child = page_get_item(mcx, nontarget_bytes, upperbound)?;
+        let nonpivot = p_isleaf(nontarget_bytes) && upperbound >= p_firstdatakey(nontarget_bytes);
+
+        // Get number of keys + heap TID for child/non-target item.
+        let uppnkeyatts = btree_tuple_get_nkeyatts(&child, &state.rel);
+        let child_box = index_tuple_box(mcx, &child)?;
+        let childheaptid = crate::entry::BTreeTupleGetHeapTIDCareful(state, &child_box, nonpivot)?;
+
+        let keysz = key.as_ref().map(|k| k.keysz).unwrap_or(0);
+        let scantid = key.as_ref().and_then(|k| k.scantid);
+
+        // Heap TID is tiebreaker key attribute.
+        if keysz == uppnkeyatts {
+            return Ok(scantid.is_none() && childheaptid.is_some());
+        }
+
+        return Ok(keysz < uppnkeyatts);
+    }
+
+    let _ = itemid;
+    Ok(cmp < 0)
 }
 
 // ===========================================================================
