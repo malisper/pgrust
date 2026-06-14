@@ -276,7 +276,7 @@ pub fn ProcSignalInit(
     MY_PROC_SIGNAL_SLOT.set(Some((my_proc_number as usize, my_proc_pid)));
 
     // Set up to release the slot on process exit
-    backend_storage_ipc_seams::on_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
         CleanupProcSignalState,
         types_datum::Datum::from_usize(0),
     )?;

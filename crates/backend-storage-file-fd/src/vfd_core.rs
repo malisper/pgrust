@@ -14,7 +14,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 
 use backend_storage_aio_seams as aio_seams;
-use backend_storage_ipc_seams as ipc_seams;
+use backend_storage_ipc_dsm_core_seams as ipc_seams;
 use backend_utils_error::{elog, ereport};
 use types_core::{Oid, SubTransactionId};
 use types_datum::Datum;

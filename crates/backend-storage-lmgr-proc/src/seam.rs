@@ -317,7 +317,7 @@ pub(crate) fn register_postmaster_child_active() {
 pub(crate) fn on_shmem_exit(callback: fn(i32, Datum) -> PgResult<()>, arg: Datum) {
     // C `on_shmem_exit` ereport(FATAL)s only on the static-array overflow past
     // `MAX_ON_EXITS`; surface that `Err` as a panic rather than swallow.
-    backend_storage_ipc_seams::on_shmem_exit::call(callback, arg)
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(callback, arg)
         .expect("on_shmem_exit: callback array full");
 }
 

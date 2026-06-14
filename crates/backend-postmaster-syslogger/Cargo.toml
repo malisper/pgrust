@@ -23,7 +23,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-latch = { path = "../backend-storage-ipc-latch" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }

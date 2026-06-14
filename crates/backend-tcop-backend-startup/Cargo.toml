@@ -38,7 +38,7 @@ backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

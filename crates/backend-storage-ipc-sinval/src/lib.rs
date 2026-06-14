@@ -37,7 +37,7 @@ use backend_utils_error::elog;
 use backend_access_transam_xact_seams as xact;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_procsignal_seams as procsignal;
-use backend_storage_ipc_seams as ipc;
+use backend_storage_ipc_dsm_core_seams as ipc;
 use backend_storage_ipc_shmem_seams as shmem;
 use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_utils_cache_inval_seams as inval;

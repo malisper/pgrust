@@ -45,7 +45,7 @@ use types_walsummarizer::{BlockTag, ReadRecordResult, WalSummarizerData, WalSumm
 use types_blkreftable::BlockRefTableHandle;
 
 use backend_storage_ipc_shmem_seams as shmem;
-use backend_storage_ipc_seams as ipc;
+use backend_storage_ipc_dsm_core_seams as ipc;
 use backend_storage_ipc_latch_seams as latch;
 use backend_storage_ipc_procsignal_seams as procsignal;
 use backend_storage_ipc_procarray_seams as procarray;

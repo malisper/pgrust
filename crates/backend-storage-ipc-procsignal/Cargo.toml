@@ -15,7 +15,7 @@ backend-replication-logical-applyparallelworker-seams = { path = "../backend-rep
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }

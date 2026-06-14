@@ -32,7 +32,7 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }

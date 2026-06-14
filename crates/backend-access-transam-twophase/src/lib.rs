@@ -42,7 +42,7 @@ use backend_replication_logical_origin_seams as origin;
 use backend_replication_syncrep_seams as syncrep; // SyncRepWaitForLSN
 use backend_access_transam_twophase_fileio_seams as files; // pg_twophase file body I/O
 use backend_storage_ipc_procarray_seams as procarray; // dummy-proc ProcArray add/remove
-use backend_storage_ipc_seams as ipc; // before_shmem_exit
+use backend_storage_ipc_dsm_core_seams as ipc; // before_shmem_exit
 use backend_storage_ipc_shmem_seams as ipc_shmem; // ShmemInitStruct (2PC shmem stand-up)
 use backend_storage_ipc_standby_seams as standby;
 use backend_storage_lmgr_lwlock_seams as lwlock; // TwoPhaseStateLock

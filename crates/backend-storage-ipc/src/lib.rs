@@ -21,9 +21,9 @@
 //! ## ipc.c is NOT here
 //!
 //! `storage/ipc/ipc.c` (the `proc_exit`/`shmem_exit` callback machinery and
-//! the `backend-storage-ipc-seams` slots) is already ported in
+//! the `backend-storage-ipc-dsm-core-seams` slots) is already ported in
 //! `backend-storage-ipc-dsm-core` (its cycle partner). This unit reaches the
-//! `on_shmem_exit`/`proc_exit` family through `backend-storage-ipc-seams`
+//! `on_shmem_exit`/`proc_exit` family through `backend-storage-ipc-dsm-core-seams`
 //! exactly like any other consumer; it does not re-port them.
 
 #![allow(non_upper_case_globals)]

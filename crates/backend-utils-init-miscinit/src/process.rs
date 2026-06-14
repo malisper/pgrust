@@ -43,7 +43,7 @@ pub fn InitPostmasterChild() -> PgResult<()> {
     backend_utils_init_small_seams::init_process_globals::call()?;
 
     // We don't want the postmaster's proc_exit() handlers.
-    backend_storage_ipc_seams::on_exit_reset::call();
+    backend_storage_ipc_dsm_core_seams::on_exit_reset::call();
 
     // Initialize process-local latch support.
     backend_storage_ipc_waiteventset_seams::initialize_wait_event_support::call()?;

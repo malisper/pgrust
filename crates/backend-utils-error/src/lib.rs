@@ -36,7 +36,7 @@
 //!    [`report`]; the syslogger's `write_syslogger_file` goes through
 //!    `backend-postmaster-syslogger-seams`;
 //!    csv/json log lines through `backend-utils-error-small-seams`; FATAL's
-//!    `proc_exit(1)` through `backend-storage-ipc-seams`; the FATAL pgstat
+//!    `proc_exit(1)` through `backend-storage-ipc-dsm-core-seams`; the FATAL pgstat
 //!    note through `backend-utils-activity-pgstat-seams`. All panic until
 //!    their owners land — and all are unreachable under the boot defaults
 //!    (`whereToSendOutput = DestNone`, stderr logging, no redirection).

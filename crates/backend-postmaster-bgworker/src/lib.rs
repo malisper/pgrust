@@ -779,7 +779,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
                     .with_message_id("unable to find bgworker entry")
                     .with_error_location(loc(749, "BackgroundWorkerMain")),
             );
-            backend_storage_ipc_seams::proc_exit::call(1, my_pid)
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(1, my_pid)
         }
     };
 
@@ -816,7 +816,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
     match run_worker_body(worker) {
         Ok(()) => {
             // If the background worker exits without an error, exit cleanly.
-            backend_storage_ipc_seams::proc_exit::call(0, my_pid)
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(0, my_pid)
         }
         Err(_edata) => {
             // Since not using PG_TRY, must reset error stack by hand:
@@ -827,7 +827,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
             BackgroundWorkerUnblockSignals();
             // Report the error to the parallel leader and the server log.
             emit_error_report_for(&_edata);
-            backend_storage_ipc_seams::proc_exit::call(1, my_pid)
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(1, my_pid)
         }
     }
 }

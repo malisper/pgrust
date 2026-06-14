@@ -13,7 +13,7 @@
 //!   callback lists. `ipc.c` lives here because it and `dsm.c` are mutually
 //!   recursive (`shmem_exit` hard-codes a call to `dsm_backend_shutdown`;
 //!   `dsm_postmaster_startup` registers itself with `on_shmem_exit`), and
-//!   because this unit installs the pending `backend-storage-ipc-seams`
+//!   because this unit installs the pending `backend-storage-ipc-dsm-core-seams`
 //!   declarations (`proc_exit`, `on_proc_exit`, `on_shmem_exit`).
 //!
 //! The C `dsm_segment *` becomes a stable [`dsm::DsmSegmentId`] naming a
@@ -64,9 +64,14 @@ pub fn init_seams() {
         dsm::dsm_postmaster_startup(shim, max_backends)
     });
 
-    backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
-    backend_storage_ipc_seams::on_proc_exit::set(ipc::on_proc_exit);
-    backend_storage_ipc_seams::on_shmem_exit::set(ipc::on_shmem_exit);
+    backend_storage_ipc_dsm_core_seams::proc_exit::set(ipc::proc_exit);
+    backend_storage_ipc_dsm_core_seams::on_proc_exit::set(ipc::on_proc_exit);
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(ipc::on_shmem_exit);
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::set(ipc::before_shmem_exit);
+    backend_storage_ipc_dsm_core_seams::on_exit_reset::set(ipc::on_exit_reset);
+    backend_storage_ipc_dsm_core_seams::check_on_shmem_exit_lists_are_empty::set(
+        ipc::check_on_shmem_exit_lists_are_empty,
+    );
 
     option_sets::dynamic_shared_memory_options.install(dsm_impl::DYNAMIC_SHARED_MEMORY_OPTIONS);
     vars::dynamic_shared_memory_type.install(GucVarAccessors {

@@ -32,7 +32,7 @@ backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster
 backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
 types-signal = { path = "../types-signal" }
-backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }

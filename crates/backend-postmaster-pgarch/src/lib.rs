@@ -428,7 +428,7 @@ pub fn PgArchiverMain(startup_data: &types_startup::StartupData) -> ! {
         // FATAL, exactly as in C; proc_exit carries it out of the process.
         Err(err) => {
             backend_utils_error::emit_error_report_for(&err);
-            backend_storage_ipc_seams::proc_exit::call(
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(
                 1,
                 backend_utils_init_small_seams::my_proc_pid::call(),
             )
@@ -480,7 +480,7 @@ fn pg_archiver_main_inner(startup_data: &types_startup::StartupData) -> PgResult
     // Assert(XLogArchivingActive()); — debug-only GUC assertion owned by xlog.c.
 
     // Arrange to clean up at archiver exit: on_shmem_exit(pgarch_die, 0).
-    backend_storage_ipc_seams::on_shmem_exit::call(pgarch_die, types_datum::Datum::from_i32(0))?;
+    backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(pgarch_die, types_datum::Datum::from_i32(0))?;
 
     // Advertise our proc number so backends can use our latch to wake us:
     // PgArch->pgprocno = MyProcNumber;
@@ -508,7 +508,7 @@ fn pg_archiver_main_inner(startup_data: &types_startup::StartupData) -> PgResult
 
     pgarch_MainLoop()?;
 
-    backend_storage_ipc_seams::proc_exit::call(0, backend_utils_init_small_seams::my_proc_pid::call())
+    backend_storage_ipc_dsm_core_seams::proc_exit::call(0, backend_utils_init_small_seams::my_proc_pid::call())
 }
 
 /// `PgArchWakeup(void)` — wake up the archiver.
@@ -1068,7 +1068,7 @@ fn ProcessPgArchInterrupts() -> PgResult<()> {
                 )
                 .finish(loc())?;
 
-            backend_storage_ipc_seams::proc_exit::call(
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(
                 0,
                 backend_utils_init_small_seams::my_proc_pid::call(),
             );
@@ -1129,7 +1129,7 @@ fn LoadArchiveLibrary() -> PgResult<()> {
     }
 
     // before_shmem_exit(pgarch_call_module_shutdown_cb, 0).
-    backend_storage_ipc_seams::before_shmem_exit::call(
+    backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         pgarch_call_module_shutdown_cb,
         types_datum::Datum::from_i32(0),
     )?;
