@@ -11,19 +11,20 @@
 
 use mcx::Mcx;
 use types_core::Oid;
-// Datum-unification (Batch 3): this seam's only `Datum` use is the `fmgr_sql`
-// result. It is contract-pinned to the bare-word `types_datum::Datum`, NOT the
-// canonical `types_tuple::Datum<'mcx>`, by its sole consumer
-// `backend-utils-fmgr-core::function_call_invoke_with_expr`, which returns this
-// seam's result as one arm of a `match` whose other arms come from
-// `invoke_pgfunction` — the audited bare-word `Datum` PGFunction-return edge
-// site. Flipping this seam to the canonical enum would diverge from fmgr-core's
-// contract (which the Batch-3 fmgr-core sibling deliberately keeps on the
-// bare-word shim) and break the consumer's `cargo check`. The migration of this
-// seam is therefore blocked on the PGFunction-return edge migration, which is
-// out of scope for the datum-unification phase (it is one of the two sanctioned
-// bare-word edge sites). See execExpr-datum-mig-contract-blocked for the
-// identical pattern.
+// Datum-completion (Wave 5; reaffirmed): this seam's only `Datum` use is the
+// `fmgr_sql` result. It is contract-pinned to the bare-word `types_datum::Datum`,
+// NOT the canonical `types_tuple::Datum<'mcx>`, because it IS the sanctioned
+// PGFunction-return ABI edge: a `PGFunction` hands back its result as one C
+// `Datum` word (a by-value scalar, or a pointer-shaped word for by-ref). Its
+// sole consumer `backend-utils-fmgr-core::function_call_invoke_with_expr`
+// returns this seam's result as one arm of a `match` whose other arms come from
+// `invoke_pgfunction` — the same audited bare-word `Datum` PGFunction-return
+// edge — and fmgr-core is itself typed in bare-word `types_datum::Datum`.
+// Flipping this seam to the canonical enum would diverge from that consumer
+// contract and break its `cargo check`. There are no construction/read sites
+// (no `from_*`/`as_*`) to thread `'mcx` through; this lone `use` is the kept
+// bare-word edge per the datum-redesign-plan. See
+// execExpr-datum-mig-contract-blocked for the identical pattern.
 use types_datum::Datum;
 use types_error::PgResult;
 use types_fmgr::FunctionCallInfoBaseData;
