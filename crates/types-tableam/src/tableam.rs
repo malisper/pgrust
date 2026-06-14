@@ -112,11 +112,25 @@ pub struct IndexFetchTableData<'mcx> {
     pub am_private: Option<Box<dyn Any>>,
 }
 
-/// `BulkInsertStateData` (`access/heapam.h`) — opaque bulk-insert state; the
-/// tableam layer only passes it through (the dispatch unit's own callers
-/// always pass the C `NULL`, i.e. `None`).
+/// `BulkInsertStateData` (`access/hio.h`) — state for bulk inserts, private to
+/// `heapam.c` and `hio.c`. The tableam dispatch layer only ever passes this
+/// through opaquely (its own callers pass the C `NULL`, i.e. `None`); `hio.c`
+/// reads and updates these fields directly.
+///
+/// If `current_buf` isn't `InvalidBuffer`, we hold an extra pin on that buffer.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BulkInsertStateData {
-    pub am_private: Option<Box<dyn Any>>,
+    /// `strategy` — our BULKWRITE strategy object (NULL == `BufferAccessStrategy::NONE`).
+    pub strategy: types_storage::buf::BufferAccessStrategy,
+    /// `current_buf` — current insertion target page.
+    pub current_buf: types_storage::Buffer,
+    /// `next_free` — bulk-extension state: next still-unused page from the last
+    /// extension (`last_free..next_free` are further unused pages).
+    pub next_free: types_core::BlockNumber,
+    /// `last_free` — bulk-extension state: last still-unused page.
+    pub last_free: types_core::BlockNumber,
+    /// `already_extended_by` — pages this bulk insert has extended by so far.
+    pub already_extended_by: u32,
 }
 
 /// `TableAmRoutine` (`access/tableam.h`) — the table-access-method API
