@@ -7,7 +7,11 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone). The seam
+// signature below takes it (`ByVal`/`ByRef`) with the call frame's `'mcx`
+// lifetime; the bare-word `types_datum::Datum` shim is retained only at the
+// sanctioned ABI edges (none in this crate) per the datum-redesign plan.
+use types_tuple::Datum;
 use types_rel::Relation;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -21,7 +25,7 @@ seam_core::seam!(
     pub fn index_form_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
-        values: &[Datum],
+        values: &[Datum<'mcx>],
         isnull: &[bool],
         ht_ctid: ItemPointerData,
     ) -> types_error::PgResult<PgVec<'mcx, u8>>
