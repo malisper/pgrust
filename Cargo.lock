@@ -9127,6 +9127,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-tsquery-core"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "backend-tcop-postgres-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-adt-ts-small",
+ "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-error",
+ "backend-utils-hash-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-core",
+ "types-error",
+ "types-stringinfo",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-utils-adt-tsrank"
 version = "0.0.0"
 dependencies = [

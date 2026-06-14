@@ -175,6 +175,35 @@ impl Default for QueryItem {
     }
 }
 
+/// `TSQuerySign` (ts_utils.h) — `typedef uint64 TSQuerySign`. A lossy bit
+/// signature of a `tsquery`'s operand CRCs, used by the GiST opclass.
+pub type TSQuerySign = u64;
+
+/// `TSQS_SIGLEN` (ts_utils.h) — `sizeof(TSQuerySign) * BITS_PER_BYTE` = 64.
+pub const TSQS_SIGLEN: u32 = 64;
+
+/// `P_TSV_OPR_IS_DELIM` (ts_utils.h) — flag for `init_tsvector_parser`.
+pub const P_TSV_OPR_IS_DELIM: i32 = 1 << 0;
+/// `P_TSV_IS_TSQUERY` (ts_utils.h).
+pub const P_TSV_IS_TSQUERY: i32 = 1 << 1;
+/// `P_TSV_IS_WEB` (ts_utils.h).
+pub const P_TSV_IS_WEB: i32 = 1 << 2;
+
+/// `P_TSQ_PLAIN` (ts_utils.h) — flag for `parse_tsquery` (plain tokenizer).
+pub const P_TSQ_PLAIN: i32 = 1 << 0;
+/// `P_TSQ_WEB` (ts_utils.h) — flag for `parse_tsquery` (websearch tokenizer).
+pub const P_TSQ_WEB: i32 = 1 << 1;
+
+/// Opaque handle to a `TSVectorParseStateData` owned by
+/// `utils/adt/tsvector_parser.c` (the unported `backend-utils-adt-tsvector-core`
+/// unit). C declares `struct TSVectorParseStateData` opaque ("opaque struct in
+/// tsvector_parser.c"); the `tsquery` parser only holds a `TSVectorParseState`
+/// pointer and threads it through `init`/`reset`/`gettoken`/`close`. Until that
+/// unit lands, the state lives behind this token, minted by the
+/// `init_tsvector_parser` seam and resolved by the owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TsVectorParseStateHandle(pub u64);
+
 /// `TSTernaryValue` (ts_utils.h) — ternary logic for `TS_execute`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TSTernaryValue {
