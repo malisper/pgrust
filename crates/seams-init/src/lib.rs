@@ -556,7 +556,6 @@ mod recurrence_guard {
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
-        ("backend_utils_fmgr_dfmgr", "load_file"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
         ("backend_utils_init_miscinit", "initialize_session_user_id"),
