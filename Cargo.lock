@@ -5125,6 +5125,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-lib-algorithms"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-binaryheap",
+ "backend-lib-ilist",
+]
+
+[[package]]
+name = "backend-lib-binaryheap"
+version = "0.0.0"
+dependencies = [
+ "types-error",
+]
+
+[[package]]
 name = "backend-lib-bipartite-match"
 version = "0.0.0"
 dependencies = [
