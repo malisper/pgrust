@@ -13,8 +13,30 @@
 //!
 //! This crate does the same code-generation in Rust as a `#[derive(PgNode)]`
 //! proc-macro reading field/struct attributes that mirror `pg_node_attr`. It
-//! covers **copy + equal**. The OUT/READ (`outfuncs.c`/`readfuncs.c`) and
-//! JUMBLE (`queryjumblefuncs.c`) stages are deferred — this crate emits neither.
+//! covers **copy + equal** (always) and **OUT/READ**
+//! (`outfuncs.c`/`readfuncs.c`, opt-in per struct via `#[pg_node(out_read)]`).
+//! The JUMBLE (`queryjumblefuncs.c`) stage is deferred — this crate emits none.
+//!
+//! # The OUT/READ stage (`#[pg_node(out_read)]`)
+//!
+//! When a struct opts in with `#[pg_node(out_read)]`, the derive ALSO emits
+//! `impl PgNodeOut` (a `_outFoo`) and `impl PgNodeRead` (a `_readFoo`):
+//!
+//! * `out_node(&self, buf)` writes `{LABEL` (the `{` from `outNode` + the LABEL
+//!   from `WRITE_NODE_TYPE`), then for each non-ignored field its `" :fld "`
+//!   framing + the field's [`PgNodeOut::out_node`] token, then `}`. `LABEL` is
+//!   the struct name uppercased (`gen_node_support.pl`'s `uc $name`). OUT only
+//!   appends scratch bytes, so it is infallible and never charges `mcx`.
+//! * `read_node(cur, dst)` consumes `{`, the LABEL (verified), each `:field`
+//!   token + the field's [`PgNodeRead::read_node`], then `}`. Like
+//!   `copy_node_in`, READ rebuilds a node tree, so it threads the TARGET context
+//!   `dst`, returns `PgResult<Self::Bound<'dst>>` (the SAME `Bound<'dst>`
+//!   associated type as copy), and propagates a charged-allocation OOM with `?`.
+//!
+//! The stage is opt-in because it requires every field type to implement
+//! `PgNodeOut`/`PgNodeRead`, and that leaf set is wired incrementally in the
+//! owning `types-nodes` crate (the value.h leaves first). A plain copy/equal-only
+//! `#[derive(PgNode)]` is unchanged.
 //!
 //! # The two generated methods
 //!
@@ -66,6 +88,13 @@
 //! * `#[pg_node(copy_as(other_field))]` — on copy, set this field from the
 //!   sibling field `other_field` instead of from itself (C's
 //!   `newnode->f = other_field`).
+//! * `#[pg_node(read_write_ignore)]` — (OUT/READ stage) the field is neither
+//!   written nor read; `read_node` leaves it at `Default::default()` (C's
+//!   per-field `read_write_ignore`).
+//! * `#[pg_node(char_as)]` — (OUT/READ stage) the field stores a C `char` in an
+//!   integer Rust field (`u8`/`i8`); serialize it with `WRITE_CHAR_FIELD`/
+//!   `READ_CHAR_FIELD` (`outChar`, a one-character token / `<>`), NOT the integer
+//!   `%u`/`%d` form.
 //!
 //! # Struct attributes
 //!
@@ -75,8 +104,18 @@
 //! * `#[pg_node(no_equal)]` — do not generate `impl PgNodeEqual`.
 //! * `#[pg_node(custom_copy_equal)]` — generate neither copy nor equal; a
 //!   hand-written `PgNodeCopy`/`PgNodeEqual` impl is expected.
+//! * `#[pg_node(out_read)]` — ALSO generate `impl PgNodeOut` + `impl PgNodeRead`
+//!   (the OUT/READ stage; see above).
+//! * `#[pg_node(no_out)]` — opt into the OUT/READ stage but suppress the
+//!   `PgNodeOut` impl (C's hand-OUT). Implies `out_read`.
+//! * `#[pg_node(no_read)]` — opt into the OUT/READ stage but suppress the
+//!   `PgNodeRead` impl (C's `@no_read`: write-only). Implies `out_read`.
+//! * `#[pg_node(custom_read_write)]` — opt into the OUT/READ stage but generate
+//!   NEITHER `PgNodeOut` nor `PgNodeRead`; a hand-written pair is expected (C's
+//!   `pg_node_attr(custom_read_write)` / `special_read_write`, e.g. the value
+//!   nodes / `Const` / `Bitmapset` / `List`). Copy/equal stay generated.
 //! * `#[pg_node(nodetag_only)]` — the type only needs a node tag, no support
-//!   functions; generate neither copy nor equal.
+//!   functions; generate none of copy/equal/out/read.
 //!
 //! Any unrecognised attribute (field or struct) is a hard compile error, the
 //! same spirit as `gen_node_support.pl` dying on an unknown attribute. The
@@ -100,6 +139,19 @@ struct FieldAttrs {
     array_size: Option<Ident>,
     /// `copy_as(other_field)` — sibling field to copy from instead of self.
     copy_as: Option<Ident>,
+    /// `read_write_ignore` — (OUT/READ stage) skip this field entirely in BOTH
+    /// `out_node` and `read_node` (the OUT/READ analogue of
+    /// `gen_node_support.pl`'s `read_write_ignore` per-field attribute: the field
+    /// is neither written nor read, and `read_node` leaves it at
+    /// `Default::default()`).
+    read_write_ignore: bool,
+    /// `char_as` — (OUT/READ stage) this field stores a C `char` value in an
+    /// integer Rust field (`u8`/`i8`). PostgreSQL serializes it with
+    /// `WRITE_CHAR_FIELD`/`READ_CHAR_FIELD` (`outChar` — a one-character,
+    /// possibly-escaped token, or `<>` for `\0`), NOT as the `%u`/`%d` integer
+    /// `PgNodeOut`/`PgNodeRead` would emit, so route it through the dedicated
+    /// `out_char_field_byte` / `read_char_field_byte` helpers.
+    char_as: bool,
 }
 
 impl FieldAttrs {
@@ -136,6 +188,10 @@ impl FieldAttrs {
                     let content;
                     syn::parenthesized!(content in meta.input);
                     attrs.copy_as = Some(content.parse::<Ident>()?);
+                } else if meta.path.is_ident("read_write_ignore") {
+                    attrs.read_write_ignore = true;
+                } else if meta.path.is_ident("char_as") {
+                    attrs.char_as = true;
                 } else {
                     return Err(meta.error("unknown pg_node field attribute"));
                 }
@@ -156,6 +212,28 @@ impl FieldAttrs {
 struct StructAttrs {
     no_copy: bool,
     no_equal: bool,
+    /// Opt-in to OUT/READ generation. The out/read stage requires every field
+    /// type to implement `PgNodeOut`/`PgNodeRead` (the OUT/READ analogue of the
+    /// copy/equal leaf impls). Those leaf impls are only partially wired in the
+    /// owning `types-nodes` crate today (the value.h leaves), so OUT/READ is
+    /// generated ONLY when a struct opts in with `#[pg_node(out_read)]`. This
+    /// keeps every existing copy/equal-only `#[derive(PgNode)]` compiling
+    /// unchanged while an out/read-ready struct turns the stage on per struct.
+    out_read: bool,
+    /// Suppress only the `PgNodeOut` impl (C's hand-OUT / `@no_read`'s OUT-only
+    /// sibling). Implies `out_read`.
+    no_out: bool,
+    /// Suppress only the `PgNodeRead` impl (C's `@no_read`: write-only). Implies
+    /// `out_read`.
+    no_read: bool,
+    /// `custom_read_write` was given: the struct opts INTO the out/read stage
+    /// (so it participates in the central serialization) but supplies its own
+    /// hand-written `PgNodeOut`/`PgNodeRead`, so the derive emits NEITHER.
+    /// Distinguishing this from "out/read simply off" lets `out_read` +
+    /// `custom_read_write` coexist (C's `pg_node_attr(custom_read_write)`, e.g.
+    /// `Const`/`A_Const`/`Bitmapset`/`List`). Copy/equal stay generated unless
+    /// also `custom_copy_equal`.
+    custom_read_write: bool,
 }
 
 impl StructAttrs {
@@ -170,14 +248,38 @@ impl StructAttrs {
                     attrs.no_copy = true;
                 } else if meta.path.is_ident("no_equal") {
                     attrs.no_equal = true;
+                } else if meta.path.is_ident("out_read") {
+                    // Opt this struct into the OUT/READ stage.
+                    attrs.out_read = true;
+                } else if meta.path.is_ident("no_out") {
+                    // Opt into the stage but suppress only the OUT impl. Implies
+                    // out_read.
+                    attrs.out_read = true;
+                    attrs.no_out = true;
+                } else if meta.path.is_ident("no_read") {
+                    // C's @no_read: an OUT impl is generated but no READ impl.
+                    // Implies out_read.
+                    attrs.out_read = true;
+                    attrs.no_read = true;
                 } else if meta.path.is_ident("custom_copy_equal") {
                     // Hand-written copy AND equal expected: emit neither.
                     attrs.no_copy = true;
                     attrs.no_equal = true;
+                } else if meta.path.is_ident("custom_read_write") {
+                    // Hand-written out AND read expected (C's
+                    // pg_node_attr(custom_read_write)): the struct is part of the
+                    // serialization stage, but the derive emits NEITHER out_node
+                    // nor read_node, leaving copy/equal intact.
+                    attrs.out_read = true;
+                    attrs.custom_read_write = true;
+                    attrs.no_out = true;
+                    attrs.no_read = true;
                 } else if meta.path.is_ident("nodetag_only") {
                     // Only a node tag, no support functions: emit none.
                     attrs.no_copy = true;
                     attrs.no_equal = true;
+                    attrs.no_out = true;
+                    attrs.no_read = true;
                 } else {
                     return Err(meta.error("unknown pg_node struct attribute"));
                 }
@@ -199,6 +301,38 @@ pub fn derive_pg_node(input: TokenStream) -> TokenStream {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Rewrite every occurrence of the struct's lifetime `from` (its single `'mcx`)
+/// in `ty` to `'dst`, yielding the field's *bound* type — the type the field
+/// holds in the `Bound<'dst>` copy/read value (`PgString<'mcx>` -> `PgString<
+/// 'dst>`, `i32` -> `i32`). This is needed by the READ field init so the call to
+/// the fallible, projection-returning `PgNodeRead::read_node` can be UFCS-
+/// qualified (`<PgString<'dst> as PgNodeRead>::read_node(..)`): a bare
+/// `PgNodeRead::read_node(..)?` cannot infer `Self` from the associated
+/// `Bound<'dst>` return alone (associated-type projection is non-invertible), so
+/// the field type must pin it. An elided lifetime (`PgString<'_>`) and the
+/// anonymous `'_` are also retargeted, matching how a field written with `'_`
+/// rebinds. If the struct is lifetime-free, `from` is `None` and `ty` is left
+/// untouched.
+fn rebind_field_ty_to_dst(ty: &syn::Type, from: Option<&Lifetime>) -> syn::Type {
+    let mut out = ty.clone();
+    if let Some(from) = from {
+        struct Rebind<'a> {
+            from: &'a Lifetime,
+        }
+        impl<'a> syn::visit_mut::VisitMut for Rebind<'a> {
+            fn visit_lifetime_mut(&mut self, lt: &mut Lifetime) {
+                // Rewrite the struct's named lifetime and any anonymous `'_`
+                // (an elided child link) to the destination context lifetime.
+                if lt.ident == self.from.ident || lt.ident == "_" {
+                    lt.ident = syn::Ident::new("dst", lt.ident.span());
+                }
+            }
+        }
+        syn::visit_mut::VisitMut::visit_type_mut(&mut Rebind { from }, &mut out);
+    }
+    out
 }
 
 /// True if `ty` is a (possibly path-qualified) type whose final segment is
@@ -295,6 +429,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     // Per-field copy initialisers and equal comparisons.
     let mut copy_inits = Vec::new();
     let mut equal_checks = Vec::new();
+    // Per-field OUT writers and READ field initialisers (the out/read stage).
+    let mut out_writes = Vec::new();
+    let mut read_inits = Vec::new();
     // Track fields already seen, to validate that an array_size/copy_as target
     // precedes the field referencing it (mirrors gen_node_support.pl's
     // "array size field ... must precede" die check).
@@ -302,6 +439,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     for field in fields.iter() {
         let ident: &Ident = field.ident.as_ref().expect("named field");
+        let ty = &field.ty;
         let attrs = FieldAttrs::from_field(field)?;
 
         // Validate cross-field references precede this field.
@@ -434,6 +572,86 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
+        // ---- out_node ----
+        // Mirrors outfuncs.c's WRITE_*_FIELD family. Each field writes its
+        // framing `" :fldname "` then delegates the per-type token to the uniform
+        // `PgNodeOut::out_node` — exactly how WRITE_INT_FIELD splits the `" :fld "`
+        // framing from the `%d` value. `read_write_ignore` fields emit nothing (no
+        // WRITE_* line). The `:fldname` literal is the field name, matching C's
+        // `CppAsString(fldname)`.
+        if struct_attrs.out_read && !struct_attrs.no_out && !attrs.read_write_ignore {
+            let field_frame = format!(" :{ident} ");
+            if attrs.location {
+                // WRITE_LOCATION_FIELD with the default write_location_fields ==
+                // false: write the literal `-1` (outfuncs.c:99-100). Byte-for-byte
+                // identical to PG's default nodeToString.
+                out_writes.push(quote! {
+                    ::backend_nodes_node_support::out_str(buf, #field_frame);
+                    ::backend_nodes_node_support::out_str(buf, "-1");
+                });
+            } else if attrs.char_as {
+                // WRITE_CHAR_FIELD on a field whose Rust storage is an integer
+                // (`u8`/`i8`): emit the one-character `outChar` token PostgreSQL
+                // writes (e.g. `relpersistence` -> `p`), NOT the `%u`/`%d` the
+                // integer leaf would. The value is cast to `u8` (the C `char` byte)
+                // then routed through the shared `out_char` path.
+                out_writes.push(quote! {
+                    ::backend_nodes_node_support::out_str(buf, #field_frame);
+                    ::backend_nodes_node_support::out_char_field_byte(buf, self.#ident as u8);
+                });
+            } else {
+                // Covers WRITE_INT/UINT/OID/BOOL/CHAR/STRING/ENUM/NODE_FIELD — the
+                // per-type token is produced by PgNodeOut::out_node.
+                out_writes.push(quote! {
+                    ::backend_nodes_node_support::out_str(buf, #field_frame);
+                    ::backend_nodes_node_support::PgNodeOut::out_node(&self.#ident, buf);
+                });
+            }
+        }
+
+        // ---- read_node ----
+        // Mirrors readfuncs.c's READ_*_FIELD family. Every READ_*_FIELD first
+        // skips the `:fldname` token, then reads the value via the uniform
+        // `PgNodeRead::read_node`, re-homing rebuilt node storage onto the target
+        // context `__dst` and propagating an OOM with `?`. `read_write_ignore`
+        // fields read nothing and stay at `Default` (no READ_* line; makeNode's
+        // palloc0 zero).
+        if struct_attrs.out_read && !struct_attrs.no_read {
+            if attrs.read_write_ignore {
+                read_inits.push(quote! {
+                    #ident: ::core::default::Default::default()
+                });
+            } else if attrs.char_as {
+                // READ_CHAR_FIELD into an integer Rust field (see the OUT side):
+                // skip `:fldname`, read the one-character `outChar` token as a
+                // byte, then cast back to the field's integer type.
+                read_inits.push(quote! {
+                    #ident: {
+                        cur.skip_token(); // skip :fldname
+                        ::backend_nodes_node_support::read_char_field_byte(cur) as #ty
+                    }
+                });
+            } else {
+                // Covers READ_INT/UINT/OID/BOOL/CHAR/STRING/ENUM/NODE_FIELD /
+                // READ_LOCATION_FIELD — skip `:fldname`, then read the value via
+                // PgNodeRead (re-homed onto `__dst`). A location field's OUT wrote
+                // the literal `-1`, so its own `PgNodeRead` parse yields exactly
+                // -1, identical to READ_LOCATION_FIELD, advancing the cursor as far
+                // as OUT wrote. UFCS-qualified on the field's BOUND type (its `'mcx`
+                // rebound to `'dst`) so `Self` is pinned — `PgNodeRead::read_node`
+                // returns the projection `Self::Bound<'dst>`, which a bare call
+                // cannot infer `Self` from.
+                let bound_field_ty = rebind_field_ty_to_dst(ty, lifetimes.first().copied());
+                read_inits.push(quote! {
+                    #ident: {
+                        cur.skip_token(); // skip :fldname
+                        <#bound_field_ty as ::backend_nodes_node_support::PgNodeRead>
+                            ::read_node(cur, __dst)?
+                    }
+                });
+            }
+        }
+
         seen_fields.push(ident.clone());
     }
 
@@ -470,6 +688,87 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 fn equal_node(&self, other: &Self) -> bool {
                     #(#equal_checks)*
                     true
+                }
+            }
+        }
+    };
+
+    // The node LABEL is the C node-tag name uppercased, exactly as
+    // `gen_node_support.pl` computes it (`my $N = uc $n;`) and feeds to
+    // `WRITE_NODE_TYPE("$N")` / `MATCH("$N", ...)`. The struct identifier is the
+    // node type name, so we uppercase it (ASCII, matching Perl's `uc`).
+    let label = name.to_string().to_ascii_uppercase();
+    // `{LABEL` opener — the `{` is emitted by `outNode` (outfuncs.c:755) and the
+    // LABEL by `WRITE_NODE_TYPE` (no leading space). We fold both into the
+    // per-struct writer so `out_node` produces a complete, self-contained
+    // `{LABEL ...}` token (the owned-tree analogue collapses outNode's dispatch
+    // brace into the per-type writer).
+    let open_brace_label = format!("{{{label}");
+
+    // ---- out_node impl ----
+    // Emits `{LABEL :f1 v1 :f2 v2 ... }` matching outfuncs.c byte-for-byte:
+    // `{` + LABEL, then each non-ignored field's `" :fld "` framing + value, then
+    // `}`. OUT only appends scratch-buffer bytes, so it is infallible and takes a
+    // plain `String` (no `mcx` / `'dst`), unlike the fallible READ side.
+    let out_impl = if !struct_attrs.out_read || struct_attrs.no_out {
+        quote! {}
+    } else {
+        quote! {
+            impl #impl_generics ::backend_nodes_node_support::PgNodeOut for #name #ty_generics
+                #where_clause
+            {
+                fn out_node(
+                    &self,
+                    buf: &mut ::backend_nodes_node_support::alloc_reexport::string::String,
+                ) {
+                    // `{` + WRITE_NODE_TYPE(LABEL).
+                    ::backend_nodes_node_support::out_str(buf, #open_brace_label);
+                    #(#out_writes)*
+                    // closing `}` (outfuncs.c:770).
+                    ::backend_nodes_node_support::out_str(buf, "}");
+                }
+            }
+        }
+    };
+
+    // ---- read_node impl ----
+    // Consumes `{LABEL :f1 v1 ... }`: read `{`, read+verify LABEL, read each
+    // field (skip `:fld`, read value into `__dst`), then read `}`. Like
+    // `copy_node_in`, READ rebuilds a node tree, so it threads the TARGET context
+    // `__dst`, returns `PgResult<Self::Bound<'dst>>` (the same `Bound<'dst>` as
+    // copy: `Foo<'mcx>` reads to `Foo<'dst>`, a lifetime-free leaf to `Self`), and
+    // propagates a charged-allocation OOM with `?`. The owned-tree fusion of
+    // nodeRead's brace handling (read.c:337-342) with parseNodeString's label
+    // dispatch (readfuncs.c:580-585) and the per-struct `_read#name`.
+    let read_impl = if !struct_attrs.out_read || struct_attrs.no_read {
+        quote! {}
+    } else {
+        quote! {
+            impl #impl_generics ::backend_nodes_node_support::PgNodeRead for #name #ty_generics
+                #where_clause
+            {
+                type Bound<'dst> = #bound_ty;
+                fn read_node<'dst>(
+                    cur: &mut ::backend_nodes_node_support::ReadCursor<'_>,
+                    __dst: ::backend_nodes_node_support::Mcx<'dst>,
+                ) -> ::backend_nodes_node_support::PgResult<Self::Bound<'dst>> {
+                    // Consume the opening `{` (nodeRead LEFT_BRACE, read.c:337).
+                    let __open = cur.expect_token();
+                    debug_assert_eq!(__open.text, "{", "expected '{{' at start of node");
+                    // Read the LABEL and verify it matches (parseNodeString's
+                    // MATCH, readfuncs.c:582-585).
+                    let __label = cur.expect_token();
+                    debug_assert_eq!(
+                        __label.text, #label,
+                        "node label mismatch: expected '{}'", #label,
+                    );
+                    let __result = #bound_ctor {
+                        #(#read_inits,)*
+                    };
+                    // Consume the closing `}` (nodeRead, read.c:339-341).
+                    let __close = cur.expect_token();
+                    debug_assert_eq!(__close.text, "}", "expected '}}' at end of node");
+                    ::core::result::Result::Ok(__result)
                 }
             }
         }
@@ -528,6 +827,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     Ok(quote! {
         #copy_impl
         #equal_impl
+        #out_impl
+        #read_impl
         #plan_base_impl
     })
 }

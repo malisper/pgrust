@@ -9,7 +9,6 @@ name = "backend_catalog_dependency_seams"
 path = "src/lib.rs"
 
 [dependencies]
-backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 seam-core = { path = "../seam-core" }
 types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }

@@ -11,7 +11,20 @@
 # column with `mcx` (so the generator threads `<'mcx>` / re-homes onto `'dst`);
 # lifetime-free leaves use `-`.
 #
-# tag            struct path                    lifetime
+# OPTIONAL 4th column = the OUT/READ central-dispatch kind:
+#   * `derived` — the struct opts into the serialization stage
+#     (`#[derive(PgNode)] #[pg_node(out_read)]`) or hand-writes a *framed*
+#     `PgNodeOut`/`PgNodeRead`; the central `out_node`/`read_node` delegates
+#     straight to it.
+#   * `custom`  — (DEFAULT, used when the column is omitted) the variant is
+#     `special_read_write` in C (the value nodes, `Bitmapset`, `List`, all with
+#     hand-written `_out`/`_read` routines). Until those hand-written
+#     serializers + the per-label/value-token read dispatch are wired (a later
+#     stage), the central dispatch routes the variant to a panicking
+#     `out_node_custom`/`read_node_custom` hook — the sanctioned "not yet ported"
+#     seam, NEVER a fabricated token. Every current row is `custom`.
+#
+# tag            struct path                    lifetime  [out_read]
 
 # --- bitmapset (nodes/bitmapset.h), custom_copy_equal ---
 T_Bitmapset      crate::bitmapset::Bitmapset    mcx

@@ -313,6 +313,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_pread(fd, buf, count, offset)` — positioned read against a bare
+    /// kernel fd (the `BasicOpenFile` return value, e.g. the WAL segment fd a
+    /// reader holds in `state->seg.ws_file`). Returns bytes read (>=0) or
+    /// `-errno`; reads `buf.len()` bytes into `buf` at `offset`. Consumed by
+    /// `xlogreader.c`'s `WALRead`.
+    pub fn pg_pread(fd: i32, buf: &mut [u8], offset: i64) -> isize
+);
+
+seam_core::seam!(
     /// `int pg_fsync(int fd)` (`fd.c`). 0 on success, `-errno` on failure.
     pub fn pg_fsync(fd: i32) -> i32
 );

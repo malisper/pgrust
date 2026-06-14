@@ -22,6 +22,47 @@ pub const PERFORM_DELETION_SKIP_EXTENSIONS: i32 = 0x0010;
 /// `PERFORM_DELETION_CONCURRENT_LOCK` — normal drop with concurrent lock mode.
 pub const PERFORM_DELETION_CONCURRENT_LOCK: i32 = 0x0020;
 
+/// `ObjectAddresses *` — the opaque runtime accumulator
+/// (`new_object_addresses()` / `add_exact_object_address` /
+/// `object_address_present` / `record_object_address_dependencies` /
+/// `free_object_addresses`). Its payload (the growable `ObjectAddress` array
+/// with its hashtable) is owned by dependency.c; callers (pg_constraint.c) only
+/// thread the handle between these seams. Inherited opacity — a foreign runtime
+/// handle, not a modeled value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectAddressesHandle(pub u64);
+
+seam_core::seam!(
+    /// `new_object_addresses()` (dependency.c): allocate a fresh
+    /// `ObjectAddresses` accumulator and return its handle. `Err` carries OOM.
+    pub fn new_object_addresses() -> PgResult<ObjectAddressesHandle>
+);
+
+seam_core::seam!(
+    /// `add_exact_object_address(&object, addrs)` (dependency.c): append
+    /// `object` to the accumulator (growing it as needed). `Err` carries OOM.
+    pub fn add_exact_object_address(
+        object: ObjectAddress,
+        addrs: ObjectAddressesHandle,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `object_address_present(&object, addrs)` (dependency.c): is `object`
+    /// (matching class/object, and subid present or whole-object) already in
+    /// the accumulator?
+    pub fn object_address_present(
+        object: ObjectAddress,
+        addrs: ObjectAddressesHandle,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `free_object_addresses(addrs)` (dependency.c): release the accumulator
+    /// and its hashtable.
+    pub fn free_object_addresses(addrs: ObjectAddressesHandle) -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `performDeletion(&object, behavior, flags)` (dependency.c) for the
     /// `ObjectAddress {classId, objectId, objectSubId}`: delete the object
@@ -83,7 +124,7 @@ seam_core::seam!(
     /// carries the pg_depend-insert `ereport(ERROR)`s.
     pub fn record_object_address_dependencies(
         depender: ObjectAddress,
-        refs: backend_catalog_objectaddress_seams::ObjectAddressesHandle,
+        refs: ObjectAddressesHandle,
         behavior: types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );

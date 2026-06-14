@@ -16,7 +16,6 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
-backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
