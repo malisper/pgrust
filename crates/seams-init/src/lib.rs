@@ -50,6 +50,7 @@ pub fn init_all() {
     backend_commands_cluster::init_seams();
     backend_commands_copyto::init_seams();
     backend_commands_define::init_seams();
+    backend_commands_dropcmds::init_seams();
     backend_commands_foreigncmds::init_seams();
     backend_commands_matview::init_seams();
     backend_commands_portalcmds::init_seams();

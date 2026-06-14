@@ -17,7 +17,7 @@
 #![allow(non_upper_case_globals)]
 
 use types_core::Oid;
-use types_nodes::parsenodes::DropBehavior;
+use types_nodes::parsenodes::{DropBehavior, ObjectType};
 
 /// `int ParseLoc` (`nodes/parsenodes.h`) — token location, `-1` if unknown.
 pub type ParseLoc = i32;
@@ -369,6 +369,25 @@ pub struct VariableSetStmt {
     pub is_local: bool,
     /// token location, or -1 if unknown
     pub location: ParseLoc,
+}
+
+/// `typedef struct DropStmt` (`nodes/parsenodes.h`) — DROP of one or more
+/// generic objects (TYPE / DOMAIN / FUNCTION / AGGREGATE / OPERATOR / SCHEMA /
+/// CAST / TRANSFORM / TRIGGER / RULE / POLICY / TEXT SEARCH … — every object
+/// type handled by `RemoveObjects`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropStmt {
+    /// `objects` — list of names. Each element is a polymorphic value node
+    /// (`String`, `TypeName`, `ObjectWithArgs`, or `List`) per `removeType`.
+    pub objects: Vec<Node>,
+    /// `removeType` — object type.
+    pub removeType: ObjectType,
+    /// `behavior` — RESTRICT or CASCADE.
+    pub behavior: DropBehavior,
+    /// `missing_ok` — skip error if object is missing?
+    pub missing_ok: bool,
+    /// `concurrent` — drop index concurrently?
+    pub concurrent: bool,
 }
 
 /// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).

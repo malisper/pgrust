@@ -2057,8 +2057,12 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-catalog",
+ "types-core",
  "types-error",
  "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -2620,6 +2624,40 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-commands-dropcmds"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-dependency-seams",
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-commands-dropcmds-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+ "types-rel",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-commands-dropcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-parsenodes",
 ]
 
 [[package]]
@@ -9916,6 +9954,7 @@ dependencies = [
  "backend-commands-cluster",
  "backend-commands-copyto",
  "backend-commands-define",
+ "backend-commands-dropcmds",
  "backend-commands-foreigncmds",
  "backend-commands-matview",
  "backend-commands-portalcmds",

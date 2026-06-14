@@ -66,3 +66,23 @@ seam_core::seam!(
         type_name: &ParseTypeName,
     ) -> PgResult<PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `LookupTypeNameOid(NULL, typeName, missing_ok)` (parse_type.c): resolve
+    /// a raw-parser `TypeName` node to its type OID, returning `InvalidOid`
+    /// (the C `InvalidOid` with `missing_ok = true`) when the type does not
+    /// exist. With `missing_ok = false`, or for any catalog failure, the error
+    /// is carried on `Err`.
+    pub fn lookup_type_name_oid(type_name: &ParseTypeName, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `TypeNameListToString(typenames)` (parse_func.c): render a comma-
+    /// separated list of raw-parser `TypeName` nodes (a function/aggregate
+    /// argument-type list) for an error message, palloc'd in the caller's
+    /// `mcx`. `Err` includes OOM from the construction.
+    pub fn type_name_list_to_string<'mcx>(
+        mcx: Mcx<'mcx>,
+        typenames: &[ParseTypeName],
+    ) -> PgResult<PgString<'mcx>>
+);
