@@ -158,7 +158,7 @@ pub fn AggStateIsShared<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> bool {
 pub fn AggRegisterCallback<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     func: types_nodes::ExprContextCallbackFunction,
-    arg: types_datum::Datum,
+    arg: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
     if agg_context(fcinfo).is_some() {
         // RegisterExprContextCallback(aggstate->curaggcontext, func, arg);

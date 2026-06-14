@@ -365,8 +365,10 @@ pub fn process_ordered_aggregate_single<'mcx>(
     // MemoryContext workcontext = aggstate->tmpcontext->ecxt_per_tuple_memory;
     // bool isDistinct = (pertrans->numDistinctCols > 0);
     let is_distinct = pertrans.num_distinct_cols > 0;
-    let mut new_abbrev_val: types_datum::Datum = types_datum::Datum::null();
-    let mut old_abbrev_val: types_datum::Datum = types_datum::Datum::null();
+    let mut new_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
+    let mut old_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
 
     // Assert(pertrans->numDistinctCols < 2);
     debug_assert!(pertrans.num_distinct_cols < 2);
@@ -401,7 +403,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
         }
         // The tuplesort seam does not surface the abbreviated key, so the
         // abbreviated-equality fast path always falls through to equalfnOne.
-        new_abbrev_val = types_datum::Datum::null();
+        new_abbrev_val = types_tuple::backend_access_common_heaptuple::Datum::null();
 
         // Load the fetched datum into the transfn's argument 1.
         fcinfo_set_arg(pertrans, 1, new_val, new_is_null);
@@ -498,8 +500,10 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     let mut slot2 = pertrans.uniqslot;
     let num_trans_inputs = pertrans.num_trans_inputs;
     let num_distinct_cols = pertrans.num_distinct_cols;
-    let mut new_abbrev_val: types_datum::Datum = types_datum::Datum::null();
-    let mut old_abbrev_val: types_datum::Datum = types_datum::Datum::null();
+    let mut new_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
+    let mut old_abbrev_val: types_tuple::backend_access_common_heaptuple::Datum =
+        types_tuple::backend_access_common_heaptuple::Datum::null();
     let mut have_old_value = false;
     // TupleTableSlot *save = aggstate->tmpcontext->ecxt_outertuple;
     let save = tmpcontext_outertuple(aggstate);
@@ -536,7 +540,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         }
         // The tuplesort seam does not surface the abbreviated key, so the
         // abbreviated-equality fast path always falls through to equalfnMulti.
-        new_abbrev_val = types_datum::Datum::null();
+        new_abbrev_val = types_tuple::backend_access_common_heaptuple::Datum::null();
 
         // CHECK_FOR_INTERRUPTS();
         backend_tcop_postgres_seams::check_for_interrupts::call()?;
