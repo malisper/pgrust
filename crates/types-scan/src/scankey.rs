@@ -2,7 +2,7 @@
 
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `StrategyNumber` (`access/stratnum.h`).
 pub type StrategyNumber = u16;
@@ -34,17 +34,17 @@ pub const SK_BT_MAXVAL: i32 = 0x00100000;
 /// scan. `sk_func` is trimmed to the procedure OID ([`FmgrInfo`]); the scan
 /// code performs the real fmgr lookup when it consumes the key.
 #[derive(Clone, Debug)]
-pub struct ScanKeyData {
+pub struct ScanKeyData<'mcx> {
     pub sk_flags: i32,
     pub sk_attno: AttrNumber,
     pub sk_strategy: StrategyNumber,
     pub sk_subtype: Oid,
     pub sk_collation: Oid,
     pub sk_func: FmgrInfo,
-    pub sk_argument: Datum,
+    pub sk_argument: Datum<'mcx>,
 }
 
-impl ScanKeyData {
+impl ScanKeyData<'_> {
     pub fn empty() -> Self {
         Self {
             sk_flags: 0,
