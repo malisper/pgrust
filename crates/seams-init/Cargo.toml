@@ -223,6 +223,7 @@ backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-utils-misc-guc-file = { path = "../backend-utils-misc-guc-file" }
+backend-utils-misc-guc-funcs = { path = "../backend-utils-misc-guc-funcs" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }

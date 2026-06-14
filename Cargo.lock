@@ -10325,6 +10325,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc-funcs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-commands-functioncmds-seams",
+ "backend-utils-error",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-funcs-seams",
+ "mcx",
+ "types-acl",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-misc-guc-funcs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-seams"
 version = "0.0.0"
 dependencies = [
@@ -11441,6 +11471,7 @@ dependencies = [
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-file",
+ "backend-utils-misc-guc-funcs",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
