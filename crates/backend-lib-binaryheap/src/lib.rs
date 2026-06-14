@@ -237,12 +237,24 @@ impl<T, C: FnMut(&T, &T) -> i32> BinaryHeap<T, C> {
 
         // compare last node to the one that is being removed
         //   cmp = bh_compare(bh_nodes[--bh_size], bh_nodes[n], bh_arg);
-        let last = self.nodes.pop().expect("non-empty heap");
-        let cmp = (self.compare)(&last, &self.nodes[n as usize]);
+        // C decrements bh_size first, then reads bh_nodes[bh_size] (the last
+        // node) and bh_nodes[n]. When n == size-1 these alias the same slot, so
+        // cmp == 0 and the node simply drops — compare by index *before* the
+        // pop so that aliasing case is preserved (popping first would put
+        // bh_nodes[n] out of bounds and panic, diverging from C).
+        let last_idx = (self.size() - 1) as usize;
+        let cmp = (self.compare)(&self.nodes[last_idx], &self.nodes[n as usize]);
 
         // remove the last node, placing it in the vacated entry
         //   bh_nodes[n] = bh_nodes[bh_size];
-        self.nodes[n as usize] = last;
+        // When n == size-1 the removed node *is* the last node: C writes
+        // bh_nodes[n] = bh_nodes[bh_size] into the just-vacated slot (a no-op),
+        // and cmp == 0 means no sift. Here the pop already removed it, so skip
+        // the (out-of-bounds) self-assignment.
+        let last = self.nodes.pop().expect("non-empty heap");
+        if (n as usize) != last_idx {
+            self.nodes[n as usize] = last;
+        }
 
         // sift as needed to preserve the heap property
         if cmp > 0 {
@@ -437,6 +449,30 @@ mod tests {
         h.add(2).unwrap();
         assert!(h.add(3).is_err()); // capacity exceeded
         assert!(h.add_unordered(3).is_err());
+    }
+
+    #[test]
+    fn remove_node_last_index() {
+        // Removing the last node (n == size-1): C reads bh_nodes[--bh_size]
+        // and bh_nodes[n] which alias, so cmp == 0 and the node just drops.
+        // The port must not panic on this valid input.
+        let mut h: BinaryHeap<i32, fn(&i32, &i32) -> i32> =
+            BinaryHeap::allocate(8, max_cmp as fn(&i32, &i32) -> i32).unwrap();
+        for &v in &[7, 5, 6, 3, 4] {
+            h.add(v).unwrap();
+        }
+        let last = h.size() - 1;
+        let removed_val = *h.get_node(last);
+        h.remove_node(last);
+        assert_eq!(h.size(), 4);
+        // The rest is the original multiset minus the removed last node, and
+        // remains a valid max-heap (drains in descending order).
+        let rest = drain_sorted(&mut h);
+        let mut expected: Vec<i32> = [7, 5, 6, 3, 4].into_iter().collect();
+        let pos = expected.iter().position(|&x| x == removed_val).unwrap();
+        expected.remove(pos);
+        expected.sort_unstable_by(|a: &i32, b: &i32| b.cmp(a));
+        assert_eq!(rest, expected);
     }
 
     #[test]
