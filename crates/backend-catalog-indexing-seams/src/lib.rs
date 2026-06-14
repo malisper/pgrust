@@ -240,6 +240,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heap_form_tuple` + `CatalogTupleInsert` + `heap_freetuple` for one
+    /// pg_largeobject_metadata row (pg_largeobject.c `LargeObjectCreate`): form
+    /// the metadata tuple from the already-chosen large-object OID, owner, and
+    /// optional default ACL, then insert it with index maintenance. Unlike the
+    /// pg_namespace/pg_am inserts, the OID is assigned by the caller (the C
+    /// `OidIsValid(loid) ? loid : GetNewOidWithIndex(...)` branch runs in
+    /// `LargeObjectCreate` itself), so this seam does no OID allocation; it just
+    /// builds `values[]` (`oid = loid`, `lomowner = lomowner`) and, when
+    /// `lomacl == None`, sets `nulls[Anum_pg_largeobject_metadata_lomacl - 1] =
+    /// true`. The `lomacl` varlena (`Acl *` = `ArrayType`) crosses unchanged.
+    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_largeobject_metadata(
+        rel: &RelationData<'_>,
+        loid: Oid,
+        lomowner: Oid,
+        lomacl: Option<types_array::ArrayType>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetNewOidWithIndex(rel, AmOidIndexId, Anum_pg_am_oid)` +
     /// `namein(amname)` + `heap_form_tuple` + `CatalogTupleInsert` for one
     /// pg_am row (amcmds.c `CreateAccessMethod`): assign the row OID, form the
@@ -255,4 +275,28 @@ seam_core::seam!(
         amhandler: Oid,
         amtype: u8,
     ) -> PgResult<Oid>
+);
+
+/* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
+
+seam_core::seam!(
+    /// `get_catalog_object_by_oid(Relation catalog, AttrNumber oidcol, Oid
+    /// objectId)` scan primitive (objectaddress.c 2790): over the already-open
+    /// `catalog` relation, `systable_beginscan` keyed on `oidcol = objectId`
+    /// (index scan when `oidcol` is the catalog's OID column, sequential
+    /// otherwise), `systable_getnext` the single matching row, `systable_endscan`,
+    /// returning the located tuple copied into `mcx` (or `None` when absent).
+    /// Backs `get_catalog_object_by_oid[_extended]`; declared additively here
+    /// because the indexing/genam owner (a sibling decomp) has not landed yet.
+    /// The `locktuple` flag mirrors the `_extended` variant
+    /// (`get_catalog_object_by_oid_extended`): when `true` a `LockTuple` is taken
+    /// on the located row before it is returned. `Err` carries the
+    /// index/heap-fetch error surface.
+    pub fn get_catalog_object_by_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        catalog: &RelationData<'mcx>,
+        oidcol: i16,
+        object_id: Oid,
+        locktuple: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
 );

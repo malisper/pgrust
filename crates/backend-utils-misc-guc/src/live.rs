@@ -1,0 +1,340 @@
+//! The **unified live GUC variable store** — the idiomatic analog of `guc.c`'s
+//! single `guc_hashtab` of `struct config_generic *`, boot-initialized by
+//! `InitializeGUCOptions` / `InitializeOneGUCOption`.
+//!
+//! The single store is the process-global [`GucRegistry`]. The boot init
+//! ([`initialize_guc_options`], the `InitializeGUCOptions` analog) builds every
+//! `config_*` record from [`backend_utils_misc_guc_tables`] and seeds each
+//! record's `value`/`reset_val` from its compiled-in `boot_val` (the
+//! `InitializeOneGUCOption` body, `*conf->variable = conf->reset_val =
+//! boot_val`). The typed accessors below read **through** that store, so a `SET`
+//! applied via [`set_config_option_global`] is immediately visible to every
+//! value seam; reporting ([`crate::report`]) walks the same store.
+//!
+//! # Reconciliation with the restructured `guc_tables`
+//!
+//! Unlike the prior idiomatic tree (whose `guc_tables` carried unresolved
+//! `IntExpr`/`EnumExpr`/`RealExpr` boot-value *placeholder strings* and symbolic
+//! min/max *expression strings*), this repo's [`backend_utils_misc_guc_tables`]
+//! is **fully resolved**: every `boot_val` is a concrete
+//! [`GucDefaultValue::Bool`]/`Int`/`Real`/`String`/`Enum` (the C `#define`d
+//! default, evaluated in `consts.rs`), and every int/real `min`/`max` is a real
+//! `i32`/`f64`. So the prior tree's two documented honest deferrals —
+//! *unresolved boot placeholders yield `variable = None` (skipped, never
+//! guessed)* and *symbolic min/max fall back to the widest bound* — are **moot
+//! here**: those settings (`checkpoint_flush_after`, `bgwriter_flush_after`, …)
+//! now seed their real boot values and carry exact bounds, strictly improving
+//! fidelity. The build still *skips* (never fabricates) any setting whose boot
+//! value cannot be turned into a typed value — but with the resolved tables this
+//! case does not arise.
+//!
+//! Hooks (check/assign/show) and the storage variable are not fn-pointer fields
+//! of the record here; they are the typed install-once *slots* the `guc_tables`
+//! `GucSetting` references, carried straight into the live record (see
+//! [`crate::model`]). The registry calls them through those slots, the faithful
+//! analog of the C record carrying the hook/variable pointers — so the prior
+//! tree's `assign_interval_style`/`assign_datestyle_str`/`assign_timezone_str`
+//! special-case seams are gone: an applied SET runs the variable's real
+//! `assign_*` hook slot (when its owner installed it) and writes the owner's
+//! storage through the `vars` slot, exactly as C's address-shared
+//! `*conf->variable = newval` plus `assign_hook` does.
+//!
+//! # Storage model
+//!
+//! GUC state is process-local (not shared memory), exactly as `guc.c`'s file
+//! statics are. The backend reaches `initialize_guc_options` single-threaded at
+//! startup; a `static mut` written once at boot and thereafter mutated only by
+//! the (single-threaded) `SET` path is the faithful analog of the C file-static
+//! `guc_hashtab`.
+
+#![allow(static_mut_refs)]
+
+use backend_utils_misc_guc_tables::{all_settings, GucDefaultValue, GucSetting};
+use types_core::{Oid, TimestampTz};
+use types_error::{ErrorLevel, PgResult};
+use types_guc::{config_type, GucContext, GucSource};
+
+use crate::model::{config_bool, config_enum, config_generic, config_int, config_real, config_string};
+use crate::registry::{GucRegistry, GucVariable};
+
+/// The process-global GUC store: the idiomatic `guc_hashtab`.
+static mut GUC_STORE: Option<GucRegistry> = None;
+
+/// `TimestampTz PgReloadTime` (guc.c file static): the time of the most recent
+/// successful config-file load, surfaced by `pg_conf_load_time()`.
+static mut PG_RELOAD_TIME: TimestampTz = 0;
+
+/// `PgReloadTime = GetCurrentTimestamp()` — record when the config file was last
+/// successfully (re)loaded. The caller supplies the timestamp.
+pub fn set_pg_reload_time(t: TimestampTz) {
+    unsafe {
+        PG_RELOAD_TIME = t;
+    }
+}
+
+/// Read `PgReloadTime` (the `pg_conf_load_time()` source value).
+pub fn pg_reload_time() -> TimestampTz {
+    unsafe { PG_RELOAD_TIME }
+}
+
+/// One resolved boot value (the result of evaluating a `guc_tables` `boot_val`).
+enum BootValue {
+    Bool(bool),
+    Int(i32),
+    Real(f64),
+    String(Option<String>),
+    Enum(i32),
+}
+
+/// Resolve a `guc_tables` setting's `boot_val` into a concrete [`BootValue`].
+///
+/// The resolved `guc_tables` only carries the five literal forms, so every
+/// setting resolves; the `None` arm is unreachable with the current tables and
+/// exists only so an unexpected future variant is *skipped*, never guessed.
+fn resolve_boot_value(setting: GucSetting) -> Option<BootValue> {
+    match setting.default_value() {
+        GucDefaultValue::Bool(b) => Some(BootValue::Bool(b)),
+        GucDefaultValue::Int(i) => Some(BootValue::Int(i)),
+        GucDefaultValue::Real(r) => Some(BootValue::Real(r)),
+        GucDefaultValue::String(s) => Some(BootValue::String(s.map(|v| v.to_string()))),
+        GucDefaultValue::Enum(e) => Some(BootValue::Enum(e)),
+    }
+}
+
+/// Build one [`GucVariable`] from a `guc_tables` setting, with `value` /
+/// `reset_val` seeded from the resolved boot value (the `InitializeOneGUCOption`
+/// `*conf->variable = conf->reset_val = boot_val` step), and the hook/variable
+/// slots carried from the table.
+fn build_variable(setting: GucSetting) -> Option<GucVariable> {
+    let name = setting.name();
+    let boot = resolve_boot_value(setting)?;
+    let gen = |vartype: config_type| {
+        config_generic::boot(
+            name,
+            setting.context(),
+            setting.group(),
+            None,
+            None,
+            setting.flags(),
+            vartype,
+        )
+    };
+    Some(match (setting, boot) {
+        (GucSetting::Bool(s), BootValue::Bool(b)) => GucVariable::Bool(config_bool {
+            gen: gen(types_guc::PGC_BOOL),
+            variable: s.variable,
+            value: Some(b),
+            boot_val: b,
+            check_hook: s.check_hook,
+            assign_hook: s.assign_hook,
+            show_hook: s.show_hook,
+            reset_val: b,
+            reset_extra: None,
+        }),
+        (GucSetting::Int(s), BootValue::Int(i)) => GucVariable::Int(config_int {
+            gen: gen(types_guc::PGC_INT),
+            variable: s.variable,
+            value: Some(i),
+            boot_val: i,
+            min: s.min,
+            max: s.max,
+            check_hook: s.check_hook,
+            assign_hook: s.assign_hook,
+            show_hook: s.show_hook,
+            reset_val: i,
+            reset_extra: None,
+        }),
+        (GucSetting::Real(s), BootValue::Real(r)) => GucVariable::Real(config_real {
+            gen: gen(types_guc::PGC_REAL),
+            variable: s.variable,
+            value: Some(r),
+            boot_val: r,
+            min: s.min,
+            max: s.max,
+            check_hook: s.check_hook,
+            assign_hook: s.assign_hook,
+            show_hook: s.show_hook,
+            reset_val: r,
+            reset_extra: None,
+        }),
+        (GucSetting::String(s), BootValue::String(v)) => GucVariable::String(config_string {
+            gen: gen(types_guc::PGC_STRING),
+            variable: s.variable,
+            value: Some(v.clone()),
+            boot_val: v.clone(),
+            check_hook: s.check_hook,
+            assign_hook: s.assign_hook,
+            show_hook: s.show_hook,
+            reset_val: v,
+            reset_extra: None,
+        }),
+        (GucSetting::Enum(s), BootValue::Enum(e)) => GucVariable::Enum(config_enum {
+            gen: gen(types_guc::PGC_ENUM),
+            variable: s.variable,
+            value: Some(e),
+            boot_val: e,
+            options: s.options,
+            check_hook: s.check_hook,
+            assign_hook: s.assign_hook,
+            show_hook: s.show_hook,
+            reset_val: e,
+            reset_extra: None,
+        }),
+        // The kind tag and the resolved boot value always agree; a mismatch is
+        // unreachable. Skip rather than guess.
+        _ => return None,
+    })
+}
+
+/// `InitializeGUCOptions()` (guc.c:1530), boot-scope subset.
+///
+/// `build_guc_variables()` + the `InitializeOneGUCOption` loop: build a
+/// `config_*` record for every `guc_tables` setting and seed each one's live
+/// `value`/`reset_val` from its compiled-in `boot_val`.
+///
+/// Idempotent: a second call rebuilds the store from scratch. Call once,
+/// single-threaded, at startup.
+pub fn initialize_guc_options() {
+    try_initialize_guc_options()
+        .unwrap_or_else(|_| panic!("initialize_guc_options: out of memory building the GUC store"));
+}
+
+/// Fallible [`initialize_guc_options`].
+pub fn try_initialize_guc_options() -> PgResult<()> {
+    let mut reg = GucRegistry::new();
+    for setting in all_settings() {
+        if let Some(var) = build_variable(setting) {
+            reg.define(var)?;
+        }
+    }
+    unsafe {
+        GUC_STORE = Some(reg);
+    }
+    Ok(())
+}
+
+/// True once [`initialize_guc_options`] has built the store.
+pub fn is_initialized() -> bool {
+    unsafe { GUC_STORE.is_some() }
+}
+
+/// Borrow the global GUC store, if initialized.
+pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
+    unsafe {
+        let store = GUC_STORE.as_ref()?;
+        Some(f(store))
+    }
+}
+
+/// Mutably borrow the global GUC store (the SET write path), if initialized.
+pub fn with_store_mut<R>(f: impl FnOnce(&mut GucRegistry) -> R) -> Option<R> {
+    unsafe {
+        let store = GUC_STORE.as_mut()?;
+        Some(f(store))
+    }
+}
+
+/// `ResetAllOptions()` over the process-global GUC store. Panics (loud) if the
+/// live store is not initialized — never a silent no-op.
+pub fn reset_all_options_global() {
+    with_store_mut(crate::registry::reset_all_options)
+        .expect("reset_all_options_global: live GUC store not initialized");
+}
+
+/// Look up a variable's live value (the C `*conf->variable` dereference).
+fn lookup_var<R>(name: &str, pick: impl FnOnce(&GucVariable) -> Option<R>) -> Option<R> {
+    with_store(|reg| reg.find_option(name).and_then(pick)).flatten()
+}
+
+/// Read the current value of a `PGC_BOOL` GUC.
+pub fn get_bool(name: &str) -> Option<bool> {
+    lookup_var(name, |v| match v {
+        GucVariable::Bool(c) => c.value,
+        _ => None,
+    })
+}
+
+/// Read the current value of a `PGC_INT` GUC.
+pub fn get_int(name: &str) -> Option<i32> {
+    lookup_var(name, |v| match v {
+        GucVariable::Int(c) => c.value,
+        _ => None,
+    })
+}
+
+/// Read the current value of a `PGC_REAL` GUC.
+pub fn get_real(name: &str) -> Option<f64> {
+    lookup_var(name, |v| match v {
+        GucVariable::Real(c) => c.value,
+        _ => None,
+    })
+}
+
+/// Read the integer encoding of a `PGC_ENUM` GUC.
+pub fn get_enum(name: &str) -> Option<i32> {
+    lookup_var(name, |v| match v {
+        GucVariable::Enum(c) => c.value,
+        _ => None,
+    })
+}
+
+/// Read the current value of a `PGC_STRING` GUC. `Some(None)` for a present GUC
+/// whose value is NULL; `None` if absent / not a string.
+pub fn get_string(name: &str) -> Option<Option<String>> {
+    lookup_var(name, |v| match v {
+        GucVariable::String(c) => c.value.clone(),
+        _ => None,
+    })
+}
+
+/// `GetConfigOptionResetString(name)`'s store lookup: the variable's RESET value
+/// rendered as a string.
+pub fn get_reset_string(name: &str) -> Option<Option<String>> {
+    with_store(|reg| {
+        reg.find_option(name)
+            .map(crate::registry::reset_value_string)
+    })
+    .flatten()
+}
+
+/// `set_config_option(name, value, context, source)` over the **global** store.
+///
+/// Routes a write through [`crate::registry::set_config_option`] on the one
+/// process-global [`GucRegistry`], so the change is immediately visible to every
+/// read-through accessor and to [`crate::report`]. On a successful applied change
+/// (`Ok(1)`) the variable is marked `GUC_NEEDS_REPORT`.
+///
+/// Returns the C `set_config_option` convention: `Ok(1)` applied, `Ok(0)`
+/// rejected-below-ERROR, `Ok(-1)` skipped, `Err` when elevel >= ERROR and
+/// rejected. Panics loudly if called before [`initialize_guc_options`].
+#[allow(clippy::too_many_arguments)]
+pub fn set_config_option_global(
+    name: &str,
+    value: Option<&str>,
+    context: GucContext,
+    source: GucSource,
+    srole: Oid,
+    action: crate::registry::GucAction,
+    change_val: bool,
+    elevel: ErrorLevel,
+    is_reload: bool,
+) -> PgResult<i32> {
+    with_store_mut(|reg| {
+        let rc = crate::registry::set_config_option(
+            reg, name, value, context, source, srole, action, change_val, elevel, is_reload,
+        )?;
+        if rc == 1 {
+            // Mark for the next ReportChangedGUCOptions.
+            if let Some(var) = reg.find_option_mut(name) {
+                var.gen_mut().status |= crate::model::GUC_NEEDS_REPORT;
+            }
+        }
+        Ok(rc)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "set_config_option_global({name:?}) called before initialize_guc_options seeded the \
+             global GUC store"
+        )
+    })
+}

@@ -14,14 +14,14 @@
 
 use mcx::PgVec;
 use types_core::primitive::{
-    uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, XLogRecPtr, BLCKSZ,
+    uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
 use types_core::xact::FullTransactionId;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_scan::scankey::ScanKeyData;
 use types_scan::sdir::ScanDirection;
 use types_storage::storage::{Buffer, InvalidBuffer, LocationIndex};
-use types_tuple::heaptuple::ItemPointerData;
+use types_tuple::heaptuple::{IndexTuple, ItemPointerData};
 
 /// There's room for a 16-bit vacuum cycle ID in `BTPageOpaqueData`.
 pub type BTCycleId = uint16;
@@ -568,3 +568,98 @@ pub struct IndexBulkDeleteResult {
     /// `BlockNumber pages_free` — pages available for reuse.
     pub pages_free: BlockNumber,
 }
+
+// ===========================================================================
+// Insertion / search scankey descriptor model (access/nbtree.h)
+// ---------------------------------------------------------------------------
+// These are the btree-private "insertion scankey" and tree-descent stack
+// structures used by `_bt_search` / `_bt_compare` / `_bt_binsrch_insert`.
+// They are runtime (not on-disk) state, `palloc`'d in C. amcheck
+// (verify_nbtree.c) is a heavy consumer: every cross-page invariant check
+// builds a `BTScanInsert` via `_bt_mkscankey` and descends with `_bt_search`.
+// ===========================================================================
+
+/// `BTStackData` (`access/nbtree.h`) — as we descend a tree, we push the
+/// location of pivot tuples whose downlink we are about to follow onto a
+/// private stack. Used to walk back up after a leaf split, and by
+/// `_bt_rootdescend` in amcheck. The C `bts_parent` is a `BTStackData *`
+/// chain; here it is an owned boxed link.
+#[derive(Clone, Debug)]
+pub struct BTStackData {
+    /// `bts_blkno` — block number of the page the downlink was found on.
+    pub bts_blkno: BlockNumber,
+    /// `bts_offset` — offset of the pivot tuple whose downlink we followed.
+    pub bts_offset: OffsetNumber,
+    /// `bts_parent` — the next stack frame up the tree (the page one level
+    /// above), or `None` at the root.
+    pub bts_parent: Option<Box<BTStackData>>,
+}
+
+/// `BTStackData *` (`access/nbtree.h`).
+pub type BTStack = Option<Box<BTStackData>>;
+
+/// `BTScanInsertData` (`access/nbtree.h`) — the btree-private state needed to
+/// find an initial position for an indexscan, or to insert new tuples: an
+/// "insertion scankey" (not to be confused with a search scankey). Used to
+/// descend a B-tree using `_bt_search`.
+///
+/// The C struct sizes `scankeys[INDEX_MAX_KEYS]` as a flexible array member
+/// (sized to `keysz` at alloc time); here it is a heap [`Vec`], so `keysz`
+/// equals `scankeys.len()`.
+#[derive(Clone, Debug)]
+pub struct BTScanInsertData<'mcx> {
+    /// `heapkeyspace` — do we expect all keys in the index to be physically
+    /// unique because heap TID is used as a tiebreaker (index version >= 4)?
+    pub heapkeyspace: bool,
+    /// `allequalimage` — is deduplication safe for the index?
+    pub allequalimage: bool,
+    /// `anynullkeys` — did any key have a NULL value when the scankey was
+    /// built from an index tuple?
+    pub anynullkeys: bool,
+    /// `nextkey` — see comments in `_bt_first` for nextkey/backward.
+    pub nextkey: bool,
+    /// `backward` — backward index scan?
+    pub backward: bool,
+    /// `scantid` — the heap TID used as a final tiebreaker attribute, or
+    /// `None` when the scan doesn't need to find a position for a specific
+    /// physical tuple.
+    pub scantid: Option<ItemPointerData>,
+    /// `keysz` — size of the `scankeys` array (== `scankeys.len()`).
+    pub keysz: i32,
+    /// `scankeys[]` — scan key entries for attributes compared before
+    /// `scantid` (user-visible attributes). Flexible array member in C.
+    pub scankeys: Vec<ScanKeyData<'mcx>>,
+}
+
+/// `BTScanInsertData *` (`access/nbtree.h`).
+pub type BTScanInsert<'mcx> = Option<Box<BTScanInsertData<'mcx>>>;
+
+/// `BTInsertStateData` (`access/nbtree.h`) — a working area used during
+/// insertion, filled in after descending the tree to the first leaf page the
+/// new tuple might belong on. Tracks the current position while performing the
+/// uniqueness check. Also used by `_bt_binsrch_insert`.
+#[derive(Clone, Debug)]
+pub struct BTInsertStateData<'mcx> {
+    /// `itup` — the item we're inserting.
+    pub itup: IndexTuple<'mcx>,
+    /// `itemsz` — size of `itup`, should be `MAXALIGN()`'d.
+    pub itemsz: Size,
+    /// `itup_key` — insertion scankey.
+    pub itup_key: BTScanInsert<'mcx>,
+    /// `buf` — buffer containing the leaf page we're likely to insert on.
+    pub buf: Buffer,
+    /// `bounds_valid` — is the cached `low`/`stricthigh` bound within `buf`
+    /// still valid?
+    pub bounds_valid: bool,
+    /// `low` — cached lower bound offset within `buf`.
+    pub low: OffsetNumber,
+    /// `stricthigh` — cached strict upper bound offset within `buf`.
+    pub stricthigh: OffsetNumber,
+    /// `postingoff` — if `_bt_binsrch_insert` found the location inside an
+    /// existing posting list, the position inside that list. `-1` indicates
+    /// overlap with an existing LP_DEAD posting-list tuple.
+    pub postingoff: i32,
+}
+
+/// `BTInsertStateData *` (`access/nbtree.h`).
+pub type BTInsertState<'mcx> = Option<Box<BTInsertStateData<'mcx>>>;

@@ -84,6 +84,22 @@ pub const PROCEDURE_RELATION_ID: Oid = 1255;
 pub const LANGUAGE_RELATION_ID: Oid = 2612;
 /// `LargeObjectRelationId` — `pg_largeobject` (`pg_largeobject_d.h`).
 pub const LARGE_OBJECT_RELATION_ID: Oid = 2613;
+/// `LargeObjectLOidPNIndexId` — `pg_largeobject_loid_pn_index`
+/// (`pg_largeobject_d.h`).
+pub const LARGE_OBJECT_LOID_PN_INDEX_ID: Oid = 2683;
+/// `LargeObjectMetadataRelationId` — `pg_largeobject_metadata`
+/// (`pg_largeobject_metadata_d.h`).
+pub const LARGE_OBJECT_METADATA_RELATION_ID: Oid = 2995;
+/// `LargeObjectMetadataOidIndexId` — `pg_largeobject_metadata_oid_index`
+/// (`pg_largeobject_metadata_d.h`).
+pub const LARGE_OBJECT_METADATA_OID_INDEX_ID: Oid = 2996;
+
+/// `Anum_pg_largeobject_metadata_oid` — `pg_largeobject_metadata.oid` column
+/// number (`pg_largeobject_metadata_d.h`).
+pub const ANUM_PG_LARGEOBJECT_METADATA_OID: types_core::primitive::AttrNumber = 1;
+/// `Anum_pg_largeobject_loid` — `pg_largeobject.loid` column number
+/// (`pg_largeobject_d.h`).
+pub const ANUM_PG_LARGEOBJECT_LOID: types_core::primitive::AttrNumber = 1;
 /// `OperatorFamilyRelationId` — `pg_opfamily` (`pg_opfamily_d.h`).
 pub const OPERATOR_FAMILY_RELATION_ID: Oid = 2753;
 /// `OperatorClassRelationId` — `pg_opclass` (`pg_opclass_d.h`).

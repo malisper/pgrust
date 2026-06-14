@@ -149,12 +149,22 @@ impl XLogRecord {
     pub const fn rmid(&self) -> RmgrId {
         self.xl_rmid
     }
+
+    /// `XLogRecGetPrev` — `xl_prev`.
+    pub const fn prev(&self) -> XLogRecPtr {
+        self.xl_prev
+    }
+
+    /// `xl_crc` — the record's stored CRC.
+    pub const fn crc(&self) -> pg_crc32c {
+        self.xl_crc
+    }
 }
 
 /// One decoded block reference of a WAL record (`DecodedBkpBlock`,
-/// access/xlogreader.h). Trimmed to the fields current ports read; the
-/// xlogreader port owns the full shape and will widen it. The block-data
-/// borrow points into the reader's decode buffer (C `char *data`).
+/// access/xlogreader.h). The full C field set; the block-data / block-image
+/// borrows point into the reader's decode arena (C `char *data` / `char
+/// *bkp_image`, here the borrowed `&'a [u8]` per the arena+queue model).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DecodedBkpBlock<'a> {
     in_use: bool,
@@ -170,10 +180,23 @@ pub struct DecodedBkpBlock<'a> {
     flags: uint8,
     has_image: bool,
     apply_image: bool,
+    /// `char *bkp_image` — the raw (possibly compressed) full-page image bytes,
+    /// borrowed from the reader's decode arena; `None` when `!has_image`.
+    bkp_image: Option<&'a [u8]>,
+    /// `uint16 hole_offset` — offset of the "hole" omitted from the image.
+    hole_offset: uint16,
+    /// `uint16 hole_length` — length of the hole.
+    hole_length: uint16,
     bimg_len: uint16,
+    /// `uint8 bimg_info` — the `BKPIMAGE_*` flag bits of the block image.
+    bimg_info: uint8,
+    /// `bool has_data` — the block carries block data.
+    has_data: bool,
     /// `Some` iff the block carries block data (`has_data`); the slice is the
     /// `XLogRecGetBlockData` payload.
     data: Option<&'a [u8]>,
+    /// `uint16 data_len` — the block-data length (== `data.map_or(0, len)`).
+    data_len: uint16,
 }
 
 impl<'a> DecodedBkpBlock<'a> {
@@ -184,6 +207,10 @@ impl<'a> DecodedBkpBlock<'a> {
         bimg_len: uint16,
         data: Option<&'a [u8]>,
     ) -> Self {
+        let data_len = match data {
+            Some(d) => d.len() as uint16,
+            None => 0,
+        };
         Self {
             in_use,
             rlocator: RelFileLocator::new(0, 0, 0),
@@ -193,9 +220,118 @@ impl<'a> DecodedBkpBlock<'a> {
             flags: 0,
             has_image,
             apply_image,
+            bkp_image: None,
+            hole_offset: 0,
+            hole_length: 0,
             bimg_len,
+            bimg_info: 0,
+            has_data: data.is_some(),
             data,
+            data_len,
         }
+    }
+
+    /// Build a fully-decoded block reference, mirroring the C `DecodedBkpBlock`
+    /// field set that `DecodeXLogRecord` fills. `prefetch_buffer` starts at
+    /// `InvalidBuffer` (0). The block-data / block-image slices borrow the
+    /// reader's decode arena.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn decoded(
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+        blkno: BlockNumber,
+        flags: uint8,
+        has_image: bool,
+        apply_image: bool,
+        bkp_image: Option<&'a [u8]>,
+        hole_offset: uint16,
+        hole_length: uint16,
+        bimg_len: uint16,
+        bimg_info: uint8,
+        has_data: bool,
+        data: Option<&'a [u8]>,
+        data_len: uint16,
+    ) -> Self {
+        Self {
+            in_use: true,
+            rlocator,
+            forknum,
+            blkno,
+            prefetch_buffer: 0,
+            flags,
+            has_image,
+            apply_image,
+            bkp_image,
+            hole_offset,
+            hole_length,
+            bimg_len,
+            bimg_info,
+            has_data,
+            data,
+            data_len,
+        }
+    }
+
+    /// Set the full-page-image fields (`bkp_image`/`hole_offset`/`hole_length`/
+    /// `bimg_info`), builder-style; `DecodeXLogRecord` fills these when the
+    /// block carries an image.
+    pub const fn with_image(
+        mut self,
+        bkp_image: Option<&'a [u8]>,
+        hole_offset: uint16,
+        hole_length: uint16,
+        bimg_info: uint8,
+    ) -> Self {
+        self.bkp_image = bkp_image;
+        self.hole_offset = hole_offset;
+        self.hole_length = hole_length;
+        self.bimg_info = bimg_info;
+        self
+    }
+
+    /// `block->bimg_info` — the `BKPIMAGE_*` bits.
+    pub const fn bimg_info(&self) -> uint8 {
+        self.bimg_info
+    }
+
+    /// `block->bimg_len` — the (possibly compressed) block-image byte length.
+    pub const fn bimg_len(&self) -> uint16 {
+        self.bimg_len
+    }
+
+    /// `block->hole_offset`.
+    pub const fn hole_offset(&self) -> uint16 {
+        self.hole_offset
+    }
+
+    /// `block->hole_length`.
+    pub const fn hole_length(&self) -> uint16 {
+        self.hole_length
+    }
+
+    /// `block->bkp_image` — the raw block-image bytes, `None` when `!has_image`.
+    pub const fn bkp_image(&self) -> Option<&'a [u8]> {
+        self.bkp_image
+    }
+
+    /// `block->has_data`.
+    pub const fn has_data(&self) -> bool {
+        self.has_data
+    }
+
+    /// `block->data_len`.
+    pub const fn data_len(&self) -> uint16 {
+        self.data_len
+    }
+
+    /// `block->data` — the block-data bytes, `None` when `!has_data`.
+    pub const fn data(&self) -> Option<&'a [u8]> {
+        self.data
+    }
+
+    /// `block->apply_image`.
+    pub const fn apply_image(&self) -> bool {
+        self.apply_image
     }
 
     /// Set the block-reference identity fields (`rlocator`/`forknum`/`blkno`/
@@ -274,28 +410,63 @@ impl<'a> DecodedBkpBlock<'a> {
 /// buffer with the same lifetime.
 #[derive(Debug)]
 pub struct DecodedXLogRecord<'mcx> {
+    /// `size_t size` — total size of the decoded record (private; used by the
+    /// decode-buffer resource manager to advance the ring cursor).
+    size: usize,
+    /// `bool oversized` — the record was allocated outside the regular decode
+    /// buffer (a separate `palloc`, because it did not fit).
+    oversized: bool,
+    /// The decode-buffer offset at which this (non-oversized) record was placed
+    /// — the offset analogue of the C `(char *) record` inside the circular
+    /// `decode_buffer`, used to advance `decode_buffer_head` when the record is
+    /// released. `0` for oversized records (not in the buffer).
+    buffer_offset: usize,
+    /// `XLogRecPtr lsn` — the record's location (start LSN).
+    lsn: XLogRecPtr,
+    /// `XLogRecPtr next_lsn` — location of the next record.
+    next_lsn: XLogRecPtr,
     header: XLogRecord,
-    /// `XLogRecGetData` — the record's main data.
-    main_data: &'mcx [u8],
-    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
     /// `DecodedXLogRecord.record_origin` — the replication origin decoded from
     /// the record (`XLogRecGetOrigin`); `InvalidRepOriginId` when none.
     record_origin: RepOriginId,
+    /// `TransactionId toplevel_xid` — XID of the top-level transaction.
+    toplevel_xid: TransactionId,
+    /// `XLogRecGetData` — the record's main data.
+    main_data: &'mcx [u8],
+    /// `uint32 main_data_len` — the main data portion's length. Stored
+    /// explicitly (mirroring C); equal to `main_data.len()`.
+    main_data_len: uint32,
+    /// `int max_block_id` — highest block_id in use (`-1` if none). Stored
+    /// explicitly (mirroring C); the block array is sized `0..=max_block_id`.
+    max_block_id: i32,
+    blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
     /// `blocks` must hold the block references `0..=max_block_id` (in-use or
     /// not), mirroring the C array indexed by block id.
-    pub const fn new(
+    pub fn new(
         header: XLogRecord,
         main_data: &'mcx [u8],
         blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
     ) -> Self {
+        let main_data_len = main_data.len() as uint32;
+        // The block array is sized `0..=max_block_id`, so the highest in-use id
+        // is `blocks.len() - 1` (`-1` when empty), matching `XLogRecMaxBlockId`.
+        let max_block_id = blocks.len() as i32 - 1;
         Self {
+            size: 0,
+            oversized: false,
+            buffer_offset: 0,
+            lsn: types_core::InvalidXLogRecPtr,
+            next_lsn: types_core::InvalidXLogRecPtr,
             header,
-            main_data,
-            blocks,
             record_origin: types_core::InvalidRepOriginId,
+            toplevel_xid: types_core::InvalidTransactionId,
+            main_data,
+            main_data_len,
+            max_block_id,
+            blocks,
         }
     }
 
@@ -304,6 +475,91 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
     pub const fn with_origin(mut self, origin: RepOriginId) -> Self {
         self.record_origin = origin;
         self
+    }
+
+    /// Set `lsn` / `next_lsn` (the record's location and the next record's
+    /// location), builder-style; `DecodeXLogRecord` fills these as it links the
+    /// record onto the decode queue.
+    pub const fn with_lsns(mut self, lsn: XLogRecPtr, next_lsn: XLogRecPtr) -> Self {
+        self.lsn = lsn;
+        self.next_lsn = next_lsn;
+        self
+    }
+
+    /// Set `lsn` only (the record's start LSN), builder-style; `DecodeXLogRecord`
+    /// fills it from the decode position.
+    pub const fn with_lsn(mut self, lsn: XLogRecPtr) -> Self {
+        self.lsn = lsn;
+        self
+    }
+
+    /// Set the decode-buffer placement offset, builder-style (the C
+    /// `(char *) record` position inside the circular `decode_buffer`).
+    pub const fn with_buffer_offset(mut self, offset: usize) -> Self {
+        self.buffer_offset = offset;
+        self
+    }
+
+    /// The decode-buffer offset this record was placed at (`0` for oversized).
+    pub const fn buffer_offset(&self) -> usize {
+        self.buffer_offset
+    }
+
+    /// `record->blocks[block_id].prefetch_buffer = buffer` — the prefetcher's
+    /// write-back onto a decoded block reference. No-op for an out-of-range id.
+    pub fn set_block_prefetch_buffer(&mut self, block_id: i32, buffer: Buffer) {
+        if block_id >= 0 && (block_id as usize) < self.blocks.len() {
+            self.blocks[block_id as usize].set_prefetch_buffer(buffer);
+        }
+    }
+
+    /// Set `toplevel_xid` (`XLogRecGetTopXid`), builder-style; the decoder
+    /// fills it from the record's `XLR_BLOCK_ID_TOPLEVEL_XID` block-data when
+    /// present.
+    pub const fn with_toplevel_xid(mut self, xid: TransactionId) -> Self {
+        self.toplevel_xid = xid;
+        self
+    }
+
+    /// Set the resource-management bookkeeping (`size` total decoded size and
+    /// `oversized`), builder-style; `DecodeXLogRecord` fills these when sizing
+    /// the record in the decode buffer.
+    pub const fn with_size(mut self, size: usize, oversized: bool) -> Self {
+        self.size = size;
+        self.oversized = oversized;
+        self
+    }
+
+    /// `record->size` — total decoded size, used by the decode-buffer ring
+    /// bookkeeping.
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    /// `record->oversized` — whether the record was allocated outside the
+    /// regular decode buffer.
+    pub const fn oversized(&self) -> bool {
+        self.oversized
+    }
+
+    /// `record->lsn` — the record's location (start LSN).
+    pub const fn lsn(&self) -> XLogRecPtr {
+        self.lsn
+    }
+
+    /// `record->next_lsn` — location of the next record.
+    pub const fn next_lsn(&self) -> XLogRecPtr {
+        self.next_lsn
+    }
+
+    /// `XLogRecGetTopXid(record)` — `record->toplevel_xid`.
+    pub const fn toplevel_xid(&self) -> TransactionId {
+        self.toplevel_xid
+    }
+
+    /// `XLogRecGetDataLen(record)` — `record->main_data_len`.
+    pub const fn main_data_len(&self) -> uint32 {
+        self.main_data_len
     }
 
     pub const fn header(&self) -> &XLogRecord {
@@ -346,9 +602,9 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
 
     /// `XLogRecMaxBlockId(record)` — the highest block id in the record
     /// (`record->max_block_id`); `-1` when no blocks are registered. The block
-    /// array is sized `0..=max_block_id`, so this is `blocks.len() - 1`.
-    pub fn max_block_id(&self) -> i32 {
-        self.blocks.len() as i32 - 1
+    /// array is sized `0..=max_block_id`, so this equals `blocks.len() - 1`.
+    pub const fn max_block_id(&self) -> i32 {
+        self.max_block_id
     }
 
     /// `XLogRecHasBlockRef(record, block_id)` — whether the block id is in

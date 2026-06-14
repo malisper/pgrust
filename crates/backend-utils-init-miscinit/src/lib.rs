@@ -804,6 +804,7 @@ pub fn init_seams() {
     );
     s::in_no_force_rls_operation::set(InNoForceRLSOperation);
     s::in_security_restricted_operation::set(InSecurityRestrictedOperation);
+    s::in_local_user_id_change::set(InLocalUserIdChange);
     s::get_backend_type_desc::set(GetBackendTypeDesc);
     s::check_data_dir::set(crate::process::checkDataDir);
     s::change_to_data_dir::set(crate::process::ChangeToDataDir);

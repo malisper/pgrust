@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-indextuple = { path = "../backend-access-common-indextuple" }
@@ -42,6 +43,7 @@ backend-access-transam-varsup = { path = "../backend-access-transam-varsup" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
+backend-access-transam-xlogreader = { path = "../backend-access-transam-xlogreader" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
 backend-backup-server = { path = "../backend-backup-server" }
@@ -50,9 +52,11 @@ backend-bootstrap-bootstrap = { path = "../backend-bootstrap-bootstrap" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
+backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
 backend-catalog-pg-db-role-setting = { path = "../backend-catalog-pg-db-role-setting" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
+backend-catalog-pg-largeobject = { path = "../backend-catalog-pg-largeobject" }
 backend-catalog-pg-namespace = { path = "../backend-catalog-pg-namespace" }
 backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
@@ -223,7 +227,9 @@ backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
 backend-utils-misc-guc-file = { path = "../backend-utils-misc-guc-file" }
+backend-utils-misc-guc-funcs = { path = "../backend-utils-misc-guc-funcs" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
