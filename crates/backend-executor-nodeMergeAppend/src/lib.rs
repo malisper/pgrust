@@ -49,7 +49,14 @@ use backend_utils_sort_sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
+// Migration target: the canonical enum `Datum<'mcx>` from the keystone tuple
+// crate. The binary heap's `bh_nodes` storage (owned by `types-nodes`) is still
+// the bare-word shim `types_datum::Datum` and carries a plain `SlotNumber`
+// (`int32`) word — that dep-owned storage word is the audited ABI/storage edge,
+// so the canonical enum is converted to/from the stored slot-index at the
+// `bh_nodes` push/read boundary inside the heap helpers below.
+use types_datum::Datum as StoredSlotWord;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_nodes::nodemergeappend::{BinaryHeap, MergeAppend, MergeAppendStateData};
@@ -437,8 +444,8 @@ pub fn ExecMergeAppend<'mcx>(
 fn heap_compare_slots<'mcx>(
     slots: &[Option<SlotId>],
     sortkeys: &[SortSupportData<'mcx>],
-    a: Datum,
-    b: Datum,
+    a: Datum<'_>,
+    b: Datum<'_>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<i32> {
     // SlotNumber slot1 = DatumGetInt32(a); SlotNumber slot2 = DatumGetInt32(b);
@@ -594,22 +601,23 @@ fn binaryheap_empty(heap: &BinaryHeap<'_>) -> bool {
 /// the heap property (paired with [`binaryheap_build_node`]). The capacity was
 /// reserved in `binaryheap_allocate`; an overflow is the C
 /// `elog(ERROR, "out of binary heap slots")`.
-fn binaryheap_add_unordered(heap: &mut BinaryHeap<'_>, d: Datum) -> PgResult<()> {
+fn binaryheap_add_unordered(heap: &mut BinaryHeap<'_>, d: Datum<'_>) -> PgResult<()> {
     if heap.bh_size >= heap.bh_space {
         return Err(elog_error("out of binary heap slots"));
     }
     heap.bh_has_heap_property = false;
-    heap.bh_nodes.push(d);
+    heap.bh_nodes.push(slot_word(&d));
     heap.bh_size += 1;
     Ok(())
 }
 
 /// `binaryheap_first(heap)` — peek at the heap's top (root) entry. The caller
 /// must ensure the heap is non-empty.
-fn binaryheap_first(heap: &BinaryHeap<'_>) -> PgResult<Datum> {
+fn binaryheap_first<'mcx>(heap: &BinaryHeap<'_>) -> PgResult<Datum<'mcx>> {
     heap.bh_nodes
         .first()
         .copied()
+        .map(slot_datum)
         .ok_or_else(|| elog_error("binaryheap_first on empty heap"))
 }
 
@@ -619,7 +627,7 @@ fn binaryheap_first(heap: &BinaryHeap<'_>) -> PgResult<Datum> {
 fn binaryheap_remove_first_node<'mcx>(
     node: &mut MergeAppendStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     let mut heap = node
         .ms_heap
         .take()
@@ -635,7 +643,7 @@ fn binaryheap_remove_first_node<'mcx>(
         if heap.bh_size == 1 {
             heap.bh_size -= 1;
             heap.bh_nodes.pop();
-            return Ok(result);
+            return Ok(slot_datum(result));
         }
 
         // Remove the last node, placing it in the vacated root entry, and sift
@@ -647,7 +655,7 @@ fn binaryheap_remove_first_node<'mcx>(
             .ok_or_else(|| elog_error("binaryheap underflow"))?;
         heap.bh_nodes[0] = last;
         sift_down(&mut heap, 0, &node.ms_slots, &node.ms_sortkeys, estate)?;
-        Ok(result)
+        Ok(slot_datum(result))
     })();
     node.ms_heap = Some(heap);
     result
@@ -687,7 +695,7 @@ fn binaryheap_build_node<'mcx>(
 /// comparator.
 fn binaryheap_replace_first_node<'mcx>(
     node: &mut MergeAppendStateData<'mcx>,
-    d: Datum,
+    d: Datum<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut heap = node
@@ -698,7 +706,7 @@ fn binaryheap_replace_first_node<'mcx>(
         if binaryheap_empty(&heap) {
             return Err(elog_error("binaryheap_replace_first on empty heap"));
         }
-        heap.bh_nodes[0] = d;
+        heap.bh_nodes[0] = slot_word(&d);
         if heap.bh_size > 1 {
             sift_down(&mut heap, 0, &node.ms_slots, &node.ms_sortkeys, estate)?;
         }
@@ -706,6 +714,22 @@ fn binaryheap_replace_first_node<'mcx>(
     })();
     node.ms_heap = Some(heap);
     result
+}
+
+/// Storage-edge converter: the binary heap's `bh_nodes` is owned by
+/// `types-nodes` and still carries the bare-word shim (`StoredSlotWord`), into
+/// which `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`. Pack
+/// the canonical [`Datum`] (always a `ByVal` slot index here) back into that
+/// stored word. This is the audited ABI/storage edge where a plain word is the
+/// faithful representation (`Int32GetDatum`).
+fn slot_word(d: &Datum<'_>) -> StoredSlotWord {
+    StoredSlotWord::from_i32(d.as_i32())
+}
+
+/// Storage-edge converter: lift a stored slot-index word back into the
+/// canonical [`Datum`] enum (`DatumGetInt32` -> `Datum::from_i32`).
+fn slot_datum<'mcx>(w: StoredSlotWord) -> Datum<'mcx> {
+    Datum::from_i32(w.as_i32())
 }
 
 /// Offset of the parent of the node at index `i`.
@@ -734,6 +758,9 @@ fn sift_down<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mut node_off = node_off;
+    // The heap stores the bare slot-index word (dep-owned `bh_nodes`); the
+    // comparator consumes the canonical `Datum` enum, so the word is lifted at
+    // each read site.
     let node_val = heap.bh_nodes[node_off as usize];
 
     loop {
@@ -745,7 +772,9 @@ fn sift_down<'mcx>(
         if right_off < heap.bh_size {
             let left_val = heap.bh_nodes[left_off as usize];
             let right_val = heap.bh_nodes[right_off as usize];
-            if heap_compare_slots(slots, sortkeys, left_val, right_val, estate)? < 0 {
+            if heap_compare_slots(slots, sortkeys, slot_datum(left_val), slot_datum(right_val), estate)?
+                < 0
+            {
                 swap_off = right_off;
             }
         }
@@ -756,7 +785,8 @@ fn sift_down<'mcx>(
             break;
         }
         let swap_val = heap.bh_nodes[swap_off as usize];
-        if heap_compare_slots(slots, sortkeys, node_val, swap_val, estate)? >= 0 {
+        if heap_compare_slots(slots, sortkeys, slot_datum(node_val), slot_datum(swap_val), estate)? >= 0
+        {
             break;
         }
 
@@ -861,10 +891,15 @@ fn list_length(l: &[types_nodes::nodes::Node<'_>]) -> i32 {
 ///     return compare;
 /// }
 /// ```
+// `datum1`/`datum2` are real per-column sort values that flow straight from the
+// `slot_getattr` seam into the `apply_sort_comparator` seam. Both seams still
+// carry the bare-word shim (`StoredSlotWord`) in their contracts and are owned
+// by other crates (out of this migration's scope), so this pass-through stays
+// on the shim — migrating it here would diverge those seam contracts.
 fn ApplySortComparator(
-    datum1: Datum,
+    datum1: StoredSlotWord,
     is_null1: bool,
-    datum2: Datum,
+    datum2: StoredSlotWord,
     is_null2: bool,
     ssup: &SortSupportData<'_>,
 ) -> PgResult<i32> {
@@ -934,31 +969,37 @@ mod tests {
     fn apply_sort_comparator_null_handling() {
         let ctx = MemoryContext::new("ma-test");
         let mut key = SortSupportData::new(ctx.mcx());
+        // `ApplySortComparator` carries the shim column-value word at its seam
+        // boundary (see its definition), so these args use `StoredSlotWord`.
         // both null -> 0 (the seam is never consulted on a null branch).
         assert_eq!(
-            ApplySortComparator(Datum::null(), true, Datum::null(), true, &key).unwrap(),
+            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::null(), true, &key).unwrap(),
             0
         );
         // null1 only, nulls_first -> -1 ; nulls_last -> 1
         key.ssup_nulls_first = true;
         assert_eq!(
-            ApplySortComparator(Datum::null(), true, Datum::from_i32(5), false, &key).unwrap(),
+            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::from_i32(5), false, &key)
+                .unwrap(),
             -1
         );
         key.ssup_nulls_first = false;
         assert_eq!(
-            ApplySortComparator(Datum::null(), true, Datum::from_i32(5), false, &key).unwrap(),
+            ApplySortComparator(StoredSlotWord::null(), true, StoredSlotWord::from_i32(5), false, &key)
+                .unwrap(),
             1
         );
         // null2 only, nulls_first -> 1 ; nulls_last -> -1
         key.ssup_nulls_first = true;
         assert_eq!(
-            ApplySortComparator(Datum::from_i32(5), false, Datum::null(), true, &key).unwrap(),
+            ApplySortComparator(StoredSlotWord::from_i32(5), false, StoredSlotWord::null(), true, &key)
+                .unwrap(),
             1
         );
         key.ssup_nulls_first = false;
         assert_eq!(
-            ApplySortComparator(Datum::from_i32(5), false, Datum::null(), true, &key).unwrap(),
+            ApplySortComparator(StoredSlotWord::from_i32(5), false, StoredSlotWord::null(), true, &key)
+                .unwrap(),
             -1
         );
     }

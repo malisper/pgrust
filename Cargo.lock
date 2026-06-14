@@ -4050,6 +4050,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
