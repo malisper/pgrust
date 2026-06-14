@@ -15,24 +15,35 @@
 //! the simplehash template instantiation.
 
 use types_core::fmgr::FmgrInfo;
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `ScalarArrayOpExprHashEntry` (execExprInterp.c:195) — one simplehash slot.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ScalarArrayOpExprHashEntry {
+#[derive(Clone, Debug)]
+pub struct ScalarArrayOpExprHashEntry<'mcx> {
     /// `Datum key` (`SH_KEY`).
-    pub key: Datum,
+    pub key: Datum<'mcx>,
     /// `uint32 status` — `SH_STATUS_EMPTY` (0) / `SH_STATUS_IN_USE` (1).
     pub status: u32,
     /// `uint32 hash` — cached hash (`SH_STORE_HASH` / `SH_GET_HASH`).
     pub hash: u32,
 }
 
+impl Default for ScalarArrayOpExprHashEntry<'_> {
+    fn default() -> Self {
+        // The C `SH_ALLOCATE` zeroes the bucket array: NULL key, EMPTY status.
+        ScalarArrayOpExprHashEntry {
+            key: Datum::null(),
+            status: 0,
+            hash: 0,
+        }
+    }
+}
+
 /// `saophash_hash` — the macro-generated open-addressing table header
 /// (`SH_TYPE`). The C `ctx`/`private_data` fields are folded into the owning
 /// [`ScalarArrayOpExprHashTable`]; this header keeps only the bookkeeping.
 #[derive(Debug, Default)]
-pub struct SaophashHash {
+pub struct SaophashHash<'mcx> {
     /// `uint64 size` — bucket count, always a power of two.
     pub size: u64,
     /// `uint32 members` — live entry count.
@@ -42,7 +53,7 @@ pub struct SaophashHash {
     /// `uint32 grow_threshold` — grow once `members >= grow_threshold`.
     pub grow_threshold: u32,
     /// `SH_ELEMENT_TYPE *data` — the bucket array (`SH_ALLOCATE`d, zeroed).
-    pub data: alloc::vec::Vec<ScalarArrayOpExprHashEntry>,
+    pub data: alloc::vec::Vec<ScalarArrayOpExprHashEntry<'mcx>>,
 }
 
 /// `ScalarArrayOpExprHashTable` (execExprInterp.c:217) — the hashed-SAOP table
@@ -57,9 +68,9 @@ pub struct SaophashHash {
 /// dispatch through the fmgr seam (by OID), so the flexible `hash_fcinfo_data`
 /// tail and the `op` back-pointer are not materialized.
 #[derive(Debug, Default)]
-pub struct ScalarArrayOpExprHashTable {
+pub struct ScalarArrayOpExprHashTable<'mcx> {
     /// `saophash_hash *hashtab` — the underlying open-addressing table.
-    pub hashtab: SaophashHash,
+    pub hashtab: SaophashHash<'mcx>,
     /// `FmgrInfo hash_finfo` — the hash function's lookup data
     /// (`fmgr_info(saop->hashfuncid)`). The owned model needs only `fn_oid`
     /// (the fmgr seam re-resolves by OID; see the crate's F0 contract).

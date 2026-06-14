@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid};
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 
 /// `SubLinkType` (nodes/primnodes.h) — the kind of sub-select. Values match the
@@ -294,7 +294,7 @@ pub struct Var {
 }
 
 /// `Const` (nodes/primnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Const {
     /// `Oid consttype` — pg_type OID of the constant's type.
     pub consttype: Oid,
@@ -309,9 +309,26 @@ pub struct Const {
     /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
     pub constcollid: Oid,
     /// `Datum constvalue` — the constant's value (undefined if `constisnull`).
-    pub constvalue: Datum,
+    ///
+    /// A `Const` lives in its plan node's long-lived context (it is not
+    /// per-tuple working state), so its value carries the `'static` lifetime —
+    /// matching the `Box<SubPlan<'static>>` convention used elsewhere in the
+    /// lifetime-free [`Expr`] enum.
+    pub constvalue: Datum<'static>,
     /// `bool constisnull` — whether the constant is null.
     pub constisnull: bool,
+}
+
+impl Default for Const {
+    fn default() -> Self {
+        Const {
+            consttype: Default::default(),
+            consttypmod: 0,
+            constcollid: Default::default(),
+            constvalue: Datum::null(),
+            constisnull: false,
+        }
+    }
 }
 
 /// `OpExpr` (nodes/primnodes.h) — expression node for an operator invocation.
