@@ -7,6 +7,7 @@
 use types_core::Oid;
 use types_error::PgResult;
 use types_opclass::ObjectWithArgs;
+use types_parsenodes::ObjectWithArgs as ParseObjectWithArgs;
 
 seam_core::seam!(
     /// `LookupOperWithArgs(oper, noError)` (parse_oper.c): resolve an
@@ -14,6 +15,19 @@ seam_core::seam!(
     /// its OID. With `no_error = false` a missing operator raises (`Err`);
     /// with `no_error = true` it returns `InvalidOid`.
     pub fn lookup_oper_with_args(oper: &ObjectWithArgs, no_error: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `LookupOperWithArgs(oper, missing_ok)` (parse_oper.c), taking the
+    /// parser's own [`ParseObjectWithArgs`] (the `castNode(ObjectWithArgs,
+    /// object)` `get_object_address`'s `OBJECT_OPERATOR` arm passes). Resolves
+    /// the operator name + explicit left/right argument types to its
+    /// `pg_operator` OID. With `missing_ok = false` a miss raises (`Err`); else
+    /// `InvalidOid`.
+    pub fn lookup_oper_with_args_node(
+        oper: &ParseObjectWithArgs,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
 );
 
 seam_core::seam!(

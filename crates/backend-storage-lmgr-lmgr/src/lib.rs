@@ -1224,6 +1224,7 @@ pub fn init_seams() {
     inward::lock_shared_object::set(seam_lock_shared_object);
     inward::unlock_relation_oid::set(UnlockRelationOid);
     inward::unlock_database_object::set(UnlockDatabaseObject);
+    inward::unlock_shared_object::set(UnlockSharedObject);
     inward::lock_relation_for_extension::set(seam_lock_relation_for_extension);
     inward::unlock_relation_for_extension::set(seam_unlock_relation_for_extension);
     inward::describe_lock_tag::set(seam_describe_lock_tag);

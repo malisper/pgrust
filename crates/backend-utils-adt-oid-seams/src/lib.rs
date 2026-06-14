@@ -6,6 +6,16 @@
 
 use types_core::Oid;
 use types_error::PgResult;
+use types_parsenodes::Node;
+
+seam_core::seam!(
+    /// `oidparse(node)` (oid.c): parse the OID literal carried by a parser
+    /// value node — an `Integer` (its `ival`) or a `Float` (re-parsed via
+    /// `oidin` because OIDs can exceed `int32`). Any other node tag is an
+    /// `elog(ERROR)`. Used by `get_object_address`'s `OBJECT_LARGEOBJECT` arm.
+    /// Malformed input raises (`Err`).
+    pub fn oidparse(node: &Node) -> PgResult<Oid>
+);
 
 seam_core::seam!(
     /// `oidin(cstring)` (oid.c) via `DirectInputFunctionCallSafe(oidin, ...)`:

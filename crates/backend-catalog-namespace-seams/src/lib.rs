@@ -168,6 +168,50 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_conversion_oid(conname, missing_ok)` (namespace.c): the OID of a
+    /// conversion given its possibly-qualified name list. With
+    /// `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT`.
+    pub fn get_conversion_oid(
+        mcx: Mcx<'_>,
+        names: &[&str],
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_ts_parser_oid(names, missing_ok)` (namespace.c): the OID of a text
+    /// search parser given its possibly-qualified name list. With
+    /// `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT`.
+    pub fn get_ts_parser_oid(
+        mcx: Mcx<'_>,
+        names: &[&str],
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_ts_template_oid(names, missing_ok)` (namespace.c): the OID of a
+    /// text search template given its possibly-qualified name list. With
+    /// `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT`.
+    pub fn get_ts_template_oid(
+        mcx: Mcx<'_>,
+        names: &[&str],
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_statistics_object_oid(names, missing_ok)` (namespace.c): the OID of
+    /// an extended statistics object given its possibly-qualified name list.
+    /// With `missing_ok = false` a miss raises `ERRCODE_UNDEFINED_OBJECT`.
+    pub fn get_statistics_object_oid(
+        mcx: Mcx<'_>,
+        names: &[&str],
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `RelationIsVisible(relid)` (namespace.c): whether `relid` is visible
     /// in the current search path (would be found unqualified).
     pub fn relation_is_visible(mcx: Mcx<'_>, relid: Oid) -> PgResult<bool>

@@ -109,11 +109,43 @@ const HASHEXTENDED_PROC: i32 = 2;
 /// `SHRT_MAX` (`<limits.h>`) — the cap applied when an AM's `amstrategies` is 0.
 const SHRT_MAX: i32 = 32767;
 
-/// `pub fn init_seams()` — opclasscmds owns no inward seam (its only callers,
-/// utility.c / alter.c, are not yet ported and will depend on it directly when
-/// they land, no cycle). Present for the aggregator convention; installs
-/// nothing.
-pub fn init_seams() {}
+/// `pub fn init_seams()` — opclasscmds owns the full-name-list
+/// `get_opclass_oid` / `get_opfamily_oid` lookup seams (the `objectaddress.c`
+/// `get_object_address_opcf` resolution path's callees). Its DDL surface
+/// (CREATE/ALTER OPERATOR CLASS/FAMILY) is reached only from the still-unported
+/// utility.c / alter.c, so no other inward seam is owned.
+pub fn init_seams() {
+    backend_commands_opclasscmds_seams::get_opclass_oid::set(seam_get_opclass_oid);
+    backend_commands_opclasscmds_seams::get_opfamily_oid::set(seam_get_opfamily_oid);
+}
+
+/// Adapt the seam-borne `&[&str]` qualified name into the owner's
+/// `Vec<StringNode>` image, then call the in-crate lookup.
+fn seam_get_opclass_oid(
+    mcx: Mcx<'_>,
+    am_id: Oid,
+    opclassname: &[&str],
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let owned: Vec<StringNode> = opclassname
+        .iter()
+        .map(|s| StringNode { sval: Some((*s).to_string()) })
+        .collect();
+    get_opclass_oid(mcx, am_id, &owned, missing_ok)
+}
+
+fn seam_get_opfamily_oid(
+    mcx: Mcx<'_>,
+    am_id: Oid,
+    opfamilyname: &[&str],
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let owned: Vec<StringNode> = opfamilyname
+        .iter()
+        .map(|s| StringNode { sval: Some((*s).to_string()) })
+        .collect();
+    get_opfamily_oid(mcx, am_id, &owned, missing_ok)
+}
 
 /// Render a `&[StringNode]` as a `NameList` (`&[Option<String>]`) for the
 /// `backend-catalog-namespace` helpers, mirroring a PostgreSQL `List *` of

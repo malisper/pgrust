@@ -15,3 +15,15 @@ seam_core::seam!(
     /// carried on `Err`.
     pub fn remove_role_from_object_policy(roleid: Oid, classid: Oid, objid: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `get_relation_policy_oid(relid, policy_name, missing_ok)` (policy.c): the
+    /// OID of the named row-security policy on relation `relid`, or `InvalidOid`
+    /// with `missing_ok = true`. With `missing_ok = false` a miss raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_relation_policy_oid(
+        relid: Oid,
+        policy_name: &str,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);

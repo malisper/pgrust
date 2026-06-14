@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-commands-opclasscmds-seams = { path = "../backend-commands-opclasscmds-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 

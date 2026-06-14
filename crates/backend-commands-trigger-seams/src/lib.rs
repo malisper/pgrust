@@ -16,6 +16,14 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 
 seam_core::seam!(
+    /// `get_trigger_oid(relid, trigname, missing_ok)` (trigger.c): the OID of
+    /// the named trigger on relation `relid`, or `InvalidOid` with
+    /// `missing_ok = true`. With `missing_ok = false` a miss raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`).
+    pub fn get_trigger_oid(relid: Oid, trigname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `AfterTriggerBeginXact()` — initialize the deferred-trigger manager.
     pub fn after_trigger_begin_xact() -> PgResult<()>
 );

@@ -157,6 +157,10 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::type_is_visible::set(crate::TypeIsVisible);
     backend_catalog_namespace_seams::is_temp_namespace::set(seam_is_temp_namespace);
     backend_catalog_namespace_seams::lookup_creation_namespace::set(seam_lookup_creation_namespace);
+    backend_catalog_namespace_seams::get_conversion_oid::set(seam_get_conversion_oid);
+    backend_catalog_namespace_seams::get_ts_parser_oid::set(seam_get_ts_parser_oid);
+    backend_catalog_namespace_seams::get_ts_template_oid::set(seam_get_ts_template_oid);
+    backend_catalog_namespace_seams::get_statistics_object_oid::set(seam_get_statistics_object_oid);
 }
 
 /// Adapt a seam-borne `&[&str]` qualified name into the owned `NameList`
@@ -217,6 +221,26 @@ fn seam_get_collation_oid(mcx: Mcx<'_>, collname: &[&str], missing_ok: bool) -> 
 fn seam_get_ts_dict_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
     let owned = name_list_owned(names);
     get_ts_dict_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_get_conversion_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    get_conversion_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_get_ts_parser_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    get_ts_parser_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_get_ts_template_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    get_ts_template_oid(mcx, &owned, missing_ok)
+}
+
+fn seam_get_statistics_object_oid(mcx: Mcx<'_>, names: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let owned = name_list_owned(names);
+    get_statistics_object_oid(mcx, &owned, missing_ok)
 }
 
 fn seam_make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar> {

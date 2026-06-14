@@ -343,4 +343,5 @@ pub fn init_seams() {
     backend_catalog_pg_largeobject_seams::large_object_exists_with_snapshot::set(
         |loid, snapshot| LargeObjectExistsWithSnapshot(loid, snapshot),
     );
+    backend_catalog_pg_largeobject_seams::large_object_exists::set(LargeObjectExists);
 }

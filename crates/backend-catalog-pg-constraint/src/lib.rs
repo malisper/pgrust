@@ -1999,6 +1999,8 @@ pub fn init_seams() {
     seams::get_ri_constraint_root::set(get_ri_constraint_root);
     seams::find_fk_period_opers::set(find_fk_period_opers);
     seams::constraint_type_oids::set(constraint_type_oids);
+    seams::get_relation_constraint_oid::set(get_relation_constraint_oid);
+    seams::get_domain_constraint_oid::set(get_domain_constraint_oid);
 }
 
 /* ===========================================================================
