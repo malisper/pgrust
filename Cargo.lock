@@ -8769,7 +8769,6 @@ dependencies = [
  "seam-core",
  "types-cache",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-tuple",
