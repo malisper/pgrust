@@ -522,7 +522,7 @@ pub fn InitializeMaxBackends() -> PgResult<()> {
     // Note that this does not include "auxiliary" processes.
     let max_connections = backend_utils_init_small_seams::max_connections::call();
     let av_worker_slots = backend_postmaster_autovacuum_seams::autovacuum_worker_slots::call();
-    let max_worker_processes = backend_postmaster_bgworker_seams::max_worker_processes::call();
+    let max_worker_processes = backend_utils_init_small_seams::max_worker_processes::call();
     let max_wal_senders = backend_replication_walsender_seams::max_wal_senders::call();
 
     let max_backends =
@@ -780,7 +780,9 @@ pub fn InitPostgres(
                 ))
                 .finish(loc(876, "InitPostgres"));
         }
-    } else if backend_postmaster_bgworker_seams::am_background_worker_process::call() {
+    } else if backend_utils_init_small_seams::my_backend_type::call()
+        == types_core::init::BackendType::BgWorker
+    {
         if username.is_none() && !OidIsValid(useroid) {
             backend_utils_init_miscinit_seams::initialize_session_user_id_standalone::call()?;
             am_superuser = true;
