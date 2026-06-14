@@ -28,7 +28,7 @@ use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::heaptuple::{TupleDesc, TupleDescData};
 use types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
@@ -65,6 +65,29 @@ pub struct EcxtId(pub u32);
 /// [`EStateData::es_result_rel_pool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
+
+/// `JunkFilter` (nodes/execnodes.h) — junk-attribute filter state built by
+/// `ExecInitJunkFilter`/`ExecInitJunkFilterConversion` (execJunk.c).
+///
+/// `jf_resultSlot` (C: `TupleTableSlot *`) is an id into the owning EState slot
+/// pool ([`EStateData::es_tupleTable`]); the rest mirror the C struct
+/// field-for-field. `jf_cleanMap` (C: `AttrNumber *`) is the per-clean-attribute
+/// map onto the source tuple's 1-based attribute numbers (0 = NULL output).
+#[derive(Debug)]
+pub struct JunkFilter<'mcx> {
+    /// `NodeTag type`.
+    pub type_: NodeTag,
+    /// `List *jf_targetList` — the original target list (including junk
+    /// attributes).
+    pub jf_targetList: PgVec<'mcx, crate::primnodes::TargetEntry<'mcx>>,
+    /// `TupleDesc jf_cleanTupType` — the "clean" tuple's descriptor.
+    pub jf_cleanTupType: TupleDesc<'mcx>,
+    /// `AttrNumber *jf_cleanMap` — clean->original attribute-number map.
+    pub jf_cleanMap: PgVec<'mcx, AttrNumber>,
+    /// `TupleTableSlot *jf_resultSlot` — the slot holding the cleaned tuple
+    /// (id into [`EStateData::es_tupleTable`]).
+    pub jf_resultSlot: SlotId,
+}
 
 /// `EPQState` (`nodes/execnodes.h`) — state for executing an EvalPlanQual
 /// recheck on a candidate tuple, owned by the EvalPlanQual machinery
@@ -486,6 +509,25 @@ pub struct ScanStateData<'mcx> {
     pub ss_currentScanDesc: Option<Opaque>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
+}
+
+/// `SubqueryScanState` (execnodes.h):
+///
+/// ```c
+/// typedef struct SubqueryScanState {
+///     ScanState   ss;             /* its first field is NodeTag */
+///     PlanState  *subplan;
+/// } SubqueryScanState;
+/// ```
+#[derive(Debug, Default)]
+pub struct SubqueryScanState<'mcx> {
+    /// `ScanState ss` — its first field is `NodeTag`.
+    pub ss: ScanStateData<'mcx>,
+    /// `PlanState *subplan` — the sub-query's `PlanState`. The SubqueryScan
+    /// node's single child link, carried as the owned whole-node
+    /// [`crate::planstate::PlanStateNode`] so the executor can recurse into it
+    /// (`ExecProcNode`/`ExecEndNode`/`ExecReScan`) through the central dispatch.
+    pub subplan: Option<PgBox<'mcx, crate::planstate::PlanStateNode<'mcx>>>,
 }
 
 // `ModifyTableState` (execnodes.h) is the full owned struct defined in

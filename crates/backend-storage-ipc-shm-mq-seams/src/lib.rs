@@ -56,3 +56,13 @@ seam_core::seam!(pub fn shm_mq_receive(mqh: ShmMqAttachHandle) -> PgResult<(Opti
 /// its reassembly buffer; cancels the `on_dsm_detach` callback) and drops the
 /// registry slot.
 seam_core::seam!(pub fn shm_mq_detach(mqh: ShmMqAttachHandle));
+/// `shm_mq_send(mqh, nbytes, data, nowait, force_flush)` — write one message of
+/// `data.len()` bytes to the queue. Returns the result code. Can `ereport`
+/// (oversized message / interrupts). Used by `tqueue.c`'s `tqueueReceiveSlot`
+/// (always `nowait = false, force_flush = false`).
+seam_core::seam!(pub fn shm_mq_send(mqh: ShmMqAttachHandle, data: alloc::vec::Vec<u8>, nowait: bool, force_flush: bool) -> PgResult<ShmMqResult>);
+/// `shm_mq_receive(mqh, &nbytes, &data, nowait)` with caller-chosen `nowait` —
+/// the message bytes (valid only when `result == Some(Success)`) and its result
+/// code. Can `ereport` (oversized message / interrupts). Used by `tqueue.c`'s
+/// `TupleQueueReaderNext`, which threads its own `nowait`.
+seam_core::seam!(pub fn shm_mq_receive_nowait(mqh: ShmMqAttachHandle, nowait: bool) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)>);

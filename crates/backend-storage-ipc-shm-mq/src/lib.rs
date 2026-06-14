@@ -1474,9 +1474,9 @@ mod seam_layer {
     use crate::{
         shm_mq_attach as real_attach, shm_mq_create as real_create, shm_mq_detach as real_detach,
         shm_mq_get_queue as real_get_queue, shm_mq_get_sender as real_get_sender,
-        shm_mq_receive as real_receive, shm_mq_set_handle as real_set_handle,
-        shm_mq_set_receiver, shm_mq_set_sender, ShmMq, ShmMqHandle, SHM_MQ_DETACHED,
-        SHM_MQ_SUCCESS, SHM_MQ_WOULD_BLOCK,
+        shm_mq_receive as real_receive, shm_mq_send as real_send,
+        shm_mq_set_handle as real_set_handle, shm_mq_set_receiver, shm_mq_set_sender, ShmMq,
+        ShmMqHandle, SHM_MQ_DETACHED, SHM_MQ_SUCCESS, SHM_MQ_WOULD_BLOCK,
     };
 
     /// `MyProcNumber` — the identity passed to `shm_mq_set_receiver/sender(mq,
@@ -1649,6 +1649,44 @@ mod seam_layer {
         real_detach(owned);
     }
 
+    fn shm_mq_send(
+        mqh: ShmMqAttachHandle,
+        data: alloc::vec::Vec<u8>,
+        nowait: bool,
+        force_flush: bool,
+    ) -> PgResult<ShmMqResult> {
+        with_registry(|r| {
+            // SAFETY: the registry holds a live, attached handle for this id.
+            let res = unsafe { real_send(r.get_mut(mqh), &data, nowait, force_flush) }?;
+            Ok(match res {
+                SHM_MQ_SUCCESS => ShmMqResult::Success,
+                SHM_MQ_WOULD_BLOCK => ShmMqResult::WouldBlock,
+                SHM_MQ_DETACHED => ShmMqResult::Detached,
+            })
+        })
+    }
+
+    fn shm_mq_receive_nowait(
+        mqh: ShmMqAttachHandle,
+        nowait: bool,
+    ) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)> {
+        with_registry(|r| {
+            // SAFETY: the registry holds a live, attached handle for this id.
+            let (res, data) = unsafe { real_receive(r.get_mut(mqh), nowait) }?;
+            let result = match res {
+                SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
+                SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
+                SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
+            };
+            let owned = if result == Some(ShmMqResult::Success) {
+                data.to_vec()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            Ok((result, owned))
+        })
+    }
+
     pub fn install() {
         use backend_storage_ipc_shm_mq_seams as seams;
         seams::shm_mq_create_at::set(shm_mq_create_at);
@@ -1661,6 +1699,8 @@ mod seam_layer {
         seams::shm_mq_get_queue::set(shm_mq_get_queue);
         seams::shm_mq_receive::set(shm_mq_receive);
         seams::shm_mq_detach::set(shm_mq_detach);
+        seams::shm_mq_send::set(shm_mq_send);
+        seams::shm_mq_receive_nowait::set(shm_mq_receive_nowait);
     }
 }
 

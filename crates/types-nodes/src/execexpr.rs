@@ -1075,6 +1075,107 @@ impl<'mcx> Clone for ExprState<'mcx> {
     }
 }
 
+/// `T_SetExprState` (nodes/nodetags.h) — the executor-state node tag for a
+/// [`SetExprState`]. Verified against PostgreSQL 18.3's generated `nodetags.h`
+/// (value 391).
+pub const T_SetExprState: NodeTag = NodeTag(391);
+
+/// `ExprDoneCond` (executor/executor.h / nodes/execnodes.h) — whether an
+/// expression's evaluation is complete, mid-set, or exhausted.
+///
+/// ```c
+/// typedef enum
+/// {
+///     ExprSingleResult,       /* expression does not return a set */
+///     ExprMultipleResult,     /* this result is an element of a set */
+///     ExprEndResult,          /* there are no more elements in the set */
+/// } ExprDoneCond;
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ExprDoneCond {
+    /// `ExprSingleResult` — expression does not return a set.
+    #[default]
+    ExprSingleResult,
+    /// `ExprMultipleResult` — this result is an element of a set.
+    ExprMultipleResult,
+    /// `ExprEndResult` — there are no more elements in the set.
+    ExprEndResult,
+}
+
+/// `SetExprState` (execnodes.h) — state for evaluating a potentially
+/// set-returning expression (a `FuncExpr` or `OpExpr`).
+///
+/// ```c
+/// typedef struct SetExprState
+/// {
+///     NodeTag     type;
+///     Expr       *expr;
+///     List       *args;
+///     ExprState  *elidedFuncState;
+///     FmgrInfo    func;
+///     Tuplestorestate *funcResultStore;
+///     TupleTableSlot *funcResultSlot;
+///     TupleDesc   funcResultDesc;
+///     bool        funcReturnsTuple;
+///     bool        funcReturnsSet;
+///     bool        setArgsValid;
+///     bool        shutdown_reg;
+///     FunctionCallInfo fcinfo;
+/// } SetExprState;
+/// ```
+///
+/// All of these fields are produced and consumed by the still-unported
+/// `execSRF.c` owner (via `ExecInitFunctionResultSet` /
+/// `ExecMakeFunctionResultSet`); `nodeProjectSet` only holds the boxed value in
+/// its `elems[]` array and hands a `&mut` to the owner's seam. The `expr` /
+/// `args` plan-tree links and the heterogeneous SRF execution state therefore
+/// live here as owned/boxed fields exactly as the C struct lays them out.
+#[derive(Debug, Default)]
+pub struct SetExprState<'mcx> {
+    /// `Expr *expr` — the expression plan node (`FuncExpr`/`OpExpr`).
+    pub expr: Option<PgBox<'mcx, Expr>>,
+    /// `List *args` — `ExprState`s for the argument expressions.
+    pub args: Option<PgVec<'mcx, ExprState<'mcx>>>,
+    /// `ExprState *elidedFuncState` — for an inlined ROWS FROM function, the
+    /// compiled non-set-returning expression evaluated with regular
+    /// `ExecEvalExpr` (`None` = the C `NULL`).
+    pub elidedFuncState: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    /// `FmgrInfo func` — function-manager lookup info for the target function
+    /// (`func.fn_oid == InvalidOid` until initialized).
+    pub func: FmgrInfo,
+    /// `Tuplestorestate *funcResultStore` — materialized SRF result rows
+    /// (`None` = the C `NULL`).
+    pub funcResultStore: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
+    /// `TupleTableSlot *funcResultSlot` — the row currently being returned
+    /// (`None` = the C `NULL`).
+    pub funcResultSlot: Option<PgBox<'mcx, TupleTableSlot>>,
+    /// `TupleDesc funcResultDesc` — tuple descriptor for the function's output
+    /// (`None` = the C `NULL`).
+    pub funcResultDesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
+    /// `bool funcReturnsTuple` — valid when `funcResultDesc` isn't NULL.
+    pub funcReturnsTuple: bool,
+    /// `bool funcReturnsSet` — whether the function is declared to return a set
+    /// (set by `ExecInitExpr`, valid even before the `FmgrInfo` is set up).
+    pub funcReturnsSet: bool,
+    /// `bool setArgsValid` — true when mid value-per-call series, so
+    /// `fcinfo` already holds valid argument data.
+    pub setArgsValid: bool,
+    /// `bool shutdown_reg` — whether a shutdown callback is registered.
+    pub shutdown_reg: bool,
+    /// `FunctionCallInfo fcinfo` — call-parameter structure for the function
+    /// (`None` = not yet initialized).
+    pub fcinfo: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
+}
+
+impl SetExprState<'_> {
+    /// `nodeTag(node)` — always [`T_SetExprState`].
+    #[inline]
+    pub fn tag(&self) -> NodeTag {
+        T_SetExprState
+    }
+}
+
 /// `ProjectionInfo` (execnodes.h) — node for caching needed info for
 /// projection.
 ///

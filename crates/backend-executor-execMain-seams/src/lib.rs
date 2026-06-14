@@ -485,3 +485,175 @@ seam_core::seam!(
         subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
     ) -> types_error::PgResult<()>
 );
+
+// ===========================================================================
+// CteScan leader-aliased operations (nodeCtescan.c).
+// ===========================================================================
+//
+// A `CteScanState`'s `leader` is an aliased self-/cross-reference into the
+// executor-owned node graph (the C `struct CteScanState *leader`); only the
+// leader holds the valid shared `cte_table` / `eof_cte`. A live mutable alias
+// into another owned node cannot be held in safe Rust, so every operation that
+// crosses that link is reached through these seams. execMain owns the live
+// node graph + the `EState.es_param_exec_vals` Param slot that establishes the
+// leader and the `es_subplanstates` that hold the CTE subplan, so it installs
+// them when it lands; until then a call panics loudly. nodeCtescan keeps the
+// node-machine control flow and reaches the leader-aliased state through here.
+
+use types_nodes::nodectescan::{CteScan, CteScanState};
+
+seam_core::seam!(
+    /// `ExecInitCteScan` Param-slot leader handshake: read
+    /// `prmdata = &estate->es_param_exec_vals[node->cteParam]`,
+    /// `Assert(prmdata->execPlan == NULL); Assert(!prmdata->isnull)`, take
+    /// `scanstate->leader = castNode(CteScanState, DatumGetPointer(prmdata->value))`.
+    /// If the slot was empty (this node is the leader), publish
+    /// `prmdata->value = PointerGetDatum(scanstate)` and
+    /// `scanstate->leader = scanstate`, returning `true`; otherwise record the
+    /// existing leader link and return `false`.
+    pub fn cte_resolve_leader<'mcx>(
+        scanstate: &mut CteScanState<'mcx>,
+        plan: &CteScan<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `scanstate->cteplanstate = (PlanState *) list_nth(estate->es_subplanstates,
+    /// node->ctePlanId - 1)` (`ExecInitCteScan`): link the already-initialized
+    /// CTE subplan from the executor-owned `es_subplanstates`.
+    pub fn cte_link_plan_state<'mcx>(
+        scanstate: &mut CteScanState<'mcx>,
+        plan: &CteScan<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Leader-only store creation (`ExecInitCteScan`):
+    /// `scanstate->cte_table = tuplestore_begin_heap(true, false, work_mem);
+    /// tuplestore_set_eflags(scanstate->cte_table, scanstate->eflags)`.
+    pub fn cte_tuplestore_begin_heap_leader<'mcx>(
+        scanstate: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Follower read-pointer setup (`ExecInitCteScan`):
+    /// `scanstate->readptr =
+    ///   tuplestore_alloc_read_pointer(scanstate->leader->cte_table, scanstate->eflags);
+    /// tuplestore_select_read_pointer(...); tuplestore_rescan(...)`. Sets
+    /// `scanstate->readptr` to the freshly allocated pointer index.
+    pub fn cte_tuplestore_alloc_read_pointer_follower<'mcx>(
+        scanstate: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->leader->eof_cte` (read): the leader's end-of-CTE flag.
+    pub fn cte_leader_eof_cte<'mcx>(
+        node: &CteScanState<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `node->leader->eof_cte = value` (write).
+    pub fn cte_set_leader_eof_cte<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        value: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_select_read_pointer(node->leader->cte_table, node->readptr)`:
+    /// make this node's read pointer active on the shared store.
+    pub fn cte_tuplestore_select_read_pointer<'mcx>(
+        node: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_ateof(node->leader->cte_table)`.
+    pub fn cte_tuplestore_ateof<'mcx>(
+        node: &CteScanState<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplestore_advance(node->leader->cte_table, forward)`: returns `false`
+    /// when the store is empty (the C `false`).
+    pub fn cte_tuplestore_advance<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        forward: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplestore_gettupleslot(node->leader->cte_table, forward, /*copy*/true,
+    /// node->ss.ss_ScanTupleSlot)`: fetch the next tuple from the shared store
+    /// into the node's scan slot. Returns `true` when a tuple was fetched.
+    pub fn cte_tuplestore_gettupleslot<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        forward: bool,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `tuplestore_puttupleslot(node->leader->cte_table, cteslot)`: append a copy
+    /// of the CTE subplan's just-returned tuple to the shared store.
+    pub fn cte_tuplestore_puttupleslot<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_rescan(node->leader->cte_table)`.
+    pub fn cte_tuplestore_rescan<'mcx>(
+        node: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_clear(node->leader->cte_table)`.
+    pub fn cte_tuplestore_clear<'mcx>(
+        node: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplestore_end(node->cte_table)` (leader only, `ExecEndCteScan`).
+    pub fn cte_tuplestore_end<'mcx>(
+        node: &mut CteScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `cteslot = ExecProcNode(node->cteplanstate)` then `!TupIsNull(cteslot)`:
+    /// run the CTE subplan one tuple. Returns `true` when a non-null tuple was
+    /// returned (its slot is stashed for the following puttupleslot / copy);
+    /// `false` at end of the subplan.
+    pub fn cte_exec_proc_node<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecCopySlot(node->ss.ss_ScanTupleSlot, cteslot)`: copy the CTE subplan's
+    /// just-returned tuple into the node's own scan slot (stable across other
+    /// readers advancing the subplan).
+    pub fn cte_copy_tuple_to_scan_slot<'mcx>(
+        node: &mut CteScanState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->leader->cteplanstate->chgParam != NULL` (`ExecReScanCteScan`):
+    /// whether the underlying CTE needs a fresh scan.
+    pub fn cte_leader_cteplanstate_chgparam_set<'mcx>(
+        node: &CteScanState<'mcx>,
+    ) -> types_error::PgResult<bool>
+);
