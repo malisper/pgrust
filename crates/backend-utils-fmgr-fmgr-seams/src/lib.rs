@@ -15,8 +15,8 @@ use types_error::PgResult;
 use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 // Migration target: the canonical per-attribute value enum. The former
-// transitional `TupleValue<'mcx>` alias resolved to this exact type, so every
-// seam that carried a typed per-attribute value (the deformed-slot/`TupleValue`
+// transitional `Datum<'mcx>` alias resolved to this exact type, so every
+// seam that carried a typed per-attribute value (the deformed-slot/`Datum`
 // readers) now names the canonical `Datum<'mcx>` enum directly.
 use types_tuple::backend_access_common_heaptuple::Datum;
 // The bare-word `Datum` shim (`types_datum::Datum(usize)`), still named at the
@@ -308,7 +308,7 @@ seam_core::seam!(
     /// function through an already-resolved `FmgrInfo`. The owned `FmgrInfo`
     /// carries only the resolved function's OID (the lookup key), so the owner
     /// re-resolves and calls. The argument crosses as the owned per-attribute
-    /// value model (`TupleValue`, as the deformed-slot readers produce). The C
+    /// value model (`Datum`, as the deformed-slot readers produce). The C
     /// `char *` result crosses as its NUL-excluded bytes allocated in `mcx`.
     /// `Err` carries the strict-null `elog` and whatever the output function
     /// raises.
@@ -477,7 +477,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `InputFunctionCall(flinfo, str, typioparam, typmod)` (fmgr.c) on a
     /// caller-cached `FmgrInfo`, returning the result classified as a
-    /// [`TupleValue`] ready for `heap_form_tuple`. Call a type's text input
+    /// [`Datum`] ready for `heap_form_tuple`. Call a type's text input
     /// function on the NUL-terminated C string `str_` (`None` is C's
     /// `str == NULL`, supported so the call still happens for NULL fields to
     /// support domains), then package the resulting `Datum` as `ByVal` when
@@ -583,7 +583,7 @@ seam_core::seam!(
     /// it: call the element type's text output function on a materialized
     /// element value, returning the printable bytes (NUL excluded) in `mcx`.
     /// `Err` carries the strict-null `elog` and whatever the output function
-    /// raises. (Array-element form; distinct from the `TupleValue`-based
+    /// raises. (Array-element form; distinct from the `Datum`-based
     /// `output_function_call` above.)
     pub fn array_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -677,7 +677,7 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 // Generic raw-`Datum` fmgr dispatch driven by `tcop/fastpath.c`
 // (backend-tcop-fastpath, the server side of `PQfn`). Unlike the
-// record/rowtypes consumers above (which classify values as `TupleValue`),
+// record/rowtypes consumers above (which classify values as `Datum`),
 // the fastpath path marshals raw argument `Datum` words straight through
 // `FunctionCallInvoke`, so these seams keep the values as opaque `Datum`s.
 // C's `FmgrInfo` cannot cross a seam, so each call dispatches by OID and the

@@ -36,7 +36,7 @@
 //! tuple-descriptor constructors and the `begin/do/end_tup_output` family — is
 //! implemented as own-logic over the body-bearing carriers: the slot fields
 //! carry the full `FormedTuple` / `FormedMinimalTuple` (header + data-area
-//! bytes), `tts_values` carries the by-reference `TupleValue::ByRef` lane, and
+//! bytes), `tts_values` carries the by-reference `Datum::ByRef` lane, and
 //! the op return / store-param types are the body-bearing carriers so no data
 //! bytes are dropped at any boundary.
 //!

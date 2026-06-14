@@ -37,7 +37,7 @@ pub struct IndexCreateArgs<'mcx> {
     /// `const int16 *coloptions`.
     pub coloptions: std::vec::Vec<i16>,
     /// `Datum reloptions`.
-    pub reloptions: types_tuple::TupleValue<'mcx>,
+    pub reloptions: types_tuple::Datum<'mcx>,
     /// `bits16 flags`.
     pub flags: u16,
     /// `bits16 constr_flags`.
@@ -91,7 +91,7 @@ seam_core::seam!(
     /// Expression evaluation can `ereport(ERROR)`, carried on `Err`.
     ///
     /// The result array stays on the word-model `types_datum::Datum` (rather
-    /// than the canonical `TupleValue`): the sole consumer feeds it straight
+    /// than the canonical `Datum`): the sole consumer feeds it straight
     /// into `backend-access-index-genam-seams::build_index_value_description`,
     /// whose `values: &[types_datum::Datum]` contract is owned outside this
     /// batch. Migrating the element type here would diverge from that landed

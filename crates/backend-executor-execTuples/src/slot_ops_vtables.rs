@@ -17,8 +17,8 @@ use types_nodes::tuptable::{
     VirtualTupleTableSlot, TTS_FLAG_SHOULDFREE,
 };
 use types_storage::buf::{BufferIsValid, InvalidBuffer};
-// The canonical value enum; `TupleValue` is its transitional alias.
-use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple, TupleValue};
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
 use types_tuple::heaptuple::CompactAttribute;
 
 use crate::slot_deform::slot_deform_heap_tuple;
@@ -223,7 +223,7 @@ pub fn tts_virtual_materialize<'mcx>(
     // /* compute size of memory required */
     // for (int natt = 0; natt < desc->natts; natt++) { ... }
     //
-    // The slot's tts_values now carry a `TupleValue`: a by-value column is
+    // The slot's tts_values now carry a `Datum`: a by-value column is
     // `ByVal` (skipped here, exactly as C skips `att->attbyval`), a
     // by-reference column is `ByRef` over the verbatim on-disk bytes (C's
     // `DatumGetPointer(val)`). Sizing/copying reads from those owned ByRef
@@ -319,7 +319,7 @@ pub fn tts_virtual_materialize<'mcx>(
         // slot->tts_values[natt] = PointerGetDatum(data);
         // (re-point at the materialized field bytes — now owned by the slot)
         slot.base.tts_values[natt] =
-            TupleValue::ByRef(slice_in(mcx, &data[cur..cur + data_length])?);
+            Datum::ByRef(slice_in(mcx, &data[cur..cur + data_length])?);
 
         // data += data_length;
         cur += data_length;
@@ -405,7 +405,7 @@ fn source_all_attrs<'mcx>(
     src: &SlotData<'mcx>,
     natts: i32,
 ) -> PgResult<(
-    alloc::vec::Vec<TupleValue<'mcx>>,
+    alloc::vec::Vec<Datum<'mcx>>,
     alloc::vec::Vec<bool>,
 )> {
     let natts = natts as usize;
@@ -414,7 +414,7 @@ fn source_all_attrs<'mcx>(
     let deform = |mcx: Mcx<'mcx>,
                   tuple: &types_tuple::heaptuple::HeapTupleData<'mcx>,
                   data: &[u8]|
-     -> PgResult<(alloc::vec::Vec<TupleValue<'mcx>>, alloc::vec::Vec<bool>)> {
+     -> PgResult<(alloc::vec::Vec<Datum<'mcx>>, alloc::vec::Vec<bool>)> {
         let desc = src
             .base()
             .tts_tupleDescriptor
@@ -422,7 +422,7 @@ fn source_all_attrs<'mcx>(
             .ok_or_else(|| elog_error("tts_virtual_copyslot: source slot has no tuple descriptor"))?;
         let columns =
             backend_access_common_heaptuple::heap_deform_tuple(mcx, tuple, desc, data)?;
-        let mut values: alloc::vec::Vec<TupleValue<'mcx>> = alloc::vec::Vec::with_capacity(natts);
+        let mut values: alloc::vec::Vec<Datum<'mcx>> = alloc::vec::Vec::with_capacity(natts);
         let mut isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
         for (v, n) in columns.into_iter() {
             values.push(v);
@@ -443,7 +443,7 @@ fn source_all_attrs<'mcx>(
         // A virtual source is already fully valid; copy its values out.
         SlotData::Virtual(_) => {
             let sb = src.base();
-            let mut values: alloc::vec::Vec<TupleValue<'mcx>> = alloc::vec::Vec::with_capacity(natts);
+            let mut values: alloc::vec::Vec<Datum<'mcx>> = alloc::vec::Vec::with_capacity(natts);
             let mut isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
             for natt in 0..natts {
                 values.push(sb.tts_values[natt].clone());
@@ -511,7 +511,7 @@ pub fn tts_virtual_copy_heap_tuple<'mcx>(
     // return heap_form_tuple(slot->tts_tupleDescriptor, slot->tts_values,
     //                        slot->tts_isnull);
     //
-    // The slot's `tts_values` carry `TupleValue`s (the by-ref lane heap_form_tuple
+    // The slot's `tts_values` carry `Datum`s (the by-ref lane heap_form_tuple
     // consumes); `heap_form_tuple` yields the body-bearing `FormedTuple` (header +
     // data area), which the widened `copy_heap_tuple` op return carries verbatim.
     let desc = slot
@@ -542,7 +542,7 @@ pub fn tts_virtual_copy_minimal_tuple<'mcx>(
     // return heap_form_minimal_tuple(slot->tts_tupleDescriptor,
     //                                slot->tts_values, slot->tts_isnull, extra);
     //
-    // `heap_form_minimal_tuple` over the slot's `TupleValue` tts_values yields the
+    // `heap_form_minimal_tuple` over the slot's `Datum` tts_values yields the
     // body-bearing `FormedMinimalTuple` (header + data area), carried verbatim by
     // the widened `copy_minimal_tuple` op return.
     let desc = slot
@@ -688,7 +688,7 @@ pub fn tts_heap_materialize<'mcx>(
     // The expanded slot payload model carries the materialized tuple as the
     // body-bearing `FormedTuple` (header + data-area bytes), so both arms store
     // their `FormedTuple` result directly into `hslot->tuple`. `tts_values` now
-    // carries `TupleValue`s (the by-ref lane owns the bytes), exactly what
+    // carries `Datum`s (the by-ref lane owns the bytes), exactly what
     // heap_form_tuple consumes; the `'mcx` allocation context is the slot's
     // memory context (C's MemoryContextSwitchTo(slot->tts_mcxt)).
     if slot.tuple.is_none() {

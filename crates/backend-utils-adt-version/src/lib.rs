@@ -12,7 +12,7 @@
 //! forwards verbatim from `backend_utils_adt_varlena_seams::cstring_to_text`
 //! (owned by the `backend-utils-adt-varlena` lane, migrated in this same batch).
 //! A `text` result is by-reference, so its canonical form is
-//! `types_tuple::TupleValue::ByRef`; once the `cstring_to_text` seam flips to
+//! `types_tuple::Datum::ByRef`; once the `cstring_to_text` seam flips to
 //! the canonical value enum, `pgsql_version`'s return type follows it with no
 //! other change. We therefore name the seam's return type inline rather than
 //! importing the shim, so this crate carries no standalone `use types_datum`.

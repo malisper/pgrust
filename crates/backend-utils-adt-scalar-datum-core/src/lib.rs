@@ -10,7 +10,7 @@
 //!
 //! * the **byte-model** lane (`backend-utils-adt-scalar-seams::datum_copy`),
 //!   where a by-reference value crosses as the verbatim on-disk bytes held in
-//!   [`TupleValue::ByRef`] (already detoasted, varlena header included) — the
+//!   [`Datum::ByRef`] (already detoasted, varlena header included) — the
 //!   established idiomatic stand-in for C's bare pointer into a tuple. Consumed
 //!   by `brin-tuple`.
 //!
@@ -61,7 +61,7 @@ use backend_utils_adt_misc2_seams::{eoh_flatten_into, eoh_get_flat_size};
 //
 // These read the SAME bytes brin-tuple's `fetchatt` / `varsize_any` and
 // rowtypes' `varlena_payload` already read. They operate on a `&[u8]` view of
-// the value's on-disk image (the `TupleValue::ByRef` payload, or, in the
+// the value's on-disk image (the `Datum::ByRef` payload, or, in the
 // bare-Datum lane, a slice synthesised over the pointed-at memory).
 // ===========================================================================
 
@@ -137,7 +137,7 @@ fn varlena_payload(b: &[u8]) -> (&[u8], usize) {
 // ===========================================================================
 // datumGetSize / datumIsEqual / image-eq / image-hash over the BYTE model.
 //
-// The verbatim on-disk bytes of one by-reference value (the `TupleValue::ByRef`
+// The verbatim on-disk bytes of one by-reference value (the `Datum::ByRef`
 // payload). `datumGetSizeBytes` is the `att_addlength_datum`-shaped size read.
 // ===========================================================================
 
@@ -183,7 +183,7 @@ fn cstr_len(s: &[u8]) -> usize {
 // ===========================================================================
 // datumCopy — BYTE model (backend-utils-adt-scalar-seams::datum_copy).
 //
-// Consumed by brin-tuple: a value crosses as `TupleValue`, the deep copy lands
+// Consumed by brin-tuple: a value crosses as `Datum`, the deep copy lands
 // in the caller's `mcx`.
 // ===========================================================================
 

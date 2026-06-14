@@ -29,7 +29,7 @@ use types_datum::Datum as ScalarWord;
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_scan::scankey::ScanKeyData;
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{FormedTuple, Datum};
 
 use backend_access_index_genam_seams as genam;
 
@@ -558,12 +558,12 @@ fn build_fetched(
                     let col = &deformed[(attno - 1) as usize];
                     keys[i] = match &col.0 {
                         // By-value key: the scalar word is the key Datum.
-                        TupleValue::ByVal(d) => *d,
+                        Datum::ByVal(d) => *d,
                         // By-reference key: the payload cannot inhabit a bare
                         // Datum word; the comparison core re-resolves it from
                         // the cached bytes, so the stored word is the owned
                         // model's by-reference placeholder.
-                        TupleValue::ByRef(_) => ScalarWord::null(),
+                        Datum::ByRef(_) => ScalarWord::null(),
                     };
                 }
             }

@@ -13,8 +13,8 @@ use types_nodes::tuptable::{
     TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
 };
 use types_nodes::{TupleSlotKind, TupleTableSlot};
-// The canonical value enum; `TupleValue` is its transitional alias.
-use types_tuple::backend_access_common_heaptuple::{Datum, TupleValue};
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum};
 use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
 use crate::slot_ops_vtables;
@@ -119,7 +119,7 @@ pub fn MakeTupleTableSlot<'mcx>(
         // palloc0 of the Datum/bool arrays. A freshly-allocated slot has
         // tts_nvalid = 0, so the array contents are don't-care until deform
         // fills them; the zero word maps to `Datum::null()`.
-        let mut values: mcx::PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, natts)?;
+        let mut values: mcx::PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
         let mut isnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
         values.resize(natts, Datum::null());
         isnull.resize(natts, false);

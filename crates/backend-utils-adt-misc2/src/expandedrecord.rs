@@ -13,7 +13,7 @@
 //! opaque `ExpandedObjectRef` byte handle, so the real struct is carried here as
 //! [`ExpandedRecordHeader`], field-for-field with `utils/expandedrecord.h`
 //! (verified against the c2rust `ExpandedRecordHeader`). In the owned model:
-//!   * `Datum *dvalues` / `bool *dnulls` -> `PgVec<TupleValue>` / `PgVec<bool>`
+//!   * `Datum *dvalues` / `bool *dnulls` -> `PgVec<Datum>` / `PgVec<bool>`
 //!     (per-field payloads, matching how `backend-access-common-heaptuple`'s
 //!     form/deform core models a tuple field — `ByVal` word or `ByRef` bytes);
 //!   * `HeapTuple fvalue` (+ `fstartptr`/`fendptr`) -> `Option<FormedTuple>`
@@ -41,7 +41,7 @@
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{FormedTuple, Datum};
 use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, BITMAPLEN, RECORDOID};
 
 use backend_access_common_heaptuple as heaptuple;
@@ -141,7 +141,7 @@ pub struct ExpandedRecordHeader<'mcx> {
     pub er_tupdesc_refcounted: bool,
 
     /// `dvalues` — per-field values (C `Datum *`), present iff DVALUES_VALID.
-    pub dvalues: PgVec<'mcx, TupleValue<'mcx>>,
+    pub dvalues: PgVec<'mcx, Datum<'mcx>>,
     /// `dnulls` — per-field is-null flags (C `bool *`).
     pub dnulls: PgVec<'mcx, bool>,
     /// Per-field "this field owns separately-allocated storage" flag — the owned
@@ -276,10 +276,10 @@ fn toast_flatten_tuple<'mcx>(
 /// `mcx`, which is the faithful effect of `datumCopy` for the by-reference case.
 fn datum_copy<'mcx>(
     mcx: Mcx<'mcx>,
-    value: &TupleValue<'_>,
+    value: &Datum<'_>,
     _typbyval: bool,
     _typlen: i16,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     value.clone_in(mcx)
 }
 
@@ -363,7 +363,7 @@ pub fn er_get_flat_size<'mcx>(
                 let external = !erh.dnulls[i as usize]
                     && !attr.attbyval
                     && attr.attlen == -1
-                    && matches!(&erh.dvalues[i as usize], TupleValue::ByRef(b) if varatt_is_external(b));
+                    && matches!(&erh.dvalues[i as usize], Datum::ByRef(b) if varatt_is_external(b));
                 (external, ())
             };
             let _ = val;
@@ -920,7 +920,7 @@ pub fn deconstruct_expanded_record<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::null());
+            dvalues.push(Datum::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -985,17 +985,17 @@ pub fn expanded_record_fetch_field<'mcx>(
     mcx: Mcx<'mcx>,
     erh: &mut ExpandedRecordHeader<'mcx>,
     fnumber: i32,
-) -> PgResult<(TupleValue<'mcx>, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     if fnumber > 0 {
         // Empty record has null fields.
         if erh.is_empty() {
-            return Ok((TupleValue::null(), true));
+            return Ok((Datum::null(), true));
         }
         // Make sure we have deconstructed form.
         deconstruct_expanded_record(mcx, erh)?;
         // Out-of-range field number reads as null.
         if fnumber > erh.nfields {
-            return Ok((TupleValue::null(), true));
+            return Ok((Datum::null(), true));
         }
         let isnull = erh.dnulls[(fnumber - 1) as usize];
         let value = erh.dvalues[(fnumber - 1) as usize].clone_in(mcx)?;
@@ -1003,7 +1003,7 @@ pub fn expanded_record_fetch_field<'mcx>(
     } else {
         // System columns read as null if we haven't got a flat tuple.
         let Some(fv) = erh.fvalue.as_ref() else {
-            return Ok((TupleValue::null(), true));
+            return Ok((Datum::null(), true));
         };
         // heap_getsysattr doesn't actually use tupdesc.
         heaptuple::heap_getsysattr(mcx, &fv.tuple, fnumber)
@@ -1020,7 +1020,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
     mcx: Mcx<'mcx>,
     erh: &mut ExpandedRecordHeader<'mcx>,
     fnumber: i32,
-    new_value: TupleValue<'mcx>,
+    new_value: Datum<'mcx>,
     isnull: bool,
     expand_external: bool,
     check_constraints: bool,
@@ -1063,7 +1063,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
     if !isnull && !attbyval {
         if expand_external {
             let is_ext = attlen == -1
-                && matches!(&value, TupleValue::ByRef(b) if varatt_is_external(b));
+                && matches!(&value, Datum::ByRef(b) if varatt_is_external(b));
             if is_ext {
                 // C detoasts into the short-lived context to bound any cruft,
                 // then datumCopy's into the object context. In the owned model
@@ -1071,7 +1071,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
                 // detoast straight into `mcx` (the object context) — no separate
                 // intermediate to reclaim, the same net effect.
                 let bytes = detoast_external_attr(mcx, value.as_ref_bytes())?;
-                value = TupleValue::ByRef(bytes);
+                value = Datum::ByRef(bytes);
             }
         }
 
@@ -1082,7 +1082,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
         this_field_owned = true;
 
         // Note whether it's an external toasted value (might need inlining).
-        if attlen == -1 && matches!(&value, TupleValue::ByRef(b) if varatt_is_external(b)) {
+        if attlen == -1 && matches!(&value, Datum::ByRef(b) if varatt_is_external(b)) {
             have_external = true;
         }
     }
@@ -1101,7 +1101,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
         erh.flags |= ER_FLAG_HAVE_EXTERNAL;
     }
 
-    // And finally we can insert the new field. (Replacing the old TupleValue
+    // And finally we can insert the new field. (Replacing the old Datum
     // drops its storage — the owned analog of the C pfree of the old value,
     // guarded so we never reclaim a field that pointed into the flat record.)
     let idx = (fnumber - 1) as usize;
@@ -1117,7 +1117,7 @@ pub fn expanded_record_set_field_internal<'mcx>(
 pub fn expanded_record_set_fields<'mcx>(
     mcx: Mcx<'mcx>,
     erh: &mut ExpandedRecordHeader<'mcx>,
-    new_values: &[TupleValue<'_>],
+    new_values: &[Datum<'_>],
     isnulls: &[bool],
     expand_external: bool,
 ) -> PgResult<()> {
@@ -1159,17 +1159,17 @@ pub fn expanded_record_set_fields<'mcx>(
         if !attbyval && !isnull {
             // Is it an external toasted value?
             let is_ext = attlen == -1
-                && matches!(&new_value, TupleValue::ByRef(b) if varatt_is_external(b));
+                && matches!(&new_value, Datum::ByRef(b) if varatt_is_external(b));
             if is_ext {
                 if expand_external {
                     // Detoast as requested while copying the value.
                     let bytes = detoast_external_attr(mcx, new_value.as_ref_bytes())?;
-                    new_value = TupleValue::ByRef(bytes);
+                    new_value = Datum::ByRef(bytes);
                 } else {
                     // Just copy the value.
                     new_value = datum_copy(mcx, &new_value, false, -1)?;
                     // If it's still external, remember that.
-                    if matches!(&new_value, TupleValue::ByRef(b) if varatt_is_external(b)) {
+                    if matches!(&new_value, Datum::ByRef(b) if varatt_is_external(b)) {
                         erh.flags |= ER_FLAG_HAVE_EXTERNAL;
                     }
                 }
@@ -1181,7 +1181,7 @@ pub fn expanded_record_set_fields<'mcx>(
             erh.flags |= ER_FLAG_DVALUES_ALLOCED;
         }
 
-        // Insert the new field (replacing/freeing the old TupleValue's storage).
+        // Insert the new field (replacing/freeing the old Datum's storage).
         erh.dvalues[idx] = new_value;
         erh.dnulls[idx] = isnull;
         erh.dvalues_owned[idx] = this_field_owned;
@@ -1364,7 +1364,7 @@ fn check_domain_for_new_field<'mcx>(
     mcx: Mcx<'mcx>,
     erh: &mut ExpandedRecordHeader<'mcx>,
     fnumber: i32,
-    new_value: &TupleValue<'_>,
+    new_value: &Datum<'_>,
     isnull: bool,
 ) -> PgResult<()> {
     build_dummy_expanded_header(mcx, erh)?;
@@ -1395,7 +1395,7 @@ fn check_domain_for_new_field<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::null());
+            dvalues.push(Datum::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -1427,7 +1427,7 @@ fn check_domain_for_new_field<'mcx>(
         };
         if !attbyval
             && attlen == -1
-            && matches!(new_value, TupleValue::ByRef(b) if varatt_is_external(b))
+            && matches!(new_value, Datum::ByRef(b) if varatt_is_external(b))
         {
             erh.er_dummy_header.as_mut().expect("dummy").flags |= ER_FLAG_HAVE_EXTERNAL;
         }

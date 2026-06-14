@@ -21,7 +21,7 @@
 //! body-bearing [`FormedTuple`], so the one place this engine needs
 //! `(char *) tup + t_hoff` — [`heap_slot_body`] — returns the slot's owned data
 //! body directly, and the by-reference [`fetchatt`] writes a
-//! `TupleValue::ByRef` over the verbatim on-disk field bytes into the
+//! `Datum::ByRef` over the verbatim on-disk field bytes into the
 //! by-reference `tts_values` lane. Everything here is complete.
 
 extern crate alloc;
@@ -33,8 +33,8 @@ use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{
     HeapTupleTableSlot, SlotData, TTS_FLAG_SLOW,
 };
-// The canonical value enum; `TupleValue` is its transitional alias.
-use types_tuple::backend_access_common_heaptuple::{Datum, TupleValue};
+// The canonical value enum; `Datum` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum};
 use types_tuple::heaptuple::{CompactAttribute, HeapTupleHeaderGetNatts};
 
 use crate::slot_ops_vtables;
@@ -145,7 +145,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// the scalar from `data[off..]` as a Datum word, sign/zero handling matching
 /// the C `*(intN *)` reads on a little-endian 64-bit build.
 #[inline]
-fn fetch_att_byval<'mcx>(data: &[u8], off: usize, attlen: i16) -> TupleValue<'mcx> {
+fn fetch_att_byval<'mcx>(data: &[u8], off: usize, attlen: i16) -> Datum<'mcx> {
     match attlen {
         1 => Datum::from_usize(data[off] as usize),
         2 => Datum::from_usize(u16::from_ne_bytes([data[off], data[off + 1]]) as usize),
@@ -168,9 +168,9 @@ fn fetch_att_byval<'mcx>(data: &[u8], off: usize, attlen: i16) -> TupleValue<'mc
 
 /// `values[attnum] = fetchatt(thisatt, tp + *offp)` (tupmacs.h `fetchatt`).
 ///
-/// For a by-value att, read the scalar word (`TupleValue::ByVal`). For a
+/// For a by-value att, read the scalar word (`Datum::ByVal`). For a
 /// by-reference att, C yields `PointerGetDatum(tp + off)` — a pointer into the
-/// tuple data; the faithful idiomatic carrier is `TupleValue::ByRef` over the
+/// tuple data; the faithful idiomatic carrier is `Datum::ByRef` over the
 /// verbatim on-disk bytes the field spans (the C contract that the pointer
 /// "points into the given tuple" is preserved by copying the exact bytes). The
 /// field's length is the same one the byte engine advances `off` by, computed
@@ -181,7 +181,7 @@ fn fetchatt<'mcx>(
     att: &CompactAttribute,
     data: &[u8],
     off: usize,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if att.attbyval {
         Ok(fetch_att_byval(data, off, att.attlen))
     } else {
@@ -189,7 +189,7 @@ fn fetchatt<'mcx>(
         // occupies: end == att_addlength_pointer(off, attlen, tp, off), the very
         // advance the deform loop applies to `off` right after this fetch.
         let end = att_addlength_pointer(off, att.attlen, data, off);
-        Ok(TupleValue::ByRef(slice_in(mcx, &data[off..end])?))
+        Ok(Datum::ByRef(slice_in(mcx, &data[off..end])?))
     }
 }
 
@@ -205,7 +205,7 @@ fn fetchatt<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn slot_deform_heap_tuple_internal<'mcx>(
     mcx: Mcx<'mcx>,
-    values: &mut [TupleValue<'mcx>],
+    values: &mut [Datum<'mcx>],
     isnull: &mut [bool],
     compact_attrs: &[CompactAttribute],
     bp: &[u8],
@@ -482,9 +482,9 @@ pub fn slot_getmissingattrs<'mcx>(
         let constr = desc.constr.as_ref().unwrap();
         // Snapshot the (value, present) pairs to avoid borrowing the descriptor
         // and the tts arrays simultaneously. With the expanded tts_values
-        // (`TupleValue`), the missing value — by-value or by-reference — is
+        // (`Datum`), the missing value — by-value or by-reference — is
         // carried verbatim: C's `tts_values[missattnum] = attrmiss->am_value`.
-        let mut pairs: alloc::vec::Vec<(TupleValue<'mcx>, bool)> = alloc::vec::Vec::new();
+        let mut pairs: alloc::vec::Vec<(Datum<'mcx>, bool)> = alloc::vec::Vec::new();
         for missattnum in start_att_num..last_att_num {
             let am = &constr.missing[missattnum as usize];
             pairs.push((am.am_value.clone(), !am.am_present));

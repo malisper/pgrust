@@ -53,7 +53,7 @@ use types_error::{
     ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
 use types_stringinfo::StringInfo;
-use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{FormedTuple, Datum};
 use types_tuple::heaptuple::{
     FormData_pg_attribute, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, TupleDescData,
 };
@@ -121,10 +121,10 @@ pub fn record_in<'mcx>(
     let tupdesc = lookup_rowtype_tupdesc::call(mcx, tup_type, tup_typmod)?;
     let ncolumns = tupdesc.natts as usize;
 
-    let mut values: Vec<TupleValue<'mcx>> = Vec::with_capacity(ncolumns);
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(ncolumns);
     let mut nulls: Vec<bool> = Vec::with_capacity(ncolumns);
     for _ in 0..ncolumns {
-        values.push(TupleValue::null());
+        values.push(Datum::null());
         nulls.push(false);
     }
 
@@ -155,7 +155,7 @@ pub fn record_in<'mcx>(
 
         // Ignore dropped columns in datatype, but fill with nulls.
         if att.attisdropped {
-            values[i] = TupleValue::null();
+            values[i] = Datum::null();
             nulls[i] = true;
             continue;
         }
@@ -399,10 +399,10 @@ pub fn record_recv<'mcx>(
     let tupdesc = lookup_rowtype_tupdesc::call(mcx, tup_type, tup_typmod)?;
     let ncolumns = tupdesc.natts as usize;
 
-    let mut values: Vec<TupleValue<'mcx>> = Vec::with_capacity(ncolumns);
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(ncolumns);
     let mut nulls: Vec<bool> = Vec::with_capacity(ncolumns);
     for _ in 0..ncolumns {
-        values.push(TupleValue::null());
+        values.push(Datum::null());
         nulls.push(false);
     }
 
@@ -433,7 +433,7 @@ pub fn record_recv<'mcx>(
 
         // Ignore dropped columns in datatype, but fill with nulls.
         if att.attisdropped {
-            values[i] = TupleValue::null();
+            values[i] = Datum::null();
             nulls[i] = true;
             continue;
         }
@@ -1097,7 +1097,7 @@ pub fn hash_record_extended<'mcx>(
 type DeformedRecord<'mcx> = (
     mcx::PgBox<'mcx, TupleDescData<'mcx>>,
     usize,
-    mcx::PgVec<'mcx, (TupleValue<'mcx>, bool)>,
+    mcx::PgVec<'mcx, (Datum<'mcx>, bool)>,
 );
 
 fn deform_record<'mcx>(mcx: Mcx<'mcx>, record: &FormedTuple<'_>) -> PgResult<DeformedRecord<'mcx>> {
@@ -1149,7 +1149,7 @@ fn matching_collation(
 fn form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tupdesc: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     nulls: &[bool],
 ) -> PgResult<FormedTuple<'mcx>> {
     // C `heap_form_tuple` raises ereport(ERROR) for too-many-columns; the owned
@@ -1171,17 +1171,17 @@ fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<mcx::PgVec<'mcx,
 /// * fixed-length pass-by-reference (`attlen > 0`): `memcmp` of `attlen` bytes.
 /// * varlena (`attlen == -1`): compare `VARDATA` over `Min(payload lengths)`,
 ///   breaking ties by total length. The column image is already detoasted
-///   (`TupleValue::ByRef`), so this reads it directly.
+///   (`Datum::ByRef`), so this reads it directly.
 /// * any other `attlen`: the C `elog(ERROR, "unexpected attlen: %d")`.
 fn column_image_cmp(
-    v1: &TupleValue<'_>,
-    v2: &TupleValue<'_>,
+    v1: &Datum<'_>,
+    v2: &Datum<'_>,
     attbyval: bool,
     attlen: i16,
 ) -> PgResult<i32> {
     if attbyval {
         let (w1, w2) = match (v1, v2) {
-            (TupleValue::ByVal(a), TupleValue::ByVal(b)) => (a.as_usize(), b.as_usize()),
+            (Datum::ByVal(a), Datum::ByVal(b)) => (a.as_usize(), b.as_usize()),
             _ => panic!("record_image_cmp: by-value attribute deformed as by-reference"),
         };
         Ok(match w1.cmp(&w2) {

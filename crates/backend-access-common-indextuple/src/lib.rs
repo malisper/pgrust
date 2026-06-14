@@ -73,7 +73,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
 // The one canonical value type (Datum-unification keystone). The crate's own
-// form/deform model is `Datum<'mcx>` (ByVal/ByRef); the former `TupleValue`
+// form/deform model is `Datum<'mcx>` (ByVal/ByRef); the former `Datum`
 // spelling was a transitional alias for exactly this enum.
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{

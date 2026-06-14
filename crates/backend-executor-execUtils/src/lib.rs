@@ -82,7 +82,7 @@ use types_nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
 use types_storage::lock::{AccessShareLock, NoLock};
-use types_tuple::backend_access_common_heaptuple::{DeformedColumn, FormedTuple, TupleValue};
+use types_tuple::backend_access_common_heaptuple::{DeformedColumn, FormedTuple};
 use types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderGetDatumLength, HeapTupleHeaderGetNatts,
     HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, ItemPointerData, TupleDescData,
@@ -1100,7 +1100,7 @@ fn heap_getattr<'r>(
             //   HeapTupleNoNulls || !att_isnull -> fetch; else NULL.
             let has_nulls = (header.t_infomask & HEAP_HASNULL) != 0;
             if has_nulls && heap_attisnull(tup, attnum, Some(tuple_desc)) {
-                Ok((TupleValue::null(), true))
+                Ok((Datum::null(), true))
             } else {
                 Ok((nocachegetattr(mcx, tup, attnum, tuple_desc, data)?, false))
             }
@@ -1147,10 +1147,10 @@ pub fn GetAttributeByName<'r>(
     mcx: Mcx<'r>,
     tuple: Option<&FormedTuple<'_>>,
     attname: &str,
-) -> PgResult<(TupleValue<'r>, bool)> {
+) -> PgResult<(Datum<'r>, bool)> {
     let Some(tuple) = tuple else {
         // Kinda bogus but compatible with old behavior...
-        return Ok((TupleValue::null(), true));
+        return Ok((Datum::null(), true));
     };
 
     let header = tuple
@@ -1192,7 +1192,7 @@ pub fn GetAttributeByNum<'r>(
     mcx: Mcx<'r>,
     tuple: Option<&FormedTuple<'_>>,
     attrno: AttrNumber,
-) -> PgResult<(TupleValue<'r>, bool)> {
+) -> PgResult<(Datum<'r>, bool)> {
     // if (!AttributeNumberIsValid(attrno))
     if attrno == InvalidAttrNumber {
         // elog(ERROR, "invalid attribute number %d", attrno);
@@ -1201,7 +1201,7 @@ pub fn GetAttributeByNum<'r>(
 
     let Some(tuple) = tuple else {
         // Kinda bogus but compatible with old behavior...
-        return Ok((TupleValue::null(), true));
+        return Ok((Datum::null(), true));
     };
 
     let header = tuple

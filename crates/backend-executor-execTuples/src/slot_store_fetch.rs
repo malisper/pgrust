@@ -536,9 +536,9 @@ fn _slot_kind(slot: &SlotData) -> TupleSlotKind {
 // In C these are a `heap_deform_tuple` straight into the slot's `tts_values`/
 // `tts_isnull` arrays. heaptuple.c's `heap_deform_tuple` is a direct dependency;
 // its idiomatic form deforms a `(header, tupleDesc, data-area bytes)` triple
-// into `(TupleValue, bool)` columns. The body-bearing `FormedTuple` carrier
+// into `(Datum, bool)` columns. The body-bearing `FormedTuple` carrier
 // supplies both the header and the data area, so the deform is now real
-// own-logic over the slot's `TupleValue` lanes.
+// own-logic over the slot's `Datum` lanes.
 // ---------------------------------------------------------------------------
 
 /// `heap_deform_tuple(tuple, slot->tts_tupleDescriptor, slot->tts_values,
@@ -557,7 +557,7 @@ fn deform_into_slot<'mcx>(
         .as_ref()
         .ok_or_else(|| PgError::error("deform_into_slot: slot has no tuple descriptor"))?;
     // heap_deform_tuple(tuple, tupleDesc, values, isnull): a column at a time
-    // into (TupleValue, bool) pairs (heaptuple.c is a direct dependency).
+    // into (Datum, bool) pairs (heaptuple.c is a direct dependency).
     let columns =
         backend_access_common_heaptuple::heap_deform_tuple(mcx, &tuple.tuple, desc, &tuple.data)?;
 

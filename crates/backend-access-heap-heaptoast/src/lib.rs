@@ -47,7 +47,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_rel::Relation;
 // The one canonical per-attribute value type (the unified enum). The old
-// `TupleValue` alias / bare-word `types_datum::Datum` newtype are gone from
+// `Datum` alias / bare-word `types_datum::Datum` newtype are gone from
 // this crate entirely: every value site (deform/form, ScanKey args, fastgetattr
 // reads) is the canonical `Datum<'mcx>` enum, including `ScanKeyData.sk_argument`
 // and the args threaded into `ScanKeyInit`.

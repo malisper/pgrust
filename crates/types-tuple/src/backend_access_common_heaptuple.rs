@@ -1,6 +1,6 @@
 //! Type vocabulary for `access/common/heaptuple.c`'s form/deform core. Lives
 //! here (not in the owning crate) so seam-crate signatures can reference
-//! [`FormedTuple`] / [`TupleValue`] / [`DeformedColumn`] without depending on
+//! [`FormedTuple`] / [`Datum`] / [`DeformedColumn`] without depending on
 //! the owning crate; `backend-access-common-heaptuple` re-exports them.
 
 extern crate alloc;
@@ -34,8 +34,8 @@ use types_datum::Datum as ScalarWord;
 
 /// The one canonical value type — the faithful idiomatic substitute for C's
 /// `Datum`. A by-value scalar (`att->attbyval`) or a detoasted by-reference
-/// image. (Renamed from the former `TupleValue`; the `TupleValue` alias below
-/// is a transitional shim removed in cleanup.)
+/// image. (Renamed from the former `TupleValue`, whose transitional alias was
+/// removed in cleanup.)
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Datum<'mcx> {
     /// Pass-by-value scalar (`att->attbyval`); the machine word itself,
@@ -46,10 +46,6 @@ pub enum Datum<'mcx> {
     /// bytes, already detoasted, including any varlena header.
     ByRef(PgVec<'mcx, u8>),
 }
-
-/// Transitional compat alias for the renamed enum. Removed in cleanup once all
-/// consumers refer to [`Datum`] directly.
-pub type TupleValue<'mcx> = Datum<'mcx>;
 
 impl Datum<'_> {
     /// `DatumGetPointer(datum)` analogue: borrow the by-reference bytes. Panics
@@ -242,7 +238,7 @@ impl Datum<'_> {
 /// area (`ByRef`) — the faithful idiomatic stand-in for C's bare pointer into
 /// the tuple (the C contract that the pointer "points into the given tuple" is
 /// preserved by copying the exact bytes spanned by the field).
-pub type DeformedColumn<'mcx> = (TupleValue<'mcx>, bool);
+pub type DeformedColumn<'mcx> = (Datum<'mcx>, bool);
 
 /// A fully-formed heap tuple: the owned [`HeapTupleData`] plus its user-data
 /// area bytes (`td + t_hoff .. td + t_len`).

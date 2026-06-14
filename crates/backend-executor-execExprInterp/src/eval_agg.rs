@@ -113,7 +113,7 @@ fn invoke_transfn(
 // childed under the aggcontext), and frees the old via `DeleteExpandedObject` /
 // `pfree`. In the trimmed model `transValue` is a bare `Datum` word: a
 // by-reference datum is a pointer that the shared vocabulary cannot round-trip
-// through `datumCopy` (which works on the byte-model `TupleValue`; see the
+// through `datumCopy` (which works on the byte-model `Datum`; see the
 // `justs.rs` note), and the expanded-object helpers
 // (`DatumIsReadWriteExpandedObject` / `DatumGetEOHP` / `DeleteExpandedObject`)
 // are not in the shared vocabulary. So the copy/free body is the

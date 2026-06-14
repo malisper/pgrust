@@ -41,7 +41,7 @@ seam_core::seam!(
     /// Fallible on `ereport(ERROR)` from the function or argument evaluation.
     ///
     /// The function-produced result word crosses as the canonical unified value
-    /// [`TupleValue`](types_tuple::backend_access_common_heaptuple::TupleValue):
+    /// [`Datum`](types_tuple::backend_access_common_heaptuple::Datum):
     /// a `ByVal` scalar word for a pass-by-value return type, or the
     /// materialized `ByRef` payload bytes otherwise (the C `Datum` result of
     /// `FunctionCallInvoke` / the dematerialized tuplestore row).
@@ -51,7 +51,7 @@ seam_core::seam!(
         arg_context: &mcx::MemoryContext,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<(
-        types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>,
+        types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
         bool,
         types_nodes::execexpr::ExprDoneCond,
     )>

@@ -1999,17 +1999,17 @@ fn oid_function_call_1_deflist(
     null_check(&fcinfo, result, &oid.to_string())
 }
 
-/// Marshal a tuple-attribute [`TupleValue`] into the boundary [`FmgrArg`] an
+/// Marshal a tuple-attribute [`Datum`] into the boundary [`FmgrArg`] an
 /// output/send function expects: a by-value scalar stays a `Datum` word; a
 /// by-reference attribute's owned byte image is its `Varlena` referent (the
 /// already-detoasted `struct varlena *` C would have passed).
 fn tuple_value_to_arg(
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> (Datum, Option<RefPayload>) {
-    use types_tuple::backend_access_common_heaptuple::TupleValue;
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match val {
-        TupleValue::ByVal(d) => (*d, None),
-        TupleValue::ByRef(b) => (
+        CanonDatum::ByVal(d) => (*d, None),
+        CanonDatum::ByRef(b) => (
             Datum::null(),
             Some(RefPayload::Varlena(b.as_slice().to_vec())),
         ),
@@ -2033,7 +2033,7 @@ fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 fn oid_send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
     let resolved = fmgr_info(mcx, function_id)?;
@@ -2056,7 +2056,7 @@ fn oid_send_function_call_seam<'mcx>(
 fn oid_output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
     let resolved = fmgr_info(mcx, function_id)?;
@@ -2108,7 +2108,7 @@ fn function_call3_seam(
 fn output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_output_function_call_seam(mcx, flinfo.fn_oid, val)
 }
@@ -2119,7 +2119,7 @@ fn output_function_call_seam<'mcx>(
 fn send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+    val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_send_function_call_seam(mcx, flinfo.fn_oid, val)
 }
@@ -2149,7 +2149,7 @@ fn oid_input_function_call_seam<'mcx>(
 
 /// `InputFunctionCall(&flinfo, str, typioparam, typmod)` seam over a
 /// caller-cached `FmgrInfo` (`BuildTupleFromCStrings`), returning the result
-/// classified as a [`TupleValue`] for `heap_form_tuple`. The owned `FmgrInfo`
+/// classified as a [`Datum`] for `heap_form_tuple`. The owned `FmgrInfo`
 /// carries only `fn_oid`, so this is the `Option<&str>` (NULL-allowing) form of
 /// the one-shot lookup + call. By-value results travel as `ByVal`; by-reference
 /// results have their registry payload materialized into `mcx`-owned bytes.
@@ -2160,8 +2160,8 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     typioparam: Oid,
     typmod: i32,
     attbyval: bool,
-) -> PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>> {
-    use types_tuple::backend_access_common_heaptuple::TupleValue;
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     // The seam contract is the canonical `Datum<'mcx>` enum, so the input
     // function's result maps straight onto it — no per-backend registry token
     // round-trip. A by-value result is `ByVal` (the bare word); a by-reference
@@ -2169,7 +2169,7 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     // bytes (C's `PointerGetDatum(palloc'd result)`).
     match oid_input_function_call_out(mcx, fn_oid, str_, typioparam, typmod)? {
         // A strict NULL / by-value scalar: keep the bare ABI word.
-        FmgrOut::ByVal(d) => Ok(TupleValue::ByVal(canon_word(&d))),
+        FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d))),
         // C classifies by `attbyval`: a by-value type with a by-reference-shaped
         // result still reads its word back; otherwise materialize the payload.
         FmgrOut::Ref(payload) if attbyval => {
@@ -2181,13 +2181,13 @@ fn input_function_call_for_heap_form_seam<'mcx>(
             let mut word_bytes = [0u8; core::mem::size_of::<usize>()];
             let n = bytes.len().min(word_bytes.len());
             word_bytes[..n].copy_from_slice(&bytes[..n]);
-            Ok(TupleValue::ByVal(Datum::from_usize(usize::from_ne_bytes(
+            Ok(CanonDatum::ByVal(Datum::from_usize(usize::from_ne_bytes(
                 word_bytes,
             ))))
         }
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(TupleValue::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
         }
     }
 }

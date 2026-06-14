@@ -25,7 +25,7 @@ use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_storage::PrepareToInvalidateCacheTuple;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderGetNatts, TupleDescData};
 
 use backend_access_common_heaptuple::{getmissingattr, heap_attisnull, nocachegetattr};
@@ -65,7 +65,7 @@ fn heap_getattr<'mcx>(
     attnum: i32,
     tupdesc: &TupleDescData<'_>,
     data: &[u8],
-) -> PgResult<(TupleValue<'mcx>, bool)> {
+) -> PgResult<(Datum<'mcx>, bool)> {
     debug_assert!(attnum > 0, "heap_getattr: catcache keys are user columns");
     let header = tuple
         .t_data
@@ -75,7 +75,7 @@ fn heap_getattr<'mcx>(
         return getmissingattr(mcx, tupdesc, attnum);
     }
     if heap_attisnull(tuple, attnum, Some(tupdesc)) {
-        return Ok((TupleValue::ByVal(ScalarWord::null()), true));
+        return Ok((Datum::ByVal(ScalarWord::null()), true));
     }
     Ok((nocachegetattr(mcx, tuple, attnum, tupdesc, data)?, false))
 }
@@ -151,10 +151,10 @@ fn tuple_data_area<'a>(_tuple: &'a HeapTupleData<'_>) -> &'a [u8] {
 /// `PointerGetDatum(bytes)` — the pointer to the detoasted bytes, exactly as C's
 /// `fastgetattr` hands `CatalogCacheComputeHashValue` a `char *` Datum for the
 /// `name`/`text`/`oidvector` key types.
-fn tuple_value_as_datum(value: &TupleValue<'_>) -> ScalarWord {
+fn tuple_value_as_datum(value: &Datum<'_>) -> ScalarWord {
     match value {
-        TupleValue::ByVal(d) => *d,
-        TupleValue::ByRef(b) => ScalarWord::from_usize(b.as_ptr() as usize),
+        Datum::ByVal(d) => *d,
+        Datum::ByRef(b) => ScalarWord::from_usize(b.as_ptr() as usize),
     }
 }
 
