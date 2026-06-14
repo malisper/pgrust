@@ -80,17 +80,3 @@ pub const FORMAT_TYPE_ALLOW_INVALID: u16 = 0x02;
 pub const FORMAT_TYPE_FORCE_QUALIFY: u16 = 0x04;
 /// `utils/builtins.h`: `FORMAT_TYPE_INVALID_AS_NULL`.
 pub const FORMAT_TYPE_INVALID_AS_NULL: u16 = 0x08;
-
-seam_core::seam!(
-    /// `format_type_extended(type_oid, typemod, flags)` (format_type.c): the
-    /// printable type name under the `bits16` `FORMAT_TYPE_*` mask. `Ok(None)`
-    /// is the C `NULL` (only with `FORMAT_TYPE_INVALID_AS_NULL` on an invalid
-    /// type). `typemod = -1` selects the no-typmod rendering. Allocated in
-    /// `mcx`.
-    pub fn format_type_extended<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        type_oid: Oid,
-        typemod: i32,
-        flags: u16,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
-);
