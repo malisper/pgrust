@@ -685,8 +685,10 @@ fn _bt_parallel_serialize_arrays(btscan: &mut BTParallelScanDescData, so: &mut B
         }
 
         if (skey.sk_flags & (SK_BT_MINVAL | SK_BT_MAXVAL)) != 0 {
-            // No sk_argument datum to serialize.
-            debug_assert!(skey.sk_argument.as_usize() == 0);
+            // No sk_argument datum to serialize (C: `Assert(skey->sk_argument == 0)`).
+            // The canonical NULL word is `Datum::null()` (`ByVal(0)`); the value
+            // compare avoids `as_usize()` on a `ByRef`.
+            debug_assert!(skey.sk_argument == Datum::null());
             continue;
         }
 
@@ -736,10 +738,17 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
         // Restore skip array by restoring its key directly.
         {
             let skey = &mut so.keyData[scan_key];
-            if !attbyval && skey.sk_argument.as_usize() != 0 {
+            if !attbyval && skey.sk_argument != Datum::null() {
                 // pfree(DatumGetPointer(skey->sk_argument)): the C frees the old
                 // pass-by-ref datum; under mcx ownership it is released when the
                 // owning context resets. (Pointer is into another context.)
+                //
+                // C's `if (!array->attbyval && skey->sk_argument)` is a non-NULL
+                // pointer test. On the canonical `Datum<'mcx>` a NULL pass-by-ref
+                // word is `ByVal(0)` (== `Datum::null()`) and a live by-reference
+                // image is a `ByRef`, so this value compare is the faithful
+                // non-NULL test and never calls the by-value-only `as_usize()` on
+                // a `ByRef` (which would panic).
             }
             skey.sk_argument = Datum::null();
             // memcpy(&skey->sk_flags, datumshared, sizeof(int)); datumshared += 4.
@@ -762,7 +771,7 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
         datumshared = adv;
         so.keyData[scan_key].sk_argument = Datum::ByVal(val);
         if isnull {
-            debug_assert!(so.keyData[scan_key].sk_argument.as_usize() == 0);
+            debug_assert!(so.keyData[scan_key].sk_argument == Datum::null());
             debug_assert!((so.keyData[scan_key].sk_flags & SK_SEARCHNULL) != 0);
             debug_assert!((so.keyData[scan_key].sk_flags & SK_ISNULL) != 0);
         }
