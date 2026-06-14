@@ -514,7 +514,7 @@ pub(crate) fn exec_init_func<'mcx>(
             state.result_cells.set(
                 cell,
                 ResultCell {
-                    value: con.constvalue,
+                    value: con.constvalue.clone(),
                     isnull: con.constisnull,
                 },
             );

@@ -20,7 +20,12 @@
 //! `ExecInitExprRec` can thread distinct output targets exactly as C does.
 
 use mcx::{Mcx, PgBox, PgVec};
+// The bare-word newtype: the transitional return word of the interpreter eval
+// seam (`exec_eval_*_switch_context` return `(types_datum::Datum, bool)`).
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what
+// `ExprEvalStepData::ConstVal { value }` carries.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalOp, ExprEvalRowtypeCache, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState,
@@ -437,7 +442,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 resvalue: resv,
                 resnull: resv,
                 d: ExprEvalStepData::ConstVal {
-                    value: con.constvalue,
+                    value: con.constvalue.clone(),
                     isnull: con.constisnull,
                 },
             };
@@ -1831,7 +1836,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
                 resvalue: STATE_RESULT_CELL,
                 resnull: STATE_RESULT_CELL,
                 d: ExprEvalStepData::ConstVal {
-                    value: Datum::null(),
+                    value: DatumV::null(),
                     isnull: true,
                 },
             };
