@@ -411,12 +411,12 @@ pub fn ReplicationSlotInitialize() -> PgResult<()> {
     // enum; the token here is `(Datum) 0` in C, i.e. `Datum::null()`.
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
-        types_datum::Datum::null(),
+        types_tuple::Datum::null(),
     )
 }
 
 /// `static void ReplicationSlotShmemExit(int code, Datum arg)` (slot.c:248).
-fn replication_slot_shmem_exit_cb(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn replication_slot_shmem_exit_cb(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if my_replication_slot().is_some() {
         ReplicationSlotRelease()?;
     }

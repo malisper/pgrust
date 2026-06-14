@@ -1478,6 +1478,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -5341,11 +5342,11 @@ dependencies = [
  "port-noblock-seams",
  "port-pgsleep-seams",
  "types-core",
- "types-datum",
  "types-error",
  "types-net",
  "types-storage",
  "types-stringinfo",
+ "types-tuple",
 ]
 
 [[package]]
@@ -6092,6 +6093,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-storage",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -6151,6 +6153,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-timeout",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -6251,6 +6254,7 @@ dependencies = [
  "types-pgstat",
  "types-startup",
  "types-storage",
+ "types-tuple",
  "types-wal",
  "types-walsummarizer",
 ]
@@ -6604,6 +6608,7 @@ dependencies = [
  "types-replication-slot",
  "types-startup",
  "types-storage",
+ "types-tuple",
  "types-wal",
  "types-walreceiver",
 ]
@@ -6811,6 +6816,7 @@ dependencies = [
  "types-pgstat",
  "types-signal",
  "types-startup",
+ "types-tuple",
  "types-wal",
  "types-walreceiver",
 ]
@@ -7043,6 +7049,7 @@ dependencies = [
  "types-error",
  "types-guc",
  "types-storage",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -7243,6 +7250,7 @@ dependencies = [
  "types-freepage",
  "types-guc",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7362,6 +7370,7 @@ dependencies = [
  "types-pgstat",
  "types-signal",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7410,6 +7419,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7546,6 +7556,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7814,6 +7825,7 @@ dependencies = [
  "types-storage",
  "types-stringinfo",
  "types-timeout",
+ "types-tuple",
  "types-wal",
 ]
 
@@ -10006,6 +10018,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -10090,6 +10103,7 @@ dependencies = [
  "types-guc",
  "types-storage",
  "types-timeout",
+ "types-tuple",
 ]
 
 [[package]]

@@ -395,7 +395,7 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     walrcvfuncs::set_written_upto::call(0); /* pg_atomic_write_u64(&WalRcv->writtenUpto, 0); */
 
     /* Arrange to clean up at walreceiver exit */
-    ipc::on_shmem_exit::call(wal_rcv_die_callback, types_datum::Datum::null())?;
+    ipc::on_shmem_exit::call(wal_rcv_die_callback, types_tuple::Datum::null())?;
 
     /* Properly accept or ignore signals the postmaster might send us */
     setup_signal_handlers();
@@ -903,7 +903,7 @@ fn WalRcvFetchTimeLineHistoryFiles(first: TimeLineID, last: TimeLineID) -> PgRes
 /// `on_shmem_exit` callback wrapper for `WalRcvDie` (C registers
 /// `PointerGetDatum(&startpointTLI)`; we read the live TLI from thread-local
 /// state instead, matching the pointer's read-latest semantics).
-fn wal_rcv_die_callback(code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn wal_rcv_die_callback(code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     let startpointTLI = with_state(|s| s.startpointTLI);
     WalRcvDie(code, startpointTLI)
 }

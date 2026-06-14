@@ -2390,12 +2390,12 @@ fn seam_twophase_file_exists(xid: TransactionId) -> PgResult<bool> {
 /// (set via [`set_proc_exit_cleanup`]); it is a no-op until the owning backend
 /// state installs one. This is the exit safety-net, not a release registry.
 fn register_twophase_exit() -> PgResult<()> {
-    ipc::before_shmem_exit::call(at_proc_exit_twophase, types_datum::Datum::from_i32(0))
+    ipc::before_shmem_exit::call(at_proc_exit_twophase, types_tuple::Datum::from_i32(0))
 }
 
 /// `AtProcExit_Twophase(code, arg)` — exit hook; defers to the installed
 /// cleanup (same logic as `AtAbort_Twophase`).
-fn at_proc_exit_twophase(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn at_proc_exit_twophase(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     PROC_EXIT_CLEANUP.with(|c| match &*c.borrow() {
         Some(f) => f(),
         None => Ok(()),

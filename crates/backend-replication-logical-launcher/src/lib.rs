@@ -870,7 +870,7 @@ pub fn logicalrep_worker_attach(slot: i32) -> PgResult<()> {
     my_logical_rep_worker_slot().set(Some(slot));
     let my_pid = globals::my_proc_pid::call();
     with_workers(|ws| ws[slot as usize].proc_pid = Some(my_pid));
-    ipc::before_shmem_exit::call(logicalrep_worker_onexit, types_datum::Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_worker_onexit, types_tuple::Datum::from_usize(0))?;
 
     worker_lock_release()?;
     Ok(())
@@ -932,14 +932,14 @@ fn my_worker_subid() -> PgResult<Oid> {
 // ===========================================================================
 
 /// `logicalrep_launcher_onexit(code, arg)` (launcher.c).
-fn logicalrep_launcher_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn logicalrep_launcher_onexit(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // LogicalRepCtx->launcher_pid = 0;
     with_ctx(|c| c.launcher_pid = 0);
     Ok(())
 }
 
 /// `logicalrep_worker_onexit(code, arg)` (launcher.c).
-fn logicalrep_worker_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
+fn logicalrep_worker_onexit(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     // Disconnect gracefully from the remote side.
     if worker::have_walrcv_conn::call() {
         worker::walrcv_disconnect::call()?;
@@ -1225,7 +1225,7 @@ pub fn ApplyLauncherMain(_main_arg: types_datum::Datum) -> PgResult<()> {
         .errmsg_internal("logical replication launcher started")
         .finish(error_location())?;
 
-    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, types_datum::Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, types_tuple::Datum::from_usize(0))?;
 
     debug_assert!(with_ctx(|c| c.launcher_pid) == 0);
     with_ctx(|c| c.launcher_pid = globals::my_proc_pid::call());

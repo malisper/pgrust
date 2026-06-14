@@ -9,7 +9,11 @@
 use std::cell::{Cell, RefCell};
 
 use backend_utils_error::{config, elog, ereport};
-use types_datum::Datum;
+// The exit-callback `arg` is the canonical unified `Datum` (Datum-unification);
+// the `on_proc_exit`/`on_shmem_exit`/`before_shmem_exit` seam contract carries
+// `types_tuple::Datum<'static>`. It is the machine word the C `Datum arg`
+// holds, stored by value in the registration list for the process lifetime.
+use types_tuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, DEBUG3, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, PANIC,
 };
@@ -23,16 +27,21 @@ fn loc(funcname: &str) -> ErrorLocation {
 /// `pg_on_exit_callback` (`storage/ipc.h`): callbacks take the exit code and
 /// the Datum supplied at registration. They may `ereport(ERROR/FATAL)`,
 /// hence the `PgResult` (the C longjmp surface).
-pub type PgOnExitCallback = fn(code: i32, arg: Datum) -> PgResult<()>;
+pub type PgOnExitCallback = fn(code: i32, arg: Datum<'static>) -> PgResult<()>;
 
 /// `MAX_ON_EXITS`.
 const MAX_ON_EXITS: usize = 20;
 
 /// `struct ONEXIT`.
-#[derive(Clone, Copy)]
+///
+/// `arg` is the canonical unified `Datum<'static>`, which is not `Copy` (it has
+/// a `ByRef` arm), so `OnExit` is `Clone` rather than `Copy`. The exit-callback
+/// arg in practice is always a registered machine word (the `ByVal` arm), as in
+/// C's `uintptr_t`-valued `Datum`.
+#[derive(Clone)]
 struct OnExit {
     function: PgOnExitCallback,
-    arg: Datum,
+    arg: Datum<'static>,
 }
 
 /// One of the three fixed-size callback lists (`on_proc_exit_list` etc. with
@@ -45,8 +54,12 @@ struct OnExitList {
 
 impl OnExitList {
     const fn new() -> Self {
+        // `OnExit` is not `Copy` (its `Datum<'static>` arg has a `ByRef` arm),
+        // so the array-repeat operand must be a named const, not an inline
+        // `None`, to build the fixed-size list in const context.
+        const NONE: Option<OnExit> = None;
         Self {
-            items: [None; MAX_ON_EXITS],
+            items: [NONE; MAX_ON_EXITS],
             index: 0,
         }
     }
@@ -223,7 +236,7 @@ fn setup_atexit_callback() {
 fn register(
     list: &'static std::thread::LocalKey<RefCell<OnExitList>>,
     function: PgOnExitCallback,
-    arg: Datum,
+    arg: Datum<'static>,
     overflow_msg: &str,
     funcname: &str,
 ) -> PgResult<()> {
@@ -248,7 +261,7 @@ fn register(
 
 /// `on_proc_exit(pg_on_exit_callback function, Datum arg)` — add a callback
 /// to the list invoked by [`proc_exit`].
-pub fn on_proc_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
+pub fn on_proc_exit(function: PgOnExitCallback, arg: Datum<'static>) -> PgResult<()> {
     register(
         &ON_PROC_EXIT_LIST,
         function,
@@ -261,7 +274,7 @@ pub fn on_proc_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
 /// `before_shmem_exit(pg_on_exit_callback function, Datum arg)` — register an
 /// early callback for user-level cleanup (e.g. transaction abort) before
 /// low-level subsystems shut down.
-pub fn before_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
+pub fn before_shmem_exit(function: PgOnExitCallback, arg: Datum<'static>) -> PgResult<()> {
     register(
         &BEFORE_SHMEM_EXIT_LIST,
         function,
@@ -274,7 +287,7 @@ pub fn before_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()>
 /// `on_shmem_exit(pg_on_exit_callback function, Datum arg)` — register an
 /// ordinary callback for low-level shutdown (e.g. releasing our PGPROC);
 /// runs after before_shmem_exit callbacks and before on_proc_exit ones.
-pub fn on_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
+pub fn on_shmem_exit(function: PgOnExitCallback, arg: Datum<'static>) -> PgResult<()> {
     register(
         &ON_SHMEM_EXIT_LIST,
         function,
@@ -288,11 +301,11 @@ pub fn on_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
 /// remove a previously-registered before_shmem_exit callback. Only the
 /// latest entry is considered: callers are expected to add and remove
 /// temporary callbacks in strict LIFO order.
-pub fn cancel_before_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgResult<()> {
+pub fn cancel_before_shmem_exit(function: PgOnExitCallback, arg: Datum<'static>) -> PgResult<()> {
     let removed = BEFORE_SHMEM_EXIT_LIST.with(|cell| {
         let mut list = cell.borrow_mut();
         if list.index > 0 {
-            let last = list.items[list.index - 1];
+            let last = list.items[list.index - 1].as_ref();
             if let Some(cb) = last {
                 if cb.function as usize == function as usize && cb.arg == arg {
                     list.index -= 1;
@@ -323,17 +336,17 @@ pub fn cancel_before_shmem_exit(function: PgOnExitCallback, arg: Datum) -> PgRes
 pub fn on_exit_reset() {
     BEFORE_SHMEM_EXIT_LIST.with(|cell| {
         let mut list = cell.borrow_mut();
-        list.items = [None; MAX_ON_EXITS];
+        list.items = std::array::from_fn(|_| None);
         list.index = 0;
     });
     ON_SHMEM_EXIT_LIST.with(|cell| {
         let mut list = cell.borrow_mut();
-        list.items = [None; MAX_ON_EXITS];
+        list.items = std::array::from_fn(|_| None);
         list.index = 0;
     });
     ON_PROC_EXIT_LIST.with(|cell| {
         let mut list = cell.borrow_mut();
-        list.items = [None; MAX_ON_EXITS];
+        list.items = std::array::from_fn(|_| None);
         list.index = 0;
     });
     dsm::reset_on_dsm_detach();

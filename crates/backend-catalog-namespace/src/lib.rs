@@ -3963,7 +3963,10 @@ pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) -> PgResult<()> {
 
     if should_handle {
         if isCommit {
-            ipc_seams::before_shmem_exit::call(RemoveTempRelationsCallback, Datum::null())?;
+            ipc_seams::before_shmem_exit::call(
+                RemoveTempRelationsCallback,
+                types_tuple::Datum::null(),
+            )?;
         } else {
             STATE.with(|s| {
                 let mut st = s.borrow_mut();
@@ -4055,7 +4058,7 @@ fn RemoveTempRelations(tempNamespaceId: Oid) -> PgResult<()> {
 /// `RemoveTempRelationsCallback` — remove temp relations at backend exit
 /// (registered as a `before_shmem_exit` callback; the C `(code, arg)`
 /// parameters are unused).
-pub fn RemoveTempRelationsCallback(_code: i32, _arg: Datum) -> PgResult<()> {
+pub fn RemoveTempRelationsCallback(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
     if OidIsValid(my_temp_namespace()) {
         /* should always be true */
         /* Need to ensure we have a usable transaction. */

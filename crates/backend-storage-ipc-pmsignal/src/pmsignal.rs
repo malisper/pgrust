@@ -399,10 +399,10 @@ pub fn RegisterPostmasterChildActive() -> PgResult<()> {
         |_code, _arg| MarkPostmasterChildInactive(),
         // C: `on_shmem_exit(MarkPostmasterChildInactive, 0)` — the callback
         // takes an unused `Datum arg`. The `on_shmem_exit` seam contract is
-        // owned by `backend-storage-ipc-dsm-core` and is not yet migrated off
-        // the bare-word shim, so the null arg must cross this seam edge as a
-        // `types_datum::Datum`. Forced ABI/seam-contract residual.
-        types_datum::Datum::null(),
+        // owned by `backend-storage-ipc-dsm-core`, now on the canonical
+        // unified `types_tuple::Datum<'static>` (Datum-unification); the null
+        // arg crosses this seam edge as that type.
+        types_tuple::Datum::null(),
     )
 }
 
