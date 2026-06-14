@@ -8471,6 +8471,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-array-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-selfuncs",
+]
+
+[[package]]
 name = "backend-utils-adt-arrayfuncs"
 version = "0.0.0"
 dependencies = [
@@ -11320,6 +11337,7 @@ dependencies = [
  "backend-utils-activity-waitevent",
  "backend-utils-activity-xact",
  "backend-utils-adt-acl",
+ "backend-utils-adt-array-selfuncs",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-char",

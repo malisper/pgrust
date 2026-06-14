@@ -38,6 +38,27 @@ pub const STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM: i32 = 6;
 /// slot kind.
 pub const STATISTIC_KIND_BOUNDS_HISTOGRAM: i32 = 7;
 
+/// `STATISTIC_KIND_MCELEM` (pg_statistic.h) — the most-common-elements slot
+/// kind, used by the array selectivity estimators.
+pub const STATISTIC_KIND_MCELEM: i32 = 4;
+/// `STATISTIC_KIND_DECHIST` (pg_statistic.h) — the distinct-element-count
+/// histogram slot kind, used by the `array <@ const` estimator.
+pub const STATISTIC_KIND_DECHIST: i32 = 5;
+
+/// Decoded `Const` node fields the array selectivity estimators read after an
+/// `IsA(node, Const)` test (`scalararraysel_containment`'s `leftop`): the
+/// `(constisnull, constvalue, consttype)` triple. The `const_node_info` seam
+/// returns `None` when the node is not a `Const` (C: the `!IsA` punt).
+#[derive(Copy, Clone, Debug)]
+pub struct ConstNodeInfo {
+    /// `((Const *) node)->constisnull`.
+    pub constisnull: bool,
+    /// `((Const *) node)->constvalue` (the raw Datum word).
+    pub constvalue: Datum,
+    /// `((Const *) node)->consttype`.
+    pub consttype: Oid,
+}
+
 /// A `HeapTuple` from `pg_statistic` (`VariableStatData.statsTuple`). It is
 /// syscache-owned memory the selectivity code only passes back to the
 /// `get_attstatsslot` / `statistic_proc_security_check` seams, so it stays an
@@ -56,6 +77,16 @@ pub struct StatsVarNode {
     pub ptr: *mut core::ffi::c_void,
 }
 
+/// The `RelOptInfo *rel` of a `VariableStatData` — the relation the variable
+/// belongs to (`NULL` when `examine_variable` could not identify one). Opaque
+/// (planner-owned); the selectivity code only tests it for presence
+/// (C: `if (!vardata.rel)`).
+#[derive(Copy, Clone, Debug)]
+pub struct StatsRelNode {
+    /// The `RelOptInfo *` address (planner-owned).
+    pub ptr: *mut core::ffi::c_void,
+}
+
 /// `VariableStatData` (selfuncs.h), trimmed to the fields the range selectivity
 /// estimators consume. Filled by `get_restriction_variable`; released by
 /// `ReleaseVariableStats` (which runs `freefunc(statsTuple)` — modeled by the
@@ -64,6 +95,9 @@ pub struct StatsVarNode {
 pub struct VariableStatData {
     /// `Node *var` — the examined expression (opaque, planner-owned).
     pub var: StatsVarNode,
+    /// `RelOptInfo *rel` — the relation the variable belongs to, or `None`
+    /// (`NULL`). `scalararraysel_containment` punts when this is `None`.
+    pub rel: Option<StatsRelNode>,
     /// `HeapTuple statsTuple` — the `pg_statistic` row, or `None`
     /// (`!HeapTupleIsValid`).
     pub stats_tuple: Option<StatsTuple>,
