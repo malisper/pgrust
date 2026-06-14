@@ -4128,6 +4128,7 @@ dependencies = [
  "backend-executor-instrument-seams",
  "backend-executor-nodeAppend",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGather",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeIndexonlyscan",
@@ -4602,6 +4603,33 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeGather"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execParallel-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
+ "backend-executor-tqueue-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-pgstat",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -11919,6 +11947,7 @@ dependencies = [
  "backend-executor-nodeCtescan",
  "backend-executor-nodeCustom",
  "backend-executor-nodeForeignscan",
+ "backend-executor-nodeGather",
  "backend-executor-nodeGatherMerge",
  "backend-executor-nodeGroup",
  "backend-executor-nodeHash",

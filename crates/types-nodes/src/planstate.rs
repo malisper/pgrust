@@ -36,6 +36,8 @@ pub enum PlanStateNode<'mcx> {
     Append(PgBox<'mcx, AppendStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
+    /// `T_GatherState`.
+    Gather(PgBox<'mcx, crate::nodegather::GatherStateData<'mcx>>),
     /// `T_GatherMergeState`.
     GatherMerge(PgBox<'mcx, crate::nodegathermerge::GatherMergeStateData<'mcx>>),
     /// `T_MergeAppendState`.
@@ -100,6 +102,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
+            PlanStateNode::Gather(_) => crate::nodegather::T_GatherState,
             PlanStateNode::GatherMerge(_) => crate::nodegathermerge::T_GatherMergeState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::BitmapAnd(_) => crate::nodebitmapand::T_BitmapAndState,
@@ -138,6 +141,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
+            PlanStateNode::Gather(g) => &g.ps,
             PlanStateNode::GatherMerge(g) => &g.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::BitmapAnd(b) => &b.ps,
@@ -173,6 +177,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
+            PlanStateNode::Gather(g) => &mut g.ps,
             PlanStateNode::GatherMerge(g) => &mut g.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::BitmapAnd(b) => &mut b.ps,
