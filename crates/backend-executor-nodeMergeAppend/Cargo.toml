@@ -19,7 +19,6 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
-types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-sortsupport = { path = "../types-sortsupport" }
