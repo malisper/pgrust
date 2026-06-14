@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use backend_timezone_localtime::{pg_tz_acceptable, tzload, tzparse, TzLoadError};
+use backend_timezone_localtime::{pg_tz_acceptable, tzload, tzparse};
 use port_pgstrcasecmp::{pg_strncasecmp, pg_toupper};
 use types_core::MAXPGPATH;
 use types_error::{PgError, PgResult};
@@ -362,15 +362,12 @@ pub fn pg_tzenumerate_next(dir: &mut PgTzEnum) -> PgResult<Option<&pg_tz>> {
         // cache. Don't ask for the canonical spelling: we already know it.
         let relname = &fullname[dir.baselen..];
         let mut tzstate = state::default();
-        match tzload(relname, &mut tzstate, false, true) {
-            Ok(_) => {}
-            Err(TzLoadError::OutOfMemory) => {
-                return Err(PgError::error("out of memory"));
-            }
-            Err(_) => {
-                // Zone could not be loaded, ignore it.
-                continue;
-            }
+        // C: `if (tzload(fullname + dir->baselen, NULL, &dir->tz.state, true)
+        // != 0) { continue; }` — ANY nonzero errno (ENOENT/EINVAL/ENOMEM)
+        // causes the zone to be silently skipped, not raised.
+        if tzload(relname, &mut tzstate, false, true).is_err() {
+            // Zone could not be loaded, ignore it.
+            continue;
         }
 
         // OK, return the canonical zone name spelling.
