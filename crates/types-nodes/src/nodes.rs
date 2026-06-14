@@ -142,6 +142,8 @@ pub enum Node<'mcx> {
     BitmapAnd(crate::nodebitmapand::BitmapAnd<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_RecursiveUnion`.
+    RecursiveUnion(crate::noderecursiveunion::RecursiveUnion<'mcx>),
     /// `T_Group`.
     Group(crate::nodegroup::Group<'mcx>),
     /// `T_ProjectSet`.
@@ -154,6 +156,8 @@ pub enum Node<'mcx> {
     Memoize(crate::nodememoize::Memoize<'mcx>),
     /// `T_IndexOnlyScan`.
     IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
+    /// `T_BitmapIndexScan`.
+    BitmapIndexScan(crate::nodebitmapindexscan::BitmapIndexScan<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
     /// `T_Unique`.
@@ -208,12 +212,14 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(_) => T_MergeAppend,
             Node::BitmapAnd(_) => T_BitmapAnd,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::RecursiveUnion(_) => crate::noderecursiveunion::T_RecursiveUnion,
             Node::Group(_) => crate::nodegroup::T_Group,
             Node::ProjectSet(_) => crate::nodeprojectset::T_ProjectSet,
             Node::Result(_) => T_Result,
             Node::SetOp(_) => T_SetOp,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
+            Node::BitmapIndexScan(_) => crate::nodebitmapindexscan::T_BitmapIndexScan,
             Node::Limit(_) => T_Limit,
             Node::Unique(_) => crate::nodeunique::T_Unique,
             Node::Sort(_) => T_Sort,
@@ -242,12 +248,14 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => &m.plan,
             Node::BitmapAnd(b) => &b.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::RecursiveUnion(r) => &r.plan,
             Node::Group(g) => &g.plan,
             Node::ProjectSet(p) => &p.plan,
             Node::Result(r) => &r.plan,
             Node::SetOp(s) => &s.plan,
             Node::Memoize(m) => &m.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
+            Node::BitmapIndexScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
             Node::Unique(u) => &u.plan,
             Node::Sort(s) => &s.plan,
@@ -286,12 +294,14 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::BitmapAnd(b) => Ok(Node::BitmapAnd(b.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::RecursiveUnion(r) => Ok(Node::RecursiveUnion(r.clone_in(mcx)?)),
             Node::Group(g) => Ok(Node::Group(g.clone_in(mcx)?)),
             Node::ProjectSet(p) => Ok(Node::ProjectSet(p.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
             Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
+            Node::BitmapIndexScan(m) => Ok(Node::BitmapIndexScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Unique(u) => Ok(Node::Unique(u.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),

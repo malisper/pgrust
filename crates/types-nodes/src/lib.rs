@@ -27,6 +27,7 @@ pub mod list;
 pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
+pub mod nodebitmapindexscan;
 pub mod nodectescan;
 pub mod nodebitmapand;
 pub mod nodeforeigncustom;
@@ -40,6 +41,7 @@ pub mod nodelimit;
 pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
+pub mod noderecursiveunion;
 pub mod nodeprojectset;
 pub mod nodenamedtuplestorescan;
 pub mod noderesult;
@@ -123,6 +125,9 @@ pub use nodeagg::{
 };
 pub use nodectescan::{CteScan, CteScanState, T_CteScan, T_CteScanState};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
+pub use noderecursiveunion::{
+    RecursiveUnion, RecursiveUnionStateData, T_RecursiveUnion, T_RecursiveUnionState,
+};
 pub use nodegroup::{Group, GroupStateData, T_Group, T_GroupState};
 pub use noderesult::{Result as ResultPlan, ResultState, T_ResultState};
 pub use nodesetop::{

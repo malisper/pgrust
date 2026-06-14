@@ -14,6 +14,7 @@
 
 use types_error::PgResult;
 use types_nodes::execnodes::EStateData;
+use types_nodes::noderecursiveunion::RecursiveUnionStateData;
 use types_nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
 
 // --- node factory / plan-state links ---
@@ -257,4 +258,28 @@ seam_core::seam!(
         node: &mut WorkTableScanStateData<'mcx>,
         scanrelid: u32,
     ) -> PgResult<bool>
+);
+
+// --- work-table Param-slot deposit (driven by ExecInitRecursiveUnion) ---
+
+seam_core::seam!(
+    /// `prmdata = &(estate->es_param_exec_vals[node->wtParam]);
+    /// Assert(prmdata->execPlan == NULL); prmdata->value =
+    /// PointerGetDatum(rustate); prmdata->isnull = false;`
+    /// (nodeRecursiveunion.c `ExecInitRecursiveUnion`).
+    ///
+    /// Publish the freshly-built `RecursiveUnionState` into the reserved
+    /// `wt_param` `Param` slot so descendant `WorkTableScan` nodes can recover
+    /// it (the mirror of [`resolve_rustate`], the recovery side). In C the slot
+    /// stores `PointerGetDatum(rustate)` — a live cross-node alias of the
+    /// ancestor's executor state — and the recovery side does
+    /// `castNode(RecursiveUnionState, DatumGetPointer(param->value))`. Both ends
+    /// of that aliasing channel live with nodeWorktablescan's state model, so
+    /// the deposit goes through this seam; it panics loudly until the owning
+    /// unit installs a real implementation.
+    pub fn publish_wtparam_slot<'mcx>(
+        rustate: &mut RecursiveUnionStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        wt_param: i32,
+    ) -> PgResult<()>
 );
