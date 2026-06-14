@@ -48,9 +48,10 @@ use types_core::{AttrNumber, Oid};
 use types_rel::Relation;
 // The one canonical per-attribute value type (the unified enum). The old
 // `TupleValue` alias / bare-word `types_datum::Datum` newtype are gone from
-// this crate's own logic; the only remaining bare word is the `ScanKeyData`
+// this crate entirely: every value site (deform/form, ScanKey args, fastgetattr
+// reads) is the canonical `Datum<'mcx>` enum, including `ScanKeyData.sk_argument`
+// and the args threaded into `ScanKeyInit`.
 use types_tuple::backend_access_common_heaptuple::Datum;
-// `ScanKeyData.sk_argument` ABI struct-field edge consumed by `ScanKeyInit`.
 use types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
