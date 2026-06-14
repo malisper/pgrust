@@ -29,7 +29,12 @@ use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_core::catalog::BOOLOID;
 use types_core::InvalidOid;
+// The bare-word newtype is the transitional input form of the `makeConst` seam
+// contract (the value the caller already holds as a machine word). The owned
+// `Const` carries the canonical unified value type [`DatumV`]; `make_const`
+// wraps the incoming word into its by-value arm.
 use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 
 use types_nodes::nodes::Node;
@@ -106,7 +111,11 @@ pub fn make_const<'mcx>(
         consttype,
         consttypmod,
         constcollid,
-        constvalue,
+        // The (possibly detoasted) machine word crosses into the canonical
+        // value's by-value arm. (Transitional: by-reference varlena images are
+        // carried as a forged pointer-word under the same arm until the cleanup
+        // phase moves them to `ByRef` bytes.)
+        constvalue: DatumV::ByVal(constvalue),
         constisnull,
     })
 }
@@ -125,7 +134,7 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
         consttype: BOOLOID,
         consttypmod: -1,
         constcollid: InvalidOid,
-        constvalue: Datum::from_bool(value),
+        constvalue: DatumV::from_bool(value),
         constisnull: isnull,
     }
 }
