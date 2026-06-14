@@ -8,8 +8,8 @@
 use mcx::Mcx;
 use types_cluster::RelOptionsToken;
 use types_core::primitive::Oid;
-use types_datum::Datum;
 use types_error::PgResult;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_nodes::primnodes::OnCommitAction;
 use types_rel::Relation;
 use types_tuple::heaptuple::TupleDescData;
@@ -51,7 +51,7 @@ pub struct HeapCreateWithCatalogArgs<'mcx> {
     /// `OnCommitAction oncommit`.
     pub oncommit: OnCommitAction,
     /// `Datum reloptions`.
-    pub reloptions: Datum,
+    pub reloptions: Datum<'mcx>,
     /// `bool use_user_acl`.
     pub use_user_acl: bool,
     /// `bool allow_system_table_mods`.
