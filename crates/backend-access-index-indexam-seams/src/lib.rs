@@ -58,6 +58,43 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_beginscan_bitmap(indexRelation, snapshot, instrument, nkeys)`
+    /// (indexam.c): begin a scan of an index for a bitmap index scan
+    /// (`amgetbitmap`-style; no heap relation, no order-by keys), returning a
+    /// fresh `IndexScanDesc` allocated in `mcx`. Fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn index_beginscan_bitmap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: types_rel::Relation<'mcx>,
+        snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+        instrument: IndexScanInstrumentation,
+        nkeys: i32,
+    ) -> types_error::PgResult<IndexScanDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `index_getbitmap(scan, bitmap)` (indexam.c): the `amgetbitmap` access
+    /// method — fetch the TIDs of all heap tuples satisfying the scan keys into
+    /// `bitmap`, returning the number of TIDs inserted (a double in the caller,
+    /// `int64` from the AM). Fallible on `ereport(ERROR)`.
+    pub fn index_getbitmap<'mcx>(
+        scan: &mut types_nodes::IndexScanDescData<'mcx>,
+        bitmap: &mut types_tidbitmap::TIDBitmap,
+    ) -> types_error::PgResult<i64>
+);
+
+seam_core::seam!(
+    /// `index_rescan(node->biss_ScanDesc, node->biss_ScanKeys,
+    /// node->biss_NumScanKeys, NULL, 0)` (indexam.c), driven from a bitmap index
+    /// scan node: (re)start the scan with the node's current (possibly
+    /// recomputed) scan keys. The owned model takes the node so the AM reads its
+    /// `biss_ScanKeys` array and `biss_ScanDesc`. Fallible on `ereport(ERROR)`.
+    pub fn index_rescan_bis<'mcx>(
+        node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `index_getnext_tid(scan, direction)` (indexam.c): fetch the next TID in
     /// the given direction; `Ok(None)` at end of scan (the C `NULL`). Fills
     /// the scan descriptor's per-tuple result fields as a side effect.

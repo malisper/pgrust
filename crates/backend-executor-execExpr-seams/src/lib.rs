@@ -831,3 +831,30 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `ExecBuildHash32Expr(desc, ops, hashfunc_oids, collations, hash_exprs,
+    /// opstrict, parent, init_value, keep_nulls)` (execExpr.c:4302): compile an
+    /// `ExprState` that hashes the `hash_exprs` expression list into a single
+    /// `uint32` hash value (the per-side hash-value program used by hash joins —
+    /// `hjstate->hj_OuterHash` / the inner `HashState`'s `hash_expr`). Each key
+    /// `i` is evaluated, its value fed through `fmgr_info(hashfunc_oids[i])`, and
+    /// combined via the `HASHDATUM_FIRST`/`_NEXT32`(`_STRICT`) opcodes;
+    /// `opstrict[i]` + `!keep_nulls` selects the NULL-aborting strict variant.
+    /// `init_value` optionally seeds the running hash. The owned model passes the
+    /// node's result `desc`/`ops` directly (the C `parent` is only used for slot
+    /// descriptors / SubPlan attribution). The compiled `ExprState` is allocated
+    /// in `mcx`; fallible on OOM / `ereport(ERROR)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_build_hash32_expr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        ops: types_nodes::TupleSlotKind,
+        hashfunc_oids: &[types_core::Oid],
+        collations: &[types_core::Oid],
+        hash_exprs: &[types_nodes::primnodes::Expr],
+        opstrict: &[bool],
+        init_value: u32,
+        keep_nulls: bool,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
+);

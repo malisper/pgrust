@@ -49,3 +49,30 @@ seam_core::seam!(
         plan_node_id: i32,
     ) -> types_error::PgResult<types_nodes::ParallelIndexScanDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `node->biss_SharedInfo = shm_toc_allocate(pcxt->toc, size); shm_toc_insert(
+    /// pcxt->toc, plan_node_id, ...); memset(0); num_workers = pcxt->nworkers`
+    /// (nodeBitmapIndexscan.c `ExecBitmapIndexScanInitializeDSM`): allocate a
+    /// zeroed `SharedIndexScanInstrumentation` (header + `nworkers` per-worker
+    /// slots) in the context's DSM TOC, register it under the plan node id, and
+    /// return the live shared struct. Fallible on OOM / `ereport(ERROR)`.
+    pub fn toc_allocate_and_insert_bitmap_instr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pcxt: ParallelContextHandle,
+        plan_node_id: i32,
+        descriptor: types_nodes::SharedIndexScanInstrumentation,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::SharedIndexScanInstrumentation>>
+);
+
+seam_core::seam!(
+    /// `node->biss_SharedInfo = shm_toc_lookup(pwcxt->toc, plan_node_id, false)`
+    /// (nodeBitmapIndexscan.c `ExecBitmapIndexScanInitializeWorker`): retrieve
+    /// the `SharedIndexScanInstrumentation` a worker attaches to, by plan node
+    /// id. Fallible on the not-found `ereport(ERROR)` (noError=false).
+    pub fn toc_lookup_bitmap_instr<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        pwcxt: ParallelWorkerContextHandle,
+        plan_node_id: i32,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::SharedIndexScanInstrumentation>>
+);

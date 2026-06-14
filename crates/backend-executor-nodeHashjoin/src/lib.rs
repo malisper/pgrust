@@ -44,6 +44,7 @@ use types_nodes::nodehashjoin::{
     PHJ_BATCH_ALLOCATE, PHJ_BATCH_ELECT, PHJ_BATCH_FREE, PHJ_BATCH_LOAD, PHJ_BATCH_PROBE,
     PHJ_BATCH_SCAN, PHJ_BUILD_FREE, PHJ_BUILD_HASH_OUTER, PHJ_BUILD_RUN,
 };
+use types_nodes::primnodes::Expr;
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 // ===========================================================================
@@ -733,6 +734,24 @@ pub fn ExecInitHashJoin<'mcx>(
 /// sets up the skew hash function (both owned by nodeHash since they write the
 /// HashState). All of this — the per-clause loop and the field plumbing — is
 /// the hash join's own init logic.
+/// Materialize a `List` of expression `Node`s (the planner's `hashkeys`) into a
+/// `Vec<Expr>` for `ExecBuildHash32Expr`. Each hash key is an expression node
+/// (`Node::Expr`); anything else is a planner invariant violation.
+fn node_list_to_exprs<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    nodes: Option<&[types_nodes::nodes::Node<'mcx>]>,
+) -> PgResult<PgVec<'mcx, Expr>> {
+    let nodes = nodes.unwrap_or(&[]);
+    let mut out: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nodes.len())?;
+    for n in nodes {
+        match n {
+            types_nodes::nodes::Node::Expr(e) => out.push(e.clone()),
+            other => panic!("hashkeys list element is not an expression node: {other:?}"),
+        }
+    }
+    Ok(out)
+}
+
 fn build_hash_exprs<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
     hj: &HashJoin<'mcx>,
@@ -744,10 +763,10 @@ fn build_hash_exprs<'mcx>(
     // outer_hashfuncid = palloc_array(Oid, nkeys); etc.
     let mut outer_hashfuncid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
     let mut inner_hashfuncid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
-    let mut hash_strict: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, nkeys)?;
+    let mut hash_strict: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, nkeys)?;
 
     // Determine the hash function for each side of the join for each operator.
-    for (i, &hashop) in hj.hashoperators.iter().enumerate() {
+    for &hashop in hj.hashoperators.iter() {
         match lsyscache::get_op_hash_functions::call(hashop)? {
             Some((lhs, rhs)) => {
                 outer_hashfuncid.push(lhs);
@@ -759,13 +778,24 @@ fn build_hash_exprs<'mcx>(
                 )));
             }
         }
-        // hash_strict[i] = op_strict(hashop); — store strictness as 0/1
-        hash_strict.push(if lsyscache::op_strict::call(hashop)? { 1 } else { 0 });
-        let _ = i;
+        // hash_strict[i] = op_strict(hashop);
+        hash_strict.push(lsyscache::op_strict::call(hashop)?);
     }
 
     // Collations for ExecBuildHash32Expr (one per clause).
     let collations: &[Oid] = &hj.hashcollations;
+
+    // The per-side hash key expression lists: `node->hashkeys` (outer) and
+    // `hash->hashkeys` (the inner Hash plan), each a `List` of expression Nodes.
+    let outer_keys: PgVec<'mcx, Expr> = node_list_to_exprs(mcx, hj.hashkeys.as_deref())?;
+    let inner_keys: PgVec<'mcx, Expr> = {
+        let inner_hash_keys = match hj.join.plan.righttree.as_deref() {
+            Some(types_nodes::nodes::Node::Hash(h)) => h.hashkeys.as_deref(),
+            Some(other) => panic!("innerPlan(HashJoin) is not a Hash node: {other:?}"),
+            None => None,
+        };
+        node_list_to_exprs(mcx, inner_hash_keys)?
+    };
 
     // Build the outer-side hash ExprState (keep_nulls = HJ_FILL_OUTER).
     let fill_outer = HJ_FILL_OUTER(hjstate);
@@ -774,22 +804,32 @@ fn build_hash_exprs<'mcx>(
         true,
         &outer_hashfuncid,
         collations,
+        &outer_keys,
+        &hash_strict,
         fill_outer,
         estate,
     )?;
     hjstate.hj_OuterHash = Some(outer_hash);
 
-    // Build the inner-side hash ExprState (keep_nulls = HJ_FILL_INNER); the
-    // owner stores it on the inner HashState's `hash_expr`.
+    // Build the inner-side hash ExprState (keep_nulls = HJ_FILL_INNER), stored
+    // below on the inner HashState's `hash_expr` (the C `hashstate->hash_expr`).
     let fill_inner = HJ_FILL_INNER(hjstate);
-    let _inner_hash = nodeHash::exec_build_hash32_expr::call(
+    let inner_hash = nodeHash::exec_build_hash32_expr::call(
         hjstate,
         false,
         &inner_hashfuncid,
         collations,
+        &inner_keys,
+        &hash_strict,
         fill_inner,
         estate,
     )?;
+    // hashstate->hash_expr = ExecBuildHash32Expr(...); store on the inner
+    // HashState (`(HashState *) innerPlanState(hjstate)`).
+    match hjstate.js.ps.righttree.as_deref_mut() {
+        Some(PlanStateNode::Hash(h)) => h.hash_expr = Some(inner_hash),
+        _ => panic!("innerPlanState(HashJoin) is not a HashState"),
+    }
 
     // Set up the skew table hash function from the first key's hash function:
     //   if (OidIsValid(hash->skewTable)) { skew_hashfunction = palloc0(FmgrInfo);
