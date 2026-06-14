@@ -25,6 +25,7 @@ pub fn init_all() {
     backend_access_rmgrdesc_xactdesc::init_seams();
     backend_access_table_table::init_seams();
     backend_access_table_tableam::init_seams();
+    backend_access_brin_xlog::init_seams();
     backend_access_transam_clog::init_seams();
     backend_access_transam_commit_ts::init_seams();
     backend_access_transam_generic_xlog::init_seams();
