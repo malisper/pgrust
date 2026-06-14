@@ -134,6 +134,23 @@ fn instr_count_filtered2(node: &mut HashJoinState) {
 /// depending on this crate directly.
 pub fn init_seams() {
     backend_executor_nodeHashjoin_seams::ExecHashJoinSaveTuple::set(exec_hash_join_save_tuple_seam);
+
+    // Parallel-executor per-node hooks (`backend-executor-nodeHashjoin-pq-seams`),
+    // dispatched generically by execParallel through a `PlanStateHandle`. Each
+    // shim re-casts the handle to the live `HashJoinState` and runs the real
+    // ported entry point.
+    backend_executor_nodeHashjoin_pq_seams::exec_hashjoin_estimate::set(
+        exec_hashjoin_estimate_shim,
+    );
+    backend_executor_nodeHashjoin_pq_seams::exec_hashjoin_initialize_dsm::set(
+        exec_hashjoin_initialize_dsm_shim,
+    );
+    backend_executor_nodeHashjoin_pq_seams::exec_hashjoin_reinitialize_dsm::set(
+        exec_hashjoin_reinitialize_dsm_shim,
+    );
+    backend_executor_nodeHashjoin_pq_seams::exec_hashjoin_initialize_worker::set(
+        exec_hashjoin_initialize_worker_shim,
+    );
 }
 
 /// `ExecHashJoinSaveTuple(tuple, hashvalue, fileptr, hashtable)`
@@ -1922,4 +1939,62 @@ pub fn ExecHashJoinInitializeWorker(
     // ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
     node.js.ps.ExecProcNode = Some(exec_parallel_hash_join_node);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Seam shims installed into `backend-executor-nodeHashjoin-pq-seams`.
+//
+// `execParallel` dispatches the per-node parallel hooks generically, holding a
+// `PlanState *` (here the opaque `PlanStateHandle`); the C `ExecHashJoinEstimate`
+// etc. begin with the `(HashJoinState *) node` cast. Recovering the live
+// `HashJoinState` from the handle is the executor's `PlanState`-pointer registry
+// — that pointer table is the unported executor surface, so each shim performs
+// the C cast through `resolve_hash_join_state` (which panics until that registry
+// lands) and then runs the real, ported entry point above. Mirrors
+// nodeAgg::aggapi / nodeHash::instrument.
+// ---------------------------------------------------------------------------
+
+/// `(HashJoinState *) node` — recover the live `HashJoinState` a
+/// `PlanStateHandle` refers to. The executor's `PlanState` pointer registry that
+/// backs this lookup is not yet ported.
+fn resolve_hash_join_state<'mcx>(
+    _node: types_execparallel::PlanStateHandle,
+) -> &'mcx mut HashJoinState<'mcx> {
+    panic!(
+        "backend-executor-nodeHashjoin: resolving a PlanStateHandle to the live HashJoinState \
+         needs the executor PlanState pointer registry (unported); the (HashJoinState *) node \
+         cast in the ExecHashJoin* parallel hooks cannot run yet"
+    );
+}
+
+/// Seam shim for `ExecHashJoinEstimate`.
+fn exec_hashjoin_estimate_shim(
+    node: types_execparallel::PlanStateHandle,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    ExecHashJoinEstimate(resolve_hash_join_state(node), pcxt)
+}
+
+/// Seam shim for `ExecHashJoinInitializeDSM`.
+fn exec_hashjoin_initialize_dsm_shim(
+    node: types_execparallel::PlanStateHandle,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    ExecHashJoinInitializeDSM(resolve_hash_join_state(node), pcxt)
+}
+
+/// Seam shim for `ExecHashJoinReInitializeDSM`.
+fn exec_hashjoin_reinitialize_dsm_shim(
+    node: types_execparallel::PlanStateHandle,
+    pcxt: types_execparallel::ParallelContextHandle,
+) -> PgResult<()> {
+    ExecHashJoinReInitializeDSM(resolve_hash_join_state(node), pcxt)
+}
+
+/// Seam shim for `ExecHashJoinInitializeWorker`.
+fn exec_hashjoin_initialize_worker_shim(
+    node: types_execparallel::PlanStateHandle,
+    pwcxt: types_execparallel::ParallelWorkerContextHandle,
+) -> PgResult<()> {
+    ExecHashJoinInitializeWorker(resolve_hash_join_state(node), pwcxt)
 }
