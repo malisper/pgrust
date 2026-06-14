@@ -5940,6 +5940,7 @@ dependencies = [
  "port-pgsleep-seams",
  "types-bgworker",
  "types-core",
+ "types-datum",
  "types-error",
  "types-pgstat",
  "types-startup",
@@ -11649,7 +11650,7 @@ name = "types-json"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-datum",
+ "types-tuple",
 ]
 
 [[package]]
