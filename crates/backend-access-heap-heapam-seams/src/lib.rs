@@ -49,6 +49,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `simple_heap_insert(relation, tup)` (heapam.c) — insert one heap tuple
+    /// with a default command id and no speedup options, stamping `tup`'s
+    /// header and toasting if necessary. The repo carries the heap tuple as the
+    /// owned `FormedTuple` value (header + user-data area); `tup.tuple.t_self`
+    /// is updated in place with the stored TID. `Err` carries the insert
+    /// `ereport(ERROR)` surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn simple_heap_insert<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tup: &mut types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heap_insert(relation, tup, cid, options, bistate)` (heapam.c) — insert
+    /// one heap tuple stamped with the current xid and the given `cid`.
+    /// `options` is the `HEAP_INSERT_*` bitmask; `bistate` is the optional
+    /// bulk-insert carrier. `tup`'s header is stamped in place and
+    /// `tup.tuple.t_self` receives the stored TID. `Err` carries the insert
+    /// `ereport(ERROR)` surface. **Installed by `backend-access-heap-heapam`.**
+    pub fn heap_insert<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tup: &mut types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        cid: types_core::xact::CommandId,
+        options: i32,
+        bistate: Option<&mut types_tableam::tableam::BulkInsertStateData>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `HeapTupleGetUpdateXid(htup)` (heapam.c) — resolve a multixact xmax to
     /// the single update XID it carries (`MultiXactIdGetUpdateXid`), or
     /// `InvalidTransactionId` if the multixact has no updater. Only the header's
