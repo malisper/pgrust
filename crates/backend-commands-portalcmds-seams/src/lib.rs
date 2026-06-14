@@ -6,8 +6,9 @@
 //! installs all of them from its `init_seams()`.
 
 use types_error::PgResult;
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
-use types_portal::{DestReceiver, Portal, QueryCompletion};
+use types_portal::{Portal, QueryCompletion};
 
 seam_core::seam!(
     /// `PerformCursorOpen(pstate, cstmt, params, isTopLevel)` — execute SQL
@@ -25,9 +26,11 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `PerformPortalFetch(stmt, dest, qc)` — execute SQL `FETCH`/`MOVE`.
+    /// `dest` is the router-keyed [`DestReceiverHandle`] the dispatcher built
+    /// (`tcop/dest.c`'s `CreateDestReceiver`) — QueryDesc de-handle F1b.
     pub fn perform_portal_fetch(
         stmt: &FetchStmt,
-        dest: DestReceiver,
+        dest: DestReceiverHandle,
         qc: Option<&mut QueryCompletion>,
     ) -> PgResult<()>
 );
