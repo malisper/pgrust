@@ -796,6 +796,28 @@ mod recurrence_guard {
         // seam-and-panic (mirror-pg-and-panic) until those owners land.
         ("backend_nodes_core", "call_stmt_result_desc"),
         ("backend_nodes_core", "get_expr_result_type_node"),
+        // DESIGN_DEBT (provider-unported): the CustomScan/CustomScanState
+        // provider callbacks (extensible.h `CustomScanMethods` /
+        // `CustomExecMethods`, dispatched by nodeCustom.c through
+        // `node->methods->X`) are installed by a custom-scan-provider extension.
+        // There is no in-tree custom-scan provider — exactly the FDW-provider
+        // case above (`backend_foreign_foreign` begin/end/iterate_foreign_scan
+        // et al.) — so there is nothing to `::set()`: the seams stay
+        // seam-and-panic (mirror-pg-and-panic) until a provider lands.
+        // backend-nodes-extensible owns the registry side (Register*/Get* method
+        // tables) which it installs in init_seams(). See DESIGN_DEBT.md.
+        ("backend_nodes_extensible", "begin_custom_scan"),
+        ("backend_nodes_extensible", "create_custom_scan_state"),
+        ("backend_nodes_extensible", "end_custom_scan"),
+        ("backend_nodes_extensible", "estimate_dsm_custom_scan"),
+        ("backend_nodes_extensible", "exec_custom_scan"),
+        ("backend_nodes_extensible", "initialize_dsm_custom_scan"),
+        ("backend_nodes_extensible", "initialize_worker_custom_scan"),
+        ("backend_nodes_extensible", "mark_pos_custom_scan"),
+        ("backend_nodes_extensible", "reinitialize_dsm_custom_scan"),
+        ("backend_nodes_extensible", "rescan_custom_scan"),
+        ("backend_nodes_extensible", "restr_pos_custom_scan"),
+        ("backend_nodes_extensible", "shutdown_custom_scan"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
