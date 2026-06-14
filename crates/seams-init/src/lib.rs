@@ -864,6 +864,22 @@ mod recurrence_guard {
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook_present"),
+        // DESIGN_DEBT: `record_from_values` returns a composite *record* `Datum`
+        // (`heap_form_tuple` + `HeapTupleGetDatum`). The composite-Datum bridge
+        // (`HeapTupleGetDatum` / the `FormedTuple`->record-Datum carrier) is
+        // unported workspace-wide — `types_tuple::Datum` (`TupleValue` ByVal/ByRef)
+        // is a scalar byte lane with no Composite/record arm, so the owner cannot
+        // construct the return value faithfully. K1-gated on the FormedTuple->
+        // HeapTuple carrier bridge (task #161); install once that lands.
+        ("backend_utils_fmgr_funcapi", "record_from_values"),
+        // DESIGN_DEBT: `value_srf_unported` is the value-per-call SRF protocol
+        // (`SRF_FIRSTCALL_INIT`/`SRF_PERCALL_SETUP`/`SRF_RETURN_NEXT`/`_DONE` over a
+        // `FuncCallContext` with `multi_call_memory_ctx`/`user_fctx`). funcapi only
+        // models the materialize-mode tuplestore path; the value-SRF owner is not
+        // yet landed, so this seam is declared genuinely-unported and panics loudly
+        // (consumers wrap it in `unreachable!`). Install when the value-SRF
+        // machinery is ported.
+        ("backend_utils_fmgr_funcapi", "value_srf_unported"),
         ("backend_utils_init_small", "init_process_globals"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "guc_check_errdetail"),
