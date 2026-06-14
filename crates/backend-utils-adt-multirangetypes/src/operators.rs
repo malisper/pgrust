@@ -26,13 +26,13 @@ use crate::serialize_core::{multirange_get_bounds, multirange_get_range};
 /// `MultirangeTypeGetOid(mr)` (multirangetypes.h): the multirange's own type OID.
 #[inline]
 fn multirange_type_get_oid(mr: MultirangeTypeP<'_>) -> types_core::primitive::Oid {
-    unsafe { (*mr.ptr).multirangetypid }
+    mr.multirangetypid()
 }
 
 /// `mr->rangeCount` — the number of member ranges.
 #[inline]
 fn multirange_range_count(mr: MultirangeTypeP<'_>) -> u32 {
-    unsafe { (*mr.ptr).rangeCount }
+    mr.range_count()
 }
 
 /// `MultirangeIsEmpty(mr)` (multirangetypes.h): a multirange is empty iff it has

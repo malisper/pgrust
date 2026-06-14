@@ -336,7 +336,7 @@ pub fn write_multirange_data<'mcx>(
     let elemalign = elem_type(rangetyp).typalign;
     let range_count = ranges.len() as i32;
     let base = multirange.ptr as *mut u8;
-    let rc = unsafe { (*multirange.ptr).rangeCount };
+    let rc = multirange.range_count();
 
     unsafe {
         let items = base.add(items_offset()) as *mut u32;
@@ -526,7 +526,7 @@ pub fn multirange_constructor1<'mcx>(
     let range = range_seams::datum_get_range_type_p::call(mcx, range)?;
 
     // Make sure the range type matches.
-    let rngtypid = unsafe { (*range.ptr).rangetypid };
+    let rngtypid = range.rangetypid();
     if rngtypid != rangetyp.type_id {
         return Err(PgError::error(format!(
             "type {rngtypid} does not match constructor type"
@@ -581,7 +581,7 @@ pub fn multirange_get_bounds_offset(multirange: MultirangeTypeP<'_>, i: i32) -> 
 /// bound values.
 #[inline]
 pub fn multirange_get_flags(multirange: MultirangeTypeP<'_>, i: u32) -> u8 {
-    let rc = unsafe { (*multirange.ptr).rangeCount };
+    let rc = multirange.range_count();
     debug_assert!(i < rc);
     let base = multirange.ptr as *const u8;
     // SAFETY: the flags array of `rc` bytes lives at `flags_offset(rc)`, and
@@ -601,7 +601,7 @@ pub fn multirange_get_range<'mcx>(
     let typlen = elem.typlen;
     let typalign = elem.typalign;
 
-    let rc = unsafe { (*multirange.ptr).rangeCount };
+    let rc = multirange.range_count();
     debug_assert!((i as u32) < rc);
 
     let offset = multirange_get_bounds_offset(multirange, i)? as usize;
@@ -652,7 +652,7 @@ pub fn multirange_get_bounds(
     let typalign = elem.typalign;
     let typbyval = elem.typbyval;
 
-    let rc = unsafe { (*multirange.ptr).rangeCount };
+    let rc = multirange.range_count();
     debug_assert!(i < rc);
 
     let offset = multirange_get_bounds_offset(multirange, i as i32)? as usize;
@@ -710,7 +710,7 @@ pub fn multirange_get_union_range<'mcx>(
     rangetyp: &TypeCacheEntry,
     mr: MultirangeTypeP<'mcx>,
 ) -> PgResult<RangeTypeP<'mcx>> {
-    let rc = unsafe { (*mr.ptr).rangeCount };
+    let rc = mr.range_count();
     if rc == 0 {
         return make_empty_range::call(mcx, rangetyp);
     }
@@ -729,7 +729,7 @@ pub fn multirange_deserialize<'mcx>(
     rangetyp: &TypeCacheEntry,
     multirange: MultirangeTypeP<'mcx>,
 ) -> PgResult<Vec<RangeTypeP<'mcx>>> {
-    let range_count = unsafe { (*multirange.ptr).rangeCount } as i32;
+    let range_count = multirange.range_count() as i32;
 
     // Convert each ShortRangeType into a RangeType.
     if range_count > 0 {

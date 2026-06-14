@@ -36,14 +36,14 @@ use common_hashfn_seams as hashfn_seams;
 fn multirange_range_count(mr: MultirangeTypeP<'_>) -> u32 {
     // SAFETY: `mr.ptr` is a detoasted `MultirangeType *` whose header (incl.
     // `rangeCount`) is always readable, as in C.
-    unsafe { (*mr.ptr).rangeCount }
+    mr.range_count()
 }
 
 /// `mr->multirangetypid` — the multirange type's own OID.
 #[inline]
 fn multirange_type_oid(mr: MultirangeTypeP<'_>) -> Oid {
     // SAFETY: see [`multirange_range_count`].
-    unsafe { (*mr.ptr).multirangetypid }
+    mr.multirangetypid()
 }
 
 /// `MultirangeIsEmpty(mr)` (multirangetypes.h): a multirange with no ranges.

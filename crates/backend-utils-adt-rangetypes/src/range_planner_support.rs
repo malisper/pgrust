@@ -269,7 +269,7 @@ pub fn find_simplified_clause<'mcx>(
         backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(mcx, constvalue)?;
 
     // RangeTypeGetOid(range): the serialized header's range type oid.
-    let rngtypid = unsafe { (*range.ptr).rangetypid };
+    let rngtypid = range.rangetypid();
 
     // rangetypcache = lookup_type_cache(RangeTypeGetOid(range), TYPECACHE_RANGE_INFO);
     // if (rangetypcache->rngelemtype == NULL)

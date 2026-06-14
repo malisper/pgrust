@@ -23,7 +23,7 @@ use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags
 fn range_type_get_oid(r: RangeTypeP<'_>) -> Oid {
     // SAFETY: `r` is a detoasted `RangeType *` whose fixed header (`vl_len_`,
     // `rangetypid`) is directly readable, as in C.
-    unsafe { (*r.ptr).rangetypid }
+    r.rangetypid()
 }
 
 /// `RangeIsEmpty(r)` (rangetypes.h:56): `(range_get_flags(r) & RANGE_EMPTY) != 0`.

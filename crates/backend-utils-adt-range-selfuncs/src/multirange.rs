@@ -286,7 +286,7 @@ fn calc_multirangesel(
      * Extract the overall bounds of the constant value, and learn if it's
      * empty (a multirange is empty iff it has zero ranges).
      */
-    let range_count = unsafe { (*constval.ptr).rangeCount };
+    let range_count = constval.range_count();
     let const_is_empty = range_count == 0;
     let (const_lower, const_upper) = if const_is_empty {
         (RangeBound::default(), RangeBound::default())

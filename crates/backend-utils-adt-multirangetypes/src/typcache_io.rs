@@ -240,8 +240,8 @@ unsafe fn varsize_any(ptr: *const u8) -> usize {
 }
 
 /// `VARTAG_SIZE(tag)` (varatt.h): size of an external TOAST pointer datum body
-/// for the given vartag.
-unsafe fn vartag_size(tag: u8) -> usize {
+/// for the given vartag. Pure arithmetic over the tag byte -- no pointer access.
+fn vartag_size(tag: u8) -> usize {
     // VARTAG_INDIRECT = 1 -> sizeof(varatt_indirect); VARTAG_EXPANDED_RO/RW =
     // 2/3 -> sizeof(varatt_expanded); VARTAG_ONDISK = 18 -> sizeof(varatt_external).
     match tag {
@@ -424,7 +424,7 @@ fn strncasecmp_empty(bytes: &[u8]) -> bool {
 pub fn multirange_out(mcx: Mcx<'_>, multirange: Datum) -> PgResult<String> {
     let mr = datum_get_multirange_type_p(mcx, multirange)?;
     // mltrngtypoid = MultirangeTypeGetOid(multirange);
-    let mltrngtypoid = unsafe { (*mr.ptr).multirangetypid };
+    let mltrngtypoid = mr.multirangetypid();
 
     let cache = get_multirange_io_data(mltrngtypoid, IOFuncSelector::Output)?;
     let rngtype = cache
@@ -499,8 +499,8 @@ pub fn multirange_recv<'mcx>(
 pub fn multirange_send(mcx: Mcx<'_>, multirange: Datum) -> PgResult<Vec<u8>> {
     let mr = datum_get_multirange_type_p(mcx, multirange)?;
     // mltrngtypoid = MultirangeTypeGetOid(multirange);
-    let mltrngtypoid = unsafe { (*mr.ptr).multirangetypid };
-    let range_count_hdr = unsafe { (*mr.ptr).rangeCount };
+    let mltrngtypoid = mr.multirangetypid();
+    let range_count_hdr = mr.range_count();
 
     let cache = get_multirange_io_data(mltrngtypoid, IOFuncSelector::Send)?;
     let rngtype = cache
