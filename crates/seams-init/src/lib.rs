@@ -615,6 +615,22 @@ mod recurrence_guard {
         ("backend_executor_execTuples", "slot_getattr"),
         ("backend_executor_execTuples", "slot_getattr_by_id"),
         ("backend_executor_execTuples", "slot_natts"),
+        // DESIGN_DEBT: `publish_wtparam_slot` is the *deposit* end of the
+        // RecursiveUnion<->WorkTableScan cross-node aliasing channel. In C
+        // `ExecInitRecursiveUnion` does `prmdata->value = PointerGetDatum(rustate)`,
+        // storing a *live pointer* to the ancestor's `RecursiveUnionState` into the
+        // reserved `Param` slot (`es_param_exec_vals[wtParam]`), which a descendant
+        // `WorkTableScan` recovers via `resolve_rustate`
+        // (`castNode(RecursiveUnionState, DatumGetPointer(param->value))`). Our
+        // `ParamExecData.value` is the bare-word `Datum(usize)` with no pointer
+        // lane, and `WorkTableScanStateData.rustate` is an owned
+        // `Option<Box<RecursiveUnionStateData>>`, not an alias of the ancestor's
+        // `PgBox`. Installing the deposit faithfully requires the same unported
+        // datum-pointer/handle-arena machinery the recovery side
+        // (`resolve_rustate`, also still seam-and-panic) needs — a contract
+        // redesign of the cross-node aliasing channel, not a `::set()`. Pay down
+        // alongside the `resolve_rustate` recovery channel.
+        ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
