@@ -59,9 +59,9 @@ fn install() {
         log("exec_init_qual");
         Ok(())
     });
-    resolve_rustate::set(|node, _estate| {
+    resolve_rustate::set(|node, estate| {
         log("resolve_rustate");
-        node.rustate = Some(Box::new(RecursiveUnionStateData::default()));
+        node.rustate = Some(Box::new(RecursiveUnionStateData::new_in(estate.es_query_cxt)));
         Ok(())
     });
     exec_assign_scan_type_from_rustate::set(|_, _| {
@@ -156,7 +156,7 @@ fn next_loads_tuple_from_working_table() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::default()));
+    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
     assert!(have);
@@ -173,7 +173,7 @@ fn next_returns_false_when_exhausted() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::default()));
+    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
     assert!(!have);
@@ -217,7 +217,7 @@ fn exec_skips_resolution_when_rustate_set() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::default()));
+    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let out = ExecWorkTableScan(&mut st, &mut estate).unwrap();
     assert!(out);
@@ -258,7 +258,7 @@ fn rescan_rescans_tuplestore_when_rustate_set() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
     st.ss.ps.ps_ResultTupleSlot = Some(estate.make_slot(TupleTableSlot::default()).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::default()));
+    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     ExecReScanWorkTableScan(&mut st, &mut estate).unwrap();
     assert_eq!(

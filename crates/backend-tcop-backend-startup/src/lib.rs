@@ -972,13 +972,19 @@ fn send_negotiate_protocol_version(
 /// SIGTERM while processing the startup packet: `_exit(1)`. Running before
 /// shared memory is touched, so no atexit handlers run.
 pub fn process_startup_packet_die() -> ! {
-    std::process::exit(1)
+    // C calls `_exit(1)` directly: this runs in a signal handler before shared
+    // memory is touched, so atexit/on_exit and Rust destructors must NOT run.
+    // `libc::_exit` mirrors C exactly (immediate, skips all exit handlers);
+    // `std::process::exit` would run them and is unsafe here.
+    unsafe { libc::_exit(1) }
 }
 
 /// `StartupPacketTimeoutHandler()` (backend_startup.c:957-960) — timeout while
 /// processing the startup packet: `_exit(1)`.
 pub fn startup_packet_timeout_handler() {
-    std::process::exit(1)
+    // Same as process_startup_packet_die: `_exit(1)` from a signal handler,
+    // skipping atexit/on_exit handlers and Rust destructors.
+    unsafe { libc::_exit(1) }
 }
 
 // ===========================================================================
