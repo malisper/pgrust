@@ -18,6 +18,15 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
+// Batch 6 (datum-unification): this crate's sole `Datum` use is the
+// `on_dsm_detach` callback argument of `dsm_segment_from_datum` below — a
+// contract-pinned bare machine word (C: `void (*)(int, Datum)`, the `Datum arg`
+// from `UInt32GetDatum(dsm_segment_handle(seg))`). It is NOT a tuple-attribute
+// value, so the canonical `types_tuple` `Datum<'mcx>` (the ByVal/ByRef
+// `TupleValue` enum) is semantically inapplicable here, and the C callback ABI
+// supplies no memory context to thread `'mcx` through. The shim word is the
+// faithful model of this edge; migrating it is contract-blocked, not deferred
+// work (mirrors `backend-replication-logical-proto`'s SysCacheKey word edge).
 use types_datum::Datum;
 use types_error::PgResult;
 use types_parallel::{
