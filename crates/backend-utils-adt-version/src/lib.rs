@@ -6,11 +6,20 @@
 //! compile-time `PG_VERSION_STR` into a `text` `Datum` via the varlena owner's
 //! `cstring_to_text`. Nothing calls into this unit across a cycle, so it owns
 //! no inward seam crate and `init_seams()` is empty.
+//!
+//! Datum-unification status: this unit has **no own-logic shim use**. Its only
+//! contact with the bare-word `types_datum::Datum` is the return type it
+//! forwards verbatim from `backend_utils_adt_varlena_seams::cstring_to_text`
+//! (owned by the `backend-utils-adt-varlena` lane, migrated in this same batch).
+//! A `text` result is by-reference, so its canonical form is
+//! `types_tuple::TupleValue::ByRef`; once the `cstring_to_text` seam flips to
+//! the canonical value enum, `pgsql_version`'s return type follows it with no
+//! other change. We therefore name the seam's return type inline rather than
+//! importing the shim, so this crate carries no standalone `use types_datum`.
 
 #![no_std]
 
 use mcx::Mcx;
-use types_datum::Datum;
 use types_error::PgResult;
 
 use backend_utils_adt_varlena_seams::cstring_to_text;
@@ -28,7 +37,7 @@ pub const PG_VERSION_STR: &str =
 ///
 /// `mcx` is the caller's current memory context (the C `palloc` target inside
 /// `cstring_to_text`). OOM `ereport(ERROR)` is carried on `Err`.
-pub fn pgsql_version<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Datum> {
+pub fn pgsql_version<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_datum::Datum> {
     cstring_to_text::call(mcx, PG_VERSION_STR)
 }
 
