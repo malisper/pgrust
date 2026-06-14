@@ -53,8 +53,8 @@ seam_core::seam!(
     /// `ereport(FATAL)` past `MAX_ON_EXITS`. Callbacks carry the same
     /// `PgResult` failure surface (the C callbacks may `ereport`).
     pub fn on_proc_exit(
-        function: fn(i32, types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        function: fn(i32, types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
@@ -65,8 +65,8 @@ seam_core::seam!(
     /// `MAX_ON_EXITS`. Callbacks carry the same `PgResult` failure surface
     /// (the C callbacks may `ereport`).
     pub fn on_shmem_exit(
-        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        callback: fn(code: i32, arg: types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
@@ -76,8 +76,8 @@ seam_core::seam!(
     /// full, carried on `Err`. The callback's `PgResult` mirrors a C callback
     /// that can `ereport(ERROR)`.
     pub fn before_shmem_exit(
-        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
-        arg: types_datum::Datum,
+        callback: fn(code: i32, arg: types_tuple::Datum<'static>) -> types_error::PgResult<()>,
+        arg: types_tuple::Datum<'static>,
     ) -> types_error::PgResult<()>
 );
 
