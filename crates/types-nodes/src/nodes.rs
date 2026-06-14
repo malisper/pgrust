@@ -147,6 +147,8 @@ pub enum Node<'mcx> {
     IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
+    /// `T_Unique`.
+    Unique(crate::nodeunique::Unique<'mcx>),
     /// `T_Sort`.
     Sort(crate::nodesort::Sort<'mcx>),
     /// `T_TableFuncScan`.
@@ -191,6 +193,7 @@ impl<'mcx> Node<'mcx> {
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
+            Node::Unique(_) => crate::nodeunique::T_Unique,
             Node::Sort(_) => T_Sort,
             Node::TableFuncScan(_) => T_TableFuncScan,
             Node::NestLoop(_) => crate::nodenestloop::T_NestLoop,
@@ -216,6 +219,7 @@ impl<'mcx> Node<'mcx> {
             Node::Memoize(m) => &m.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
+            Node::Unique(u) => &u.plan,
             Node::Sort(s) => &s.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
             Node::NestLoop(m) => &m.join.plan,
@@ -251,6 +255,7 @@ impl<'mcx> Node<'mcx> {
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
+            Node::Unique(u) => Ok(Node::Unique(u.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
             Node::NestLoop(m) => Ok(Node::NestLoop(m.clone_in(mcx)?)),

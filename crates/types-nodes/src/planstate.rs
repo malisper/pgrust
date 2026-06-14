@@ -12,6 +12,7 @@ use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
 use crate::nodeindexonlyscan::T_IndexOnlyScanState;
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
+use crate::nodeunique::T_UniqueState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
@@ -49,6 +50,8 @@ pub enum PlanStateNode<'mcx> {
     IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
+    /// `T_UniqueState`.
+    Unique(PgBox<'mcx, crate::nodeunique::UniqueStateData<'mcx>>),
     /// `T_SortState`.
     Sort(PgBox<'mcx, crate::nodesort::SortStateData<'mcx>>),
     /// `T_TableFuncScanState`.
@@ -79,6 +82,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Memoize(_) => T_MemoizeState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::Limit(_) => T_LimitState,
+            PlanStateNode::Unique(_) => T_UniqueState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
             PlanStateNode::NestLoop(_) => T_NestLoopState,
@@ -103,6 +107,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Memoize(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
+            PlanStateNode::Unique(u) => &u.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
             PlanStateNode::NestLoop(m) => &m.js.ps,
@@ -126,6 +131,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
+            PlanStateNode::Unique(u) => &mut u.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
