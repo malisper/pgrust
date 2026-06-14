@@ -11,7 +11,13 @@
 
 use types_cache::backend_utils_cache_catcache::CCFastKind;
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// these fast hash/equality functions consume the by-value scalar key word (C's
+// `DatumGetChar/Int16/Int32`) directly. Pass-by-value scalar keys stay the
+// audited bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which is
+// for deformed tuple values). By-reference keys (name/text/oidvector) re-resolve
+// their payload bytes elsewhere and never inhabit this word.
+use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 
 /* ----------------------------------------------------------------------------
@@ -76,19 +82,19 @@ pub fn murmurhash32(data: u32) -> u32 {
 
 /// `DatumGetChar(d)` — the low byte as a signed `char`.
 #[inline]
-pub fn datum_get_char(d: Datum) -> i8 {
+pub fn datum_get_char(d: ScalarWord) -> i8 {
     d.as_char()
 }
 
 /// `DatumGetInt16(d)`.
 #[inline]
-pub fn datum_get_int16(d: Datum) -> i16 {
+pub fn datum_get_int16(d: ScalarWord) -> i16 {
     d.as_i16()
 }
 
 /// `DatumGetInt32(d)`.
 #[inline]
-pub fn datum_get_int32(d: Datum) -> i32 {
+pub fn datum_get_int32(d: ScalarWord) -> i32 {
     d.as_i32()
 }
 
@@ -98,13 +104,13 @@ pub fn datum_get_int32(d: Datum) -> i32 {
 
 /// `chareqfast` — `DatumGetChar(a) == DatumGetChar(b)`.
 #[inline]
-pub fn chareqfast(a: Datum, b: Datum) -> bool {
+pub fn chareqfast(a: ScalarWord, b: ScalarWord) -> bool {
     datum_get_char(a) == datum_get_char(b)
 }
 
 /// `charhashfast` — `murmurhash32((int32) DatumGetChar(datum))`.
 #[inline]
-pub fn charhashfast(datum: Datum) -> u32 {
+pub fn charhashfast(datum: ScalarWord) -> u32 {
     // C: `murmurhash32((int32) DatumGetChar(datum))` — the signed char widens
     // to int32 (sign-extending) before the cast to the uint32 hash input.
     murmurhash32(datum_get_char(datum) as i32 as u32)
@@ -147,25 +153,25 @@ pub fn namehashfast(key: &[u8]) -> u32 {
 
 /// `int2eqfast` — `DatumGetInt16(a) == DatumGetInt16(b)`.
 #[inline]
-pub fn int2eqfast(a: Datum, b: Datum) -> bool {
+pub fn int2eqfast(a: ScalarWord, b: ScalarWord) -> bool {
     datum_get_int16(a) == datum_get_int16(b)
 }
 
 /// `int2hashfast` — `murmurhash32((int32) DatumGetInt16(datum))`.
 #[inline]
-pub fn int2hashfast(datum: Datum) -> u32 {
+pub fn int2hashfast(datum: ScalarWord) -> u32 {
     murmurhash32(datum_get_int16(datum) as i32 as u32)
 }
 
 /// `int4eqfast` — `DatumGetInt32(a) == DatumGetInt32(b)`.
 #[inline]
-pub fn int4eqfast(a: Datum, b: Datum) -> bool {
+pub fn int4eqfast(a: ScalarWord, b: ScalarWord) -> bool {
     datum_get_int32(a) == datum_get_int32(b)
 }
 
 /// `int4hashfast` — `murmurhash32((int32) DatumGetInt32(datum))`.
 #[inline]
-pub fn int4hashfast(datum: Datum) -> u32 {
+pub fn int4hashfast(datum: ScalarWord) -> u32 {
     murmurhash32(datum_get_int32(datum) as u32)
 }
 
@@ -231,7 +237,7 @@ pub fn oidvectorhashfast(v: &[Oid]) -> PgResult<u32> {
  * ------------------------------------------------------------------------- */
 
 /// Apply the fast hash function for a by-value key kind to one key datum.
-pub fn fast_hash(kind: CCFastKind, datum: Datum) -> PgResult<u32> {
+pub fn fast_hash(kind: CCFastKind, datum: ScalarWord) -> PgResult<u32> {
     match kind {
         CCFastKind::Char => Ok(charhashfast(datum)),
         CCFastKind::Int2 => Ok(int2hashfast(datum)),
@@ -245,7 +251,7 @@ pub fn fast_hash(kind: CCFastKind, datum: Datum) -> PgResult<u32> {
 }
 
 /// Apply the fast equality function for a by-value key kind to two key datums.
-pub fn fast_eq(kind: CCFastKind, a: Datum, b: Datum) -> PgResult<bool> {
+pub fn fast_eq(kind: CCFastKind, a: ScalarWord, b: ScalarWord) -> PgResult<bool> {
     match kind {
         CCFastKind::Char => Ok(chareqfast(a, b)),
         CCFastKind::Int2 => Ok(int2eqfast(a, b)),
@@ -300,7 +306,7 @@ pub fn pg_rotate_left32(word: u32, n: u32) -> u32 {
 pub fn CatalogCacheComputeHashValue(
     kinds: &[CCFastKind],
     nkeys: i32,
-    keys: &[Datum],
+    keys: &[ScalarWord],
 ) -> PgResult<u32> {
     let mut hash_value: u32 = 0;
     let mut one_hash: u32;
@@ -349,8 +355,8 @@ pub fn CatalogCacheComputeHashValue(
 pub fn CatalogCacheCompareTuple(
     kinds: &[CCFastKind],
     nkeys: i32,
-    cachekeys: &[Datum],
-    searchkeys: &[Datum],
+    cachekeys: &[ScalarWord],
+    searchkeys: &[ScalarWord],
 ) -> PgResult<bool> {
     // C: `for (i = 0; i < nkeys; i++) if (!cc_fastequal[i](cachekeys[i],
     // searchkeys[i])) return false; return true;`

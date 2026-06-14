@@ -20,7 +20,13 @@ use types_cache::backend_utils_cache_catcache::{
 };
 use types_cache::SysCacheKey;
 use types_core::Oid;
-use types_datum::Datum;
+// Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`:
+// the per-search key arguments cross as by-value scalar words (C's
+// `cur_skey[i].sk_argument = vN`); a by-reference key's `catcache_byref_key_datum`
+// seam reconstitutes a pointer-bearing word. Pass-by-value scalar keys stay the
+// audited bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which
+// carries deformed tuple values).
+use types_datum::Datum as ScalarWord;
 use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
@@ -62,7 +68,7 @@ seam_core::seam!(
     pub fn catcache_scan_single(
         cache_id: i32,
         nkeys: i32,
-        arguments: [Datum; 4],
+        arguments: [ScalarWord; 4],
     ) -> PgResult<alloc::vec::Vec<FetchedCatalogTuple>>
 );
 
@@ -84,7 +90,7 @@ seam_core::seam!(
     /// (`name`/`text`/`oidvector`) from its on-disk bytes — in C the search key
     /// already arrives as a pointer-bearing `Datum`. Owned by the
     /// datum/heaptuple substrate. Panics until it lands.
-    pub fn catcache_byref_key_datum(bytes: &[u8]) -> Datum
+    pub fn catcache_byref_key_datum(bytes: &[u8]) -> ScalarWord
 );
 
 /// One probe outcome from the bucket scan.
@@ -99,7 +105,7 @@ pub(crate) enum ProbeResult {
 /// carry on-disk bytes that the datum substrate reconstitutes into a
 /// pointer-bearing `Datum`.
 #[inline]
-fn key_to_datum(key: SysCacheKey<'_>) -> Datum {
+fn key_to_datum(key: SysCacheKey<'_>) -> ScalarWord {
     match key {
         SysCacheKey::Value(d) => d,
         SysCacheKey::Str(s) => catcache_byref_key_datum::call(s.as_bytes()),
@@ -115,7 +121,7 @@ fn build_arguments(
     v2: SysCacheKey<'_>,
     v3: SysCacheKey<'_>,
     v4: SysCacheKey<'_>,
-) -> [Datum; 4] {
+) -> [ScalarWord; 4] {
     [
         key_to_datum(v1),
         key_to_datum(v2),
@@ -255,7 +261,7 @@ pub(crate) fn search_cat_cache_miss<'mcx>(
     nkeys: i32,
     hash_value: u32,
     hash_index: usize,
-    arguments: [Datum; 4],
+    arguments: [ScalarWord; 4],
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
     /*
      * Tuple was not found in cache, so we have to try to retrieve it directly
