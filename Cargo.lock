@@ -43,7 +43,6 @@ dependencies = [
  "mcx",
  "types-brin",
  "types-core",
- "types-datum",
  "types-error",
  "types-rel",
  "types-storage",
