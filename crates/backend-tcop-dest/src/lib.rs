@@ -265,6 +265,7 @@ pub fn init_seams() {
     backend_tcop_dest_seams::dest_rstartup::set(dest_rstartup_impl);
     backend_tcop_dest_seams::dest_receive_slot::set(dest_receive_slot_impl);
     backend_tcop_dest_seams::dest_rshutdown::set(dest_rshutdown_impl);
+    backend_tcop_dest_seams::create_dest_receiver::set(CreateDestReceiver);
 }
 
 #[cfg(test)]

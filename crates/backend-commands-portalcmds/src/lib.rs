@@ -22,9 +22,10 @@ use types_nodes::portalcmds::{
     DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState, Query, CURSOR_OPT_HOLD,
     CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
+use types_nodes::parsestmt::DestReceiverHandle;
 use types_portal::{
-    CommandTag, DestReceiver, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE,
-    PORTAL_FAILED, PORTAL_ONE_SELECT, PORTAL_READY,
+    CommandTag, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE, PORTAL_FAILED,
+    PORTAL_ONE_SELECT, PORTAL_READY,
 };
 use types_snapshot::SnapshotData;
 
@@ -33,6 +34,7 @@ use backend_executor_execMain_seams as executor;
 use backend_nodes_queryjumble_seams as queryjumble;
 use backend_parser_analyze_seams as analyze;
 use backend_rewrite_rewritehandler_seams as rewrite;
+use backend_tcop_dest_seams as dest;
 use backend_tcop_postgres_seams as postgres;
 use backend_tcop_pquery_seams as pquery;
 use backend_utils_init_miscinit_seams as miscinit;
@@ -66,7 +68,7 @@ fn perform_cursor_open_seam<'mcx>(
 }
 fn perform_portal_fetch_seam(
     stmt: &FetchStmt,
-    dest: DestReceiver,
+    dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     PerformPortalFetch(stmt, dest, qc)
@@ -224,10 +226,11 @@ pub fn PerformCursorOpen<'mcx>(
 // PerformPortalFetch — portalcmds.c lines 166-217
 // ===========================================================================
 
-/// `PerformPortalFetch` — execute SQL `FETCH` or `MOVE`.
+/// `PerformPortalFetch` — execute SQL `FETCH` or `MOVE`. `dest` is the
+/// router-keyed [`DestReceiverHandle`] the dispatcher built.
 pub fn PerformPortalFetch(
     stmt: &FetchStmt,
-    mut dest: DestReceiver,
+    mut dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     // Disallow empty-string cursor name.
@@ -246,8 +249,9 @@ pub fn PerformPortalFetch(
     };
 
     // Adjust dest if needed.  MOVE wants destination DestNone.
+    //   dest = CreateDestReceiver(DestNone);
     if stmt.ismove {
-        dest = DestReceiver::new(types_dest::CommandDest::None);
+        dest = dest::create_dest_receiver::call(types_dest::CommandDest::None);
     }
 
     // nprocessed = PortalRunFetch(portal, stmt->direction, stmt->howMany, dest);
@@ -461,7 +465,7 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
     //   SetTuplestoreDestReceiverParams(queryDesc->dest, portal->holdStore,
     //                                   portal->holdContext, true, NULL, NULL);
     let dest = tstore::create_dest_receiver_tuplestore::call()?;
-    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = Some(dest);
+    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = dest;
     tstore::set_tuplestore_dest_receiver_params::call(dest, portal, true)?;
 
     // Fetch the result set into the tuplestore.
@@ -473,10 +477,10 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
 
     //   queryDesc->dest->rDestroy(queryDesc->dest);  queryDesc->dest = NULL;
     let dest = portal.borrow().queryDesc.as_ref().unwrap().dest;
-    if let Some(dest) = dest {
+    if dest != DestReceiverHandle::NULL {
         tstore::dest_destroy::call(dest)?;
     }
-    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = None;
+    portal.borrow_mut().queryDesc.as_mut().unwrap().dest = DestReceiverHandle::NULL;
 
     // Now shut down the inner executor.
     //   portal->queryDesc = NULL;   /* prevent double shutdown */

@@ -243,7 +243,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`. (`once` defaulted to false here, as in
     /// `PersistHoldablePortal`'s call.)
     pub fn executor_run(
-        query_desc: &mut types_portal::QueryDesc,
+        query_desc: &mut types_nodes::querydesc::QueryDesc,
         direction: types_scan::sdir::ScanDirection,
         count: u64,
     ) -> types_error::PgResult<()>
@@ -252,25 +252,33 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExecutorFinish(queryDesc)` (execMain.c) — run the executor's
     /// after-query cleanup (AFTER triggers etc.). Can `ereport(ERROR)`.
-    pub fn executor_finish(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+    pub fn executor_finish(
+        query_desc: &mut types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `ExecutorEnd(queryDesc)` (execMain.c) — shut down the executor and free
     /// its per-query state. Can `ereport(ERROR)`.
-    pub fn executor_end(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+    pub fn executor_end(
+        query_desc: &mut types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `ExecutorRewind(queryDesc)` (execMain.c) — rewind the executor to the
     /// start of the query so it can be re-run. Can `ereport(ERROR)`.
-    pub fn executor_rewind(query_desc: &mut types_portal::QueryDesc) -> types_error::PgResult<()>
+    pub fn executor_rewind(
+        query_desc: &mut types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `FreeQueryDesc(queryDesc)` (pquery.c, reached through the executor
     /// surface) — free a finished `QueryDesc` (consumes it).
-    pub fn free_query_desc(query_desc: types_portal::QueryDesc) -> types_error::PgResult<()>
+    pub fn free_query_desc(
+        query_desc: types_nodes::querydesc::QueryDesc,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

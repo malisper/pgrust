@@ -437,6 +437,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hash-xlog"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-bufmask-seams",
+ "backend-access-hash-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-page",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-tuple",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-hash-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -3349,6 +3369,7 @@ dependencies = [
  "backend-nodes-queryjumble-seams",
  "backend-parser-analyze-seams",
  "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-dest-seams",
  "backend-tcop-postgres-seams",
  "backend-tcop-pquery-seams",
  "backend-utils-init-miscinit-seams",
@@ -3828,7 +3849,6 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
- "types-portal",
  "types-rel",
  "types-scan",
  "types-tableam",
@@ -8307,6 +8327,7 @@ name = "backend-tcop-dest-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-dest",
  "types-error",
  "types-nodes",
  "types-tuple",
@@ -11615,6 +11636,7 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-hash-xlog",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",
@@ -12331,7 +12353,6 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
- "types-dest",
  "types-nodes",
  "types-snapshot",
  "types-tuple",

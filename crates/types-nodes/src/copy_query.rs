@@ -88,13 +88,13 @@ pub use crate::parsestmt::RawStmt;
 /// started query state (the owned stand-in for the `QueryDesc *` the executor
 /// keeps its `EState`/`DestReceiver` under).
 ///
-/// K1 phase 2 note: `QueryDesc` has several other in-repo views — the portal's
-/// [`types_portal::QueryDesc`] (a `snapshot`/`dest`-bearing value) and the
-/// opaque `QueryDescHandle` newtypes in `types-matview` / `types-execparallel`
-/// (a bare `usize`/handle into the executor's not-yet-modeled state). These are
-/// *disjoint trimmed views / a different model* (none subsumes another: this
-/// one carries `tupDesc`+`exec_token`, the portal one carries `snapshot`+`dest`,
-/// the handles carry no fields). A canonical-subsumes-trimmed re-export is not
+/// K1 phase 2 note: `QueryDesc` has several other in-repo views — the canonical
+/// owned [`crate::querydesc::QueryDesc`] (which the portal now embeds by value)
+/// and the opaque `QueryDescHandle` newtypes in `types-matview` /
+/// `types-execparallel` (a bare `usize`/handle into the executor's
+/// not-yet-modeled state). These are *disjoint trimmed views / a different
+/// model* (none subsumes another: this one carries `tupDesc`+`exec_token`, the
+/// handles carry no fields). A canonical-subsumes-trimmed re-export is not
 /// possible without re-modeling them onto one owned executor `QueryDesc`, which
 /// is the executor-ownership keystone (the de-handle the executor onto owned
 /// values task), not a pure type-identity unification. They therefore stay
