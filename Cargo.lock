@@ -1859,11 +1859,17 @@ name = "backend-access-transam-xlog"
 version = "0.0.0"
 dependencies = [
  "backend-access-transam-xlog-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-utils-error",
  "mcx",
+ "port-crc32c",
  "types-control",
  "types-core",
  "types-error",
+ "types-storage",
  "types-tuple",
  "types-wal",
 ]
