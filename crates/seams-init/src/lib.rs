@@ -628,6 +628,20 @@ mod recurrence_guard {
         ("backend_timezone_pgtz", "pg_localtime"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
+        // DESIGN_DEBT: the generic range I/O procs `range_in`/`range_out`/
+        // `range_recv`/`range_send` (rangetypes.c) parse/render a range by
+        // calling the *element* subtype's I/O proc through the fmgr Datum lane
+        // (InputFunctionCallSafe / OutputFunctionCall / ReceiveFunctionCall /
+        // SendFunctionCall on `cache->typioproc`). That per-element fmgr
+        // dispatch is not ported into this unit, so the real kernels in
+        // `range_io.rs` deliberately mirror-pg-and-panic. Installing the seams
+        // would only forward a call into a guaranteed panic, so they are held
+        // here until the element-I/O fmgr lane lands. Consumed by multirange I/O
+        // (backend-utils-adt-multirangetypes::typcache_io).
+        ("backend_utils_adt_rangetypes", "range_in"),
+        ("backend_utils_adt_rangetypes", "range_out"),
+        ("backend_utils_adt_rangetypes", "range_recv"),
+        ("backend_utils_adt_rangetypes", "range_send"),
         ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
