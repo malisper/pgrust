@@ -5736,6 +5736,7 @@ dependencies = [
  "backend-postmaster-autovacuum-ext-seams",
  "backend-postmaster-autovacuum-seams",
  "backend-utils-error",
+ "backend-utils-init-small-seams",
  "types-autovacuum",
  "types-core",
  "types-error",
