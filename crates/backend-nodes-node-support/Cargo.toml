@@ -1,0 +1,23 @@
+[package]
+name = "backend-nodes-node-support"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_nodes_node_support"
+path = "src/lib.rs"
+
+[dependencies]
+# `Mcx`/`PgVec`/`PgBox`/`PgString` — the charged node-tree containers and the
+# TARGET memory context every fallible `copy_node_in` allocates into (the C
+# `copyObject` allocates against `CurrentMemoryContext`; here we thread the
+# destination context explicitly). `mcx` is `#![no_std]` and depends on neither
+# `types-nodes` nor this crate, so it cannot form a dependency cycle (the central
+# `Node` enum is generated INTO `types-nodes`, which is what lets `types-nodes`
+# depend on this leaf without a cycle).
+mcx = { path = "../mcx" }
+# `PgResult`/`PgError` — `copy_node_in` is fallible (allocating into the target
+# context can OOM), matching the existing ~42 hand-written `clone_in` methods
+# that return `PgResult`. `types-error` is `#![no_std]` and a pure leaf.
+types-error = { path = "../types-error" }

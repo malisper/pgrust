@@ -176,12 +176,10 @@ const TCFLAGS_OPERATOR_FLAGS: i32 = !(TCFLAGS_HAVE_PG_TYPE_DATA
 ///
 /// Cross-entry links (`rngelemtype`, `rngtype`, `nextDomain`) are type OIDs
 /// (re-looked-up in the cache), not handles — see the crate docs. The
-/// composite `tup_desc` is owned plain data in the cache context, shared with
-/// the record caches via `PgBox`... but `PgBox` is not clonable across the
-/// cache, so the shared descriptor lives in [`TypCacheState::tupdescs`] keyed
-/// by an id and the entry holds the id (`tup_desc_id`). `domain_data` /
-/// `enum_data` are tokens into the side tables.
-struct TypeCacheEntry {
+/// composite `tup_desc` is owned plain data held INLINE on the entry in the
+/// cache context (the C `tupDesc`); callers receive owned `clone_in` copies.
+/// `domain_data` / `enum_data` are tokens into the side tables.
+struct TypeCacheEntry<'mcx> {
     type_id: Oid,
     type_id_hash: u32,
     typlen: i16,
@@ -208,8 +206,8 @@ struct TypeCacheEntry {
     cmp_proc_finfo: FmgrInfo,
     hash_proc_finfo: FmgrInfo,
     hash_extended_proc_finfo: FmgrInfo,
-    /// Token into [`TypCacheState::tupdescs`], or `None` (the C `tupDesc`).
-    tup_desc_id: Option<u64>,
+    /// The composite type's owned descriptor (the C `tupDesc`), or `None`.
+    tup_desc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
     tup_desc_identifier: u64,
     /// Range element type OID (the C `rngelemtype->type_id`), or `None`.
     rngelemtype: Option<Oid>,
@@ -231,7 +229,7 @@ struct TypeCacheEntry {
     next_domain: Option<Oid>,
 }
 
-impl TypeCacheEntry {
+impl<'mcx> TypeCacheEntry<'mcx> {
     fn zeroed(type_id: Oid) -> Self {
         TypeCacheEntry {
             type_id,
@@ -260,7 +258,7 @@ impl TypeCacheEntry {
             cmp_proc_finfo: FmgrInfo::empty(),
             hash_proc_finfo: FmgrInfo::empty(),
             hash_extended_proc_finfo: FmgrInfo::empty(),
-            tup_desc_id: None,
+            tup_desc: None,
             tup_desc_identifier: 0,
             rngelemtype: None,
             rng_opfamily: INVALID_OID,
@@ -378,16 +376,12 @@ struct TypCacheState<'mcx> {
     initialized: bool,
     /// `TypeCacheHash` — keyed by type OID; entries live for the backend's
     /// life.
-    type_cache: HashMap<Oid, TypeCacheEntry>,
+    type_cache: HashMap<Oid, TypeCacheEntry<'mcx>>,
     /// `RelIdToTypeIdCacheHash` — relid → composite type OID.
     rel_id_to_type_id: HashMap<Oid, Oid>,
     /// `firstDomainTypeEntry` — head OID of the domain-entry chain threaded via
     /// `TypeCacheEntry.next_domain`.
     first_domain_type_entry: Option<Oid>,
-    /// Side table owning composite/record `TupleDesc`s shared between
-    /// `TypeCacheEntry.tup_desc_id` and `record_cache_array`.
-    tupdescs: HashMap<u64, PgBox<'mcx, TupleDescData<'mcx>>>,
-    next_tupdesc_id: u64,
     /// Side tables owning the `DomainConstraintCache` / `TypeCacheEnumData`.
     dcc_table: HashMap<u64, DomainConstraintCache>,
     enum_table: HashMap<u64, TypeCacheEnumData<'mcx>>,
@@ -421,8 +415,6 @@ impl<'mcx> TypCacheState<'mcx> {
             type_cache: HashMap::new(),
             rel_id_to_type_id: HashMap::new(),
             first_domain_type_entry: None,
-            tupdescs: HashMap::new(),
-            next_tupdesc_id: 1,
             dcc_table: HashMap::new(),
             enum_table: HashMap::new(),
             next_token: 1,
@@ -441,18 +433,12 @@ impl<'mcx> TypCacheState<'mcx> {
         t
     }
 
-    fn fresh_tupdesc_id(&mut self) -> u64 {
-        let t = self.next_tupdesc_id;
-        self.next_tupdesc_id += 1;
-        t
-    }
-
-    fn entry(&self, type_id: Oid) -> &TypeCacheEntry {
+    fn entry(&self, type_id: Oid) -> &TypeCacheEntry<'mcx> {
         self.type_cache
             .get(&type_id)
             .expect("typcache: entry must exist for type_id")
     }
-    fn entry_mut(&mut self, type_id: Oid) -> &mut TypeCacheEntry {
+    fn entry_mut(&mut self, type_id: Oid) -> &mut TypeCacheEntry<'mcx> {
         self.type_cache
             .get_mut(&type_id)
             .expect("typcache: entry must exist for type_id")
@@ -976,7 +962,7 @@ fn build_type_cache_entry(type_id: Oid, flags: &mut i32) -> PgResult<()> {
     {
         let (want, has_tupdesc, is_composite) = with_state(|st| {
             let e = st.entry(type_id);
-            ((*flags & TYPECACHE_TUPDESC) != 0, e.tup_desc_id.is_some(), e.typtype == TYPTYPE_COMPOSITE)
+            ((*flags & TYPECACHE_TUPDESC) != 0, e.tup_desc.is_some(), e.typtype == TYPTYPE_COMPOSITE)
         });
         if want && !has_tupdesc && is_composite {
             load_typcache_tupdesc(type_id)?;
@@ -1136,12 +1122,10 @@ fn load_typcache_tupdesc(type_id: Oid) -> PgResult<()> {
         // relation_close, copied into the cache context. The C bumps
         // tdrefcount; the safe port owns the copy.
         let tupdesc = relcache_seams::relation_get_composite_tupdesc::call(st.mcx, typrelid, type_id)?;
-        let id = st.fresh_tupdesc_id();
-        st.tupdescs.insert(id, tupdesc);
         st.tupledesc_id_counter += 1;
         let next_id = st.tupledesc_id_counter;
         let e = st.entry_mut(type_id);
-        e.tup_desc_id = Some(id);
+        e.tup_desc = Some(tupdesc);
         e.tup_desc_identifier = next_id;
         Ok(())
     })
@@ -1446,7 +1430,7 @@ fn record_fields_have_extended_hashing(type_id: Oid) -> PgResult<bool> {
 
 fn cache_record_field_properties(type_id: Oid) -> PgResult<()> {
     let (typtype, has_tupdesc) =
-        with_state(|st| (st.entry(type_id).typtype, st.entry(type_id).tup_desc_id.is_some()));
+        with_state(|st| (st.entry(type_id).typtype, st.entry(type_id).tup_desc.is_some()));
 
     if type_id == RECORDOID {
         // Can't tell; assume equality + comparison work.
@@ -1462,8 +1446,7 @@ fn cache_record_field_properties(type_id: Oid) -> PgResult<()> {
         // owned `Rc`-clone of C is the cache ownership; here the descriptor is
         // pinned in the cache context for the backend's life).
         let field_types: Vec<Oid> = with_state(|st| {
-            let id = st.entry(type_id).tup_desc_id.expect("composite has tupdesc after load");
-            let td = st.tupdescs.get(&id).expect("tupdesc id present");
+            let td = st.entry(type_id).tup_desc.as_ref().expect("composite has tupdesc after load");
             let natts = td.natts;
             let mut v = Vec::new();
             for i in 0..natts {
@@ -1676,11 +1659,8 @@ fn lookup_rowtype_tupdesc_internal<'mcx>(
         // Named composite type: use the regular typcache.
         lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
         let copied = with_state(|st| -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
-            match st.entry(type_id).tup_desc_id {
-                Some(id) => {
-                    let td = st.tupdescs.get(&id).expect("tupdesc id present");
-                    Ok(Some(copy_tupdesc_out(out_mcx, td)?))
-                }
+            match st.entry(type_id).tup_desc.as_ref() {
+                Some(td) => Ok(Some(copy_tupdesc_out(out_mcx, td)?)),
                 None => Ok(None),
             }
         })?;
@@ -1796,7 +1776,7 @@ pub fn lookup_rowtype_tupdesc_domain<'mcx>(
         lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)?;
         let (is_domain, base, base_typmod, has_td) = with_state(|st| {
             let e = st.entry(type_id);
-            (e.typtype == TYPTYPE_DOMAIN, e.domain_base_type, e.domain_base_typmod, e.tup_desc_id.is_some())
+            (e.typtype == TYPTYPE_DOMAIN, e.domain_base_type, e.domain_base_typmod, e.tup_desc.is_some())
         });
         if is_domain {
             return lookup_rowtype_tupdesc_noerror(mcx, base, base_typmod, no_error);
@@ -1811,8 +1791,7 @@ pub fn lookup_rowtype_tupdesc_domain<'mcx>(
             return Ok(None);
         }
         let out = with_state(|st| -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-            let id = st.entry(type_id).tup_desc_id.expect("has td");
-            let td = st.tupdescs.get(&id).expect("tupdesc id present");
+            let td = st.entry(type_id).tup_desc.as_ref().expect("has td");
             copy_tupdesc_out(mcx, td)
         })?;
         Ok(Some(out))
@@ -1948,7 +1927,7 @@ pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64>
     if type_id != RECORDOID {
         lookup_type_cache(type_id, TYPECACHE_TUPDESC)?;
         let (td_null, id) =
-            with_state(|st| (st.entry(type_id).tup_desc_id.is_none(), st.entry(type_id).tup_desc_identifier));
+            with_state(|st| (st.entry(type_id).tup_desc.is_none(), st.entry(type_id).tup_desc_identifier));
         if td_null {
             return ereport_error(
                 ERRCODE_WRONG_OBJECT_TYPE,
@@ -1990,11 +1969,8 @@ fn read_tupdesc_view<'mcx>(
     with_state(|st| -> PgResult<(Option<PgBox<'mcx, TupleDescData<'mcx>>>, u64)> {
         let e = st.entry(type_id);
         let id = e.tup_desc_identifier;
-        match e.tup_desc_id {
-            Some(tid) => {
-                let td = st.tupdescs.get(&tid).expect("tupdesc id present");
-                Ok((Some(copy_tupdesc_out(mcx, td)?), id))
-            }
+        match e.tup_desc.as_ref() {
+            Some(td) => Ok((Some(copy_tupdesc_out(mcx, td)?), id)),
             None => Ok((None, id)),
         }
     })
@@ -2088,10 +2064,10 @@ pub fn shared_record_typmod_registry_attach() -> PgResult<()> {
 
 /// `InvalidateCompositeTypeCacheEntry`.
 fn invalidate_composite_type_cache_entry(type_id: Oid) {
-    let (had_tupdesc, had_opclass, tup_desc_id) = with_state(|st| {
+    let (had_tupdesc, had_opclass) = with_state(|st| {
         let e = st.entry(type_id);
         debug_assert!(e.typtype == TYPTYPE_COMPOSITE && oid_is_valid(e.typrelid));
-        (e.tup_desc_id.is_some(), (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0, e.tup_desc_id)
+        (e.tup_desc.is_some(), (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0)
     });
 
     let had_tupdesc_or_opclass = had_tupdesc || had_opclass;
@@ -2101,11 +2077,8 @@ fn invalidate_composite_type_cache_entry(type_id: Oid) {
     // callers hold are independent owned copies).
     if had_tupdesc {
         with_state(|st| {
-            if let Some(id) = tup_desc_id {
-                st.tupdescs.remove(&id);
-            }
             let e = st.entry_mut(type_id);
-            e.tup_desc_id = None;
+            e.tup_desc = None;
             e.tup_desc_identifier = 0;
         });
     }
@@ -2414,7 +2387,7 @@ fn insert_rel_type_cache_if_needed(type_id: Oid) {
         debug_assert!(oid_is_valid(e.typrelid));
         if (e.flags & TCFLAGS_HAVE_PG_TYPE_DATA) != 0
             || (e.flags & TCFLAGS_OPERATOR_FLAGS) != 0
-            || e.tup_desc_id.is_some()
+            || e.tup_desc.is_some()
         {
             let relid = e.typrelid;
             let typid = e.type_id;
@@ -2428,7 +2401,7 @@ fn delete_rel_type_cache_if_needed(type_id: Oid) {
     with_state(|st| {
         let (typtype, typrelid, flags, td_null) = {
             let e = st.entry(type_id);
-            (e.typtype, e.typrelid, e.flags, e.tup_desc_id.is_none())
+            (e.typtype, e.typrelid, e.flags, e.tup_desc.is_none())
         };
 
         // C computes is_in_progress (USE_ASSERT_CHECKING only) by scanning the
