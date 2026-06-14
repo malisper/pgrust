@@ -7551,7 +7551,6 @@ dependencies = [
  "libc",
  "seam-core",
  "types-core",
- "types-datum",
  "types-error",
  "types-storage",
  "types-tuple",
