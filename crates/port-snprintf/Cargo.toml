@@ -1,0 +1,11 @@
+[package]
+name = "port-snprintf"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "port_snprintf"
+path = "src/lib.rs"
+
+[dependencies]
