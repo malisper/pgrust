@@ -1,0 +1,47 @@
+[package]
+name = "backend-catalog-objectaddress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_catalog_objectaddress"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-catalog = { path = "../types-catalog" }
+types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
+types-array = { path = "../types-array" }
+types-tuple = { path = "../types-tuple" }
+types-cache = { path = "../types-cache" }
+types-datum = { path = "../types-datum" }
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
+backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# F1 getObjectDescription cross-crate description helpers (called via -seams).
+types-namespace = { path = "../types-namespace" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
+backend-catalog-pg-largeobject-seams = { path = "../backend-catalog-pg-largeobject-seams" }
