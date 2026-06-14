@@ -30,16 +30,17 @@
 
 pub mod freeze;
 pub mod index_delete;
+pub mod insert;
 
 use mcx::Mcx;
 use types_core::primitive::{
-    BlockNumber, InvalidBlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId,
+    InvalidBlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId,
 };
 use types_core::xact::{CommandId, InvalidCommandId};
 use types_core::XLogRecPtr;
 use types_error::PgResult;
 use types_rel::RelationData;
-use types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
+use types_storage::buf::BufferAccessStrategyType;
 use types_storage::{Buffer, InvalidBuffer};
 use types_tableam::tableam::LockTupleMode;
 use types_tuple::heaptuple::{
@@ -117,23 +118,11 @@ pub struct HeapPageFreeze {
 // ===========================================================================
 
 /// `BulkInsertStateData` (`access/hio.h`): the state carried across a bulk
-/// insert. `current_buf` is the current insertion-target page (an
-/// `InvalidBuffer` when none is held); `next_free`/`last_free` track pages left
-/// unused by the last bulk extension; `already_extended_by` records how many
-/// pages this bulk inserter has extended by so far.
-#[derive(Clone, Copy, Debug)]
-pub struct BulkInsertStateData {
-    /// Our `BULKWRITE` strategy object.
-    pub strategy: BufferAccessStrategy,
-    /// Current insertion target page.
-    pub current_buf: Buffer,
-
-    /// Further pages that were unused at the time of the last extension.
-    pub next_free: BlockNumber,
-    pub last_free: BlockNumber,
-    /// Number of pages that this bulk inserter extended by.
-    pub already_extended_by: u32,
-}
+/// insert. The canonical struct lives in `types-tableam` (the dispatch layer
+/// passes it through opaquely and `hio.c`'s `RelationGetBufferForTuple` reads
+/// it directly); the heap AM re-exports it so `GetBulkInsertState` /
+/// `heap_insert` and the hio page placement share one type.
+pub use types_tableam::tableam::BulkInsertStateData;
 
 /// `BulkInsertState` (`access/heapam.h`) — the by-value handle callers thread.
 /// C uses a `BulkInsertStateData *`; the repo carries the owned struct.
@@ -467,6 +456,19 @@ pub fn init_seams() {
     heapam_seam::heap_index_delete_tuples::set(|mcx, rel, delstate| {
         index_delete::heap_index_delete_tuples(mcx, rel, delstate)
     });
+
+    // F2 INSERT — the cross-family heap-insert entry points.
+    heapam_seam::heap_insert::set(|mcx, rel, tup, cid, options, bistate| {
+        insert::heap_insert(mcx, rel, tup, cid, options, bistate)
+    });
+    heapam_seam::simple_heap_insert::set(|mcx, rel, tup| {
+        insert::simple_heap_insert(mcx, rel, tup)
+    });
+    // NB: the `insert_one_tuple` seam (bootstrap.c `InsertOneTuple` batch) stays
+    // uninstalled here, exactly as F0 left it: forming the tuple requires
+    // bridging bootstrap's bare-word `types_datum::Datum` array to the canonical
+    // `Datum<'mcx>` that `heap_form_tuple` consumes — the datum-model bridge
+    // (see the Datum-redesign plan) is out of the heap-INSERT family's scope.
 }
 
 /// Materialize an on-page `HeapTupleHeader` at `(buffer, offnum)` into `mcx`
@@ -576,7 +578,7 @@ mod tests {
         // The carrier mirrors C's BulkInsertStateData defaults set in
         // GetBulkInsertState (sans the strategy ring, which needs the seam).
         let bistate = BulkInsertStateData {
-            strategy: BufferAccessStrategy::NONE,
+            strategy: types_storage::buf::BufferAccessStrategy::NONE,
             current_buf: InvalidBuffer,
             next_free: InvalidBlockNumber,
             last_free: InvalidBlockNumber,

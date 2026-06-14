@@ -15,6 +15,11 @@ pub struct xl_heap_insert {
     pub flags: u8,
 }
 
+/// `SizeOfHeapInsert` (`access/heapam_xlog.h`): `offsetof(xl_heap_insert,
+/// flags) + sizeof(uint8)` — `offnum`(u16)@0, `flags`(u8)@2 => 3 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapInsert: usize = 3;
+
 impl xl_heap_insert {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self {
@@ -22,7 +27,67 @@ impl xl_heap_insert {
             flags: u8_at(rec, 2),
         }
     }
+
+    /// Serialize into the `SizeOfHeapInsert`-byte on-disk layout, matching the
+    /// C struct field order (`offnum`@0, `flags`@2). The `xl_heap_header` &
+    /// tuple data ride in backup block 0.
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapInsert] {
+        let mut out = [0u8; SizeOfHeapInsert];
+        out[0..2].copy_from_slice(&self.offnum.to_ne_bytes());
+        out[2] = self.flags;
+        out
+    }
 }
+
+/// `xl_heap_header` (`access/heapam_xlog.h`): the parts of a `HeapTupleHeader`
+/// we must store in WAL — `{uint16 t_infomask2; uint16 t_infomask; uint8
+/// t_hoff;}`.
+#[derive(Clone, Copy, Debug)]
+pub struct xl_heap_header {
+    pub t_infomask2: u16,
+    pub t_infomask: u16,
+    pub t_hoff: u8,
+}
+
+/// `SizeOfHeapHeader` (`access/heapam_xlog.h`): `offsetof(xl_heap_header,
+/// t_hoff) + sizeof(uint8)` — `t_infomask2`(u16)@0, `t_infomask`(u16)@2,
+/// `t_hoff`(u8)@4 => 5 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapHeader: usize = 5;
+
+impl xl_heap_header {
+    pub fn from_bytes(rec: &[u8]) -> Self {
+        Self {
+            t_infomask2: u16_at(rec, 0),
+            t_infomask: u16_at(rec, 2),
+            t_hoff: u8_at(rec, 4),
+        }
+    }
+
+    /// Serialize into the `SizeOfHeapHeader`-byte on-disk layout.
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapHeader] {
+        let mut out = [0u8; SizeOfHeapHeader];
+        out[0..2].copy_from_slice(&self.t_infomask2.to_ne_bytes());
+        out[2..4].copy_from_slice(&self.t_infomask.to_ne_bytes());
+        out[4] = self.t_hoff;
+        out
+    }
+}
+
+// `XLH_INSERT_*` flags (access/heapam_xlog.h) — the `flags` field of
+// `xl_heap_insert` / `xl_heap_multi_insert`.
+/// `XLH_INSERT_ALL_VISIBLE_CLEARED` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+/// `XLH_INSERT_LAST_IN_MULTI` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_LAST_IN_MULTI: u8 = 1 << 1;
+/// `XLH_INSERT_IS_SPECULATIVE` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_IS_SPECULATIVE: u8 = 1 << 2;
+/// `XLH_INSERT_CONTAINS_NEW_TUPLE` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_CONTAINS_NEW_TUPLE: u8 = 1 << 3;
+/// `XLH_INSERT_ON_TOAST_RELATION` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_ON_TOAST_RELATION: u8 = 1 << 4;
+/// `XLH_INSERT_ALL_FROZEN_SET` (`access/heapam_xlog.h`).
+pub const XLH_INSERT_ALL_FROZEN_SET: u8 = 1 << 5;
 
 /// `xl_heap_delete`: `{TransactionId xmax; OffsetNumber offnum;
 /// uint8 infobits_set; uint8 flags;}`.
@@ -315,6 +380,12 @@ pub struct xl_heap_multi_insert {
     pub ntuples: u16,
 }
 
+/// `SizeOfHeapMultiInsert` (`access/heapam_xlog.h`): `offsetof(
+/// xl_heap_multi_insert, offsets)` — `flags`(u8)@0, `ntuples`(u16)@2 (aligned),
+/// `offsets`@4 => 4 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfHeapMultiInsert: usize = 4;
+
 impl xl_heap_multi_insert {
     pub fn from_bytes(rec: &[u8]) -> Self {
         Self {
@@ -323,9 +394,57 @@ impl xl_heap_multi_insert {
         }
     }
 
+    /// Serialize the fixed `SizeOfHeapMultiInsert`-byte header (the trailing
+    /// `offsets` array is appended separately by the caller). Byte 1 is the C
+    /// struct's alignment padding before `ntuples`.
+    pub fn to_bytes(&self) -> [u8; SizeOfHeapMultiInsert] {
+        let mut out = [0u8; SizeOfHeapMultiInsert];
+        out[0] = self.flags;
+        out[2..4].copy_from_slice(&self.ntuples.to_ne_bytes());
+        out
+    }
+
     /// The trailing `offsets` array.
     pub fn offsets(rec: &[u8]) -> OffsetNumbers<'_> {
         OffsetNumbers::from_bytes(&rec[4..])
+    }
+}
+
+/// `xl_multi_insert_tuple` (`access/heapam_xlog.h`): the per-tuple header in a
+/// multi-insert record's block-0 data — `{uint16 datalen; uint16 t_infomask2;
+/// uint16 t_infomask; uint8 t_hoff;}`, followed by the tuple data.
+#[derive(Clone, Copy, Debug)]
+pub struct xl_multi_insert_tuple {
+    pub datalen: u16,
+    pub t_infomask2: u16,
+    pub t_infomask: u16,
+    pub t_hoff: u8,
+}
+
+/// `SizeOfMultiInsertTuple` (`access/heapam_xlog.h`): `offsetof(
+/// xl_multi_insert_tuple, t_hoff) + sizeof(uint8)` — `datalen`(u16)@0,
+/// `t_infomask2`(u16)@2, `t_infomask`(u16)@4, `t_hoff`(u8)@6 => 7 bytes.
+#[allow(non_upper_case_globals)]
+pub const SizeOfMultiInsertTuple: usize = 7;
+
+impl xl_multi_insert_tuple {
+    pub fn from_bytes(rec: &[u8]) -> Self {
+        Self {
+            datalen: u16_at(rec, 0),
+            t_infomask2: u16_at(rec, 2),
+            t_infomask: u16_at(rec, 4),
+            t_hoff: u8_at(rec, 6),
+        }
+    }
+
+    /// Serialize into the `SizeOfMultiInsertTuple`-byte on-disk layout.
+    pub fn to_bytes(&self) -> [u8; SizeOfMultiInsertTuple] {
+        let mut out = [0u8; SizeOfMultiInsertTuple];
+        out[0..2].copy_from_slice(&self.datalen.to_ne_bytes());
+        out[2..4].copy_from_slice(&self.t_infomask2.to_ne_bytes());
+        out[4..6].copy_from_slice(&self.t_infomask.to_ne_bytes());
+        out[6] = self.t_hoff;
+        out
     }
 }
 
