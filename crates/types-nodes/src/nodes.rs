@@ -139,6 +139,8 @@ pub enum Node<'mcx> {
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Group`.
     Group(crate::nodegroup::Group<'mcx>),
+    /// `T_ProjectSet`.
+    ProjectSet(crate::nodeprojectset::ProjectSet<'mcx>),
     /// `T_Result`.
     Result(crate::noderesult::Result<'mcx>),
     /// `T_SetOp`.
@@ -196,6 +198,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Group(_) => crate::nodegroup::T_Group,
+            Node::ProjectSet(_) => crate::nodeprojectset::T_ProjectSet,
             Node::Result(_) => T_Result,
             Node::SetOp(_) => T_SetOp,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
@@ -225,6 +228,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Group(g) => &g.plan,
+            Node::ProjectSet(p) => &p.plan,
             Node::Result(r) => &r.plan,
             Node::SetOp(s) => &s.plan,
             Node::Memoize(m) => &m.plan,
@@ -264,6 +268,7 @@ impl<'mcx> Node<'mcx> {
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Group(g) => Ok(Node::Group(g.clone_in(mcx)?)),
+            Node::ProjectSet(p) => Ok(Node::ProjectSet(p.clone_in(mcx)?)),
             Node::Result(r) => Ok(Node::Result(r.clone_in(mcx)?)),
             Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),

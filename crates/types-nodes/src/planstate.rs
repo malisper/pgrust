@@ -16,6 +16,7 @@ use crate::nodeunique::T_UniqueState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::nodeprojectset::T_ProjectSetState;
 use crate::noderesult::T_ResultState;
 use crate::nodesetop::T_SetOpState;
 use crate::nodetablefuncscan::T_TableFuncScanState;
@@ -40,6 +41,8 @@ pub enum PlanStateNode<'mcx> {
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
     /// `T_GroupState`.
     Group(PgBox<'mcx, crate::nodegroup::GroupStateData<'mcx>>),
+    /// `T_ProjectSetState`.
+    ProjectSet(PgBox<'mcx, crate::nodeprojectset::ProjectSetState<'mcx>>),
     /// `T_ResultState`.
     Result(PgBox<'mcx, crate::noderesult::ResultState<'mcx>>),
     /// `T_SetOpState`.
@@ -83,6 +86,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
             PlanStateNode::Group(_) => crate::nodegroup::T_GroupState,
+            PlanStateNode::ProjectSet(_) => T_ProjectSetState,
             PlanStateNode::Result(_) => T_ResultState,
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
@@ -111,6 +115,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
             PlanStateNode::Group(g) => &g.ss.ps,
+            PlanStateNode::ProjectSet(p) => &p.ps,
             PlanStateNode::Result(r) => &r.ps,
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
@@ -138,6 +143,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
             PlanStateNode::Group(g) => &mut g.ss.ps,
+            PlanStateNode::ProjectSet(p) => &mut p.ps,
             PlanStateNode::Result(r) => &mut r.ps,
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
