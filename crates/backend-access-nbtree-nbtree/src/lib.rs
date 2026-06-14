@@ -725,10 +725,10 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
             debug_assert!((so.keyData[scan_key].sk_flags & SK_BT_SKIP) == 0);
             so.arrayKeys[i].cur_elem = cur_elem_saved;
             let ce = so.arrayKeys[i].cur_elem as usize;
-            // `elem_values` is still the transitional bare-word `types_datum::Datum`
-            // (types-nbtree's struct is not yet migrated); wrap its scalar word
-            // into the canonical by-value arm of `sk_argument: Datum<'mcx>`.
-            so.keyData[scan_key].sk_argument = Datum::ByVal(so.arrayKeys[i].elem_values[ce]);
+            // `elem_values` is now the canonical `Datum<'mcx>` (types-nbtree
+            // migrated): copy the saved array element straight into
+            // `sk_argument: Datum<'mcx>` (C: `skey->sk_argument = array->elem_values[curelem]`).
+            so.keyData[scan_key].sk_argument = so.arrayKeys[i].elem_values[ce].clone();
             continue;
         }
 

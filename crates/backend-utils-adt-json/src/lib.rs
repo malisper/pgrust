@@ -381,6 +381,17 @@ pub fn array_to_json_internal(
     use_line_feeds: bool,
 ) -> PgResult<()> {
     let arr = catalog_fmgr::deconstruct_array::call(array)?;
+    // `deconstruct_array` now yields the canonical `Datum<'mcx>` element model
+    // (types-json migration); `array_dim_to_json` / `datum_to_json_internal`
+    // drive the per-element `OutputFunctionCall`, which consumes the scalar
+    // machine word. Collapse each element to the bare-word `ScalarWord`
+    // (`as_usize` panics on a `ByRef` image, exactly as the C output-function
+    // path would on a malformed by-reference scalar).
+    let elements: Vec<ScalarWord> = arr
+        .elements
+        .iter()
+        .map(|d| ScalarWord::from_usize(d.as_usize()))
+        .collect();
 
     // nitems = ArrayGetNItems(ndim, dim). The overflow guard
     // (ArrayGetNItemsSafe) is enforced by the seam (it owns
@@ -407,7 +418,7 @@ pub fn array_to_json_internal(
         0,
         arr.ndim as usize,
         &arr.dims,
-        &arr.elements,
+        &elements,
         &arr.nulls,
         &mut count,
         arr.element_tcategory,
@@ -442,7 +453,10 @@ pub fn composite_to_json(
         buf_push(result, b':')?;
 
         datum_to_json_internal(
-            field.val,
+            // `walk_composite` yields the canonical `Datum<'mcx>` per attribute
+            // (types-json migration); collapse to the bare-word `ScalarWord`
+            // the output-function path consumes.
+            ScalarWord::from_usize(field.val.as_usize()),
             field.is_null,
             result,
             field.tcategory,

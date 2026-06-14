@@ -247,7 +247,16 @@ fn ExecProjectSRF<'mcx>(
                         execSRF::exec_make_function_result_set::call(
                             fcache, econtext, argcontext, estate,
                         )?;
-                    result.push(value);
+                    // execSRF migrated its result to the canonical
+                    // `Datum<'mcx>` (`TupleValue`) value model, but this crate's
+                    // result vector + the downstream `store_virtual_values` seam
+                    // still carry the bare-word `types_datum::Datum` (the
+                    // execTuples canonical-carrier widening is a separate,
+                    // pending migration). Collapse the scalar word at the
+                    // boundary; a by-reference SRF result would need the slot's
+                    // canonical value array (`as_usize` panics on `ByRef`,
+                    // matching the C path that stores a pointer word there).
+                    result.push(Datum::from_usize(value.as_usize()));
                     isnull.push(this_isnull);
                     elemdone[argno] = this_isdone;
 

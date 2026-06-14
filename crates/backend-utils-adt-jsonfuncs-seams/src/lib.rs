@@ -65,7 +65,7 @@ seam_core::seam!(
     /// `deconstruct_array`. Returns the element classification and the flat
     /// element/null vectors plus dimensionality; the structural `[ ... ]`
     /// assembly (`array_dim_to_json`) stays in-crate.
-    pub fn deconstruct_array(array: Datum) -> PgResult<ArrayForJson>
+    pub fn deconstruct_array(array: Datum) -> PgResult<ArrayForJson<'static>>
 );
 
 seam_core::seam!(
@@ -74,5 +74,5 @@ seam_core::seam!(
     /// `json_categorize_type`. Returns one entry per *non-dropped* attribute
     /// (dropped attributes already skipped, matching the C `continue`); the
     /// `{ ... }` assembly stays in-crate.
-    pub fn walk_composite(composite: Datum) -> PgResult<Vec<CompositeFieldForJson>>
+    pub fn walk_composite(composite: Datum) -> PgResult<Vec<CompositeFieldForJson<'static>>>
 );
