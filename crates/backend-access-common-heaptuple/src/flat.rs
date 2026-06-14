@@ -40,7 +40,7 @@ use types_tuple::heaptuple::{
 
 use crate::{
     heap_tuple_from_minimal_tuple, DeformedColumn, FormedMinimalTuple, FormedTuple,
-    HeapTupleError, TupleValue, SIZEOF_MINIMAL_TUPLE_HEADER,
+    HeapTupleError, Datum, SIZEOF_MINIMAL_TUPLE_HEADER,
 };
 
 /// A structural inconsistency found while decoding (or assembling) a flat
@@ -198,7 +198,7 @@ pub fn minimal_tuple_from_flat<'mcx>(
 pub fn heap_form_minimal_tuple_flat<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_descriptor: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> Result<PgVec<'mcx, u8>, HeapTupleError> {
     let formed = crate::heap_form_minimal_tuple(mcx, tuple_descriptor, values, isnull, 0)?;

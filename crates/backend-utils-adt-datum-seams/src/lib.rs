@@ -10,6 +10,10 @@
 
 use types_core::primitive::Size;
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone). The `*_v`
+// seam variants below take/return it by reference; the bare-word `Datum`
+// variants are transitional shims kept until every consumer migrates.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 seam_core::seam!(
     /// `datumCopy(value, typByVal, typLen)` (datum.c) — make a self-contained
@@ -18,7 +22,75 @@ seam_core::seam!(
     /// The raw-`Datum` form (vs. the byte-model `TupleValue` copy in
     /// `backend-utils-adt-scalar-seams`) used by callers that hold a bare
     /// `Datum` and its `(typByVal, typLen)`, e.g. `copyParamList` (params.c).
+    ///
+    /// TRANSITIONAL SHIM: superseded by [`datum_copy_v`], which carries the
+    /// unified `types_tuple::Datum` value. Kept until callers migrate.
     pub fn datum_copy(value: Datum, typ_byval: bool, typ_len: i32) -> Datum
+);
+
+// ---------------------------------------------------------------------------
+// Datum-unification keystone: the value-consuming seams gain a `&Datum<'mcx>`
+// (the unified enum) variant. These are the migration-target contract; the
+// bare-word variants above/below are deprecated shims removed in Cleanup.
+//
+// By-value arms are returned verbatim; by-reference arms are deep-copied /
+// serialized over their byte image. The owner installs these from its
+// `init_seams()` once it migrates; until then a call panics loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `datumCopy(value, typByVal, typLen)` (datum.c) over the unified value
+    /// type. The migration-target form of [`datum_copy`].
+    pub fn datum_copy_v<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        value: &DatumV<'_>,
+        typ_byval: bool,
+        typ_len: i32,
+    ) -> types_error::PgResult<DatumV<'mcx>>
+);
+
+seam_core::seam!(
+    /// `datumEstimateSpace` over the unified value type. The migration-target
+    /// form of [`datum_estimate_space`].
+    pub fn datum_estimate_space_v(
+        value: &DatumV<'_>,
+        isnull: bool,
+        typ_byval: bool,
+        typ_len: i32,
+    ) -> Size
+);
+
+seam_core::seam!(
+    /// `datumSerialize` over the unified value type. The migration-target form
+    /// of [`datum_serialize`].
+    pub fn datum_serialize_v(
+        value: &DatumV<'_>,
+        isnull: bool,
+        typ_byval: bool,
+        typ_len: i32,
+        cursor: *mut u8,
+    ) -> *mut u8
+);
+
+seam_core::seam!(
+    /// `datum_image_hash` over the unified value type. The migration-target
+    /// form of [`datum_image_hash`].
+    pub fn datum_image_hash_v(
+        value: &DatumV<'_>,
+        typ_byval: bool,
+        typ_len: i16,
+    ) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `datum_image_eq` over the unified value type. The migration-target form
+    /// of [`datum_image_eq`].
+    pub fn datum_image_eq_v(
+        value1: &DatumV<'_>,
+        value2: &DatumV<'_>,
+        typ_byval: bool,
+        typ_len: i16,
+    ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

@@ -20,7 +20,7 @@ seam_core::seam!(
     /// scan/delete `ereport(ERROR)`s.
     pub fn toast_delete_external(
         rel: &types_rel::RelationData<'_>,
-        values: &[types_tuple::backend_access_common_heaptuple::TupleValue<'_>],
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'_>],
         isnull: &[bool],
         is_speculative: bool,
     ) -> types_error::PgResult<()>

@@ -15,7 +15,7 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, BlockNumber};
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
 use types_typcache::TypeCacheEntry;
 
@@ -109,8 +109,8 @@ impl BrinDesc<'_> {
 /// `BrinValues` (`brin_tuple.h`): per-column accumulated values inside a
 /// [`BrinMemTuple`].
 ///
-/// `bv_values` carries each stored datum as a [`TupleValue`] (the codec's
-/// faithful `Datum` substitute — by-value scalars and by-reference byte
+/// `bv_values` carries each stored datum as a [`Datum`] (the codec's
+/// faithful `Datum` model — by-value scalars and by-reference byte
 /// images), matching `access/common/heaptuple.c`'s form/deform model.
 #[derive(Debug)]
 pub struct BrinValues<'mcx> {
@@ -121,10 +121,10 @@ pub struct BrinValues<'mcx> {
     /// `bv_allnulls`: are all values nulls in the page range?
     pub bv_allnulls: bool,
     /// `bv_values[oi_nstored]`: current accumulated values.
-    pub bv_values: PgVec<'mcx, TupleValue<'mcx>>,
+    pub bv_values: PgVec<'mcx, Datum<'mcx>>,
     /// `bv_mem_value`: opclass-expanded accumulated value (`Datum` of an
     /// expanded object in C); `None` is C's `PointerGetDatum(NULL)`.
-    pub bv_mem_value: Option<TupleValue<'mcx>>,
+    pub bv_mem_value: Option<Datum<'mcx>>,
     /// Whether a `bv_serialize` opclass callback is registered for this column
     /// (`brin_serialize_callback_type`; `false` is the C NULL pointer). The
     /// callback itself is opclass-owned and invoked through the brin-tuple
@@ -163,4 +163,4 @@ pub struct BrinMemTuple<'mcx> {
 /// destination `dst` slice (the column's `bv_values`), allocating any
 /// by-reference output in `mcx`.
 pub type BrinSerializeFn =
-    for<'mcx> fn(Mcx<'mcx>, &TupleValue<'_>, &mut [TupleValue<'mcx>]) -> PgResult<()>;
+    for<'mcx> fn(Mcx<'mcx>, &Datum<'_>, &mut [Datum<'mcx>]) -> PgResult<()>;

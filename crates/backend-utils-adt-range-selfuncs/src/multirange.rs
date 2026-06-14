@@ -3,6 +3,10 @@
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::{Oid, OidIsValid, Selectivity};
+// The bare-word newtype: the still-shim-typed sinks (`RangeBound.val` and the
+// `DatumGetRangeTypeP` / `DatumGetMultirangeTypeP` / `range_serialize` seams
+// owned by the not-yet-migrated rangetypes/multirangetypes crates) carry the
+// raw `Datum` machine word.
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
@@ -173,14 +177,18 @@ pub fn multirangesel(
             .expect("range typcache has rngelemtype")
             .type_id;
         if other.consttype == elem_type_id {
+            // C: `lower.val = upper.val = other->constvalue;` — a verbatim
+            // Datum-word copy. Pull the machine word out of the canonical
+            // value's by-value arm for the still-shim `RangeBound.val`.
+            let constword = Datum::from_usize(other.constvalue.as_usize());
             let lower = RangeBound {
-                val: other.constvalue,
+                val: constword,
                 infinite: false,
                 inclusive: true,
                 lower: true,
             };
             let upper = RangeBound {
-                val: other.constvalue,
+                val: constword,
                 infinite: false,
                 inclusive: true,
                 lower: false,
@@ -208,10 +216,12 @@ pub fn multirangesel(
             .as_ref()
             .expect("multirange typcache has rngtype");
         if other.consttype == rngtype.type_id {
+            // C: `DatumGetRangeTypeP(other->constvalue)` — the word is a range
+            // varlena pointer; the seam (still shim-typed) detoasts it.
             let constrange =
                 backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(
                     mcx,
-                    other.constvalue,
+                    Datum::from_usize(other.constvalue.as_usize()),
                 )?;
             constmultirange =
                 Some(make_multirange::call(mcx, tc.type_id, rngtype, &[constrange])?);
@@ -233,7 +243,12 @@ pub fn multirangesel(
     } else if other.consttype == vardata.data().vartype {
         /* Both sides are the same multirange type */
         let tc = multirange_get_typcache::call(vardata.data().vartype)?;
-        constmultirange = Some(datum_get_multirange_type_p::call(mcx, other.constvalue)?);
+        // C: `DatumGetMultirangeTypeP(other->constvalue)` — the word is a
+        // multirange varlena pointer; the seam (still shim-typed) detoasts it.
+        constmultirange = Some(datum_get_multirange_type_p::call(
+            mcx,
+            Datum::from_usize(other.constvalue.as_usize()),
+        )?);
         typcache = Some(tc);
     }
 

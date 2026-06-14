@@ -67,7 +67,10 @@ use backend_utils_mb_mbutils_seams as mbutils_seams;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid};
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what
+// `ExprContext.caseValue_datum`/`domainValue_datum` and the
+// `ExprContext_CB.arg` callback argument carry.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::execnodes::{
@@ -998,7 +1001,7 @@ pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> P
 pub fn RegisterExprContextCallback<'mcx>(
     econtext: &mut ExprContext<'mcx>,
     function: ExprContextCallbackFunction,
-    arg: Datum,
+    arg: Datum<'mcx>,
 ) -> PgResult<()> {
     // Save the info in appropriate memory context
     let mut ecxt_callback = alloc_in(
@@ -1063,7 +1066,10 @@ fn ShutdownExprContext(econtext: &mut ExprContext<'_>, is_commit: bool) -> PgRes
     while let Some(mut ecxt_callback) = econtext.ecxt_callbacks.take() {
         econtext.ecxt_callbacks = ecxt_callback.next.take();
         if is_commit {
-            (ecxt_callback.function)(econtext.ecxt_per_tuple_memory.mcx(), ecxt_callback.arg)?;
+            (ecxt_callback.function)(
+                econtext.ecxt_per_tuple_memory.mcx(),
+                ecxt_callback.arg.clone(),
+            )?;
         }
         // pfree(ecxt_callback): drop
     }
@@ -1094,7 +1100,7 @@ fn heap_getattr<'r>(
             //   HeapTupleNoNulls || !att_isnull -> fetch; else NULL.
             let has_nulls = (header.t_infomask & HEAP_HASNULL) != 0;
             if has_nulls && heap_attisnull(tup, attnum, Some(tuple_desc)) {
-                Ok((TupleValue::ByVal(Datum::null()), true))
+                Ok((TupleValue::null(), true))
             } else {
                 Ok((nocachegetattr(mcx, tup, attnum, tuple_desc, data)?, false))
             }
@@ -1144,7 +1150,7 @@ pub fn GetAttributeByName<'r>(
 ) -> PgResult<(TupleValue<'r>, bool)> {
     let Some(tuple) = tuple else {
         // Kinda bogus but compatible with old behavior...
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((TupleValue::null(), true));
     };
 
     let header = tuple
@@ -1195,7 +1201,7 @@ pub fn GetAttributeByNum<'r>(
 
     let Some(tuple) = tuple else {
         // Kinda bogus but compatible with old behavior...
-        return Ok((TupleValue::ByVal(Datum::null()), true));
+        return Ok((TupleValue::null(), true));
     };
 
     let header = tuple

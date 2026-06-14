@@ -41,7 +41,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
+use mcx::{Mcx, MemoryContext};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 use types_nodes::params::{
     ParamExternData, ParamListInfoData, ParamRef, ParamsErrorCbData, T_Param,
@@ -54,7 +54,11 @@ use backend_utils_adt_datum_seams as datum_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache_seam;
 use backend_utils_fmgr_fmgr_seams as fmgr_seam;
 use types_core::Oid;
-use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone). The owned
+// `ParamListInfoData`/`ParamExternData` carry `Datum<'mcx>`; the handle-keyed
+// store backs them in a backend-lifetime context, so the stored value type is
+// `Datum<'static>` (see `PARAM_LIST_CONTEXT`).
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `sizeof(int)` — the 4-byte count word written/read by the serializer
 /// (`memcpy(..., &nparams, sizeof(int))`).
@@ -77,11 +81,27 @@ fn oid_is_valid(oid: Oid) -> bool {
 thread_local! {
     /// The backend-local `ParamListInfo` store. The C `ParamListInfo` pointer is
     /// the [`ParamListInfoHandle`] key; the palloc'd object is the owned value.
-    static PARAM_LISTS: RefCell<HashMap<u64, ParamListInfoData>> =
+    ///
+    /// The stored value carries `Datum<'static>`: the C objects are palloc'd in a
+    /// long-lived (backend-lifetime) context, modeled by [`param_list_mcx`].
+    static PARAM_LISTS: RefCell<HashMap<u64, ParamListInfoData<'static>>> =
         RefCell::new(HashMap::new());
     /// Monotonic handle allocator (`1..`; `0` is reserved for the C `NULL`
     /// `ParamListInfoHandle::NULL`).
     static NEXT_HANDLE: RefCell<u64> = const { RefCell::new(1) };
+    /// The backend-lifetime memory context backing the store's by-reference
+    /// datum images. C's `copyParamList` / `RestoreParamList` `datumCopy` into a
+    /// caller context that outlives the `ParamListInfo`; the owned model copies
+    /// into this leaked, never-reset context so the stored `Datum<'static>`
+    /// by-reference bytes stay valid for the store's lifetime.
+    static PARAM_LIST_CONTEXT: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("ParamListInfo")));
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`PARAM_LIST_CONTEXT`] — where the
+/// store's owned by-reference datum images are allocated.
+fn param_list_mcx() -> Mcx<'static> {
+    PARAM_LIST_CONTEXT.with(|c| c.mcx())
 }
 
 /// Allocate the next non-NULL handle id.
@@ -95,7 +115,10 @@ fn alloc_handle() -> u64 {
 }
 
 /// Run `f` over the owned `ParamListInfoData` behind `handle` (read-only).
-fn with_list<R>(handle: ParamListInfoHandle, f: impl FnOnce(&ParamListInfoData) -> R) -> R {
+fn with_list<R>(
+    handle: ParamListInfoHandle,
+    f: impl FnOnce(&ParamListInfoData<'static>) -> R,
+) -> R {
     PARAM_LISTS.with(|store| {
         let store = store.borrow();
         let pl = store
@@ -108,7 +131,7 @@ fn with_list<R>(handle: ParamListInfoHandle, f: impl FnOnce(&ParamListInfoData) 
 /// Run `f` over the owned `ParamListInfoData` behind `handle` (mutable).
 fn with_list_mut<R>(
     handle: ParamListInfoHandle,
-    f: impl FnOnce(&mut ParamListInfoData) -> R,
+    f: impl FnOnce(&mut ParamListInfoData<'static>) -> R,
 ) -> R {
     PARAM_LISTS.with(|store| {
         let mut store = store.borrow_mut();
@@ -121,7 +144,7 @@ fn with_list_mut<R>(
 
 /// Install a freshly built `ParamListInfoData` into the store and return its
 /// handle.
-fn install(pl: ParamListInfoData) -> ParamListInfoHandle {
+fn install(pl: ParamListInfoData<'static>) -> ParamListInfoHandle {
     let h = alloc_handle();
     PARAM_LISTS.with(|store| store.borrow_mut().insert(h, pl));
     ParamListInfoHandle(h)
@@ -129,7 +152,7 @@ fn install(pl: ParamListInfoData) -> ParamListInfoHandle {
 
 /// Snapshot the owned struct behind `handle` (used where the C reads `*paramLI`
 /// out of the store before re-entering it under a fresh allocation).
-fn snapshot(handle: ParamListInfoHandle) -> ParamListInfoData {
+fn snapshot(handle: ParamListInfoHandle) -> ParamListInfoData<'static> {
     with_list(handle, |pl| pl.clone())
 }
 
@@ -205,7 +228,7 @@ pub fn copyParamList(from: ParamListInfoHandle) -> PgResult<ParamListInfoHandle>
         let oprm = if from.param_fetch {
             paramFetch(&from, (i + 1) as i32)
         } else {
-            from.params[i]
+            from.params[i].clone()
         };
 
         // flat-copy the parameter info
@@ -214,7 +237,8 @@ pub fn copyParamList(from: ParamListInfoHandle) -> PgResult<ParamListInfoHandle>
         // need datumCopy in case it's a pass-by-reference datatype
         if !(nprm.isnull || !oid_is_valid(nprm.ptype)) {
             let (typ_len, typ_byval) = lsyscache_seam::get_typlenbyval::call(nprm.ptype)?;
-            nprm.value = datum_seam::datum_copy::call(nprm.value, typ_byval, typ_len as i32);
+            nprm.value =
+                datum_seam::datum_copy_v::call(param_list_mcx(), &nprm.value, typ_byval, typ_len as i32)?;
         }
 
         with_list_mut(retval, |pl| pl.params[i] = nprm);
@@ -261,7 +285,7 @@ pub fn paramlist_param_ref(
     let prm = if param_li.param_fetch {
         paramFetch(&param_li, paramno)
     } else {
-        param_li.params[(paramno - 1) as usize]
+        param_li.params[(paramno - 1) as usize].clone()
     };
 
     if !oid_is_valid(prm.ptype) {
@@ -290,7 +314,7 @@ pub fn paramlist_param_ref(
 /// owned model carries the hook in another subsystem and never installs one
 /// itself (`makeParamList` leaves `param_fetch == false`), so reaching here
 /// means a caller set `param_fetch` without an owner having landed.
-fn paramFetch(_param_li: &ParamListInfoData, _paramid: i32) -> ParamExternData {
+fn paramFetch(_param_li: &ParamListInfoData<'static>, _paramid: i32) -> ParamExternData<'static> {
     panic!(
         "params: dynamic ParamListInfo paramFetch hook invoked, but no paramFetch owner is \
          ported (the hook function pointer lives in an unported subsystem)"
@@ -320,7 +344,7 @@ pub fn EstimateParamListSpace(param_li: ParamListInfoHandle) -> PgResult<usize> 
         let prm = if param_li.param_fetch {
             paramFetch(&param_li, (i + 1) as i32)
         } else {
-            param_li.params[i]
+            param_li.params[i].clone()
         };
 
         let type_oid = prm.ptype;
@@ -332,7 +356,12 @@ pub fn EstimateParamListSpace(param_li: ParamListInfoHandle) -> PgResult<usize> 
         let (typ_len, typ_byval) = typlenbyval_or_assumed(type_oid)?;
         sz = add_size(
             sz,
-            datum_seam::datum_estimate_space::call(prm.value, prm.isnull, typ_byval, typ_len as i32),
+            datum_seam::datum_estimate_space_v::call(
+                &prm.value,
+                prm.isnull,
+                typ_byval,
+                typ_len as i32,
+            ),
         )?;
     }
 
@@ -346,7 +375,8 @@ fn typlenbyval_or_assumed(type_oid: Oid) -> PgResult<(i16, bool)> {
     if oid_is_valid(type_oid) {
         lsyscache_seam::get_typlenbyval::call(type_oid)
     } else {
-        Ok((core::mem::size_of::<Datum>() as i16, true))
+        // C: `{ sizeof(Datum), true }` — `sizeof(Datum)` is the machine word.
+        Ok((core::mem::size_of::<usize>() as i16, true))
     }
 }
 
@@ -403,7 +433,7 @@ pub unsafe fn SerializeParamList(
             let prm = if param_li.param_fetch {
                 paramFetch(&param_li, (i + 1) as i32)
             } else {
-                param_li.params[i]
+                param_li.params[i].clone()
             };
             let type_oid = prm.ptype;
 
@@ -427,8 +457,8 @@ pub unsafe fn SerializeParamList(
                 // the unsafe cursor contract has no PgResult channel.
                 Err(e) => panic!("SerializeParamList: get_typlenbyval failed: {e:?}"),
             };
-            cursor = datum_seam::datum_serialize::call(
-                prm.value,
+            cursor = datum_seam::datum_serialize_v::call(
+                &prm.value,
                 prm.isnull,
                 typ_byval,
                 typ_len as i32,
@@ -479,7 +509,11 @@ pub unsafe fn RestoreParamList(
         let pflags = u16::from_ne_bytes(fbuf);
         cursor = cursor.add(SIZEOF_UINT16);
 
-        // Read datum/isnull.
+        // Read datum/isnull. `datum_restore` is the transitional bare-word seam
+        // (no `*_v` form exists yet); wrap its scalar word into the canonical
+        // by-value arm. By-reference values restored over a byte image are
+        // produced by the owner's seam impl as a `ByVal` carrying a pointer-word
+        // under the transitional model — preserved verbatim here.
         let (value, isnull, adv) = datum_seam::datum_restore::call(cursor);
         cursor = adv;
 
@@ -487,7 +521,7 @@ pub unsafe fn RestoreParamList(
             let prm = &mut pl.params[i];
             prm.ptype = ptype;
             prm.pflags = pflags;
-            prm.value = value;
+            prm.value = Datum::ByVal(value);
             prm.isnull = isnull;
         });
     }
@@ -547,8 +581,8 @@ pub fn BuildParamLogString<'mcx>(
             let (typoutput, _typisvarlena) =
                 lsyscache_seam::get_type_output_info::call(param.ptype)?;
             let pstring =
-                fmgr_seam::oid_output_function_call_datum::call(mcx, typoutput, param.value)?;
-            let s = core::str::from_utf8(pstring.as_bytes())
+                fmgr_seam::oid_output_function_call::call(mcx, typoutput, &param.value)?;
+            let s = core::str::from_utf8(&pstring)
                 .expect("type output function returns valid UTF-8 text");
             append_string_info_string_quoted(&mut buf, s, maxlen);
         }

@@ -52,7 +52,17 @@ use exec_expr::ProjectionKind;
 use mcx::{vec_with_capacity_in, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
+// The fmgr-call ABI / seam contracts still hand and return the bare-word
+// `Datum` newtype: the subplan result `Datum` (the `ExecSubPlan` /
+// `eval_testexpr_switch_context` seams), `FunctionCall2Coll`, the
+// `make_array_result_any` / `pfree_array_datum` array seams, and the
+// `*GetDatum` / `DatumGet*` scalar codecs. Those edges stay on the word until
+// their owners migrate.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// now-migrated `ParamExecData.value` and `SubPlanState.curArray` carry. The
+// per-value words crossing the still-word seams enter via its by-value arm.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
 use types_nodes::execexpr::SubPlanState;
 use types_nodes::primnodes::SubLinkType;
@@ -812,7 +822,7 @@ pub fn ExecInitSubPlan<'mcx>(
     // Default; the hash arrays are None until the useHashTable branch fills
     // them).
     sstate.curTuple = None;
-    sstate.curArray = Datum::null();
+    sstate.curArray = DatumV::null();
 
     // If this is an initplan with output params and no direct correlation (and
     // not a CTE), mark those params as needing evaluation.  We don't set
@@ -1059,14 +1069,18 @@ pub fn ExecSetParamPlan<'mcx>(
         //   node->curArray = makeArrayResultAny(astate,
         //                                       econtext->ecxt_per_query_memory,
         //                                       true);
-        arrayfuncs::pfree_array_datum::call(node.curArray);
+        // pfree(DatumGetPointer(node->curArray)). The array seam still takes the
+        // bare-word `Datum`; recover it from the canonical by-value arm.
+        arrayfuncs::pfree_array_datum::call(Datum::from_usize(node.curArray.as_usize()));
         let arr = arrayfuncs::make_array_result_any::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
         )?;
-        node.curArray = arr;
+        // node->curArray holds the freshly built array varlena `Datum`; carry
+        // the seam's bare word into the canonical value's by-value arm.
+        node.curArray = DatumV::ByVal(arr);
         set_exec_param_clear_execplan(estate, paramid, arr, false)?;
     } else if !found {
         if subLinkType == SubLinkType::Exists {
@@ -1299,14 +1313,17 @@ fn reset_per_tuple_memory(estate: &mut EStateData<'_>, ecxt: EcxtId) -> PgResult
 /// prmdata->isnull = n;` — write a PARAM_EXEC slot in the EState param array
 /// (the C reaches it via the econtext alias of `estate->es_param_exec_vals`).
 #[inline]
-fn set_exec_param(
-    estate: &mut EStateData<'_>,
+fn set_exec_param<'mcx>(
+    estate: &mut EStateData<'mcx>,
     paramid: i32,
     value: Datum,
     isnull: bool,
 ) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
-    prm.value = value;
+    // ParamExecData.value is the canonical unified value; the scalar word
+    // produced by the caller (a slot column, a bool, or a NULL placeholder)
+    // crosses into its by-value arm.
+    prm.value = DatumV::ByVal(value);
     prm.isnull = isnull;
     Ok(())
 }
@@ -1315,14 +1332,15 @@ fn set_exec_param(
 /// (`prm->execPlan = NULL`) — the form used by `ExecSetParamPlan` after
 /// evaluating an initplan's output.
 #[inline]
-fn set_exec_param_clear_execplan(
-    estate: &mut EStateData<'_>,
+fn set_exec_param_clear_execplan<'mcx>(
+    estate: &mut EStateData<'mcx>,
     paramid: i32,
     value: Datum,
     isnull: bool,
 ) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
-    prm.value = value;
+    // As above: the bare-word value crosses into the canonical by-value arm.
+    prm.value = DatumV::ByVal(value);
     prm.isnull = isnull;
     // prm->execPlan = NULL; — the execPlan link is modeled by the executor's
     // param-pending seam below; the value/isnull writes above are the data.
@@ -1350,10 +1368,10 @@ fn exec_param_execplan_pending(estate: &EStateData<'_>, paramid: i32) -> bool {
 /// `&estate->es_param_exec_vals[paramid]` — the param slot, mutably. The C
 /// indexes unconditionally; an out-of-range id is a caller/planner bug.
 #[inline]
-fn exec_param_mut<'a>(
-    estate: &'a mut EStateData<'_>,
+fn exec_param_mut<'a, 'mcx>(
+    estate: &'a mut EStateData<'mcx>,
     paramid: i32,
-) -> PgResult<&'a mut types_nodes::execnodes::ParamExecData> {
+) -> PgResult<&'a mut types_nodes::execnodes::ParamExecData<'mcx>> {
     estate
         .es_param_exec_vals
         .get_mut(paramid as usize)

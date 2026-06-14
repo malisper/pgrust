@@ -20,6 +20,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `t_isalnum_cstr(c)` (`ts_locale.c`) — true iff the leading character of
+    /// `s` is alphanumeric under the database ctype/locale. `s` is positioned
+    /// at the character under test and is never empty at a call site.
+    pub fn t_isalnum(s: &[u8]) -> bool
+);
+
+seam_core::seam!(
     /// `tsearch_readline_begin` + `tsearch_readline` loop (`ts_locale.c`) — open
     /// the tsearch config file at `filename` (a NUL-free path in the database
     /// encoding) and return its whole content, already recoded to the database

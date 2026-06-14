@@ -27,7 +27,13 @@ use backend_utils_fmgr_funcapi_seams::{materialized_srf_putvalues, InitMateriali
 use backend_utils_hash_dynahash_seams as dynahash;
 use mcx::Mcx;
 use types_core::Size;
-use types_datum::Datum;
+// `Datum` is the transitional bare-word shim type (`types_datum::Datum`),
+// retained ONLY at the audited fmgr/SRF edges this crate touches: the SQL
+// function return values (`fmgr` return), and the `values[]` row arrays handed
+// to the `materialized_srf_putvalues` seam and built from the `cstring_to_text`
+// seam — both seam contracts still carry the shim word. No canonical
+// `Datum<'mcx>` value is constructed or consumed here, so every site below is
+// written fully-qualified `types_datum::Datum` at the edge.
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
@@ -519,7 +525,7 @@ fn key_str(key: &[u8; SHMEM_INDEX_KEYSIZE]) -> std::borrow::Cow<'_, str> {
 pub fn pg_get_shmem_allocations(
     mcx: Mcx<'_>,
     fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<Datum> {
+) -> PgResult<types_datum::Datum> {
     const PG_GET_SHMEM_SIZES_COLS: usize = 4;
 
     InitMaterializedSRF::call(fcinfo, 0)?;
@@ -539,7 +545,7 @@ pub fn pg_get_shmem_allocations(
 
     let shmem_seg_hdr = SHMEM_SEG_HDR.get();
     let mut named_allocated: Size = 0;
-    let mut values = [Datum::null(); PG_GET_SHMEM_SIZES_COLS];
+    let mut values = [types_datum::Datum::null(); PG_GET_SHMEM_SIZES_COLS];
     let mut nulls = [false; PG_GET_SHMEM_SIZES_COLS];
 
     // output all allocated entries
@@ -552,9 +558,9 @@ pub fn pg_get_shmem_allocations(
         // ShmemIndexLock (entries are never freed; shmem is never returned).
         let ent = unsafe { &*ent };
         values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[1] = Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
-        values[2] = Datum::from_i64(ent.size as i64);
-        values[3] = Datum::from_i64(ent.allocated_size as i64);
+        values[1] = types_datum::Datum::from_i64(ent.location as i64 - shmem_seg_hdr as i64);
+        values[2] = types_datum::Datum::from_i64(ent.size as i64);
+        values[3] = types_datum::Datum::from_i64(ent.allocated_size as i64);
         named_allocated += ent.allocated_size;
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
@@ -567,21 +573,21 @@ pub fn pg_get_shmem_allocations(
     // output shared memory allocated but not counted via the shmem index
     values[0] = backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, "<anonymous>")?;
     nulls[1] = true;
-    values[2] = Datum::from_i64((freeoffset - named_allocated) as i64);
+    values[2] = types_datum::Datum::from_i64((freeoffset - named_allocated) as i64);
     values[3] = values[2];
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     // output as-of-yet unused shared memory
     nulls[0] = true;
-    values[1] = Datum::from_i64(freeoffset as i64);
+    values[1] = types_datum::Datum::from_i64(freeoffset as i64);
     nulls[1] = false;
-    values[2] = Datum::from_i64((totalsize - freeoffset) as i64);
+    values[2] = types_datum::Datum::from_i64((totalsize - freeoffset) as i64);
     values[3] = values[2];
     materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
 
     guard.release()?;
 
-    Ok(Datum::null())
+    Ok(types_datum::Datum::null())
 }
 
 /// `pg_numa_touch_mem_if_required(ptr)` (`port/pg_numa.h` static inline) —
@@ -606,7 +612,7 @@ pub fn pg_get_shmem_allocations_numa(
     mcx: Mcx<'_>,
     fcinfo: &mut FunctionCallInfoBaseData<'_>,
     huge_pages_status: HugePagesStatus,
-) -> PgResult<Datum> {
+) -> PgResult<types_datum::Datum> {
     const PG_GET_SHMEM_NUMA_SIZES_COLS: usize = 3;
 
     if port_pg_numa_seams::pg_numa_init::call() == -1 {
@@ -661,7 +667,7 @@ pub fn pg_get_shmem_allocations_numa(
     let mut hstat = HASH_SEQ_STATUS::new();
     dynahash::hash_seq_init::call(&mut hstat, SHMEM_INDEX.get());
 
-    let mut values = [Datum::null(); PG_GET_SHMEM_NUMA_SIZES_COLS];
+    let mut values = [types_datum::Datum::null(); PG_GET_SHMEM_NUMA_SIZES_COLS];
 
     // output all allocated entries
     loop {
@@ -750,8 +756,8 @@ pub fn pg_get_shmem_allocations_numa(
             values[0] =
                 backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
             // C: values[1] = i (a raw int assigned into the Datum word).
-            values[1] = Datum::from_i64(i as i64);
-            values[2] = Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
+            values[1] = types_datum::Datum::from_i64(i as i64);
+            values[2] = types_datum::Datum::from_i64((nodes[i as usize] * os_page_size) as i64);
 
             materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
         }
@@ -760,7 +766,7 @@ pub fn pg_get_shmem_allocations_numa(
         nulls[1] = true;
         values[0] =
             backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, &key_str(&ent.key))?;
-        values[2] = Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
+        values[2] = types_datum::Datum::from_i64((nodes[(max_nodes + 1) as usize] * os_page_size) as i64);
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }
@@ -768,7 +774,7 @@ pub fn pg_get_shmem_allocations_numa(
     guard.release()?;
     FIRST_NUMA_TOUCH.set(false);
 
-    Ok(Datum::null())
+    Ok(types_datum::Datum::null())
 }
 
 /// `pg_get_shmem_pagesize()` — the memory page size used for the shared
@@ -798,8 +804,8 @@ pub fn pg_get_shmem_pagesize(huge_pages_status: HugePagesStatus) -> Size {
 
 /// `pg_numa_available(PG_FUNCTION_ARGS)` — SQL function: whether NUMA
 /// inquiry is supported.
-pub fn pg_numa_available() -> Datum {
-    Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
+pub fn pg_numa_available() -> types_datum::Datum {
+    types_datum::Datum::from_bool(port_pg_numa_seams::pg_numa_init::call() != -1)
 }
 
 // ---------------------------------------------------------------------------

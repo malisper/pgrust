@@ -428,7 +428,7 @@ pub struct BTScanOpaqueData<'mcx> {
     /// number of preprocessed scan keys
     pub numberOfKeys: i32,
     /// array of preprocessed scan keys
-    pub keyData: PgVec<'mcx, ScanKeyData>,
+    pub keyData: PgVec<'mcx, ScanKeyData<'mcx>>,
 
     /// number of equality-type array keys
     pub numArrayKeys: i32,

@@ -28,7 +28,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT,
 };
-use types_datum::Datum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_foreigncmds::{
     ForeignDataWrapper, ForeignServer, ForeignTable, ImportForeignSchemaStmt, UserMapping,
     FDW_IMPORT_SCHEMA_ALL, FDW_IMPORT_SCHEMA_EXCEPT, FDW_IMPORT_SCHEMA_LIMIT_TO,
@@ -484,7 +484,7 @@ pub fn IsImportableForeignTable(tablename: &str, stmt: &ImportForeignSchemaStmt<
 pub fn pg_options_to_table<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     // Datum array = PG_GETARG_DATUM(0);
     let array = fmgr::pg_getarg_varlena_pp::call(fcinfo, 0)?;
 
@@ -496,22 +496,27 @@ pub fn pg_options_to_table<'mcx>(
 
     // foreach(cell, options) { ... tuplestore_putvalues(...); }
     for (defname, arg) in options.iter() {
-        let mut values: [Datum; 2] = [Datum::from_usize(0); 2];
+        let mut values: [Datum; 2] = [Datum::null(), Datum::null()];
         let mut nulls: [bool; 2] = [false; 2];
 
         // values[0] = CStringGetTextDatum(def->defname); nulls[0] = false;
-        values[0] = funcapi::cstring_get_text_datum::call(mcx, defname)?;
+        // CStringGetTextDatum is a `text *` (by-reference) value; the funcapi
+        // seam still hands back the shim bare word, so lift it into the
+        // canonical enum's by-value word and lower it again at the tuplestore
+        // ABI edge below.
+        values[0] = Datum::from_usize(funcapi::cstring_get_text_datum::call(mcx, defname)?.as_usize());
         nulls[0] = false;
 
         // if (def->arg) { values[1] = CStringGetTextDatum(strVal(def->arg)); }
         // else { values[1] = (Datum) 0; nulls[1] = true; }
         match arg {
             Some(v) => {
-                values[1] = funcapi::cstring_get_text_datum::call(mcx, v)?;
+                values[1] =
+                    Datum::from_usize(funcapi::cstring_get_text_datum::call(mcx, v)?.as_usize());
                 nulls[1] = false;
             }
             None => {
-                values[1] = Datum::from_usize(0);
+                values[1] = Datum::null();
                 nulls[1] = true;
             }
         }
@@ -520,11 +525,17 @@ pub fn pg_options_to_table<'mcx>(
             .resultinfo
             .as_mut()
             .expect("InitMaterializedSRF set fcinfo->resultinfo");
-        funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+        // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+        // Lower the canonical by-value words to the still-shim-typed seam
+        // contract at this audited tuplestore edge (funcapi/tuplestore have not
+        // advanced off the bare-word newtype).
+        let shim_values: [types_datum::Datum; 2] =
+            std::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
+        funcapi::materialized_srf_putvalues::call(rsinfo, &shim_values, &nulls)?;
     }
 
     // return (Datum) 0;
-    Ok(Datum::from_usize(0))
+    Ok(Datum::null())
 }
 
 /// `MAT_SRF_USE_EXPECTED_DESC` (`funcapi.h`).
@@ -577,10 +588,10 @@ fn is_conninfo_option(option: &str, context: Oid) -> bool {
 /// The argument extraction (`untransformRelOptions(PG_GETARG_DATUM(0))` +
 /// `PG_GETARG_OID(1)`) is performed here off `fcinfo`; the validation logic is
 /// ported 1:1. Returns the boolean the SQL function would `PG_RETURN_BOOL`.
-pub fn postgresql_fdw_validator(
-    mcx: Mcx<'_>,
-    fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<Datum> {
+pub fn postgresql_fdw_validator<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     // List *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
     let array = fmgr::pg_getarg_varlena_pp::call(fcinfo, 0)?;
     let options_list = backend_access_common_reloptions::untransformRelOptions(mcx, Some(array.as_bytes()))?;
@@ -632,7 +643,11 @@ pub fn postgresql_fdw_validator(
     }
 
     // PG_RETURN_BOOL(true);
-    Ok(fmgr::pg_return_bool::call(fcinfo, true))
+    // fmgr owns the SQL-return bare-word ABI edge; lift its word into the
+    // canonical enum for this crate's return type.
+    Ok(Datum::from_usize(
+        fmgr::pg_return_bool::call(fcinfo, true).as_usize(),
+    ))
 }
 
 /* ===========================================================================

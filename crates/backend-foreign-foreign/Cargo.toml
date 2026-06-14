@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-cache = { path = "../types-cache" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
 types-foreigncmds = { path = "../types-foreigncmds" }
 types-rel = { path = "../types-rel" }
 types-pathnodes = { path = "../types-pathnodes" }

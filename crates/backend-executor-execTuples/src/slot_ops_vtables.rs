@@ -11,14 +11,14 @@ extern crate alloc;
 
 use mcx::{slice_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::AttrNumber;
-use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     VirtualTupleTableSlot, TTS_FLAG_SHOULDFREE,
 };
 use types_storage::buf::{BufferIsValid, InvalidBuffer};
-use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple, TupleValue};
+// The canonical value enum; `TupleValue` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple, TupleValue};
 use types_tuple::heaptuple::CompactAttribute;
 
 use crate::slot_deform::slot_deform_heap_tuple;
@@ -171,7 +171,7 @@ pub fn tts_virtual_getsomeattrs(_slot: &mut VirtualTupleTableSlot, _natts: i32) 
 pub fn tts_virtual_getsysattr(
     slot: &VirtualTupleTableSlot,
     _attnum: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
     Err(feature_not_supported(
@@ -433,7 +433,7 @@ fn source_all_attrs<'mcx>(
         // slot_getmissingattrs over the descriptor — but for a copyslot the dst
         // descriptor matches the src, and a too-short source tuple pads NULL.
         while values.len() < natts {
-            values.push(TupleValue::ByVal(Datum::null()));
+            values.push(Datum::null());
             isnull.push(true);
         }
         Ok((values, isnull))
@@ -610,7 +610,7 @@ pub fn tts_heap_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &HeapTupleTableSlot<'mcx>,
     attnum: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
 
@@ -1004,7 +1004,7 @@ fn deform_minimal_through_heap_view<'mcx>(
 pub fn tts_minimal_getsysattr(
     slot: &MinimalTupleTableSlot,
     _attnum: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.is_empty());
     Err(feature_not_supported(
@@ -1375,7 +1375,7 @@ pub fn tts_buffer_heap_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &BufferHeapTupleTableSlot<'mcx>,
     attnum: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!slot.base.base.is_empty());
 
@@ -1720,7 +1720,7 @@ pub fn tts_buffer_heap_copy_minimal_tuple<'mcx>(
 /// owned model — that pointer-Datum boundary is the slot payload model's
 /// (the owned values cross as `TupleValue`, not raw words). Mirror PG (which
 /// hands a raw pointer) and panic.
-fn tuple_value_to_datum(value: &TupleValue<'_>) -> PgResult<Datum> {
+fn tuple_value_to_datum(value: &TupleValue<'_>) -> PgResult<types_datum::Datum> {
     match value {
         TupleValue::ByVal(d) => Ok(*d),
         TupleValue::ByRef(_) => Err(elog_error(
@@ -1780,7 +1780,7 @@ pub fn slot_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<(types_datum::Datum, bool)> {
     match slot {
         SlotData::Virtual(s) => tts_virtual_getsysattr(s, attnum as i32),
         SlotData::Heap(s) => tts_heap_getsysattr(mcx, s, attnum as i32),

@@ -11,12 +11,12 @@
 
 use mcx::Mcx;
 use types_core::primitive::Size;
-use types_datum::Datum;
 use types_error::{PgError, PgResult};
 use types_nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
 use types_nodes::TupleSlotKind;
 use types_storage::buf::{Buffer, BufferIsValid};
-use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple, TupleValue};
+// The canonical value enum.
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
 use types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
 use crate::slot_ops_vtables::{
@@ -247,9 +247,11 @@ pub fn ExecStoreAllNullTuple<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) ->
     let base = slot.base_mut();
     // MemSet(slot->tts_values, 0, natts * sizeof(Datum));
     base.tts_values.clear();
-    base.tts_values.try_reserve(natts).map_err(|_| mcx.oom(natts * core::mem::size_of::<Datum>()))?;
+    base.tts_values
+        .try_reserve(natts)
+        .map_err(|_| mcx.oom(natts * core::mem::size_of::<types_datum::Datum>()))?;
     for _ in 0..natts {
-        base.tts_values.push(TupleValue::ByVal(Datum::null()));
+        base.tts_values.push(Datum::null());
     }
     // memset(slot->tts_isnull, true, natts * sizeof(bool));
     base.tts_isnull.clear();
@@ -266,7 +268,7 @@ pub fn ExecStoreAllNullTuple<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>) ->
 /// `Datum` into the slot as a virtual tuple.
 pub fn ExecStoreHeapTupleDatum<'mcx>(
     mcx: Mcx<'mcx>,
-    data: Datum,
+    data: Datum<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
     // HeapTupleData tuple = {0};
@@ -364,7 +366,7 @@ pub fn ExecFetchSlotMinimalTuple<'mcx>(
 pub fn ExecFetchSlotHeapTupleDatum<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     // tup = ExecFetchSlotHeapTuple(slot, false, &shouldFree);
     let (tup, should_free) = ExecFetchSlotHeapTuple(mcx, slot, false)?;
     // tupdesc = slot->tts_tupleDescriptor;
@@ -572,15 +574,16 @@ fn deform_into_slot<'mcx>(
 /// `tuple` (built from `DatumGetHeapTupleHeader(data)`) deformed into the slot
 /// (`ExecStoreHeapTupleDatum`).
 ///
-/// `DatumGetHeapTupleHeader(data)` decodes a composite (`record`) `Datum` — a
-/// pointer-into-varlena word — back into a `HeapTupleHeader` + its data area.
-/// In this owned model a `Datum` is a bare machine word (`types-datum`) with no
-/// by-reference / pointer-to-tuple lane, and the composite-Datum decode bridge
-/// (`DatumGetHeapTupleHeader` / `HeapTupleHeaderGetDatumLength` over owned bytes)
-/// is not ported anywhere in the workspace — every consumer of it
-/// (execExprInterp's row/fieldselect/fieldstore steps included) is still a
-/// mirror-PG-and-panic on the same unported bridge. Mirror PG and panic on the
-/// genuinely-unported composite-Datum decode.
+/// `DatumGetHeapTupleHeader(data)` decodes a composite (`record`) `Datum` back
+/// into a `HeapTupleHeader` + its data area. The canonical `Datum` enum carries
+/// a composite value as `ByRef(bytes)`, but the composite-Datum decode bridge —
+/// reinterpreting those `ByRef` bytes as a `HeapTupleHeader`
+/// (`DatumGetHeapTupleHeader`) and reading `HeapTupleHeaderGetDatumLength` /
+/// the composite-Datum header fields off them — is not ported anywhere in the
+/// workspace. Every consumer of it (execExprInterp's row/fieldselect/fieldstore
+/// /convert-rowtype steps included) is still a mirror-PG-and-panic on the same
+/// unported bridge. Mirror PG and panic on the genuinely-unported composite-Datum
+/// decode.
 fn deform_composite_datum_into_slot<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &mut SlotData<'mcx>,
@@ -588,8 +591,9 @@ fn deform_composite_datum_into_slot<'mcx>(
 ) -> PgResult<()> {
     panic!(
         "execTuples.c ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader (composite-Datum \
-         decode) is not ported anywhere in the workspace (bare-word Datum has no \
-         pointer-to-tuple lane); same unported bridge execExprInterp's row steps panic on"
+         decode — reinterpreting the record Datum's ByRef bytes as a HeapTupleHeader) is \
+         not ported anywhere in the workspace; same unported bridge execExprInterp's \
+         composite steps panic on"
     )
 }
 
@@ -598,19 +602,23 @@ fn deform_composite_datum_into_slot<'mcx>(
 /// composite `Datum`.
 ///
 /// `heap_copy_tuple_as_datum` itself is ported (it yields a `FormedTuple`
-/// composite image), but minting that image back into a composite `Datum` word
-/// (`HeapTupleGetDatum` / `PointerGetDatum` over owned bytes) is the same
-/// composite-Datum bridge that has no representation in the bare-word `Datum`
-/// model and is unported workspace-wide. Mirror PG and panic on the
-/// genuinely-unported composite-Datum mint.
+/// composite image), but minting that image into a composite `Datum` —
+/// serializing the `HeapTupleHeader` (with the `datum_len_`/`datum_typeid`/
+/// `datum_typmod` fields) into the `ByRef` byte layout `DatumGetHeapTupleHeader`
+/// reads back (`HeapTupleGetDatum`) — is the composite-Datum bridge that is
+/// unported workspace-wide. (Even with the canonical `Datum::ByRef` lane, that
+/// header-serialization layout has no porter; execExprInterp's composite steps
+/// panic on the same boundary.) Mirror PG and panic on the genuinely-unported
+/// composite-Datum mint.
 fn heap_copy_tuple_as_datum_carrier<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &SlotData<'mcx>,
     _tup: FormedTuple<'mcx>,
-) -> PgResult<Datum> {
+) -> PgResult<Datum<'mcx>> {
     panic!(
         "execTuples.c ExecFetchSlotHeapTupleDatum: minting heap_copy_tuple_as_datum's image \
-         into a composite Datum word (HeapTupleGetDatum) needs the composite-Datum bridge, \
-         which the bare-word Datum model cannot represent and is unported workspace-wide"
+         into a composite Datum (HeapTupleGetDatum — serializing the HeapTupleHeader into the \
+         ByRef byte layout DatumGetHeapTupleHeader reads back) needs the composite-Datum bridge, \
+         which is unported workspace-wide"
     )
 }

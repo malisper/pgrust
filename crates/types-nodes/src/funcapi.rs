@@ -218,7 +218,7 @@ pub struct AttInMetadata<'mcx> {
 #[derive(Debug)]
 pub struct ExtractedVariadicArgs<'mcx> {
     /// `*values` — per-element datums (the C `Datum *args`).
-    pub values: mcx::PgVec<'mcx, types_datum::Datum>,
+    pub values: mcx::PgVec<'mcx, types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     /// `*types` — per-element type OIDs (the C `Oid *types`).
     pub types: mcx::PgVec<'mcx, types_core::Oid>,
     /// `*nulls` — per-element null flags (the C `bool *nulls`).

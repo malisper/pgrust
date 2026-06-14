@@ -18,7 +18,8 @@
 use mcx::{MemoryContext, PgBox, PgString, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
-use types_datum::datum::{Datum, NullableDatum};
+use types_datum::datum::NullableDatum;
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::HeapTuple;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -313,13 +314,13 @@ pub enum MinMaxOp {
 /// `PGFunction` (fmgr.h) — the C-level fmgr function pointer
 /// `Datum (*)(FunctionCallInfo)`. Mirrored here as the stored shape; the fmgr
 /// owner installs concrete addresses.
-pub type PGFunction = for<'mcx> fn(&mut FunctionCallInfoBaseData<'mcx>) -> Datum;
+pub type PGFunction = for<'mcx> fn(&mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx>;
 
 /// `ExprStateEvalFunc` (execnodes.h) — `Datum (*)(ExprState *, ExprContext *,
 /// bool *isNull)`: the function that actually evaluates a compiled expression
 /// (set to different bodies depending on expression complexity). The
 /// `ExprContext` is identified by its [`EcxtId`] pool index in the owned model.
-pub type ExprStateEvalFunc = for<'mcx> fn(&mut ExprState<'mcx>, EcxtId, &mut bool) -> Datum;
+pub type ExprStateEvalFunc = for<'mcx> fn(&mut ExprState<'mcx>, EcxtId, &mut bool) -> Datum<'mcx>;
 
 /// `ExecEvalSubroutine` (execExpr.h) — typical out-of-line evaluation
 /// subroutine: `void (*)(ExprState *, struct ExprEvalStep *, ExprContext *)`.
@@ -334,7 +335,7 @@ pub type ExecEvalBoolSubroutine =
 
 /// `SubscriptingRefState` (execExpr.h) — non-inline data for container
 /// (`SubscriptingRef`) operations. Pointed at by the `sbsref*` steps.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SubscriptingRefState<'mcx> {
     /// `bool isassignment` — is it assignment, or just fetch?
     pub isassignment: bool,
@@ -346,7 +347,7 @@ pub struct SubscriptingRefState<'mcx> {
     /// `bool *upperprovided` — indicates if this position is supplied.
     pub upperprovided: Option<PgVec<'mcx, bool>>,
     /// `Datum *upperindex`.
-    pub upperindex: Option<PgVec<'mcx, Datum>>,
+    pub upperindex: Option<PgVec<'mcx, Datum<'mcx>>>,
     /// `bool *upperindexnull`.
     pub upperindexnull: Option<PgVec<'mcx, bool>>,
     /// `int numlower`.
@@ -354,17 +355,39 @@ pub struct SubscriptingRefState<'mcx> {
     /// `bool *lowerprovided`.
     pub lowerprovided: Option<PgVec<'mcx, bool>>,
     /// `Datum *lowerindex`.
-    pub lowerindex: Option<PgVec<'mcx, Datum>>,
+    pub lowerindex: Option<PgVec<'mcx, Datum<'mcx>>>,
     /// `bool *lowerindexnull`.
     pub lowerindexnull: Option<PgVec<'mcx, bool>>,
     /// `Datum replacevalue` — for assignment, new value to assign.
-    pub replacevalue: Datum,
+    pub replacevalue: Datum<'mcx>,
     /// `bool replacenull`.
     pub replacenull: bool,
     /// `Datum prevvalue` — nested-assignment old value sink.
-    pub prevvalue: Datum,
+    pub prevvalue: Datum<'mcx>,
     /// `bool prevnull`.
     pub prevnull: bool,
+}
+
+impl Default for SubscriptingRefState<'_> {
+    fn default() -> Self {
+        // C `palloc0` zero-init of the sbsref workspace.
+        SubscriptingRefState {
+            isassignment: false,
+            workspace: 0,
+            numupper: 0,
+            upperprovided: None,
+            upperindex: None,
+            upperindexnull: None,
+            numlower: 0,
+            lowerprovided: None,
+            lowerindex: None,
+            lowerindexnull: None,
+            replacevalue: Datum::null(),
+            replacenull: false,
+            prevvalue: Datum::null(),
+            prevnull: false,
+        }
+    }
 }
 
 /// `JsonConstructorExprState` (execExpr.h) — EEOP_JSON_CONSTRUCTOR state, too
@@ -375,7 +398,7 @@ pub struct SubscriptingRefState<'mcx> {
 #[derive(Debug, Default)]
 pub struct JsonConstructorExprState<'mcx> {
     /// `Datum *arg_values`.
-    pub arg_values: Option<PgVec<'mcx, Datum>>,
+    pub arg_values: Option<PgVec<'mcx, Datum<'mcx>>>,
     /// `bool *arg_nulls`.
     pub arg_nulls: Option<PgVec<'mcx, bool>>,
     /// `Oid *arg_types`.
@@ -469,7 +492,7 @@ pub enum ExprEvalStepData<'mcx> {
         jumpdone: i32,
     },
     /// `constval` — for EEOP_CONST.
-    ConstVal { value: Datum, isnull: bool },
+    ConstVal { value: Datum<'mcx>, isnull: bool },
     /// `func` — for EEOP_FUNCEXPR_* / NULLIF / DISTINCT.
     Func {
         /// `FmgrInfo *finfo` — function's lookup data.
@@ -565,7 +588,7 @@ pub enum ExprEvalStepData<'mcx> {
     /// `arrayexpr` — for EEOP_ARRAYEXPR.
     ArrayExpr {
         /// `Datum *elemvalues` — element values get stored here.
-        elemvalues: Option<PgVec<'mcx, Datum>>,
+        elemvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *elemnulls`.
         elemnulls: Option<PgVec<'mcx, bool>>,
         /// length of the above arrays
@@ -596,7 +619,7 @@ pub enum ExprEvalStepData<'mcx> {
         /// descriptor for result tuples
         tupdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
         /// `Datum *elemvalues`.
-        elemvalues: Option<PgVec<'mcx, Datum>>,
+        elemvalues: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *elemnulls`.
         elemnulls: Option<PgVec<'mcx, bool>>,
     },
@@ -615,7 +638,7 @@ pub enum ExprEvalStepData<'mcx> {
     /// `minmax` — for EEOP_MINMAX.
     MinMax {
         /// `Datum *values` — argument workspace.
-        values: Option<PgVec<'mcx, Datum>>,
+        values: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *nulls`.
         nulls: Option<PgVec<'mcx, bool>>,
         nelems: i32,
@@ -640,7 +663,7 @@ pub enum ExprEvalStepData<'mcx> {
         /// `ExprEvalRowtypeCache *rowcache` — shared by the DEFORM/FORM pair.
         rowcache: Option<PgBox<'mcx, ExprEvalRowtypeCache>>,
         /// `Datum *values` — column-value workspace.
-        values: Option<PgVec<'mcx, Datum>>,
+        values: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *nulls`.
         nulls: Option<PgVec<'mcx, bool>>,
         ncolumns: i32,
@@ -673,7 +696,7 @@ pub enum ExprEvalStepData<'mcx> {
         escontext: usize,
     },
     /// `hashdatum_initvalue` — for EEOP_HASHDATUM_SET_INITVAL.
-    HashDatumInitValue { init_value: Datum },
+    HashDatumInitValue { init_value: Datum<'mcx> },
     /// `hashdatum` — for EEOP_HASHDATUM_(FIRST|NEXT32)[_STRICT].
     HashDatum {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
@@ -739,7 +762,7 @@ pub enum ExprEvalStepData<'mcx> {
         /// the interpreter builds on first evaluation and reuses across rows.
         /// `None` is the C `NULL` (not yet built); per the "opacity inherited"
         /// rule this is the real typed table, not an address word.
-        elements_tab: Option<alloc::boxed::Box<crate::saophash::ScalarArrayOpExprHashTable>>,
+        elements_tab: Option<alloc::boxed::Box<crate::saophash::ScalarArrayOpExprHashTable<'mcx>>>,
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         /// `ScalarArrayOpExpr *saop` — original node.
@@ -757,11 +780,11 @@ pub enum ExprEvalStepData<'mcx> {
         /// `XmlExpr` (opaque address).
         xexpr: usize,
         /// `Datum *named_argvalue`.
-        named_argvalue: Option<PgVec<'mcx, Datum>>,
+        named_argvalue: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *named_argnull`.
         named_argnull: Option<PgVec<'mcx, bool>>,
         /// `Datum *argvalue`.
-        argvalue: Option<PgVec<'mcx, Datum>>,
+        argvalue: Option<PgVec<'mcx, Datum<'mcx>>>,
         /// `bool *argnull`.
         argnull: Option<PgVec<'mcx, bool>>,
     },
@@ -936,12 +959,22 @@ pub const STATE_RESULT_CELL: ResultCellId = ResultCellId(0);
 /// One per-step result cell: the `(Datum, bool)` pair a `Datum *`/`bool *`
 /// pointer pair points at in C. Stored in the [`ResultCellArena`] and addressed
 /// by [`ResultCellId`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ResultCell {
+#[derive(Clone, Debug)]
+pub struct ResultCell<'mcx> {
     /// The cell's `Datum` value (the `*resvalue` target).
-    pub value: Datum,
+    pub value: Datum<'mcx>,
     /// The cell's is-null flag (the `*resnull` target).
     pub isnull: bool,
+}
+
+impl Default for ResultCell<'_> {
+    fn default() -> Self {
+        // A freshly-allocated cell holds a NULL value, not-null cleared.
+        ResultCell {
+            value: Datum::null(),
+            isnull: false,
+        }
+    }
 }
 
 /// Arena of per-step result cells owned by an [`ExprState`]. Replaces the web
@@ -954,20 +987,20 @@ pub struct ResultCell {
 #[derive(Debug, Default)]
 pub struct ResultCellArena<'mcx> {
     /// The cells, indexed by [`ResultCellId`].
-    pub cells: Option<PgVec<'mcx, ResultCell>>,
+    pub cells: Option<PgVec<'mcx, ResultCell<'mcx>>>,
 }
 
 impl<'mcx> ResultCellArena<'mcx> {
     /// Read a cell by id.
-    pub fn get(&self, id: ResultCellId) -> ResultCell {
+    pub fn get(&self, id: ResultCellId) -> ResultCell<'mcx> {
         self.cells
             .as_ref()
-            .and_then(|c| c.get(id.0 as usize).copied())
+            .and_then(|c| c.get(id.0 as usize).cloned())
             .unwrap_or_default()
     }
 
     /// Write a cell by id (extends the arena with default cells if needed).
-    pub fn set(&mut self, id: ResultCellId, cell: ResultCell) {
+    pub fn set(&mut self, id: ResultCellId, cell: ResultCell<'mcx>) {
         if let Some(cells) = self.cells.as_mut() {
             let i = id.0 as usize;
             if i < cells.len() {
@@ -997,7 +1030,7 @@ impl<'mcx> ResultCellArena<'mcx> {
 /// `ext_params`, the innermost case/domain value pointers, and the soft-error
 /// `escontext`). The C `evalfunc_private` is an opaque interpreter scratch
 /// pointer, carried as an address.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExprState<'mcx> {
     /// `uint8 flags` — bitmask of `EEO_FLAG_*` bits.
     pub flags: u8,
@@ -1005,7 +1038,7 @@ pub struct ExprState<'mcx> {
     pub resnull: bool,
     /// `Datum resvalue` — scalar result, or per-column result during
     /// projection.
-    pub resvalue: Datum,
+    pub resvalue: Datum<'mcx>,
     /// `TupleTableSlot *resultslot` — holds the result if projecting a tuple,
     /// else NULL.
     pub resultslot: Option<PgBox<'mcx, TupleTableSlot>>,
@@ -1057,7 +1090,7 @@ impl<'mcx> Clone for ExprState<'mcx> {
         ExprState {
             flags: self.flags,
             resnull: self.resnull,
-            resvalue: self.resvalue,
+            resvalue: self.resvalue.clone(),
             resultslot: None,
             steps: None,
             result_cells: ResultCellArena::default(),
@@ -1071,6 +1104,32 @@ impl<'mcx> Clone for ExprState<'mcx> {
             innermost_caseval: None,
             innermost_domainval: None,
             escontext: self.escontext,
+        }
+    }
+}
+
+impl Default for ExprState<'_> {
+    fn default() -> Self {
+        // The C `ExprState` is `palloc0`'d / `makeNode`'d: all-zero, NULL
+        // result value. The canonical `Datum` is not itself `Default`, so the
+        // NULL `resvalue` is spelled out.
+        ExprState {
+            flags: 0,
+            resnull: false,
+            resvalue: Datum::null(),
+            resultslot: None,
+            steps: None,
+            result_cells: ResultCellArena::default(),
+            evalfunc: None,
+            expr: None,
+            evalfunc_private: 0,
+            steps_len: 0,
+            steps_alloc: 0,
+            parent: None,
+            ext_params: 0,
+            innermost_caseval: None,
+            innermost_domainval: None,
+            escontext: 0,
         }
     }
 }
@@ -1203,7 +1262,7 @@ pub struct ProjectionInfo<'mcx> {
 /// that nodeSubplan only builds and probes through those units' seams. The C
 /// `parent` back-pointer is not carried: callers thread the parent state
 /// explicitly.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SubPlanState<'mcx> {
     /// `SubPlan *subplan` — the expression plan node.
     pub subplan: Option<PgBox<'mcx, SubPlan<'mcx>>>,
@@ -1214,7 +1273,7 @@ pub struct SubPlanState<'mcx> {
     /// `HeapTuple curTuple` — copy of most recent tuple from subplan.
     pub curTuple: HeapTuple<'mcx>,
     /// `Datum curArray` — most recent array from `ARRAY()` subplan.
-    pub curArray: Datum,
+    pub curArray: Datum<'mcx>,
     /// `TupleDesc descRight` — subselect desc after projection.
     pub descRight: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
     /// `ProjectionInfo *projLeft` — for projecting lefthand exprs
@@ -1264,6 +1323,39 @@ pub struct SubPlanState<'mcx> {
     /// `ExprState *cur_eq_comp` — equality comparator for LHS vs. table
     /// (execExpr-owned).
     pub cur_eq_comp: Opaque,
+}
+
+impl Default for SubPlanState<'_> {
+    fn default() -> Self {
+        // `makeNode(SubPlanState)` zero-init; the canonical `Datum` is not
+        // `Default`, so the NULL `curArray` is spelled out.
+        SubPlanState {
+            subplan: None,
+            planstate: None,
+            testexpr: Default::default(),
+            curTuple: Default::default(),
+            curArray: Datum::null(),
+            descRight: None,
+            projLeft: Default::default(),
+            projRight: Default::default(),
+            hashtable: None,
+            hashnulls: None,
+            havehashrows: false,
+            havenullrows: false,
+            hashtablecxt: None,
+            hashtempcxt: None,
+            hashiter: Default::default(),
+            innerecontext: None,
+            numCols: 0,
+            keyColIdx: None,
+            tab_eq_funcoids: None,
+            tab_collations: None,
+            tab_hash_funcs: None,
+            lhs_hash_expr: Default::default(),
+            cur_eq_funcs: None,
+            cur_eq_comp: Default::default(),
+        }
+    }
 }
 
 /// `LastAttnumInfo` (execExpr.c) — bookkeeping used by

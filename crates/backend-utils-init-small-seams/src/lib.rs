@@ -340,3 +340,12 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `char *DataDir` (`globals.c` global): the absolute path to the top
+    /// level of the data directory, or `None` when unset. Pure read of
+    /// process-startup state; used by `AbsoluteConfigLocation`
+    /// (`utils/misc/conffiles.c`) to resolve a relative config location at the
+    /// top level.
+    pub fn data_dir() -> Option<String>
+);

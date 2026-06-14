@@ -17,6 +17,7 @@ use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
 use types_datum::Datum;
 use types_error::PgResult;
 use types_scan::scankey::{ScanKeyData, StrategyNumber, SK_SEARCHNOTNULL, SK_SEARCHNULL};
+use types_tuple::backend_access_common_heaptuple::Datum as ScanKeyArg;
 
 /// `ScanKeyEntryInitialize(entry, flags, attributeNumber, strategy, subtype,
 /// collation, procedure, argument)` (`access/common/scankey.c`) — initialize a
@@ -46,7 +47,7 @@ pub fn ScanKeyEntryInitialize(
     entry.sk_strategy = strategy;
     entry.sk_subtype = subtype;
     entry.sk_collation = collation;
-    entry.sk_argument = argument;
+    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
     // C: if (RegProcedureIsValid(procedure)) fmgr_info(...); else { Assert(...);
     // MemSet(&entry->sk_func, 0, ...) }. RegProcedureIsValid is `!= InvalidOid`.
     if procedure != InvalidOid {
@@ -83,7 +84,7 @@ pub fn ScanKeyEntryInitializeWithInfo(
     entry.sk_strategy = strategy;
     entry.sk_subtype = subtype;
     entry.sk_collation = collation;
-    entry.sk_argument = argument;
+    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
     // C: fmgr_info_copy(&entry->sk_func, finfo, CurrentMemoryContext).
     entry.sk_func = *finfo;
 }
@@ -111,7 +112,7 @@ pub fn ScanKeyInit(
     entry.sk_strategy = strategy;
     entry.sk_subtype = InvalidOid;
     entry.sk_collation = C_COLLATION_OID;
-    entry.sk_argument = argument;
+    entry.sk_argument = ScanKeyArg::from_usize(argument.as_usize());
     // C: fmgr_info(procedure, &entry->sk_func). The resolved FmgrInfo cannot
     // cross the seam (it embeds the C function pointer); the lookup half runs
     // behind the seam and the carrier records the resolved function's OID.

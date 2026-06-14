@@ -463,7 +463,7 @@ pub fn apply_relabel_type(
         // Const is value-typed, so we always produce the updated copy
         // (overwrite-vs-copy is an in-place-pointer optimization in C with no
         // observable difference here).
-        let mut con: Const = *con;
+        let mut con: Const = con.clone();
         con.consttype = rtype;
         con.consttypmod = rtypmod;
         con.constcollid = rcollid;

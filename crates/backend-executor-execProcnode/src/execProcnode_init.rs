@@ -65,16 +65,16 @@ pub fn exec_init_node<'mcx>(
         // case T_ModifyTable: ExecInitModifyTable(...) (nodeModifyTable.c)
 
         // case T_Append: ExecInitAppend((Append *) node, estate, eflags)
-        Node::Append(_) => panic!(
-            "backend-executor-nodeAppend::ExecInitAppend: ExecInitNode T_Append arm; \
-             not ported / no seam declared"
-        ),
+        Node::Append(append) => {
+            let s = backend_executor_nodeAppend::ExecInitAppend(mcx, node, append, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Append(s))?
+        }
 
-        // case T_MergeAppend: ExecInitMergeAppend(...) (nodeMergeAppend.c)
-        Node::MergeAppend(_) => panic!(
-            "backend-executor-nodeMergeAppend::ExecInitMergeAppend: ExecInitNode \
-             T_MergeAppend arm; not ported / no seam declared"
-        ),
+        // case T_MergeAppend: ExecInitMergeAppend((MergeAppend *) node, estate, eflags)
+        Node::MergeAppend(_) => {
+            let s = backend_executor_nodeMergeAppend::ExecInitMergeAppend(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::MergeAppend(s))?
+        }
 
         // case T_RecursiveUnion: ExecInitRecursiveUnion(...) (nodeRecursiveunion.c)
 
@@ -86,20 +86,20 @@ pub fn exec_init_node<'mcx>(
         // scan nodes
         // ------------------------------------------------------------------
         // case T_SeqScan: ExecInitSeqScan((SeqScan *) node, estate, eflags)
-        Node::SeqScan(_) => panic!(
-            "backend-executor-nodeSeqscan::ExecInitSeqScan: ExecInitNode T_SeqScan arm; \
-             not ported / no seam declared"
-        ),
+        Node::SeqScan(seqscan) => {
+            let s = backend_executor_nodeSeqscan::ExecInitSeqScan(seqscan, node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::SeqScan(s))?
+        }
 
         // case T_SampleScan: ExecInitSampleScan(...) (nodeSamplescan.c)
 
         // case T_IndexScan: ExecInitIndexScan(...) (nodeIndexscan.c)
 
-        // case T_IndexOnlyScan: ExecInitIndexOnlyScan(...) (nodeIndexonlyscan.c)
-        Node::IndexOnlyScan(_) => panic!(
-            "backend-executor-nodeIndexonlyscan::ExecInitIndexOnlyScan: ExecInitNode \
-             T_IndexOnlyScan arm; not ported / no seam declared"
-        ),
+        // case T_IndexOnlyScan: ExecInitIndexOnlyScan((IndexOnlyScan *) node, estate, eflags)
+        Node::IndexOnlyScan(_) => {
+            let s = backend_executor_nodeIndexonlyscan::ExecInitIndexOnlyScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::IndexOnlyScan(s))?
+        }
 
         // case T_BitmapIndexScan: ExecInitBitmapIndexScan(...) (nodeBitmapIndexscan.c)
 
@@ -118,10 +118,10 @@ pub fn exec_init_node<'mcx>(
         // case T_FunctionScan: ExecInitFunctionScan(...) (nodeFunctionscan.c)
 
         // case T_TableFuncScan: ExecInitTableFuncScan((TableFuncScan *) node, estate, eflags)
-        Node::TableFuncScan(_) => panic!(
-            "backend-executor-nodeTableFuncscan::ExecInitTableFuncScan: ExecInitNode \
-             T_TableFuncScan arm; not ported / no seam declared"
-        ),
+        Node::TableFuncScan(_) => {
+            let s = backend_executor_nodeTableFuncscan::ExecInitTableFuncScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::TableFuncScan(s))?
+        }
 
         // case T_ValuesScan: ExecInitValuesScan(...) (nodeValuesscan.c)
 
@@ -133,10 +133,10 @@ pub fn exec_init_node<'mcx>(
         // case T_WorkTableScan: ExecInitWorkTableScan(...) (nodeWorktablescan.c)
 
         // case T_ForeignScan: ExecInitForeignScan((ForeignScan *) node, estate, eflags)
-        Node::ForeignScan(_) => panic!(
-            "backend-executor-nodeForeignscan::ExecInitForeignScan: ExecInitNode \
-             T_ForeignScan arm; not ported / no seam declared"
-        ),
+        Node::ForeignScan(_) => {
+            let s = backend_executor_nodeForeignscan::ExecInitForeignScan(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::ForeignScan(s))?
+        }
 
         // case T_CustomScan: ExecInitCustomScan(...) (nodeCustom.c)
 
@@ -144,45 +144,53 @@ pub fn exec_init_node<'mcx>(
         // join nodes
         // ------------------------------------------------------------------
         // case T_NestLoop: ExecInitNestLoop((NestLoop *) node, estate, eflags)
-        Node::NestLoop(_) => panic!(
-            "backend-executor-nodeNestloop::ExecInitNestLoop: ExecInitNode T_NestLoop arm; \
-             not ported / no seam declared"
-        ),
+        Node::NestLoop(_) => {
+            let s = backend_executor_nodeNestloop::ExecInitNestLoop(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::NestLoop(s))?
+        }
 
         // case T_MergeJoin: ExecInitMergeJoin((MergeJoin *) node, estate, eflags)
-        Node::MergeJoin(_) => panic!(
-            "backend-executor-nodeMergejoin::ExecInitMergeJoin: ExecInitNode T_MergeJoin arm; \
-             not ported / no seam declared"
-        ),
+        Node::MergeJoin(_) => {
+            let s = backend_executor_nodeMergejoin::ExecInitMergeJoin(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::MergeJoin(s))?
+        }
 
         // case T_HashJoin: ExecInitHashJoin((HashJoin *) node, estate, eflags)
-        Node::HashJoin(_) => panic!(
-            "backend-executor-nodeHashjoin::ExecInitHashJoin: ExecInitNode T_HashJoin arm; \
-             not ported / no seam declared"
-        ),
+        Node::HashJoin(_) => {
+            let s = backend_executor_nodeHashjoin::ExecInitHashJoin(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::HashJoin(s))?
+        }
 
         // ------------------------------------------------------------------
         // materialization nodes
         // ------------------------------------------------------------------
         // case T_Material: ExecInitMaterial((Material *) node, estate, eflags)
-        Node::Material(_) => panic!(
-            "backend-executor-nodeMaterial::ExecInitMaterial: ExecInitNode T_Material arm; \
-             not ported / no seam declared"
-        ),
+        Node::Material(_) => {
+            let s = backend_executor_nodeMaterial::ExecInitMaterial(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Material(s))?
+        }
 
         // case T_Sort: ExecInitSort((Sort *) node, estate, eflags)
-        Node::Sort(_) => panic!(
-            "backend-executor-nodeSort::ExecInitSort: ExecInitNode T_Sort arm; \
-             not ported / no seam declared"
-        ),
+        Node::Sort(_) => {
+            let s = backend_executor_nodeSort::ExecInitSort(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Sort(s))?
+        }
 
         // case T_IncrementalSort: ExecInitIncrementalSort(...) (nodeIncrementalsort.c)
 
         // case T_Memoize: ExecInitMemoize((Memoize *) node, estate, eflags)
-        Node::Memoize(_) => panic!(
-            "backend-executor-nodeMemoize::ExecInitMemoize: ExecInitNode T_Memoize arm; \
-             not ported / no seam declared"
-        ),
+        //
+        // `ExecInitMemoize` returns the node state in a global-allocator
+        // `alloc::boxed::Box` (the nodeMemoize port's local makeNode allocation
+        // model), whereas the `PlanStateNode::Memoize` variant — like every
+        // other plan-state arm — carries the executor-context `PgBox`. Re-home
+        // the owned `MemoizeScanState` into the query context via `alloc_in`,
+        // matching the C `makeNode(MemoizeState)` allocation in the executor
+        // memory context (move-only; the state struct owns its contents).
+        Node::Memoize(_) => {
+            let s = backend_executor_nodeMemoize::ExecInitMemoize(node, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Memoize(alloc_in(mcx, *s)?))?
+        }
 
         // case T_Group: ExecInitGroup(...) (nodeGroup.c)
 
@@ -197,10 +205,10 @@ pub fn exec_init_node<'mcx>(
         // case T_GatherMerge: ExecInitGatherMerge(...) (nodeGatherMerge.c)
 
         // case T_Hash: ExecInitHash((Hash *) node, estate, eflags)
-        Node::Hash(_) => panic!(
-            "backend-executor-nodeHash::ExecInitHash: ExecInitNode T_Hash arm; \
-             not ported / no seam declared"
-        ),
+        Node::Hash(hash) => {
+            let s = backend_executor_nodeHash::exec_hash::ExecInitHash(mcx, hash, estate, eflags)?;
+            alloc_in(mcx, PlanStateNode::Hash(s))?
+        }
 
         // case T_SetOp: ExecInitSetOp(...) (nodeSetop.c)
 

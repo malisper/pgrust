@@ -38,11 +38,22 @@
 //! it aborts with a loud panic naming the unported owner rather than silently
 //! stubbing a result.
 
+// The bare-word newtype: the scalar form the composite eval helpers operate on.
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ExprState.resvalue` / `ResultCell.value` carry.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, STATE_RESULT_CELL,
 };
+
+/// Recover the bare scalar word from a stored canonical by-value datum (the
+/// transitional bridge: the composite helpers operate on a word).
+#[inline]
+fn word_of(v: &DatumV<'_>) -> Datum {
+    Datum::from_usize(v.as_usize())
+}
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 
@@ -74,10 +85,12 @@ fn composite_datum_owner_unported(what: &str) -> ! {
 fn load_result(state: &ExprState<'_>, op: usize) -> (Datum, bool) {
     let cell = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
-        (state.resvalue, state.resnull)
+        // The canonical result value crosses back to the bare scalar word the
+        // composite helpers operate on.
+        (word_of(&state.resvalue), state.resnull)
     } else {
         let c = state.result_cells.get(cell);
-        (c.value, c.isnull)
+        (word_of(&c.value), c.isnull)
     }
 }
 
@@ -87,10 +100,13 @@ fn load_result(state: &ExprState<'_>, op: usize) -> (Datum, bool) {
 fn store_result(state: &mut ExprState<'_>, op: usize, value: Datum, isnull: bool) {
     let cell: ResultCellId = state.steps.as_ref().expect("eval_composite: steps not ready")[op].resvalue;
     if cell == STATE_RESULT_CELL {
-        state.resvalue = value;
+        // The bare scalar word crosses into the canonical by-value arm.
+        state.resvalue = DatumV::ByVal(value);
         state.resnull = isnull;
     } else {
-        state.result_cells.set(cell, ResultCell { value, isnull });
+        state
+            .result_cells
+            .set(cell, ResultCell { value: DatumV::ByVal(value), isnull });
     }
 }
 
@@ -261,7 +277,7 @@ pub fn ExecEvalMinMax<'mcx>(
         if cur_isnull {
             // /* first nonnull input, adopt value */
             // *op->resvalue = values[off]; *op->resnull = false;
-            store_result(state, op, values[off], false);
+            store_result(state, op, word_of(&values[off]), false);
         } else {
             // /* apply comparison function */
             // fcinfo->args[0].value = *op->resvalue;

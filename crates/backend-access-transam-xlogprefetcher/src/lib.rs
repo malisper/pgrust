@@ -59,8 +59,8 @@ use types_core::{
     uint8, BlockNumber, BufferIsValid, ForkNumber::MAIN_FORKNUM, InvalidBuffer, InvalidOid,
     InvalidRelFileNumber, InvalidXLogRecPtr, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER,
 };
-use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_wal::rmgr::XLogReaderState;
 use types_wal::{
@@ -893,7 +893,9 @@ fn storage_locator(rlocator: RelFileLocator) -> types_storage::RelFileLocator {
 
 /// `pg_stat_get_recovery_prefetch(PG_FUNCTION_ARGS)` (xlogprefetcher.c:823) —
 /// expose statistics about recovery prefetching.
-pub fn pg_stat_get_recovery_prefetch(fcinfo: &mut FunctionCallInfoBaseData<'_>) -> PgResult<Datum> {
+pub fn pg_stat_get_recovery_prefetch<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     const PG_STAT_GET_RECOVERY_PREFETCH_COLS: usize = 10;
 
     funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
@@ -904,6 +906,7 @@ pub fn pg_stat_get_recovery_prefetch(fcinfo: &mut FunctionCallInfoBaseData<'_>) 
         .expect("InitMaterializedSRF establishes fcinfo->resultinfo");
 
     let s = shared_stats();
+    // Build each column via the unified `Datum<'mcx>` enum's scalar codec.
     let values: [Datum; PG_STAT_GET_RECOVERY_PREFETCH_COLS] = [
         // TimestampTzGetDatum(pg_atomic_read_u64(&SharedStats->reset_time))
         Datum::from_i64(s.reset_time.load(Relaxed) as i64),
@@ -919,7 +922,13 @@ pub fn pg_stat_get_recovery_prefetch(fcinfo: &mut FunctionCallInfoBaseData<'_>) 
     ];
     let nulls = [false; PG_STAT_GET_RECOVERY_PREFETCH_COLS];
 
-    funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+    // ABI edge: `materialized_srf_putvalues` (funcapi-owned seam) still takes
+    // the bare machine word `&[types_datum::Datum]`; all ten columns are
+    // pass-by-value scalars, so narrow each enum to its `ByVal` word here.
+    let words: [types_datum::Datum; PG_STAT_GET_RECOVERY_PREFETCH_COLS] =
+        core::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
+
+    funcapi::materialized_srf_putvalues::call(rsinfo, &words, &nulls)?;
 
     // return (Datum) 0;
     Ok(Datum::null())

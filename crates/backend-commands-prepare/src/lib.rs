@@ -41,6 +41,12 @@ use std::collections::HashMap;
 
 use mcx::Mcx;
 use types_core::{Oid, TimestampTz};
+// Canonical migration-target value type (the `Datum<'mcx>` enum). The SRF value
+// layer builds these via the `from_*` / `null` codec methods; they are lowered
+// to the still-shim-typed `types_datum::Datum` only at the audited seam edges
+// (`materialized_srf_putvalues` / `construct_array_builtin`), whose owning units
+// have not yet advanced their contract off the bare-word newtype.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_PSTATEMENT,
     ERRCODE_INVALID_PSTATEMENT_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_PSTATEMENT,
@@ -814,7 +820,7 @@ pub fn ExplainExecuteQuery<'mcx>(
 pub fn pg_prepared_statement<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<types_datum::Datum> {
+) -> PgResult<Datum<'mcx>> {
     // We put all tuples into a tuplestore in one scan of the hashtable.
     //
     //   InitMaterializedSRF(fcinfo, 0);
@@ -842,16 +848,22 @@ pub fn pg_prepared_statement<'mcx>(
                 plancache_seam::plansource_result_desc::call(mcx, prep_stmt.plansource)?;
 
             // values[8], nulls[8] = {0}
-            let mut values = [types_datum::Datum::null(); 8];
+            let mut values: [Datum<'mcx>; 8] = std::array::from_fn(|_| Datum::null());
             let mut nulls = [false; 8];
 
             // values[0] = CStringGetTextDatum(prep_stmt->stmt_name);
-            values[0] = varlena_seam::cstring_to_text::call(mcx, &prep_stmt.stmt_name)?;
+            // `cstring_to_text` is varlena-owned and still hands back the
+            // bare-word `text` pointer (shim contract not yet advanced); carry
+            // it as the canonical enum's by-value pointer word at this edge.
+            values[0] = Datum::from_usize(
+                varlena_seam::cstring_to_text::call(mcx, &prep_stmt.stmt_name)?.as_usize(),
+            );
             // values[1] = CStringGetTextDatum(prep_stmt->plansource->query_string);
             let qs = plancache_seam::plansource_query_string::call(mcx, prep_stmt.plansource)?;
-            values[1] = varlena_seam::cstring_to_text::call(mcx, qs.as_str())?;
+            values[1] =
+                Datum::from_usize(varlena_seam::cstring_to_text::call(mcx, qs.as_str())?.as_usize());
             // values[2] = TimestampTzGetDatum(prep_stmt->prepare_time);
-            values[2] = types_datum::Datum::from_i64(prep_stmt.prepare_time);
+            values[2] = Datum::from_i64(prep_stmt.prepare_time);
             // values[3] = build_regtype_array(param_types, num_params);
             let param_types =
                 plancache_seam::plansource_param_types::call(mcx, prep_stmt.plansource)?;
@@ -876,40 +888,50 @@ pub fn pg_prepared_statement<'mcx>(
             }
 
             // values[5] = BoolGetDatum(prep_stmt->from_sql);
-            values[5] = types_datum::Datum::from_bool(prep_stmt.from_sql);
+            values[5] = Datum::from_bool(prep_stmt.from_sql);
             // values[6] = Int64GetDatumFast(num_generic_plans);
-            values[6] = types_datum::Datum::from_i64(
+            values[6] = Datum::from_i64(
                 plancache_seam::plansource_num_generic_plans::call(prep_stmt.plansource)?,
             );
             // values[7] = Int64GetDatumFast(num_custom_plans);
-            values[7] = types_datum::Datum::from_i64(
+            values[7] = Datum::from_i64(
                 plancache_seam::plansource_num_custom_plans::call(prep_stmt.plansource)?,
             );
 
             // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-            funcapi_seam::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+            // Lower the canonical by-value words to the still-shim-typed seam
+            // contract at this audited tuplestore edge (funcapi/tuplestore have
+            // not advanced off the bare-word newtype).
+            let shim_values: [types_datum::Datum; 8] =
+                std::array::from_fn(|i| types_datum::Datum::from_usize(values[i].as_usize()));
+            funcapi_seam::materialized_srf_putvalues::call(rsinfo, &shim_values, &nulls)?;
         }
     }
 
     // return (Datum) 0;
-    Ok(types_datum::Datum::null())
+    Ok(Datum::null())
 }
 
 /// `build_regtype_array(param_types, num_params)` — a one-dimensional `regtype`
 /// array `Datum` from a C array of Oids. An empty array is a zero-element
 /// array, not NULL.
-fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<types_datum::Datum> {
+fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<Datum<'mcx>> {
     // tmp_ary = palloc_array(Datum, num_params);
     // for i in 0..num_params: tmp_ary[i] = ObjectIdGetDatum(param_types[i]);
+    // The element words are built as canonical by-value `regtype` oids; they are
+    // lowered to the still-shim-typed `construct_array_builtin` contract at this
+    // audited array-build edge (arrayfuncs has not advanced off the bare-word
+    // newtype).
     let mut tmp_ary: mcx::PgVec<'mcx, types_datum::Datum> =
         mcx::vec_with_capacity_in(mcx, param_types.len())?;
     for &t in param_types {
-        tmp_ary.push(types_datum::Datum::from_oid(t));
+        tmp_ary.push(types_datum::Datum::from_usize(Datum::from_oid(t).as_usize()));
     }
 
     // result = construct_array_builtin(tmp_ary, num_params, REGTYPEOID);
     // return PointerGetDatum(result);
-    arrayfuncs_seam::construct_array_builtin::call(mcx, tmp_ary.as_slice(), REGTYPEOID)
+    let arr = arrayfuncs_seam::construct_array_builtin::call(mcx, tmp_ary.as_slice(), REGTYPEOID)?;
+    Ok(Datum::from_usize(arr.as_usize()))
 }
 
 // ===========================================================================

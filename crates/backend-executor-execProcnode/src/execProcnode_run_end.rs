@@ -219,70 +219,64 @@ pub fn exec_end_node<'mcx>(
     // executor units have landed, so the remaining C arms cannot occur yet.
     match node {
         // case T_AppendState: ExecEndAppend((AppendState *) node);
-        PlanStateNode::Append(_) => panic!(
-            "ExecEndNode(T_AppendState): route to backend-executor-nodeAppend ExecEndAppend seam"
-        ),
+        PlanStateNode::Append(append_state) => {
+            backend_executor_nodeAppend::ExecEndAppend(append_state, estate)
+        }
         // case T_MaterialState: ExecEndMaterial((MaterialState *) node);
-        PlanStateNode::Material(_) => panic!(
-            "ExecEndNode(T_MaterialState): route to backend-executor-nodeMaterial \
-             ExecEndMaterial seam"
-        ),
+        PlanStateNode::Material(material_state) => {
+            backend_executor_nodeMaterial::ExecEndMaterial(material_state, estate)
+        }
         // case T_MergeAppendState: ExecEndMergeAppend((MergeAppendState *) node);
-        PlanStateNode::MergeAppend(_) => panic!(
-            "ExecEndNode(T_MergeAppendState): route to backend-executor-nodeMergeappend \
-             ExecEndMergeAppend seam"
-        ),
+        PlanStateNode::MergeAppend(state) => {
+            backend_executor_nodeMergeAppend::ExecEndMergeAppend(state, estate)
+        }
         // case T_MergeJoinState: ExecEndMergeJoin((MergeJoinState *) node);
-        PlanStateNode::MergeJoin(_) => panic!(
-            "ExecEndNode(T_MergeJoinState): route to backend-executor-nodeMergejoin \
-             ExecEndMergeJoin seam"
-        ),
+        PlanStateNode::MergeJoin(state) => {
+            backend_executor_nodeMergejoin::ExecEndMergeJoin(state, estate)
+        }
         // case T_MemoizeState: ExecEndMemoize((MemoizeState *) node);
-        PlanStateNode::Memoize(_) => panic!(
-            "ExecEndNode(T_MemoizeState): route to backend-executor-nodeMemoize \
-             ExecEndMemoize seam"
-        ),
+        PlanStateNode::Memoize(state) => {
+            backend_executor_nodeMemoize::ExecEndMemoize(state, estate)
+        }
         // case T_IndexOnlyScanState: ExecEndIndexOnlyScan((IndexOnlyScanState *) node);
-        PlanStateNode::IndexOnlyScan(_) => panic!(
-            "ExecEndNode(T_IndexOnlyScanState): route to backend-executor-nodeIndexonlyscan \
-             ExecEndIndexOnlyScan seam"
-        ),
+        PlanStateNode::IndexOnlyScan(state) => {
+            backend_executor_nodeIndexonlyscan::ExecEndIndexOnlyScan(state, estate)
+        }
         // case T_LimitState: ExecEndLimit((LimitState *) node);
         PlanStateNode::Limit(limit_state) => {
             backend_executor_nodeLimit::ExecEndLimit(limit_state, estate)
         }
         // case T_SortState: ExecEndSort((SortState *) node);
-        PlanStateNode::Sort(_) => panic!(
-            "ExecEndNode(T_SortState): route to backend-executor-nodeSort ExecEndSort seam"
-        ),
+        PlanStateNode::Sort(state) => backend_executor_nodeSort::ExecEndSort(state, estate),
         // case T_TableFuncScanState: ExecEndTableFuncScan((TableFuncScanState *) node);
-        PlanStateNode::TableFuncScan(_) => panic!(
-            "ExecEndNode(T_TableFuncScanState): route to backend-executor-nodeTablefuncscan \
-             ExecEndTableFuncScan seam"
-        ),
+        //
+        // `ExecEndTableFuncScan` releases only the node's own tuplestore and
+        // takes no `EState` (the C routine ignores its estate); call it with the
+        // state struct alone.
+        PlanStateNode::TableFuncScan(state) => {
+            backend_executor_nodeTableFuncscan::ExecEndTableFuncScan(state)
+        }
         // case T_NestLoopState: ExecEndNestLoop((NestLoopState *) node);
-        PlanStateNode::NestLoop(_) => panic!(
-            "ExecEndNode(T_NestLoopState): route to backend-executor-nodeNestloop \
-             ExecEndNestLoop seam"
-        ),
+        PlanStateNode::NestLoop(state) => {
+            backend_executor_nodeNestloop::ExecEndNestLoop(state, estate)
+        }
         // case T_HashJoinState: ExecEndHashJoin((HashJoinState *) node);
-        PlanStateNode::HashJoin(_) => panic!(
-            "ExecEndNode(T_HashJoinState): route to backend-executor-nodeHashjoin \
-             ExecEndHashJoin seam"
-        ),
+        PlanStateNode::HashJoin(state) => {
+            backend_executor_nodeHashjoin::ExecEndHashJoin(state, estate)
+        }
         // case T_SeqScanState: ExecEndSeqScan((SeqScanState *) node);
-        PlanStateNode::SeqScan(_) => panic!(
-            "ExecEndNode(T_SeqScanState): route to backend-executor-nodeSeqscan ExecEndSeqScan seam"
-        ),
+        //
+        // `ExecEndSeqScan` closes the table-AM scan via its own seams and takes
+        // no `EState`; call it with the state struct alone.
+        PlanStateNode::SeqScan(state) => backend_executor_nodeSeqscan::ExecEndSeqScan(state),
         // case T_ForeignScanState: ExecEndForeignScan((ForeignScanState *) node);
-        PlanStateNode::ForeignScan(_) => panic!(
-            "ExecEndNode(T_ForeignScanState): route to backend-executor-nodeForeignscan \
-             ExecEndForeignScan seam"
-        ),
+        PlanStateNode::ForeignScan(state) => {
+            backend_executor_nodeForeignscan::ExecEndForeignScan(state, estate)
+        }
         // case T_HashState: ExecEndHash((HashState *) node);
-        PlanStateNode::Hash(_) => panic!(
-            "ExecEndNode(T_HashState): route to backend-executor-nodeHash ExecEndHash seam"
-        ),
+        PlanStateNode::Hash(state) => {
+            backend_executor_nodeHash::exec_hash::ExecEndHash(state, estate)
+        }
 
         // The remaining C arms (control nodes T_ResultState/T_ProjectSetState/
         // T_ModifyTableState/T_RecursiveUnionState/T_BitmapAndState/

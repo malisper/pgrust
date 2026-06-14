@@ -12,10 +12,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
-use types_datum::Datum;
 use types_nodes::tuptable::SlotData;
 use types_nodes::TupleSlotKind;
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The canonical value enum; `TupleValue` is its transitional alias.
+use types_tuple::backend_access_common_heaptuple::{Datum, TupleValue};
 use types_tuple::heaptuple::{CompactAttribute, TupleDesc, TupleDescData};
 
 use crate::slot_payload_model::MakeTupleTableSlot;
@@ -105,7 +105,7 @@ fn fill_virtual<'mcx>(mcx: Mcx<'mcx>, slot: &mut SlotData<'mcx>, text: &[u8]) {
     base.tts_isnull.clear();
     let v: PgVec<'mcx, u8> = slice_in(mcx, &varlena_4b(text)).unwrap();
     base.tts_values
-        .push(TupleValue::ByVal(Datum::from_i32(0x01020304)));
+        .push(Datum::from_i32(0x01020304));
     base.tts_values.push(TupleValue::ByRef(v));
     base.tts_isnull.push(false);
     base.tts_isnull.push(false);
@@ -151,7 +151,7 @@ fn virtual_to_heap_carrier_roundtrip() {
     // Deform the heap slot and confirm the round-tripped values match.
     let cols = deform_all(mcx, &mut hslot);
     assert_eq!(cols.len(), 2);
-    assert_eq!(cols[0].0, TupleValue::ByVal(Datum::from_i32(0x01020304)));
+    assert_eq!(cols[0].0, Datum::from_i32(0x01020304));
     assert_eq!(cols[0].1, false);
     match &cols[1].0 {
         TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"hello world"),
@@ -187,7 +187,7 @@ fn virtual_to_minimal_carrier_roundtrip() {
     assert!(!fetched.data.is_empty(), "fetched minimal tuple lost its body");
 
     let cols = deform_all(mcx, &mut mslot);
-    assert_eq!(cols[0].0, TupleValue::ByVal(Datum::from_i32(0x01020304)));
+    assert_eq!(cols[0].0, Datum::from_i32(0x01020304));
     match &cols[1].0 {
         TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"minimal!"),
         other => panic!("expected by-reference text column, got {other:?}"),
@@ -247,7 +247,7 @@ fn force_store_heap_tuple_into_virtual_deforms() {
     let base = dst.base();
     assert_eq!(
         base.tts_values[0],
-        TupleValue::ByVal(Datum::from_i32(0x01020304))
+        Datum::from_i32(0x01020304)
     );
     match &base.tts_values[1] {
         TupleValue::ByRef(b) => assert_eq!(varlena_payload(b), b"force"),

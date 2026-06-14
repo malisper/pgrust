@@ -34,7 +34,20 @@ use types_error::{DEBUG1, WARNING};
 
 use types_core::primitive::{InvalidOid, Oid, OidIsValid, Size, TimestampTz, XLogRecPtr};
 use types_core::xact::InvalidXLogRecPtr;
-use types_datum::Datum;
+// Datum-unification: this crate's OWN value construction is on the canonical
+// `types_tuple::Datum` (the `bgw_main_arg` writes use
+// `types_tuple::Datum::{from_i32,null}().as_usize()` to fill the raw-word
+// `usize` ABI/storage field on `types_bgworker`'s `BackgroundWorker`). The
+// transitional bare-word shim `types_datum::Datum` is kept ONLY at the audited
+// external ABI/seam edges whose contracts have NOT migrated yet: the
+// `backend-storage-ipc-seams` `before_shmem_exit` callback registration (whose
+// `PgOnExitCallback` signature is still `fn(i32, types_datum::Datum)`), and the
+// `backend-utils-fmgr-funcapi-seams` set-returning-function plumbing
+// (`materialized_srf_putvalues` / `cstring_get_text_datum` and the fmgr return
+// value, all still `types_datum::Datum`). Every such site is qualified
+// `types_datum::Datum` at the edge; those move to the canonical type once their
+// owning seam contracts migrate. Mirrors the convention in
+// `backend-replication-slot` (shmem-exit callback edge).
 use types_storage::storage::{
     dsa_handle as DsaHandle, dshash_table_handle as DshashTableHandle, DsaArea, DshashKeyKind,
     DshashParameters, DshashTable, DSM_HANDLE_INVALID as DSA_HANDLE_INVALID,
@@ -614,7 +627,10 @@ pub fn logicalrep_worker_launch(
 
     bgw.bgw_restart_time = BGW_NEVER_RESTART;
     bgw.bgw_notify_pid = globals::my_proc_pid::call();
-    bgw.bgw_main_arg = Datum::from_i32(slot); // Int32GetDatum(slot)
+    // Int32GetDatum(slot): `bgw_main_arg` is the raw Datum word (audited
+    // ABI/storage edge, typed `usize`). Construct the value on the canonical
+    // `types_tuple::Datum` and store its word.
+    bgw.bgw_main_arg = types_tuple::Datum::from_i32(slot).as_usize();
 
     let bgw_handle = match bgworker::register_dynamic_background_worker::call(&bgw)? {
         Some(h) => h,
@@ -854,7 +870,7 @@ pub fn logicalrep_worker_attach(slot: i32) -> PgResult<()> {
     my_logical_rep_worker_slot().set(Some(slot));
     let my_pid = globals::my_proc_pid::call();
     with_workers(|ws| ws[slot as usize].proc_pid = Some(my_pid));
-    ipc::before_shmem_exit::call(logicalrep_worker_onexit, Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_worker_onexit, types_datum::Datum::from_usize(0))?;
 
     worker_lock_release()?;
     Ok(())
@@ -916,14 +932,14 @@ fn my_worker_subid() -> PgResult<Oid> {
 // ===========================================================================
 
 /// `logicalrep_launcher_onexit(code, arg)` (launcher.c).
-fn logicalrep_launcher_onexit(_code: i32, _arg: Datum) -> PgResult<()> {
+fn logicalrep_launcher_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
     // LogicalRepCtx->launcher_pid = 0;
     with_ctx(|c| c.launcher_pid = 0);
     Ok(())
 }
 
 /// `logicalrep_worker_onexit(code, arg)` (launcher.c).
-fn logicalrep_worker_onexit(_code: i32, _arg: Datum) -> PgResult<()> {
+fn logicalrep_worker_onexit(_code: i32, _arg: types_datum::Datum) -> PgResult<()> {
     // Disconnect gracefully from the remote side.
     if worker::have_walrcv_conn::call() {
         worker::walrcv_disconnect::call()?;
@@ -1016,7 +1032,8 @@ pub fn ApplyLauncherRegister() -> PgResult<()> {
     types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication launcher");
     bgw.bgw_restart_time = 5;
     bgw.bgw_notify_pid = 0;
-    bgw.bgw_main_arg = Datum::null(); // (Datum) 0
+    // (Datum) 0: store the null Datum's raw word into the `usize` ABI field.
+    bgw.bgw_main_arg = types_tuple::Datum::null().as_usize();
 
     bgworker::register_background_worker::call(&bgw)
 }
@@ -1203,12 +1220,12 @@ fn ApplyLauncherWakeup() -> PgResult<()> {
 
 /// `ApplyLauncherMain(main_arg)` (launcher.c). Main loop for the apply
 /// launcher process.
-pub fn ApplyLauncherMain(_main_arg: Datum) -> PgResult<()> {
+pub fn ApplyLauncherMain(_main_arg: types_datum::Datum) -> PgResult<()> {
     ereport(DEBUG1)
         .errmsg_internal("logical replication launcher started")
         .finish(error_location())?;
 
-    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, Datum::from_usize(0))?;
+    ipc::before_shmem_exit::call(logicalrep_launcher_onexit, types_datum::Datum::from_usize(0))?;
 
     debug_assert!(with_ctx(|c| c.launcher_pid) == 0);
     with_ctx(|c| c.launcher_pid = globals::my_proc_pid::call());
@@ -1359,7 +1376,7 @@ pub fn GetLeaderApplyWorkerPid(pid: i32) -> PgResult<i32> {
 pub fn pg_stat_get_subscription(
     mcx: mcx::Mcx<'_>,
     fcinfo: &mut FunctionCallInfoBaseData<'_>,
-) -> PgResult<Datum> {
+) -> PgResult<types_datum::Datum> {
     // Oid subid = PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
     let subid: Oid = funcapi::srf_arg0_oid::call(fcinfo).unwrap_or(InvalidOid);
 
@@ -1388,24 +1405,24 @@ pub fn pg_stat_get_subscription(
             continue;
         }
 
-        let mut values: [Datum; PG_STAT_GET_SUBSCRIPTION_COLS] =
-            [Datum::from_usize(0); PG_STAT_GET_SUBSCRIPTION_COLS];
+        let mut values: [types_datum::Datum; PG_STAT_GET_SUBSCRIPTION_COLS] =
+            [types_datum::Datum::from_usize(0); PG_STAT_GET_SUBSCRIPTION_COLS];
         let mut nulls: [bool; PG_STAT_GET_SUBSCRIPTION_COLS] =
             [false; PG_STAT_GET_SUBSCRIPTION_COLS];
 
         // Column 0: subid.
-        values[0] = Datum::from_oid(w.subid);
+        values[0] = types_datum::Datum::from_oid(w.subid);
         // Column 1: relid (only for tablesync workers, else null).
         if w.is_tablesync_worker() {
-            values[1] = Datum::from_oid(w.relid);
+            values[1] = types_datum::Datum::from_oid(w.relid);
         } else {
             nulls[1] = true;
         }
         // Column 2: worker pid (always present).
-        values[2] = Datum::from_i32(worker_pid);
+        values[2] = types_datum::Datum::from_i32(worker_pid);
         // Column 3: leader_pid (only for parallel apply workers, else null).
         if w.is_parallel_apply_worker() {
-            values[3] = Datum::from_i32(w.leader_pid);
+            values[3] = types_datum::Datum::from_i32(w.leader_pid);
         } else {
             nulls[3] = true;
         }
@@ -1413,31 +1430,31 @@ pub fn pg_stat_get_subscription(
         if XLogRecPtrIsInvalid(w.last_lsn) {
             nulls[4] = true;
         } else {
-            values[4] = Datum::from_u64(w.last_lsn);
+            values[4] = types_datum::Datum::from_u64(w.last_lsn);
         }
         // Column 5: last_send_time (null if 0).
         if w.last_send_time == 0 {
             nulls[5] = true;
         } else {
-            values[5] = Datum::from_i64(w.last_send_time);
+            values[5] = types_datum::Datum::from_i64(w.last_send_time);
         }
         // Column 6: last_recv_time (null if 0).
         if w.last_recv_time == 0 {
             nulls[6] = true;
         } else {
-            values[6] = Datum::from_i64(w.last_recv_time);
+            values[6] = types_datum::Datum::from_i64(w.last_recv_time);
         }
         // Column 7: reply_lsn (null if invalid).
         if XLogRecPtrIsInvalid(w.reply_lsn) {
             nulls[7] = true;
         } else {
-            values[7] = Datum::from_u64(w.reply_lsn);
+            values[7] = types_datum::Datum::from_u64(w.reply_lsn);
         }
         // Column 8: reply_time (null if 0).
         if w.reply_time == 0 {
             nulls[8] = true;
         } else {
-            values[8] = Datum::from_i64(w.reply_time);
+            values[8] = types_datum::Datum::from_i64(w.reply_time);
         }
         // Column 9: worker type text.
         let worker_type = match w.wtype {
@@ -1466,7 +1483,7 @@ pub fn pg_stat_get_subscription(
 
     worker_lock_release()?;
 
-    Ok(Datum::from_usize(0)) // (Datum) 0
+    Ok(types_datum::Datum::from_usize(0)) // (Datum) 0
 }
 
 // ===========================================================================

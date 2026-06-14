@@ -14,6 +14,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+// Sibling files of the `backend-utils-misc-more2` unit. `timeout.c` is this
+// crate's lib body below; these are the remaining manifest c_sources.
+pub mod conffiles;
+pub mod injection_point;
+pub mod pg_config;
+pub mod tzparser;
+
 use std::cell::{Cell, RefCell};
 
 use types_core::TimestampTz;
@@ -753,4 +760,25 @@ pub fn init_seams() {
     m2::enable_timeout_after::set(enable_timeout_after_core);
     m2::disable_timeout::set(disable_timeout_core);
     m2::reschedule_timeouts::set(reschedule_timeouts_seam);
+
+    // conffiles.c: this unit owns the conffiles-seams declarations guc-file.l
+    // calls. Adapt the owned `(&str, &Path)` signatures to the seam's
+    // `(String, Option<PathBuf>)` shape.
+    backend_utils_misc_conffiles_seams::absolute_config_location::set(|location, calling_file| {
+        conffiles::absolute_config_location(&location, calling_file.as_deref())
+    });
+    backend_utils_misc_conffiles_seams::get_conf_files_in_dir::set(
+        |includedir, calling_file, elevel| {
+            conffiles::get_conf_files_in_dir(&includedir, calling_file.as_deref(), elevel)
+        },
+    );
+
+    // injection_point.c: this unit owns the injection-point-seams declarations
+    // ipci.c sizes/initializes (the `#else`/disabled-build arms here).
+    backend_storage_ipc_injection_point_seams::injection_point_shmem_size::set(
+        injection_point::injection_point_shmem_size,
+    );
+    backend_storage_ipc_injection_point_seams::injection_point_shmem_init::set(
+        injection_point::injection_point_shmem_init,
+    );
 }

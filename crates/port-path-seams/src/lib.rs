@@ -9,3 +9,15 @@ seam_core::seam!(
     /// Windows). Pure string predicate, infallible.
     pub fn is_absolute_path(filename: &str) -> bool
 );
+
+seam_core::seam!(
+    /// Read a timezone-abbreviation file named `filename` (no path) from the
+    /// installation's `<sharedir>/timezonesets/` directory, as `ParseTzFile`
+    /// (`utils/misc/tzparser.c`) does via `get_share_path(my_exec_path, ...)`
+    /// (`port/path.c`) followed by `AllocateFile`/`AllocateDir`
+    /// (`storage/fd.c`). Returns the file's lines, or a classified open/read
+    /// failure so the caller can pick the matching diagnostic. The owner
+    /// (`get_share_path` build-config relativization + `fd.c` directory I/O) is
+    /// not yet ported; the call panics until it lands.
+    pub fn read_tz_file(filename: &str) -> types_misc_more2::TzFileResult
+);

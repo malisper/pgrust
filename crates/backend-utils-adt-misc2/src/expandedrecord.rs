@@ -40,7 +40,6 @@
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use types_core::Oid;
-use types_datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, TupleValue};
 use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, BITMAPLEN, RECORDOID};
@@ -89,10 +88,6 @@ pub const ER_FLAGS_NON_DATA: i32 =
 
 /// `TYPTYPE_DOMAIN` (`pg_type.h`).
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
-/// `TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO` flag bits (typcache.h);
-/// passed through to the unported `lookup_type_cache` owner.
-const TYPECACHE_TUPDESC: i32 = 0x00100;
-const TYPECACHE_DOMAIN_BASE_INFO: i32 = 0x01000;
 
 // ---------------------------------------------------------------------------
 // The carrier struct (utils/expandedrecord.h: ExpandedRecordHeader)
@@ -227,37 +222,17 @@ impl<'mcx> ExpandedRecordHeader<'mcx> {
 // panic, never a silent stub of our own behaviour.
 // ---------------------------------------------------------------------------
 
-/// Result of `lookup_type_cache(type_id, flags)` so far as this module reads it.
-struct TypeCacheView<'mcx> {
-    typtype: i8,
-    domain_base_type: Oid,
-    tup_desc: Option<TupleDescData<'mcx>>,
-    tup_desc_identifier: u64,
-}
-
-/// `lookup_type_cache(type_id, flags)` (utils/cache/typcache.c). Owner not yet
-/// ported (task #58: backend-utils-cache-typcache).
-fn lookup_type_cache<'mcx>(_type_id: Oid, _flags: i32) -> TypeCacheView<'mcx> {
-    panic!("expandedrecord: lookup_type_cache: unported owner (backend-utils-cache-typcache)")
-}
-
-/// `assign_record_type_identifier(type_id, typmod)` (utils/cache/typcache.c).
-/// Owner not yet ported (task #58).
-fn assign_record_type_identifier(_type_id: Oid, _typmod: i32) -> u64 {
-    panic!(
-        "expandedrecord: assign_record_type_identifier: unported owner \
-         (backend-utils-cache-typcache)"
-    )
+/// `assign_record_type_identifier(type_id, typmod)` (utils/cache/typcache.c) —
+/// routed to the real typcache owner via its seam crate.
+fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64> {
+    backend_utils_cache_typcache_seams::assign_record_type_identifier::call(type_id, typmod)
 }
 
 /// `assign_record_type_typmod(tupdesc)` (utils/cache/typcache.c) — registers an
-/// anonymous RECORD tupdesc and stamps it with the assigned typmod. Owner not
-/// yet ported (task #58). Returns the assigned tdtypmod.
-fn assign_record_type_typmod(_tupdesc: &mut TupleDescData<'_>) -> i32 {
-    panic!(
-        "expandedrecord: assign_record_type_typmod: unported owner \
-         (backend-utils-cache-typcache)"
-    )
+/// anonymous RECORD tupdesc and stamps it with the assigned typmod in place
+/// (also stamping `tdtypeid = RECORDOID`). Routed to the real typcache owner.
+fn assign_record_type_typmod(tupdesc: &mut TupleDescData<'_>) -> PgResult<()> {
+    backend_utils_cache_typcache_seams::assign_record_type_typmod::call(tupdesc)
 }
 
 /// `domain_check(value, isnull, domainType, extra, mcxt)` (utils/adt/domains.c).
@@ -265,8 +240,12 @@ fn assign_record_type_typmod(_tupdesc: &mut TupleDescData<'_>) -> i32 {
 /// thin `(void) domain_check_internal(..., escontext = NULL)` that re-runs the
 /// typcache-resident `domain_check_input` engine. We route through that same
 /// engine seam directly (the owned model carries no `extra` memoization handle).
-fn domain_check(value: Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
-    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
+fn domain_check(value: types_datum::Datum, isnull: bool, domain_type: Oid) -> PgResult<()> {
+    backend_utils_cache_typcache_seams::domain_check_input::call(
+        &types_tuple::backend_access_common_heaptuple::Datum::ByVal(value),
+        isnull,
+        domain_type,
+    )
 }
 
 /// `detoast_external_attr(attr)` (access/common/detoast.c). Owner not yet ported
@@ -355,9 +334,8 @@ pub fn er_get_flat_size<'mcx>(
     if erh.er_typeid == RECORDOID && erh.er_typmod < 0 {
         expanded_record_get_tupdesc(mcx, erh)?;
         let td = erh.er_tupdesc.as_mut().expect("tupdesc valid by now");
-        let new_typmod = assign_record_type_typmod(td);
-        td.tdtypmod = new_typmod;
-        erh.er_typmod = new_typmod;
+        assign_record_type_typmod(td)?;
+        erh.er_typmod = td.tdtypmod;
     }
 
     // If we have a valid flattened value without out-of-line fields, use it.
@@ -592,27 +570,30 @@ pub fn make_expanded_record_from_typeid<'mcx>(
     let mut flags = 0;
     let tupdesc: TupleDescData<'mcx>;
     let tupdesc_id: u64;
-    let mut tupdesc_refcounted = false;
+    let tupdesc_refcounted: bool;
 
     if type_id != RECORDOID {
         // Consult the typcache to see if it's a domain over composite, and in
-        // any case to get the tupdesc and tupdesc identifier.
-        let mut typentry =
-            lookup_type_cache(type_id, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO);
+        // any case to get the tupdesc and tupdesc identifier. The seam runs
+        // lookup_type_cache(type_id, TYPECACHE_TUPDESC|TYPECACHE_DOMAIN_BASE_INFO)
+        // and, for a domain, the chained lookup of the base type's tupdesc.
+        let typentry = backend_utils_cache_typcache_seams::lookup_type_cache_expanded_record::call(
+            mcx, type_id,
+        )?;
         if typentry.typtype == TYPTYPE_DOMAIN {
             flags |= ER_FLAG_IS_DOMAIN;
-            typentry = lookup_type_cache(typentry.domain_base_type, TYPECACHE_TUPDESC);
         }
         let Some(td) = typentry.tup_desc else {
             // ereport(ERROR, type %s is not composite)
             return Err(type_is_not_composite(mcx, type_id));
         };
-        tupdesc = td;
+        tupdesc = td.clone_in(mcx)?;
         tupdesc_id = typentry.tup_desc_identifier;
+        tupdesc_refcounted = typentry.tup_desc_refcounted;
     } else {
         // For RECORD types, get the tupdesc and identifier from typcache.
         tupdesc = lookup_rowtype_tupdesc(mcx, type_id, typmod)?;
-        tupdesc_id = assign_record_type_identifier(type_id, typmod);
+        tupdesc_id = assign_record_type_identifier(type_id, typmod)?;
         tupdesc_refcounted = true; // lookup_rowtype_tupdesc took a pin we'd release
     }
 
@@ -651,23 +632,29 @@ pub fn make_expanded_record_from_tupdesc<'mcx>(
     let chosen: TupleDescData<'mcx>;
     let tupdesc_id: u64;
     let mut alloced = false;
+    let chosen_refcounted: bool;
 
     if tupdesc.tdtypeid != RECORDOID {
         // Prefer the typcache's refcounted copy; consult it for the identifier.
-        let typentry = lookup_type_cache(tupdesc.tdtypeid, TYPECACHE_TUPDESC);
+        let typentry = backend_utils_cache_typcache_seams::lookup_type_cache_tupdesc_view::call(
+            mcx,
+            tupdesc.tdtypeid,
+        )?;
         let Some(td) = typentry.tup_desc else {
             return Err(type_is_not_composite(mcx, tupdesc.tdtypeid));
         };
         chosen = td.clone_in(mcx)?;
         tupdesc_id = typentry.tup_desc_identifier;
+        chosen_refcounted = typentry.tup_desc_refcounted;
     } else {
         // For RECORD types, get the appropriate unique identifier.
-        tupdesc_id = assign_record_type_identifier(tupdesc.tdtypeid, tupdesc.tdtypmod);
+        tupdesc_id = assign_record_type_identifier(tupdesc.tdtypeid, tupdesc.tdtypmod)?;
         // tdrefcount < 0 (a plain caller tupdesc): C copies it locally.
         if tupdesc.tdrefcount < 0 {
             alloced = true;
         }
         chosen = tupdesc.clone_in(mcx)?;
+        chosen_refcounted = tupdesc.tdrefcount >= 0;
     }
 
     let objcxt = mcx.context().new_child("expanded record");
@@ -681,7 +668,7 @@ pub fn make_expanded_record_from_tupdesc<'mcx>(
     erh.er_typmod = chosen.tdtypmod;
     erh.er_tupdesc_id = tupdesc_id;
 
-    if chosen.tdrefcount >= 0 {
+    if chosen_refcounted {
         erh.er_tupdesc_refcounted = true;
     } else if alloced {
         erh.flags |= ER_FLAG_TUPDESC_ALLOCED;
@@ -847,7 +834,7 @@ pub fn expanded_record_fetch_tupdesc<'mcx>(
         erh.er_tupdesc_refcounted = true;
     }
 
-    erh.er_tupdesc_id = assign_record_type_identifier(tupdesc.tdtypeid, tupdesc.tdtypmod);
+    erh.er_tupdesc_id = assign_record_type_identifier(tupdesc.tdtypeid, tupdesc.tdtypmod)?;
     erh.er_tupdesc = Some(tupdesc);
     Ok(())
 }
@@ -933,7 +920,7 @@ pub fn deconstruct_expanded_record<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(TupleValue::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -1002,13 +989,13 @@ pub fn expanded_record_fetch_field<'mcx>(
     if fnumber > 0 {
         // Empty record has null fields.
         if erh.is_empty() {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         }
         // Make sure we have deconstructed form.
         deconstruct_expanded_record(mcx, erh)?;
         // Out-of-range field number reads as null.
         if fnumber > erh.nfields {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         }
         let isnull = erh.dnulls[(fnumber - 1) as usize];
         let value = erh.dvalues[(fnumber - 1) as usize].clone_in(mcx)?;
@@ -1016,7 +1003,7 @@ pub fn expanded_record_fetch_field<'mcx>(
     } else {
         // System columns read as null if we haven't got a flat tuple.
         let Some(fv) = erh.fvalue.as_ref() else {
-            return Ok((TupleValue::ByVal(Datum::null()), true));
+            return Ok((TupleValue::null(), true));
         };
         // heap_getsysattr doesn't actually use tupdesc.
         heaptuple::heap_getsysattr(mcx, &fv.tuple, fnumber)
@@ -1408,7 +1395,7 @@ fn check_domain_for_new_field<'mcx>(
         let mut dnulls = vec_with_capacity_in(mcx, nfields as usize)?;
         let mut owned = vec_with_capacity_in(mcx, nfields as usize)?;
         for _ in 0..nfields {
-            dvalues.push(TupleValue::ByVal(Datum::null()));
+            dvalues.push(TupleValue::null());
             dnulls.push(true);
             owned.push(false);
         }
@@ -1466,7 +1453,7 @@ fn check_domain_for_new_tuple<'mcx>(
     // If we're being told to set record to empty, just see if NULL is OK.
     let Some(tuple) = tuple else {
         ensure_short_term_cxt(erh);
-        domain_check(Datum::null(), true, erh.er_decltypeid)?;
+        domain_check(types_datum::Datum::null(), true, erh.er_decltypeid)?;
         if let Some(cxt) = erh.er_short_term_cxt.as_mut() {
             cxt.reset();
         }
@@ -1512,6 +1499,6 @@ fn tuple_has_external(tup: &FormedTuple<'_>) -> bool {
 /// model the dummy header IS the value, so we cross the placeholder datum word
 /// (the C `EOHPGetRODatum` pointer). The unported `domain_check` owner will be
 /// the consumer; until then this is a structural placeholder, never read here.
-fn expanded_record_get_ro_datum(_erh: &ExpandedRecordHeader<'_>) -> Datum {
-    Datum::null()
+fn expanded_record_get_ro_datum(_erh: &ExpandedRecordHeader<'_>) -> types_datum::Datum {
+    types_datum::Datum::null()
 }

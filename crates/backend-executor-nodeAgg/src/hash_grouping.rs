@@ -132,7 +132,7 @@ pub fn build_hash_table<'mcx>(
 
     // additionalsize = aggstate->numtrans * sizeof(AggStatePerGroupData);
     let _additionalsize =
-        aggstate.numtrans as usize * core::mem::size_of::<AggStatePerGroupData>();
+        aggstate.numtrans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
 
     // use_variable_hash_iv = DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit);
     let _use_variable_hash_iv = do_aggsplit_skipfinal(aggstate.aggsplit);
@@ -619,7 +619,7 @@ pub fn hash_agg_entry_size(num_trans: i32, tuple_width: usize, transition_space:
     // TupleHashEntrySize() is an execGrouping inline (sizeof TupleHashEntryData)
     // with no seam and no real type to size; the rest is faithful arithmetic.
     // Loud panic until execGrouping lands.
-    let _pergroup_size = num_trans as usize * core::mem::size_of::<AggStatePerGroupData>();
+    let _pergroup_size = num_trans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
     let _transition_chunk = if transition_space > 0 {
         CHUNKHDRSZ + pg_nextpower2_size_t(transition_space)
     } else {

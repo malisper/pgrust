@@ -2,6 +2,10 @@
 //! GROUPING() and MERGE support functions.
 
 use types_datum::Datum;
+// The canonical unified value type (Datum-unification keystone) — what the
+// keystone-owned `ResultCell.value` carries. The opcode results here are scalar
+// words, so they cross into its by-value arm.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult};
 use types_nodes::execexpr::{ExprEvalStepData, ExprState, ResultCell};
 use types_nodes::execnodes::EcxtId;
@@ -63,7 +67,7 @@ pub fn ExecEvalSubPlan<'mcx>(
 
     state
         .result_cells
-        .set(resvalue_id, ResultCell { value, isnull });
+        .set(resvalue_id, ResultCell { value: DatumV::ByVal(value), isnull });
     Ok(())
 }
 
@@ -139,7 +143,7 @@ pub fn ExecEvalGroupingFunc<'mcx>(
     state.result_cells.set(
         resvalue_id,
         ResultCell {
-            value: Datum::from_i32(result),
+            value: DatumV::from_i32(result),
             isnull: false,
         },
     );
@@ -215,7 +219,7 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     state.result_cells.set(
         resvalue_id,
         ResultCell {
-            value,
+            value: DatumV::ByVal(value),
             isnull: false,
         },
     );
