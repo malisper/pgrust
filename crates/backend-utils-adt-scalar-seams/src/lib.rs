@@ -12,10 +12,10 @@ seam_core::seam!(
     /// carries OOM and the expanded-object flatten `ereport(ERROR)` surface.
     pub fn datum_copy<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        value: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+        value: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
         typbyval: bool,
         typlen: i16,
-    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::TupleValue<'mcx>>
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(
