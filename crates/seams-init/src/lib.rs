@@ -849,6 +849,25 @@ mod recurrence_guard {
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
+        // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
+        // resolve another backend's PGPROC-embedded `procLatch` to a
+        // `LatchHandle` and set it. The owner (backend-storage-ipc-latch) names
+        // a latch by its position in this crate's own append-only `LATCHES`
+        // registry (`lookup_latch` panics on any handle not minted by
+        // `allocate_latch`). proc.c's `proc_latch` seam DOES return a handle,
+        // but it mints it from the proc number (`proc_latch_handle(procno)`),
+        // which is a DIFFERENT, unregistered handle space — `SetLatch` on it
+        // panics "invalid LatchHandle". Unifying the two (registering each
+        // PGPROC's `procLatch` into the latch registry, or sharing one handle
+        // space) is the latch<->proc PGPROC-latch integration bridge that does
+        // not exist yet; proc.c's own `set_proc_latch` already aborts loudly on
+        // exactly this boundary. `set_latch_for_proc_pid` is additionally
+        // blocked on procarray.c (unported, status=todo) for the PID->proc
+        // lookup (`BackendPidGetProc`). Install once that bridge lands; do not
+        // force-wire a handle from the wrong space.
+        ("backend_storage_ipc_latch", "set_latch_by_proc_number"),
+        ("backend_storage_ipc_latch", "set_latch_for_proc_pid"),
+        ("backend_storage_ipc_latch", "set_latch_for_procno"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
         // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
         // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
