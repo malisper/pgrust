@@ -220,6 +220,7 @@ backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-guc-file = { path = "../backend-utils-misc-guc-file" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
