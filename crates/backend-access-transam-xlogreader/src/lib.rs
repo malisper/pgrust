@@ -71,11 +71,13 @@ use types_wal::wal::{DecodedBkpBlock, DecodedXLogRecord, RelFileLocator, XLogRec
 use types_wal::xlog_consts::{SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ};
 
 pub mod seams;
+pub mod summarizer;
 
 /// Install every inward seam this unit owns (the crate-root entry point
 /// `seams-init`'s `init_all()` calls).
 pub fn init_seams() {
     seams::init_seams();
+    summarizer::init_seams();
 }
 
 #[cfg(test)]
@@ -166,7 +168,7 @@ const fn MAXALIGN(len: usize) -> usize {
 }
 
 /// `LSN_FORMAT_ARGS(lsn)` — `(high32, low32)` for the `%X/%X` format.
-fn lsn_fmt(lsn: XLogRecPtr) -> (u32, u32) {
+pub(crate) fn lsn_fmt(lsn: XLogRecPtr) -> (u32, u32) {
     ((lsn >> 32) as u32, lsn as u32)
 }
 
@@ -175,12 +177,12 @@ fn lsn_fmt(lsn: XLogRecPtr) -> (u32, u32) {
 // ---------------------------------------------------------------------------
 
 /// `XLByteToSeg(xlrp, logSegNo, wal_segsz_bytes)`.
-fn XLByteToSeg(xlrp: XLogRecPtr, wal_segsz_bytes: i32) -> XLogSegNo {
+pub(crate) fn XLByteToSeg(xlrp: XLogRecPtr, wal_segsz_bytes: i32) -> XLogSegNo {
     xlrp / wal_segsz_bytes as u64
 }
 
 /// `XLogSegmentOffset(xlogptr, wal_segsz_bytes)`.
-fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: i32) -> u32 {
+pub(crate) fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: i32) -> u32 {
     (xlogptr & (wal_segsz_bytes as u64 - 1)) as u32
 }
 
@@ -197,7 +199,7 @@ fn XRecOffIsValid(xlrp: XLogRecPtr) -> bool {
 }
 
 /// `XLogFileName(fname, tli, logSegNo, wal_segsz_bytes)` (access/xlog_internal.h).
-fn XLogFileName(tli: TimeLineID, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> String {
+pub(crate) fn XLogFileName(tli: TimeLineID, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> String {
     let segs_per_id: u64 = 0x1_0000_0000u64 / wal_segsz_bytes as u64;
     let hi = log_seg_no / segs_per_id;
     let lo = log_seg_no % segs_per_id;
@@ -396,7 +398,7 @@ pub fn XLogReaderSetDecodeBuffer(state: &mut XLogReaderState<'_>, size: usize) {
 /// `allocate_recordbuf` (xlogreader.c:190). Allocate `readRecordBuf` to fit a
 /// record of at least `reclength`, rounded to a `XLOG_BLCKSZ` multiple and at
 /// least `5*Max(BLCKSZ, XLOG_BLCKSZ)`.
-fn allocate_recordbuf<'mcx>(state: &mut XLogReaderState<'mcx>, reclength: uint32) -> PgResult<()> {
+pub(crate) fn allocate_recordbuf<'mcx>(state: &mut XLogReaderState<'mcx>, reclength: uint32) -> PgResult<()> {
     let arena = state.decode_arena.expect("reader has no allocator context");
     let mut new_size: uint32 = reclength;
     new_size = new_size.wrapping_add(XLOG_BLCKSZ as u32 - (new_size % XLOG_BLCKSZ as u32));
