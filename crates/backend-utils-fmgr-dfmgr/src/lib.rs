@@ -813,8 +813,17 @@ fn install_invoke_output_plugin_callback(
     loader::invoke_output_plugin_callback::call(inv)
 }
 
+/// Installer for `backend_utils_fmgr_dfmgr_seams::load_file`: supply the
+/// MemoryContext inside the installer (exactly like `load_external_function`
+/// / `load_output_plugin`) so the marshaled arity-2 seam shape stays intact.
+fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("load_file");
+    load_file(ctx.mcx(), filename, restricted)
+}
+
 /// Install this crate's owned inward seams (`backend-utils-fmgr-dfmgr-seams`).
 pub fn init_seams() {
+    backend_utils_fmgr_dfmgr_seams::load_file::set(install_load_file);
     backend_utils_fmgr_dfmgr_seams::load_external_function::set(install_load_external_function);
     backend_utils_fmgr_dfmgr_seams::load_output_plugin::set(install_load_output_plugin);
     backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback::set(
