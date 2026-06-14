@@ -14,7 +14,7 @@
 //! * [`index_truncate_tuple`] — drop trailing key columns to build a pivot
 //!   tuple (the nbtree suffix-truncation primitive).
 //!
-//! ## The byte / `TupleValue` model (shared with `heaptuple`)
+//! ## The byte / `Datum` model (shared with `heaptuple`)
 //!
 //! In C an index tuple is one contiguous `palloc` chunk: an `IndexTupleData`
 //! header, then (when there are nulls) an `IndexAttributeBitMapData` null bitmap,
@@ -24,7 +24,7 @@
 //!
 //! This port keeps the arithmetic identical but, exactly like
 //! [`backend_access_common_heaptuple`], represents the user-data area as a
-//! `PgVec<u8>` and a per-attribute value as a [`TupleValue`]
+//! `PgVec<u8>` and a per-attribute value as a [`Datum`]
 //! (`ByVal(Datum)` / `ByRef(PgVec<u8>)`): the header is an owned
 //! [`IndexTupleData`], the optional null bitmap travels alongside as
 //! [`FormedIndexTuple::bits`], and the `MAXALIGN`-padded user data as
@@ -72,12 +72,19 @@ use types_core::{Size, INDEX_MAX_KEYS};
 // ABI-edge bare scalar word: the `index_form_tuple` seam's `values: &[ScalarWord]`
 // is the C/nbtree call contract (`Datum *values`), an audited external types-nodes
 // ABI edge that stays a plain machine word.  The crate's own model is the
-// canonical `TupleValue` enum (`types_tuple::backend_access_common_heaptuple`).
+// canonical `Datum<'mcx>` enum (`types_tuple::backend_access_common_heaptuple`).
+// This bare-word `&[Datum]` ABI variant is the same one the migrated
+// `backend-utils-adt-datum-seams` keeps for `copyParamList` et al — a genuine
+// machine-word array, not a value carrier — so it stays `types_datum::Datum`
+// (the shim) until that whole C-ABI surface is retired in cleanup.
 use types_datum::Datum as ScalarWord;
 use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
-use types_tuple::backend_access_common_heaptuple::TupleValue;
+// The one canonical value type (Datum-unification keystone). The crate's own
+// form/deform model is `Datum<'mcx>` (ByVal/ByRef); the former `TupleValue`
+// spelling was a transitional alias for exactly this enum.
+use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{
     bits8, CompactAttribute, IndexTupleData, ItemPointerData, TupleDescData,
     HEAP_HASEXTERNAL, HEAP_HASVARWIDTH, INDEX_NULL_MASK, INDEX_SIZE_MASK, INDEX_VAR_MASK,
@@ -234,7 +241,7 @@ impl<'mcx> FormedIndexTuple<'mcx> {
 pub fn index_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_descriptor: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> PgResult<FormedIndexTuple<'mcx>> {
     index_form_tuple_context(mcx, tuple_descriptor, values, isnull)
@@ -246,7 +253,7 @@ pub fn index_form_tuple<'mcx>(
 pub fn index_form_tuple_context<'mcx>(
     mcx: Mcx<'mcx>,
     tuple_descriptor: &TupleDescData<'_>,
-    values: &[TupleValue<'_>],
+    values: &[Datum<'_>],
     isnull: &[bool],
 ) -> PgResult<FormedIndexTuple<'mcx>> {
     let number_of_attributes = tuple_descriptor.natts;
@@ -266,7 +273,7 @@ pub fn index_form_tuple_context<'mcx>(
     // copy of `values` with TOAST-detoasted / compressed substitutions.  In the
     // owned model the substituted values carry their own bytes, so the C
     // `untoasted_free[]` pfree loop is the drop of these owned values.
-    let mut untoasted_values: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, natts)?;
+    let mut untoasted_values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
     for i in 0..natts {
         // untoasted_values[i] = values[i];
         // C: Form_pg_attribute att = TupleDescAttr(tupleDescriptor, i);
@@ -286,7 +293,7 @@ pub fn index_form_tuple_context<'mcx>(
                 mcx,
                 value.as_ref_bytes(),
             )?;
-            value = TupleValue::ByRef(detoasted);
+            value = Datum::ByRef(detoasted);
         }
 
         // If value is above size target and is of a compressible datatype, try
@@ -305,7 +312,7 @@ pub fn index_form_tuple_context<'mcx>(
                 )?
             {
                 // successful compression
-                value = TupleValue::ByRef(compressed);
+                value = Datum::ByRef(compressed);
             }
         }
 
@@ -379,7 +386,7 @@ pub fn index_form_tuple_context<'mcx>(
 
 /// One column produced by [`index_deform_tuple`] / [`nocache_index_getattr`]:
 /// a `(value, isnull)` pair (a null column is `(ByVal(Datum::null()), true)`).
-pub type IndexColumn<'mcx> = (TupleValue<'mcx>, bool);
+pub type IndexColumn<'mcx> = (Datum<'mcx>, bool);
 
 /// `nocache_index_getattr(tup, attnum, tupleDesc)` (indextuple.c:240) — fetch a
 /// single attribute of an index tuple, walking only as far as the target column.
@@ -407,7 +414,7 @@ pub fn nocache_index_getattr<'mcx>(
     // nulls scan still walks the bitmap; mirror that by returning NULL for the
     // target if it is null.
     if bp.is_some_and(|bits| att_isnull(index, bits)) {
-        return Ok((TupleValue::null(), true));
+        return Ok((Datum::null(), true));
     }
 
     // tp = (char *) tup + IndexInfoFindDataOffset(tup->t_info);
@@ -451,7 +458,7 @@ pub fn nocache_index_getattr<'mcx>(
     }
 
     // Unreachable: the `cur == index` arm always returns for a non-null target.
-    Ok((TupleValue::null(), true))
+    Ok((Datum::null(), true))
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +505,7 @@ pub fn index_deform_tuple_internal<'mcx>(
 
         if hasnulls && bp.is_some_and(|bits| att_isnull(attnum, bits)) {
             // values[attnum] = (Datum) 0; isnull[attnum] = true;
-            out.push((TupleValue::null(), true));
+            out.push((Datum::null(), true));
             slow = true; // can't use attcacheoff anymore
             continue;
         }
@@ -577,7 +584,7 @@ pub fn index_truncate_tuple<'mcx>(
     let columns =
         index_deform_tuple_internal(mcx, &truncdesc, source.data.as_slice(), source.null_bitmap())?;
     let n = columns.len();
-    let mut values: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, n)?;
+    let mut values: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, n)?;
     let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, n)?;
     for (val, null) in columns {
         values.push(val);
@@ -606,7 +613,7 @@ pub fn index_truncate_tuple<'mcx>(
 /// `itup->t_tid = ht_ctid`, returning the formed on-disk bytes.
 ///
 /// The descriptor comes from `rel.rd_att`; the bare `Datum` arrays are bridged
-/// to [`TupleValue`] via [`tuple_value_from_datum`] (a by-reference column hits
+/// to [`Datum`] via [`tuple_value_from_datum`] (a by-reference column hits
 /// the unresolved slot-payload frontier and panics, mirroring `execTuples`).
 pub fn index_form_tuple_seam<'mcx>(
     mcx: Mcx<'mcx>,
@@ -617,7 +624,7 @@ pub fn index_form_tuple_seam<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let tupdesc = rel.rd_att.as_ref();
     let natts = tupdesc.natts as usize;
-    let mut tvalues: PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, natts)?;
+    let mut tvalues: PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, natts)?;
     for i in 0..natts {
         tvalues.push(tuple_value_from_datum(tupdesc.compact_attr(i), values[i], isnull[i]));
     }
@@ -665,19 +672,20 @@ pub fn init_seams() {
 }
 
 // ---------------------------------------------------------------------------
-// Datum <-> TupleValue bridge (the slot-payload frontier)
+// Bare-word `Datum` <-> canonical `Datum<'mcx>` bridge (the slot-payload frontier)
 // ---------------------------------------------------------------------------
 
-/// Bridge a bare `Datum` (+ its descriptor entry) to the owned [`TupleValue`].
+/// Bridge a bare-word `Datum` (`ScalarWord`, + its descriptor entry) to the
+/// owned canonical [`Datum`] value.
 ///
 /// A by-value attribute (`attbyval`) or a NULL is `ByVal(datum)`; a
 /// by-reference attribute would need to dereference the `Datum`'s pointer to
 /// copy the on-disk varlena/cstring bytes — which the safe byte model cannot do
 /// from a bare word. That is the unresolved slot-payload frontier (mirrors
 /// `execTuples`), so it panics loudly here.
-fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: ScalarWord, isnull: bool) -> TupleValue<'mcx> {
+fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: ScalarWord, isnull: bool) -> Datum<'mcx> {
     if isnull || att.attbyval {
-        TupleValue::ByVal(datum)
+        Datum::ByVal(datum)
     } else {
         panic!(
             "indextuple.c index_form_tuple seam: a by-reference index key Datum needs the \
@@ -687,11 +695,11 @@ fn tuple_value_from_datum<'mcx>(att: &CompactAttribute, datum: ScalarWord, isnul
     }
 }
 
-/// Clone a [`TupleValue`] into `mcx` (its `ByRef` bytes are copied).
-fn clone_tuple_value<'mcx>(mcx: Mcx<'mcx>, value: &TupleValue<'_>) -> PgResult<TupleValue<'mcx>> {
+/// Clone a [`Datum`] into `mcx` (its `ByRef` bytes are copied).
+fn clone_tuple_value<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'_>) -> PgResult<Datum<'mcx>> {
     Ok(match value {
-        TupleValue::ByVal(d) => TupleValue::ByVal(*d),
-        TupleValue::ByRef(b) => TupleValue::ByRef(slice_in(mcx, b)?),
+        Datum::ByVal(d) => Datum::ByVal(*d),
+        Datum::ByRef(b) => Datum::ByRef(slice_in(mcx, b)?),
     })
 }
 
@@ -757,25 +765,25 @@ fn fetchatt<'mcx>(
     att: &CompactAttribute,
     tp: &[u8],
     off: usize,
-) -> PgResult<TupleValue<'mcx>> {
+) -> PgResult<Datum<'mcx>> {
     if att.attbyval {
         Ok(fetch_att_byval(tp, off, att.attlen))
     } else {
         let end = att_addlength_pointer(off, att.attlen, tp, off);
-        Ok(TupleValue::ByRef(slice_in(mcx, &tp[off..end])?))
+        Ok(Datum::ByRef(slice_in(mcx, &tp[off..end])?))
     }
 }
 
 /// `fetch_att(T, attbyval=true, attlen)` (tupmacs.h) for a by-value field.
 #[inline]
-fn fetch_att_byval<'mcx>(tp: &[u8], off: usize, attlen: i16) -> TupleValue<'mcx> {
+fn fetch_att_byval<'mcx>(tp: &[u8], off: usize, attlen: i16) -> Datum<'mcx> {
     match attlen {
-        1 => TupleValue::from_usize(tp[off] as i8 as i64 as usize),
-        2 => TupleValue::from_usize(i16::from_ne_bytes([tp[off], tp[off + 1]]) as i64 as usize),
-        4 => TupleValue::from_usize(
+        1 => Datum::from_usize(tp[off] as i8 as i64 as usize),
+        2 => Datum::from_usize(i16::from_ne_bytes([tp[off], tp[off + 1]]) as i64 as usize),
+        4 => Datum::from_usize(
             i32::from_ne_bytes([tp[off], tp[off + 1], tp[off + 2], tp[off + 3]]) as i64 as usize,
         ),
-        8 => TupleValue::from_usize(usize::from_ne_bytes([
+        8 => Datum::from_usize(usize::from_ne_bytes([
             tp[off],
             tp[off + 1],
             tp[off + 2],
