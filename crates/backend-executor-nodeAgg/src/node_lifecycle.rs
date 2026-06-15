@@ -267,15 +267,19 @@ pub fn find_cols_walker<'mcx>(
     // if (IsA(node, Var)) { ... } / if (IsA(node, Aggref)) { ... } /
     // return expression_tree_walker(node, find_cols_walker, context);
     //
-    // The `Var`/`Aggref`/general expression node tags are not yet present in
-    // the shared `Node` enum, and `expression_tree_walker` is owned by the
-    // unported `nodes/nodeFuncs.c`. The walk therefore belongs to that owner;
-    // dispatching it requires the expression-node vocabulary it defines. Until
-    // it lands the walk panics loudly rather than silently dropping columns.
+    // expression_tree_walker IS ported (backend-nodes-core::node_walker) and
+    // `Var`/`Aggref` ARE Expr variants in the shared Node enum now, so the walk
+    // is implementable. But its only caller `find_cols` sources the Agg plan
+    // node's targetlist/qual/grpColIdx via `agg_plan(aggstate)` reading
+    // `ss.ps.plan` — and the shared `Node` vocabulary still has no `T_Agg`
+    // plan-node variant (agg_plan() below panics on exactly that). The walk is
+    // therefore unreachable with real expression trees until the planner's Agg
+    // plan node lands. Blocked on the T_Agg plan-node keystone, NOT on nodeFuncs.
     let _ = context;
     panic!(
-        "backend-nodes-nodeFuncs: expression_tree_walker / Var / Aggref node vocabulary \
-         not yet ported; find_cols_walker cannot classify column references"
+        "backend-nodes-plannodes: find_cols_walker is implementable (expression_tree_walker + \
+         Var/Aggref ported) but unreachable — its caller find_cols cannot read the Agg plan node \
+         (T_Agg not in the shared Node vocabulary; see agg_plan)"
     )
 }
 
@@ -285,13 +289,16 @@ pub fn find_hash_columns<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    // Find Vars that will be needed in tlist and qual. find_cols itself
-    // depends on the unported expression-walker vocabulary (see find_cols),
-    // so the whole hash-column analysis lands with it.
+    // Find Vars that will be needed in tlist and qual. find_cols reads the Agg
+    // plan node (ss.ps.plan) via agg_plan(), which the shared Node vocabulary
+    // cannot express until the T_Agg plan-node variant lands. The
+    // expression-walker vocabulary it would feed (expression_tree_walker /
+    // Var / Aggref) is already ported; the block is the upstream Agg plan node.
     let _ = (aggstate, mcx);
     panic!(
-        "backend-nodes-nodeFuncs: find_hash_columns depends on find_cols' expression walk, \
-         which needs the unported nodeFuncs expression-node vocabulary"
+        "backend-nodes-plannodes: find_hash_columns depends on find_cols, which cannot read the \
+         Agg plan node (T_Agg not in the shared Node vocabulary). nodeFuncs walker is ported; \
+         the block is the T_Agg plan-node keystone"
     )
 }
 
@@ -1062,9 +1069,21 @@ fn clear_slot<'mcx>(estate: &mut EStateData<'mcx>, slot_id: SlotId) -> PgResult<
 /// EcxtId for ps_ExprContext on its facet here, so the clear lands with the
 /// execUtils ExprContext model.
 fn clear_agg_values<'mcx>(_node: &mut AggStateData<'mcx>) {
-    // No-op placeholder: ecxt_aggvalues/ecxt_aggnulls are owned by the
-    // EState-side ExprContext (EcxtId pool); the rescan owner clears them.
-    // The C MemSet is exactly this and must run when that facet is threaded.
+    // C: `MemSet(econtext->ecxt_aggvalues, 0, sizeof(Datum) * node->numaggs);
+    //     MemSet(econtext->ecxt_aggnulls, 0, sizeof(bool) * node->numaggs);`
+    // The aggvalues/aggnulls arrays live on the node's per-output-tuple
+    // ExprContext (`ss.ps.ps_ExprContext`), which the owned AggState carries as
+    // an EcxtId into the EState pool — but that EcxtId is NOT on this facet (the
+    // same ExprContext storage-model carrier gap ExecInitAgg/hash_create_memory
+    // hit), and execUtils exposes no "clear ecxt_aggvalues/aggnulls by EcxtId"
+    // seam to marshal the MemSet through. A silent no-op would drop the C clear;
+    // per "loud panic beats a silent stub", panic until the per-tuple ExprContext
+    // reaches this facet (and a clear seam exists).
+    panic!(
+        "backend-executor-nodeAgg::ExecReScanAgg: clearing ecxt_aggvalues/ecxt_aggnulls needs the \
+         node's per-tuple ExprContext (EcxtId) on the AggState facet — same ExprContext carrier \
+         gap as ExecInitAgg; no execUtils clear-agg-values seam yet"
+    );
 }
 
 /// `ExecReScan(outerPlanState(node))` (execAmi.c) — rescan the child plan

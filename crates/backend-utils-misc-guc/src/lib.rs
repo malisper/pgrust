@@ -243,13 +243,46 @@ pub fn NewGUCNestLevel() -> i32 {
     GUC_NEST_LEVEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
+/// `ParseLongOption(string, &name, &value)` (guc.c:6367) — a little "long
+/// argument" simulation. Takes `"some-option=some value"` and returns
+/// `name = "some_option"` and `value = Some("some value")` in `mcx`-allocated
+/// storage; `'-'` in the option name is converted to `'_'`. If there is no `'='`
+/// in the input, `value` is `None`.
+pub fn ParseLongOption<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    string: &str,
+) -> types_error::PgResult<(mcx::PgString<'mcx>, Option<mcx::PgString<'mcx>>)> {
+    // equal_pos = strcspn(string, "="): byte offset of the first '=', or the
+    // whole length if none.
+    let bytes = string.as_bytes();
+    let equal_pos = bytes.iter().position(|&b| b == b'=');
+
+    let (name_src, value): (&str, Option<mcx::PgString<'mcx>>) = match equal_pos {
+        Some(pos) => {
+            // *name = strlcpy of string[..pos]; *value = pstrdup(string[pos+1..]).
+            let value = mcx::PgString::from_str_in(&string[pos + 1..], mcx)?;
+            (&string[..pos], Some(value))
+        }
+        // no equal sign in string: *name = pstrdup(string); *value = NULL.
+        None => (string, None),
+    };
+
+    // *name with '-' converted to '_'.
+    let mut name = mcx::PgString::new_in(mcx);
+    for c in name_src.chars() {
+        name.try_push(if c == '-' { '_' } else { c })?;
+    }
+
+    Ok((name, value))
+}
+
 // ---------------------------------------------------------------------------
 // Tier-A seam install (this crate is guc.c's home).
 // ---------------------------------------------------------------------------
 
 use types_core::BOOTSTRAP_SUPERUSERID;
 use types_guc::{
-    GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_SIGHUP, PGC_SUSET,
+    GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET,
     PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE,
 };
 
@@ -274,6 +307,150 @@ fn set_config_option_seam(
         false,
     )
     .map(|_| ())
+}
+
+/// `CONFIG_FILENAME` (guc.h): default postgresql.conf basename.
+const CONFIG_FILENAME: &str = "postgresql.conf";
+/// `HBA_FILENAME` (guc.h): default pg_hba.conf basename.
+const HBA_FILENAME: &str = "pg_hba.conf";
+/// `IDENT_FILENAME` (guc.h): default pg_ident.conf basename.
+const IDENT_FILENAME: &str = "pg_ident.conf";
+
+/// `pg_timezone_abbrev_initialize()` (guc.c:1991): if no `timezone_abbreviations`
+/// setting was found, select the `"Default"` value (a no-op if a non-default is
+/// already installed, per the GUC source-precedence rules).
+fn pg_timezone_abbrev_initialize() -> PgResult<()> {
+    set_config_option_seam(
+        "timezone_abbreviations",
+        "Default",
+        PGC_POSTMASTER,
+        PGC_S_DYNAMIC_DEFAULT,
+    )
+}
+
+/// `SelectConfigFiles(userDoption, progname)` (guc.c:1784): locate and read
+/// `postgresql.conf`, establishing `config_file`/`data_directory`/`hba_file`/
+/// `ident_file` and the `DataDir`. Returns `Ok(false)` for the C `return false`
+/// configuration problems (the caller `proc_exit(1)`s); `Err` carries an
+/// `ereport(ERROR)`.
+///
+/// `ConfigFileName`/`HbaFileName`/`IdentFileName` are themselves GUC string
+/// variables in this crate's registry; they are read with [`live::get_string`].
+/// `SetConfigOption(..., PGC_S_OVERRIDE)` pins each path so it cannot be
+/// overridden later. `make_absolute_path`/`SetDataDir` are reached through the
+/// miscinit-seams re-exports, and `ProcessConfigFile(PGC_POSTMASTER)` through the
+/// guc-file owner.
+pub fn SelectConfigFiles(user_doption: Option<&str>, progname: &str) -> PgResult<bool> {
+    use backend_utils_init_miscinit_seams as misc;
+
+    // configdir is -D option, or $PGDATA if no -D.
+    let configdir: Option<String> = match user_doption {
+        Some(d) => Some(misc::make_absolute_path::call(d)?),
+        None => match std::env::var("PGDATA") {
+            Ok(v) => Some(misc::make_absolute_path::call(&v)?),
+            Err(_) => None,
+        },
+    };
+
+    if let Some(dir) = &configdir {
+        if std::fs::metadata(dir).is_err() {
+            eprintln!("{progname}: could not access directory \"{dir}\"");
+            eprintln!(
+                "Run initdb or pg_basebackup to initialize a PostgreSQL data directory."
+            );
+            return Ok(false);
+        }
+    }
+
+    // Find the configuration file: config_file GUC if set, else
+    // configdir/postgresql.conf. Make the result absolute.
+    let config_file_guc = live::get_string("config_file").flatten();
+    let fname: String = if let Some(cf) = config_file_guc.as_deref().filter(|s| !s.is_empty()) {
+        misc::make_absolute_path::call(cf)?
+    } else if let Some(dir) = &configdir {
+        format!("{dir}/{CONFIG_FILENAME}")
+    } else {
+        eprintln!(
+            "{progname} does not know where to find the server configuration file.\n\
+             You must specify the --config-file or -D invocation option or set the PGDATA \
+             environment variable."
+        );
+        return Ok(false);
+    };
+
+    // Pin config_file to its final value.
+    set_config_option_seam("config_file", &fname, PGC_POSTMASTER, PGC_S_OVERRIDE)?;
+
+    // Read the config file for the first time (only data_directory is picked up
+    // this pass, to find the data directory so the autoconf file can be read).
+    let config_file_name = live::get_string("config_file").flatten().unwrap_or_default();
+    if std::fs::metadata(&config_file_name).is_err() {
+        eprintln!(
+            "{progname}: could not access the server configuration file \"{config_file_name}\""
+        );
+        return Ok(false);
+    }
+    backend_utils_misc_guc_file_seams::process_config_file::call(PGC_POSTMASTER)?;
+
+    // If data_directory has been set, use that as DataDir; else configdir; else
+    // punt.
+    let data_directory = live::get_string("data_directory").flatten().unwrap_or_default();
+    if !data_directory.is_empty() {
+        misc::set_data_dir::call(&data_directory)?;
+    } else if let Some(dir) = &configdir {
+        misc::set_data_dir::call(dir)?;
+    } else {
+        eprintln!(
+            "{progname} does not know where to find the database system data.\n\
+             This can be specified as \"data_directory\" in \"{config_file_name}\", or by the \
+             -D invocation option, or by the PGDATA environment variable."
+        );
+        return Ok(false);
+    }
+
+    // Reflect the final DataDir back into the data_directory GUC var.
+    let data_dir = backend_utils_init_small_seams::data_dir::call().unwrap_or_default();
+    set_config_option_seam("data_directory", &data_dir, PGC_POSTMASTER, PGC_S_OVERRIDE)?;
+
+    // Read the config file a second time, allowing autoconf settings to apply.
+    backend_utils_misc_guc_file_seams::process_config_file::call(PGC_POSTMASTER)?;
+
+    // If timezone_abbreviations wasn't set in the file, install the default.
+    pg_timezone_abbrev_initialize()?;
+
+    // Figure out where pg_hba.conf is, make absolute, pin it.
+    let hba_guc = live::get_string("hba_file").flatten();
+    let fname = if let Some(h) = hba_guc.as_deref().filter(|s| !s.is_empty()) {
+        misc::make_absolute_path::call(h)?
+    } else if let Some(dir) = &configdir {
+        format!("{dir}/{HBA_FILENAME}")
+    } else {
+        eprintln!(
+            "{progname} does not know where to find the \"hba\" configuration file.\n\
+             This can be specified as \"hba_file\" in \"{config_file_name}\", or by the -D \
+             invocation option, or by the PGDATA environment variable."
+        );
+        return Ok(false);
+    };
+    set_config_option_seam("hba_file", &fname, PGC_POSTMASTER, PGC_S_OVERRIDE)?;
+
+    // Likewise for pg_ident.conf.
+    let ident_guc = live::get_string("ident_file").flatten();
+    let fname = if let Some(i) = ident_guc.as_deref().filter(|s| !s.is_empty()) {
+        misc::make_absolute_path::call(i)?
+    } else if let Some(dir) = &configdir {
+        format!("{dir}/{IDENT_FILENAME}")
+    } else {
+        eprintln!(
+            "{progname} does not know where to find the \"ident\" configuration file.\n\
+             This can be specified as \"ident_file\" in \"{config_file_name}\", or by the -D \
+             invocation option, or by the PGDATA environment variable."
+        );
+        return Ok(false);
+    };
+    set_config_option_seam("ident_file", &fname, PGC_POSTMASTER, PGC_S_OVERRIDE)?;
+
+    Ok(true)
 }
 
 /// `GUC_SAFE_SEARCH_PATH` (guc.c:74): the locked-down `search_path` value
@@ -426,19 +603,12 @@ pub fn init_seams() {
         .map(|_| ())
     });
 
-    // postgresql.conf parsing orchestration (config_file.c / guc-file.l).
-    s::parse_long_option::set(|_mcx, _string| {
-        panic!(
-            "ParseLongOption: the command-line/config option splitter (config_file.c) is a \
-             separate unit not yet ported"
-        )
-    });
-    s::select_config_files::set(|_user_doption, _progname| {
-        panic!(
-            "SelectConfigFiles: postgresql.conf location/read (config_file.c) is a separate unit \
-             not yet ported"
-        )
-    });
+    // ParseLongOption (guc.c) — split a `name=value` long option. guc.c's own
+    // body, owned here.
+    s::parse_long_option::set(ParseLongOption);
+    // SelectConfigFiles (guc.c) — locate/read postgresql.conf and pin the
+    // config-file/data-directory GUCs. guc.c's own body, owned here.
+    s::select_config_files::set(SelectConfigFiles);
     // ProcessConfigFile(PGC_SIGHUP) (guc-file.l) — the SIGHUP reload. The
     // memory-context wrapper lives in guc-file.l (its own unit); drive it
     // through its seam so a SIGHUP reload re-reads and applies the file.
@@ -453,13 +623,9 @@ pub fn init_seams() {
     });
 
     // SetPGVariable's List *A_Const marshaling (the DISCARD ALL session_auth
-    // reset).
-    s::set_pg_variable_session_authorization_reset::set(|| {
-        panic!(
-            "SetPGVariable(\"session_authorization\", NIL, false): the A_Const List marshaling is \
-             not yet modeled in this core"
-        )
-    });
+    // reset) is installed by the seam's owner, guc_funcs.c
+    // (backend-utils-misc-guc-funcs), which owns `SetPGVariable` and depends on
+    // this crate's seam crate (acyclic). See its `init_seams`.
 }
 
 /// Install the parallel-worker GUC-state transfer seams declared in

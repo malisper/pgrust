@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 backend-commands-comment-seams = { path = "../backend-commands-comment-seams" }
+backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
@@ -23,3 +24,4 @@ types-catalog = { path = "../types-catalog" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
