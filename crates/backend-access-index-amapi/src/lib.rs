@@ -49,6 +49,9 @@ const BTREE_AM_OID: Oid = 403;
 /// `HASH_AM_OID` (catalog/pg_am.dat) — the built-in hash access method.
 const HASH_AM_OID: Oid = 405;
 
+/// `GIST_AM_OID` (catalog/pg_am.dat) — the built-in GiST access method.
+const GIST_AM_OID: Oid = 783;
+
 /// `GIN_AM_OID` (catalog/pg_am.dat) — the built-in GIN access method.
 const GIN_AM_OID: Oid = 2742;
 
@@ -280,10 +283,10 @@ pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
             backend_access_gin_core_probe::ginvalidate::ginvalidate(mcx, opclassoid)?
         }
         BRIN_AM_OID => backend_access_brin_validate::brinvalidate(mcx, opclassoid)?,
-        // SP-GiST (4000) / GiST (783) validators are not yet ported (no
-        // `spgvalidate`/`gistvalidate`), so their handlers' `amvalidate` is
-        // unreachable here; that maps to the C `function amvalidate is not
-        // defined for index access method %u` error.
+        GIST_AM_OID => backend_access_gist_validate::gistvalidate(mcx, opclassoid)?,
+        // SP-GiST (4000) validator is not yet ported (no `spgvalidate`), so its
+        // handler's `amvalidate` is unreachable here; that maps to the C
+        // `function amvalidate is not defined for index access method %u` error.
         _ => {
             return Err(PgError::error(format!(
                 "function amvalidate is not defined for index access method \

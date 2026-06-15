@@ -1195,10 +1195,16 @@ pub fn gisthandler() -> IndexAmRoutine {
             | VACUUM_OPTION_PARALLEL_COND_CLEANUP,
         amkeytype: InvalidOid,
 
-        // gistvalidate returns a soft-error result; reached by name (like bt).
+        // gistvalidate returns a soft-error result + needs an Mcx, so it cannot
+        // ride the raw fn-ptr `amvalidate` slot; it is reached by name through
+        // amapi's `amvalidate` dispatch (backend-access-gist-validate), exactly
+        // like bt/hash/gin/brin.
         amvalidate: None,
         amtranslatestrategy: None,
-        // gisttranslatecmptype is reached by name (not the raw fn ptr ABI).
+        // gisttranslatecmptype dispatches the opclass's GIST_TRANSLATE_CMPTYPE_PROC
+        // support function (fmgr), so it needs an Mcx and is fallible — it cannot
+        // ride the infallible/context-free `amtranslatecmptype` fn-ptr slot.
+        // It is reached by name (backend-access-gist-core::gisttranslatecmptype).
         amtranslatecmptype: None,
 
         // Insert / vacuum callbacks — NOT this F2-scan unit's logic. Reached by

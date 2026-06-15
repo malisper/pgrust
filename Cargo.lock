@@ -1020,6 +1020,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
  "backend-access-common-indextuple-seams",
+ "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
  "backend-access-gist-am-seams",
  "backend-access-gist-core-seams",
@@ -1045,6 +1046,7 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
  "backend-utils-error-elog-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-stack-depth-seams",
  "mcx",
  "pg-prng",
@@ -1100,6 +1102,24 @@ dependencies = [
  "types-gist",
  "types-sortsupport",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gist-validate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-hash",
+ "types-opclass",
 ]
 
 [[package]]
@@ -1612,6 +1632,7 @@ dependencies = [
  "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
  "backend-access-gist-core",
+ "backend-access-gist-validate",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
@@ -15340,6 +15361,7 @@ dependencies = [
  "backend-access-gin-ginxlog",
  "backend-access-gist-core",
  "backend-access-gist-proc",
+ "backend-access-gist-validate",
  "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hash-xlog",
