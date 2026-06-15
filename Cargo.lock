@@ -201,12 +201,15 @@ dependencies = [
 name = "backend-access-common-printtup"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
+ "types-nodes",
  "types-stringinfo",
  "types-tuple",
 ]
