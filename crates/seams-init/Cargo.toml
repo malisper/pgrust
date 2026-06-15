@@ -22,6 +22,7 @@ backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
 backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
 backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
+backend-access-gin-ginvacuum = { path = "../backend-access-gin-ginvacuum" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heapam = { path = "../backend-access-heap-heapam" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
