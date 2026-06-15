@@ -54,6 +54,7 @@ pub mod process_config;
 pub mod registry;
 pub mod report;
 pub mod seam;
+pub mod serialize;
 pub mod units;
 
 #[cfg(test)]
@@ -83,9 +84,9 @@ pub use registry::{
 };
 pub use report::{begin_reporting_guc_options, report_changed_guc_options};
 pub use units::{
-    convert_int_from_base_unit, convert_real_from_base_unit, convert_to_base_unit,
-    get_config_unit_name, parse_int as parse_int_units, parse_real as parse_real_units, ParseNum,
-    MAX_UNIT_LEN, MEMORY_UNITS_HINT, TIME_UNITS_HINT,
+    convert_int_from_base_unit, convert_real_from_base_unit, convert_to_base_unit, fmt_e, fmt_g,
+    fmt_g_prec, get_config_unit_name, parse_int as parse_int_units, parse_real as parse_real_units,
+    ParseNum, MAX_UNIT_LEN, MEMORY_UNITS_HINT, TIME_UNITS_HINT,
 };
 
 /// Map an allocation-failure (`TryReserveError`) into the project's OOM
@@ -366,6 +367,16 @@ pub fn init_seams() {
     //     (guc.c is their home) but each loud-panics into the unported sub-unit
     //     rather than silently stubbing (mirror-and-panic). ---
 
+    // Parallel-worker GUC-state transfer (guc.c EstimateGUCStateSpace /
+    // SerializeGUCState / RestoreGUCState). These are guc.c's own bodies; the
+    // `parallel-rt` seam crate declares them (consumed by parallel.c's
+    // InitializeParallelDSM / ParallelWorkerMain) and guc.c is their owner, so
+    // they are installed here. The `space: usize` carried by the seams is the
+    // raw start address inside the DSM segment shm_toc_allocate handed back;
+    // bridging it to a byte slice is the audited DSM-pointer primitive (same as
+    // the sibling combocid/snapshot serializers).
+    install_guc_state_transfer_seams();
+
     // GUC nesting level (guc.c): NewGUCNestLevel is `++GUCNestLevel`, owned
     // here. AtEOXact_GUC's stack rollback still belongs to guc_stack.c.
     s::new_guc_nest_level::set(NewGUCNestLevel);
@@ -444,6 +455,60 @@ pub fn init_seams() {
              not yet modeled in this core"
         )
     });
+}
+
+/// Install the parallel-worker GUC-state transfer seams declared in
+/// `backend-access-transam-parallel-rt-seams` (guc.c owns the bodies).
+///
+/// `EstimateGUCStateSpace` / `SerializeGUCState` / `RestoreGUCState` operate on
+/// the process-global live GUC store; the `space: usize` argument is the raw DSM
+/// start address `shm_toc_allocate` returned, bridged here into a byte slice.
+/// The serialize side receives the planned length (`len`, equal to the prior
+/// estimate); the restore side reads the payload length from the first
+/// `size_of::<usize>()` bytes of the stream (mirroring C
+/// `RestoreGUCState(void *gucstate)`), so it forms the slice in two steps.
+fn install_guc_state_transfer_seams() {
+    use backend_access_transam_parallel_rt_seams as rt;
+
+    rt::estimate_guc_state_space::set(|| {
+        live::with_store(serialize::estimate_guc_state_space)
+            .ok_or_else(guc_store_uninitialized)
+    });
+
+    rt::serialize_guc_state::set(|len, space| {
+        // SAFETY: `space` is the start of a `len`-byte chunk shm_toc_allocate
+        // reserved for the GUC state (EstimateGUCStateSpace sized it); the
+        // leader writes the whole chunk here. This is the audited DSM-pointer
+        // primitive.
+        let buf = unsafe { core::slice::from_raw_parts_mut(space as *mut u8, len) };
+        live::with_store(|reg| serialize::serialize_guc_state(reg, buf))
+            .ok_or_else(guc_store_uninitialized)?
+    });
+
+    rt::restore_guc_state::set(|space| {
+        // The first machine-word of the stream is the payload length; read it,
+        // then form the full `size_of::<usize>() + len` slice. SAFETY: `space`
+        // points at the GUC-state chunk the leader serialized; the length
+        // prefix bounds the readable extent.
+        let prefix = core::mem::size_of::<usize>();
+        let len = unsafe {
+            let head = core::slice::from_raw_parts(space as *const u8, prefix);
+            usize::from_ne_bytes(head.try_into().expect("usize-sized prefix"))
+        };
+        let total = prefix + len;
+        let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
+        live::with_store_mut(|reg| serialize::restore_guc_state(reg, buf))
+            .ok_or_else(guc_store_uninitialized)?
+    });
+}
+
+/// The live GUC store has not been built yet (`initialize_guc_options` not run).
+/// A parallel transfer cannot proceed without it — surface the project's error.
+fn guc_store_uninitialized() -> PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+        .errmsg("GUC state transfer attempted before the GUC store was initialized")
+        .into_error()
 }
 
 /// `GetConfigOption` value lookup over the live store.

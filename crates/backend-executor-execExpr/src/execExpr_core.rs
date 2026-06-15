@@ -1935,6 +1935,32 @@ pub fn exec_eval_array_expr_switch_context<'mcx>(
     )
 }
 
+/// `ExecCheck(state, econtext)` (execExpr.c) — evaluate a check expression
+/// (e.g. a CHECK constraint or WITH CHECK OPTION). Unlike `ExecQual`, a NULL
+/// result is treated as TRUE.
+pub fn exec_check<'mcx>(
+    state: Option<&mut ExprState<'mcx>>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    // short-circuit (here and in ExecInitCheck) for empty restriction list
+    let state = match state {
+        None => return Ok(true),
+        Some(state) => state,
+    };
+
+    // verify that expression was not compiled using ExecInitQual
+    debug_assert!(state.flags & EEO_FLAG_IS_QUAL == 0);
+
+    let (ret, isnull) = exec_eval_expr_switch_context(state, econtext, estate)?;
+
+    if isnull {
+        return Ok(true);
+    }
+
+    Ok(ret.as_bool())
+}
+
 /// `ExecQual(state, econtext)` (executor.h).
 pub fn exec_qual<'mcx>(
     state: &mut ExprState<'mcx>,

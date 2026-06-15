@@ -15,6 +15,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PredicateLockPageSplit(relation, oldblkno, newblkno)` (predicate.c):
+    /// copy the predicate (SIREAD) locks from `oldblkno` to `newblkno` when a
+    /// hash bucket page splits, so serializable conflicts are preserved across
+    /// the split. Keyed on the relation by OID; can `ereport(ERROR)`.
+    pub fn predicate_lock_page_split(
+        index_oid: types_core::primitive::Oid,
+        old_blkno: types_core::primitive::BlockNumber,
+        new_blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CheckForSerializableConflictIn(relation, NULL, blkno)` (predicate.c):
+    /// the page-granularity rw-conflict check the hash AM performs on the
+    /// primary bucket page before inserting. `Err` carries the
+    /// serialization-failure `ereport(ERROR)`.
+    pub fn check_for_serializable_conflict_in_page(
+        index_oid: types_core::primitive::Oid,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetSerializableTransactionSnapshot(snapshot)` (predicate.c) — get a
     /// snapshot for a serializable transaction, registering it with the
     /// predicate-locking machinery. C fills the caller's `SnapshotData`; here

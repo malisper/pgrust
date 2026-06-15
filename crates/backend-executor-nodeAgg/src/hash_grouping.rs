@@ -2,6 +2,7 @@
 //! tables, the in-memory and refill retrieve paths, the recompiled transition
 //! expressions for hashed input, and the bucket/partition sizing helpers.
 
+use backend_executor_nodeHash_seams as nodeHash_seams;
 use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::nodeagg::{
@@ -251,40 +252,50 @@ pub fn hash_choose_num_partitions(
     used_bits: i32,
 ) -> (i32, i32) {
     // Size hash_mem_limit = get_hash_memory_limit();
-    //
-    // get_hash_memory_limit() reads the work_mem / hash_mem_multiplier GUCs
-    // (utils/misc/guc), which this unit does not depend on and for which no seam
-    // is declared. The arithmetic below is faithful, but cannot run without that
-    // value. Loud panic until the GUC surface is reachable.
-    //
-    // Faithful body (for reference, runs once hash_mem_limit is available):
+    let hash_mem_limit = nodeHash_seams::get_hash_memory_limit::call()
+        .expect("get_hash_memory_limit (nodeHash.c) does not ereport")
+        as f64;
+
+    // Avoid creating so many partitions that the memory requirements of the
+    // open partition files are greater than 1/4 of hash_mem.
     //   partition_limit = (hash_mem_limit * 0.25 - HASHAGG_READ_BUFFER_SIZE)
     //                     / HASHAGG_WRITE_BUFFER_SIZE;
-    //   mem_wanted = HASHAGG_PARTITION_FACTOR * input_groups * hashentrysize;
+    let partition_limit = (hash_mem_limit * 0.25 - HASHAGG_READ_BUFFER_SIZE as f64)
+        / HASHAGG_WRITE_BUFFER_SIZE as f64;
+
+    // mem_wanted = HASHAGG_PARTITION_FACTOR * input_groups * hashentrysize;
+    let mem_wanted = HASHAGG_PARTITION_FACTOR * input_groups * hashentrysize;
+
+    // make enough partitions so that each one is likely to fit in memory
     //   dpartitions = 1 + (mem_wanted / hash_mem_limit);
-    //   if (dpartitions > partition_limit) dpartitions = partition_limit;
-    //   if (dpartitions < HASHAGG_MIN_PARTITIONS) dpartitions = HASHAGG_MIN_PARTITIONS;
-    //   if (dpartitions > HASHAGG_MAX_PARTITIONS) dpartitions = HASHAGG_MAX_PARTITIONS;
-    //   npartitions = (int) dpartitions;
-    //   partition_bits = my_log2(npartitions);
-    //   if (partition_bits + used_bits >= 32) partition_bits = 32 - used_bits;
-    //   npartitions = 1 << partition_bits;
-    //   return (npartitions, partition_bits);
-    let _ = (
-        input_groups,
-        hashentrysize,
-        used_bits,
-        HASHAGG_PARTITION_FACTOR,
-        HASHAGG_MIN_PARTITIONS,
-        HASHAGG_MAX_PARTITIONS,
-        HASHAGG_READ_BUFFER_SIZE,
-        HASHAGG_WRITE_BUFFER_SIZE,
-    );
-    let _ = my_log2 as fn(i64) -> i32;
-    panic!(
-        "backend-utils-misc-guc: get_hash_memory_limit (work_mem/hash_mem_multiplier) \
-         not yet reachable (hash_choose_num_partitions)"
-    );
+    let mut dpartitions = 1.0 + (mem_wanted / hash_mem_limit);
+
+    if dpartitions > partition_limit {
+        dpartitions = partition_limit;
+    }
+
+    if dpartitions < HASHAGG_MIN_PARTITIONS as f64 {
+        dpartitions = HASHAGG_MIN_PARTITIONS as f64;
+    }
+    if dpartitions > HASHAGG_MAX_PARTITIONS as f64 {
+        dpartitions = HASHAGG_MAX_PARTITIONS as f64;
+    }
+
+    // HASHAGG_MAX_PARTITIONS limit makes this safe
+    let mut npartitions = dpartitions as i32;
+
+    // ceil(log2(npartitions))
+    let mut partition_bits = my_log2(npartitions as i64);
+
+    // make sure that we don't exhaust the hash bits
+    if partition_bits + used_bits >= 32 {
+        partition_bits = 32 - used_bits;
+    }
+
+    // number of partitions will be a power of two
+    npartitions = 1 << partition_bits;
+
+    (npartitions, partition_bits)
 }
 
 /// `initialize_hash_entry(aggstate, hashtable, entry)` — initialize a freshly

@@ -355,6 +355,11 @@ scalar_global!(
     N_BUFFERS, NBuffers, SetNBuffers, i32, 16384
 );
 scalar_global!(
+    /// `int NLocBuffer = 0;` (globals.c) — number of local (temp-table) buffers;
+    /// set during `InitLocalBuffers`.
+    N_LOC_BUFFER, NLocBuffer, SetNLocBuffer, i32, 0
+);
+scalar_global!(
     /// `int MaxConnections = 100;`
     MAX_CONNECTIONS, MaxConnections, SetMaxConnections, i32, 100
 );

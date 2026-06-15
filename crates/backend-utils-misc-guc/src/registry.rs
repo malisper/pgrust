@@ -36,7 +36,7 @@ use crate::enum_lookup::{
 };
 use crate::model::{
     config_bool, config_enum, config_generic, config_int, config_real, config_string,
-    config_var_val,
+    config_var_val, GUC_PENDING_RESTART,
 };
 use crate::name::{guc_name_eq, MAP_OLD_GUC_NAMES};
 use crate::units::{
@@ -691,15 +691,14 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
     }
 }
 
-/// Render a double the way C `snprintf("%g")` does.
+/// Render a double the way C `snprintf(buf, "%g", v)` does (the renderer
+/// `ShowGUCOption` uses for `PGC_REAL`). C `%g` uses precision `P = 6`
+/// significant digits by default: it formats with `%e` style when the decimal
+/// exponent `X` satisfies `X < -4` or `X >= P`, otherwise `%f` style, and then
+/// strips trailing zeros and a trailing decimal point. See
+/// [`crate::units::fmt_g`] for the shared implementation.
 fn fmt_g(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        let s = format!("{v:.6}");
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        trimmed.to_string()
-    }
+    crate::units::fmt_g(v)
 }
 
 /// `GetConfigOptionResetString`'s per-record core (guc.c): render a variable's
@@ -832,6 +831,29 @@ pub fn set_config_option(
         }
     };
 
+    // prohibitValueChange (guc.c:3490-3495,3734-3751): re-reading a
+    // PGC_POSTMASTER variable from postgresql.conf under PGC_SIGHUP. The value
+    // can't be changed; compare the canonicalized newval against the live one.
+    let prohibit_value_change =
+        reg.vars[idx].gen().context == PGC_POSTMASTER && context == PGC_SIGHUP;
+    if prohibit_value_change {
+        // (newextra is dropped here, mirroring the C guc_free of non-reset
+        // extra; Rust drops `newextra` at end of scope.)
+        let differs = current_value_differs(&reg.vars[idx], &newval);
+        if differs {
+            reg.vars[idx].gen_mut().status |= GUC_PENDING_RESTART;
+            let e = err(
+                ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
+                format!(
+                    "parameter \"{name}\" cannot be changed without restarting the server"
+                ),
+            );
+            return reject(elevel, e);
+        }
+        reg.vars[idx].gen_mut().status &= !GUC_PENDING_RESTART;
+        return Ok(-1);
+    }
+
     if change_val {
         let record = &mut reg.vars[idx];
         apply_value(record, newval.clone(), newextra, source, context, srole);
@@ -887,6 +909,46 @@ fn reset_value(record: &GucVariable) -> config_var_val {
         GucVariable::Real(c) => config_var_val::Realval(c.reset_val),
         GucVariable::String(c) => config_var_val::Stringval(c.reset_val.clone()),
         GucVariable::Enum(c) => config_var_val::Enumval(c.reset_val),
+    }
+}
+
+/// `*conf->variable != newval` (the `prohibitValueChange` comparison of each
+/// per-type case, guc.c:3739/3837/3935/4052/4203). Reads the variable's live
+/// storage when the owner has installed it, else the GUC's tracked value, and
+/// reports whether it differs from the canonicalized `newval`. String values
+/// follow the C NULL-aware comparison.
+fn current_value_differs(record: &GucVariable, newval: &config_var_val) -> bool {
+    match (record, newval) {
+        (GucVariable::Bool(c), config_var_val::Boolval(nv)) => {
+            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
+            cur != *nv
+        }
+        (GucVariable::Int(c), config_var_val::Intval(nv)) => {
+            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
+            cur != *nv
+        }
+        (GucVariable::Real(c), config_var_val::Realval(nv)) => {
+            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
+            cur != *nv
+        }
+        (GucVariable::Enum(c), config_var_val::Enumval(nv)) => {
+            let cur = if c.variable.installed() { c.variable.read() } else { c.value.unwrap_or(c.reset_val) };
+            cur != *nv
+        }
+        (GucVariable::String(c), config_var_val::Stringval(nv)) => {
+            let cur = if c.variable.installed() {
+                c.variable.read()
+            } else {
+                c.value.clone().unwrap_or_else(|| c.reset_val.clone())
+            };
+            // C: (*conf->variable && newval) ? strcmp(...) != 0 : *conf->variable != newval
+            match (cur, nv) {
+                (Some(a), Some(b)) => a != *b,
+                (None, None) => false,
+                _ => true,
+            }
+        }
+        _ => true,
     }
 }
 
