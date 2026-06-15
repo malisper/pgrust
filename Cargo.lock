@@ -2187,6 +2187,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-archive-shell-archive"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-archive-shell-archive-seams",
+ "backend-postmaster-pgarch",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "common-percentrepl",
+ "common-wait-error-seams",
+ "libc",
+ "mcx",
+ "types-error",
+ "types-pgarch",
+]
+
+[[package]]
 name = "backend-archive-shell-archive-seams"
 version = "0.0.0"
 dependencies = [
@@ -11243,6 +11260,7 @@ dependencies = [
 name = "backend-utils-misc-guc"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-libpq-pqcomm-seams",
