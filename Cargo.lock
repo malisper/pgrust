@@ -6589,6 +6589,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-small"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-small-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+ "types-selfuncs",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-optimizer-path-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -12748,6 +12775,7 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-small",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
  "backend-parser-parse-oper",
