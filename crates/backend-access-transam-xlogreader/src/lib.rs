@@ -2318,6 +2318,46 @@ pub fn read_ahead_record_info(
     })
 }
 
+/// `XLogRecGetFullXid(record)` (xlogreader.c:2187) — the `FullTransactionId`
+/// of the reader's current record. It is only safe during replay because it
+/// depends on the replay state (`TransamVariables->nextXid`); see
+/// `AdvanceNextFullTransactionIdPastXid` for more.
+///
+/// `FullTransactionIdFromAllowableAt(TransamVariables->nextXid,
+/// XLogRecGetXid(record))` (transam.h:380): recover the epoch for the record's
+/// bare `xl_xid`, which is known to precede-or-equal the next full xid. The
+/// `TransamVariables->nextXid` read is the varsup-owned
+/// `read_next_full_transaction_id` seam. The `current(state)` borrow mirrors the
+/// C `record->record->header.xl_xid` dereference (the caller guarantees a
+/// decoded current record during replay).
+pub fn XLogRecGetFullXid(state: &XLogReaderState<'_>) -> types_core::FullTransactionId {
+    use backend_access_transam_varsup_seams as varsup;
+    use types_core::xact::TransactionIdIsNormal;
+    use types_core::FullTransactionId;
+
+    let xid = current(state)
+        .expect("XLogRecGetFullXid requires a decoded current record")
+        .xid();
+
+    // FullTransactionIdFromAllowableAt(TransamVariables->nextXid, xid):
+
+    // Special transaction ID.
+    if !TransactionIdIsNormal(xid) {
+        return FullTransactionId::from_epoch_and_xid(0, xid);
+    }
+
+    let next_full_xid = varsup::read_next_full_transaction_id::call();
+
+    // The 64-bit result must be <= nextFullXid, so xid is from the epoch of
+    // nextFullXid or the epoch before.
+    let mut epoch = next_full_xid.epoch();
+    if xid > next_full_xid.xid() {
+        debug_assert!(epoch != 0);
+        epoch -= 1;
+    }
+    FullTransactionId::from_epoch_and_xid(epoch, xid)
+}
+
 // ---------------------------------------------------------------------------
 // RelFileLocator conversion: the seam's `XLogBlockTag` uses
 // `types_storage::RelFileLocator`; the decoded block carries
