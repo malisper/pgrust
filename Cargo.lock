@@ -6759,6 +6759,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-node-support",
+ "seam-core",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-nodes-equalfuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -14130,6 +14141,7 @@ dependencies = [
  "backend-main-main",
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
+ "backend-nodes-equalfuncs",
  "backend-nodes-extensible",
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize",
