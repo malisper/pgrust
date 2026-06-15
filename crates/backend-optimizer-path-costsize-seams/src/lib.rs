@@ -8,6 +8,8 @@
 //! getter seams: per the no-ambient-global-seams rule, consumers take the
 //! values as explicit parameters.
 
+extern crate alloc;
+
 seam_core::seam!(
     /// `clamp_row_est(nrows)` (costsize.c): force a row-count estimate to a
     /// sane value — `rint()` it and clamp to at least one row. Pure math;
@@ -22,3 +24,364 @@ seam_core::seam!(
     /// `i64::MAX`. Pure math; cannot `ereport`.
     pub fn clamp_cardinality_to_long(x: f64) -> i64
 );
+
+/* ==========================================================================
+ * Cross-unit deps with no ported owner in the fabled tree (selectivity /
+ * catalog / AM / RTE-read / executor legs). costsize.c reads exactly the
+ * value declared here; the surrounding cost arithmetic stays in-crate. Each
+ * panics until its owner installs it ("mirror PG and panic").
+ *
+ * Argument/return shapes are adapted to the fabled value/arena model
+ * (`NodeId`/`RinfoId`/`RelId`/`PathId` handles into the `PlannerInfo` arena,
+ * `&PlannerInfo`, primitive scalars).
+ * ======================================================================== */
+
+use types_core::primitive::{Cost, Oid, Selectivity};
+use types_pathnodes::{NodeId, PathId, PlannerInfo, RelId, RinfoId, SpecialJoinInfo};
+
+/// `GetTablespacePageCosts` output (`utils/cache/spccache.c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TablespacePageCosts {
+    pub spc_random_page_cost: f64,
+    pub spc_seq_page_cost: f64,
+}
+
+/// `amcostestimate` output (`access/<am>/...` cost callback via index AM).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AmCostEstimate {
+    pub index_startup_cost: Cost,
+    pub index_total_cost: Cost,
+    pub index_selectivity: Selectivity,
+    pub index_correlation: f64,
+    pub index_pages: f64,
+}
+
+/// `hash_agg_set_limits` output (`executor/nodeAgg.c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HashAggLimits {
+    pub mem_limit: usize,
+    pub ngroups_limit: u64,
+    pub num_partitions: i32,
+}
+
+/// `ExecChooseHashTableSize` output (`executor/nodeHash.c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HashTableSize {
+    pub numbuckets: i32,
+    pub numbatches: i32,
+}
+
+/* --- selectivity (selfuncs.c / clausesel.c) ----------------------------- */
+seam_core::seam!(
+    /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over
+    /// a list of clause-expr handles (the C `List *RestrictInfo*`).
+    pub fn clauselist_selectivity(
+        root: &PlannerInfo,
+        clauses: &[NodeId],
+        var_relid: i32,
+        jointype: i32,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> Selectivity
+);
+seam_core::seam!(
+    /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)`.
+    pub fn clause_selectivity(
+        root: &PlannerInfo,
+        clause: NodeId,
+        var_relid: i32,
+        jointype: i32,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> Selectivity
+);
+seam_core::seam!(
+    /// `estimate_num_groups(root, groupExprs, input_rows, NULL, NULL)` —
+    /// returns the estimated number of groups.
+    pub fn estimate_num_groups(
+        root: &PlannerInfo,
+        group_exprs: &[NodeId],
+        input_rows: f64,
+    ) -> f64
+);
+seam_core::seam!(
+    /// `mergejoinscansel(root, clause, opfamily, cmptype, nulls_first)` —
+    /// returns `(leftstartsel, leftendsel, rightstartsel, rightendsel)`.
+    pub fn mergejoinscansel(
+        root: &PlannerInfo,
+        clause: NodeId,
+        opfamily: Oid,
+        cmptype: i32,
+        nulls_first: bool,
+    ) -> (Selectivity, Selectivity, Selectivity, Selectivity)
+);
+seam_core::seam!(
+    /// `estimate_hash_bucket_stats(root, hashkey, nbuckets, &mcvfreq, &bucketsize)`
+    /// — returns `(mcvfreq, bucketsize)`.
+    pub fn estimate_hash_bucket_stats(
+        root: &PlannerInfo,
+        hashkey: NodeId,
+        nbuckets: f64,
+    ) -> (Selectivity, Selectivity)
+);
+seam_core::seam!(
+    /// `estimate_multivariate_bucketsize(root, inner_rel, hashclauses, &out)` —
+    /// returns `(bucketsize, remaining_clause_handles)`.
+    pub fn estimate_multivariate_bucketsize(
+        root: &PlannerInfo,
+        inner_rel: RelId,
+        hashclauses: &[RinfoId],
+    ) -> (Selectivity, alloc::vec::Vec<RinfoId>)
+);
+seam_core::seam!(
+    /// `clauses.c:expression_returns_set_rows(root, (Node *) expr)`.
+    pub fn expression_returns_set_rows(root: &PlannerInfo, node: NodeId) -> f64
+);
+
+/* --- the heterogeneous-node clause-cost walker (clauses.c +
+ *     pg_proc.procost catalog). `cost_qual_eval` recursion is routed whole
+ *     through this single-node walker; the list wrapper is in-crate. ----- */
+seam_core::seam!(
+    /// `cost_qual_eval_walker((Node *) qual, &context)` over a single node.
+    /// Returns the `(startup, per_tuple)` cost contributed by this node and its
+    /// descendants. Crosses into `add_function_cost` (`pg_proc.procost`).
+    pub fn cost_qual_eval_walker(root: &PlannerInfo, node: NodeId) -> (Cost, Cost)
+);
+seam_core::seam!(
+    /// `add_function_cost(root, funcid, node, &cost)` — accumulate `pg_proc.procost`.
+    /// Returns the `(startup, per_tuple)` to add.
+    pub fn add_function_cost(root: &PlannerInfo, funcid: Oid, node: Option<NodeId>) -> (Cost, Cost)
+);
+
+/* --- catalog / type-width reads (lsyscache.c) --------------------------- */
+seam_core::seam!(
+    /// `get_typavgwidth(typid, typmod)`.
+    pub fn get_typavgwidth(typid: Oid, typmod: i32) -> i32
+);
+seam_core::seam!(
+    /// `get_attavgwidth(reloid, attnum)`.
+    pub fn get_attavgwidth(reloid: Oid, attnum: i16) -> i32
+);
+seam_core::seam!(
+    /// `get_relation_data_width(reloid, attr_widths)` (plancat.c).
+    pub fn get_relation_data_width(reloid: Oid, attr_widths: &[i32]) -> u32
+);
+seam_core::seam!(
+    /// `exprType((Node *) expr)` (nodeFuncs.c).
+    pub fn expr_type(root: &PlannerInfo, node: NodeId) -> Oid
+);
+seam_core::seam!(
+    /// `exprTypmod((Node *) expr)` (nodeFuncs.c).
+    pub fn expr_typmod(root: &PlannerInfo, node: NodeId) -> i32
+);
+seam_core::seam!(
+    /// `find_placeholder_info(root, phv)->ph_width` + the PHV's contained-expr
+    /// eval cost. Returns `(ph_width, cost_startup, cost_per_tuple)`.
+    pub fn find_placeholder_info_width(root: &PlannerInfo, node: NodeId) -> (i32, Cost, Cost)
+);
+
+/* --- index-AM / tablespace / parallel-worker (plancat.c, spccache.c,
+ *     allpaths.c) ------------------------------------------------------- */
+seam_core::seam!(
+    /// `get_tablespace_page_costs(tablespace, &spc_random, &spc_seq)`.
+    pub fn get_tablespace_page_costs(spcid: Oid) -> TablespacePageCosts
+);
+seam_core::seam!(
+    /// `OidFunctionCall...` the index AM's `amcostestimate` (index AM dispatch).
+    pub fn amcostestimate(root: &PlannerInfo, path: PathId, loop_count: f64) -> AmCostEstimate
+);
+seam_core::seam!(
+    /// `compute_parallel_worker(rel, heap_pages, index_pages, max_workers)`.
+    pub fn compute_parallel_worker(
+        root: &PlannerInfo,
+        rel: RelId,
+        heap_pages: f64,
+        index_pages: f64,
+        max_workers: i32,
+    ) -> i32
+);
+
+/* --- executor helpers (nodeHash.c / tidbitmap.c / tuplesort.c /
+ *     nodeMemoize.c / execAmi.c) --------------------------------------- */
+seam_core::seam!(
+    /// `tbm_calculate_entries(maxbytes)` (tidbitmap.c).
+    pub fn tbm_calculate_entries(maxbytes: usize) -> f64
+);
+seam_core::seam!(
+    /// `tuplesort_merge_order(allowedMem)` (tuplesort.c).
+    pub fn tuplesort_merge_order(allowed_mem: i64) -> f64
+);
+seam_core::seam!(
+    /// `hash_agg_entry_size(numTrans, tupleWidth, transitionSpace)` (nodeAgg.c).
+    pub fn hash_agg_entry_size(num_trans: i32, tuple_width: f64, transition_space: u64) -> f64
+);
+seam_core::seam!(
+    /// `hash_agg_set_limits(hashentrysize, numGroups, used_bits, ...)` (nodeAgg.c).
+    pub fn hash_agg_set_limits(
+        hashentrysize: f64,
+        num_groups: f64,
+        used_bits: i32,
+    ) -> HashAggLimits
+);
+seam_core::seam!(
+    /// `ExecChooseHashTableSize(ntuples, tupwidth, useskew, try_combined_hash_mem,
+    /// parallel_workers, ...)` (nodeHash.c).
+    pub fn exec_choose_hash_table_size(
+        ntuples: f64,
+        tupwidth: i32,
+        useskew: bool,
+        try_combined_hash_mem: bool,
+        parallel_workers: i32,
+    ) -> HashTableSize
+);
+seam_core::seam!(
+    /// `ExecSupportsMarkRestore(path)` (execAmi.c) over a `PathId`.
+    pub fn exec_supports_mark_restore(root: &PlannerInfo, path: PathId) -> bool
+);
+seam_core::seam!(
+    /// `ExecEstimateCacheEntryOverheadBytes(ntuples)` (nodeMemoize.c).
+    pub fn exec_estimate_cache_entry_overhead_bytes(ntuples: f64) -> f64
+);
+
+/* --- predicate / movability walkers (indxpath.c / equivclass.c /
+ *     restrictinfo.c / initsplan.c) ------------------------------------ */
+seam_core::seam!(
+    /// `is_redundant_with_indexclauses(rinfo, indexclauses)` (indxpath.c). The
+    /// `index_path` is identified by its `PathId`; the rinfo by `RinfoId`.
+    pub fn is_redundant_with_indexclauses(
+        root: &PlannerInfo,
+        rinfo: RinfoId,
+        index_path: PathId,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `join_clause_is_movable_into(rinfo, currentrelids, current_and_required)`
+    /// (restrictinfo.c). Identifies the clause by `RinfoId`, the rels by `RelId`.
+    pub fn join_clause_is_movable_into(
+        root: &PlannerInfo,
+        rinfo: RinfoId,
+        current_rel: RelId,
+        join_rel: RelId,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `init_dummy_sjinfo(left_relids, right_relids)` (joinrels.c) — build a
+    /// JOIN_INNER dummy `SpecialJoinInfo` for the two rels (by `RelId`).
+    pub fn init_dummy_sjinfo(root: &PlannerInfo, outer_rel: RelId, inner_rel: RelId) -> SpecialJoinInfo
+);
+seam_core::seam!(
+    /// `tsm_uses_random_access(tsmhandler)` (tablesample method probe): true if
+    /// `GetTsmRoutine(tsmhandler)->NextSampleBlock != NULL`.
+    pub fn tsm_uses_random_access(tsmhandler: Oid) -> bool
+);
+seam_core::seam!(
+    /// `estimate_array_length(root, arrayexpr)` (selfuncs.c).
+    pub fn estimate_array_length(root: &PlannerInfo, node: NodeId) -> f64
+);
+seam_core::seam!(
+    /// `bms_is_member(0, pull_varnos(root, node))` (var.c) — true iff the
+    /// expression references a Var with `varno 0` (cost_incremental_sort).
+    pub fn pull_varnos_contains_zero(root: &PlannerInfo, node: NodeId) -> bool
+);
+seam_core::seam!(
+    /// `get_sortgrouplist_exprs(sgClauses, targetList)` (tlist.c) — the C reads
+    /// `root->parse->targetList`; the owner resolves the SortGroupClause handles
+    /// against it and returns the matched expr handles.
+    pub fn get_sortgrouplist_exprs(
+        root: &PlannerInfo,
+        sgclauses: &[NodeId],
+    ) -> alloc::vec::Vec<NodeId>
+);
+
+/* --- RTE / Query reads (parsenodes.h structs are opaque handles in the
+ *     fabled `PlannerInfo`: `simple_rte_array: Vec<RangeTblEntryId>` and
+ *     `parse: QueryId` have no resolver). Each focused seam returns exactly the
+ *     value costsize.c reads from the RTE/Query, keeping the surrounding
+ *     arithmetic in-crate. -------------------------------------------- */
+seam_core::seam!(
+    /// `rte->tablesample->tsmhandler` for the baserel's RTE (cost_samplescan).
+    pub fn rte_tablesample_tsmhandler(root: &PlannerInfo, rel: RelId) -> Oid
+);
+seam_core::seam!(
+    /// `cost_qual_eval_node((Node *) rte->functions, root)` for the baserel's
+    /// RTE (cost_functionscan) — the eval cost of the function exprs.
+    pub fn rte_functions_exprcost(root: &PlannerInfo, rel: RelId) -> (Cost, Cost)
+);
+seam_core::seam!(
+    /// `cost_qual_eval_node((Node *) rte->tablefunc, root)` (cost_tablefuncscan).
+    pub fn rte_tablefunc_exprcost(root: &PlannerInfo, rel: RelId) -> (Cost, Cost)
+);
+seam_core::seam!(
+    /// `set_function_size_estimates`: the largest `expression_returns_set_rows`
+    /// over `rte->functions` (the rte funcexprs are unreachable in-arena).
+    pub fn rte_function_max_set_rows(root: &PlannerInfo, rel: RelId) -> f64
+);
+seam_core::seam!(
+    /// `rte->self_reference` (set_cte_size_estimates).
+    pub fn rte_cte_self_reference(root: &PlannerInfo, rel: RelId) -> bool
+);
+seam_core::seam!(
+    /// `rte->enrtuples` (set_namedtuplestore_size_estimates).
+    pub fn rte_enrtuples(root: &PlannerInfo, rel: RelId) -> f64
+);
+seam_core::seam!(
+    /// `rte->relid` (set_rel_width): the underlying table OID, 0 for a phony rel.
+    pub fn rte_relid(root: &PlannerInfo, rel: RelId) -> Oid
+);
+/// The WindowClause-derived values `cost_windowagg` needs but cannot read from
+/// the fabled arena (the `WindowClause` carries a lifetime and is not arena-
+/// resolvable, and `get_windowclause_startup_tuples` also reads
+/// `root->parse->targetList`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowClauseCostInfo {
+    /// `list_length(winclause->partitionClause)`.
+    pub num_part_cols: i32,
+    /// `list_length(winclause->orderClause)`.
+    pub num_order_cols: i32,
+    /// `get_windowclause_startup_tuples(root, wc, input_tuples)`.
+    pub startup_tuples: f64,
+}
+seam_core::seam!(
+    /// Per-WindowFunc cost contribution (cost_windowagg inner loop): returns
+    /// `(startup_contribution, per_input_row_cost)` for one WindowFunc =
+    /// `add_function_cost(winfnoid)` + `cost_qual_eval_node(wfunc->args)` +
+    /// `cost_qual_eval_node(wfunc->aggfilter)`. The args/aggfilter are inline
+    /// `Expr` values on the WindowFunc (no `NodeId`), so the per-func cost is
+    /// computed by the owner from the WindowFunc node handle.
+    pub fn windowfunc_cost(root: &PlannerInfo, wfunc: NodeId) -> (Cost, Cost)
+);
+seam_core::seam!(
+    /// The WindowClause column counts + startup-tuples estimate — needs the
+    /// WindowClause fields + `root->parse->targetList`, neither reachable in the
+    /// fabled arena (winclause carried as a `NodeId`; `parse` is opaque).
+    pub fn windowclause_cost_info(
+        root: &PlannerInfo,
+        winclause: NodeId,
+        input_tuples: f64,
+    ) -> WindowClauseCostInfo
+);
+
+seam_core::seam!(
+    /// `get_foreign_key_join_selectivity(root, outer_relids, inner_relids,
+    /// sjinfo, &restrictlist)` (costsize.c:5650). The `root->fkey_list`
+    /// `ForeignKeyOptInfo` structs are opaque `NodeId` handles in the fabled
+    /// arena (no resolver), so the whole FK-matching pass — including the
+    /// removal of FK-matched clauses from the restrictlist — is routed to the
+    /// owner. Returns `(fkselec, remaining_clause_handles)`.
+    pub fn get_foreign_key_join_selectivity(
+        root: &PlannerInfo,
+        outer_rel: RelId,
+        inner_rel: RelId,
+        sjinfo: &SpecialJoinInfo,
+        restrictlist: &[RinfoId],
+    ) -> (Selectivity, alloc::vec::Vec<RinfoId>)
+);
+
+seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` over two arena expr handles (nodeFuncs.c).
+    /// Used by the FK-EC-member identity recovery in
+    /// `get_foreign_key_join_selectivity`.
+    pub fn equal_nodes(root: &PlannerInfo, a: NodeId, b: NodeId) -> bool
+);
+
+/// Re-exported so installers can name the carrier types without importing the
+/// optimizer crate.
+pub use types_pathnodes::QualCost;

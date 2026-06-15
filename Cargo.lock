@@ -6558,10 +6558,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-costsize"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -12717,6 +12735,7 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-costsize",
  "backend-optimizer-util-pathnode",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
