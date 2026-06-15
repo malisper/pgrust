@@ -287,6 +287,14 @@ impl BufferManager {
         self.states[buf_id].value.load(Ordering::Acquire)
     }
 
+    /// `&GetBufferDescriptor(buf_id)->state` — the raw atomic word, for the
+    /// lock-free CAS loops (`MarkBufferDirty`) that drive their own
+    /// `compare_exchange_weak`.
+    #[allow(dead_code)]
+    pub(crate) fn states_atomic(&self, buf_id: usize) -> &std::sync::atomic::AtomicU32 {
+        &self.states[buf_id].value
+    }
+
     /// `pg_atomic_compare_exchange_u32(&buf->state, &expected, new)` — the
     /// lock-free pin/unpin/mark CAS substrate. C `pg_atomic_compare_exchange_u32`
     /// has FULL barrier semantics (atomics.h:370); `SeqCst` on both the success
@@ -379,6 +387,15 @@ impl BufferManager {
         let mut blocks = self.blocks.borrow_mut();
         let start = buf_id * BLCKSZ;
         f(&mut blocks[start..start + BLCKSZ])
+    }
+
+    /// Read-only view of buffer `buf_id`'s page bytes under a caller-held content
+    /// lock (F1d `BufferGetPage` read / `PageGetLSN` / `PageIsNew`).
+    #[allow(dead_code)]
+    pub(crate) fn with_block<R>(&self, buf_id: usize, f: impl FnOnce(&[u8]) -> R) -> R {
+        let blocks = self.blocks.borrow();
+        let start = buf_id * BLCKSZ;
+        f(&blocks[start..start + BLCKSZ])
     }
 }
 

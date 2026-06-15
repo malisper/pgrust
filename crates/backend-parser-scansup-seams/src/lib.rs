@@ -31,3 +31,23 @@ seam_core::seam!(
         warn: bool,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `downcase_truncate_identifier(ident, len, warn)` (scansup.c:69) —
+    /// downcase an unquoted identifier (ASCII `A-Z` unconditionally; high-bit
+    /// bytes `tolower`'d only in a single-byte server encoding) and, with
+    /// truncation enabled, clip it to `NAMEDATALEN - 1` bytes on a multibyte
+    /// boundary.
+    ///
+    /// C mutates `ident` in place; here the seam returns the downcased
+    /// (and possibly truncated) bytes (without the trailing NUL) allocated in
+    /// `mcx`. With `warn` set, truncation emits an `ereport(NOTICE,
+    /// ERRCODE_NAME_TOO_LONG)`; the NOTICE path and palloc OOM are carried on
+    /// `Err`. The owning unit (`backend-parser-small1`) installs this; until then
+    /// a call panics loudly (mirror-PG-and-panic).
+    pub fn downcase_truncate_identifier<'mcx>(
+        mcx: Mcx<'mcx>,
+        ident: &[u8],
+        warn: bool,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);

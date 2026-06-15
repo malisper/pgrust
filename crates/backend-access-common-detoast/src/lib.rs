@@ -90,7 +90,6 @@ struct VarattExternal {
     /// (top 2 bits).
     va_extinfo: u32,
     /// `va_valueid`: unique ID of value within the toast table.
-    #[allow(dead_code)]
     va_valueid: u32,
     /// `va_toastrelid`: RelID of the TOAST table containing it.
     #[allow(dead_code)]
@@ -732,6 +731,24 @@ pub fn toast_datum_size(mcx: Mcx<'_>, value: &[u8]) -> PgResult<Size> {
     }
 }
 
+/// Seam `toast_datum_size` — `toast_datum_size(value)` returning the size as a
+/// plain `usize` (the seam carrier). Thin wrapper over [`toast_datum_size`].
+fn toast_datum_size_seam(mcx: Mcx<'_>, attr: &[u8]) -> PgResult<usize> {
+    Ok(toast_datum_size(mcx, attr)? as usize)
+}
+
+/// Seam `toast_chunk_id` — `pg_column_toast_chunk_id`'s
+/// `VARATT_IS_EXTERNAL_ONDISK(attr)` test + `VARATT_EXTERNAL_GET_POINTER`'s
+/// `va_valueid` extraction (varlena.c:5403-5408): the TOAST value OID of an
+/// on-disk external varlena, or `None` when not stored on-disk-external.
+fn toast_chunk_id(attr: &[u8]) -> PgResult<Option<types_core::Oid>> {
+    if !varatt_is_external_ondisk(attr) {
+        return Ok(None);
+    }
+    let toast_pointer = external_pointer(attr)?;
+    Ok(Some(toast_pointer.va_valueid as types_core::Oid))
+}
+
 // ---------------------------------------------------------------------------
 // pg_detoast_datum family (fmgr.c) — the in-crate detoast helpers fmgr.c
 // inlines. Ported here against the owned model.
@@ -803,6 +820,8 @@ fn corrupt_pglz() -> PgError {
 pub fn init_seams() {
     backend_access_common_detoast_seams::detoast_external_attr::set(detoast_external_attr);
     backend_access_common_detoast_seams::detoast_attr::set(detoast_attr);
+    backend_access_common_detoast_seams::toast_datum_size::set(toast_datum_size_seam);
+    backend_access_common_detoast_seams::toast_chunk_id::set(toast_chunk_id);
 }
 
 #[cfg(test)]
