@@ -24,5 +24,12 @@ backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 # FAMILY 1 (pull_up_sublinks) calls the re-keyed SubLink → join conversions.
 backend-optimizer-plan-subselect-pullup-seams = { path = "../backend-optimizer-plan-subselect-pullup-seams" }
 
+# FAMILY 2 (pull_up_subqueries): pull_varnos/contain_vars_of_level, PlaceHolderVar
+# creation, flatten_join_alias_vars, and CombineRangeTables/replace_empty_jointree.
+backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-placeholder-seams" }
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
+
 # Inward seams this unit owns + installs.
 backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-prepjointree-seams" }

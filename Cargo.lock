@@ -5291,6 +5291,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -7576,10 +7577,14 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-placeholder-seams",
+ "backend-optimizer-util-vars",
  "backend-rewrite-core",
+ "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
  "mcx",
  "seam-core",
@@ -15498,6 +15503,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-error",
  "types-storage",
  "types-tuple",
 ]

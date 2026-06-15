@@ -30,7 +30,8 @@ use types_core::primitive::{
 use types_rel::Relation;
 use types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_nodes::{TupleSlotKind, TupleTableSlot};
+use types_nodes::TupleSlotKind;
+use types_nodes::tuptable::SlotData;
 use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
@@ -138,7 +139,7 @@ fn table_beginscan_seam<'mcx>(
 fn table_scan_getnextslot_fwd<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     table_scan_getnextslot(
         mcx,
@@ -155,7 +156,7 @@ pub fn table_scan_getnextslot<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
     direction: types_scan::sdir::ScanDirection,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let routine = am(&scan.rs_rd);
     (routine.scan_getnextslot)(mcx, scan, direction, slot)
@@ -504,7 +505,7 @@ pub fn table_index_fetch_tuple<'mcx>(
     scan: &mut IndexFetchTableData<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
     call_again: &mut bool,
     all_dead: Option<&mut bool>,
 ) -> PgResult<bool> {
@@ -548,7 +549,7 @@ pub fn table_index_fetch_tuple_check<'mcx>(
         &mut scan,
         tid,
         &snapshot,
-        slot.base_mut(),
+        &mut slot,
         &mut call_again,
         all_dead,
     )?;
@@ -638,7 +639,7 @@ pub fn table_tuple_fetch_row_version<'mcx>(
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     // We don't expect direct calls to table_tuple_fetch_row_version with valid
     // CheckXidAlive for catalog or regular tables. See detailed comments in
@@ -660,7 +661,7 @@ pub fn table_tuple_fetch_row_version<'mcx>(
 pub fn table_tuple_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
     cid: types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
@@ -690,7 +691,7 @@ pub fn table_tuple_update<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
     cid: types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
@@ -722,7 +723,7 @@ pub fn table_tuple_lock<'mcx>(
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
     cid: types_core::xact::CommandId,
     mode: LockTupleMode,
     wait_policy: types_tableam::tableam::LockWaitPolicy,
@@ -744,7 +745,7 @@ pub fn table_tuple_lock<'mcx>(
 pub fn simple_table_tuple_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
     table_tuple_insert(mcx, rel, slot, cid, 0, None)
@@ -800,7 +801,7 @@ pub fn simple_table_tuple_update<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
-    slot: &mut TupleTableSlot<'mcx>,
+    slot: &mut SlotData<'mcx>,
     snapshot: &Snapshot,
     update_indexes: &mut TU_UpdateIndexes,
 ) -> PgResult<()> {

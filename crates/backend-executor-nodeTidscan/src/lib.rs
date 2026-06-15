@@ -454,7 +454,7 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
                 rel,
                 &tid,
                 &snapshot,
-                estate.slot_mut(slot_id),
+                estate.slot_data_mut(slot_id),
             )?
         };
         if found {

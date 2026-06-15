@@ -192,7 +192,7 @@ pub fn ExecMergeMatched<'mcx>(
         let rel = relation_alias(estate, result_rel_info);
         let any = snapshot_any();
         let mcx = estate.es_query_cxt;
-        let slot_ref = estate.slot_mut(old_tuple_slot);
+        let slot_ref = estate.slot_data_mut(old_tuple_slot);
         if !backend_access_table_tableam::table_tuple_fetch_row_version(
             mcx, &rel, &tid, &any, slot_ref,
         )? {
@@ -599,7 +599,7 @@ pub fn ExecMergeMatched<'mcx>(
                     let snapshot = estate.es_snapshot.as_deref().cloned();
                     let cid = estate.es_output_cid;
                     let mcx = estate.es_query_cxt;
-                    let inslot = estate.slot_mut(inputslot);
+                    let inslot = estate.slot_data_mut(inputslot);
                     let lock_result = backend_access_table_tableam::table_tuple_lock(
                         mcx,
                         &rel,
@@ -683,7 +683,7 @@ pub fn ExecMergeMatched<'mcx>(
                                 let rel2 = relation_alias(estate, result_rel_info);
                                 let any = snapshot_any();
                                 let mcx = estate.es_query_cxt;
-                                let oldslot_ref = estate.slot_mut(old_tuple_slot);
+                                let oldslot_ref = estate.slot_data_mut(old_tuple_slot);
                                 if !backend_access_table_tableam::table_tuple_fetch_row_version(
                                     mcx, &rel2, &tid, &any, oldslot_ref,
                                 )? {
