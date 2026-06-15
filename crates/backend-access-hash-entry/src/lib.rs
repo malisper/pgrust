@@ -67,12 +67,12 @@ const XLOG_HASH_DELETE: u8 = 0x90;
 const XLOG_HASH_SPLIT_CLEANUP: u8 = 0xA0;
 const XLOG_HASH_UPDATE_META_PAGE: u8 = 0xB0;
 
-// XLogRegisterBuffer flags (matching the contract the hash-core unit uses with
-// the xloginsert seam: REGBUF_STANDARD = 0x04, REGBUF_NO_IMAGE = 0x02,
-// REGBUF_NO_CHANGE = 0x10; see backend-access-hash-core/src/hashpage.rs).
-const REGBUF_STANDARD: u8 = 0x04;
+// XLogRegisterBuffer flags (access/xloginsert.h): REGBUF_STANDARD = 0x08,
+// REGBUF_NO_IMAGE = 0x02, REGBUF_NO_CHANGE = 0x20;
+// see backend-access-hash-core/src/hashpage.rs and types-wal/src/xloginsert.rs.
+const REGBUF_STANDARD: u8 = 0x08;
 const REGBUF_NO_IMAGE: u8 = 0x02;
-const REGBUF_NO_CHANGE: u8 = 0x10;
+const REGBUF_NO_CHANGE: u8 = 0x20;
 
 // SizeOf for the WAL records constructed here.
 const SIZE_OF_HASH_DELETE: usize = 2; // {bool clear_dead_marking; bool is_primary_bucket_page;}

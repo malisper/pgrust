@@ -43,7 +43,7 @@ pub const CACHEDEXPR_MAGIC: i32 = 838_275_847;
 /// `CURSOR_OPT_CUSTOM_PLAN` (`parsenodes.h`).
 pub const CURSOR_OPT_CUSTOM_PLAN: i32 = 0x0400;
 /// `CURSOR_OPT_GENERIC_PLAN` (`parsenodes.h`).
-pub const CURSOR_OPT_GENERIC_PLAN: i32 = 0x0800;
+pub const CURSOR_OPT_GENERIC_PLAN: i32 = 0x0200;
 
 /// `RTE_RELATION` (`parsenodes.h`).
 pub const RTE_RELATION: i32 = 0;

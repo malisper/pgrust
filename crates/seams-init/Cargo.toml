@@ -155,6 +155,7 @@ backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
 backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }
+backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 backend-access-nbt-compare = { path = "../backend-access-nbt-compare" }
 backend-access-nbt-validate = { path = "../backend-access-nbt-validate" }
