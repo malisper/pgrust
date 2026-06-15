@@ -18,7 +18,7 @@ use types_error::PgResult;
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
 // The canonical value enum; `Datum` is its transitional alias.
-use types_tuple::backend_access_common_heaptuple::{Datum};
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
 
 use backend_access_common_tupdesc::{
@@ -309,12 +309,16 @@ pub fn BuildTupleFromCStrings<'mcx>(
     Ok(Some(formed.tuple))
 }
 
-/// `HeapTupleHeaderGetDatum(tuple)` (execTuples.c): wrap a heap tuple's header
+/// `HeapTupleHeaderGetDatum(tuple)` (execTuples.c): wrap a freshly-formed tuple
 /// as a composite `Datum` (flattening external TOAST pointers if present).
+///
+/// The tuple crosses as the data-carrying [`FormedTuple`] (a composite Datum is
+/// the whole contiguous `HeapTupleHeader` image, so its source must carry the
+/// column bytes), NOT a header-only `HeapTuple`.
 pub fn HeapTupleHeaderGetDatum<'mcx>(
     mcx: Mcx<'mcx>,
-    tuple: HeapTuple<'mcx>,
-) -> PgResult<(HeapTuple<'mcx>, Datum<'mcx>)> {
+    tuple: FormedTuple<'mcx>,
+) -> PgResult<(FormedTuple<'mcx>, Datum<'mcx>)> {
     // No work if there are no external TOAST pointers in the tuple. The
     // composite-Datum production (`PointerGetDatum`) and the detoast/flatten
     // path are the heap/datum owner's concern; reach both through its seam.

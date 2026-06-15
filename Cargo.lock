@@ -606,6 +606,7 @@ dependencies = [
  "backend-access-heap-heaptoast-seams",
  "backend-access-index-genam-seams",
  "backend-access-table-toast-helper-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "mcx",
  "types-core",
@@ -10836,6 +10837,7 @@ name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
  "allocator-api2",
+ "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",
  "backend-access-common-tupdesc",
