@@ -6470,6 +6470,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-equalfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-extensible"
 version = "0.0.0"
 dependencies = [
@@ -6633,6 +6641,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-rte-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-clauses"
 version = "0.0.0"
 dependencies = [
@@ -6716,6 +6733,21 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-vars"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-var-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -12729,6 +12761,7 @@ dependencies = [
  "backend-commands-matview",
  "backend-commands-opclasscmds",
  "backend-commands-portalcmds",
+ "backend-common-relpath",
  "backend-executor-execAmi",
  "backend-executor-execCurrent",
  "backend-executor-execExpr",
@@ -12789,7 +12822,9 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-vars",
  "backend-parser-parse-expr",
  "backend-parser-parse-oper",
  "backend-parser-parse-type",
