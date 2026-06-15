@@ -122,9 +122,14 @@ pub struct IndexFetchTableData<'mcx> {
 /// reads and updates these fields directly.
 ///
 /// If `current_buf` isn't `InvalidBuffer`, we hold an extra pin on that buffer.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// Not `Copy`: the `strategy` field is the backend-private ring handed out by
+/// pointer (`Rc<RefCell<BufferAccessStrategyData>>` / `None`), exactly as C's
+/// `BulkInsertStateData.strategy` is a `BufferAccessStrategy` pointer — C never
+/// copies the struct by value (it passes `BulkInsertState`, a pointer to it).
+#[derive(Clone, Debug, Default)]
 pub struct BulkInsertStateData {
-    /// `strategy` — our BULKWRITE strategy object (NULL == `BufferAccessStrategy::NONE`).
+    /// `strategy` — our BULKWRITE strategy object (NULL == `None`).
     pub strategy: types_storage::buf::BufferAccessStrategy,
     /// `current_buf` — current insertion target page.
     pub current_buf: types_storage::Buffer,

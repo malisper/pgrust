@@ -46,15 +46,6 @@ pub const RBM_ZERO_AND_LOCK: i32 = 1;
 /// but acquire a cleanup lock.
 pub const RBM_ZERO_AND_CLEANUP_LOCK: i32 = 2;
 
-/// A `BufferAccessStrategy` ring (`storage/buf.h`). `id == 0` is the C `NULL`
-/// strategy (use the shared buffer pool with no ring); a nonzero id selects a
-/// ring the buffer manager owns. The opaque `BufferAccessStrategyData` lives in
-/// the buffer manager; callers only thread this handle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BufferAccessStrategy {
-    pub id: u32,
-}
-
 /// `BufferAccessStrategyType` (`storage/bufmgr.h`): the kind of ring buffer to
 /// create with `GetAccessStrategy`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,15 +61,53 @@ pub enum BufferAccessStrategyType {
     BasVacuum,
 }
 
-impl BufferAccessStrategy {
-    /// The C `NULL` strategy.
-    pub const NONE: BufferAccessStrategy = BufferAccessStrategy { id: 0 };
+/// `BufferAccessStrategyData` (freelist.c) — the backend-private ring of shared
+/// buffers a bulk operation re-uses instead of trashing the whole cache. This
+/// is BACKEND-LOCAL state, NOT shared memory: the ring is an owned `Vec<Buffer>`
+/// touched only by the owning backend, exactly as `freelist.c` documents. The
+/// ring merely *names* shared buffers (by `Buffer` number); the buffers
+/// themselves live in the shared pool.
+///
+/// In C the fixed fields and the flexible `buffers[]` array are `palloc0`'d
+/// together and the object is handed out BY POINTER (`typedef struct
+/// BufferAccessStrategyData *BufferAccessStrategy`). Callers hold that pointer
+/// directly, mutate the ring through it, and `pfree` it with
+/// `FreeAccessStrategy`. The faithful Rust model of that backend-private heap
+/// object shared/mutated by pointer is an `Rc<RefCell<_>>`; see the
+/// [`BufferAccessStrategy`] alias, whose `None` is the C `NULL` (default,
+/// no-ring) strategy.
+///
+/// The ring algorithms (sizing, slot reuse, reject) live in
+/// `backend-storage-buffer-support` (`strategy.rs`); the fields are exposed here
+/// because this is the shared vocabulary crate every consumer that threads the
+/// pointer can reach, just as `storage/buf.h` declares the typedef.
+#[derive(Clone, Debug)]
+pub struct BufferAccessStrategyData {
+    /// `BufferAccessStrategyType btype` — overall strategy type.
+    pub btype: BufferAccessStrategyType,
+    /// `int nbuffers` — number of elements in `buffers`.
+    pub nbuffers: i32,
+    /// `int current` — index of the "current" slot, i.e. the one most recently
+    /// returned by `GetBufferFromRing`.
+    pub current: i32,
+    /// `Buffer buffers[]` — ring slots; `InvalidBuffer` (0) = empty slot.
+    pub buffers: alloc::vec::Vec<Buffer>,
+}
 
-    /// Whether a (non-NULL) strategy is set.
-    #[inline]
-    pub const fn is_set(self) -> bool {
-        self.id != 0
-    }
+/// `typedef struct BufferAccessStrategyData *BufferAccessStrategy;`
+/// (storage/buf.h). A backend-private ring handed out by pointer; the C `NULL`
+/// (default, no-ring) strategy is `None`. The object is shared and mutated
+/// through the pointer (an [`alloc::rc::Rc`] of an interior-mutable cell here),
+/// mirroring C's single palloc'd object reused across the bulk operation, and
+/// dropped by `FreeAccessStrategy`.
+pub type BufferAccessStrategy = Option<alloc::rc::Rc<core::cell::RefCell<BufferAccessStrategyData>>>;
+
+/// The C `NULL` strategy as a value, for sites that built `BufferAccessStrategy`
+/// from the old `::NONE` constant. (`Option::None` is the canonical spelling;
+/// this exists to keep call sites that named a single constant readable.)
+#[inline]
+pub fn buffer_access_strategy_none() -> BufferAccessStrategy {
+    None
 }
 
 // ---------------------------------------------------------------------------

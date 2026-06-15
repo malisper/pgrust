@@ -1711,22 +1711,71 @@ fn transformTypeCast<'mcx>(
 /// (qualified type name, `String` nodes) and `arrayBounds` (`Integer` nodes,
 /// whose values the lookup ignores — only `arrayBounds != NIL` matters) bridge
 /// cleanly. The `typmods` decoration (`varchar(10)` etc.) is a `List *` of
-/// A_Const/ColumnRef raw nodes that the parser-node `Node` vocabulary does not
-/// carry; a decorated-type cast is therefore SEAM-AND-PANIC pending a TypeName
-/// vocabulary-unification keystone.
+/// `A_Const`/`ColumnRef` raw nodes; the owner's `typenameTypeMod` only ever
+/// consults each element as one of the value-node forms `Integer`/`Float`/
+/// `String` (the C "simple numeric constants, string literals, and
+/// identifiers"). We bridge each raw typmod into the parser-node value Node it
+/// reduces to: an `A_Const` carries its literal in `.val`
+/// (`Integer`/`Float`/`String`/`Boolean`/`BitString`); a single-field
+/// `ColumnRef` is an identifier and reduces to its `String` field. The actual
+/// constant→cstring conversion + `typmodin` dispatch (and the "type modifiers
+/// must be simple constants or identifiers" error for anything else) stays in
+/// the owner, mirroring C `typenameTypeMod`.
 fn typename_type_id_and_mod<'mcx>(
     pstate: &ParseState<'mcx>,
     tn: &types_nodes::rawnodes::TypeName<'mcx>,
 ) -> PgResult<(Oid, i32)> {
-    if !tn.typmods.is_empty() {
-        panic!(
-            "transformTypeCast: a decorated-type cast (TypeName.typmods non-empty, \
-             e.g. `x::varchar(10)`) needs the typmod-decoration `List *` of \
-             A_Const/ColumnRef nodes bridged into the merged parse_type owner's \
-             `types_parsenodes::Node` vocabulary; that vocabulary does not carry \
-             the raw-grammar typmod nodes, so it is blocked pending a TypeName \
-             vocabulary-unification keystone."
-        );
+    let mut typmods: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
+    for tm in tn.typmods.iter() {
+        let bridged: types_parsenodes::Node = match &**tm {
+            // `IsA(tm, A_Const)`: the literal rides in `A_Const.val`.
+            Node::A_Const(ac) => match ac.val.as_deref() {
+                Some(Node::Integer(i)) => types_parsenodes::Node::Integer(
+                    types_parsenodes::Integer { ival: i.ival },
+                ),
+                Some(Node::Float(f)) => {
+                    types_parsenodes::Node::Float(types_parsenodes::Float {
+                        fval: Some(String::from(f.fval.as_str())),
+                    })
+                }
+                Some(Node::String(s)) => types_parsenodes::Node::String(
+                    types_parsenodes::StringNode {
+                        sval: Some(String::from(s.sval.as_str())),
+                    },
+                ),
+                Some(Node::Boolean(b)) => types_parsenodes::Node::Boolean(
+                    types_parsenodes::Boolean { boolval: b.boolval },
+                ),
+                Some(Node::BitString(b)) => types_parsenodes::Node::BitString(
+                    types_parsenodes::BitString {
+                        bsval: Some(String::from(b.bsval.as_str())),
+                    },
+                ),
+                // SQL NULL constant or any other val: not a simple constant; carry
+                // an A_Star so the owner rejects it with the C error message.
+                _ => types_parsenodes::Node::A_Star,
+            },
+            // `IsA(tm, ColumnRef)` with a single String field is an identifier
+            // typmod (the trimmed parser-node model carries it as a bare String).
+            Node::ColumnRef(cr) => {
+                if cr.fields.len() == 1 {
+                    if let Node::String(s) = &*cr.fields[0] {
+                        types_parsenodes::Node::String(types_parsenodes::StringNode {
+                            sval: Some(String::from(s.sval.as_str())),
+                        })
+                    } else {
+                        types_parsenodes::Node::A_Star
+                    }
+                } else {
+                    types_parsenodes::Node::A_Star
+                }
+            }
+            // Anything else is not a simple constant or identifier; let the owner
+            // raise the C "type modifiers must be simple constants or
+            // identifiers" error.
+            _ => types_parsenodes::Node::A_Star,
+        };
+        typmods.push(bridged);
     }
     let mut names: Vec<types_parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
@@ -1763,7 +1812,7 @@ fn typename_type_id_and_mod<'mcx>(
         typeOid: tn.typeOid,
         setof: tn.setof,
         pct_type: tn.pct_type,
-        typmods: Vec::new(),
+        typmods,
         typemod: tn.typemod,
         arrayBounds: array_bounds,
         location: tn.location,

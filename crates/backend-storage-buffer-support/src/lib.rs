@@ -32,7 +32,8 @@
 
 extern crate alloc;
 
-use std::cell::RefCell;
+use alloc::rc::Rc;
+use core::cell::RefCell;
 
 use types_error::PgResult;
 use types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
@@ -45,7 +46,10 @@ mod strategy;
 pub use buf_table::{buf_table_hash_code, buf_table_hash_partition, BufTable, BufTableShmemSize};
 pub use freelist::{BufferStrategyControl, ClockSweep, StrategyShmemSize};
 pub use localbuf::{check_temp_buffers, LocalBufferManager};
-pub use strategy::FreeAccessStrategy;
+pub use strategy::{
+    get_access_strategy_ring, get_access_strategy_with_size_ring, BufferAccessStrategyRing,
+    FreeAccessStrategy,
+};
 
 // Re-export the shared signature types from types-storage so callers reach them
 // through this crate's surface.
@@ -67,60 +71,32 @@ fn buf_state_get_usagecount(buf_state: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Backend-private `BufferAccessStrategy` registry.
+// Backend-private `BufferAccessStrategy` ring.
 //
-// The inward `get_access_strategy`/`free_access_strategy` bufmgr seams carry the
-// opaque `types_storage::buf::BufferAccessStrategy { id: u32 }`, not the ring
-// struct. Strategy objects are BACKEND-PRIVATE, so this crate owns a
-// per-backend slab mapping `id -> ring`. `id == 0` is the C NULL (default,
-// no-ring) strategy; nonzero ids name a live ring.
+// `BufferAccessStrategyData` is a backend-private object that C's
+// `GetAccessStrategy` `palloc`s and hands BACK BY POINTER (`typedef struct
+// BufferAccessStrategyData *BufferAccessStrategy`); callers hold it directly and
+// mutate the ring through the pointer until `FreeAccessStrategy` `pfree`s it.
+// The faithful Rust model of that single shared/mutated heap object is an
+// `Rc<RefCell<_>>` (see the `BufferAccessStrategy` alias in types-storage); the
+// C `NULL` (default, no-ring) strategy is `None`. There is no id-keyed lookup
+// table — the handle IS the object.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// `id - 1` indexes the slab; `None` entries are freed slots. The id `0` is
-    /// reserved for the C NULL strategy and is never stored here.
-    static STRATEGIES: RefCell<alloc::vec::Vec<Option<strategy::BufferAccessStrategy>>> =
-        const { RefCell::new(alloc::vec::Vec::new()) };
-}
-
 /// `GetAccessStrategy(btype)` (freelist.c) installed inward seam. Builds the
-/// ring, stores it in the backend-private slab, and returns its id; id 0 is the
-/// C NULL/default strategy (returned when `GetAccessStrategy` yields no ring).
+/// ring (or `None` for the default/no-ring strategy) and returns it as the
+/// by-pointer handle (`Rc<RefCell<_>>`), mirroring C's `palloc`'d object.
 pub fn get_access_strategy(btype: BufferAccessStrategyType) -> PgResult<BufferAccessStrategy> {
     let nbuffers_total = backend_utils_init_small_seams::nbuffers::call();
-    let ring = strategy::BufferAccessStrategy::GetAccessStrategy(btype, nbuffers_total)?;
-    match ring {
-        None => Ok(BufferAccessStrategy { id: 0 }),
-        Some(ring) => {
-            let id = STRATEGIES.with(|slab| {
-                let mut slab = slab.borrow_mut();
-                // Reuse a freed slot if one exists.
-                if let Some(pos) = slab.iter().position(|s| s.is_none()) {
-                    slab[pos] = Some(ring);
-                    (pos as u32) + 1
-                } else {
-                    slab.push(Some(ring));
-                    slab.len() as u32
-                }
-            });
-            Ok(BufferAccessStrategy { id })
-        }
-    }
+    let ring = strategy::get_access_strategy_ring(btype, nbuffers_total)?;
+    Ok(ring.map(|ring| Rc::new(RefCell::new(ring))))
 }
 
 /// `FreeAccessStrategy(strategy)` (freelist.c) installed inward seam. A NULL
-/// (`id == 0`) strategy is a no-op (C's guard).
+/// (`None`) strategy is a no-op (C's guard); otherwise dropping the handle frees
+/// the ring once the last reference is gone (C's `pfree`).
 pub fn free_access_strategy(strategy: BufferAccessStrategy) {
-    if strategy.id == 0 {
-        return;
-    }
-    STRATEGIES.with(|slab| {
-        let mut slab = slab.borrow_mut();
-        let idx = (strategy.id - 1) as usize;
-        if let Some(slot) = slab.get_mut(idx) {
-            *slot = None;
-        }
-    });
+    drop(strategy);
 }
 
 /// Install this crate's inward seams (the two `BufferAccessStrategy` bufmgr

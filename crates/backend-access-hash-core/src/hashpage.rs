@@ -291,13 +291,15 @@ pub fn _hash_getbuf_with_strategy<'mcx>(
     blkno: BlockNumber,
     access: i32,
     flags: i32,
-    bstrategy: types_storage::buf::BufferAccessStrategy,
+    bstrategy: &types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<Buffer> {
     if blkno == P_NEW {
         return Err(PgError::new(ERROR, "hash AM does not use P_NEW"));
     }
 
-    let buf = bufmgr::read_buffer_with_strategy::call(rel, blkno, bstrategy)?;
+    // Pass the ring handle across the seam by value; cloning is an `Rc` bump
+    // (aliasing C's pointer), not a copy of the ring.
+    let buf = bufmgr::read_buffer_with_strategy::call(rel, blkno, bstrategy.clone())?;
 
     if access != HASH_NOLOCK {
         bufmgr::lock_buffer::call(buf, access)?;

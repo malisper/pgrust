@@ -24,9 +24,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use backend_storage_lmgr_s_lock::{s_lock_macro, s_unlock, Spinlock};
 use types_core::Size;
 use types_error::{PgError, PgResult};
-use types_storage::buf::{Victim, BUF_USAGECOUNT_ONE, FREENEXT_NOT_IN_LIST};
+use types_storage::buf::{
+    BufferAccessStrategyData, Victim, BUF_USAGECOUNT_ONE, FREENEXT_NOT_IN_LIST,
+};
 use types_storage::NUM_BUFFER_PARTITIONS;
 
+use crate::strategy::BufferAccessStrategyRing;
 use crate::{buf_state_get_refcount, buf_state_get_usagecount};
 
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
@@ -277,7 +280,7 @@ impl<'a> ClockSweep<'a> {
     /// the `&mut bool`) is true iff the victim came from the strategy ring.
     pub fn get_buffer(
         &self,
-        mut strategy: Option<&mut crate::strategy::BufferAccessStrategy>,
+        mut strategy: Option<&mut BufferAccessStrategyData>,
         from_ring: &mut bool,
     ) -> PgResult<Victim> {
         let control = self.control;

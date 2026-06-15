@@ -446,7 +446,7 @@ pub fn _hash_freeovflpage<'mcx>(
     itups: &[Vec<u8>],
     tups_size: &[usize],
     nitups: u16,
-    bstrategy: types_storage::buf::BufferAccessStrategy,
+    bstrategy: &types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<BlockNumber> {
     // Get information from the doomed page.
     _hash_checkpage(rel, ovflbuf, LH_OVERFLOW_PAGE as i32)?;
@@ -678,7 +678,7 @@ pub fn _hash_squeezebucket<'mcx>(
     bucket: Bucket,
     bucket_blkno: BlockNumber,
     bucket_buf: Buffer,
-    bstrategy: types_storage::buf::BufferAccessStrategy,
+    bstrategy: &types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<()> {
     // start squeezing into the primary bucket page.
     let mut wblkno = bucket_blkno;
