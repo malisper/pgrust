@@ -14,7 +14,8 @@
 //! `backend-access-brin-entry-seams` opclass-dispatch seams, which this crate
 //! installs (resolving the column's support-procedure OID via
 //! `index_getprocinfo` and dispatching the built-in `brin_minmax_*` OIDs here;
-//! the other built-in opclasses panic until their stage lands). This is the
+//! the inclusion opclass dispatches into `backend-access-brin-inclusion`; bloom
+//! / minmax-multi panic until their stage lands). This is the
 //! BRIN F0-opclass S1-minmax stage; S2-S4 (inclusion/bloom/minmax-multi) reuse
 //! the same [`types_brin::OpaqueOpcInfo`] carrier and the same dispatch
 //! installer pattern.
@@ -51,6 +52,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use backend_utils_error::ereport;
 
 use backend_access_brin_entry_seams as opclass;
+use backend_access_brin_inclusion as inclusion;
 use backend_access_index_indexam_seams as indexam;
 use backend_utils_adt_scalar_seams as scalar;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -445,9 +447,10 @@ fn minmax_get_strategy_procinfo(
 // procedures through these `(index, keyno, ...)`-keyed seams. The single
 // installer resolves the column's support-procedure OID via `index_getprocinfo`
 // (the same `BRIN_PROCNUM_*` lookup `brin_build_desc`/`bringetbitmap` do) and
-// dispatches the built-in `brin_minmax_*` OIDs to the bodies above. The other
-// built-in opclasses (inclusion/bloom/minmax-multi) panic until their stage
-// lands — `seam-and-panic`, never a silent stub.
+// dispatches the built-in `brin_minmax_*` OIDs to the bodies above and the
+// `brin_inclusion_*` OIDs into `backend-access-brin-inclusion`. The remaining
+// built-in opclasses (bloom/minmax-multi) panic until their stage lands —
+// `seam-and-panic`, never a silent stub.
 
 /// `index_getprocinfo(index, keyno + 1, procnum).fn_oid` — the OID of the
 /// opclass support procedure registered for indexed column `keyno` (0-based).
@@ -457,7 +460,7 @@ fn support_proc_oid(index: &Relation<'_>, keyno: usize, procnum: u16) -> PgResul
 }
 
 /// Panic for a built-in BRIN opclass support procedure whose stage has not
-/// landed yet (inclusion S2 / bloom S3 / minmax-multi S4).
+/// landed yet (bloom S3 / minmax-multi S4).
 fn unported_opclass(which: &str, oid: Oid) -> ! {
     panic!("brin opclass support procedure {which} (proc oid {oid}) not yet ported");
 }
@@ -471,6 +474,7 @@ fn dispatch_opcinfo<'mcx>(
     let oid = support_proc_oid(index, keyno, BRIN_PROCNUM_OPCINFO)?;
     match oid {
         F_BRIN_MINMAX_OPCINFO => brin_minmax_opcinfo(mcx, atttypid),
+        inclusion::F_BRIN_INCLUSION_OPCINFO => inclusion::brin_inclusion_opcinfo(mcx, atttypid),
         _ => unported_opclass("OpcInfo", oid),
     }
 }
@@ -491,6 +495,9 @@ fn dispatch_addvalue<'mcx>(
         F_BRIN_MINMAX_ADD_VALUE => {
             brin_minmax_add_value(mcx, bdesc, bval, value, isnull, collation)
         }
+        inclusion::F_BRIN_INCLUSION_ADD_VALUE => {
+            inclusion::brin_inclusion_add_value(mcx, bdesc, bval, value, isnull, collation)
+        }
         _ => unported_opclass("AddValue", oid),
     }
 }
@@ -507,6 +514,9 @@ fn dispatch_union<'mcx>(
     let oid = support_proc_oid(index, attno, BRIN_PROCNUM_UNION)?;
     match oid {
         F_BRIN_MINMAX_UNION => brin_minmax_union(mcx, bdesc, col_a, col_b, collation),
+        inclusion::F_BRIN_INCLUSION_UNION => {
+            inclusion::brin_inclusion_union(mcx, bdesc, col_a, col_b, collation)
+        }
         _ => unported_opclass("Union", oid),
     }
 }
@@ -514,15 +524,16 @@ fn dispatch_union<'mcx>(
 fn dispatch_consistent_is_multi(index: &Relation<'_>, attno: usize) -> PgResult<bool> {
     let oid = support_proc_oid(index, attno, BRIN_PROCNUM_CONSISTENT)?;
     match oid {
-        // minmax's Consistent uses the old 3-arg signature (fn_nargs < 4).
-        F_BRIN_MINMAX_CONSISTENT => Ok(false),
+        // Both minmax's and inclusion's Consistent use the old 3-arg signature
+        // (fn_nargs < 4), so neither selects the multi-key form.
+        F_BRIN_MINMAX_CONSISTENT | inclusion::F_BRIN_INCLUSION_CONSISTENT => Ok(false),
         _ => unported_opclass("Consistent", oid),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_consistent_single<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     attno: usize,
     collation: Oid,
@@ -533,6 +544,9 @@ fn dispatch_consistent_single<'mcx>(
     let oid = support_proc_oid(index, attno, BRIN_PROCNUM_CONSISTENT)?;
     match oid {
         F_BRIN_MINMAX_CONSISTENT => brin_minmax_consistent(bdesc, bval, key, collation),
+        inclusion::F_BRIN_INCLUSION_CONSISTENT => {
+            inclusion::brin_inclusion_consistent(mcx, bdesc, bval, key, collation)
+        }
         _ => unported_opclass("Consistent", oid),
     }
 }
