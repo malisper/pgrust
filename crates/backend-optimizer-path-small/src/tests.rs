@@ -194,6 +194,7 @@ fn recognizes_ctid_equal_const() {
         constcollid: 0,
         constvalue: types_tuple_datum_null(),
         constisnull: false,
+        location: -1,
     });
     let op = Expr::OpExpr(OpExpr {
         opno: TID_EQUAL_OPERATOR,
@@ -281,6 +282,7 @@ fn mk_opclause(root: &mut PlannerInfo, opno: Oid, relid: i32) -> NodeId {
         constcollid: 0,
         constvalue: types_tuple_datum_null(),
         constisnull: false,
+        location: -1,
     });
     let op = Expr::OpExpr(OpExpr {
         opno,

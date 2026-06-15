@@ -32,6 +32,7 @@ fn select_common_typmod_all_match() {
             constcollid: InvalidOid,
             constvalue: TupleDatum::ByVal(0),
             constisnull: false,
+            location: -1,
         })
     };
     let exprs = [mk(5), mk(5)];

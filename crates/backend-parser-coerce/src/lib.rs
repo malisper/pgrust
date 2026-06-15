@@ -228,6 +228,8 @@ pub fn coerce_to_target_type<'mcx>(
         let newcoll = CollateExpr {
             arg: Some(alloc::boxed::Box::new(result)),
             collOid: coll.collOid,
+            // newcoll->location = coll->location;
+            location: coll.location,
         };
         return Ok(Some(Expr::CollateExpr(newcoll)));
     }
@@ -249,6 +251,7 @@ fn strip_top_collate(expr: Expr) -> (Expr, Option<CollateExpr>) {
                     top = Some(CollateExpr {
                         arg: None,
                         collOid: coll.collOid,
+                        location: coll.location,
                     });
                 }
                 match coll.arg {
@@ -259,6 +262,7 @@ fn strip_top_collate(expr: Expr) -> (Expr, Option<CollateExpr>) {
                         cur = Expr::CollateExpr(CollateExpr {
                             arg: None,
                             collOid: coll.collOid,
+                            location: coll.location,
                         });
                         break;
                     }
@@ -373,6 +377,7 @@ pub fn coerce_type<'mcx>(
         // Push the coercion underneath the COLLATE (or discard if target not
         // collatable).
         let coll_oid = coll.collOid;
+        let coll_location = coll.location;
         let arg = coll.arg.clone().map(|b| *b);
         let result = coerce_type(
             mcx,
@@ -389,6 +394,8 @@ pub fn coerce_type<'mcx>(
             let newcoll = CollateExpr {
                 arg: result.map(alloc::boxed::Box::new),
                 collOid: coll_oid,
+                // newcoll->location = coll->location;
+                location: coll_location,
             };
             return Ok(Some(Expr::CollateExpr(newcoll)));
         }
@@ -481,6 +488,8 @@ pub fn coerce_type<'mcx>(
             arg: Some(alloc::boxed::Box::new(node)),
             resulttype: targetTypeId,
             convertformat: cformat,
+            // r->location = location;
+            location,
         };
         return Ok(Some(Expr::ConvertRowtypeExpr(r)));
     }
@@ -670,9 +679,9 @@ pub fn coerce_to_domain<'mcx>(
         resulttypmod: -1,
         resultcollid: InvalidOid,
         coercionformat: cformat,
+        // result->location = location;
+        location,
     };
-    // result->location = location (not modeled on CoerceToDomain).
-    let _ = location;
 
     Ok(Expr::CoerceToDomain(result))
 }
@@ -899,8 +908,9 @@ fn build_coercion_expression<'mcx>(
                 resulttypmod,
                 resultcollid: InvalidOid,
                 coerceformat: cformat,
+                // acoerce->location = location;
+                location,
             };
-            let _ = location;
             Ok(Expr::ArrayCoerceExpr(acoerce))
         }
         CoercionPathType::Coerceviaio => {
@@ -910,8 +920,9 @@ fn build_coercion_expression<'mcx>(
                 resulttype: targetTypeId,
                 resultcollid: InvalidOid,
                 coerceformat: cformat,
+                // iocoerce->location = location;
+                location,
             };
-            let _ = location;
             Ok(Expr::CoerceViaIO(iocoerce))
         }
         other => Err(types_error::PgError::error(format!(
@@ -1040,9 +1051,9 @@ fn coerce_record_to_complex<'mcx>(
         row_typeid: baseTypeId,
         row_format: cformat,
         colnames: Vec::new(),
+        // rowexpr->location = location;
+        location,
     };
-    // rowexpr->location = location (not modeled on RowExpr).
-    let _ = location;
 
     if baseTypeId != targetTypeId {
         rowexpr.row_format = COERCE_IMPLICIT_CAST;

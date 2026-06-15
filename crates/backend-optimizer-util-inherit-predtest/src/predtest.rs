@@ -237,6 +237,8 @@ fn make_dummy_const(
         constcollid: arrayconst.constcollid,
         constvalue: types_tuple::backend_access_common_heaptuple::Datum::from_usize(value.as_usize()),
         constisnull: isnull,
+        // makeConst sets location = -1.
+        location: -1,
     })
 }
 
@@ -443,6 +445,8 @@ fn wrap_list(items: &[Expr]) -> PgResult<Expr> {
     Ok(Expr::BoolExpr(types_nodes::primnodes::BoolExpr {
         boolop: BoolExprType::AND_EXPR,
         args,
+        // make_andclause sets location = -1.
+        location: -1,
     }))
 }
 

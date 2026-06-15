@@ -19,6 +19,8 @@ use mcx::PgString;
 use types_namespace::{CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
 use types_cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
+use types_catalog::pg_aggregate::AggRow;
+use types_nodes::nodes::NodePtr;
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(
@@ -441,9 +443,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `func_get_detail`'s default-argument extraction (`parse_func.c`):
+    ///
+    /// ```c
+    /// proargdefaults = SysCacheGetAttrNotNull(PROCOID, ftup,
+    ///                                         Anum_pg_proc_proargdefaults);
+    /// str = TextDatumGetCString(proargdefaults);
+    /// defaults = castNode(List, stringToNode(str));
+    /// ```
+    ///
+    /// Projects the `pg_proc.proargdefaults` `pg_node_tree` column of `funcid`
+    /// to its deserialized default-expression list (the elements of the
+    /// `castNode(List, ...)`), each node allocated in `mcx`. The caller only
+    /// reaches this path when `best_candidate->ndargs > 0`, where the column is
+    /// guaranteed non-null (`SysCacheGetAttrNotNull`); a SQL-null column or a
+    /// cache miss is therefore an `Err` (catcache `ereport(ERROR)`), as in C.
+    pub fn proc_argdefaults<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(OPEROID, oprid)` projected to the [`OperRow`]
     /// fields; `Ok(None)` on cache miss (`OperatorIsVisibleExt`).
     pub fn oper_row_by_oid<'mcx>(mcx: Mcx<'mcx>, oprid: Oid) -> PgResult<Option<OperRow<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` projected to the
+    /// [`AggRow`] fields (`Form_pg_aggregate` `aggkind` / `aggnumdirectargs`);
+    /// read by `func_get_detail` (`parse_func.c`) for an aggregate function.
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises its
+    /// own `cache lookup failed for aggregate %u` `elog(ERROR)`, as in C.
+    pub fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<AggRow>>
 );
 
 seam_core::seam!(

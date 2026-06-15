@@ -474,8 +474,8 @@ pub fn transformContainerSubscripts<'mcx>(
 /// caller's current context; the owned `ParseState` carries no arena field.
 pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &ParseState<'mcx>,
-    aconst: &A_Const<'mcx>,
+    _pstate: &ParseState<'_>,
+    aconst: &A_Const<'_>,
 ) -> PgResult<Const> {
     if aconst.isnull {
         // return a null const: makeConst(UNKNOWNOID, -1, InvalidOid, -2,
@@ -621,7 +621,8 @@ pub fn fixed_paramref_hook<'mcx>(
         paramtype,
         paramtypmod: -1,
         paramcollid: lsyscache::get_typcollation::call(paramtype)?,
-        // location: pref->location — not modeled on Param.
+        // param->location = pref->location;
+        location: pref.location,
     })
 }
 

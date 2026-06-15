@@ -302,7 +302,8 @@ pub fn paramlist_param_ref(
         paramtype,
         paramtypmod: -1,
         paramcollid: lsyscache_seam::get_typcollation::call(paramtype)?,
-        // `pref->location` is a trimmed (`location`) field of `Param` here.
+        // param->location = pref->location;
+        location: pref.location,
     };
     let _ = T_Param;
 

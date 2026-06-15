@@ -1023,6 +1023,8 @@ fn arm_nulltest(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
                 arg: Some(Box::new(relem)),
                 nulltesttype: ntest.nulltesttype,
                 argisrow: false,
+                // newntest->location = ntest->location;
+                location: ntest.location,
             }));
         }
         if newargs.is_empty() {
@@ -1601,6 +1603,8 @@ pub fn make_SAOP_expr(
             element_typeid: coltype,
             elements: exprs,
             multidims: false,
+            // arrayExpr->location = -1;
+            location: -1,
         });
         if have_non_const {
             ae
