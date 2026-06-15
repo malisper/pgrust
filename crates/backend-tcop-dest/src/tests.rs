@@ -61,7 +61,7 @@ fn register_dest_receiver_threads_owner_state() {
     fn capture_startup(_state: u64, _op: CmdType, _td: &TupleDescData<'_>) -> PgResult<()> {
         Ok(())
     }
-    fn capture_receive(_state: u64, _slot: &SlotData<'_>) -> PgResult<bool> {
+    fn capture_receive(_state: u64, _slot: &mut SlotData<'_>) -> PgResult<bool> {
         Ok(true)
     }
     fn capture_shutdown(state: u64) -> PgResult<()> {

@@ -398,7 +398,7 @@ pub fn do_tup_output<'mcx>(
     crate::slot_store_fetch::ExecStoreVirtualTuple(&mut tstate.slot)?;
 
     // send the tuple to the receiver
-    let _ = backend_tcop_dest_seams::dest_receive_slot::call(&tstate.slot, tstate.dest)?;
+    let _ = backend_tcop_dest_seams::dest_receive_slot::call(&mut tstate.slot, tstate.dest)?;
 
     // clean up
     crate::slot_store_fetch::ExecClearTuple(&mut tstate.slot)?;

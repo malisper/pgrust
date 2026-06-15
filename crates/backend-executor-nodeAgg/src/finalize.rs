@@ -384,12 +384,23 @@ fn make_expanded_object_read_only<'mcx>(d: Datum<'mcx>, isnull: bool, typlen: i1
     if isnull || typlen != -1 {
         return d;
     }
-    // The varlena case needs VARATT_IS_EXTERNAL_EXPANDED_RW inspection and the
-    // expanded-object read-only conversion, both owned by the unported
-    // expandeddatum unit.
+    // The varlena case marshals through the now-installed
+    // `backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v`
+    // seam (expandeddatum.c is ported in backend-utils-adt-misc2). That seam
+    // allocates the read-only pointer copy in a target `Mcx` — in C the
+    // per-tuple context `ps_ExprContext->ecxt_per_tuple_memory` switched to just
+    // above the finalfn call. The owned `AggStateData` does NOT carry that
+    // per-tuple `Mcx`/`EcxtId` on its facet here (the same ExprContext storage-
+    // model carrier gap `ExecInitAgg`/`hash_create_memory` hit: AggState models
+    // ExprContext as `PgBox<ExprContext>` while execUtils owns an `EcxtId` pool),
+    // so the correct allocation context cannot be named at this call site.
+    // Loud panic until the per-tuple ExprContext `Mcx` reaches this facet; the
+    // owner seam itself is wired and ready.
     panic!(
-        "backend-executor-nodeAgg::finalize: MakeExpandedObjectReadOnly on a varlena datum needs \
-         the expanded-datum machinery (utils/adt/expandeddatum.c), unported with no seam"
+        "backend-executor-nodeAgg::finalize: MakeExpandedObjectReadOnly varlena case is ready to \
+         call make_expanded_object_read_only_internal_v (misc2 owner installed), but the per-tuple \
+         ExprContext Mcx (ps_ExprContext->ecxt_per_tuple_memory) is not on the AggState facet — \
+         same ExprContext EcxtId carrier gap as ExecInitAgg/hash_create_memory"
     );
 }
 

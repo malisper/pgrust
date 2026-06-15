@@ -42,7 +42,7 @@ seam_core::seam!(
     /// `slot`) to the receiver, returning the receiver's bool result (C casts
     /// it to `(void)`). `Err` carries whatever the receiver raises.
     pub fn dest_receive_slot(
-        slot: &SlotData<'_>,
+        slot: &mut SlotData<'_>,
         dest: DestReceiverHandle,
     ) -> types_error::PgResult<bool>
 );

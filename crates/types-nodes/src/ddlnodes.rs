@@ -20,7 +20,7 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::{Oid, ParseLoc, RelFileNumber};
+use types_core::primitive::{AttrNumber, Oid, ParseLoc, RelFileNumber};
 use types_error::PgResult;
 
 use crate::nodes::NodePtr;
@@ -270,6 +270,50 @@ impl Constraint<'_> {
             old_conpfeqop: copy_node_vec(&self.old_conpfeqop, mcx)?,
             old_pktable_oid: self.old_pktable_oid,
             location: self.location,
+        })
+    }
+}
+
+/// `CookedConstraint` (`catalog/heap.h`) — a post-transformation constraint
+/// expression, produced when a stored constraint is read back out of the
+/// catalog (or transformed at table-creation time).
+#[derive(Debug)]
+pub struct CookedConstraint<'mcx> {
+    /// `ConstrType contype` — `CONSTR_DEFAULT`, `CONSTR_CHECK`, `CONSTR_NOTNULL`.
+    pub contype: ConstrType,
+    /// `Oid conoid` — constr OID if created, otherwise `Invalid`.
+    pub conoid: Oid,
+    /// `char *name` — name, or `None` if none.
+    pub name: Option<PgString<'mcx>>,
+    /// `AttrNumber attnum` — which attr (only for `NOTNULL`, `DEFAULT`).
+    pub attnum: AttrNumber,
+    /// `Node *expr` — transformed default or check expr.
+    pub expr: Option<NodePtr<'mcx>>,
+    /// `bool is_enforced` — is enforced? (only for `CHECK`).
+    pub is_enforced: bool,
+    /// `bool skip_validation` — skip validation? (only for `CHECK`).
+    pub skip_validation: bool,
+    /// `bool is_local` — constraint has local (non-inherited) def.
+    pub is_local: bool,
+    /// `int16 inhcount` — number of times constraint is inherited.
+    pub inhcount: i16,
+    /// `bool is_no_inherit` — constraint has local def and cannot be inherited.
+    pub is_no_inherit: bool,
+}
+
+impl CookedConstraint<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CookedConstraint<'b>> {
+        Ok(CookedConstraint {
+            contype: self.contype,
+            conoid: self.conoid,
+            name: copy_opt_str(&self.name, mcx)?,
+            attnum: self.attnum,
+            expr: copy_opt_node(&self.expr, mcx)?,
+            is_enforced: self.is_enforced,
+            skip_validation: self.skip_validation,
+            is_local: self.is_local,
+            inhcount: self.inhcount,
+            is_no_inherit: self.is_no_inherit,
         })
     }
 }

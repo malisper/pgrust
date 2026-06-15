@@ -20,36 +20,73 @@
 
 #![allow(non_snake_case)]
 
+use types_core::Oid;
+use types_datum::Datum;
 use types_sortsupport::{SkipSupportData, SortSupportData};
+
+/// A SortSupport fast comparator: C `int (*comparator)(Datum, Datum,
+/// SortSupport)` minus the third `ssup` argument the in-core fast comparators
+/// (`btint2fastcmp` / `ssup_datum_int32_cmp` / `ssup_datum_signed_cmp` /
+/// `btoidfastcmp`) never read. The two operands are the packed scalar `Datum`s
+/// exactly as C passes them; the substrate mints a
+/// [`types_sortsupport::SortComparatorId`] token denoting this function pointer.
+pub type FastComparator = fn(Datum, Datum) -> i32;
+
+// ===========================================================================
+// run_sortsupport — invoke the type's `*sortsupport` strategy routine.
+//
+// INWARD seam owned by `nbtcompare`. This is the owned-model stand-in for the
+// C `OidFunctionCall1(sortfunc, PointerGetDatum(ssup))` in
+// `FinishSortSupportFunction` / `PrepareSortSupportFromGistIndexRel`: the C
+// type-specific sortsupport function receives the live `SortSupport` and fills
+// `ssup->comparator`. An owned `Datum` cannot carry the `SortSupport` pointer,
+// so the dispatch crosses as a typed `&mut SortSupportData` here, keyed by the
+// function OID, instead of through the (pointer-less) fmgr boundary.
+//
+// Returns `true` if `sortfunc` is a sortsupport routine this crate implements
+// (it ran and may have set `ssup.comparator`); `false` if the OID is not one of
+// nbtcompare's in-core sortsupport functions, so the caller can fall through to
+// its fmgr path (which loud-fails for an as-yet-unported sortsupport builtin,
+// matching C reaching an unregistered/undefined function).
+// ===========================================================================
+
+seam_core::seam!(
+    /// `OidFunctionCall1(sortfunc, PointerGetDatum(ssup))` for an in-core btree
+    /// `*sortsupport` routine: dispatch by OID to `btint2/4/8/oidsortsupport`,
+    /// each of which sets `ssup->comparator`. Returns whether `sortfunc` was a
+    /// recognized nbtcompare sortsupport function.
+    pub fn run_sortsupport(sortfunc: Oid, ssup: &mut SortSupportData<'_>) -> bool
+);
 
 // ===========================================================================
 // sortsupport: install the type's fast comparator into `ssup.comparator`.
 //
 // Each routine corresponds to `ssup->comparator = <fastcmp>;` in C. The
-// substrate registers the appropriate fast comparator (`btint2fastcmp`,
+// substrate registers the supplied fast comparator (`btint2fastcmp`,
 // `ssup_datum_int32_cmp`, `ssup_datum_signed_cmp` / `btint8fastcmp`,
 // `btoidfastcmp`) and stores the resulting token into `ssup.comparator`.
+// `nbtcompare` passes the kernel; the substrate mints + interprets the token.
 // ===========================================================================
 
 seam_core::seam!(
     /// `ssup->comparator = btint2fastcmp;` (btint2sortsupport).
-    pub fn install_sortsupport_int2(ssup: &mut SortSupportData<'_>)
+    pub fn install_sortsupport_int2(ssup: &mut SortSupportData<'_>, cmp: FastComparator)
 );
 
 seam_core::seam!(
     /// `ssup->comparator = ssup_datum_int32_cmp;` (btint4sortsupport).
-    pub fn install_sortsupport_int4(ssup: &mut SortSupportData<'_>)
+    pub fn install_sortsupport_int4(ssup: &mut SortSupportData<'_>, cmp: FastComparator)
 );
 
 seam_core::seam!(
     /// `ssup->comparator = ssup_datum_signed_cmp;` on `SIZEOF_DATUM >= 8` (the
     /// only platform target), else `btint8fastcmp` (btint8sortsupport).
-    pub fn install_sortsupport_int8(ssup: &mut SortSupportData<'_>)
+    pub fn install_sortsupport_int8(ssup: &mut SortSupportData<'_>, cmp: FastComparator)
 );
 
 seam_core::seam!(
     /// `ssup->comparator = btoidfastcmp;` (btoidsortsupport).
-    pub fn install_sortsupport_oid(ssup: &mut SortSupportData<'_>)
+    pub fn install_sortsupport_oid(ssup: &mut SortSupportData<'_>, cmp: FastComparator)
 );
 
 // ===========================================================================

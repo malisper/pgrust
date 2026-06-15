@@ -7,13 +7,17 @@
 //! 3-vs-2 delete scan keys, and the GetComment `!isnull` branch.
 
 use super::*;
-use backend_commands_comment_seams::{DescriptionColumn, DescriptionTupleId, ResolvedObject};
+use backend_catalog_objectaddress_seams::ResolvedObjectAddress;
+use backend_commands_comment_seams::{DescriptionColumn, DescriptionTupleId};
 use mcx::MemoryContext;
 use std::sync::{Mutex, MutexGuard, Once};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_nodes::parsenodes::{ObjectType, OBJECT_TABLE};
+use types_parsenodes::{Node, StringNode};
+use types_rel::{FormData_pg_class, Relation, RelationData};
 use types_storage::lock::LOCKMODE;
-use types_tuple::heaptuple::ItemPointerData;
+use types_storage::RelFileLocator;
+use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CatalogAction {
@@ -46,7 +50,11 @@ static FOUND: Mutex<Option<DescriptionTupleId>> = Mutex::new(None);
 // only ever reads a by-value scalar word, so the static snapshots the raw word
 // plus the isnull flag; the mock rebuilds the `Datum` in the seam's `'mcx`.
 static FOUND_COLUMN: Mutex<Option<(usize, bool)>> = Mutex::new(None);
-static RESOLVED: Mutex<Option<ResolvedObject>> = Mutex::new(None);
+// The resolved ObjectAddress (always present once set) plus the Oid of the
+// relation `get_object_address` "opened" (`None` for non-relation objects). The
+// mock rebuilds a real `Relation<'mcx>` from the seam's `mcx` (it borrows the
+// context, so it can't be stored `'static`).
+static RESOLVED: Mutex<Option<(ObjectAddress, Option<Oid>)>> = Mutex::new(None);
 static RELKIND: Mutex<u8> = Mutex::new(b'r');
 static DB_OID: Mutex<Oid> = Mutex::new(0);
 static FIND_KEY: Mutex<Option<(Oid, Oid, i32)>> = Mutex::new(None);
@@ -78,17 +86,16 @@ fn install_once() {
     ONCE.call_once(|| {
         backend_commands_dbcommands_seams::get_database_oid::set(|_n, _m| Ok(*DB_OID.lock().unwrap()));
         get_user_id::set(|| 10);
-        seam::database_name::set(|_stmt| "db".to_string());
-        seam::get_object_address::set(|_stmt, _lockmode| {
-            Ok(RESOLVED.lock().unwrap().expect("RESOLVED not set"))
-        });
-        seam::check_object_ownership::set(|_r, _s, _a, _rel| Ok(()));
-        seam::relation_get_relkind::set(|_rel| Ok(*RELKIND.lock().unwrap()));
-        seam::relation_get_relation_name::set(|_rel| Ok("my_index".to_string()));
-        seam::relation_close::set(|rel, _lockmode| {
-            *CLOSED_REL.lock().unwrap() = Some(rel);
-            Ok(())
-        });
+        backend_catalog_objectaddress_seams::get_object_address::set(
+            |mcx, _objtype, _object, _lockmode, _missing_ok| {
+                let (address, rel_oid) = RESOLVED.lock().unwrap().expect("RESOLVED not set");
+                let relation = rel_oid.map(|oid| make_rel(mcx, oid, *RELKIND.lock().unwrap()));
+                Ok(ResolvedObjectAddress { address, relation })
+            },
+        );
+        backend_catalog_objectaddress_seams::check_object_ownership::set(
+            |_r, _objtype, _a, _object, _rel| Ok(()),
+        );
         // Sentinel text Datum: the comment's byte length.
         seam::cstring_get_text_datum::set(|_mcx, comment| Ok(Datum::from_usize(comment.len())));
         seam::text_datum_get_cstring::set(|_value| Ok("the comment".to_string()));
@@ -177,10 +184,81 @@ fn tid(n: u16) -> DescriptionTupleId {
     DescriptionTupleId(ItemPointerData::new(0, n))
 }
 
+/// `relation_close(rel, NoLock)` — the closer the test relation carries; records
+/// which relation Oid was closed so the dispatch tests can assert it happened.
+fn rel_closer(oid: Oid, _lockmode: LOCKMODE) -> PgResult<()> {
+    *CLOSED_REL.lock().unwrap() = Some(oid);
+    Ok(())
+}
+
+/// Build a cell-less test `Relation<'mcx>` (relname "my_index"), the relation
+/// the canonical `get_object_address` mock "opens". Carries [`rel_closer`] so
+/// `CommentObject`'s `relation_close` is observable.
+fn make_rel(mcx: Mcx<'_>, oid: Oid, relkind: u8) -> Relation<'_> {
+    let td = TupleDescData {
+        natts: 0,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs: mcx::PgVec::new_in(mcx),
+        attrs: mcx::PgVec::new_in(mcx),
+    };
+    let data = RelationData {
+        rd_id: oid,
+        rd_locator: RelFileLocator {
+            spcOid: 0,
+            dbOid: 0,
+            relNumber: 0,
+        },
+        rd_backend: types_core::primitive::INVALID_PROC_NUMBER,
+        rd_rel: FormData_pg_class {
+            relname: mcx::PgString::from_str_in("my_index", mcx).unwrap(),
+            relnamespace: 0,
+            relowner: 0,
+            relrowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            reltablespace: 0,
+            relfilenode: 0,
+            relisshared: false,
+            relhasindex: false,
+            relhassubclass: false,
+            relpersistence: b'p',
+            relkind,
+            relam: 0,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 0,
+        },
+        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_options: None,
+        rd_index: None,
+        rd_opcintype: mcx::PgVec::new_in(mcx),
+        rd_opfamily: mcx::PgVec::new_in(mcx),
+        rd_indoption: mcx::PgVec::new_in(mcx),
+        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_trigdesc: None,
+    };
+    Relation::open(data, Some(rel_closer))
+}
+
+/// A `String` value node naming the object (`strVal(stmt->object)`).
+fn string_node(name: &str) -> Box<Node> {
+    Box::new(Node::String(StringNode {
+        sval: Some(name.to_string()),
+    }))
+}
+
 fn comment_stmt(objtype: ObjectType, comment: Option<&str>) -> CommentStmt {
     CommentStmt {
         objtype,
-        object: None,
+        // `strVal(stmt->object)` is read for OBJECT_DATABASE; a String value
+        // node serves every objtype the dispatch tests exercise.
+        object: Some(string_node("the_object")),
         comment: comment.map(|c| c.to_string()),
     }
 }
@@ -297,7 +375,7 @@ fn comment_object_database_routes_to_shared() {
     let _g = lock();
     reset();
     *DB_OID.lock().unwrap() = 1234;
-    *RESOLVED.lock().unwrap() = Some(ResolvedObject::new(addr(1262, 1234, 0), None));
+    *RESOLVED.lock().unwrap() = Some((addr(1262, 1234, 0), None));
 
     let stmt = comment_stmt(OBJECT_DATABASE, Some("hello"));
     let cx = MemoryContext::new("t");
@@ -314,7 +392,7 @@ fn comment_object_database_routes_to_shared() {
 fn comment_object_table_routes_to_local_and_closes_relation() {
     let _g = lock();
     reset();
-    *RESOLVED.lock().unwrap() = Some(ResolvedObject::new(addr(1259, 42, 0), Some(7)));
+    *RESOLVED.lock().unwrap() = Some((addr(1259, 42, 0), Some(7)));
 
     let stmt = comment_stmt(OBJECT_TABLE, Some("tbl note"));
     let cx = MemoryContext::new("t");
@@ -329,7 +407,7 @@ fn comment_object_table_routes_to_local_and_closes_relation() {
 fn comment_object_column_on_index_relkind_errors() {
     let _g = lock();
     reset();
-    *RESOLVED.lock().unwrap() = Some(ResolvedObject::new(addr(1259, 99, 1), Some(3)));
+    *RESOLVED.lock().unwrap() = Some((addr(1259, 99, 1), Some(3)));
     *RELKIND.lock().unwrap() = b'i'; // RELKIND_INDEX, not whitelisted
 
     let stmt = comment_stmt(OBJECT_COLUMN, Some("x"));
@@ -343,7 +421,7 @@ fn comment_object_column_on_index_relkind_errors() {
 fn comment_object_column_on_table_relkind_passes() {
     let _g = lock();
     reset();
-    *RESOLVED.lock().unwrap() = Some(ResolvedObject::new(addr(1259, 99, 2), Some(4)));
+    *RESOLVED.lock().unwrap() = Some((addr(1259, 99, 2), Some(4)));
     *RELKIND.lock().unwrap() = RELKIND_RELATION;
 
     let stmt = comment_stmt(OBJECT_COLUMN, Some("col note"));
