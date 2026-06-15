@@ -9706,6 +9706,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-reorderbuffer"
+version = "0.0.0"
+dependencies = [
+ "backend-replication-logical-reorderbuffer-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-logical",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-replication-logical-reorderbuffer-seams"
 version = "0.0.0"
 dependencies = [
@@ -15145,6 +15159,7 @@ dependencies = [
  "backend-replication-logical-logical",
  "backend-replication-logical-origin",
  "backend-replication-logical-proto",
+ "backend-replication-logical-reorderbuffer",
  "backend-replication-logical-slotsync",
  "backend-replication-logical-snapbuild",
  "backend-replication-slot",
