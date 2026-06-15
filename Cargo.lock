@@ -7694,6 +7694,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-prep-preptlist"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-prep-preptlist-seams",
+ "backend-optimizer-util-restrictinfo-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-prep-preptlist-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-rte-seams"
 version = "0.0.0"
 dependencies = [
@@ -14751,6 +14777,7 @@ dependencies = [
  "backend-optimizer-plan-subselect-pullup",
  "backend-optimizer-prep-prepjointree",
  "backend-optimizer-prep-prepqual",
+ "backend-optimizer-prep-preptlist",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
