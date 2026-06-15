@@ -234,6 +234,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecFetchSlotHeapTuple(slot, materialize, &shouldFree)` (execTuples.c)
+    /// over the payload-bearing [`SlotData`] the table-AM DML vtable callbacks
+    /// (`heapam_tuple_insert` / `heapam_tuple_update` / `heapam_tuple_lock`)
+    /// hold directly. C's `heapam_handler.c` calls `ExecFetchSlotHeapTuple(slot,
+    /// true, &shouldFree)` to obtain the heap tuple to pass to
+    /// `heap_insert`/`heap_update`/`heap_lock_tuple`; the heap modify core is the
+    /// unported owner of those wrappers, so this seam is the bridge it will call.
+    /// Unlike the pool-id `exec_*` seams, the caller has the `&mut SlotData` from
+    /// the vtable, not an `EState` `SlotId`. Returns `(tuple, should_free)` —
+    /// `should_free` is `true` when a fresh tuple was built (virtual/minimal
+    /// slots) and the caller must free it, `false` when the slot's stored tuple
+    /// was returned (heap/buffer-heap slots). `Err` carries the materialize OOM.
+    pub fn exec_fetch_slot_heap_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        materialize: bool,
+    ) -> types_error::PgResult<(
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        bool,
+    )>
+);
+
+seam_core::seam!(
     /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
     /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
     /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.

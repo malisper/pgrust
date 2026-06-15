@@ -2,13 +2,17 @@
 //! (`access/heap/heapam.c`): `heap_fetch` / `heap_hot_search_buffer` /
 //! `heap_get_latest_tid`.
 //!
-//! These pin/lock a heap page through the bufmgr seams, decode the page-resident
-//! tuple header into an owned [`HeapTupleData`], test visibility, and (for the
-//! HOT chain / latest-TID chase) follow `t_ctid` links. The carrier is the
-//! header-only [`HeapTupleData`] (`t_data == None` is the C `t_data == NULL`
-//! "not found" sentinel) — the user-data area stays on the pinned page, exactly
-//! as C leaves `t_data` pointing into the buffer; consumers re-read the page
-//! bytes while they hold the pin.
+//! These pin/lock a heap page through the bufmgr seams, materialize the
+//! page-resident tuple (header + user-data area) into an owned [`FormedTuple`],
+//! test visibility, and (for the HOT chain / latest-TID chase) follow `t_ctid`
+//! links. The carrier is the full [`FormedTuple`] (`None` is the C `t_data ==
+//! NULL` "not found" sentinel) so that the table-AM read-path callbacks
+//! (`heapam_index_fetch_tuple` / `heapam_fetch_row_version`) can store the
+//! result into a `BufferHeapTupleTableSlot` via `ExecStoreBufferHeapTuple` /
+//! `ExecStorePinnedBufferHeapTuple`. C leaves `t_data` pointing into the still
+//! pinned buffer and the slot store copies it out under the pin; the owned model
+//! materializes the bytes up front while the pin is held, which is behaviorally
+//! identical.
 //!
 //! ## What this owns
 //!
@@ -31,9 +35,10 @@ use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_storage::{Buffer, InvalidBuffer};
 use types_tuple::heaptuple::{
-    HeapTupleData, HeapTupleHeaderData, ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
+    HeapTupleHeaderData, ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     HEAP_HOT_UPDATED, HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID,
 };
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
 use backend_storage_page::{
     ItemIdGetLength, ItemIdGetRedirect, ItemIdIsNormal, ItemIdIsRedirected, ItemPointerGetBlockNumber,
@@ -89,10 +94,12 @@ fn heap_tuple_header_indicates_moved_partitions(tup: &HeapTupleHeaderData<'_>) -
     ItemPointerIndicatesMovedPartitions(&tup.t_ctid)
 }
 
-/// `tup->t_data` (shared); a normal line pointer always carries a header.
+/// `tup->t_data` (shared); a normal line pointer always carries a header. The
+/// header lives in the [`FormedTuple`]'s owned [`HeapTupleData`].
 #[inline]
-fn data_ref<'a, 'mcx>(tuple: &'a HeapTupleData<'mcx>) -> &'a HeapTupleHeaderData<'mcx> {
+fn data_ref<'a, 'mcx>(tuple: &'a FormedTuple<'mcx>) -> &'a HeapTupleHeaderData<'mcx> {
     tuple
+        .tuple
         .t_data
         .as_ref()
         .expect("heap fetch: normal line-pointer tuple has no t_data")
@@ -100,18 +107,22 @@ fn data_ref<'a, 'mcx>(tuple: &'a HeapTupleData<'mcx>) -> &'a HeapTupleHeaderData
 
 /// The outcome of decoding the on-page line pointer at `(buffer, offnum)`.
 enum PageItem<'mcx> {
-    /// `ItemIdIsNormal` — a live tuple header decoded into `HeapTupleData`.
-    Normal(HeapTupleData<'mcx>),
+    /// `ItemIdIsNormal` — a live tuple materialized into a [`FormedTuple`]
+    /// (header + user-data area).
+    Normal(FormedTuple<'mcx>),
     /// `ItemIdIsRedirected` — a HOT redirect to the given offset.
     Redirected(u16),
     /// Unused / dead line pointer (`!ItemIdIsNormal && !ItemIdIsRedirected`).
     Dead,
 }
 
-/// Read the line pointer at `offnum` and, when normal, decode the on-page tuple
-/// header into an owned [`HeapTupleData`] with identity `(block, offnum)`.
-/// Mirrors C's `lp = PageGetItemId(page, offnum); ... loctup.t_data =
-/// PageGetItem(page, lp); loctup.t_len = ItemIdGetLength(lp)`.
+/// Read the line pointer at `offnum` and, when normal, materialize the on-page
+/// tuple (header incl. its `t_bits` null bitmap + user-data area) into an owned
+/// [`FormedTuple`] with identity `(block, offnum)`. Mirrors C's `lp =
+/// PageGetItemId(page, offnum); ... loctup.t_data = PageGetItem(page, lp);
+/// loctup.t_len = ItemIdGetLength(lp)` — except the user-data area is copied out
+/// of the page rather than left aliasing it (the buffer stays pinned while the
+/// caller holds the result, so this is behavior-preserving).
 fn read_page_item<'mcx>(
     mcx: Mcx<'mcx>,
     buffer: Buffer,
@@ -132,13 +143,8 @@ fn read_page_item<'mcx>(
             return Ok(());
         }
         let item = PageGetItem(&page, &item_id)?;
-        let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
-        let tuple = HeapTupleData {
-            t_len: ItemIdGetLength(&item_id) as u32,
-            t_self: ItemPointerData::new(block, offnum),
-            t_tableOid: table_oid,
-            t_data: Some(mcx::alloc_in(mcx, hdr)?),
-        };
+        let len = ItemIdGetLength(&item_id) as usize;
+        let tuple = FormedTuple::read_on_page_full(mcx, &item[..len], block, offnum, table_oid)?;
         out = Some(PageItem::Normal(tuple));
         Ok(())
     })?;
@@ -170,12 +176,7 @@ pub fn heap_fetch<'mcx>(
     let not_found = |userbuf: Buffer| HeapFetchResult {
         found: false,
         userbuf,
-        tuple: HeapTupleData {
-            t_len: 0,
-            t_self: tid,
-            t_tableOid: relid,
-            t_data: None,
-        },
+        tuple: None,
     };
 
     // Fetch and pin the appropriate page of the relation.
@@ -203,30 +204,30 @@ pub fn heap_fetch<'mcx>(
         }
     };
     // fill in *tuple fields (t_self / t_tableOid already set by read_page_item).
-    tuple.t_self = tid;
+    tuple.tuple.t_self = tid;
 
     // check tuple visibility, then release lock
-    let valid = HeapTupleSatisfiesVisibility(&mut tuple, &mut snapshot.clone(), buffer)?;
+    let valid = HeapTupleSatisfiesVisibility(&mut tuple.tuple, &mut snapshot.clone(), buffer)?;
 
     if valid {
         let xmin = HeapTupleHeaderGetXmin(data_ref(&tuple));
-        predicate_seam::predicate_lock_tid::call(relid, tuple.t_self, snapshot, xmin)?;
+        predicate_seam::predicate_lock_tid::call(relid, tuple.tuple.t_self, snapshot, xmin)?;
     }
 
     predicate_seam::heap_check_for_serializable_conflict_out::call(
-        valid, relid, &tuple, buffer, snapshot,
+        valid, relid, &tuple.tuple, buffer, snapshot,
     )?;
 
     bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
 
     if valid {
         // All checks passed; caller is now responsible for releasing the buffer.
-        return Ok(HeapFetchResult { found: true, userbuf: buffer, tuple });
+        return Ok(HeapFetchResult { found: true, userbuf: buffer, tuple: Some(tuple) });
     }
 
     // Tuple failed time qual, but maybe caller wants to see it anyway.
     if keep_buf {
-        Ok(HeapFetchResult { found: false, userbuf: buffer, tuple })
+        Ok(HeapFetchResult { found: false, userbuf: buffer, tuple: Some(tuple) })
     } else {
         bufmgr_seam::release_buffer::call(buffer);
         Ok(not_found(InvalidBuffer))
@@ -305,9 +306,9 @@ pub fn heap_hot_search_buffer<'mcx>(
         // passes to avoid an infinite loop / duplicate).
         if !skip {
             let valid =
-                HeapTupleSatisfiesVisibility(&mut heap_tuple, &mut snapshot.clone(), buffer)?;
+                HeapTupleSatisfiesVisibility(&mut heap_tuple.tuple, &mut snapshot.clone(), buffer)?;
             predicate_seam::heap_check_for_serializable_conflict_out::call(
-                valid, relid, &heap_tuple, buffer, snapshot,
+                valid, relid, &heap_tuple.tuple, buffer, snapshot,
             )?;
 
             if valid {
@@ -315,7 +316,7 @@ pub fn heap_hot_search_buffer<'mcx>(
                 let xmin = HeapTupleHeaderGetXmin(data_ref(&heap_tuple));
                 predicate_seam::predicate_lock_tid::call(
                     relid,
-                    heap_tuple.t_self,
+                    heap_tuple.tuple.t_self,
                     snapshot,
                     xmin,
                 )?;
@@ -325,7 +326,7 @@ pub fn heap_hot_search_buffer<'mcx>(
                 return Ok(HotSearchResult {
                     found: true,
                     tid: result_tid,
-                    heap_tuple,
+                    heap_tuple: Some(heap_tuple),
                     all_dead,
                 });
             }
@@ -338,7 +339,7 @@ pub fn heap_hot_search_buffer<'mcx>(
             if vistest.is_none() {
                 vistest = Some(vacuumlazy_seam::global_vis_test_for::call(relid)?);
             }
-            if !HeapTupleIsSurelyDead(&heap_tuple, vistest.unwrap())? {
+            if !HeapTupleIsSurelyDead(&heap_tuple.tuple, vistest.unwrap())? {
                 all_dead = Some(false);
             }
         }
@@ -359,12 +360,7 @@ pub fn heap_hot_search_buffer<'mcx>(
     Ok(HotSearchResult {
         found: false,
         tid: result_tid,
-        heap_tuple: HeapTupleData {
-            t_len: 0,
-            t_self: ItemPointerData::default(),
-            t_tableOid: relid,
-            t_data: None,
-        },
+        heap_tuple: None,
         all_dead,
     })
 }
@@ -414,7 +410,7 @@ pub fn heap_get_latest_tid<'mcx>(
             }
         };
         // OK to access the tuple.
-        tp.t_self = ctid;
+        tp.tuple.t_self = ctid;
 
         // After following a t_ctid link, we might arrive at an unrelated tuple.
         // Check for XMIN match.
@@ -426,9 +422,9 @@ pub fn heap_get_latest_tid<'mcx>(
         }
 
         // Check tuple visibility; if visible, set the new result candidate.
-        let valid = HeapTupleSatisfiesVisibility(&mut tp, &mut snapshot.clone(), buffer)?;
+        let valid = HeapTupleSatisfiesVisibility(&mut tp.tuple, &mut snapshot.clone(), buffer)?;
         predicate_seam::heap_check_for_serializable_conflict_out::call(
-            valid, relid, &tp, buffer, snapshot,
+            valid, relid, &tp.tuple, buffer, snapshot,
         )?;
         if valid {
             tid = ctid;
@@ -439,7 +435,7 @@ pub fn heap_get_latest_tid<'mcx>(
         if (header.t_infomask & HEAP_XMAX_INVALID) != 0
             || HeapTupleHeaderIsOnlyLocked(header)?
             || heap_tuple_header_indicates_moved_partitions(header)
-            || ItemPointerEquals(&tp.t_self, &header.t_ctid)
+            || ItemPointerEquals(&tp.tuple.t_self, &header.t_ctid)
         {
             unlock_release(buffer)?;
             break;
