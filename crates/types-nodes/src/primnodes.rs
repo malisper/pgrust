@@ -1531,6 +1531,66 @@ pub struct PlaceHolderVar {
     pub phlevelsup: u32,
 }
 
+impl PlaceHolderVar {
+    /// Deep copy into `mcx` (C: `copyObject` shape), recursing into `phexpr`
+    /// through the non-panicking arena clone (never a shallow `.clone()` on an
+    /// `Aggref`/`SubLink`/… child). Mirrors the `Expr::PlaceHolderVar`
+    /// [`Expr::clone_in`] arm.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PlaceHolderVar> {
+        Ok(PlaceHolderVar {
+            phexpr: clone_opt_box_expr(&self.phexpr, mcx)?,
+            phrels: self.phrels.clone(),
+            phnullingrels: self.phnullingrels.clone(),
+            phid: self.phid,
+            phlevelsup: self.phlevelsup,
+        })
+    }
+}
+
+impl Aggref {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Delegates to the
+    /// non-panicking `args`-deep-copying path used by the [`Expr::Aggref`]
+    /// [`Expr::clone_in`] arm (never the panicking derived `.clone()`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Aggref> {
+        clone_aggref(self, mcx)
+    }
+}
+
+impl GroupingFunc {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
+    /// [`Expr::GroupingFunc`] [`Expr::clone_in`] arm.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GroupingFunc> {
+        Ok(GroupingFunc {
+            args: clone_vec_expr(&self.args, mcx)?,
+            refs: self.refs.clone(),
+            cols: self.cols.clone(),
+            agglevelsup: self.agglevelsup,
+            location: self.location,
+        })
+    }
+}
+
+impl MergeSupportFunc {
+    /// Deep copy (C: `copyObject` shape). `MergeSupportFunc` is `Copy` (no
+    /// node children), so this is a bitwise copy; the `mcx` is accepted for a
+    /// uniform `clone_in` signature.
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<MergeSupportFunc> {
+        Ok(*self)
+    }
+}
+
+impl ReturningExpr {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
+    /// [`Expr::ReturningExpr`] [`Expr::clone_in`] arm.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReturningExpr> {
+        Ok(ReturningExpr {
+            retlevelsup: self.retlevelsup,
+            retold: self.retold,
+            retexpr: clone_opt_box_expr(&self.retexpr, mcx)?,
+        })
+    }
+}
+
 /// Handle into the planner's `RestrictInfo` arena (`RinfoId` in
 /// `types-pathnodes`), as embedded inside an [`Expr`] tree. C casts a
 /// `RestrictInfo *` to `Expr *` so a RestrictInfo node can live as a child of a

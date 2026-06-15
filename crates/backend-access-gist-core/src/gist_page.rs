@@ -288,6 +288,17 @@ pub fn GistPageGetDeleteXid(page: &[u8]) -> PgResult<FullTransactionId> {
     }
 }
 
+/// `GistPageHasGarbage(page)` (gist.h:183): `flags & F_HAS_GARBAGE`.
+pub fn GistPageHasGarbage(page: &[u8]) -> PgResult<bool> {
+    Ok((gist_page_flags(page)? & types_gist::F_HAS_GARBAGE) != 0)
+}
+
+/// `GistClearPageHasGarbage(page)` (gist.h:184): `flags &= ~F_HAS_GARBAGE`.
+pub fn GistClearPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
+    let f = gist_page_flags(page)?;
+    set_gist_page_flags(page, f & !types_gist::F_HAS_GARBAGE)
+}
+
 // ===========================================================================
 // PageXLogRecPtr split-word codec (bufpage.h PageXLogRecPtrGet/Set).
 // ===========================================================================

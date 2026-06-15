@@ -363,10 +363,77 @@ const SIZEOF_ITEM_ID_DATA: usize = 4;
 /// `IndexTupleSize(itup)` (access/itup.h) over an on-disk byte image: the size
 /// is the low [`INDEX_SIZE_MASK`] bits of `t_info`, the `u16` at byte offset 6.
 #[inline]
-fn index_tuple_size(itup: &[u8]) -> usize {
+pub(crate) fn index_tuple_size(itup: &[u8]) -> usize {
     const INDEX_SIZE_MASK: u16 = 0x1fff;
     let t_info = u16::from_ne_bytes([itup[6], itup[7]]);
     (t_info & INDEX_SIZE_MASK) as usize
+}
+
+/// `gistjoinvector(itvec, len, additvec, addlen)` (gistutil.c:113): append the
+/// index-tuple byte images in `additvec` to `itvec`. In C this `repalloc`s the
+/// pointer array; in the owned model the vector grows in place, so this is a
+/// plain extend (each appended tuple is the caller's byte image).
+pub fn gistjoinvector<'mcx>(
+    itvec: &mut Vec<PgVec<'mcx, u8>>,
+    additvec: &[PgVec<'mcx, u8>],
+) -> PgResult<()> {
+    for it in additvec {
+        let mcx = *it.allocator();
+        itvec.push(mcx::slice_in(mcx, it)?);
+    }
+    Ok(())
+}
+
+/// `gistfillitupvec(vec, veclen, &memlen)` (gistutil.c:126): flatten an array of
+/// on-disk index tuples into a single contiguous byte buffer (their concatenated
+/// images). Returns the buffer; its length is the C `*memlen`.
+pub fn gistfillitupvec<'mcx>(mcx: Mcx<'mcx>, vec: &[&[u8]]) -> PgResult<PgVec<'mcx, u8>> {
+    let mut memlen = 0usize;
+    for it in vec {
+        memlen += index_tuple_size(it);
+    }
+    let mut out = mcx::vec_with_capacity_in(mcx, memlen)?;
+    for it in vec {
+        let sz = index_tuple_size(it);
+        out.extend_from_slice(&it[..sz]);
+    }
+    Ok(out)
+}
+
+/// `GistTupleSetValid(itup)` (gist_private.h): clear the `GIST_TRUNCATED` /
+/// invalid marking — set the offset of `t_tid` to `TUPLE_IS_VALID` (`0xffff`).
+/// `t_tid`'s `ip_posid` is the `u16` at byte offset 4 of the on-disk image.
+#[inline]
+pub(crate) fn gist_tuple_set_valid(itup: &mut [u8]) {
+    itup[4..6].copy_from_slice(&types_gist::TUPLE_IS_VALID.to_ne_bytes());
+}
+
+/// `GistTupleIsInvalid(itup)` (gist_private.h): is the tuple's `t_tid` offset the
+/// invalid sentinel (`TUPLE_IS_INVALID`)?
+#[inline]
+pub(crate) fn gist_tuple_is_invalid(itup: &[u8]) -> bool {
+    u16::from_ne_bytes([itup[4], itup[5]]) == types_gist::TUPLE_IS_INVALID
+}
+
+/// `ItemPointerGetBlockNumber(&itup->t_tid)` over an on-disk image: `t_tid` is
+/// the leading `ItemPointerData` (`BlockIdData ip_blkid` [4 bytes] then
+/// `OffsetNumber ip_posid` [2 bytes]); the block number is the `BlockIdData`,
+/// stored as two big-to-low `u16` halves (`bi_hi`, `bi_lo`) at bytes 0..4.
+#[inline]
+pub(crate) fn itup_block_number(itup: &[u8]) -> BlockNumber {
+    let bi_hi = u16::from_ne_bytes([itup[0], itup[1]]) as u32;
+    let bi_lo = u16::from_ne_bytes([itup[2], itup[3]]) as u32;
+    (bi_hi << 16) | bi_lo
+}
+
+/// `ItemPointerSetBlockNumber(&itup->t_tid, blkno)` over an on-disk image: store
+/// the block number into the leading `BlockIdData` (`bi_hi`, `bi_lo` halves).
+#[inline]
+pub(crate) fn itup_set_block_number(itup: &mut [u8], blkno: BlockNumber) {
+    let bi_hi = (blkno >> 16) as u16;
+    let bi_lo = (blkno & 0xffff) as u16;
+    itup[0..2].copy_from_slice(&bi_hi.to_ne_bytes());
+    itup[2..4].copy_from_slice(&bi_lo.to_ne_bytes());
 }
 
 /// `gistnospace(page, itvec, len, todelete, freespace)` (gistutil.c:58): does the
@@ -439,6 +506,17 @@ fn index_getattr<'mcx>(
         .expect("gistutil: GISTSTATE leafTupdesc not initialized")
         .as_ref();
     nocache_index_getattr::call(mcx, itup, attno_1based, leaf)
+}
+
+/// Public re-export of [`index_getattr`] for the split layer (gistsplit.c uses
+/// `index_getattr(itup, attno, leafTupdesc, &isnull)` directly).
+pub fn index_getattr_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    itup: &[u8],
+    attno_1based: i32,
+    giststate: &GISTSTATE<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    index_getattr(mcx, itup, attno_1based, giststate)
 }
 
 /// `gistMakeUnionItVec(giststate, itvec, len, attr, isnull)` (gistutil.c:154):

@@ -948,14 +948,17 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gist-core-seams",
  "backend-access-gist-dispatch-seams",
+ "backend-access-heap-heapam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-transam-xlog-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-predicate-seams",
  "backend-storage-page",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "pg-prng",
  "types-core",
@@ -974,7 +977,9 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-gist",
  "types-rel",
+ "types-storage",
  "types-wal",
 ]
 
@@ -2210,13 +2215,16 @@ dependencies = [
 name = "backend-access-spgist-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-indextuple",
  "backend-access-common-reloptions-seams",
  "backend-access-common-tupdesc",
  "backend-access-index-amvalidate-seams",
  "backend-access-spg-core-seams",
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
+ "backend-access-transam-xloginsert-seams",
  "backend-parser-coerce-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
@@ -2225,11 +2233,16 @@ dependencies = [
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
  "mcx",
+ "pg-prng",
  "seam-core",
  "types-amvalidate",
  "types-cache",
  "types-core",
+ "types-datum",
  "types-error",
  "types-opclass",
  "types-rel",
@@ -2237,6 +2250,8 @@ dependencies = [
  "types-spgist",
  "types-storage",
  "types-tuple",
+ "types-wal",
+ "types-xlog-records",
 ]
 
 [[package]]
@@ -8224,6 +8239,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-paramassign"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-equalfuncs",
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-paramassign-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-pathkeys-seams"
 version = "0.0.0"
 dependencies = [
@@ -8402,6 +8447,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-var-seams",
  "mcx",
@@ -9821,8 +9867,10 @@ dependencies = [
 name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-binaryheap",
  "backend-replication-logical-reorderbuffer-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-cache-inval-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -15242,6 +15290,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",

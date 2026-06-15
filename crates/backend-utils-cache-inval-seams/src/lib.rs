@@ -181,3 +181,14 @@ seam_core::seam!(
         rlocator: types_storage::RelFileLocatorBackend,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LocalExecuteInvalidationMessage(msg)` (inval.c): process one inbound
+    /// shared-invalidation message against the local caches (flushing the
+    /// catcache/relcache entries it names). Used by logical decoding's
+    /// `ReorderBufferExecuteInvalidations` to apply a decoded transaction's
+    /// accumulated invalidations locally. `Err` carries its `ereport(ERROR)`s.
+    pub fn local_execute_invalidation_message(
+        msg: &SharedInvalidationMessage,
+    ) -> PgResult<()>
+);

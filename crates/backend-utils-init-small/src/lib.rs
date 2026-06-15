@@ -45,6 +45,7 @@ pub fn init_seams() {
     });
     backend_utils_init_small_seams::set_client_connection_lost::set(globals::SetClientConnectionLost);
     backend_utils_init_small_seams::set_interrupt_pending::set(globals::SetInterruptPending);
+    backend_utils_init_small_seams::interrupt_pending::set(globals::InterruptPending);
     backend_utils_init_small_seams::set_proc_die_pending::set(globals::SetProcDiePending);
     backend_utils_init_small_seams::set_query_cancel_pending::set(globals::SetQueryCancelPending);
     backend_utils_init_small_seams::set_interrupt_holdoff_count::set(globals::SetInterruptHoldoffCount);
