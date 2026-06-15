@@ -206,7 +206,7 @@ fn ReadBufferBI(
     }
 
     // Perform a read using the buffer strategy.
-    let has_strategy = bistate.strategy.is_set();
+    let has_strategy = bistate.strategy.is_some();
     let buffer = hio_seam::read_buffer_extended::call(rel, target_block, mode, has_strategy)?;
 
     // Save the selected block as target for future inserts.
@@ -394,7 +394,7 @@ fn RelationAddBlocks(
 
     // Extend the relation.  We ask for the first returned page to be locked, so
     // that we are sure that nobody has inserted into the page concurrently.
-    let has_strategy = bistate.as_ref().map(|b| b.strategy.is_set()).unwrap_or(false);
+    let has_strategy = bistate.as_ref().map(|b| b.strategy.is_some()).unwrap_or(false);
     let extended = hio_seam::extend_buffered_rel_by::call(rel, has_strategy, extend_by_pages)?;
     let first_block = extended.first_block;
     let extend_by_pages = extended.extended_by;

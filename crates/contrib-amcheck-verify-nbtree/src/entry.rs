@@ -253,7 +253,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
         rootdescend,
         checkunique,
         targetcontext: mcx::MemoryContext::new("amcheck per-page"),
-        checkstrategy: types_storage::buf::BufferAccessStrategy::NONE,
+        checkstrategy: None,
         indexinfo: None,
         snapshot: None,
         target: None,
@@ -326,7 +326,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
     // checkstrategy = GetAccessStrategy(BAS_BULKREAD). The buffer-access-strategy
     // allocator (freelist.c GetAccessStrategy) is not modeled; passing None
     // (the default strategy) is behaviour-preserving for the page reads.
-    state.checkstrategy = types_storage::buf::BufferAccessStrategy::NONE;
+    state.checkstrategy = None;
 
     // Get true root block from meta page.
     let metapage = palloc_btree_page(&state, BTREE_METAPAGE)?;

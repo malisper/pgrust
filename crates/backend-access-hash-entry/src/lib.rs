@@ -99,8 +99,12 @@ pub use core::HashScan;
 
 /// `IndexVacuumInfo` (`access/genam.h`) — the subset `hashbulkdelete` /
 /// `hashvacuumcleanup` read directly. The vacuum buffer-access ring crosses as
-/// the `BufferAccessStrategy` handle (`None`/`NONE` is the C `NULL`).
-#[derive(Clone, Copy, Debug, Default)]
+/// the `BufferAccessStrategy` handle (`None` is the C `NULL`).
+///
+/// Not `Copy`: `strategy` is the backend-private ring handed out by pointer
+/// (`Rc<RefCell<_>>` / `None`), which is not `Copy` — mirroring C's
+/// `BufferAccessStrategy` pointer.
+#[derive(Clone, Debug, Default)]
 pub struct HashVacuumInfo {
     /// `analyze_only` — used only via `stats == None` handling in cleanup.
     pub analyze_only: bool,
@@ -240,16 +244,18 @@ fn hashbulkdelete_am<'mcx>(
     stats: Option<AmIndexBulkDeleteResult>,
     callback_state: Option<u64>,
 ) -> PgResult<Option<AmIndexBulkDeleteResult>> {
-    // C `info->strategy` is a `BufferAccessStrategy` (a small handle, here
-    // `{id:u32}`). The unified `IndexVacuumInfo` carries it erased; downcast it
-    // back, or `NONE` for the C `NULL` strategy.
-    let strategy = info
+    // C `info->strategy` is a `BufferAccessStrategy` (the backend-private ring
+    // pointer, modeled as `Option<Rc<RefCell<_>>>`). The unified
+    // `IndexVacuumInfo` carries it erased; downcast it back, cloning the handle
+    // (an `Rc` bump, like aliasing C's pointer), or `None` for the C `NULL`
+    // strategy.
+    let strategy: BufferAccessStrategy = info
         .strategy
         .as_ref()
         .and_then(|s| s.payload.as_ref())
         .and_then(|p| p.downcast_ref::<BufferAccessStrategy>())
-        .copied()
-        .unwrap_or(BufferAccessStrategy::NONE);
+        .cloned()
+        .unwrap_or(None);
     let hinfo = HashVacuumInfo {
         analyze_only: info.analyze_only,
         strategy,
@@ -787,7 +793,8 @@ pub fn hashbulkdelete<'mcx>(
 
             // Acquire a cleanup lock on the primary bucket page to out-wait
             // concurrent scans before deleting the dead tuples.
-            let buf = bufmgr::read_buffer_with_strategy::call(rel, blkno, info.strategy)?;
+            let buf =
+                bufmgr::read_buffer_with_strategy::call(rel, blkno, info.strategy.clone())?;
             bufmgr::lock_buffer_for_cleanup::call(buf)?;
             core::_hash_checkpage(rel, buf, LH_BUCKET_PAGE as i32)?;
 
@@ -819,7 +826,7 @@ pub fn hashbulkdelete<'mcx>(
                 cur_bucket,
                 bucket_buf,
                 blkno,
-                Some(info.strategy),
+                Some(info.strategy.clone()),
                 cachedmetap.hashm_maxbucket,
                 cachedmetap.hashm_highmask,
                 cachedmetap.hashm_lowmask,
@@ -963,6 +970,12 @@ pub fn hashbucketcleanup<'mcx>(
     has_callback: bool,
     callback_state_handle: u64,
 ) -> PgResult<()> {
+    // Resolve the optional caller-supplied ring handle to the C
+    // `BufferAccessStrategy` (the by-pointer ring / `None`); it is read at the
+    // two `_hash_getbuf_with_strategy` / `_hash_squeezebucket` call sites by
+    // reference (cloning the `Rc` at the seam, like aliasing C's pointer).
+    let bstrategy_ring: BufferAccessStrategy = bstrategy.unwrap_or(None);
+
     let mut blkno;
     let mut buf;
     let mut new_bucket: Bucket = InvalidBucket;
@@ -1127,7 +1140,7 @@ pub fn hashbucketcleanup<'mcx>(
             blkno,
             HASH_WRITE,
             LH_OVERFLOW_PAGE as i32,
-            bstrategy.unwrap_or(BufferAccessStrategy::NONE),
+            &bstrategy_ring,
         )?;
 
         // release the lock on previous page after acquiring the lock on next.
@@ -1185,7 +1198,7 @@ pub fn hashbucketcleanup<'mcx>(
             cur_bucket,
             bucket_blkno,
             bucket_buf,
-            bstrategy.unwrap_or(BufferAccessStrategy::NONE),
+            &bstrategy_ring,
         )?;
     } else {
         bufmgr::lock_buffer::call(bucket_buf, BUFFER_LOCK_UNLOCK)?;
