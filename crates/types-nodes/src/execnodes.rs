@@ -938,6 +938,22 @@ impl<'mcx> EStateData<'mcx> {
         Ok(id)
     }
 
+    /// `ExecAllocTableSlot` over an already-built payload-bearing [`SlotData`]:
+    /// append the live slot (the proper `Virtual/Heap/Minimal/BufferHeap`
+    /// superstructure, with its descriptor + value arrays) to the per-query pool
+    /// and return its id. This is the kind-aware path the slot-creation seams use
+    /// (via `MakeTupleTableSlot`); [`make_slot`](Self::make_slot) is the
+    /// header-only convenience that wraps a bare header in an empty virtual slot.
+    pub fn push_slot_data(&mut self, slot: SlotData<'mcx>) -> PgResult<SlotId> {
+        let mcx = *self.es_tupleTable.allocator();
+        self.es_tupleTable
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<SlotData<'_>>()))?;
+        let id = SlotId(self.es_tupleTable.len() as u32);
+        self.es_tupleTable.push(slot);
+        Ok(id)
+    }
+
     /// Resolve a slot id to the live slot's shared header (C: dereference the
     /// pointer and read its base bits). The header projection bridges through
     /// [`SlotData::base`]; the payload-aware view is [`slot_data`](Self::slot_data).

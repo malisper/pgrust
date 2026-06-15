@@ -12,10 +12,12 @@ seam_core::seam!(
     /// table's `spillCxt`, threaded as `mcx`) on first write. `nodeHash.c`
     /// calls this from `ExecHashIncreaseNumBatches` to dump tuples that have
     /// moved to a later batch. The first write `palloc`s and can `ereport` on
-    /// I/O error, so the call is fallible.
+    /// I/O error, so the call is fallible. The tuple crosses as its contiguous
+    /// C `MinimalTuple` byte image (the flat blob, `t_len` first) — exactly the
+    /// `tuple->t_len` bytes C `BufFileWrite`s after the hash value.
     pub fn ExecHashJoinSaveTuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        tuple: &types_tuple::heaptuple::MinimalTupleData<'mcx>,
+        tuple: &[u8],
         hashvalue: types_core::uint32,
         fileptr: &mut Option<mcx::PgBox<'mcx, types_nodes::nodehash::BufFile>>,
     ) -> types_error::PgResult<()>

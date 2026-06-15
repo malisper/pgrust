@@ -52,6 +52,37 @@ use types_nodes::nodehashjoin::{
 };
 use types_nodes::primnodes::Expr;
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
+
+/// Serialize a [`FormedMinimalTuple`] to its contiguous C `MinimalTuple` byte
+/// image (the flat blob, `t_len` first) — the form the batch temp file / shared
+/// tuplestore boundary carries. A well-formed tuple can only fail on the
+/// allocation `ereport(ERROR)` (OOM).
+fn mintuple_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
+        Ok(blob) => Ok(blob),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_to_flat failed: {other:?}"),
+    }
+}
+
+/// Decode a flat C `MinimalTuple` byte image (the blob a batch file / shared
+/// tuplestore stored) back into a [`FormedMinimalTuple`].
+fn mintuple_from_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    blob: &[u8],
+) -> PgResult<FormedMinimalTuple<'mcx>> {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+        Ok(mtup) => Ok(mtup),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_from_flat on a batch-file image failed: {other:?}"),
+    }
+}
 
 // ===========================================================================
 // States of the ExecHashJoin state machine (nodeHashjoin.c).
@@ -160,7 +191,7 @@ pub fn init_seams() {
 /// hash value, then the tuple in MinimalTuple format.
 fn exec_hash_join_save_tuple_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    tuple: &types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    tuple: &[u8],
     hashvalue: u32,
     fileptr: &mut Option<PgBox<'mcx, BufFile>>,
 ) -> PgResult<()> {
@@ -174,9 +205,10 @@ fn exec_hash_join_save_tuple_seam<'mcx>(
 
     // BufFileWrite(file, &hashvalue, sizeof(uint32));
     // BufFileWrite(file, tuple, tuple->t_len);
-    let bytes = tuple.to_minimal_bytes();
+    // `tuple` is the tuple's contiguous C MinimalTuple byte image (flat blob,
+    // exactly the `tuple->t_len` bytes C writes).
     buffile::buf_file_write::call(file, &hashvalue.to_ne_bytes())?;
-    buffile::buf_file_write::call(file, &bytes)?;
+    buffile::buf_file_write::call(file, tuple)?;
     Ok(())
 }
 
@@ -1050,11 +1082,12 @@ fn ExecParallelHashJoinOuterGetTuple<'mcx>(
                 .expect("nodeHashjoin: parallel batch outer_tuples must be attached");
             sts::sts_parallel_scan_next::call(mcx, acc)?
         };
-        if let Some((tuple, hashvalue)) = next {
+        if let Some((blob, hashvalue)) = next {
             // ExecForceStoreMinimalTuple(tuple, hj_OuterTupleSlot, false)
             let outer_slot = node
                 .hj_OuterTupleSlot
                 .expect("nodeHashjoin: hj_OuterTupleSlot must be set up by init");
+            let tuple = mintuple_from_flat(mcx, &blob)?;
             execTuples::exec_force_store_minimal_tuple::call(outer_slot, tuple, false, estate)?;
             return Ok(Some(hashvalue));
         } else {
@@ -1331,10 +1364,11 @@ fn parallel_batch_load_probe<'mcx>(
                 .expect("checked above");
             sts::sts_parallel_scan_next::call(mcx, acc)?
         };
-        let (tuple, hashvalue) = match next {
+        let (blob, hashvalue) = match next {
             Some(t) => t,
             None => break,
         };
+        let tuple = mintuple_from_flat(mcx, &blob)?;
         execTuples::exec_force_store_minimal_tuple::call(hash_tuple_slot, tuple, false, estate)?;
         nodeHash::exec_parallel_hash_table_insert_current_batch::call(
             node,
@@ -1396,12 +1430,10 @@ fn save_outer_tuple_to_batch<'mcx>(
         .hj_OuterTupleSlot
         .expect("nodeHashjoin: hj_OuterTupleSlot must be set up by init");
     let mcx = estate.es_query_cxt;
-    let (mintuple, _should_free) = {
-        let slot = estate.slot_mut(outer_slot);
-        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, slot)?
-    };
+    let (mintuple, _should_free) =
+        execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, outer_slot)?;
 
-    ExecHashJoinSaveTuple(node, BatchFileSide::Outer, batchno, &mintuple, hashvalue)?;
+    ExecHashJoinSaveTuple(mcx, node, BatchFileSide::Outer, batchno, &mintuple, hashvalue)?;
     // shouldFree → heap_free_minimal_tuple(mintuple): the minimal tuple was
     // copied into `mcx` (the query context) by the fetch seam; it is freed with
     // the context. No explicit free needed in the owned model.
@@ -1411,10 +1443,11 @@ fn save_outer_tuple_to_batch<'mcx>(
 /// The byte-level save: `BufFileWrite(file, &hashvalue, 4); BufFileWrite(file,
 /// tuple, tuple->t_len)`, lazily creating the file in `spillCxt`.
 fn ExecHashJoinSaveTuple<'mcx>(
+    mcx: Mcx<'mcx>,
     node: &mut HashJoinState<'mcx>,
     side: BatchFileSide,
     batchno: i32,
-    tuple: &types_tuple::heaptuple::MinimalTupleData<'mcx>,
+    tuple: &types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
     hashvalue: u32,
 ) -> PgResult<()> {
     // The batch file is lazily created in spillCxt (NOT batchCxt) on the first
@@ -1429,7 +1462,9 @@ fn ExecHashJoinSaveTuple<'mcx>(
         *batch_file_mut(hashtable_mut(node), side, batchno) = Some(file);
     }
 
-    let bytes = tuple.to_minimal_bytes();
+    // The recorded tuple is its contiguous C MinimalTuple byte image (the flat
+    // blob, `tuple->t_len` bytes).
+    let bytes = mintuple_to_flat(mcx, tuple)?;
     let ht = hashtable_mut(node);
     let file = batch_file_mut(ht, side, batchno)
         .as_deref_mut()
@@ -1477,22 +1512,25 @@ fn ExecHashJoinGetSavedTuple<'mcx>(
 
     // tuple = (MinimalTuple) palloc(t_len); tuple->t_len = t_len;
     // BufFileReadExact(file, (char*)tuple + 4, t_len - 4);
+    //
+    // Read the rest of the flat MinimalTuple image directly into one blob whose
+    // leading word is t_len (the on-disk record is exactly the flat C image), so
+    // the body reads into blob[4..].
     let mcx = estate.es_query_cxt;
-    let body_len = (t_len as usize).saturating_sub(core::mem::size_of::<u32>());
-    let mut body = mcx::vec_with_capacity_in(mcx, body_len)?;
-    body.resize(body_len, 0u8);
+    let mut blob: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, t_len as usize)?;
+    blob.resize(t_len as usize, 0u8);
+    blob[0..4].copy_from_slice(&t_len.to_ne_bytes());
     {
         let ht = hashtable_mut(node);
         let file = batch_file_mut(ht, side, batchno)
             .as_deref_mut()
             .expect("file checked above");
-        buffile::buf_file_read_exact::call(file, &mut body)?;
+        buffile::buf_file_read_exact::call(file, &mut blob[4..])?;
     }
 
-    // Reassemble the MinimalTuple (the leading t_len word + the body bytes) and
+    // Decode the flat MinimalTuple image and
     // ExecForceStoreMinimalTuple(tuple, tupleSlot, true).
-    let mtup = types_tuple::heaptuple::MinimalTupleData::from_minimal_parts(mcx, t_len, &body)?;
-    let mtup = alloc_in(mcx, mtup)?;
+    let mtup = mintuple_from_flat(mcx, &blob)?;
     execTuples::exec_force_store_minimal_tuple::call(tuple_slot, mtup, true, estate)?;
     Ok(Some(hashvalue))
 }
@@ -1650,10 +1688,11 @@ pub fn ExecParallelHashJoinPartitionOuter<'mcx>(
         if !isnull {
             // mintup = ExecFetchSlotMinimalTuple(slot, &shouldFree);
             let mcx = estate.es_query_cxt;
-            let (mintup, _should_free) = {
-                let s = estate.slot_mut(slot);
-                execTuples::exec_fetch_slot_minimal_tuple::call(mcx, s)?
-            };
+            let (mintup, _should_free) =
+                execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, slot)?;
+            // The shared tuplestore stores the tuple's contiguous C MinimalTuple
+            // byte image (the flat blob).
+            let blob = mintuple_to_flat(mcx, &mintup)?;
             // ExecHashGetBucketAndBatch(hashtable, hashvalue, &bucketno, &batchno);
             let batchno = nodeHash::exec_hash_get_bucket_and_batch::call(node, hashvalue);
             // sts_puttuple(batches[batchno].outer_tuples, &hashvalue, mintup);
@@ -1662,7 +1701,7 @@ pub fn ExecParallelHashJoinPartitionOuter<'mcx>(
                 .outer_tuples
                 .as_deref_mut()
                 .expect("nodeHashjoin: parallel batch outer_tuples must be attached");
-            sts::sts_puttuple::call(acc, hashvalue, &mintup)?;
+            sts::sts_puttuple::call(acc, hashvalue, &blob)?;
             // shouldFree → freed with the query context (owned-model).
         }
         tcop_postgres::check_for_interrupts::call()?;

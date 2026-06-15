@@ -58,6 +58,21 @@ use types_nodes::nodegather::{Gather, GatherStateData};
 use types_nodes::{Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind};
 use types_pgstat::wait_event::WAIT_EVENT_EXECUTE_GATHER;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
+
+/// Decode a flat C `MinimalTuple` byte image (the tuple-queue wire bytes) into
+/// the payload-bearing [`FormedMinimalTuple`] carrier.
+fn mintuple_from_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    blob: &[u8],
+) -> PgResult<FormedMinimalTuple<'mcx>> {
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+        Ok(mtup) => Ok(mtup),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_from_flat on a tuple-queue image failed: {other:?}"),
+    }
+}
 
 /// `OUTER_VAR` (primnodes.h) — special varno denoting the outer subplan, used
 /// by `ExecConditionalAssignProjectionInfo`. `#define OUTER_VAR (-2)`.
@@ -449,7 +464,7 @@ fn gather_getnext<'mcx>(
             //       ExecStoreMinimalTuple(tup, fslot, false);  /* don't pfree */
             //       return fslot;
             //   }
-            if tup.is_some() {
+            if let Some(tup) = tup {
                 execTuples::exec_store_minimal_tuple::call(estate, tup, fslot, false)?;
                 return Ok(Some(fslot));
             }
@@ -498,7 +513,7 @@ fn gather_getnext<'mcx>(
 fn gather_readnext<'mcx>(
     gatherstate: &mut GatherStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<types_tuple::heaptuple::MinimalTuple<'mcx>> {
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
     // int nvisited = 0;
@@ -566,11 +581,10 @@ fn gather_readnext<'mcx>(
         // (done by the tqueue owner here, which returns a copy of the wire
         // bytes); we reassemble the owned `MinimalTuple` into `mcx`.
         if let Some(image) = bytes {
-            let t_len = u32::from_ne_bytes([image[0], image[1], image[2], image[3]]);
-            let body = &image[core::mem::size_of::<u32>()..];
-            let mtup =
-                types_tuple::heaptuple::MinimalTupleData::from_minimal_parts(mcx, t_len, body)?;
-            return Ok(Some(alloc_in(mcx, mtup)?));
+            // `image` is the tuple's contiguous C MinimalTuple byte image (the
+            // flat blob, `t_len` first); decode it into the owned carrier.
+            let mtup = mintuple_from_flat(mcx, &image)?;
+            return Ok(Some(mtup));
         }
 
         // Advance nextreader pointer in round-robin fashion.  Note that we only
