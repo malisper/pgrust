@@ -52,9 +52,10 @@ pub use gist_vacuum::{gistbulkdelete, gistvacuumcleanup};
 pub use gistsplit::gistSplitByKey;
 pub use gistutil::{
     gistCompressValues, gistDeCompressAtt, gistFetchTuple, gistFormTuple, gistKeyIsEQ,
-    gistMakeUnionItVec, gistMakeUnionKey, gistNewBuffer, gist_page_recyclable, gistchoose,
-    gistdentryinit, gistextractpage, gistfillitupvec, gistfitpage, gistgetadjusted, gistjoinvector,
-    gistnospace, gistpenalty, gistunion, initGISTstate,
+    gistMakeUnionItVec, gistMakeUnionKey, gistNewBuffer, gist_page_recyclable,
+    gist_translate_cmptype_common, gistchoose, gistdentryinit, gistextractpage, gistfillitupvec,
+    gistfitpage, gistgetadjusted, gistjoinvector, gistnospace, gistoptions, gistpenalty,
+    gistproperty, gisttranslatecmptype, gistunion, initGISTstate, IndexAMProperty,
 };
 
 /// Install this crate's inward seams.

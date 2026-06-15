@@ -197,6 +197,7 @@ backend-optimizer-prep-prepjointree = { path = "../backend-optimizer-prep-prepjo
 backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist" }
 backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
+backend-optimizer-plan-analyzejoins = { path = "../backend-optimizer-plan-analyzejoins" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
