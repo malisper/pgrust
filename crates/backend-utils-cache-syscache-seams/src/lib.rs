@@ -36,6 +36,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// projected to the attribute's `attisdropped` flag (`Form_pg_attribute`).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`. Consumed by `get_rte_attribute_is_dropped`
+    /// (parser/parse_relation.c).
+    pub fn search_attnum_attisdropped(
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid))` projected to the
     /// `pg_authid` fields role-identity callers read. `Ok(None)` on cache miss.
     pub fn lookup_authid_by_oid<'mcx>(

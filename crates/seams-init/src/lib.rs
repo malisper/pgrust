@@ -170,6 +170,7 @@ pub fn init_all() {
     backend_parser_parse_oper::init_seams();
     backend_parser_parse_type::init_seams();
     backend_parser_small1::init_seams();
+    backend_parser_relation::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_autovacuum::init_seams();
     backend_postmaster_bgworker::init_seams();
