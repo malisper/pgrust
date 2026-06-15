@@ -181,6 +181,7 @@ pub fn init_all() {
     backend_optimizer_prep_prepqual::init_seams();
     backend_optimizer_prep_prepjointree::init_seams();
     backend_optimizer_prep_preptlist::init_seams();
+    backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
@@ -208,6 +209,7 @@ pub fn init_all() {
     backend_replication_logical_origin::init_seams();
     backend_replication_logical_proto::init_seams();
     backend_replication_logical_slotsync::init_seams();
+    backend_replication_logical_snapbuild::init_seams();
     backend_replication_syncrep_scanner::init_seams();
     backend_replication_slot::init_seams();
     backend_replication_walreceiver::init_seams();
