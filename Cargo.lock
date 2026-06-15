@@ -1885,9 +1885,12 @@ version = "0.0.0"
 dependencies = [
  "backend-access-nbtree-build-seams",
  "backend-access-nbtree-core-seams",
+ "backend-access-table-tableam-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-page",
  "backend-storage-smgr-bulkwrite-seams",
  "backend-utils-activity-small",
+ "backend-utils-misc-guc-seams",
  "backend-utils-sort-tuplesort-seams",
  "mcx",
  "types-core",
@@ -1897,6 +1900,7 @@ dependencies = [
  "types-rel",
  "types-scan",
  "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -12519,7 +12523,9 @@ dependencies = [
 name = "backend-utils-adt-misc2"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
+ "backend-access-heap-heaptoast-seams",
  "backend-catalog-binary-upgrade-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-partition-seams",
