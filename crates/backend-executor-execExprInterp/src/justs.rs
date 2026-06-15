@@ -145,7 +145,7 @@ pub fn ExecJustAssignVarImpl<'mcx>(
         .steps
         .as_ref()
         .expect("ExecJustAssignVarImpl: steps not ready");
-    let (_attnum, _resultnum) = match &steps[1].d {
+    let (attnum, resultnum) = match &steps[1].d {
         ExprEvalStepData::AssignVar { attnum, resultnum } => (*attnum + 1, *resultnum),
         _ => unreachable!("ExecJustAssignVarImpl: step[1] is not an EEOP_ASSIGN_*_VAR"),
     };
@@ -162,20 +162,34 @@ pub fn ExecJustAssignVarImpl<'mcx>(
     //     slot_getattr(inslot, attnum, &outslot->tts_isnull[resultnum]);
     // return 0;
     //
-    // The step payload (d.assign_var.attnum/resultnum) is now modeled (read
-    // above). What is still missing is the destination: the write into
-    // state->resultslot->tts_values[resultnum] / tts_isnull[resultnum]. The
-    // shared TupleTableSlot is trimmed to its header bits (no tts_values /
-    // tts_isnull arrays); those are owned by the execTuples unit, which is not
-    // ported yet. slot_getattr() on the source likewise routes through the
-    // execTuples slot_getallattrs seam, which panics first. Faithful as soon as
-    // execTuples lands the slot value-array model.
-    let _ = inslot;
-    panic!(
-        "ExecJustAssignVarImpl: writing into state->resultslot->tts_values/\
-         tts_isnull[resultnum] needs the result-slot value-array write path \
-         (execGrouping/result-slot model), not yet wired"
-    )
+    // The source attribute is read through the execTuples deform seam
+    // (slot_getattr, 1-based) and written into state->resultslot's per-attribute
+    // value/null arrays, which the canonical TupleTableSlot now carries.
+    let (value, isnull) = slot_getattr(inslot_id, attnum, estate)?;
+    write_resultslot(state, resultnum, value, isnull);
+    Ok((Datum::null(), false))
+}
+
+/// Write `(value, isnull)` into `state->resultslot->tts_values[resultnum]` /
+/// `tts_isnull[resultnum]` (the C `outslot->tts_values/tts_isnull[resultnum]`
+/// assignment shared by the `ExecJustAssignVar*` paths).
+fn write_resultslot<'mcx>(
+    state: &mut ExprState<'mcx>,
+    resultnum: i32,
+    value: Datum<'mcx>,
+    isnull: bool,
+) {
+    let outslot = state
+        .resultslot
+        .as_mut()
+        .expect("ExecJustAssignVar*: ExprState has no resultslot");
+    let idx = resultnum as usize;
+    debug_assert!(
+        idx < outslot.tts_values.len(),
+        "ExecJustAssignVar*: resultnum {resultnum} out of range"
+    );
+    outslot.tts_values[idx] = value;
+    outslot.tts_isnull[idx] = isnull;
 }
 
 /// `ExecJustVarVirtImpl` — shared body for the virtual-slot single-Var paths.
@@ -224,7 +238,7 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
         .steps
         .as_ref()
         .expect("ExecJustAssignVarVirtImpl: steps not ready");
-    let (_attnum, _resultnum) = match &steps[0].d {
+    let (attnum, resultnum) = match &steps[0].d {
         ExprEvalStepData::AssignVar { attnum, resultnum } => (*attnum, *resultnum),
         _ => unreachable!("ExecJustAssignVarVirtImpl: step[0] is not an EEOP_ASSIGN_*_VAR"),
     };
@@ -233,17 +247,12 @@ pub fn ExecJustAssignVarVirtImpl<'mcx>(
     // outslot->tts_isnull[resultnum] = inslot->tts_isnull[attnum];
     // return 0;
     //
-    // The step payload (d.assign_var.attnum/resultnum) is now modeled (read
-    // above). The copy itself reads inslot->tts_values/tts_isnull[attnum] and
-    // writes state->resultslot->tts_values/tts_isnull[resultnum]; both arrays
-    // are execTuples-owned and absent from the trimmed shared TupleTableSlot.
-    // Faithful as soon as execTuples lands the slot value-array model.
-    let _ = (inslot_id, estate);
-    panic!(
-        "ExecJustAssignVarVirtImpl: the inslot->outslot value-array copy needs \
-         the result-slot value-array write path (execGrouping/result-slot \
-         model), not yet wired"
-    )
+    // The source column is read off the virtual input slot through the deform
+    // seam (attnum is 0-based here, slot_getattr is 1-based) and written into
+    // state->resultslot's per-attribute value/null arrays.
+    let (value, isnull) = slot_getattr(inslot_id, attnum + 1, estate)?;
+    write_resultslot(state, resultnum, value, isnull);
+    Ok((Datum::null(), false))
 }
 
 /// `ExecJustHashVarImpl` — shared body for the single-Var hash-key paths.

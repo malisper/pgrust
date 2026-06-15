@@ -765,4 +765,11 @@ pub fn init_seams() {
     backend_utils_misc_guc_funcs_seams::extract_set_variable_args::set(|sstmt| {
         ExtractSetVariableArgs(&sstmt)
     });
+    // `SetPGVariable("session_authorization", NIL, false)` (guc.c DISCARD ALL).
+    // The seam decl lives in the GUC owner's seam crate, but `SetPGVariable` is
+    // guc_funcs.c's own body (this crate), so it installs the seam here. A NIL
+    // args list maps to `arg = None`; `is_local = false`.
+    backend_utils_misc_guc_seams::set_pg_variable_session_authorization_reset::set(|| {
+        SetPGVariable("session_authorization", None, false)
+    });
 }
