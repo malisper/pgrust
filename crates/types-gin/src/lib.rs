@@ -183,9 +183,15 @@ pub struct GinStatsData {
 // gin_private.h — GinOptions (reloptions storage).
 // ===========================================================================
 
-/// `GinOptions` (gin_private.h) — storage type for GIN's reloptions.
+/// `GinOptions` (gin_private.h) — storage type for GIN's reloptions, stored as a
+/// `bytea` in `rd_options`. `#[repr(C)]` with the `vl_len_` varlena header first,
+/// so `core::mem::offset_of!` of the option fields matches the C struct layout
+/// `build_reloptions` writes into.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GinOptions {
+    /// `int32 vl_len_` — varlena header (do not touch directly).
+    pub vl_len_: i32,
     /// `bool useFastUpdate` — use fast updates?
     pub useFastUpdate: bool,
     /// `int pendingListCleanupSize` — maximum size of the pending list.
