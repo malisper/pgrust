@@ -100,6 +100,10 @@ pub struct FormData_pg_index {
     pub indisunique: bool,
     /// `bool indimmediate` — is uniqueness enforced immediately?
     pub indimmediate: bool,
+    /// `bool indnullsnotdistinct` — for a unique index, do NULL key values
+    /// conflict with each other (NULLS NOT DISTINCT)? `false` is the SQL
+    /// default (NULLs are distinct, so multiple NULLs never conflict).
+    pub indnullsnotdistinct: bool,
     /// `Oid indrelid` — the table this index is for.
     pub indrelid: Oid,
     /// `int2vector indkey.values[0]` — the table column number of the index's
@@ -143,6 +147,18 @@ pub struct RelationData<'mcx> {
     /// operator class (`RelationGetIndexRawAttOptions` cache). Empty for a
     /// non-index relation. Indexed by attribute number (0-based).
     pub rd_opcintype: mcx::PgVec<'mcx, Oid>,
+    /// `Oid *rd_opfamily` — the operator family OID of each index column's
+    /// operator class. Empty for a non-index relation. Indexed by attribute
+    /// number (0-based). Consumed by nbtree's `_bt_mkscankey` /
+    /// `_bt_preprocess_keys` for opclass member/proc lookups.
+    pub rd_opfamily: mcx::PgVec<'mcx, Oid>,
+    /// `int16 *rd_indoption` — the per-column index option flags
+    /// (`INDOPTION_DESC` / `INDOPTION_NULLS_FIRST`). Empty for a non-index
+    /// relation. Indexed by attribute number (0-based).
+    pub rd_indoption: mcx::PgVec<'mcx, i16>,
+    /// `Oid *rd_indcollation` — the per-column collation OID used by the index.
+    /// Empty for a non-index relation. Indexed by attribute number (0-based).
+    pub rd_indcollation: mcx::PgVec<'mcx, Oid>,
 }
 
 impl<'mcx> RelationData<'mcx> {
@@ -486,6 +502,9 @@ mod tests {
             rd_options: None,
             rd_index: None,
             rd_opcintype: mcx::PgVec::new_in(mcx),
+            rd_opfamily: mcx::PgVec::new_in(mcx),
+            rd_indoption: mcx::PgVec::new_in(mcx),
+            rd_indcollation: mcx::PgVec::new_in(mcx),
         }
     }
 

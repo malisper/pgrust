@@ -128,12 +128,25 @@ fn project_entry<'mcx>(
         indnkeyatts: ix.indnkeyatts,
         indisunique: ix.indisunique,
         indimmediate: ix.indimmediate,
+        indnullsnotdistinct: ix.indnullsnotdistinct,
         indrelid: ix.indrelid,
         indkey0: ix.indkey.first().copied().unwrap_or(0),
     });
     let mut rd_opcintype: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
     for &t in &r.rd_opcintype {
         rd_opcintype.push(t);
+    }
+    let mut rd_opfamily: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    for &t in &r.rd_opfamily {
+        rd_opfamily.push(t);
+    }
+    let mut rd_indoption: PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    for &t in &r.rd_indoption {
+        rd_indoption.push(t);
+    }
+    let mut rd_indcollation: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    for &t in &r.rd_indcollation {
+        rd_indcollation.push(t);
     }
     Ok(types_rel::RelationData {
         rd_id: r.rd_id,
@@ -144,6 +157,9 @@ fn project_entry<'mcx>(
         rd_options: r.rd_options.clone(),
         rd_index,
         rd_opcintype,
+        rd_opfamily,
+        rd_indoption,
+        rd_indcollation,
     })
 }
 
