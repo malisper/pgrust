@@ -23,7 +23,7 @@ use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDescDa
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, ScanStateData, SlotId};
-use crate::nodeindexscan::Plan;
+use crate::nodeindexscan::Scan;
 use crate::primnodes::{Expr, TargetEntry};
 
 pub use crate::execstate_tags::T_IndexOnlyScanState;
@@ -133,28 +133,6 @@ pub struct IndexRuntimeKeyInfo<'mcx> {
     pub key_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     /// `bool key_toastable` — is the expr's result a toastable datatype?
     pub key_toastable: bool,
-}
-
-/// `Scan` plan base (plannodes.h):
-///
-/// ```c
-/// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
-/// ```
-#[derive(Debug, Default)]
-pub struct Scan<'mcx> {
-    /// `Plan plan` — its first field starts with the `NodeTag`.
-    pub plan: Plan<'mcx>,
-    /// `Index scanrelid` — relid is index into the range table.
-    pub scanrelid: u32,
-}
-
-impl Scan<'_> {
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
-        Ok(Scan {
-            plan: self.plan.clone_in(mcx)?,
-            scanrelid: self.scanrelid,
-        })
-    }
 }
 
 /// `IndexOnlyScan` plan node (plannodes.h):

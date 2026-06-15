@@ -140,7 +140,7 @@ pub use nodehash::{
 pub use nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
     IndexScanInstrumentation, IndexScanState, ParallelIndexScanDesc, ParallelIndexScanDescData,
-    ReorderTuple, Scan, SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+    ReorderTuple, SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
 };
 pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
@@ -173,7 +173,7 @@ pub use nodesort::{
 };
 pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
-pub use nodeindexscan::{SubqueryScan, SubqueryScanStatus};
+pub use nodeindexscan::{Scan, SubqueryScan, SubqueryScanStatus};
 pub use pathnodes::PathNode;
 pub use types_slot::{TupleSlotKind, TupleTableSlot};
 pub use tuptable::{

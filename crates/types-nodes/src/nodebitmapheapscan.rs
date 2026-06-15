@@ -38,7 +38,7 @@ use types_tidbitmap::{dsa_pointer, TIDBitmap};
 use crate::execexpr::ExprState;
 use crate::execnodes::ScanStateData;
 
-pub use crate::nodeindexscan::Plan;
+pub use crate::nodeindexscan::{Plan, Scan};
 
 /// `SharedBitmapState` (execnodes.h) — the state of the parallel bitmap scan.
 /// `#[repr(i32)]` to match the C enum's storage in the DSM-shared
@@ -234,16 +234,6 @@ impl SharedBitmapHeapInstrumentation {
         // uint64-bearing array element.
         8
     }
-}
-
-/// `Scan` plan node (plannodes.h) — the abstract scan base: embeds `Plan` then
-/// adds `scanrelid`.
-#[derive(Debug, Default)]
-pub struct Scan<'mcx> {
-    /// `Plan plan` head.
-    pub plan: Plan<'mcx>,
-    /// `Index scanrelid` — relid (range-table index) of the scanned relation.
-    pub scanrelid: types_core::primitive::Index,
 }
 
 /// `BitmapHeapScan` plan node (plannodes.h) — embeds `Scan` and adds

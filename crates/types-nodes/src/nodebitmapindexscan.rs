@@ -18,9 +18,10 @@ use types_scan::scankey::ScanKeyData;
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, ScanStateData};
 use crate::nodeindexonlyscan::{
-    IndexRuntimeKeyInfo, IndexScanDesc, IndexScanInstrumentation, Scan,
+    IndexRuntimeKeyInfo, IndexScanDesc, IndexScanInstrumentation,
     SharedIndexScanInstrumentation,
 };
+use crate::nodeindexscan::Scan;
 use crate::primnodes::Expr;
 
 pub use crate::execstate_tags::T_BitmapIndexScanState;
