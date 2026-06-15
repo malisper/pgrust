@@ -6992,6 +6992,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-path-equivclass",
  "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-indxpath-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-path-pathkeys-seams",
  "backend-optimizer-util-pathnode-seams",
@@ -14036,6 +14037,7 @@ dependencies = [
  "types-storage",
  "types-tableam",
  "types-tidbitmap",
+ "types-trigger",
  "types-tuple",
 ]
 
@@ -14156,6 +14158,7 @@ dependencies = [
  "types-error",
  "types-reloptions",
  "types-storage",
+ "types-trigger",
  "types-tuple",
 ]
 
@@ -14349,6 +14352,14 @@ dependencies = [
 name = "types-timeout"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-trigger"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "types-core",
 ]
 

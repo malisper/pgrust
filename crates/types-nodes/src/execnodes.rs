@@ -291,19 +291,12 @@ impl Default for IndexInfo {
     }
 }
 
-/// `TriggerDesc` (utils/reltrigger.h), trimmed to the per-event "is there at
-/// least one trigger of this kind" flags the executor consults before firing.
-/// The `triggers[]` array + transition-table flags land with the trigger
-/// owner; nodeModifyTable only reads these row-level booleans.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TriggerDesc {
-    pub trig_insert_before_row: bool,
-    pub trig_insert_instead_row: bool,
-    pub trig_update_before_row: bool,
-    pub trig_update_instead_row: bool,
-    pub trig_delete_before_row: bool,
-    pub trig_delete_instead_row: bool,
-}
+/// `TriggerDesc` (utils/reltrigger.h) — the full per-relation trigger set
+/// (array of [`Trigger`] + the per-event/transition flags), re-exported from
+/// the leaf [`types_trigger`] crate so consumers keep the `execnodes::TriggerDesc`
+/// path. The relation builds it via `RelationBuildTriggers` (commands/trigger.c);
+/// the executor reads the row-level booleans before firing.
+pub use types_trigger::{Trigger, TriggerDesc};
 
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
 /// in the EState's [`EStateData::es_result_rel_pool`], addressed by [`RriId`].
@@ -311,7 +304,7 @@ pub struct TriggerDesc {
 pub struct ResultRelInfo<'mcx> {
     /// `TriggerDesc *ri_TrigDesc` — triggers to be fired, if any. `None` is the
     /// C `NULL` (relation has no triggers).
-    pub ri_TrigDesc: Option<PgBox<'mcx, TriggerDesc>>,
+    pub ri_TrigDesc: Option<PgBox<'mcx, TriggerDesc<'mcx>>>,
     /// `Index ri_RangeTableIndex` — the rangetable index, or 0 for a
     /// trigger-only target relation not in the range table.
     pub ri_RangeTableIndex: Index,

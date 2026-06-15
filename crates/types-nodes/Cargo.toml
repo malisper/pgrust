@@ -17,6 +17,7 @@ types-snapshot = { path = "../types-snapshot" }
 types-datum = { path = "../types-datum" }
 types-sortsupport = { path = "../types-sortsupport" }
 types-rel = { path = "../types-rel" }
+types-trigger = { path = "../types-trigger" }
 types-tuple = { path = "../types-tuple" }
 types-slot = { path = "../types-slot" }
 mcx = { path = "../mcx" }

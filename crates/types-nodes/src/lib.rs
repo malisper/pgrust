@@ -85,6 +85,7 @@ pub mod primnodes;
 pub mod querydesc;
 pub mod queryenvironment;
 pub mod saophash;
+pub mod trigger;
 pub mod tuptable;
 /// Value nodes (`nodes/value.h`): the leaf literal nodes Integer/Float/Boolean/
 /// String/BitString, `#[derive(PgNode)]`-enabled and re-homed onto `mcx`.

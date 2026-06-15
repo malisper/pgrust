@@ -159,6 +159,11 @@ pub struct RelationData<'mcx> {
     /// `Oid *rd_indcollation` — the per-column collation OID used by the index.
     /// Empty for a non-index relation. Indexed by attribute number (0-based).
     pub rd_indcollation: mcx::PgVec<'mcx, Oid>,
+    /// `TriggerDesc *rd_trigdesc` (`utils/rel.h`) — the relation's triggers, or
+    /// `None` (the C NULL) when the relation has none (`relhastriggers` false).
+    /// Built by `RelationBuildTriggers` (commands/trigger.c, F1); until that
+    /// lands the relcache builder leaves it `None`.
+    pub rd_trigdesc: Option<PgBox<'mcx, types_trigger::TriggerDesc<'mcx>>>,
 }
 
 impl<'mcx> RelationData<'mcx> {
@@ -505,6 +510,7 @@ mod tests {
             rd_opfamily: mcx::PgVec::new_in(mcx),
             rd_indoption: mcx::PgVec::new_in(mcx),
             rd_indcollation: mcx::PgVec::new_in(mcx),
+            rd_trigdesc: None,
         }
     }
 

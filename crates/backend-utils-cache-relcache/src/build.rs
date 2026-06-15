@@ -160,6 +160,11 @@ fn project_entry<'mcx>(
         rd_opfamily,
         rd_indoption,
         rd_indcollation,
+        // rd_trigdesc is built by RelationBuildTriggers (commands/trigger.c, F1).
+        // Until that lands the trimmed slice carries None (the C NULL); the
+        // entry's presence flag rd_has_trigdesc tracks whether the relation has
+        // triggers at all.
+        rd_trigdesc: None,
     })
 }
 
@@ -306,13 +311,12 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
             relation.rd_has_rules = false;
         }
         if relation.rd_rel.relhastriggers {
-            // RelationBuildTriggers is trigger.c (cross-unit). Seam-and-panic.
-            return Err(ereport(ERROR)
-                .errmsg_internal(
-                    "relcache-build: RelationBuildTriggers is commands/trigger.c \
-                     (cross-unit); not yet landed",
-                )
-                .into_error());
+            // RelationBuildTriggers is commands/trigger.c (cross-unit, trigger
+            // F1). Routed through the relcache-seams declaration; trigger F1
+            // installs it. Until then the seam panics loudly (uninstalled —
+            // tracked in seams-init's CONTRACT_RECONCILE_PENDING).
+            backend_utils_cache_relcache_seams::relation_build_triggers::call(relation.rd_id)?;
+            relation.rd_has_trigdesc = true;
         } else {
             relation.rd_has_trigdesc = false;
         }

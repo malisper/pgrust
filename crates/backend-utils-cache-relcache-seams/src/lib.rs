@@ -58,6 +58,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationBuildTriggers(relation)` (commands/trigger.c): scan `pg_trigger`
+    /// for the relation, build the `TriggerDesc`, and store it on the relcache
+    /// entry (`relation->trigdesc`). Called from the relcache build path when
+    /// `relhastriggers` is set.
+    ///
+    /// The relation crosses by `Oid` (the bare-Oid relation convention used for
+    /// cross-unit relcache-build helpers, cf. hio-seams), since the trigger owner
+    /// re-opens the entry it mutates; relcache's build family applies the result
+    /// (it sets `rd_has_trigdesc`).
+    ///
+    /// This is an OUTWARD seam from relcache's perspective: relcache (the build
+    /// path) CALLS it, but the real owner is `commands/trigger.c` — NEEDS_DECOMP
+    /// (trigger F1, blocked on this F0 keystone). It is declared in this
+    /// relcache-seams crate (rather than a trigger-seams crate) because a
+    /// `commands/trigger` → relcache direct dependency would otherwise cycle; F1
+    /// installs it from the trigger owner's `init_seams()`. Until then it is
+    /// uninstalled and panics loudly on call (mirror-pg-and-panic) — no
+    /// allowlist entry is needed because the `seams-init` guard already exempts a
+    /// seam the dir-owner itself calls (outward dependency).
+    pub fn relation_build_triggers(
+        rel: types_core::primitive::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `RelationIdGetRelation(relationId)` + hand back C's live shared pointer
     /// (relcache.c): the ADDITIVE shared-ref entry point. Same lookup/build/pin
     /// logic as [`relation_id_get_relation`], but instead of projecting a *copy*
