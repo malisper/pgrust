@@ -143,12 +143,12 @@ fn OidIsValid(oid: Oid) -> bool {
 }
 
 /// `RelationGetRelationName(index)` for error messages.
-fn rel_name(index: &Relation<'_>) -> alloc::string::String {
+pub(crate) fn rel_name(index: &Relation<'_>) -> alloc::string::String {
     index.name().into()
 }
 
 /// `elog(ERROR, "...")` (internal message, no SQLSTATE).
-fn elog_error(msg: alloc::string::String) -> PgError {
+pub(crate) fn elog_error(msg: alloc::string::String) -> PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
@@ -162,11 +162,11 @@ const OPAQUE_OFFSET: usize =
     >());
 
 #[inline]
-fn opaque_n_redirection(page: &[u8]) -> u16 {
+pub(crate) fn opaque_n_redirection(page: &[u8]) -> u16 {
     u16::from_ne_bytes([page[OPAQUE_OFFSET + 2], page[OPAQUE_OFFSET + 3]])
 }
 #[inline]
-fn set_opaque_n_redirection(page: &mut [u8], v: u16) {
+pub(crate) fn set_opaque_n_redirection(page: &mut [u8], v: u16) {
     page[OPAQUE_OFFSET + 2..OPAQUE_OFFSET + 4].copy_from_slice(&v.to_ne_bytes());
 }
 #[inline]
@@ -200,7 +200,7 @@ pub(crate) fn lt_get_has_null_mask(tup: &[u8]) -> bool {
 }
 /// `SGLT_SET_NEXTOFFSET(tup, off)` — preserve the two high flag bits of `t_info`.
 #[inline]
-fn lt_set_next_offset(tup: &mut [u8], off: OffsetNumber) {
+pub(crate) fn lt_set_next_offset(tup: &mut [u8], off: OffsetNumber) {
     let cur = u16::from_ne_bytes([tup[4], tup[5]]);
     let v = (cur & 0xC000) | (off & 0x3FFF);
     tup[4..6].copy_from_slice(&v.to_ne_bytes());
@@ -488,7 +488,7 @@ pub fn spgPageIndexMultiDelete(
 /// `PageIndexMultiDelete(page, sortednos)` over the page-byte primitive: delete
 /// the given ascending offsets. The repo exposes single-offset deletion; deleting
 /// from high to low keeps the remaining offsets stable.
-fn page_index_multi_delete(page: &mut [u8], sortednos: &[OffsetNumber]) -> PgResult<()> {
+pub(crate) fn page_index_multi_delete(page: &mut [u8], sortednos: &[OffsetNumber]) -> PgResult<()> {
     for &off in sortednos.iter().rev() {
         let mut pm = PageMut::new(page)?;
         PageIndexTupleDelete(&mut pm, off)?;
@@ -742,7 +742,7 @@ fn relation_needs_wal(index: &Relation<'_>) -> bool {
 }
 
 /// Build a `spgxlogState` from `STORE_STATE(state, dest)`.
-fn store_state(state: &SpGistState<'_>) -> spgxlogState {
+pub(crate) fn store_state(state: &SpGistState<'_>) -> spgxlogState {
     spgxlogState {
         redirectXid: state.redirectXid,
         isBuild: state.isBuild,
@@ -932,7 +932,7 @@ fn moveLeafs<'mcx>(
 }
 
 /// Serialize a slice of `OffsetNumber` (uint16) for `XLogRegisterData`.
-fn offsets_to_bytes(offs: &[OffsetNumber]) -> Vec<u8> {
+pub(crate) fn offsets_to_bytes(offs: &[OffsetNumber]) -> Vec<u8> {
     let mut v = Vec::with_capacity(offs.len() * 2);
     for &o in offs {
         v.extend_from_slice(&o.to_ne_bytes());
