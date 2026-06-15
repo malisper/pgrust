@@ -330,7 +330,15 @@ fn StoreIndexTuple<'mcx>(
 ) -> PgResult<()> {
     // ExecClearTuple(slot);
     // index_deform_tuple(itup, itupdesc, slot->tts_values, slot->tts_isnull);
+    //
+    // `index_deform_tuple` deforms the on-disk `xs_itup` byte image into the
+    // per-attribute `(value, isnull)` pairs; the owned model returns them and
+    // we write them into the slot's `tts_values`/`tts_isnull` via
+    // `store_virtual_values` (the clear + fill + ExecStoreVirtualTuple
+    // primitive). The AM-supplied `itupdesc` is used for the deform (not the
+    // slot's), in case datatypes differ (btree name_ops).
     {
+        let mcx = estate.es_query_cxt;
         let scandesc = node.ioss_ScanDesc.as_ref().unwrap();
         let itup = scandesc
             .xs_itup
@@ -340,8 +348,14 @@ fn StoreIndexTuple<'mcx>(
             .xs_itupdesc
             .as_ref()
             .ok_or_else(|| elog("index-only scan: no index tuple descriptor"))?;
-        execTuples::exec_clear_tuple::call(estate, slot)?;
-        indextuple::index_deform_tuple::call(estate, slot, itup, itupdesc)?;
+        let columns = indextuple::index_deform_tuple::call(mcx, itup.as_slice(), itupdesc)?;
+        let mut values = mcx::vec_with_capacity_in(mcx, columns.len())?;
+        let mut isnull = mcx::vec_with_capacity_in(mcx, columns.len())?;
+        for (value, null) in columns.iter() {
+            values.push(value.clone());
+            isnull.push(*null);
+        }
+        execTuples::store_virtual_values::call(estate, slot, values.as_slice(), isnull.as_slice())?;
     }
 
     // Copy all name columns stored as cstrings back into NAMEDATALEN-byte

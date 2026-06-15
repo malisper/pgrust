@@ -16,7 +16,7 @@ use types_core::primitive::{BlockNumber, InvalidBlockNumber};
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
-use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDescData};
+use types_tuple::heaptuple::{HeapTuple, ItemPointerData, TupleDescData};
 
 use crate::amopaque::AmOpaque;
 use crate::genam::IndexScanInstrumentation;
@@ -209,8 +209,14 @@ pub struct IndexScanDescData<'mcx> {
     pub instrument: Option<IndexScanInstrumentation>,
 
     /* index-only-scan result data filled by amgettuple */
-    /// `IndexTuple xs_itup` — index tuple returned by the AM.
-    pub xs_itup: IndexTuple<'mcx>,
+    /// `IndexTuple xs_itup` — index tuple returned by the AM. In C this is a
+    /// pointer aliasing the on-disk index-tuple bytes in the AM's per-scan
+    /// workspace (`(IndexTuple) (so->currTuples + tupleOffset)`); the owned
+    /// model carries the contiguous on-disk byte image (header / null bitmap /
+    /// `MAXALIGN`-padded user data — what `index_form_tuple` produces), since
+    /// the header-only `IndexTupleData` cannot hold the variable-length data
+    /// area. `None` is the C `NULL`.
+    pub xs_itup: Option<mcx::PgVec<'mcx, u8>>,
     /// `struct TupleDescData *xs_itupdesc` — rowtype descriptor of `xs_itup`.
     pub xs_itupdesc: Option<Box<TupleDescData<'mcx>>>,
     /// `HeapTuple xs_hitup` — index data returned by the AM, as a HeapTuple.

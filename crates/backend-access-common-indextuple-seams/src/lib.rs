@@ -33,15 +33,20 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `index_deform_tuple(itup, itupdesc, values, isnull)` (indextuple.c):
-    /// deform an index tuple into the scan slot's per-attribute value/isnull
-    /// arrays, using the AM-supplied descriptor `itupdesc` (not the slot's, in
-    /// case the datatypes differ — btree name_ops). The owned model targets
-    /// the slot by pool id; the values land in the slot's payload. Fallible on
+    /// deform an index tuple into per-attribute `(value, isnull)` pairs, using
+    /// the AM-supplied descriptor `itupdesc` (not the slot's, in case the
+    /// datatypes differ — btree name_ops).
+    ///
+    /// `itup` is the on-disk index-tuple byte image (the widened `xs_itup`
+    /// carrier: the 8-byte `IndexTupleData` header, the null bitmap when
+    /// present, then the `MAXALIGN`-padded user data — exactly what
+    /// `index_form_tuple` produces). The deformed columns are returned
+    /// `mcx`-allocated; the caller (`nodeIndexonlyscan::StoreIndexTuple`)
+    /// writes them into the scan slot's `tts_values`/`tts_isnull`. Fallible on
     /// detoast / `ereport(ERROR)`.
     pub fn index_deform_tuple<'mcx>(
-        estate: &mut types_nodes::EStateData<'mcx>,
-        slot: types_nodes::SlotId,
-        itup: &types_tuple::heaptuple::IndexTupleData,
+        mcx: Mcx<'mcx>,
+        itup: &[u8],
         itupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
-    ) -> types_error::PgResult<()>
+    ) -> types_error::PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>>
 );

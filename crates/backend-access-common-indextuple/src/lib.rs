@@ -622,32 +622,38 @@ pub fn index_form_tuple_seam<'mcx>(
 }
 
 /// Body for the `index_deform_tuple` seam consumed by nodeIndexonlyscan
-/// (`StoreIndexTuple`): deform `itup` against `itupdesc` straight into the scan
-/// slot's `tts_values`/`tts_isnull`.
+/// (`StoreIndexTuple`): deform the on-disk index-tuple byte image `itup`
+/// against `itupdesc` into per-attribute `(value, isnull)` pairs.
 ///
-/// A by-reference (`ByRef`) deformed column cannot be stored in the slot's bare
-/// `Datum` array under the current model; that is the unresolved slot-payload
-/// model frontier (mirrors `execTuples`'s `slot_getmissingattrs`), so it panics
-/// loudly rather than silently dropping the bytes.
+/// `itup` is the contiguous `xs_itup` carrier exactly as `index_form_tuple`
+/// lays it out (header / null bitmap / `MAXALIGN`-padded user data). C does
+/// ```c
+/// tp = (char *) itup + IndexInfoFindDataOffset(itup->t_info);
+/// bp = (bits8 *) itup + sizeof(IndexTupleData);
+/// index_deform_tuple_internal(itupdesc, values, isnull, tp, bp,
+///                             IndexTupleHasNulls(itup));
+/// ```
+/// here we read `t_info` out of the byte image, slice out the data area and
+/// the bitmap, and hand them to [`index_deform_tuple_internal`]. The caller
+/// writes the returned columns into the slot's `tts_values`/`tts_isnull`.
 pub fn index_deform_tuple_seam<'mcx>(
-    estate: &mut types_nodes::EStateData<'mcx>,
-    slot: types_nodes::SlotId,
-    itup: &IndexTupleData,
+    mcx: Mcx<'mcx>,
+    itup: &[u8],
     itupdesc: &TupleDescData<'_>,
-) -> PgResult<()> {
-    // Reconstruct the owned FormedIndexTuple view over the seam's header +
-    // descriptor.  The seam crosses the header only (IndexTupleData); the data
-    // area + bitmap are not part of that ABI, so deform here works off the
-    // header's offset metadata and the descriptor.  Callers that need the full
-    // data-area model use index_deform_tuple directly; this seam variant is the
-    // header-only nodeIndexonlyscan adapter and panics on the not-yet-modeled
-    // data-area handoff.
-    let _ = (estate, slot, itup, itupdesc);
-    panic!(
-        "indextuple.c index_deform_tuple seam: deforming an IndexTupleData header into a \
-         scan slot needs the data-area carrier + by-reference slot value transfer owned by \
-         the execTuples slot-payload model (not yet landed)"
-    )
+) -> PgResult<PgVec<'mcx, IndexColumn<'mcx>>> {
+    // itup->t_info is the 2-byte field at offset 6 of IndexTupleData.
+    let t_info = u16::from_ne_bytes([itup[6], itup[7]]);
+    let hasnulls = (t_info & INDEX_NULL_MASK) != 0;
+    // tp = (char *) itup + IndexInfoFindDataOffset(itup->t_info);
+    let data_off = index_info_find_data_offset(t_info);
+    let tp = &itup[data_off..];
+    // bp = (bits8 *) itup + sizeof(IndexTupleData); only consulted when hasnulls.
+    let bp = if hasnulls {
+        Some(&itup[SIZEOF_INDEX_TUPLE_DATA..])
+    } else {
+        None
+    };
+    index_deform_tuple_internal(mcx, itupdesc, tp, bp)
 }
 
 /// Wire this crate's seams (declared in
