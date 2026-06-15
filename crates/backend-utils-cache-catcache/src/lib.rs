@@ -2,13 +2,11 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
-// SCAFFOLD: family signatures with `todo!()` bodies are not yet all wired into
-// each other; the unused-helper warnings clear as the bodies land.
 #![allow(dead_code)]
 
 //! `backend/utils/cache/catcache.c` — the system-catalog tuple cache
-//! (idiomatic port). SCAFFOLD: family module layout with signatures and
-//! `todo!()` bodies; the seam wiring is in place so consumers link.
+//! (idiomatic port). Family module layout with the seam wiring in place
+//! so consumers link.
 //!
 //! # Representation
 //!

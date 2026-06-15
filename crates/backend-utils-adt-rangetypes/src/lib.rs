@@ -3,9 +3,8 @@
 //! (`RangeType` / `RangeBound` / `RangeTypeP`) and real `Datum`, NOT a byte
 //! blob.
 //!
-//! SCAFFOLD STAGE. Every family module carries the full function inventory of
-//! `rangetypes.c` with C-faithful signatures and `todo!()` bodies so the crate
-//! compiles; the logic lands family-by-family afterwards. The crate owns and
+//! Every family module carries the full function inventory of `rangetypes.c`
+//! with C-faithful signatures and real bodies. The crate owns and
 //! installs the inward `backend-utils-adt-rangetypes-seams`
 //! (`range_cmp_bounds` / `range_subdiff` / `range_get_typcache` /
 //! `range_serialize` / `range_deserialize` / `datum_get_range_type_p`) already

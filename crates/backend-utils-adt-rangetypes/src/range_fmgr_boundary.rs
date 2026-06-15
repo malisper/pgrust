@@ -13,8 +13,7 @@
 //!
 //! In-unit kernels (`range_io` / `range_repr_serialize` / `range_bounds_compare`
 //! / `range_setops` / `range_canonical_subdiff_hash` / `range_planner_support`)
-//! are called directly; they panic via their own `todo!()` until each family
-//! lands. Genuinely-external neighbors are reached through their owners
+//! are called directly. Genuinely-external neighbors are reached through their owners
 //! (`get_fn_expr_*` from fmgr-core, `text_to_cstring`/typcache via their seams),
 //! or — where no compatible seam exists yet — by a loud owner-named panic
 //! (`AggCheckCallContext`), the sanctioned seam-and-panic for an unported dep.
