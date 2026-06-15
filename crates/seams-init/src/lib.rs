@@ -973,30 +973,16 @@ mod recurrence_guard {
         // init_seams once that owner lands.
         ("backend_replication_walreceiverfuncs", "xlog_request_wal_receiver_reply"),
         ("backend_storage_ipc_pmsignal", "set_postmaster_death_watch_cloexec"),
-        // DESIGN_DEBT: these 25 proc.c seams are declared + consumed but the owner
-        // (backend-storage-lmgr-proc, audited) has no impl for them — they need the
-        // cross-unit PGPROC/ProcGlobal-arena wiring (procarray add/remove + clog.c
-        // TransactionGroupUpdateXidStatus group-commit machinery + lock.c fast-path
-        // locks) that has not landed yet. The clog_group_* / *_clog_group_* set is
-        // the XID-status group-update batch (clog.c clogGroupFirst CAS list + the
-        // per-PGPROC clogGroupMember/Next/MemberXid/Page/Status fields); the
-        // my_proc_{xmin,xid,vxid,subxids}/proc_subxids/store_{top,sub}xid_in_proc
-        // accessors read/write live PGPROC xact state that procarray owns. Pay down
-        // when procarray (task #121) + clog group-update land. See DESIGN_DEBT.md.
-        ("backend_storage_lmgr_proc", "clog_group_first_compare_exchange"),
-        ("backend_storage_lmgr_proc", "clog_group_first_exchange"),
-        ("backend_storage_lmgr_proc", "clog_group_first_read"),
+        // DESIGN_DEBT: `initialize_fast_path_locks` is declared + consumed but the
+        // owner (backend-storage-lmgr-proc, audited) has no impl yet — it needs the
+        // lock.c fast-path lock table (per-PGPROC fpLockBits/fpRelId group layout)
+        // which has not landed. Pay down when lock.c fast-path locks land. See
+        // DESIGN_DEBT.md. (The clog.c group XID-status update set —
+        // clog_group_first_* / *_clog_group_* — was retired once clog.c
+        // TransactionGroupUpdateXidStatus + procarray's InitProcGlobal arena landed;
+        // those 13 seams are now installed by inward_seams over ProcGlobal->
+        // clogGroupFirst + the per-PGPROC clogGroup* fields.)
         ("backend_storage_lmgr_proc", "initialize_fast_path_locks"),
-        ("backend_storage_lmgr_proc", "my_proc_clog_group_member"),
-        ("backend_storage_lmgr_proc", "my_proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "proc_clog_group_member_page"),
-        ("backend_storage_lmgr_proc", "proc_clog_group_member_update"),
-        ("backend_storage_lmgr_proc", "proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member"),
-        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_member_data"),
-        ("backend_storage_lmgr_proc", "set_my_proc_clog_group_next"),
-        ("backend_storage_lmgr_proc", "set_proc_clog_group_member"),
-        ("backend_storage_lmgr_proc", "set_proc_clog_group_next"),
         // DESIGN_DEBT: `pg_localtime` is `timezone/localtime.c`'s function but its
         // seam is declared in `backend-timezone-pgtz-seams` (dfmgr/pgtz reach it).
         // It is correctly installed at runtime by backend-timezone-localtime's

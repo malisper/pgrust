@@ -420,6 +420,38 @@ pub(crate) fn proc_array_group_first_exchange(newval: u32) -> u32 {
     })
 }
 
+// ---- ProcGlobal->clogGroupFirst atomic (clog.c group XID-status update) ----
+
+/// `pg_atomic_read_u32(&ProcGlobal->clogGroupFirst)`.
+pub(crate) fn clog_group_first_read() -> u32 {
+    with_proc_global(|pg| pg.clogGroupFirst.read())
+}
+
+/// `pg_atomic_compare_exchange_u32(&ProcGlobal->clogGroupFirst, expected,
+/// newval)` — returns `(succeeded, value_seen)`.
+pub(crate) fn clog_group_first_compare_exchange(expected: u32, newval: u32) -> (bool, u32) {
+    with_proc_global(|pg| {
+        match pg.clogGroupFirst.value.compare_exchange(
+            expected,
+            newval,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(prev) => (true, prev),
+            Err(seen) => (false, seen),
+        }
+    })
+}
+
+/// `pg_atomic_exchange_u32(&ProcGlobal->clogGroupFirst, newval)`.
+pub(crate) fn clog_group_first_exchange(newval: u32) -> u32 {
+    with_proc_global(|pg| {
+        pg.clogGroupFirst
+            .value
+            .swap(newval, core::sync::atomic::Ordering::SeqCst)
+    })
+}
+
 // ---- AuxiliaryProcs (= &allProcs[MaxBackends..][..NUM_AUXILIARY_PROCS]) ----
 
 /// `GetNumberFromPGProc(&AuxiliaryProcs[proctype])` — the absolute slot number
