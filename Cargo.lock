@@ -6447,9 +6447,38 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-opclass",
  "types-parsenodes",
+]
+
+[[package]]
+name = "backend-parser-parse-oper"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
+ "backend-commands-functioncmds-seams",
+ "backend-nodes-core",
+ "backend-parser-coerce-seams",
+ "backend-parser-parse-func-seams",
+ "backend-parser-parse-oper-seams",
+ "backend-parser-parse-type-seams",
+ "backend-utils-adt-format-type",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-namespace",
+ "types-nodes",
+ "types-opclass",
+ "types-parsenodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12304,6 +12333,7 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-parser-parse-oper",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",

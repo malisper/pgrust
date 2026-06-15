@@ -194,6 +194,9 @@ pub struct OperRow<'mcx> {
     /// `oprresult` — the operator's result type (read by `assignOperTypes`
     /// in opclasscmds.c).
     pub oprresult: Oid,
+    /// `oprcode` — OID of the underlying function (`oprfuncid`; read by
+    /// `make_op` / `make_scalar_array_op` in parse_oper.c).
+    pub oprcode: Oid,
     pub oprname: PgString<'mcx>,
 }
 
