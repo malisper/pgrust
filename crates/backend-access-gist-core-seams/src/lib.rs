@@ -32,3 +32,17 @@ seam_core::seam!(
     /// slot). The bufmask helpers `elog(ERROR)` on invalid page bounds.
     pub fn gist_mask(pagedata: &mut [u8], blkno: types_core::BlockNumber) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `gistXLogPageReuse(rel, heaprel, blkno, deleteXid)` (gistxlog.c) — emit
+    /// the `XLOG_GIST_PAGE_REUSE` conflict record when recycling a deleted page
+    /// in `gistNewBuffer`. The record doesn't modify the page; it only provides
+    /// a Hot-Standby conflict point. Owned by the gistxlog layer (unported); the
+    /// `gistNewBuffer` insertion helper reaches it through this seam.
+    pub fn gist_xlog_page_reuse<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        heaprel: &types_rel::Relation<'mcx>,
+        blkno: types_core::BlockNumber,
+        delete_xid: types_core::xact::FullTransactionId,
+    ) -> types_error::PgResult<()>
+);
