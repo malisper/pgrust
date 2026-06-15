@@ -773,6 +773,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-gininsert"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-gin-core-probe",
+ "backend-access-gin-ginbtree",
+ "backend-access-gin-gindatapage",
+ "backend-access-gin-ginentrypage",
+ "backend-access-gin-gininsert-seams",
+ "backend-access-gin-ginutil",
+ "backend-access-gin-ginutil-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-storage-page",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-gin",
+ "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-gininsert-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-ginscan"
 version = "0.0.0"
 dependencies = [
@@ -843,6 +878,34 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-gist-dispatch-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gist-proc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gist-dispatch-seams",
+ "backend-utils-adt-geo-ops-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-gist",
+ "types-sortsupport",
+ "types-tuple",
 ]
 
 [[package]]
@@ -14747,6 +14810,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
  "backend-access-gin-ginscan",
+ "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",
  "backend-access-hash-xlog",
