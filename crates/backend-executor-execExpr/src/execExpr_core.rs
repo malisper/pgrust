@@ -556,28 +556,26 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        // OpExpr/DistinctExpr/NullIfExpr: C looks up op->opfuncid (the operator's
-        // implementing function) before ExecInitFunc. The keystone OpExpr is
-        // trimmed to opno/args, so the opfuncid comes from get_opcode(opno)
-        // (lsyscache owner). ExecInitFunc structurally blocks on fmgr_info
-        // anyway; pass opno as the funcid placeholder (InvalidOid inputcollid)
-        // so the dispatch is shaped, then panic in ExecInitFunc.
+        // OpExpr/DistinctExpr/NullIfExpr: C passes op->opfuncid (the PG_PROC oid
+        // of the implementing function the planner filled in) and
+        // op->inputcollid to ExecInitFunc — NOT op->opno (a PG_OPERATOR oid),
+        // which would resolve the wrong function in fmgr_info.
         Expr::OpExpr(op) => {
             let mut scratch = scratch_for(resv);
-            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
         Expr::DistinctExpr(op) => {
             let mut scratch = scratch_for(resv);
-            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_DISTINCT;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
         Expr::NullIfExpr(op) => {
             let mut scratch = scratch_for(resv);
-            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opno, types_core::InvalidOid, state)?;
+            crate::execExpr_func_subscript::exec_init_func(mcx, &mut scratch, node, &op.args, op.opfuncid, op.inputcollid, state)?;
             scratch.opcode = ExprEvalOp::EEOP_NULLIF;
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())

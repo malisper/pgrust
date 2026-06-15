@@ -102,7 +102,7 @@ const Natts_pg_proc: i32 = 30;
 const Natts_pg_type: i32 = 31;
 
 /// `RELCACHE_INIT_FILEMAGIC` (relcache.c) — the init-file magic number.
-const RELCACHE_INIT_FILEMAGIC: i32 = 0x0133_7088;
+const RELCACHE_INIT_FILEMAGIC: i32 = 0x573266;
 /// `RELCACHE_INIT_FILENAME` (relcache.c).
 const RELCACHE_INIT_FILENAME: &str = "pg_internal.init";
 

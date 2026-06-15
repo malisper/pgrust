@@ -2224,6 +2224,100 @@ fn oid_output_function_call_datum_seam<'mcx>(
     PgString::from_str_in(&s, mcx)
 }
 
+/// Collapse a typed [`FmgrOut`] to the bare ABI word the `DatumWord`-returning
+/// I/O seams contract for. The I/O scalar boundary is the bare-word lane: a
+/// by-value result is its machine word; a by-reference result is a contract
+/// anomaly here (these seams' callers wrap the word straight into a by-value
+/// arm — `domains.rs`, `parse-type`, `arrayfuncs/io.rs`), mirroring `canon_word`.
+#[inline]
+fn fmgr_out_word(out: FmgrOut<'_>) -> Datum {
+    match out {
+        FmgrOut::ByVal(d) => canon_word(&d),
+        FmgrOut::Ref(_) => {
+            panic!("I/O seam (DatumWord lane) produced a by-reference result")
+        }
+    }
+}
+
+/// `InputFunctionCall(flinfo, str, typioparam, typmod)` seam (fmgr.c) for a
+/// hard-error caller: one-shot lookup by `function_id` + call of the text input
+/// function on `str` (`None` is C's NULL cstring). Returns the bare scalar word
+/// (`parse-type`/`domains.rs` callers wrap it as a by-value `Datum`).
+fn input_function_call_seam(
+    mcx: Mcx<'_>,
+    function_id: Oid,
+    str: Option<&str>,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<Datum> {
+    Ok(fmgr_out_word(oid_input_function_call_out(
+        mcx,
+        function_id,
+        str,
+        typioparam,
+        typmod,
+    )?))
+}
+
+/// `ReceiveFunctionCall(flinfo, buf, typioparam, typmod)` seam (fmgr.c): one-shot
+/// lookup by `function_id` + call of the binary receive function on the
+/// `StringInfo` payload `buf`. Returns the bare scalar word.
+fn receive_function_call_seam(
+    mcx: Mcx<'_>,
+    function_id: Oid,
+    buf: &[u8],
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<Datum> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let out = receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        Some(buf),
+        typioparam,
+        typmod,
+    )?;
+    Ok(fmgr_out_word(out))
+}
+
+/// `InputFunctionCallSafe(&inputproc, str, typioparam, typmod, escontext,
+/// &result)` seam (fmgr.c) as `array_in` drives it: call `function_id`'s text
+/// input function on the element substring `str_` under an internal soft-error
+/// context. `Ok(Some(word))` on success, `Ok(None)` when the conversion raised
+/// a soft error (C: `array_in` returns `Ok(None)`), `Err` on a hard error.
+fn input_function_call_safe_seam(
+    function_id: Oid,
+    str_: &str,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<Option<Datum>> {
+    let ctx = MemoryContext::new("input_function_call_safe");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, function_id)?;
+    // C drives the element input function with a soft-error context so a bad
+    // element is caught rather than aborting; the caller only needs Some/None.
+    let mut escontext = types_error::SoftErrorContext::new(false);
+    let out = input_function_call_safe_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        Some(str_),
+        typioparam,
+        typmod,
+        Some(&mut escontext),
+    )?;
+    Ok(out.map(fmgr_out_word))
+}
+
+/// `OidFunctionCall0(functionId)` seam (fmgr.c): one-shot lookup + zero-argument
+/// call under the default (invalid) collation. Returns the bare result word (the
+/// handler's opaque `void *` pointer word for subscript-routines callers).
+fn oid_function_call0_seam(function_id: Oid) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("oid_function_call0");
+    oid_function_call0_coll(ctx.mcx(), function_id, InvalidOid)
+}
+
 /// Install every seam in `backend-utils-fmgr-fmgr-seams` whose implementation is
 /// `fmgr.c`'s own logic.
 ///
@@ -2250,4 +2344,8 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::set(
         oid_output_function_call_datum_seam,
     );
+    backend_utils_fmgr_fmgr_seams::input_function_call::set(input_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::receive_function_call::set(receive_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::input_function_call_safe::set(input_function_call_safe_seam);
+    backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
 }
