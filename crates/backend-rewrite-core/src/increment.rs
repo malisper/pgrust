@@ -13,14 +13,22 @@
 
 #![allow(non_snake_case)]
 
+use alloc::string::ToString;
 use backend_nodes_core::node_walker::{
     expression_tree_walker_mut, query_or_expression_tree_mutator, query_tree_mutator,
     range_table_mutator,
 };
+use backend_utils_error::ereport;
+use types_error::{PgError, PgResult, ERROR};
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::Node;
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
 use types_nodes::primnodes::{Expr, VarReturningType};
+
+/// `elog(ERROR, ...)` shorthand.
+fn elog_error(msg: &str) -> PgError {
+    ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
+}
 
 // ===========================================================================
 // IncrementVarSublevelsUp (rewriteManip.c:776)
@@ -29,9 +37,15 @@ use types_nodes::primnodes::{Expr, VarReturningType};
 struct IncrCtx {
     delta_sublevels_up: i32,
     min_sublevels_up: i32,
+    /// Captured `elog(ERROR)` from inside the infallible walker callback; the
+    /// public entry points surface it as `Err(PgError)` (mirrors C ereport).
+    err: Option<PgError>,
 }
 
 fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
+    if ctx.err.is_some() {
+        return true; // abort the remaining walk
+    }
     match node {
         Node::Expr(Expr::Var(var)) => {
             if var.varlevelsup as i32 >= ctx.min_sublevels_up {
@@ -43,7 +57,8 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
         Node::CurrentOfExpr(_) => {
             // this should not happen
             if ctx.min_sublevels_up == 0 {
-                panic!("cannot push down CurrentOfExpr");
+                ctx.err = Some(elog_error("cannot push down CurrentOfExpr"));
+                return true;
             }
             false
         }
@@ -112,10 +127,15 @@ fn increment_rte_cte(rte: &mut RangeTblEntry, ctx: &IncrCtx) {
 
 /// `IncrementVarSublevelsUp(node, delta_sublevels_up, min_sublevels_up)`
 /// (rewriteManip.c:880).
-pub fn IncrementVarSublevelsUp(node: &mut Node, delta_sublevels_up: i32, min_sublevels_up: i32) {
+pub fn IncrementVarSublevelsUp(
+    node: &mut Node,
+    delta_sublevels_up: i32,
+    min_sublevels_up: i32,
+) -> PgResult<()> {
     let mut ctx = IncrCtx {
         delta_sublevels_up,
         min_sublevels_up,
+        err: None,
     };
     // C uses query_or_expression_tree_walker(..., QTW_EXAMINE_RTES_BEFORE).
     // Starting at a Query does NOT increment min_sublevels_up, so we bump the
@@ -128,6 +148,10 @@ pub fn IncrementVarSublevelsUp(node: &mut Node, delta_sublevels_up: i32, min_sub
         &mut |n| IncrementVarSublevelsUp_walker(n, &mut ctx),
         0,
     );
+    match ctx.err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// `IncrementVarSublevelsUp_rtable(rtable, delta_sublevels_up, min_sublevels_up)`
@@ -136,10 +160,11 @@ pub fn IncrementVarSublevelsUp_rtable(
     rtable: &mut [RangeTblEntry],
     delta_sublevels_up: i32,
     min_sublevels_up: i32,
-) {
+) -> PgResult<()> {
     let mut ctx = IncrCtx {
         delta_sublevels_up,
         min_sublevels_up,
+        err: None,
     };
     // Examine each RTE node before its contents (QTW_EXAMINE_RTES_BEFORE): bump
     // RTE_CTE ctelevelsup, then walk the RTE's expression trees.
@@ -151,6 +176,10 @@ pub fn IncrementVarSublevelsUp_rtable(
         &mut |n| IncrementVarSublevelsUp_walker(n, &mut ctx),
         0,
     );
+    match ctx.err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 // ===========================================================================

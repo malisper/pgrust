@@ -215,10 +215,13 @@ pub struct TableAmRoutine {
     /// descriptor.
     pub scan_end: fn(scan: TableScanDesc<'_>) -> PgResult<()>,
 
-    /// `scan_rescan(scan, key, set_params, allow_strat, allow_sync,
+    /// `scan_rescan(mcx, scan, key, set_params, allow_strat, allow_sync,
     /// allow_pagemode)` — restart a relation scan, optionally with new params.
-    pub scan_rescan: fn(
-        scan: &mut TableScanDescData<'_>,
+    /// The leading `mcx` (convention A) is the arena the AM reinitializes the
+    /// scan state in (`heap_rescan` re-runs `initscan`, which allocates).
+    pub scan_rescan: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
         key: Option<&[ScanKeyData]>,
         set_params: bool,
         allow_strat: bool,
@@ -242,10 +245,14 @@ pub struct TableAmRoutine {
     pub tuple_tid_valid:
         fn(scan: &mut TableScanDescData<'_>, tid: &ItemPointerData) -> PgResult<bool>,
 
-    /// `tuple_get_latest_tid(scan, tid)` — chase the latest row version of
-    /// the chain starting at `tid`.
-    pub tuple_get_latest_tid:
-        fn(scan: &mut TableScanDescData<'_>, tid: &mut ItemPointerData) -> PgResult<()>,
+    /// `tuple_get_latest_tid(mcx, scan, tid)` — chase the latest row version of
+    /// the chain starting at `tid`. The leading `mcx` (convention A) is the
+    /// arena the AM reads buffers under (`heap_get_latest_tid`).
+    pub tuple_get_latest_tid: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        tid: &mut ItemPointerData,
+    ) -> PgResult<()>,
 
     /// `tuple_insert(mcx, rel, slot, cid, options, bistate)`.
     pub tuple_insert: for<'mcx> fn(
@@ -257,10 +264,12 @@ pub struct TableAmRoutine {
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()>,
 
-    /// `tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
-    /// changingPart)`.
-    pub tuple_delete: fn(
-        rel: &Relation<'_>,
+    /// `tuple_delete(mcx, rel, tid, cid, snapshot, crosscheck, wait, tmfd,
+    /// changingPart)`. The leading `mcx` (convention A) is the arena the AM
+    /// works in (`heap_delete`).
+    pub tuple_delete: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         cid: CommandId,
         snapshot: &Snapshot,

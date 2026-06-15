@@ -1452,20 +1452,117 @@ fn leafRepackItems(leaf: &mut DisassembledLeaf, remaining: &mut ItemPointerData)
 }
 
 // ===========================================================================
-// ginVacuumPostingTreeLeaf (gindatapage.c:738) — sanctioned panic leg.
+// ginVacuumPostingTreeLeaf (gindatapage.c:738)
 // ===========================================================================
 
-/// `ginVacuumPostingTreeLeaf(indexrel, buffer, gvs)` (gindatapage.c:738).
+/// `ginVacuumPostingTreeLeaf(indexrel, buffer, gvs)` (gindatapage.c:738): vacuum
+/// a posting-tree leaf page.
 ///
-/// Sanctioned panic leg: this needs the `ginvacuum.c` `GinVacuumState` /
-/// `ginVacuumItemPointers` machinery (the GIN vacuum prefetch / read_stream
-/// path), which is not yet ported. It is unreachable until `ginvacuum.c` lands.
-pub fn ginVacuumPostingTreeLeaf<'mcx>(_indexrel: &Relation<'mcx>, _buffer: Buffer) -> PgResult<()> {
-    panic!(
-        "ginVacuumPostingTreeLeaf: ginvacuum.c (GinVacuumState / ginVacuumItemPointers) \
-         is not yet ported (sanctioned GIN vacuum panic leg)"
-    )
+/// Each decoded posting-list segment is handed to the `vacuum` callback, which
+/// is `ginvacuum.c`'s `ginVacuumItemPointers` against the running
+/// `GinVacuumState` (the index-vacuum dead-TID callback lives behind it). The
+/// callback returns `(Some(cleaned), ncleaned)` if any items were removed (with
+/// the cleaned item array, which never grows the segment), or `(None, _)` if
+/// the segment is unchanged. The `disassembleLeaf` / `dataPlaceToPageLeafRecompress`
+/// / `computeLeafRecompressWALData` machinery is this crate's, so the page edit,
+/// the critical section, the `MarkBufferDirty` and the WAL emission all happen
+/// here, byte- and order-faithful to C. Modelling `GinVacuumState *gvs` as a
+/// callback keeps the running-state counters in `ginvacuum`'s owned struct
+/// without a dependency cycle.
+pub fn ginVacuumPostingTreeLeaf<'mcx>(
+    indexrel: &Relation<'mcx>,
+    buffer: Buffer,
+    vacuum: &mut dyn FnMut(&[ItemPointerData]) -> (Option<Vec<ItemPointerData>>, i32),
+) -> PgResult<()> {
+    let page = page_bytes(buffer)?;
+    let mut leaf = disassembleLeaf(&page);
+    let mut removedsomething = false;
+
+    // Vacuum each segment.
+    for seginfo in leaf.segments.iter_mut() {
+        if seginfo.items.is_none() {
+            let decoded = ginPostingListDecode(seginfo.seg.as_ref().expect("seg"), None);
+            seginfo.items = Some(decoded);
+        }
+        let oldsegsize = match seginfo.seg.as_ref() {
+            Some(seg) => size_of_gin_posting_list(seg),
+            None => GinDataPageMaxDataSize(),
+        };
+
+        let items = seginfo.items.take().expect("items decoded above");
+        let (cleaned, ncleaned) = vacuum(&items);
+        seginfo.items = None;
+
+        if let Some(cleaned) = cleaned {
+            if ncleaned > 0 {
+                // ginCompressPostingList(cleaned, ncleaned, oldsegsize, &npacked).
+                let mut npacked = 0;
+                let compressed = ginCompressPostingList(
+                    &cleaned[..ncleaned as usize],
+                    ncleaned,
+                    oldsegsize as i32,
+                    Some(&mut npacked),
+                );
+                // Removing an item never increases the size of the segment.
+                if npacked != ncleaned {
+                    return Err(ereport(ERROR)
+                        .errmsg("could not fit vacuumed posting list")
+                        .into_error());
+                }
+                seginfo.seg = Some(compressed.bytes);
+                seginfo.action = GIN_SEGMENT_REPLACE;
+            } else {
+                seginfo.seg = None;
+                seginfo.items = None;
+                seginfo.action = GIN_SEGMENT_DELETE;
+            }
+            removedsomething = true;
+        }
+    }
+
+    // If we removed any items, reconstruct the page from the pieces. We don't
+    // re-encode the segments here (see gindatapage.c:799 for the rationale).
+    if removedsomething {
+        // Make sure we have an owned copy of all segments after the first
+        // modified one. Our segments are already owned Vec<u8> copies, so this
+        // copy-on-write step is a no-op for correctness — kept as the C marker.
+        let mut modified = false;
+        for seginfo in leaf.segments.iter() {
+            if seginfo.action != GIN_SEGMENT_UNMODIFIED {
+                modified = true;
+            }
+            let _ = modified;
+        }
+
+        let want_wal = relation_needs_wal(indexrel);
+        if want_wal {
+            computeLeafRecompressWALData(&mut leaf);
+        }
+
+        // Apply changes to page.
+        // START_CRIT_SECTION();
+        let leaf_ref = &leaf;
+        bufmgr::with_buffer_page::call(buffer, &mut |page: &mut [u8]| {
+            dataPlaceToPageLeafRecompress(page, leaf_ref)
+        })?;
+
+        bufmgr::mark_buffer_dirty::call(buffer);
+
+        if want_wal {
+            xlog_begin_insert()?;
+            xlog_register_buffer(0, buffer, REGBUF_STANDARD)?;
+            xlog_register_buf_data(0, &leaf.walinfo)?;
+            let recptr = xlog_insert_record(RM_GIN_ID, XLOG_GIN_VACUUM_DATA_LEAF_PAGE)?;
+            bufmgr::page_set_lsn::call(buffer, recptr)?;
+        }
+        // END_CRIT_SECTION();
+    }
+
+    Ok(())
 }
+
+/// `XLOG_GIN_VACUUM_DATA_LEAF_PAGE` info byte (ginxlog.h).
+const XLOG_GIN_VACUUM_DATA_LEAF_PAGE: u8 = 0x90;
 
 // ===========================================================================
 // createPostingTree (gindatapage.c:1775)
