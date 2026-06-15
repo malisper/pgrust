@@ -14,8 +14,9 @@ use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
 use types_datum::Datum as KeyDatum;
 
 use crate::{
-    ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList1, SysCacheGetAttrNotNull,
-    AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, PROCOID, RELOID,
+    ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList, SearchSysCacheList1,
+    SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, PROCOID,
+    RELOID,
 };
 use backend_utils_cache_syscache_seams::CastRow;
 use backend_nodes_read_seams as nodes_read_seams;
@@ -215,6 +216,34 @@ pub(crate) fn search_amproc_list<'mcx>(
         mcx,
         AMPROCNUM,
         SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
+    )?;
+    let mut rows = vec_with_capacity_in(mcx, members.len())?;
+    for tup in &members {
+        rows.push(AmprocRow {
+            amproclefttype: getattr_oid(mcx, AMPROCNUM, tup, Anum_pg_amproc_amproclefttype)?,
+            amprocrighttype: getattr_oid(mcx, AMPROCNUM, tup, Anum_pg_amproc_amprocrighttype)?,
+            amprocnum: getattr_i16(mcx, AMPROCNUM, tup, Anum_pg_amproc_amprocnum)?,
+            amproc: getattr_oid(mcx, AMPROCNUM, tup, Anum_pg_amproc_amproc)?,
+        });
+    }
+    Ok(rows)
+}
+
+/// `SearchSysCacheList2(AMPROCNUM, ObjectIdGetDatum(opfamilyoid),
+/// ObjectIdGetDatum(lefttype))` member rows, projected (the partial-key list
+/// keyed by opfamily + amproclefttype).
+pub(crate) fn search_amproc_list2<'mcx>(
+    mcx: Mcx<'mcx>,
+    opfamilyoid: Oid,
+    lefttype: Oid,
+) -> PgResult<PgVec<'mcx, AmprocRow>> {
+    let members = SearchSysCacheList(
+        mcx,
+        AMPROCNUM,
+        2,
+        SysCacheKey::Value(KeyDatum::from_oid(opfamilyoid)),
+        SysCacheKey::Value(KeyDatum::from_oid(lefttype)),
+        SysCacheKey::UNUSED,
     )?;
     let mut rows = vec_with_capacity_in(mcx, members.len())?;
     for tup in &members {

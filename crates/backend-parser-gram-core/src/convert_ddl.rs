@@ -1386,3 +1386,670 @@ fn conv_altersubscriptionstmt<'mcx>(
         options: node_list(mcx, s.options)?,
     })
 }
+
+// ===========================================================================
+// Utility / GRANT / transaction family (parser grammar F4)
+// ===========================================================================
+
+fn grant_target_type(v: cd::GrantTargetType) -> tdn::GrantTargetType {
+    use tdn::GrantTargetType::*;
+    match v {
+        cd::ACL_TARGET_OBJECT => ACL_TARGET_OBJECT,
+        cd::ACL_TARGET_ALL_IN_SCHEMA => ACL_TARGET_ALL_IN_SCHEMA,
+        cd::ACL_TARGET_DEFAULTS => ACL_TARGET_DEFAULTS,
+        other => panic!("gram converter: invalid GrantTargetType {other}"),
+    }
+}
+
+fn variable_set_kind(v: cd::VariableSetKind) -> tdn::VariableSetKind {
+    use tdn::VariableSetKind::*;
+    match v {
+        cd::VAR_SET_VALUE => VAR_SET_VALUE,
+        cd::VAR_SET_DEFAULT => VAR_SET_DEFAULT,
+        cd::VAR_SET_CURRENT => VAR_SET_CURRENT,
+        cd::VAR_SET_MULTI => VAR_SET_MULTI,
+        cd::VAR_RESET => VAR_RESET,
+        cd::VAR_RESET_ALL => VAR_RESET_ALL,
+        other => panic!("gram converter: invalid VariableSetKind {other}"),
+    }
+}
+
+fn transaction_stmt_kind(v: cd::TransactionStmtKind) -> tdn::TransactionStmtKind {
+    use tdn::TransactionStmtKind::*;
+    match v {
+        cd::TRANS_STMT_BEGIN => TRANS_STMT_BEGIN,
+        cd::TRANS_STMT_START => TRANS_STMT_START,
+        cd::TRANS_STMT_COMMIT => TRANS_STMT_COMMIT,
+        cd::TRANS_STMT_ROLLBACK => TRANS_STMT_ROLLBACK,
+        cd::TRANS_STMT_SAVEPOINT => TRANS_STMT_SAVEPOINT,
+        cd::TRANS_STMT_RELEASE => TRANS_STMT_RELEASE,
+        cd::TRANS_STMT_ROLLBACK_TO => TRANS_STMT_ROLLBACK_TO,
+        cd::TRANS_STMT_PREPARE => TRANS_STMT_PREPARE,
+        cd::TRANS_STMT_COMMIT_PREPARED => TRANS_STMT_COMMIT_PREPARED,
+        cd::TRANS_STMT_ROLLBACK_PREPARED => TRANS_STMT_ROLLBACK_PREPARED,
+        other => panic!("gram converter: invalid TransactionStmtKind {other}"),
+    }
+}
+
+fn discard_mode(v: cd::DiscardMode) -> tdn::DiscardMode {
+    use tdn::DiscardMode::*;
+    match v {
+        cd::DISCARD_ALL => DISCARD_ALL,
+        cd::DISCARD_PLANS => DISCARD_PLANS,
+        cd::DISCARD_SEQUENCES => DISCARD_SEQUENCES,
+        cd::DISCARD_TEMP => DISCARD_TEMP,
+        other => panic!("gram converter: invalid DiscardMode {other}"),
+    }
+}
+
+fn reindex_object_type(v: cd::ReindexObjectType) -> tdn::ReindexObjectType {
+    use tdn::ReindexObjectType::*;
+    match v {
+        cd::REINDEX_OBJECT_INDEX => REINDEX_OBJECT_INDEX,
+        cd::REINDEX_OBJECT_TABLE => REINDEX_OBJECT_TABLE,
+        cd::REINDEX_OBJECT_SCHEMA => REINDEX_OBJECT_SCHEMA,
+        cd::REINDEX_OBJECT_SYSTEM => REINDEX_OBJECT_SYSTEM,
+        cd::REINDEX_OBJECT_DATABASE => REINDEX_OBJECT_DATABASE,
+        other => panic!("gram converter: invalid ReindexObjectType {other}"),
+    }
+}
+
+fn import_foreign_schema_type(v: cd::ImportForeignSchemaType) -> tdn::ImportForeignSchemaType {
+    use tdn::ImportForeignSchemaType::*;
+    match v {
+        cd::FDW_IMPORT_SCHEMA_ALL => FDW_IMPORT_SCHEMA_ALL,
+        cd::FDW_IMPORT_SCHEMA_LIMIT_TO => FDW_IMPORT_SCHEMA_LIMIT_TO,
+        cd::FDW_IMPORT_SCHEMA_EXCEPT => FDW_IMPORT_SCHEMA_EXCEPT,
+        other => panic!("gram converter: invalid ImportForeignSchemaType {other}"),
+    }
+}
+
+fn publication_obj_spec_type(v: cd::PublicationObjSpecType) -> tdn::PublicationObjSpecType {
+    use tdn::PublicationObjSpecType::*;
+    match v {
+        cd::PUBLICATIONOBJ_TABLE => PUBLICATIONOBJ_TABLE,
+        cd::PUBLICATIONOBJ_TABLES_IN_SCHEMA => PUBLICATIONOBJ_TABLES_IN_SCHEMA,
+        cd::PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA => PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA,
+        cd::PUBLICATIONOBJ_CONTINUATION => PUBLICATIONOBJ_CONTINUATION,
+        other => panic!("gram converter: invalid PublicationObjSpecType {other}"),
+    }
+}
+
+fn fetch_direction(v: cd::FetchDirection) -> tdn::FetchDirection {
+    use tdn::FetchDirection::*;
+    match v {
+        cd::FETCH_FORWARD => FETCH_FORWARD,
+        cd::FETCH_BACKWARD => FETCH_BACKWARD,
+        cd::FETCH_ABSOLUTE => FETCH_ABSOLUTE,
+        cd::FETCH_RELATIVE => FETCH_RELATIVE,
+        other => panic!("gram converter: invalid FetchDirection {other}"),
+    }
+}
+
+fn conv_grantstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::GrantStmt) -> PgResult<tdn::GrantStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::GrantStmt {
+        is_grant: s.is_grant,
+        targtype: grant_target_type(s.targtype),
+        objtype: object_type(s.objtype),
+        objects: node_list(mcx, s.objects)?,
+        privileges: node_list(mcx, s.privileges)?,
+        grantees: node_list(mcx, s.grantees)?,
+        grant_option: s.grant_option,
+        grantor: child_node_opt(mcx, s.grantor)?,
+        behavior: drop_behavior(s.behavior),
+    })
+}
+
+fn conv_grantrolestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::GrantRoleStmt,
+) -> PgResult<tdn::GrantRoleStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::GrantRoleStmt {
+        granted_roles: node_list(mcx, s.granted_roles)?,
+        grantee_roles: node_list(mcx, s.grantee_roles)?,
+        is_grant: s.is_grant,
+        opt: node_list(mcx, s.opt)?,
+        grantor: child_node_opt(mcx, s.grantor)?,
+        behavior: drop_behavior(s.behavior),
+    })
+}
+
+fn conv_variablesetstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::VariableSetStmt,
+) -> PgResult<tdn::VariableSetStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::VariableSetStmt {
+        kind: variable_set_kind(s.kind),
+        name: cstr_opt(mcx, s.name)?,
+        args: node_list(mcx, s.args)?,
+        jumble_args: s.jumble_args,
+        is_local: s.is_local,
+        location: s.location,
+    })
+}
+
+fn conv_variableshowstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::VariableShowStmt,
+) -> PgResult<tdn::VariableShowStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::VariableShowStmt { name: cstr_opt(mcx, s.name)? })
+}
+
+fn conv_transactionstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::TransactionStmt,
+) -> PgResult<tdn::TransactionStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::TransactionStmt {
+        kind: transaction_stmt_kind(s.kind),
+        options: node_list(mcx, s.options)?,
+        savepoint_name: cstr_opt(mcx, s.savepoint_name)?,
+        gid: cstr_opt(mcx, s.gid)?,
+        chain: s.chain,
+        location: s.location,
+    })
+}
+
+fn conv_copystmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::CopyStmt) -> PgResult<tdn::CopyStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CopyStmt {
+        relation: child_node_opt(mcx, s.relation)?,
+        query: node_opt(mcx, s.query)?,
+        attlist: node_list(mcx, s.attlist)?,
+        is_from: s.is_from,
+        is_program: s.is_program,
+        filename: cstr_opt(mcx, s.filename)?,
+        options: node_list(mcx, s.options)?,
+        where_clause: node_opt(mcx, s.whereClause)?,
+    })
+}
+
+fn conv_explainstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ExplainStmt,
+) -> PgResult<tdn::ExplainStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ExplainStmt {
+        query: node_opt(mcx, s.query)?,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_preparestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::PrepareStmt,
+) -> PgResult<tdn::PrepareStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::PrepareStmt {
+        name: cstr_opt(mcx, s.name)?,
+        argtypes: node_list(mcx, s.argtypes)?,
+        query: node_opt(mcx, s.query)?,
+    })
+}
+
+fn conv_executestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ExecuteStmt,
+) -> PgResult<tdn::ExecuteStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ExecuteStmt {
+        name: cstr_opt(mcx, s.name)?,
+        params: node_list(mcx, s.params)?,
+    })
+}
+
+fn conv_deallocatestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DeallocateStmt,
+) -> PgResult<tdn::DeallocateStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DeallocateStmt {
+        name: cstr_opt(mcx, s.name)?,
+        isall: s.isall,
+        location: s.location,
+    })
+}
+
+fn conv_declarecursorstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DeclareCursorStmt,
+) -> PgResult<tdn::DeclareCursorStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DeclareCursorStmt {
+        portalname: cstr_opt(mcx, s.portalname)?,
+        options: s.options,
+        query: node_opt(mcx, s.query)?,
+    })
+}
+
+fn conv_closeportalstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ClosePortalStmt,
+) -> PgResult<tdn::ClosePortalStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ClosePortalStmt { portalname: cstr_opt(mcx, s.portalname)? })
+}
+
+fn conv_fetchstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::FetchStmt) -> PgResult<tdn::FetchStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::FetchStmt {
+        direction: fetch_direction(s.direction),
+        how_many: s.howMany as i64,
+        portalname: cstr_opt(mcx, s.portalname)?,
+        ismove: s.ismove,
+    })
+}
+
+fn conv_vacuumstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::VacuumStmt) -> PgResult<tdn::VacuumStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::VacuumStmt {
+        options: node_list(mcx, s.options)?,
+        rels: node_list(mcx, s.rels)?,
+        is_vacuumcmd: s.is_vacuumcmd,
+    })
+}
+
+fn conv_vacuumrelation<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::VacuumRelation,
+) -> PgResult<tdn::VacuumRelation<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::VacuumRelation {
+        relation: child_node_opt(mcx, s.relation)?,
+        oid: s.oid,
+        va_cols: node_list(mcx, s.va_cols)?,
+    })
+}
+
+fn conv_clusterstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ClusterStmt,
+) -> PgResult<tdn::ClusterStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ClusterStmt {
+        relation: child_node_opt(mcx, s.relation)?,
+        indexname: cstr_opt(mcx, s.indexname)?,
+        params: node_list(mcx, s.params)?,
+    })
+}
+
+fn conv_reindexstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ReindexStmt,
+) -> PgResult<tdn::ReindexStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ReindexStmt {
+        kind: reindex_object_type(s.kind),
+        relation: child_node_opt(mcx, s.relation)?,
+        name: cstr_opt(mcx, s.name as *mut core::ffi::c_char)?,
+        params: node_list(mcx, s.params)?,
+    })
+}
+
+fn conv_discardstmt(p: *mut cd::DiscardStmt) -> tdn::DiscardStmt {
+    let s = unsafe { &*p };
+    tdn::DiscardStmt { target: discard_mode(s.target) }
+}
+
+fn conv_lockstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::LockStmt) -> PgResult<tdn::LockStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::LockStmt {
+        relations: node_list(mcx, s.relations)?,
+        mode: s.mode,
+        nowait: s.nowait,
+    })
+}
+
+fn conv_constraintssetstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ConstraintsSetStmt,
+) -> PgResult<tdn::ConstraintsSetStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ConstraintsSetStmt {
+        constraints: node_list(mcx, s.constraints)?,
+        deferred: s.deferred,
+    })
+}
+
+fn conv_loadstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::LoadStmt) -> PgResult<tdn::LoadStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::LoadStmt { filename: cstr_opt(mcx, s.filename)? })
+}
+
+fn conv_truncatestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::TruncateStmt,
+) -> PgResult<tdn::TruncateStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::TruncateStmt {
+        relations: node_list(mcx, s.relations)?,
+        restart_seqs: s.restart_seqs,
+        behavior: drop_behavior(s.behavior),
+    })
+}
+
+fn conv_commentstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CommentStmt,
+) -> PgResult<tdn::CommentStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CommentStmt {
+        objtype: object_type(s.objtype),
+        object: node_opt(mcx, s.object)?,
+        comment: cstr_opt(mcx, s.comment)?,
+    })
+}
+
+fn conv_seclabelstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::SecLabelStmt,
+) -> PgResult<tdn::SecLabelStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::SecLabelStmt {
+        objtype: object_type(s.objtype),
+        object: node_opt(mcx, s.object)?,
+        provider: cstr_opt(mcx, s.provider)?,
+        label: cstr_opt(mcx, s.label)?,
+    })
+}
+
+fn conv_rulestmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::RuleStmt) -> PgResult<tdn::RuleStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::RuleStmt {
+        relation: child_node_opt(mcx, s.relation)?,
+        rulename: cstr_opt(mcx, s.rulename)?,
+        where_clause: node_opt(mcx, s.whereClause)?,
+        event: cmd_type(s.event),
+        instead: s.instead,
+        actions: node_list(mcx, s.actions)?,
+        replace: s.replace,
+    })
+}
+
+fn conv_notifystmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::NotifyStmt) -> PgResult<tdn::NotifyStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::NotifyStmt {
+        conditionname: cstr_opt(mcx, s.conditionname)?,
+        payload: cstr_opt(mcx, s.payload)?,
+    })
+}
+
+fn conv_listenstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::ListenStmt) -> PgResult<tdn::ListenStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ListenStmt { conditionname: cstr_opt(mcx, s.conditionname)? })
+}
+
+fn conv_unlistenstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::UnlistenStmt,
+) -> PgResult<tdn::UnlistenStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::UnlistenStmt { conditionname: cstr_opt(mcx, s.conditionname)? })
+}
+
+fn conv_dostmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::DoStmt) -> PgResult<tdn::DoStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DoStmt { args: node_list(mcx, s.args)? })
+}
+
+fn conv_callstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::CallStmt) -> PgResult<tdn::CallStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CallStmt {
+        funccall: child_node_opt(mcx, s.funccall)?,
+        funcexpr: child_node_opt(mcx, s.funcexpr)?,
+        outargs: node_list(mcx, s.outargs)?,
+    })
+}
+
+fn conv_refreshmatviewstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::RefreshMatViewStmt,
+) -> PgResult<tdn::RefreshMatViewStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::RefreshMatViewStmt {
+        concurrent: s.concurrent,
+        skip_data: s.skipData,
+        relation: child_node_opt(mcx, s.relation)?,
+    })
+}
+
+fn conv_altersystemstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::AlterSystemStmt,
+) -> PgResult<tdn::AlterSystemStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::AlterSystemStmt { setstmt: child_node_opt(mcx, s.setstmt)? })
+}
+
+fn conv_dropdbstmt<'mcx>(mcx: Mcx<'mcx>, p: *mut cd::DropdbStmt) -> PgResult<tdn::DropdbStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DropdbStmt {
+        dbname: cstr_opt(mcx, s.dbname)?,
+        missing_ok: s.missing_ok,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_droprolestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DropRoleStmt,
+) -> PgResult<tdn::DropRoleStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DropRoleStmt {
+        roles: node_list(mcx, s.roles)?,
+        missing_ok: s.missing_ok,
+    })
+}
+
+fn conv_droptablespacestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DropTableSpaceStmt,
+) -> PgResult<tdn::DropTableSpaceStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DropTableSpaceStmt {
+        tablespacename: cstr_opt(mcx, s.tablespacename)?,
+        missing_ok: s.missing_ok,
+    })
+}
+
+fn conv_createfdwstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateFdwStmt,
+) -> PgResult<tdn::CreateFdwStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateFdwStmt {
+        fdwname: cstr_opt(mcx, s.fdwname)?,
+        func_options: node_list(mcx, s.func_options)?,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_createforeignserverstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateForeignServerStmt,
+) -> PgResult<tdn::CreateForeignServerStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateForeignServerStmt {
+        servername: cstr_opt(mcx, s.servername)?,
+        servertype: cstr_opt(mcx, s.servertype)?,
+        version: cstr_opt(mcx, s.version)?,
+        fdwname: cstr_opt(mcx, s.fdwname)?,
+        if_not_exists: s.if_not_exists,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_createforeigntablestmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateForeignTableStmt,
+) -> PgResult<tdn::CreateForeignTableStmt<'mcx>> {
+    let s = unsafe { &*p };
+    let base = conv_createstmt(mcx, &s.base as *const cd::CreateStmt as *mut cd::CreateStmt)?;
+    Ok(tdn::CreateForeignTableStmt {
+        base: mcx::alloc_in(mcx, base)?,
+        servername: cstr_opt(mcx, s.servername)?,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_createusermappingstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateUserMappingStmt,
+) -> PgResult<tdn::CreateUserMappingStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateUserMappingStmt {
+        user: child_node_opt(mcx, s.user)?,
+        servername: cstr_opt(mcx, s.servername)?,
+        if_not_exists: s.if_not_exists,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_dropusermappingstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DropUserMappingStmt,
+) -> PgResult<tdn::DropUserMappingStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DropUserMappingStmt {
+        user: child_node_opt(mcx, s.user)?,
+        servername: cstr_opt(mcx, s.servername)?,
+        missing_ok: s.missing_ok,
+    })
+}
+
+fn conv_importforeignschemastmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::ImportForeignSchemaStmt,
+) -> PgResult<tdn::ImportForeignSchemaStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::ImportForeignSchemaStmt {
+        server_name: cstr_opt(mcx, s.server_name)?,
+        remote_schema: cstr_opt(mcx, s.remote_schema)?,
+        local_schema: cstr_opt(mcx, s.local_schema)?,
+        list_type: import_foreign_schema_type(s.list_type),
+        table_list: node_list(mcx, s.table_list)?,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_createpolicystmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreatePolicyStmt,
+) -> PgResult<tdn::CreatePolicyStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreatePolicyStmt {
+        policy_name: cstr_opt(mcx, s.policy_name)?,
+        table: child_node_opt(mcx, s.table)?,
+        cmd_name: cstr_opt(mcx, s.cmd_name)?,
+        permissive: s.permissive,
+        roles: node_list(mcx, s.roles)?,
+        qual: node_opt(mcx, s.qual)?,
+        with_check: node_opt(mcx, s.with_check)?,
+    })
+}
+
+fn conv_publicationtable<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::PublicationTable,
+) -> PgResult<tdn::PublicationTable<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::PublicationTable {
+        relation: child_node_opt(mcx, s.relation)?,
+        where_clause: node_opt(mcx, s.whereClause)?,
+        columns: node_list(mcx, s.columns)?,
+    })
+}
+
+fn conv_publicationobjspec<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::PublicationObjSpec,
+) -> PgResult<tdn::PublicationObjSpec<'mcx>> {
+    let s = unsafe { &*p };
+    let pubtable = child_opt(mcx, s.pubtable, conv_publicationtable)?;
+    Ok(tdn::PublicationObjSpec {
+        pubobjtype: publication_obj_spec_type(s.pubobjtype),
+        name: cstr_opt(mcx, s.name)?,
+        pubtable,
+        location: s.location,
+    })
+}
+
+fn conv_createpublicationstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreatePublicationStmt,
+) -> PgResult<tdn::CreatePublicationStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreatePublicationStmt {
+        pubname: cstr_opt(mcx, s.pubname)?,
+        options: node_list(mcx, s.options)?,
+        pubobjects: node_list(mcx, s.pubobjects)?,
+        for_all_tables: s.for_all_tables,
+    })
+}
+
+fn conv_createsubscriptionstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateSubscriptionStmt,
+) -> PgResult<tdn::CreateSubscriptionStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateSubscriptionStmt {
+        subname: cstr_opt(mcx, s.subname)?,
+        conninfo: cstr_opt(mcx, s.conninfo)?,
+        publication: node_list(mcx, s.publication)?,
+        options: node_list(mcx, s.options)?,
+    })
+}
+
+fn conv_dropsubscriptionstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::DropSubscriptionStmt,
+) -> PgResult<tdn::DropSubscriptionStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::DropSubscriptionStmt {
+        subname: cstr_opt(mcx, s.subname)?,
+        missing_ok: s.missing_ok,
+        behavior: drop_behavior(s.behavior),
+    })
+}
+
+fn conv_createeventtrigstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateEventTrigStmt,
+) -> PgResult<tdn::CreateEventTrigStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateEventTrigStmt {
+        trigname: cstr_opt(mcx, s.trigname)?,
+        eventname: cstr_opt(mcx, s.eventname)?,
+        whenclause: node_list(mcx, s.whenclause)?,
+        funcname: node_list(mcx, s.funcname)?,
+    })
+}
+
+fn conv_altereventtrigstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::AlterEventTrigStmt,
+) -> PgResult<tdn::AlterEventTrigStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::AlterEventTrigStmt {
+        trigname: cstr_opt(mcx, s.trigname)?,
+        tgenabled: s.tgenabled as i8,
+    })
+}
+
+fn conv_createtransformstmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cd::CreateTransformStmt,
+) -> PgResult<tdn::CreateTransformStmt<'mcx>> {
+    let s = unsafe { &*p };
+    Ok(tdn::CreateTransformStmt {
+        replace: s.replace,
+        type_name: child_node_opt(mcx, s.type_name)?,
+        lang: cstr_opt(mcx, s.lang)?,
+        fromsql: child_node_opt(mcx, s.fromsql)?,
+        tosql: child_node_opt(mcx, s.tosql)?,
+    })
+}
