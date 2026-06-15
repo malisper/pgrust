@@ -948,14 +948,17 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-gist-core-seams",
  "backend-access-gist-dispatch-seams",
+ "backend-access-heap-heapam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-transam-xlog-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-predicate-seams",
  "backend-storage-page",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "pg-prng",
  "types-core",
@@ -974,7 +977,9 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-gist",
  "types-rel",
+ "types-storage",
  "types-wal",
 ]
 
@@ -8232,6 +8237,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-paramassign"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-equalfuncs",
+ "backend-nodes-equalfuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-rewrite-core",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-paramassign-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-util-pathkeys-seams"
 version = "0.0.0"
 dependencies = [
@@ -8410,6 +8445,7 @@ version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-optimizer-path-indxpath",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-var-seams",
  "mcx",
@@ -9829,8 +9865,10 @@ dependencies = [
 name = "backend-replication-logical-reorderbuffer"
 version = "0.0.0"
 dependencies = [
+ "backend-lib-binaryheap",
  "backend-replication-logical-reorderbuffer-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-cache-inval-seams",
  "mcx",
  "types-core",
  "types-error",
@@ -15249,6 +15287,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-inherit-predtest",
  "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-paramassign",
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",

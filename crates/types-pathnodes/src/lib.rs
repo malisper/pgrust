@@ -2018,6 +2018,12 @@ pub struct PlannerInfo {
     pub glob: Option<Box<PlannerGlobal>>,
     /// `Index query_level` — 1 at the outermost Query.
     pub query_level: Index,
+    /// `PlannerInfo *parent_root` — NULL at the top level, else the
+    /// PlannerInfo for the immediately surrounding Query. paramassign's
+    /// `assign_param_for_var` / `replace_outer_*` walk this chain up
+    /// `varlevelsup`/`phlevelsup`/`agglevelsup` levels to reach the query level
+    /// that must supply an outer-referenced value.
+    pub parent_root: Option<Box<PlannerInfo>>,
     /// `List *plan_params` — PlannerParamItems this level exposes to a lower
     /// level (opaque node handles).
     pub plan_params: Vec<NodeId>,
@@ -2238,6 +2244,66 @@ pub enum ArenaNode {
     /// An `AggTransInfo` node — `PlannerInfo::aggtransinfos` stores these as
     /// `Node *` handles in the same id-space.
     AggTransInfo(AggTransInfo),
+    /// A `PlannerParamItem` node — `PlannerInfo::plan_params` /
+    /// `RelOptInfo::subplan_params` store these as `Node *` handles in the same
+    /// id-space.
+    PlannerParamItem(PlannerParamItem),
+    /// A `NestLoopParam` node — `PlannerInfo::curOuterParams` stores these as
+    /// `Node *` handles in the same id-space.
+    NestLoopParam(NestLoopParamNode),
+}
+
+/// `NestLoopParam` (nodes/plannodes.h) as carried in `root->curOuterParams`
+/// during createplan:
+///
+/// ```c
+/// typedef struct NestLoopParam
+/// {
+///     NodeTag     type;
+///     int         paramno;        /* number of the PARAM_EXEC Param to set */
+///     Var        *paramval;       /* outer-relation Var to assign to Param */
+/// } NestLoopParam;
+/// ```
+///
+/// CARRIER (`paramval`): the C `paramval` is typed `Var *` but the paramassign /
+/// createplan code legitimately stores a `PlaceHolderVar *` there too (the two
+/// node kinds drive a NestLoop equivalently; `identify_current_nestloop_params`
+/// dispatches on `IsA(nlp->paramval, Var)` / `IsA(..., PlaceHolderVar)`). The
+/// executor-side [`types_nodes::nodenestloop::NestLoopParam`] keeps the strict
+/// `Var` field; this planner-working carrier widens `paramval` to the
+/// [`types_nodes::primnodes::Expr`] union so a PHV survives in `curOuterParams`
+/// until `identify_current_nestloop_params` extracts it.
+#[derive(Clone, Debug)]
+pub struct NestLoopParamNode {
+    /// `int paramno` — number of the PARAM_EXEC Param to set.
+    pub paramno: i32,
+    /// `Var *paramval` — outer-relation Var (or PlaceHolderVar) to assign.
+    pub paramval: types_nodes::primnodes::Expr,
+}
+
+/// `PlannerParamItem` (nodes/pathnodes.h):
+///
+/// ```c
+/// typedef struct PlannerParamItem
+/// {
+///     NodeTag     type;
+///     Node       *item;       /* the Var, PlaceHolderVar, or Aggref */
+///     int         paramId;    /* its assigned PARAM_EXEC slot number */
+/// } PlannerParamItem;
+/// ```
+///
+/// CARRIER (`item`): the C `item` is a `Node *` pointing at the copied
+/// `Var`/`PlaceHolderVar`/`Aggref` value. paramassign's `assign_param_for_*`
+/// interns that copied node into [`PlannerInfo::node_arena`] (as an
+/// [`ArenaNode::Expr`]) and stores the resulting [`NodeId`] handle here, so
+/// consumers (`process_subquery_nestloop_params`) can `node()`-resolve it and
+/// `IsA`-test the variant.
+#[derive(Clone, Debug, Default)]
+pub struct PlannerParamItem {
+    /// `Node *item` — the Var/PlaceHolderVar/Aggref (an arena handle).
+    pub item: NodeId,
+    /// `int paramId` — its assigned PARAM_EXEC slot number.
+    pub paramId: i32,
 }
 
 /// `AggInfo` (nodes/pathnodes.h) — per-aggregate state collected by
@@ -2577,6 +2643,52 @@ impl PlannerInfo {
             ),
         }
     }
+    /// Resolve a [`NodeId`] to its [`PlannerParamItem`] (a `plan_params` /
+    /// `subplan_params` element).
+    #[inline]
+    pub fn planner_param_item(&self, id: NodeId) -> &PlannerParamItem {
+        match &self.node_arena[id.index()] {
+            ArenaNode::PlannerParamItem(p) => p,
+            _ => panic!(
+                "PlannerInfo::planner_param_item: NodeId {} does not resolve to a PlannerParamItem",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`PlannerParamItem`] for mutation.
+    #[inline]
+    pub fn planner_param_item_mut(&mut self, id: NodeId) -> &mut PlannerParamItem {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::PlannerParamItem(p) => p,
+            _ => panic!(
+                "PlannerInfo::planner_param_item_mut: NodeId {} does not resolve to a PlannerParamItem",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`NestLoopParamNode`] (a `curOuterParams`
+    /// element).
+    #[inline]
+    pub fn nestloop_param(&self, id: NodeId) -> &NestLoopParamNode {
+        match &self.node_arena[id.index()] {
+            ArenaNode::NestLoopParam(n) => n,
+            _ => panic!(
+                "PlannerInfo::nestloop_param: NodeId {} does not resolve to a NestLoopParam",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`NestLoopParamNode`] for mutation.
+    #[inline]
+    pub fn nestloop_param_mut(&mut self, id: NodeId) -> &mut NestLoopParamNode {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::NestLoopParam(n) => n,
+            _ => panic!(
+                "PlannerInfo::nestloop_param_mut: NodeId {} does not resolve to a NestLoopParam",
+                id.0
+            ),
+        }
+    }
 
     /// Push a [`RelOptInfo`] into the arena, returning its [`RelId`].
     #[inline]
@@ -2661,6 +2773,26 @@ impl PlannerInfo {
     pub fn alloc_agg_trans_info(&mut self, a: AggTransInfo) -> NodeId {
         let id = NodeId(self.node_arena.len() as u32);
         self.node_arena.push(ArenaNode::AggTransInfo(a));
+        id
+    }
+    /// Intern a [`PlannerParamItem`] into the node store, returning its
+    /// [`NodeId`] handle (`root->plan_params` / `subplan_params` elements).
+    /// Producer: paramassign's `assign_param_for_var` /
+    /// `assign_param_for_placeholdervar`.
+    #[inline]
+    pub fn alloc_planner_param_item(&mut self, p: PlannerParamItem) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::PlannerParamItem(p));
+        id
+    }
+    /// Intern a [`NestLoopParamNode`] into the node store, returning its
+    /// [`NodeId`] handle (`root->curOuterParams` elements). Producer:
+    /// paramassign's `replace_nestloop_param_*` /
+    /// `process_subquery_nestloop_params`.
+    #[inline]
+    pub fn alloc_nestloop_param(&mut self, n: NestLoopParamNode) -> NodeId {
+        let id = NodeId(self.node_arena.len() as u32);
+        self.node_arena.push(ArenaNode::NestLoopParam(n));
         id
     }
 }

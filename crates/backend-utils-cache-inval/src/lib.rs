@@ -307,6 +307,9 @@ pub fn init_seams() {
     // Immediate smgr-close invalidation broadcast (consumed by visibilitymap.c
     // `vm_extend` / freespace.c `fsm_extend` after a fork extension).
     seams::cache_invalidate_smgr::set(cache_invalidate::CacheInvalidateSmgr);
+    // Single-message local execution (consumed by logical decoding's
+    // ReorderBufferExecuteInvalidations).
+    seams::local_execute_invalidation_message::set(local_list::LocalExecuteInvalidationMessage);
     seams::cache_invalidate_relcache_by_pg_class::set(
         cache_invalidate::CacheInvalidateRelcacheByPgClass,
     );

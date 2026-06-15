@@ -9,7 +9,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
+use types_core::primitive::{RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
 use types_storage::sinval::SharedInvalidationMessage;
 use types_storage::RelFileLocator;
@@ -189,4 +189,44 @@ seam_core::seam!(
 seam_core::seam!(
     /// `rbtxn_is_prepared(txn)` for a `ReorderBufferTXN`.
     pub fn reorder_buffer_txn_is_prepared(rb: ReorderBufferHandle, txn: TxnHandle) -> bool
+);
+
+// ---------------------------------------------------------------------------
+// Seams consumed by decode.c (the change-replay entry points).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ReorderBufferAssignChild(rb, xid, subxid, lsn)` — record that `subxid`
+    /// is a subtransaction of `xid`, as of `lsn`.
+    pub fn ReorderBufferAssignChild(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        subxid: TransactionId,
+        lsn: XLogRecPtr,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferCommitChild(rb, xid, subxid, commit_lsn, end_lsn)` —
+    /// associate a subtransaction with its toplevel txn at commit time.
+    pub fn ReorderBufferCommitChild(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        subxid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+    )
+);
+seam_core::seam!(
+    /// `ReorderBufferCommit(rb, xid, commit_lsn, end_lsn, commit_time,
+    /// origin_id, origin_lsn)` — replay a committed transaction to the output
+    /// plugin.
+    pub fn ReorderBufferCommit(
+        rb: ReorderBufferHandle,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+    )
 );

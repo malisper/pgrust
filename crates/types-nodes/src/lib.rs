@@ -39,6 +39,7 @@ pub mod nodebitmapand;
 pub mod nodebitmapheapscan;
 pub mod nodebitmapor;
 pub mod nodeforeigncustom;
+pub mod nodefunctionscan;
 pub mod nodegather;
 pub mod nodegathermerge;
 pub mod nodegroup;
