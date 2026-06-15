@@ -2728,6 +2728,7 @@ dependencies = [
  "types-cluster",
  "types-core",
  "types-error",
+ "types-foreigncmds",
  "types-rel",
  "types-tuple",
 ]
@@ -6277,6 +6278,10 @@ name = "backend-foreign-foreign"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions",
+ "backend-access-table-table",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-foreign-fdwapi-seams",
  "backend-foreign-foreign-seams",
  "backend-utils-adt-varlena",
@@ -6288,12 +6293,14 @@ dependencies = [
  "backend-utils-misc-guc-tables-seams",
  "mcx",
  "types-cache",
+ "types-catalog",
  "types-core",
  "types-error",
  "types-foreigncmds",
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 

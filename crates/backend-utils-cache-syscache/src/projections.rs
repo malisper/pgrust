@@ -15,8 +15,8 @@ use types_datum::Datum as KeyDatum;
 
 use crate::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList, SearchSysCacheList1,
-    SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, PROCOID,
-    RELOID,
+    SysCacheGetAttr, SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET,
+    CLAOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, PROCOID, RELOID, USERMAPPINGOID,
 };
 use backend_utils_cache_syscache_seams::CastRow;
 use backend_nodes_read_seams as nodes_read_seams;
@@ -55,6 +55,11 @@ const Anum_pg_proc_proargdefaults: i32 = 24;
 // `catalog/pg_aggregate.h` attribute numbers.
 const Anum_pg_aggregate_aggkind: i32 = 2;
 const Anum_pg_aggregate_aggnumdirectargs: i32 = 3;
+
+// `catalog/pg_foreign_*.h` `*options` `text[]` attribute numbers.
+const Anum_pg_foreign_data_wrapper_fdwoptions: i32 = 7;
+const Anum_pg_foreign_server_srvoptions: i32 = 8;
+const Anum_pg_user_mapping_umoptions: i32 = 4;
 
 // `catalog/pg_amproc.h` attribute numbers.
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -293,6 +298,97 @@ pub(crate) fn proc_argdefaults<'mcx>(
             "proargdefaults: stringToNode did not yield a List",
         )),
     }
+}
+
+/// `SysCacheGetAttr(cacheId, tup, attnum)` for a `text[]` (`*options`) column:
+/// `Some(Some(bytes))` with the detoasted varlena, `Some(None)` when the column
+/// is SQL NULL. (The caller maps the outer `Option` to "tuple present".)
+fn getattr_option_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let (value, is_null) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if is_null {
+        return Ok(None);
+    }
+    match &value {
+        Datum::ByRef(b) => Ok(Some(mcx::slice_in(mcx, &b[..])?)),
+        Datum::ByVal(_) => Err(PgError::error(
+            "syscache projection: *options attribute is by-value",
+        )),
+    }
+}
+
+/// `SearchSysCache1(FOREIGNDATAWRAPPEROID, fdwid)` then
+/// `SysCacheGetAttr(Anum_pg_foreign_data_wrapper_fdwoptions)` (the raw
+/// `fdwoptions` `text[]`). `Ok(None)` on a cache miss.
+pub(crate) fn foreign_data_wrapper_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    fdwid: Oid,
+) -> PgResult<Option<Option<PgVec<'mcx, u8>>>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNDATAWRAPPEROID,
+        SysCacheKey::Value(KeyDatum::from_oid(fdwid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let bytes = getattr_option_bytes(
+        mcx,
+        FOREIGNDATAWRAPPEROID,
+        &tup,
+        Anum_pg_foreign_data_wrapper_fdwoptions,
+    )?;
+    ReleaseSysCache(tup);
+    Ok(Some(bytes))
+}
+
+/// `SearchSysCache1(FOREIGNSERVEROID, serverid)` then
+/// `SysCacheGetAttr(Anum_pg_foreign_server_srvoptions)`. `Ok(None)` on a cache
+/// miss.
+pub(crate) fn foreign_server_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    serverid: Oid,
+) -> PgResult<Option<Option<PgVec<'mcx, u8>>>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        FOREIGNSERVEROID,
+        SysCacheKey::Value(KeyDatum::from_oid(serverid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let bytes = getattr_option_bytes(
+        mcx,
+        FOREIGNSERVEROID,
+        &tup,
+        Anum_pg_foreign_server_srvoptions,
+    )?;
+    ReleaseSysCache(tup);
+    Ok(Some(bytes))
+}
+
+/// `SearchSysCache1(USERMAPPINGOID, umid)` then
+/// `SysCacheGetAttr(Anum_pg_user_mapping_umoptions)`. `Ok(None)` on a cache
+/// miss.
+pub(crate) fn user_mapping_options_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    umid: Oid,
+) -> PgResult<Option<Option<PgVec<'mcx, u8>>>> {
+    let tuple = SearchSysCache1(
+        mcx,
+        USERMAPPINGOID,
+        SysCacheKey::Value(KeyDatum::from_oid(umid)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let bytes = getattr_option_bytes(mcx, USERMAPPINGOID, &tup, Anum_pg_user_mapping_umoptions)?;
+    ReleaseSysCache(tup);
+    Ok(Some(bytes))
 }
 
 /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` projected to the

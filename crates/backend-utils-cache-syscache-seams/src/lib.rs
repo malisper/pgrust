@@ -1600,6 +1600,42 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid))` then
+    /// `SysCacheGetAttr(Anum_pg_foreign_data_wrapper_fdwoptions)`: the raw
+    /// `fdwoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+    /// `Ok(None)` on a cache miss. The caller (`AlterForeignDataWrapper`) runs
+    /// `untransformRelOptions` on the bytes.
+    pub fn foreign_data_wrapper_options<'mcx>(
+        mcx: Mcx<'mcx>,
+        fdwid: Oid,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid))` then
+    /// `SysCacheGetAttr(Anum_pg_foreign_server_srvoptions)`: the raw
+    /// `srvoptions` `text[]` (`Some(bytes)`), or `None` when SQL NULL.
+    /// `Ok(None)` on a cache miss. The caller (`AlterForeignServer`) runs
+    /// `untransformRelOptions` on the bytes.
+    pub fn foreign_server_options<'mcx>(
+        mcx: Mcx<'mcx>,
+        serverid: Oid,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(USERMAPPINGOID, ObjectIdGetDatum(umid))` then
+    /// `SysCacheGetAttr(Anum_pg_user_mapping_umoptions)`: the raw `umoptions`
+    /// `text[]` (`Some(bytes)`), or `None` when SQL NULL. `Ok(None)` on a cache
+    /// miss. The caller (`AlterUserMapping`) runs `untransformRelOptions` on the
+    /// bytes.
+    pub fn user_mapping_options_by_oid<'mcx>(
+        mcx: Mcx<'mcx>,
+        umid: Oid,
+    ) -> PgResult<Option<Option<PgVec<'mcx, u8>>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache2(USERMAPPINGUSERSERVER, ObjectIdGetDatum(userid),
     /// ObjectIdGetDatum(serverid))` projected to the mapping OID
     /// (`Form_pg_user_mapping.oid`) plus the raw `umoptions` `text[]`
