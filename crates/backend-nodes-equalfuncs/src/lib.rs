@@ -281,20 +281,15 @@ fn equal_sub_link(a: &SubLink, b: &SubLink) -> bool {
 }
 
 /// `COMPARE_NODE_FIELD(subselect)` over the embedded `Query`. Both `None` is
-/// equal; both `Some` defers to the per-node `Query` comparator. `_equalQuery`
-/// is not yet reachable through `equal()` in the ported layer (the analyzed
-/// SubLink with an embedded `Query` is only produced once `transformSubLink` is
-/// ported), so this seam-and-panics rather than returning a silent wrong answer.
+/// equal; both `Some` defers to the per-node `Query` comparator [`equal_query`]
+/// (`_equalQuery`).
 fn equal_opt_subselect(
     a: Option<&types_nodes::copy_query::Query<'_>>,
     b: Option<&types_nodes::copy_query::Query<'_>>,
 ) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(_), Some(_)) => panic!(
-            "equalfuncs: _equalQuery (SubLink.subselect) not yet ported for \
-             equal()"
-        ),
+        (Some(x), Some(y)) => equal_query(x, y),
         _ => false,
     }
 }
@@ -591,6 +586,397 @@ fn equal_sort_group_clause(a: &SortGroupClause, b: &SortGroupClause) -> bool {
 }
 
 // ===========================================================================
+// Query-tree comparators (_equalRangeTblEntry, _equalQuery, ...)
+//
+// These mirror the `gen_node_support.pl`-generated comparators in
+// `equalfuncs.funcs.c` for the parse/analyze/rewrite node universe. They are
+// reachable through `equal()` via `SubLink.subselect` (an analyzed SubLink
+// embeds an owned `Query`) and via the `Node`-list fields of `Query`/its
+// sub-nodes (compared element-wise by [`equal_node`]).
+// ===========================================================================
+
+use types_nodes::nodes::NodePtr;
+
+/// `COMPARE_NODE_FIELD` over a child `Node *` carried as a [`NodePtr`]
+/// (`PgBox<Node>`): both NULL is equal; one NULL is unequal; else recurse into
+/// [`equal_node`].
+#[inline]
+fn equal_opt_node(a: Option<&NodePtr<'_>>, b: Option<&NodePtr<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => equal_node(x, y),
+        _ => false,
+    }
+}
+
+/// `COMPARE_NODE_FIELD` over a `List *` carried as a `PgVec<NodePtr>`
+/// (`_equalList`): equal length, then element-wise [`equal_node`].
+#[inline]
+fn equal_node_list(a: &[NodePtr<'_>], b: &[NodePtr<'_>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| equal_node(x, y))
+}
+
+/// `COMPARE_BITMAPSET_FIELD` — `bms_equal(a, b)`: both NULL is equal; one NULL
+/// is unequal; else compare the (canonicalized) word storage. Mirrors
+/// `backend-nodes-core::bitmapset::bms_equal`.
+#[inline]
+fn equal_bms(
+    a: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
+    b: Option<&types_nodes::bitmapset::Bitmapset<'_>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.words == y.words,
+        _ => false,
+    }
+}
+
+/// `_equalAlias` (equalfuncs.funcs.c).
+fn equal_alias(a: &types_nodes::rawnodes::Alias<'_>, b: &types_nodes::rawnodes::Alias<'_>) -> bool {
+    equalstr(a.aliasname.as_deref(), b.aliasname.as_deref())
+        && equal_node_list(&a.colnames, &b.colnames)
+}
+
+/// `COMPARE_NODE_FIELD` over an optional `Alias *`.
+#[inline]
+fn equal_opt_alias(
+    a: Option<&types_nodes::rawnodes::Alias<'_>>,
+    b: Option<&types_nodes::rawnodes::Alias<'_>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => equal_alias(x, y),
+        _ => false,
+    }
+}
+
+/// `_equalRangeTblEntry` (equalfuncs.funcs.c). Note: the C `List *` fields
+/// `joinleftcols`/`joinrightcols`/`coltypes`/`coltypmods`/`colcollations` carry
+/// Integer/Oid value nodes; this repo holds them as scalar `PgVec`s, so the
+/// node-list compare reduces to slice equality (same semantics).
+fn equal_range_tbl_entry(
+    a: &types_nodes::parsenodes::RangeTblEntry<'_>,
+    b: &types_nodes::parsenodes::RangeTblEntry<'_>,
+) -> bool {
+    equal_opt_alias(a.alias.as_deref(), b.alias.as_deref())
+        && equal_opt_alias(a.eref.as_deref(), b.eref.as_deref())
+        && a.rtekind == b.rtekind
+        && a.relid == b.relid
+        && a.inh == b.inh
+        && a.relkind == b.relkind
+        && a.rellockmode == b.rellockmode
+        && a.perminfoindex == b.perminfoindex
+        && equal_opt_node(a.tablesample.as_ref(), b.tablesample.as_ref())
+        && equal_opt_subselect(a.subquery.as_deref(), b.subquery.as_deref())
+        && a.security_barrier == b.security_barrier
+        && a.jointype == b.jointype
+        && a.joinmergedcols == b.joinmergedcols
+        && equal_node_list(&a.joinaliasvars, &b.joinaliasvars)
+        && a.joinleftcols == b.joinleftcols
+        && a.joinrightcols == b.joinrightcols
+        && equal_opt_alias(a.join_using_alias.as_deref(), b.join_using_alias.as_deref())
+        && equal_node_list(&a.functions, &b.functions)
+        && a.funcordinality == b.funcordinality
+        && equal_opt_node(a.tablefunc.as_ref(), b.tablefunc.as_ref())
+        && equal_node_list(&a.values_lists, &b.values_lists)
+        && equalstr(a.ctename.as_deref(), b.ctename.as_deref())
+        && a.ctelevelsup == b.ctelevelsup
+        && a.self_reference == b.self_reference
+        && a.coltypes == b.coltypes
+        && a.coltypmods == b.coltypmods
+        && a.colcollations == b.colcollations
+        && equalstr(a.enrname.as_deref(), b.enrname.as_deref())
+        && a.enrtuples == b.enrtuples
+        && equal_node_list(&a.groupexprs, &b.groupexprs)
+        && a.lateral == b.lateral
+        && a.inFromCl == b.inFromCl
+        && equal_node_list(&a.securityQuals, &b.securityQuals)
+}
+
+/// `_equalRTEPermissionInfo` (equalfuncs.funcs.c).
+fn equal_rte_permission_info(
+    a: &types_nodes::parsenodes::RTEPermissionInfo<'_>,
+    b: &types_nodes::parsenodes::RTEPermissionInfo<'_>,
+) -> bool {
+    a.relid == b.relid
+        && a.inh == b.inh
+        && a.requiredPerms == b.requiredPerms
+        && a.checkAsUser == b.checkAsUser
+        && equal_bms(a.selectedCols.as_deref(), b.selectedCols.as_deref())
+        && equal_bms(a.insertedCols.as_deref(), b.insertedCols.as_deref())
+        && equal_bms(a.updatedCols.as_deref(), b.updatedCols.as_deref())
+}
+
+/// `_equalRangeTblFunction` (equalfuncs.funcs.c).
+fn equal_range_tbl_function(
+    a: &types_nodes::rawnodes::RangeTblFunction<'_>,
+    b: &types_nodes::rawnodes::RangeTblFunction<'_>,
+) -> bool {
+    equal_opt_node(a.funcexpr.as_ref(), b.funcexpr.as_ref())
+        && a.funccolcount == b.funccolcount
+        && equal_node_list(&a.funccolnames, &b.funccolnames)
+        && a.funccoltypes == b.funccoltypes
+        && a.funccoltypmods == b.funccoltypmods
+        && a.funccolcollations == b.funccolcollations
+        && equal_bms(a.funcparams.as_deref(), b.funcparams.as_deref())
+}
+
+/// `_equalFromExpr` (equalfuncs.funcs.c).
+fn equal_from_expr(
+    a: &types_nodes::rawnodes::FromExpr<'_>,
+    b: &types_nodes::rawnodes::FromExpr<'_>,
+) -> bool {
+    equal_node_list(&a.fromlist, &b.fromlist) && equal_opt_node(a.quals.as_ref(), b.quals.as_ref())
+}
+
+/// `_equalJoinExpr` (equalfuncs.funcs.c).
+fn equal_join_expr(
+    a: &types_nodes::rawnodes::JoinExpr<'_>,
+    b: &types_nodes::rawnodes::JoinExpr<'_>,
+) -> bool {
+    a.jointype == b.jointype
+        && a.isNatural == b.isNatural
+        && equal_opt_node(a.larg.as_ref(), b.larg.as_ref())
+        && equal_opt_node(a.rarg.as_ref(), b.rarg.as_ref())
+        && equal_node_list(&a.usingClause, &b.usingClause)
+        && equal_opt_alias(a.join_using_alias.as_deref(), b.join_using_alias.as_deref())
+        && equal_opt_node(a.quals.as_ref(), b.quals.as_ref())
+        && equal_opt_alias(a.alias.as_deref(), b.alias.as_deref())
+        && a.rtindex == b.rtindex
+}
+
+/// `_equalRangeTblRef` (equalfuncs.funcs.c).
+fn equal_range_tbl_ref(
+    a: &types_nodes::rawnodes::RangeTblRef,
+    b: &types_nodes::rawnodes::RangeTblRef,
+) -> bool {
+    a.rtindex == b.rtindex
+}
+
+/// `_equalOnConflictExpr` (equalfuncs.funcs.c).
+fn equal_on_conflict_expr(
+    a: &types_nodes::rawnodes::OnConflictExpr<'_>,
+    b: &types_nodes::rawnodes::OnConflictExpr<'_>,
+) -> bool {
+    a.action == b.action
+        && equal_node_list(&a.arbiterElems, &b.arbiterElems)
+        && equal_opt_node(a.arbiterWhere.as_ref(), b.arbiterWhere.as_ref())
+        && a.constraint == b.constraint
+        && equal_node_list(&a.onConflictSet, &b.onConflictSet)
+        && equal_opt_node(a.onConflictWhere.as_ref(), b.onConflictWhere.as_ref())
+        && a.exclRelIndex == b.exclRelIndex
+        && equal_node_list(&a.exclRelTlist, &b.exclRelTlist)
+}
+
+/// `_equalMergeAction` (equalfuncs.funcs.c) — the parse-tree `MergeAction`.
+fn equal_merge_action(
+    a: &types_nodes::rawnodes::MergeAction<'_>,
+    b: &types_nodes::rawnodes::MergeAction<'_>,
+) -> bool {
+    a.matchKind == b.matchKind
+        && a.commandType == b.commandType
+        && a.r#override == b.r#override
+        && equal_opt_node(a.qual.as_ref(), b.qual.as_ref())
+        && equal_node_list(&a.targetList, &b.targetList)
+        && a.updateColnos == b.updateColnos
+}
+
+/// `_equalWithCheckOption` (equalfuncs.funcs.c).
+fn equal_with_check_option(
+    a: &types_nodes::rawnodes::WithCheckOption<'_>,
+    b: &types_nodes::rawnodes::WithCheckOption<'_>,
+) -> bool {
+    a.kind == b.kind
+        && equalstr(a.relname.as_deref(), b.relname.as_deref())
+        && equalstr(a.polname.as_deref(), b.polname.as_deref())
+        && equal_opt_node(a.qual.as_ref(), b.qual.as_ref())
+        && a.cascaded == b.cascaded
+}
+
+/// `_equalGroupingSet` (equalfuncs.funcs.c).
+fn equal_grouping_set(
+    a: &types_nodes::rawnodes::GroupingSet<'_>,
+    b: &types_nodes::rawnodes::GroupingSet<'_>,
+) -> bool {
+    a.kind == b.kind && equal_node_list(&a.content, &b.content)
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalWindowClause` (equalfuncs.funcs.c).
+fn equal_window_clause(
+    a: &types_nodes::rawnodes::WindowClause<'_>,
+    b: &types_nodes::rawnodes::WindowClause<'_>,
+) -> bool {
+    equalstr(a.name.as_deref(), b.name.as_deref())
+        && equalstr(a.refname.as_deref(), b.refname.as_deref())
+        && equal_node_list(&a.partitionClause, &b.partitionClause)
+        && equal_node_list(&a.orderClause, &b.orderClause)
+        && a.frameOptions == b.frameOptions
+        && equal_opt_node(a.startOffset.as_ref(), b.startOffset.as_ref())
+        && equal_opt_node(a.endOffset.as_ref(), b.endOffset.as_ref())
+        && a.startInRangeFunc == b.startInRangeFunc
+        && a.endInRangeFunc == b.endInRangeFunc
+        && a.inRangeColl == b.inRangeColl
+        && a.inRangeAsc == b.inRangeAsc
+        && a.inRangeNullsFirst == b.inRangeNullsFirst
+        && a.winref == b.winref
+        && a.copiedOrder == b.copiedOrder
+}
+
+/// `_equalRowMarkClause` (equalfuncs.funcs.c).
+fn equal_row_mark_clause(
+    a: &types_nodes::rawnodes::RowMarkClause,
+    b: &types_nodes::rawnodes::RowMarkClause,
+) -> bool {
+    a.rti == b.rti
+        && a.strength == b.strength
+        && a.waitPolicy == b.waitPolicy
+        && a.pushedDown == b.pushedDown
+}
+
+/// `_equalCTESearchClause` (equalfuncs.funcs.c).
+fn equal_cte_search_clause(
+    a: &types_nodes::rawnodes::CTESearchClause<'_>,
+    b: &types_nodes::rawnodes::CTESearchClause<'_>,
+) -> bool {
+    equal_node_list(&a.search_col_list, &b.search_col_list)
+        && a.search_breadth_first == b.search_breadth_first
+        && equalstr(a.search_seq_column.as_deref(), b.search_seq_column.as_deref())
+    // location is COMPARE_LOCATION_FIELD (no-op).
+}
+
+/// `_equalCTECycleClause` (equalfuncs.funcs.c).
+fn equal_cte_cycle_clause(
+    a: &types_nodes::rawnodes::CTECycleClause<'_>,
+    b: &types_nodes::rawnodes::CTECycleClause<'_>,
+) -> bool {
+    equal_node_list(&a.cycle_col_list, &b.cycle_col_list)
+        && equalstr(a.cycle_mark_column.as_deref(), b.cycle_mark_column.as_deref())
+        && equal_opt_node(a.cycle_mark_value.as_ref(), b.cycle_mark_value.as_ref())
+        && equal_opt_node(a.cycle_mark_default.as_ref(), b.cycle_mark_default.as_ref())
+        && equalstr(a.cycle_path_column.as_deref(), b.cycle_path_column.as_deref())
+        // location is COMPARE_LOCATION_FIELD (no-op).
+        && a.cycle_mark_type == b.cycle_mark_type
+        && a.cycle_mark_typmod == b.cycle_mark_typmod
+        && a.cycle_mark_collation == b.cycle_mark_collation
+        && a.cycle_mark_neop == b.cycle_mark_neop
+}
+
+/// `_equalCommonTableExpr` (equalfuncs.funcs.c).
+fn equal_common_table_expr(
+    a: &types_nodes::rawnodes::CommonTableExpr<'_>,
+    b: &types_nodes::rawnodes::CommonTableExpr<'_>,
+) -> bool {
+    equalstr(a.ctename.as_deref(), b.ctename.as_deref())
+        && equal_node_list(&a.aliascolnames, &b.aliascolnames)
+        && a.ctematerialized == b.ctematerialized
+        && equal_opt_node(a.ctequery.as_ref(), b.ctequery.as_ref())
+        && match (a.search_clause.as_deref(), b.search_clause.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_cte_search_clause(x, y),
+            _ => false,
+        }
+        && match (a.cycle_clause.as_deref(), b.cycle_clause.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_cte_cycle_clause(x, y),
+            _ => false,
+        }
+        // location is COMPARE_LOCATION_FIELD (no-op).
+        && a.cterecursive == b.cterecursive
+        && a.cterefcount == b.cterefcount
+        && equal_node_list(&a.ctecolnames, &b.ctecolnames)
+        && a.ctecoltypes == b.ctecoltypes
+        && a.ctecoltypmods == b.ctecoltypmods
+        && a.ctecolcollations == b.ctecolcollations
+}
+
+/// `_equalSetOperationStmt` (equalfuncs.funcs.c).
+fn equal_set_operation_stmt(
+    a: &types_nodes::rawnodes::SetOperationStmt<'_>,
+    b: &types_nodes::rawnodes::SetOperationStmt<'_>,
+) -> bool {
+    a.op == b.op
+        && a.all == b.all
+        && equal_opt_node(a.larg.as_ref(), b.larg.as_ref())
+        && equal_opt_node(a.rarg.as_ref(), b.rarg.as_ref())
+        && a.colTypes == b.colTypes
+        && a.colTypmods == b.colTypmods
+        && a.colCollations == b.colCollations
+        && equal_node_list(&a.groupClauses, &b.groupClauses)
+}
+
+/// `_equalQuery` (equalfuncs.funcs.c) — the full analyzed-`Query` comparator.
+/// `queryId`/`querySource` location-ish fields excluded? No: `_equalQuery`
+/// compares neither `queryId`/`hasGroupRTE`-class derived flags beyond what the
+/// generated comparator lists — it follows the field set verbatim below.
+/// `COMPARE_LOCATION_FIELD(stmt_location)`/`(stmt_len)` are no-ops.
+fn equal_query(
+    a: &types_nodes::copy_query::Query<'_>,
+    b: &types_nodes::copy_query::Query<'_>,
+) -> bool {
+    a.commandType == b.commandType
+        && a.querySource == b.querySource
+        && a.canSetTag == b.canSetTag
+        && equal_opt_node(a.utilityStmt.as_ref(), b.utilityStmt.as_ref())
+        && a.resultRelation == b.resultRelation
+        && a.hasAggs == b.hasAggs
+        && a.hasWindowFuncs == b.hasWindowFuncs
+        && a.hasTargetSRFs == b.hasTargetSRFs
+        && a.hasSubLinks == b.hasSubLinks
+        && a.hasDistinctOn == b.hasDistinctOn
+        && a.hasRecursive == b.hasRecursive
+        && a.hasModifyingCTE == b.hasModifyingCTE
+        && a.hasForUpdate == b.hasForUpdate
+        && a.hasRowSecurity == b.hasRowSecurity
+        && a.hasGroupRTE == b.hasGroupRTE
+        && a.isReturn == b.isReturn
+        && equal_node_list(&a.cteList, &b.cteList)
+        && a.rtable.len() == b.rtable.len()
+        && a.rtable
+            .iter()
+            .zip(b.rtable.iter())
+            .all(|(x, y)| equal_range_tbl_entry(x, y))
+        && a.rteperminfos.len() == b.rteperminfos.len()
+        && a.rteperminfos
+            .iter()
+            .zip(b.rteperminfos.iter())
+            .all(|(x, y)| equal_rte_permission_info(x, y))
+        && match (a.jointree.as_deref(), b.jointree.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_from_expr(x, y),
+            _ => false,
+        }
+        && equal_node_list(&a.mergeActionList, &b.mergeActionList)
+        && a.mergeTargetRelation == b.mergeTargetRelation
+        && equal_opt_node(a.mergeJoinCondition.as_ref(), b.mergeJoinCondition.as_ref())
+        && equal_targetentry_list_impl(&a.targetList, &b.targetList)
+        && a.r#override == b.r#override
+        && match (a.onConflict.as_deref(), b.onConflict.as_deref()) {
+            (None, None) => true,
+            (Some(x), Some(y)) => equal_on_conflict_expr(x, y),
+            _ => false,
+        }
+        && equalstr(a.returningOldAlias.as_deref(), b.returningOldAlias.as_deref())
+        && equalstr(a.returningNewAlias.as_deref(), b.returningNewAlias.as_deref())
+        && equal_targetentry_list_impl(&a.returningList, &b.returningList)
+        && equal_node_list(&a.groupClause, &b.groupClause)
+        && a.groupDistinct == b.groupDistinct
+        && equal_node_list(&a.groupingSets, &b.groupingSets)
+        && equal_opt_node(a.havingQual.as_ref(), b.havingQual.as_ref())
+        && equal_node_list(&a.windowClause, &b.windowClause)
+        && equal_node_list(&a.distinctClause, &b.distinctClause)
+        && equal_node_list(&a.sortClause, &b.sortClause)
+        && equal_opt_node(a.limitOffset.as_ref(), b.limitOffset.as_ref())
+        && equal_opt_node(a.limitCount.as_ref(), b.limitCount.as_ref())
+        && a.limitOption == b.limitOption
+        && equal_node_list(&a.rowMarks, &b.rowMarks)
+        && equal_opt_node(a.setOperations.as_ref(), b.setOperations.as_ref())
+        && a.constraintDeps == b.constraintDeps
+        && equal_node_list(&a.withCheckOptions, &b.withCheckOptions)
+    // stmt_location / stmt_len are COMPARE_LOCATION_FIELD (no-ops).
+}
+
+// ===========================================================================
 // equal() — the central tag-discriminated dispatch
 // ===========================================================================
 
@@ -694,6 +1080,26 @@ pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
         (Node::List(x), Node::List(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| equal_node(p, q))
         }
+        // Parse/analyze/rewrite query-tree node family (`_equalQuery` and the
+        // sub-node comparators reachable through `Query`'s `Node`-list fields).
+        (Node::Query(x), Node::Query(y)) => equal_query(x, y),
+        (Node::RangeTblEntry(x), Node::RangeTblEntry(y)) => equal_range_tbl_entry(x, y),
+        (Node::RTEPermissionInfo(x), Node::RTEPermissionInfo(y)) => {
+            equal_rte_permission_info(x, y)
+        }
+        (Node::RangeTblFunction(x), Node::RangeTblFunction(y)) => equal_range_tbl_function(x, y),
+        (Node::RangeTblRef(x), Node::RangeTblRef(y)) => equal_range_tbl_ref(x, y),
+        (Node::FromExpr(x), Node::FromExpr(y)) => equal_from_expr(x, y),
+        (Node::JoinExpr(x), Node::JoinExpr(y)) => equal_join_expr(x, y),
+        (Node::OnConflictExpr(x), Node::OnConflictExpr(y)) => equal_on_conflict_expr(x, y),
+        (Node::MergeAction(x), Node::MergeAction(y)) => equal_merge_action(x, y),
+        (Node::GroupingSet(x), Node::GroupingSet(y)) => equal_grouping_set(x, y),
+        (Node::WindowClause(x), Node::WindowClause(y)) => equal_window_clause(x, y),
+        (Node::RowMarkClause(x), Node::RowMarkClause(y)) => equal_row_mark_clause(x, y),
+        (Node::WithCheckOption(x), Node::WithCheckOption(y)) => equal_with_check_option(x, y),
+        (Node::CommonTableExpr(x), Node::CommonTableExpr(y)) => equal_common_table_expr(x, y),
+        (Node::SetOperationStmt(x), Node::SetOperationStmt(y)) => equal_set_operation_stmt(x, y),
+        (Node::Alias(x), Node::Alias(y)) => equal_alias(x, y),
         // Different tags are never equal.
         (a, b) if a.node_tag() != b.node_tag() => false,
         // Same-tag node family not yet reachable through equal() in the ported
