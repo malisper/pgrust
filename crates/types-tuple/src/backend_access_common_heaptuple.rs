@@ -246,6 +246,14 @@ impl Datum<'_> {
 /// preserved by copying the exact bytes spanned by the field).
 pub type DeformedColumn<'mcx> = (Datum<'mcx>, bool);
 
+/// One read of a slot/tuple attribute: its [`Datum`] value plus its is-null
+/// flag. (Not `Copy`: the by-reference `Datum` arm owns a `PgVec`.)
+#[derive(Clone, Debug)]
+pub struct SlotAttr<'mcx> {
+    pub value: Datum<'mcx>,
+    pub isnull: bool,
+}
+
 /// A fully-formed heap tuple: the owned [`HeapTupleData`] plus its user-data
 /// area bytes (`td + t_hoff .. td + t_len`).
 ///

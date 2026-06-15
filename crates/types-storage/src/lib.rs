@@ -19,6 +19,7 @@ pub mod inval;
 pub mod large_object;
 pub mod latch;
 pub mod lock;
+pub mod multixact;
 pub mod relfilelocator;
 pub mod sinval;
 pub mod smgr;

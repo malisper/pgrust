@@ -704,17 +704,7 @@ pub enum PathKeysComparison {
 }
 
 /// `BMS_Comparison` (bitmapset.h) — `bms_subset_compare` result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BMS_Comparison {
-    /// `BMS_EQUAL`.
-    BMS_EQUAL,
-    /// `BMS_SUBSET1` — a is a subset of b.
-    BMS_SUBSET1,
-    /// `BMS_SUBSET2` — b is a subset of a.
-    BMS_SUBSET2,
-    /// `BMS_DIFFERENT`.
-    BMS_DIFFERENT,
-}
+pub use types_nodes::bitmapset::BMS_Comparison;
 
 /* --- miscadmin.c --------------------------------------------------------- */
 seam_core::seam!(
