@@ -1609,5 +1609,11 @@ pub fn init_seams() {}
 pub mod spgdoinsert;
 pub use spgdoinsert::{spgPageIndexMultiDelete, spgUpdateNodeLink, spgdoinsert};
 
+pub mod spgscan;
+pub use spgscan::{
+    spgbeginscan, spgcanreturn, spgendscan, spggetbitmap, spggettuple, spgrescan,
+    SpGistScanOpaqueData,
+};
+
 #[cfg(test)]
 mod tests;

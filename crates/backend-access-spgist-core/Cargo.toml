@@ -95,4 +95,18 @@ backend-access-common-detoast-seams = { path = "../backend-access-common-detoast
 # Datum vocabulary for canonical per-attribute values.
 types-datum = { path = "../types-datum" }
 
+# --- spgscan.c scan-driver deps ---
+
+# Unified index AM vtable / scan descriptor + AmOpaque carrier (SPGIST_SCAN tag)
+# + IndexOrderByDistance + TIDBitmap.
+types-tableam = { path = "../types-tableam" }
+# The concrete TIDBitmap behind the amgetbitmap AmTIDBitmap payload.
+types-tidbitmap = { path = "../types-tidbitmap" }
+# The scan queue (pairingheap.c): SpGistSearchItem priority queue.
+backend-lib-pairingheap = { path = "../backend-lib-pairingheap" }
+# pgstat_count_index_scan (pgstat.c).
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+# tbm_add_tuples (tidbitmap.c).
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+
 [dev-dependencies]
