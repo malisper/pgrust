@@ -645,8 +645,8 @@ fn pull_up_simple_subquery<'mcx>(
     offset_var_nodes_in_append_rel_list(&mut subroot, rtoffset, 0);
 
     // Upper-level vars in subquery are now one level closer to their parent.
-    increment_var_sublevels_up_in_query(mcx, &mut subquery, -1, 1);
-    increment_var_sublevels_up_in_append_rel_list(&mut subroot, -1, 1);
+    increment_var_sublevels_up_in_query(mcx, &mut subquery, -1, 1)?;
+    increment_var_sublevels_up_in_append_rel_list(&mut subroot, -1, 1)?;
 
     // The subquery's targetlist items are now in the appropriate form to insert
     // into the top query, except that we may need to wrap them in
@@ -921,7 +921,7 @@ fn pull_up_simple_union_all<'mcx>(
     // Upper-level vars in subquery are now one level closer to their parent than
     // before. We don't have to worry about offsetting varnos, though, because the
     // UNION leaf queries can't cross-reference each other.
-    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1);
+    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1)?;
 
     // If the UNION ALL subquery had a LATERAL marker, propagate that to all its
     // children.
@@ -2705,7 +2705,7 @@ fn pullup_replace_vars_callback<'mcx>(
 
     // Must adjust varlevelsup if replaced Var is within a subquery.
     if varlevelsup > 0 {
-        IncrementVarSublevelsUp(&mut newnode, varlevelsup as i32, 0);
+        IncrementVarSublevelsUp(&mut newnode, varlevelsup as i32, 0)?;
     }
 
     match newnode {
@@ -2911,15 +2911,16 @@ fn increment_var_sublevels_up_in_query<'mcx>(
     subquery: &mut Query<'mcx>,
     delta: i32,
     min_sublevels_up: i32,
-) {
+) -> types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::Query(node);
-    IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up);
+    let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up);
     if let Node::Query(q) = qnode {
         *subquery = q;
     } else {
         unreachable!();
     }
+    res
 }
 
 /// `OffsetVarNodes((Node *) subroot->append_rel_list, rtoffset, 0)`: each
@@ -2951,7 +2952,7 @@ fn increment_var_sublevels_up_in_append_rel_list(
     subroot: &mut PlannerInfo,
     delta: i32,
     min_sublevels_up: i32,
-) {
+) -> types_error::PgResult<()> {
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -2962,11 +2963,12 @@ fn increment_var_sublevels_up_in_append_rel_list(
     }
     for id in ids {
         let mut node = Node::Expr(subroot.node(id).clone());
-        IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up);
+        IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up)?;
         if let Node::Expr(e) = node {
             *subroot.node_mut(id) = e;
         }
     }
+    Ok(())
 }
 
 // silence unused import in some configurations
