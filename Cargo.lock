@@ -886,7 +886,9 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-hash-entry",
+ "backend-access-hashvalidate",
  "backend-access-index-amapi-seams",
+ "backend-access-nbt-validate",
  "backend-access-nbtree-nbtree",
  "backend-utils-cache-syscache-seams",
  "mcx",
@@ -3593,6 +3595,7 @@ dependencies = [
 name = "backend-commands-comment"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-objectaddress-seams",
  "backend-catalog-pg-class",
  "backend-commands-comment-seams",
  "backend-commands-dbcommands-seams",
@@ -3604,6 +3607,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-parsenodes",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -3869,13 +3873,19 @@ dependencies = [
 name = "backend-commands-explain-dr"
 version = "0.0.0"
 dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-instrument",
  "backend-libpq-pqformat",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "mcx",
+ "portability-instr-time",
  "types-core",
- "types-datum",
  "types-dest",
  "types-error",
  "types-explain",
+ "types-nodes",
+ "types-slot",
  "types-stringinfo",
  "types-tuple",
 ]
@@ -9223,6 +9233,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-core"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-coerce",
+ "backend-parser-relation",
+ "backend-rewrite-rewritemanip-seams",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-rewrite-rewriteHandler-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -9333,10 +9359,16 @@ dependencies = [
 name = "backend-storage-buffer-bufmgr"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
+ "backend-storage-page",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-ps-status-seams",
  "mcx",
  "types-condvar",
  "types-core",
@@ -14225,6 +14257,7 @@ dependencies = [
  "backend-replication-syncrep-scanner",
  "backend-replication-walreceiver",
  "backend-replication-walreceiverfuncs",
+ "backend-rewrite-core",
  "backend-rmgrdesc-next",
  "backend-storage-buffer-bufmgr",
  "backend-storage-buffer-support",
