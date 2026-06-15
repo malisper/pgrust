@@ -2167,3 +2167,1058 @@ impl AlterSubscriptionStmt<'_> {
         })
     }
 }
+
+// ===========================================================================
+// Utility / GRANT / transaction family (parser grammar F4)
+//
+// The node vocabulary the bison grammar's utility rule actions build: GRANT/
+// REVOKE, SET/SHOW/RESET, transaction control, COPY, EXPLAIN, the prepared-
+// statement and cursor commands, maintenance (VACUUM/ANALYZE/CLUSTER/REINDEX/
+// CHECKPOINT/...), object commands (COMMENT/SECURITY LABEL/RULE/...), the
+// LISTEN/NOTIFY family, and the remaining CREATE/ALTER/DROP utility statements
+// (FDW/foreign server/table, user mapping, policy, publication, subscription,
+// event trigger, transform, role/db/tablespace drops).
+//
+// Authored field-for-field against `nodes/parsenodes.h`, same modelling rules
+// as the rest of this module.
+// ===========================================================================
+
+use crate::nodes::CmdType;
+
+/// `GrantTargetType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum GrantTargetType {
+    #[default]
+    ACL_TARGET_OBJECT = 0,
+    ACL_TARGET_ALL_IN_SCHEMA = 1,
+    ACL_TARGET_DEFAULTS = 2,
+}
+pub use GrantTargetType::{ACL_TARGET_ALL_IN_SCHEMA, ACL_TARGET_DEFAULTS, ACL_TARGET_OBJECT};
+
+/// `VariableSetKind` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum VariableSetKind {
+    #[default]
+    VAR_SET_VALUE = 0,
+    VAR_SET_DEFAULT = 1,
+    VAR_SET_CURRENT = 2,
+    VAR_SET_MULTI = 3,
+    VAR_RESET = 4,
+    VAR_RESET_ALL = 5,
+}
+pub use VariableSetKind::{
+    VAR_RESET, VAR_RESET_ALL, VAR_SET_CURRENT, VAR_SET_DEFAULT, VAR_SET_MULTI, VAR_SET_VALUE,
+};
+
+/// `TransactionStmtKind` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum TransactionStmtKind {
+    #[default]
+    TRANS_STMT_BEGIN = 0,
+    TRANS_STMT_START = 1,
+    TRANS_STMT_COMMIT = 2,
+    TRANS_STMT_ROLLBACK = 3,
+    TRANS_STMT_SAVEPOINT = 4,
+    TRANS_STMT_RELEASE = 5,
+    TRANS_STMT_ROLLBACK_TO = 6,
+    TRANS_STMT_PREPARE = 7,
+    TRANS_STMT_COMMIT_PREPARED = 8,
+    TRANS_STMT_ROLLBACK_PREPARED = 9,
+}
+pub use TransactionStmtKind::{
+    TRANS_STMT_BEGIN, TRANS_STMT_COMMIT, TRANS_STMT_COMMIT_PREPARED, TRANS_STMT_PREPARE,
+    TRANS_STMT_RELEASE, TRANS_STMT_ROLLBACK, TRANS_STMT_ROLLBACK_PREPARED, TRANS_STMT_ROLLBACK_TO,
+    TRANS_STMT_SAVEPOINT, TRANS_STMT_START,
+};
+
+/// `DiscardMode` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum DiscardMode {
+    #[default]
+    DISCARD_ALL = 0,
+    DISCARD_PLANS = 1,
+    DISCARD_SEQUENCES = 2,
+    DISCARD_TEMP = 3,
+}
+pub use DiscardMode::{DISCARD_ALL, DISCARD_PLANS, DISCARD_SEQUENCES, DISCARD_TEMP};
+
+/// `ReindexObjectType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ReindexObjectType {
+    #[default]
+    REINDEX_OBJECT_INDEX = 0,
+    REINDEX_OBJECT_TABLE = 1,
+    REINDEX_OBJECT_SCHEMA = 2,
+    REINDEX_OBJECT_SYSTEM = 3,
+    REINDEX_OBJECT_DATABASE = 4,
+}
+pub use ReindexObjectType::{
+    REINDEX_OBJECT_DATABASE, REINDEX_OBJECT_INDEX, REINDEX_OBJECT_SCHEMA, REINDEX_OBJECT_SYSTEM,
+    REINDEX_OBJECT_TABLE,
+};
+
+/// `ImportForeignSchemaType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ImportForeignSchemaType {
+    #[default]
+    FDW_IMPORT_SCHEMA_ALL = 0,
+    FDW_IMPORT_SCHEMA_LIMIT_TO = 1,
+    FDW_IMPORT_SCHEMA_EXCEPT = 2,
+}
+pub use ImportForeignSchemaType::{
+    FDW_IMPORT_SCHEMA_ALL, FDW_IMPORT_SCHEMA_EXCEPT, FDW_IMPORT_SCHEMA_LIMIT_TO,
+};
+
+/// `PublicationObjSpecType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum PublicationObjSpecType {
+    #[default]
+    PUBLICATIONOBJ_TABLE = 0,
+    PUBLICATIONOBJ_TABLES_IN_SCHEMA = 1,
+    PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA = 2,
+    PUBLICATIONOBJ_CONTINUATION = 3,
+}
+pub use PublicationObjSpecType::{
+    PUBLICATIONOBJ_CONTINUATION, PUBLICATIONOBJ_TABLE, PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA,
+    PUBLICATIONOBJ_TABLES_IN_SCHEMA,
+};
+
+/// `FetchDirection` (`nodes/parsenodes.h`) — raw-grammar producer view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum FetchDirection {
+    #[default]
+    FETCH_FORWARD = 0,
+    FETCH_BACKWARD = 1,
+    FETCH_ABSOLUTE = 2,
+    FETCH_RELATIVE = 3,
+}
+pub use FetchDirection::{FETCH_ABSOLUTE, FETCH_BACKWARD, FETCH_FORWARD, FETCH_RELATIVE};
+
+/// `GrantStmt` (`nodes/parsenodes.h`) — GRANT / REVOKE.
+#[derive(Debug)]
+pub struct GrantStmt<'mcx> {
+    pub is_grant: bool,
+    pub targtype: GrantTargetType,
+    pub objtype: ObjectType,
+    pub objects: PgVec<'mcx, NodePtr<'mcx>>,
+    pub privileges: PgVec<'mcx, NodePtr<'mcx>>,
+    pub grantees: PgVec<'mcx, NodePtr<'mcx>>,
+    pub grant_option: bool,
+    pub grantor: Option<NodePtr<'mcx>>,
+    pub behavior: DropBehavior,
+}
+impl GrantStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GrantStmt<'b>> {
+        Ok(GrantStmt {
+            is_grant: self.is_grant,
+            targtype: self.targtype,
+            objtype: self.objtype,
+            objects: copy_node_vec(&self.objects, mcx)?,
+            privileges: copy_node_vec(&self.privileges, mcx)?,
+            grantees: copy_node_vec(&self.grantees, mcx)?,
+            grant_option: self.grant_option,
+            grantor: copy_opt_node(&self.grantor, mcx)?,
+            behavior: self.behavior,
+        })
+    }
+}
+
+/// `GrantRoleStmt` (`nodes/parsenodes.h`) — GRANT / REVOKE role membership.
+#[derive(Debug)]
+pub struct GrantRoleStmt<'mcx> {
+    pub granted_roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub grantee_roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub is_grant: bool,
+    pub opt: PgVec<'mcx, NodePtr<'mcx>>,
+    pub grantor: Option<NodePtr<'mcx>>,
+    pub behavior: DropBehavior,
+}
+impl GrantRoleStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GrantRoleStmt<'b>> {
+        Ok(GrantRoleStmt {
+            granted_roles: copy_node_vec(&self.granted_roles, mcx)?,
+            grantee_roles: copy_node_vec(&self.grantee_roles, mcx)?,
+            is_grant: self.is_grant,
+            opt: copy_node_vec(&self.opt, mcx)?,
+            grantor: copy_opt_node(&self.grantor, mcx)?,
+            behavior: self.behavior,
+        })
+    }
+}
+
+/// `VariableSetStmt` (`nodes/parsenodes.h`) — SET / RESET.
+#[derive(Debug)]
+pub struct VariableSetStmt<'mcx> {
+    pub kind: VariableSetKind,
+    pub name: Option<PgString<'mcx>>,
+    pub args: PgVec<'mcx, NodePtr<'mcx>>,
+    pub jumble_args: bool,
+    pub is_local: bool,
+    pub location: ParseLoc,
+}
+impl VariableSetStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<VariableSetStmt<'b>> {
+        Ok(VariableSetStmt {
+            kind: self.kind,
+            name: copy_opt_str(&self.name, mcx)?,
+            args: copy_node_vec(&self.args, mcx)?,
+            jumble_args: self.jumble_args,
+            is_local: self.is_local,
+            location: self.location,
+        })
+    }
+}
+
+/// `VariableShowStmt` (`nodes/parsenodes.h`) — SHOW.
+#[derive(Debug)]
+pub struct VariableShowStmt<'mcx> {
+    pub name: Option<PgString<'mcx>>,
+}
+impl VariableShowStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<VariableShowStmt<'b>> {
+        Ok(VariableShowStmt { name: copy_opt_str(&self.name, mcx)? })
+    }
+}
+
+/// `TransactionStmt` (`nodes/parsenodes.h`).
+#[derive(Debug)]
+pub struct TransactionStmt<'mcx> {
+    pub kind: TransactionStmtKind,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub savepoint_name: Option<PgString<'mcx>>,
+    pub gid: Option<PgString<'mcx>>,
+    pub chain: bool,
+    pub location: ParseLoc,
+}
+impl TransactionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TransactionStmt<'b>> {
+        Ok(TransactionStmt {
+            kind: self.kind,
+            options: copy_node_vec(&self.options, mcx)?,
+            savepoint_name: copy_opt_str(&self.savepoint_name, mcx)?,
+            gid: copy_opt_str(&self.gid, mcx)?,
+            chain: self.chain,
+            location: self.location,
+        })
+    }
+}
+
+/// `CopyStmt` (`nodes/parsenodes.h`) — COPY.
+#[derive(Debug)]
+pub struct CopyStmt<'mcx> {
+    pub relation: Option<NodePtr<'mcx>>,
+    pub query: Option<NodePtr<'mcx>>,
+    pub attlist: PgVec<'mcx, NodePtr<'mcx>>,
+    pub is_from: bool,
+    pub is_program: bool,
+    pub filename: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub where_clause: Option<NodePtr<'mcx>>,
+}
+impl CopyStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CopyStmt<'b>> {
+        Ok(CopyStmt {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            query: copy_opt_node(&self.query, mcx)?,
+            attlist: copy_node_vec(&self.attlist, mcx)?,
+            is_from: self.is_from,
+            is_program: self.is_program,
+            filename: copy_opt_str(&self.filename, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            where_clause: copy_opt_node(&self.where_clause, mcx)?,
+        })
+    }
+}
+
+/// `ExplainStmt` (`nodes/parsenodes.h`) — EXPLAIN.
+#[derive(Debug)]
+pub struct ExplainStmt<'mcx> {
+    pub query: Option<NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl ExplainStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ExplainStmt<'b>> {
+        Ok(ExplainStmt {
+            query: copy_opt_node(&self.query, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `PrepareStmt` (`nodes/parsenodes.h`) — PREPARE (raw-grammar producer).
+#[derive(Debug)]
+pub struct PrepareStmt<'mcx> {
+    pub name: Option<PgString<'mcx>>,
+    pub argtypes: PgVec<'mcx, NodePtr<'mcx>>,
+    pub query: Option<NodePtr<'mcx>>,
+}
+impl PrepareStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PrepareStmt<'b>> {
+        Ok(PrepareStmt {
+            name: copy_opt_str(&self.name, mcx)?,
+            argtypes: copy_node_vec(&self.argtypes, mcx)?,
+            query: copy_opt_node(&self.query, mcx)?,
+        })
+    }
+}
+
+/// `ExecuteStmt` (`nodes/parsenodes.h`) — EXECUTE (raw-grammar producer).
+#[derive(Debug)]
+pub struct ExecuteStmt<'mcx> {
+    pub name: Option<PgString<'mcx>>,
+    pub params: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl ExecuteStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ExecuteStmt<'b>> {
+        Ok(ExecuteStmt {
+            name: copy_opt_str(&self.name, mcx)?,
+            params: copy_node_vec(&self.params, mcx)?,
+        })
+    }
+}
+
+/// `DeallocateStmt` (`nodes/parsenodes.h`) — DEALLOCATE (raw-grammar producer).
+#[derive(Debug)]
+pub struct DeallocateStmt<'mcx> {
+    pub name: Option<PgString<'mcx>>,
+    pub isall: bool,
+    pub location: ParseLoc,
+}
+impl DeallocateStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DeallocateStmt<'b>> {
+        Ok(DeallocateStmt {
+            name: copy_opt_str(&self.name, mcx)?,
+            isall: self.isall,
+            location: self.location,
+        })
+    }
+}
+
+/// `DeclareCursorStmt` (`nodes/parsenodes.h`) — DECLARE CURSOR (raw producer).
+#[derive(Debug)]
+pub struct DeclareCursorStmt<'mcx> {
+    pub portalname: Option<PgString<'mcx>>,
+    pub options: i32,
+    pub query: Option<NodePtr<'mcx>>,
+}
+impl DeclareCursorStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DeclareCursorStmt<'b>> {
+        Ok(DeclareCursorStmt {
+            portalname: copy_opt_str(&self.portalname, mcx)?,
+            options: self.options,
+            query: copy_opt_node(&self.query, mcx)?,
+        })
+    }
+}
+
+/// `ClosePortalStmt` (`nodes/parsenodes.h`) — CLOSE.
+#[derive(Debug)]
+pub struct ClosePortalStmt<'mcx> {
+    pub portalname: Option<PgString<'mcx>>,
+}
+impl ClosePortalStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ClosePortalStmt<'b>> {
+        Ok(ClosePortalStmt { portalname: copy_opt_str(&self.portalname, mcx)? })
+    }
+}
+
+/// `FetchStmt` (`nodes/parsenodes.h`) — FETCH / MOVE (raw-grammar producer).
+#[derive(Debug)]
+pub struct FetchStmt<'mcx> {
+    pub direction: FetchDirection,
+    pub how_many: i64,
+    pub portalname: Option<PgString<'mcx>>,
+    pub ismove: bool,
+}
+impl FetchStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<FetchStmt<'b>> {
+        Ok(FetchStmt {
+            direction: self.direction,
+            how_many: self.how_many,
+            portalname: copy_opt_str(&self.portalname, mcx)?,
+            ismove: self.ismove,
+        })
+    }
+}
+
+/// `VacuumStmt` (`nodes/parsenodes.h`) — VACUUM / ANALYZE.
+#[derive(Debug)]
+pub struct VacuumStmt<'mcx> {
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub rels: PgVec<'mcx, NodePtr<'mcx>>,
+    pub is_vacuumcmd: bool,
+}
+impl VacuumStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<VacuumStmt<'b>> {
+        Ok(VacuumStmt {
+            options: copy_node_vec(&self.options, mcx)?,
+            rels: copy_node_vec(&self.rels, mcx)?,
+            is_vacuumcmd: self.is_vacuumcmd,
+        })
+    }
+}
+
+/// `VacuumRelation` (`nodes/parsenodes.h`).
+#[derive(Debug)]
+pub struct VacuumRelation<'mcx> {
+    pub relation: Option<NodePtr<'mcx>>,
+    pub oid: Oid,
+    pub va_cols: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl VacuumRelation<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<VacuumRelation<'b>> {
+        Ok(VacuumRelation {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            oid: self.oid,
+            va_cols: copy_node_vec(&self.va_cols, mcx)?,
+        })
+    }
+}
+
+/// `ClusterStmt` (`nodes/parsenodes.h`) — CLUSTER.
+#[derive(Debug)]
+pub struct ClusterStmt<'mcx> {
+    pub relation: Option<NodePtr<'mcx>>,
+    pub indexname: Option<PgString<'mcx>>,
+    pub params: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl ClusterStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ClusterStmt<'b>> {
+        Ok(ClusterStmt {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            indexname: copy_opt_str(&self.indexname, mcx)?,
+            params: copy_node_vec(&self.params, mcx)?,
+        })
+    }
+}
+
+/// `ReindexStmt` (`nodes/parsenodes.h`) — REINDEX.
+#[derive(Debug)]
+pub struct ReindexStmt<'mcx> {
+    pub kind: ReindexObjectType,
+    pub relation: Option<NodePtr<'mcx>>,
+    pub name: Option<PgString<'mcx>>,
+    pub params: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl ReindexStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReindexStmt<'b>> {
+        Ok(ReindexStmt {
+            kind: self.kind,
+            relation: copy_opt_node(&self.relation, mcx)?,
+            name: copy_opt_str(&self.name, mcx)?,
+            params: copy_node_vec(&self.params, mcx)?,
+        })
+    }
+}
+
+/// `CheckPointStmt` (`nodes/parsenodes.h`) — CHECKPOINT.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CheckPointStmt;
+impl CheckPointStmt {
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<CheckPointStmt> { Ok(CheckPointStmt) }
+}
+
+/// `DiscardStmt` (`nodes/parsenodes.h`) — DISCARD.
+#[derive(Clone, Copy, Debug)]
+pub struct DiscardStmt {
+    pub target: DiscardMode,
+}
+impl DiscardStmt {
+    pub fn clone_in<'b>(&self, _mcx: Mcx<'b>) -> PgResult<DiscardStmt> {
+        Ok(DiscardStmt { target: self.target })
+    }
+}
+
+/// `LockStmt` (`nodes/parsenodes.h`) — LOCK TABLE.
+#[derive(Debug)]
+pub struct LockStmt<'mcx> {
+    pub relations: PgVec<'mcx, NodePtr<'mcx>>,
+    pub mode: i32,
+    pub nowait: bool,
+}
+impl LockStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<LockStmt<'b>> {
+        Ok(LockStmt {
+            relations: copy_node_vec(&self.relations, mcx)?,
+            mode: self.mode,
+            nowait: self.nowait,
+        })
+    }
+}
+
+/// `ConstraintsSetStmt` (`nodes/parsenodes.h`) — SET CONSTRAINTS.
+#[derive(Debug)]
+pub struct ConstraintsSetStmt<'mcx> {
+    pub constraints: PgVec<'mcx, NodePtr<'mcx>>,
+    pub deferred: bool,
+}
+impl ConstraintsSetStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ConstraintsSetStmt<'b>> {
+        Ok(ConstraintsSetStmt {
+            constraints: copy_node_vec(&self.constraints, mcx)?,
+            deferred: self.deferred,
+        })
+    }
+}
+
+/// `LoadStmt` (`nodes/parsenodes.h`) — LOAD.
+#[derive(Debug)]
+pub struct LoadStmt<'mcx> {
+    pub filename: Option<PgString<'mcx>>,
+}
+impl LoadStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<LoadStmt<'b>> {
+        Ok(LoadStmt { filename: copy_opt_str(&self.filename, mcx)? })
+    }
+}
+
+/// `TruncateStmt` (`nodes/parsenodes.h`) — TRUNCATE.
+#[derive(Debug)]
+pub struct TruncateStmt<'mcx> {
+    pub relations: PgVec<'mcx, NodePtr<'mcx>>,
+    pub restart_seqs: bool,
+    pub behavior: DropBehavior,
+}
+impl TruncateStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TruncateStmt<'b>> {
+        Ok(TruncateStmt {
+            relations: copy_node_vec(&self.relations, mcx)?,
+            restart_seqs: self.restart_seqs,
+            behavior: self.behavior,
+        })
+    }
+}
+
+/// `CommentStmt` (`nodes/parsenodes.h`) — COMMENT ON.
+#[derive(Debug)]
+pub struct CommentStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub object: Option<NodePtr<'mcx>>,
+    pub comment: Option<PgString<'mcx>>,
+}
+impl CommentStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CommentStmt<'b>> {
+        Ok(CommentStmt {
+            objtype: self.objtype,
+            object: copy_opt_node(&self.object, mcx)?,
+            comment: copy_opt_str(&self.comment, mcx)?,
+        })
+    }
+}
+
+/// `SecLabelStmt` (`nodes/parsenodes.h`) — SECURITY LABEL.
+#[derive(Debug)]
+pub struct SecLabelStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub object: Option<NodePtr<'mcx>>,
+    pub provider: Option<PgString<'mcx>>,
+    pub label: Option<PgString<'mcx>>,
+}
+impl SecLabelStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SecLabelStmt<'b>> {
+        Ok(SecLabelStmt {
+            objtype: self.objtype,
+            object: copy_opt_node(&self.object, mcx)?,
+            provider: copy_opt_str(&self.provider, mcx)?,
+            label: copy_opt_str(&self.label, mcx)?,
+        })
+    }
+}
+
+/// `RuleStmt` (`nodes/parsenodes.h`) — CREATE RULE.
+#[derive(Debug)]
+pub struct RuleStmt<'mcx> {
+    pub relation: Option<NodePtr<'mcx>>,
+    pub rulename: Option<PgString<'mcx>>,
+    pub where_clause: Option<NodePtr<'mcx>>,
+    pub event: CmdType,
+    pub instead: bool,
+    pub actions: PgVec<'mcx, NodePtr<'mcx>>,
+    pub replace: bool,
+}
+impl RuleStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RuleStmt<'b>> {
+        Ok(RuleStmt {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            rulename: copy_opt_str(&self.rulename, mcx)?,
+            where_clause: copy_opt_node(&self.where_clause, mcx)?,
+            event: self.event,
+            instead: self.instead,
+            actions: copy_node_vec(&self.actions, mcx)?,
+            replace: self.replace,
+        })
+    }
+}
+
+/// `NotifyStmt` (`nodes/parsenodes.h`) — NOTIFY.
+#[derive(Debug)]
+pub struct NotifyStmt<'mcx> {
+    pub conditionname: Option<PgString<'mcx>>,
+    pub payload: Option<PgString<'mcx>>,
+}
+impl NotifyStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<NotifyStmt<'b>> {
+        Ok(NotifyStmt {
+            conditionname: copy_opt_str(&self.conditionname, mcx)?,
+            payload: copy_opt_str(&self.payload, mcx)?,
+        })
+    }
+}
+
+/// `ListenStmt` (`nodes/parsenodes.h`) — LISTEN.
+#[derive(Debug)]
+pub struct ListenStmt<'mcx> {
+    pub conditionname: Option<PgString<'mcx>>,
+}
+impl ListenStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ListenStmt<'b>> {
+        Ok(ListenStmt { conditionname: copy_opt_str(&self.conditionname, mcx)? })
+    }
+}
+
+/// `UnlistenStmt` (`nodes/parsenodes.h`) — UNLISTEN.
+#[derive(Debug)]
+pub struct UnlistenStmt<'mcx> {
+    pub conditionname: Option<PgString<'mcx>>,
+}
+impl UnlistenStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<UnlistenStmt<'b>> {
+        Ok(UnlistenStmt { conditionname: copy_opt_str(&self.conditionname, mcx)? })
+    }
+}
+
+/// `DoStmt` (`nodes/parsenodes.h`) — DO.
+#[derive(Debug)]
+pub struct DoStmt<'mcx> {
+    pub args: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl DoStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DoStmt<'b>> {
+        Ok(DoStmt { args: copy_node_vec(&self.args, mcx)? })
+    }
+}
+
+/// `CallStmt` (`nodes/parsenodes.h`) — CALL.
+#[derive(Debug)]
+pub struct CallStmt<'mcx> {
+    pub funccall: Option<NodePtr<'mcx>>,
+    pub funcexpr: Option<NodePtr<'mcx>>,
+    pub outargs: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CallStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CallStmt<'b>> {
+        Ok(CallStmt {
+            funccall: copy_opt_node(&self.funccall, mcx)?,
+            funcexpr: copy_opt_node(&self.funcexpr, mcx)?,
+            outargs: copy_node_vec(&self.outargs, mcx)?,
+        })
+    }
+}
+
+/// `RefreshMatViewStmt` (`nodes/parsenodes.h`) — REFRESH MATERIALIZED VIEW.
+#[derive(Debug)]
+pub struct RefreshMatViewStmt<'mcx> {
+    pub concurrent: bool,
+    pub skip_data: bool,
+    pub relation: Option<NodePtr<'mcx>>,
+}
+impl RefreshMatViewStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RefreshMatViewStmt<'b>> {
+        Ok(RefreshMatViewStmt {
+            concurrent: self.concurrent,
+            skip_data: self.skip_data,
+            relation: copy_opt_node(&self.relation, mcx)?,
+        })
+    }
+}
+
+/// `AlterSystemStmt` (`nodes/parsenodes.h`) — ALTER SYSTEM.
+#[derive(Debug)]
+pub struct AlterSystemStmt<'mcx> {
+    pub setstmt: Option<NodePtr<'mcx>>,
+}
+impl AlterSystemStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterSystemStmt<'b>> {
+        Ok(AlterSystemStmt { setstmt: copy_opt_node(&self.setstmt, mcx)? })
+    }
+}
+
+/// `DropdbStmt` (`nodes/parsenodes.h`) — DROP DATABASE.
+#[derive(Debug)]
+pub struct DropdbStmt<'mcx> {
+    pub dbname: Option<PgString<'mcx>>,
+    pub missing_ok: bool,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl DropdbStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropdbStmt<'b>> {
+        Ok(DropdbStmt {
+            dbname: copy_opt_str(&self.dbname, mcx)?,
+            missing_ok: self.missing_ok,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `DropRoleStmt` (`nodes/parsenodes.h`) — DROP ROLE/USER/GROUP.
+#[derive(Debug)]
+pub struct DropRoleStmt<'mcx> {
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub missing_ok: bool,
+}
+impl DropRoleStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropRoleStmt<'b>> {
+        Ok(DropRoleStmt {
+            roles: copy_node_vec(&self.roles, mcx)?,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `DropTableSpaceStmt` (`nodes/parsenodes.h`) — DROP TABLESPACE.
+#[derive(Debug)]
+pub struct DropTableSpaceStmt<'mcx> {
+    pub tablespacename: Option<PgString<'mcx>>,
+    pub missing_ok: bool,
+}
+impl DropTableSpaceStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropTableSpaceStmt<'b>> {
+        Ok(DropTableSpaceStmt {
+            tablespacename: copy_opt_str(&self.tablespacename, mcx)?,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `CreateFdwStmt` (`nodes/parsenodes.h`) — CREATE FOREIGN DATA WRAPPER.
+#[derive(Debug)]
+pub struct CreateFdwStmt<'mcx> {
+    pub fdwname: Option<PgString<'mcx>>,
+    pub func_options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateFdwStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateFdwStmt<'b>> {
+        Ok(CreateFdwStmt {
+            fdwname: copy_opt_str(&self.fdwname, mcx)?,
+            func_options: copy_node_vec(&self.func_options, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `CreateForeignServerStmt` (`nodes/parsenodes.h`) — CREATE SERVER.
+#[derive(Debug)]
+pub struct CreateForeignServerStmt<'mcx> {
+    pub servername: Option<PgString<'mcx>>,
+    pub servertype: Option<PgString<'mcx>>,
+    pub version: Option<PgString<'mcx>>,
+    pub fdwname: Option<PgString<'mcx>>,
+    pub if_not_exists: bool,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateForeignServerStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateForeignServerStmt<'b>> {
+        Ok(CreateForeignServerStmt {
+            servername: copy_opt_str(&self.servername, mcx)?,
+            servertype: copy_opt_str(&self.servertype, mcx)?,
+            version: copy_opt_str(&self.version, mcx)?,
+            fdwname: copy_opt_str(&self.fdwname, mcx)?,
+            if_not_exists: self.if_not_exists,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `CreateForeignTableStmt` (`nodes/parsenodes.h`) — CREATE FOREIGN TABLE.
+#[derive(Debug)]
+pub struct CreateForeignTableStmt<'mcx> {
+    pub base: mcx::PgBox<'mcx, CreateStmt<'mcx>>,
+    pub servername: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateForeignTableStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateForeignTableStmt<'b>> {
+        Ok(CreateForeignTableStmt {
+            base: mcx::alloc_in(mcx, self.base.clone_in(mcx)?)?,
+            servername: copy_opt_str(&self.servername, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `CreateUserMappingStmt` (`nodes/parsenodes.h`) — CREATE USER MAPPING.
+#[derive(Debug)]
+pub struct CreateUserMappingStmt<'mcx> {
+    pub user: Option<NodePtr<'mcx>>,
+    pub servername: Option<PgString<'mcx>>,
+    pub if_not_exists: bool,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateUserMappingStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateUserMappingStmt<'b>> {
+        Ok(CreateUserMappingStmt {
+            user: copy_opt_node(&self.user, mcx)?,
+            servername: copy_opt_str(&self.servername, mcx)?,
+            if_not_exists: self.if_not_exists,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `DropUserMappingStmt` (`nodes/parsenodes.h`) — DROP USER MAPPING.
+#[derive(Debug)]
+pub struct DropUserMappingStmt<'mcx> {
+    pub user: Option<NodePtr<'mcx>>,
+    pub servername: Option<PgString<'mcx>>,
+    pub missing_ok: bool,
+}
+impl DropUserMappingStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropUserMappingStmt<'b>> {
+        Ok(DropUserMappingStmt {
+            user: copy_opt_node(&self.user, mcx)?,
+            servername: copy_opt_str(&self.servername, mcx)?,
+            missing_ok: self.missing_ok,
+        })
+    }
+}
+
+/// `ImportForeignSchemaStmt` (`nodes/parsenodes.h`) — IMPORT FOREIGN SCHEMA.
+#[derive(Debug)]
+pub struct ImportForeignSchemaStmt<'mcx> {
+    pub server_name: Option<PgString<'mcx>>,
+    pub remote_schema: Option<PgString<'mcx>>,
+    pub local_schema: Option<PgString<'mcx>>,
+    pub list_type: ImportForeignSchemaType,
+    pub table_list: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl ImportForeignSchemaStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ImportForeignSchemaStmt<'b>> {
+        Ok(ImportForeignSchemaStmt {
+            server_name: copy_opt_str(&self.server_name, mcx)?,
+            remote_schema: copy_opt_str(&self.remote_schema, mcx)?,
+            local_schema: copy_opt_str(&self.local_schema, mcx)?,
+            list_type: self.list_type,
+            table_list: copy_node_vec(&self.table_list, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `CreatePolicyStmt` (`nodes/parsenodes.h`) — CREATE POLICY.
+#[derive(Debug)]
+pub struct CreatePolicyStmt<'mcx> {
+    pub policy_name: Option<PgString<'mcx>>,
+    pub table: Option<NodePtr<'mcx>>,
+    pub cmd_name: Option<PgString<'mcx>>,
+    pub permissive: bool,
+    pub roles: PgVec<'mcx, NodePtr<'mcx>>,
+    pub qual: Option<NodePtr<'mcx>>,
+    pub with_check: Option<NodePtr<'mcx>>,
+}
+impl CreatePolicyStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreatePolicyStmt<'b>> {
+        Ok(CreatePolicyStmt {
+            policy_name: copy_opt_str(&self.policy_name, mcx)?,
+            table: copy_opt_node(&self.table, mcx)?,
+            cmd_name: copy_opt_str(&self.cmd_name, mcx)?,
+            permissive: self.permissive,
+            roles: copy_node_vec(&self.roles, mcx)?,
+            qual: copy_opt_node(&self.qual, mcx)?,
+            with_check: copy_opt_node(&self.with_check, mcx)?,
+        })
+    }
+}
+
+/// `PublicationTable` (`nodes/parsenodes.h`).
+#[derive(Debug)]
+pub struct PublicationTable<'mcx> {
+    pub relation: Option<NodePtr<'mcx>>,
+    pub where_clause: Option<NodePtr<'mcx>>,
+    pub columns: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl PublicationTable<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PublicationTable<'b>> {
+        Ok(PublicationTable {
+            relation: copy_opt_node(&self.relation, mcx)?,
+            where_clause: copy_opt_node(&self.where_clause, mcx)?,
+            columns: copy_node_vec(&self.columns, mcx)?,
+        })
+    }
+}
+
+/// `PublicationObjSpec` (`nodes/parsenodes.h`).
+#[derive(Debug)]
+pub struct PublicationObjSpec<'mcx> {
+    pub pubobjtype: PublicationObjSpecType,
+    pub name: Option<PgString<'mcx>>,
+    pub pubtable: Option<mcx::PgBox<'mcx, PublicationTable<'mcx>>>,
+    pub location: ParseLoc,
+}
+impl PublicationObjSpec<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PublicationObjSpec<'b>> {
+        let pubtable = match &self.pubtable {
+            Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+            None => None,
+        };
+        Ok(PublicationObjSpec {
+            pubobjtype: self.pubobjtype,
+            name: copy_opt_str(&self.name, mcx)?,
+            pubtable,
+            location: self.location,
+        })
+    }
+}
+
+/// `CreatePublicationStmt` (`nodes/parsenodes.h`) — CREATE PUBLICATION.
+#[derive(Debug)]
+pub struct CreatePublicationStmt<'mcx> {
+    pub pubname: Option<PgString<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+    pub pubobjects: PgVec<'mcx, NodePtr<'mcx>>,
+    pub for_all_tables: bool,
+}
+impl CreatePublicationStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreatePublicationStmt<'b>> {
+        Ok(CreatePublicationStmt {
+            pubname: copy_opt_str(&self.pubname, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+            pubobjects: copy_node_vec(&self.pubobjects, mcx)?,
+            for_all_tables: self.for_all_tables,
+        })
+    }
+}
+
+/// `CreateSubscriptionStmt` (`nodes/parsenodes.h`) — CREATE SUBSCRIPTION.
+#[derive(Debug)]
+pub struct CreateSubscriptionStmt<'mcx> {
+    pub subname: Option<PgString<'mcx>>,
+    pub conninfo: Option<PgString<'mcx>>,
+    pub publication: PgVec<'mcx, NodePtr<'mcx>>,
+    pub options: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateSubscriptionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateSubscriptionStmt<'b>> {
+        Ok(CreateSubscriptionStmt {
+            subname: copy_opt_str(&self.subname, mcx)?,
+            conninfo: copy_opt_str(&self.conninfo, mcx)?,
+            publication: copy_node_vec(&self.publication, mcx)?,
+            options: copy_node_vec(&self.options, mcx)?,
+        })
+    }
+}
+
+/// `DropSubscriptionStmt` (`nodes/parsenodes.h`) — DROP SUBSCRIPTION.
+#[derive(Debug)]
+pub struct DropSubscriptionStmt<'mcx> {
+    pub subname: Option<PgString<'mcx>>,
+    pub missing_ok: bool,
+    pub behavior: DropBehavior,
+}
+impl DropSubscriptionStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DropSubscriptionStmt<'b>> {
+        Ok(DropSubscriptionStmt {
+            subname: copy_opt_str(&self.subname, mcx)?,
+            missing_ok: self.missing_ok,
+            behavior: self.behavior,
+        })
+    }
+}
+
+/// `CreateEventTrigStmt` (`nodes/parsenodes.h`) — CREATE EVENT TRIGGER.
+#[derive(Debug)]
+pub struct CreateEventTrigStmt<'mcx> {
+    pub trigname: Option<PgString<'mcx>>,
+    pub eventname: Option<PgString<'mcx>>,
+    pub whenclause: PgVec<'mcx, NodePtr<'mcx>>,
+    pub funcname: PgVec<'mcx, NodePtr<'mcx>>,
+}
+impl CreateEventTrigStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateEventTrigStmt<'b>> {
+        Ok(CreateEventTrigStmt {
+            trigname: copy_opt_str(&self.trigname, mcx)?,
+            eventname: copy_opt_str(&self.eventname, mcx)?,
+            whenclause: copy_node_vec(&self.whenclause, mcx)?,
+            funcname: copy_node_vec(&self.funcname, mcx)?,
+        })
+    }
+}
+
+/// `AlterEventTrigStmt` (`nodes/parsenodes.h`) — ALTER EVENT TRIGGER.
+#[derive(Debug)]
+pub struct AlterEventTrigStmt<'mcx> {
+    pub trigname: Option<PgString<'mcx>>,
+    pub tgenabled: i8,
+}
+impl AlterEventTrigStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AlterEventTrigStmt<'b>> {
+        Ok(AlterEventTrigStmt {
+            trigname: copy_opt_str(&self.trigname, mcx)?,
+            tgenabled: self.tgenabled,
+        })
+    }
+}
+
+/// `CreateTransformStmt` (`nodes/parsenodes.h`) — CREATE TRANSFORM.
+#[derive(Debug)]
+pub struct CreateTransformStmt<'mcx> {
+    pub replace: bool,
+    pub type_name: Option<NodePtr<'mcx>>,
+    pub lang: Option<PgString<'mcx>>,
+    pub fromsql: Option<NodePtr<'mcx>>,
+    pub tosql: Option<NodePtr<'mcx>>,
+}
+impl CreateTransformStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateTransformStmt<'b>> {
+        Ok(CreateTransformStmt {
+            replace: self.replace,
+            type_name: copy_opt_node(&self.type_name, mcx)?,
+            lang: copy_opt_str(&self.lang, mcx)?,
+            fromsql: copy_opt_node(&self.fromsql, mcx)?,
+            tosql: copy_opt_node(&self.tosql, mcx)?,
+        })
+    }
+}
+
+/// `ReturnStmt` (`nodes/parsenodes.h`) — RETURN inside a SQL function body.
+#[derive(Debug)]
+pub struct ReturnStmt<'mcx> {
+    pub returnval: Option<NodePtr<'mcx>>,
+}
+impl ReturnStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReturnStmt<'b>> {
+        Ok(ReturnStmt { returnval: copy_opt_node(&self.returnval, mcx)? })
+    }
+}
+
+/// `PLAssignStmt` (`nodes/parsenodes.h`) — PL/pgSQL assignment (produced only
+/// in the `RAW_PARSE_PLPGSQL_ASSIGN*` raw-parse modes).
+#[derive(Debug)]
+pub struct PLAssignStmt<'mcx> {
+    pub name: Option<PgString<'mcx>>,
+    pub indirection: PgVec<'mcx, NodePtr<'mcx>>,
+    pub nnames: i32,
+    /// `SelectStmt *val`.
+    pub val: Option<NodePtr<'mcx>>,
+    pub location: ParseLoc,
+}
+impl PLAssignStmt<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PLAssignStmt<'b>> {
+        Ok(PLAssignStmt {
+            name: copy_opt_str(&self.name, mcx)?,
+            indirection: copy_node_vec(&self.indirection, mcx)?,
+            nnames: self.nnames,
+            val: copy_opt_node(&self.val, mcx)?,
+            location: self.location,
+        })
+    }
+}

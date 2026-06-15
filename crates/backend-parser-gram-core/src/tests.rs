@@ -286,3 +286,137 @@ fn empty_input_is_empty_vec() {
             .expect("blank input parses to empty");
         assert_eq!(r.len(), 0);
 }
+
+#[test]
+fn utility_statements_convert_to_owned_rawstmt() {
+    let ctx = MemoryContext::new("gram-test-f4");
+    let mcx = ctx.mcx();
+
+    match &*parse(mcx, "GRANT SELECT, INSERT ON t TO alice")[0].stmt {
+        Node::GrantStmt(s) => {
+            assert!(s.is_grant);
+            assert_eq!(s.privileges.len(), 2);
+            assert_eq!(s.grantees.len(), 1);
+        }
+        other => panic!("expected GrantStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "GRANT admins TO alice")[0].stmt {
+        Node::GrantRoleStmt(s) => {
+            assert!(s.is_grant);
+            assert_eq!(s.granted_roles.len(), 1);
+            assert_eq!(s.grantee_roles.len(), 1);
+        }
+        other => panic!("expected GrantRoleStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "SET work_mem = '64MB'")[0].stmt {
+        Node::VariableSetStmt(s) => {
+            assert_eq!(s.kind, types_nodes::ddlnodes::VAR_SET_VALUE);
+            assert!(s.name.is_some());
+            assert_eq!(s.args.len(), 1);
+        }
+        other => panic!("expected VariableSetStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "SHOW work_mem")[0].stmt {
+        Node::VariableShowStmt(s) => assert!(s.name.is_some()),
+        other => panic!("expected VariableShowStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "BEGIN")[0].stmt {
+        Node::TransactionStmt(s) => assert_eq!(s.kind, types_nodes::ddlnodes::TRANS_STMT_BEGIN),
+        other => panic!("expected TransactionStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "COMMIT")[0].stmt {
+        Node::TransactionStmt(s) => assert_eq!(s.kind, types_nodes::ddlnodes::TRANS_STMT_COMMIT),
+        other => panic!("expected TransactionStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "COPY t (a, b) FROM '/tmp/x'")[0].stmt {
+        Node::CopyStmt(s) => {
+            assert!(s.relation.is_some());
+            assert!(s.is_from);
+            assert_eq!(s.attlist.len(), 2);
+            assert!(s.filename.is_some());
+        }
+        other => panic!("expected CopyStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "EXPLAIN SELECT 1")[0].stmt {
+        Node::ExplainStmt(s) => assert!(s.query.is_some()),
+        other => panic!("expected ExplainStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "VACUUM t")[0].stmt {
+        Node::VacuumStmt(s) => {
+            assert!(s.is_vacuumcmd);
+            assert_eq!(s.rels.len(), 1);
+        }
+        other => panic!("expected VacuumStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "PREPARE p (int) AS SELECT $1")[0].stmt {
+        Node::PrepareStmt(s) => {
+            assert!(s.name.is_some());
+            assert_eq!(s.argtypes.len(), 1);
+            assert!(s.query.is_some());
+        }
+        other => panic!("expected PrepareStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "EXECUTE p (1)")[0].stmt {
+        Node::ExecuteStmt(s) => {
+            assert!(s.name.is_some());
+            assert_eq!(s.params.len(), 1);
+        }
+        other => panic!("expected ExecuteStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "COMMENT ON TABLE t IS 'hi'")[0].stmt {
+        Node::CommentStmt(s) => {
+            assert!(s.object.is_some());
+            assert!(s.comment.is_some());
+        }
+        other => panic!("expected CommentStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "CHECKPOINT")[0].stmt {
+        Node::CheckPointStmt(_) => {}
+        other => panic!("expected CheckPointStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "DISCARD ALL")[0].stmt {
+        Node::DiscardStmt(s) => assert_eq!(s.target, types_nodes::ddlnodes::DISCARD_ALL),
+        other => panic!("expected DiscardStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "LOCK TABLE t")[0].stmt {
+        Node::LockStmt(s) => assert_eq!(s.relations.len(), 1),
+        other => panic!("expected LockStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "NOTIFY chan, 'payload'")[0].stmt {
+        Node::NotifyStmt(s) => {
+            assert!(s.conditionname.is_some());
+            assert!(s.payload.is_some());
+        }
+        other => panic!("expected NotifyStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "TRUNCATE t")[0].stmt {
+        Node::TruncateStmt(s) => assert_eq!(s.relations.len(), 1),
+        other => panic!("expected TruncateStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "DECLARE c CURSOR FOR SELECT 1")[0].stmt {
+        Node::DeclareCursorStmt(s) => {
+            assert!(s.portalname.is_some());
+            assert!(s.query.is_some());
+        }
+        other => panic!("expected DeclareCursorStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "FETCH 5 FROM c")[0].stmt {
+        Node::FetchStmt(s) => assert!(s.portalname.is_some()),
+        other => panic!("expected FetchStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "DO $$ BEGIN END $$")[0].stmt {
+        Node::DoStmt(s) => assert!(!s.args.is_empty()),
+        other => panic!("expected DoStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "CALL p(1)")[0].stmt {
+        Node::CallStmt(s) => assert!(s.funccall.is_some()),
+        other => panic!("expected CallStmt, got {:?}", other.node_tag()),
+    }
+    match &*parse(mcx, "REINDEX TABLE t")[0].stmt {
+        Node::ReindexStmt(s) => {
+            assert_eq!(s.kind, types_nodes::ddlnodes::REINDEX_OBJECT_TABLE);
+            assert!(s.relation.is_some());
+        }
+        other => panic!("expected ReindexStmt, got {:?}", other.node_tag()),
+    };
+}

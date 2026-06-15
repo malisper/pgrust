@@ -194,6 +194,60 @@ pub const T_AlterTSDictionaryStmt: NodeTag = NodeTag(257);
 pub const T_AlterTSConfigurationStmt: NodeTag = NodeTag(258);
 pub const T_AlterPublicationStmt: NodeTag = NodeTag(262);
 pub const T_AlterSubscriptionStmt: NodeTag = NodeTag(264);
+// raw-grammar utility / GRANT / transaction family (parser grammar F4).
+pub const T_GrantStmt: NodeTag = NodeTag(152);
+pub const T_GrantRoleStmt: NodeTag = NodeTag(155);
+pub const T_CopyStmt: NodeTag = NodeTag(157);
+pub const T_VariableSetStmt: NodeTag = NodeTag(158);
+pub const T_VariableShowStmt: NodeTag = NodeTag(159);
+pub const T_ImportForeignSchemaStmt: NodeTag = NodeTag(177);
+pub const T_CreateFdwStmt: NodeTag = NodeTag(169);
+pub const T_CreateForeignServerStmt: NodeTag = NodeTag(171);
+pub const T_CreateForeignTableStmt: NodeTag = NodeTag(173);
+pub const T_CreateUserMappingStmt: NodeTag = NodeTag(174);
+pub const T_DropUserMappingStmt: NodeTag = NodeTag(176);
+pub const T_CreatePolicyStmt: NodeTag = NodeTag(178);
+pub const T_CreateEventTrigStmt: NodeTag = NodeTag(182);
+pub const T_AlterEventTrigStmt: NodeTag = NodeTag(183);
+pub const T_DropRoleStmt: NodeTag = NodeTag(188);
+pub const T_DropTableSpaceStmt: NodeTag = NodeTag(163);
+pub const T_TruncateStmt: NodeTag = NodeTag(198);
+pub const T_CommentStmt: NodeTag = NodeTag(199);
+pub const T_SecLabelStmt: NodeTag = NodeTag(200);
+pub const T_DeclareCursorStmt: NodeTag = NodeTag(201);
+pub const T_ClosePortalStmt: NodeTag = NodeTag(202);
+pub const T_FetchStmt: NodeTag = NodeTag(203);
+pub const T_DoStmt: NodeTag = NodeTag(211);
+pub const T_CallStmt: NodeTag = NodeTag(213);
+pub const T_RuleStmt: NodeTag = NodeTag(221);
+pub const T_NotifyStmt: NodeTag = NodeTag(222);
+pub const T_ListenStmt: NodeTag = NodeTag(223);
+pub const T_UnlistenStmt: NodeTag = NodeTag(224);
+pub const T_TransactionStmt: NodeTag = NodeTag(225);
+pub const T_LoadStmt: NodeTag = NodeTag(231);
+pub const T_DropdbStmt: NodeTag = NodeTag(236);
+pub const T_AlterSystemStmt: NodeTag = NodeTag(237);
+pub const T_ClusterStmt: NodeTag = NodeTag(238);
+pub const T_VacuumStmt: NodeTag = NodeTag(239);
+pub const T_VacuumRelation: NodeTag = NodeTag(240);
+pub const T_ExplainStmt: NodeTag = NodeTag(241);
+pub const T_RefreshMatViewStmt: NodeTag = NodeTag(243);
+pub const T_CheckPointStmt: NodeTag = NodeTag(244);
+pub const T_DiscardStmt: NodeTag = NodeTag(245);
+pub const T_LockStmt: NodeTag = NodeTag(246);
+pub const T_ConstraintsSetStmt: NodeTag = NodeTag(247);
+pub const T_ReindexStmt: NodeTag = NodeTag(248);
+pub const T_CreateTransformStmt: NodeTag = NodeTag(251);
+pub const T_PrepareStmt: NodeTag = NodeTag(252);
+pub const T_ExecuteStmt: NodeTag = NodeTag(253);
+pub const T_DeallocateStmt: NodeTag = NodeTag(254);
+pub const T_PublicationTable: NodeTag = NodeTag(259);
+pub const T_PublicationObjSpec: NodeTag = NodeTag(260);
+pub const T_CreatePublicationStmt: NodeTag = NodeTag(261);
+pub const T_CreateSubscriptionStmt: NodeTag = NodeTag(263);
+pub const T_DropSubscriptionStmt: NodeTag = NodeTag(265);
+pub const T_ReturnStmt: NodeTag = NodeTag(143);
+pub const T_PLAssignStmt: NodeTag = NodeTag(144);
 pub const T_RangeTblEntry: NodeTag = NodeTag(101);
 pub const T_RTEPermissionInfo: NodeTag = NodeTag(102);
 pub const T_RangeTblFunction: NodeTag = NodeTag(103);
@@ -605,6 +659,60 @@ pub enum Node<'mcx> {
     AlterTSConfigurationStmt(crate::ddlnodes::AlterTSConfigurationStmt<'mcx>),
     AlterPublicationStmt(crate::ddlnodes::AlterPublicationStmt<'mcx>),
     AlterSubscriptionStmt(crate::ddlnodes::AlterSubscriptionStmt<'mcx>),
+    // raw-grammar utility / GRANT / transaction family (parser grammar F4).
+    CheckPointStmt(crate::ddlnodes::CheckPointStmt),
+    DiscardStmt(crate::ddlnodes::DiscardStmt),
+    GrantStmt(crate::ddlnodes::GrantStmt<'mcx>),
+    GrantRoleStmt(crate::ddlnodes::GrantRoleStmt<'mcx>),
+    VariableSetStmt(crate::ddlnodes::VariableSetStmt<'mcx>),
+    VariableShowStmt(crate::ddlnodes::VariableShowStmt<'mcx>),
+    TransactionStmt(crate::ddlnodes::TransactionStmt<'mcx>),
+    CopyStmt(crate::ddlnodes::CopyStmt<'mcx>),
+    ExplainStmt(crate::ddlnodes::ExplainStmt<'mcx>),
+    PrepareStmt(crate::ddlnodes::PrepareStmt<'mcx>),
+    ExecuteStmt(crate::ddlnodes::ExecuteStmt<'mcx>),
+    DeallocateStmt(crate::ddlnodes::DeallocateStmt<'mcx>),
+    DeclareCursorStmt(crate::ddlnodes::DeclareCursorStmt<'mcx>),
+    ClosePortalStmt(crate::ddlnodes::ClosePortalStmt<'mcx>),
+    FetchStmt(crate::ddlnodes::FetchStmt<'mcx>),
+    VacuumStmt(crate::ddlnodes::VacuumStmt<'mcx>),
+    VacuumRelation(crate::ddlnodes::VacuumRelation<'mcx>),
+    ClusterStmt(crate::ddlnodes::ClusterStmt<'mcx>),
+    ReindexStmt(crate::ddlnodes::ReindexStmt<'mcx>),
+    LockStmt(crate::ddlnodes::LockStmt<'mcx>),
+    ConstraintsSetStmt(crate::ddlnodes::ConstraintsSetStmt<'mcx>),
+    LoadStmt(crate::ddlnodes::LoadStmt<'mcx>),
+    TruncateStmt(crate::ddlnodes::TruncateStmt<'mcx>),
+    CommentStmt(crate::ddlnodes::CommentStmt<'mcx>),
+    SecLabelStmt(crate::ddlnodes::SecLabelStmt<'mcx>),
+    RuleStmt(crate::ddlnodes::RuleStmt<'mcx>),
+    NotifyStmt(crate::ddlnodes::NotifyStmt<'mcx>),
+    ListenStmt(crate::ddlnodes::ListenStmt<'mcx>),
+    UnlistenStmt(crate::ddlnodes::UnlistenStmt<'mcx>),
+    DoStmt(crate::ddlnodes::DoStmt<'mcx>),
+    CallStmt(crate::ddlnodes::CallStmt<'mcx>),
+    RefreshMatViewStmt(crate::ddlnodes::RefreshMatViewStmt<'mcx>),
+    AlterSystemStmt(crate::ddlnodes::AlterSystemStmt<'mcx>),
+    DropdbStmt(crate::ddlnodes::DropdbStmt<'mcx>),
+    DropRoleStmt(crate::ddlnodes::DropRoleStmt<'mcx>),
+    DropTableSpaceStmt(crate::ddlnodes::DropTableSpaceStmt<'mcx>),
+    CreateFdwStmt(crate::ddlnodes::CreateFdwStmt<'mcx>),
+    CreateForeignServerStmt(crate::ddlnodes::CreateForeignServerStmt<'mcx>),
+    CreateForeignTableStmt(crate::ddlnodes::CreateForeignTableStmt<'mcx>),
+    CreateUserMappingStmt(crate::ddlnodes::CreateUserMappingStmt<'mcx>),
+    DropUserMappingStmt(crate::ddlnodes::DropUserMappingStmt<'mcx>),
+    ImportForeignSchemaStmt(crate::ddlnodes::ImportForeignSchemaStmt<'mcx>),
+    CreatePolicyStmt(crate::ddlnodes::CreatePolicyStmt<'mcx>),
+    PublicationTable(crate::ddlnodes::PublicationTable<'mcx>),
+    PublicationObjSpec(crate::ddlnodes::PublicationObjSpec<'mcx>),
+    CreatePublicationStmt(crate::ddlnodes::CreatePublicationStmt<'mcx>),
+    CreateSubscriptionStmt(crate::ddlnodes::CreateSubscriptionStmt<'mcx>),
+    DropSubscriptionStmt(crate::ddlnodes::DropSubscriptionStmt<'mcx>),
+    CreateEventTrigStmt(crate::ddlnodes::CreateEventTrigStmt<'mcx>),
+    AlterEventTrigStmt(crate::ddlnodes::AlterEventTrigStmt<'mcx>),
+    CreateTransformStmt(crate::ddlnodes::CreateTransformStmt<'mcx>),
+    ReturnStmt(crate::ddlnodes::ReturnStmt<'mcx>),
+    PLAssignStmt(crate::ddlnodes::PLAssignStmt<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -947,6 +1055,60 @@ impl<'mcx> Node<'mcx> {
             Node::AlterTSConfigurationStmt(_) => T_AlterTSConfigurationStmt,
             Node::AlterPublicationStmt(_) => T_AlterPublicationStmt,
             Node::AlterSubscriptionStmt(_) => T_AlterSubscriptionStmt,
+            // raw-grammar utility / GRANT / transaction family (F4).
+            Node::CheckPointStmt(_) => T_CheckPointStmt,
+            Node::DiscardStmt(_) => T_DiscardStmt,
+            Node::GrantStmt(_) => T_GrantStmt,
+            Node::GrantRoleStmt(_) => T_GrantRoleStmt,
+            Node::VariableSetStmt(_) => T_VariableSetStmt,
+            Node::VariableShowStmt(_) => T_VariableShowStmt,
+            Node::TransactionStmt(_) => T_TransactionStmt,
+            Node::CopyStmt(_) => T_CopyStmt,
+            Node::ExplainStmt(_) => T_ExplainStmt,
+            Node::PrepareStmt(_) => T_PrepareStmt,
+            Node::ExecuteStmt(_) => T_ExecuteStmt,
+            Node::DeallocateStmt(_) => T_DeallocateStmt,
+            Node::DeclareCursorStmt(_) => T_DeclareCursorStmt,
+            Node::ClosePortalStmt(_) => T_ClosePortalStmt,
+            Node::FetchStmt(_) => T_FetchStmt,
+            Node::VacuumStmt(_) => T_VacuumStmt,
+            Node::VacuumRelation(_) => T_VacuumRelation,
+            Node::ClusterStmt(_) => T_ClusterStmt,
+            Node::ReindexStmt(_) => T_ReindexStmt,
+            Node::LockStmt(_) => T_LockStmt,
+            Node::ConstraintsSetStmt(_) => T_ConstraintsSetStmt,
+            Node::LoadStmt(_) => T_LoadStmt,
+            Node::TruncateStmt(_) => T_TruncateStmt,
+            Node::CommentStmt(_) => T_CommentStmt,
+            Node::SecLabelStmt(_) => T_SecLabelStmt,
+            Node::RuleStmt(_) => T_RuleStmt,
+            Node::NotifyStmt(_) => T_NotifyStmt,
+            Node::ListenStmt(_) => T_ListenStmt,
+            Node::UnlistenStmt(_) => T_UnlistenStmt,
+            Node::DoStmt(_) => T_DoStmt,
+            Node::CallStmt(_) => T_CallStmt,
+            Node::RefreshMatViewStmt(_) => T_RefreshMatViewStmt,
+            Node::AlterSystemStmt(_) => T_AlterSystemStmt,
+            Node::DropdbStmt(_) => T_DropdbStmt,
+            Node::DropRoleStmt(_) => T_DropRoleStmt,
+            Node::DropTableSpaceStmt(_) => T_DropTableSpaceStmt,
+            Node::CreateFdwStmt(_) => T_CreateFdwStmt,
+            Node::CreateForeignServerStmt(_) => T_CreateForeignServerStmt,
+            Node::CreateForeignTableStmt(_) => T_CreateForeignTableStmt,
+            Node::CreateUserMappingStmt(_) => T_CreateUserMappingStmt,
+            Node::DropUserMappingStmt(_) => T_DropUserMappingStmt,
+            Node::ImportForeignSchemaStmt(_) => T_ImportForeignSchemaStmt,
+            Node::CreatePolicyStmt(_) => T_CreatePolicyStmt,
+            Node::PublicationTable(_) => T_PublicationTable,
+            Node::PublicationObjSpec(_) => T_PublicationObjSpec,
+            Node::CreatePublicationStmt(_) => T_CreatePublicationStmt,
+            Node::CreateSubscriptionStmt(_) => T_CreateSubscriptionStmt,
+            Node::DropSubscriptionStmt(_) => T_DropSubscriptionStmt,
+            Node::CreateEventTrigStmt(_) => T_CreateEventTrigStmt,
+            Node::AlterEventTrigStmt(_) => T_AlterEventTrigStmt,
+            Node::CreateTransformStmt(_) => T_CreateTransformStmt,
+            Node::ReturnStmt(_) => T_ReturnStmt,
+            Node::PLAssignStmt(_) => T_PLAssignStmt,
         }
     }
 
@@ -1221,6 +1383,60 @@ impl<'mcx> Node<'mcx> {
             }
             Node::AlterPublicationStmt(n) => Ok(Node::AlterPublicationStmt(n.clone_in(mcx)?)),
             Node::AlterSubscriptionStmt(n) => Ok(Node::AlterSubscriptionStmt(n.clone_in(mcx)?)),
+            // raw-grammar utility / GRANT / transaction family (F4).
+            Node::CheckPointStmt(n) => Ok(Node::CheckPointStmt(n.clone_in(mcx)?)),
+            Node::DiscardStmt(n) => Ok(Node::DiscardStmt(n.clone_in(mcx)?)),
+            Node::GrantStmt(n) => Ok(Node::GrantStmt(n.clone_in(mcx)?)),
+            Node::GrantRoleStmt(n) => Ok(Node::GrantRoleStmt(n.clone_in(mcx)?)),
+            Node::VariableSetStmt(n) => Ok(Node::VariableSetStmt(n.clone_in(mcx)?)),
+            Node::VariableShowStmt(n) => Ok(Node::VariableShowStmt(n.clone_in(mcx)?)),
+            Node::TransactionStmt(n) => Ok(Node::TransactionStmt(n.clone_in(mcx)?)),
+            Node::CopyStmt(n) => Ok(Node::CopyStmt(n.clone_in(mcx)?)),
+            Node::ExplainStmt(n) => Ok(Node::ExplainStmt(n.clone_in(mcx)?)),
+            Node::PrepareStmt(n) => Ok(Node::PrepareStmt(n.clone_in(mcx)?)),
+            Node::ExecuteStmt(n) => Ok(Node::ExecuteStmt(n.clone_in(mcx)?)),
+            Node::DeallocateStmt(n) => Ok(Node::DeallocateStmt(n.clone_in(mcx)?)),
+            Node::DeclareCursorStmt(n) => Ok(Node::DeclareCursorStmt(n.clone_in(mcx)?)),
+            Node::ClosePortalStmt(n) => Ok(Node::ClosePortalStmt(n.clone_in(mcx)?)),
+            Node::FetchStmt(n) => Ok(Node::FetchStmt(n.clone_in(mcx)?)),
+            Node::VacuumStmt(n) => Ok(Node::VacuumStmt(n.clone_in(mcx)?)),
+            Node::VacuumRelation(n) => Ok(Node::VacuumRelation(n.clone_in(mcx)?)),
+            Node::ClusterStmt(n) => Ok(Node::ClusterStmt(n.clone_in(mcx)?)),
+            Node::ReindexStmt(n) => Ok(Node::ReindexStmt(n.clone_in(mcx)?)),
+            Node::LockStmt(n) => Ok(Node::LockStmt(n.clone_in(mcx)?)),
+            Node::ConstraintsSetStmt(n) => Ok(Node::ConstraintsSetStmt(n.clone_in(mcx)?)),
+            Node::LoadStmt(n) => Ok(Node::LoadStmt(n.clone_in(mcx)?)),
+            Node::TruncateStmt(n) => Ok(Node::TruncateStmt(n.clone_in(mcx)?)),
+            Node::CommentStmt(n) => Ok(Node::CommentStmt(n.clone_in(mcx)?)),
+            Node::SecLabelStmt(n) => Ok(Node::SecLabelStmt(n.clone_in(mcx)?)),
+            Node::RuleStmt(n) => Ok(Node::RuleStmt(n.clone_in(mcx)?)),
+            Node::NotifyStmt(n) => Ok(Node::NotifyStmt(n.clone_in(mcx)?)),
+            Node::ListenStmt(n) => Ok(Node::ListenStmt(n.clone_in(mcx)?)),
+            Node::UnlistenStmt(n) => Ok(Node::UnlistenStmt(n.clone_in(mcx)?)),
+            Node::DoStmt(n) => Ok(Node::DoStmt(n.clone_in(mcx)?)),
+            Node::CallStmt(n) => Ok(Node::CallStmt(n.clone_in(mcx)?)),
+            Node::RefreshMatViewStmt(n) => Ok(Node::RefreshMatViewStmt(n.clone_in(mcx)?)),
+            Node::AlterSystemStmt(n) => Ok(Node::AlterSystemStmt(n.clone_in(mcx)?)),
+            Node::DropdbStmt(n) => Ok(Node::DropdbStmt(n.clone_in(mcx)?)),
+            Node::DropRoleStmt(n) => Ok(Node::DropRoleStmt(n.clone_in(mcx)?)),
+            Node::DropTableSpaceStmt(n) => Ok(Node::DropTableSpaceStmt(n.clone_in(mcx)?)),
+            Node::CreateFdwStmt(n) => Ok(Node::CreateFdwStmt(n.clone_in(mcx)?)),
+            Node::CreateForeignServerStmt(n) => Ok(Node::CreateForeignServerStmt(n.clone_in(mcx)?)),
+            Node::CreateForeignTableStmt(n) => Ok(Node::CreateForeignTableStmt(n.clone_in(mcx)?)),
+            Node::CreateUserMappingStmt(n) => Ok(Node::CreateUserMappingStmt(n.clone_in(mcx)?)),
+            Node::DropUserMappingStmt(n) => Ok(Node::DropUserMappingStmt(n.clone_in(mcx)?)),
+            Node::ImportForeignSchemaStmt(n) => Ok(Node::ImportForeignSchemaStmt(n.clone_in(mcx)?)),
+            Node::CreatePolicyStmt(n) => Ok(Node::CreatePolicyStmt(n.clone_in(mcx)?)),
+            Node::PublicationTable(n) => Ok(Node::PublicationTable(n.clone_in(mcx)?)),
+            Node::PublicationObjSpec(n) => Ok(Node::PublicationObjSpec(n.clone_in(mcx)?)),
+            Node::CreatePublicationStmt(n) => Ok(Node::CreatePublicationStmt(n.clone_in(mcx)?)),
+            Node::CreateSubscriptionStmt(n) => Ok(Node::CreateSubscriptionStmt(n.clone_in(mcx)?)),
+            Node::DropSubscriptionStmt(n) => Ok(Node::DropSubscriptionStmt(n.clone_in(mcx)?)),
+            Node::CreateEventTrigStmt(n) => Ok(Node::CreateEventTrigStmt(n.clone_in(mcx)?)),
+            Node::AlterEventTrigStmt(n) => Ok(Node::AlterEventTrigStmt(n.clone_in(mcx)?)),
+            Node::CreateTransformStmt(n) => Ok(Node::CreateTransformStmt(n.clone_in(mcx)?)),
+            Node::ReturnStmt(n) => Ok(Node::ReturnStmt(n.clone_in(mcx)?)),
+            Node::PLAssignStmt(n) => Ok(Node::PLAssignStmt(n.clone_in(mcx)?)),
         }
     }
 }
