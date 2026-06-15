@@ -515,3 +515,12 @@ seam_core::seam!(
         extra: &JoinPathExtraData,
     ) -> PgResult<()>
 );
+
+/* ======================================================================
+ * NOTE: `add_paths_to_joinrel` is NOT a seam. The join-relation enumerator
+ * (joinrels.c:populate_joinrel_with_paths) calls the crate-level
+ * `backend_optimizer_path_joinpath::add_paths_to_joinrel` directly — joinrels
+ * depends on joinpath (no cycle: joinpath does not depend on joinrels), and
+ * threads the `Mcx` plus the `JoinEnableFlags` GUC snapshot itself. No inward
+ * seam is needed for that entry point.
+ * ==================================================================== */

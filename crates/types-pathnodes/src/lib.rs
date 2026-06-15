@@ -573,6 +573,18 @@ pub struct PathKey {
     pub pk_nulls_first: bool,
 }
 
+/// `GroupByOrdering` (pathnodes.h) — one interesting ordering of GROUP BY keys,
+/// as produced by `get_useful_group_keys_orderings` (pathkeys.c). `pathkeys` and
+/// `clauses` are kept in matching order; `clauses` holds `SortGroupClause`
+/// expression-node handles into [`PlannerInfo::node_arena`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GroupByOrdering {
+    /// `List *pathkeys` — the group pathkeys in this ordering.
+    pub pathkeys: Vec<PathKey>,
+    /// `List *clauses` — the matching `SortGroupClause`s (node handles).
+    pub clauses: Vec<NodeId>,
+}
+
 /// `PathTarget` — the output columns a Path computes (pathnodes.h). `exprs` is
 /// the targetlist as opaque expression-node handles (the owning optimizer arena
 /// holds the `Expr` trees); `sortgrouprefs` is the per-column sort/group ref (0

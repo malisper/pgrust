@@ -110,3 +110,46 @@ seam_core::seam!(
         parent: &RelationData<'p>,
     ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
 );
+
+/* ==========================================================================
+ * Partition-bound comparison/merge routines the partitionwise-join machinery
+ * (joinrels.c:compute_partition_bounds) drives over the planner's `RelOptInfo`
+ * boundinfo. These read the planner-side `types_pathnodes::PartitionBoundInfoData`
+ * (the `RelOptInfo.boundinfo` carrier), distinct from the
+ * `types_nodes::partition::PartitionBoundInfoData` used by the routing seams
+ * above. (Additive — appended for joinrels.)
+ * ======================================================================== */
+
+seam_core::seam!(
+    /// `partition_bounds_equal(partnatts, parttyplen, parttypbyval, b1, b2)`
+    /// (partbounds.c) — do two partition-bound descriptors describe exactly the
+    /// same bounds?
+    pub fn partition_bounds_equal(
+        partnatts: i32,
+        parttyplen: &[i16],
+        parttypbyval: &[bool],
+        b1: &types_pathnodes::PartitionBoundInfoData,
+        b2: &types_pathnodes::PartitionBoundInfoData,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `partition_bounds_merge(partnatts, partsupfunc, partcollation, rel1, rel2,
+    /// jointype, &parts1, &parts2)` (partbounds.c) — merge the partition bounds
+    /// of the two input rels for a join of the given type. Returns
+    /// `Some((merged_boundinfo, parts1, parts2))` with the per-segment partition
+    /// pairings, or `None` if the bounds are not mergeable. The support functions
+    /// / collations are read from the inputs' shared partition scheme by the
+    /// owner.
+    pub fn partition_bounds_merge(
+        root: &mut types_pathnodes::PlannerInfo,
+        rel1: types_pathnodes::RelId,
+        rel2: types_pathnodes::RelId,
+        jointype: types_pathnodes::JoinType,
+    ) -> PgResult<
+        ::core::option::Option<(
+            types_pathnodes::PartitionBoundInfoData,
+            ::std::vec::Vec<::core::option::Option<types_pathnodes::RelId>>,
+            ::std::vec::Vec<::core::option::Option<types_pathnodes::RelId>>,
+        )>,
+    >
+);

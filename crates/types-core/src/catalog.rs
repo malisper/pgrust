@@ -64,6 +64,12 @@ pub const FirstNormalObjectId: Oid = 16384;
 pub const OIDOID: Oid = 26;
 /// `BOOLOID` (`catalog/pg_type_d.h`) — the OID of the `bool` type.
 pub const BOOLOID: Oid = 16;
+/// `BOOL_BTREE_FAM_OID` (`catalog/pg_opfamily_d.h`) — the built-in btree
+/// opfamily for `bool`.
+pub const BOOL_BTREE_FAM_OID: Oid = 424;
+/// `BOOL_HASH_FAM_OID` (`catalog/pg_opfamily_d.h`) — the built-in hash
+/// opfamily for `bool`.
+pub const BOOL_HASH_FAM_OID: Oid = 2222;
 /// `INT8OID` (`catalog/pg_type_d.h`) — the OID of the `int8` (bigint) type.
 pub const INT8OID: Oid = 20;
 /// `INT4OID` (`catalog/pg_type_d.h`) — the OID of the `int4` (integer) type.

@@ -6516,6 +6516,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -6565,6 +6566,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-equivclass-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-joinpath"
 version = "0.0.0"
 dependencies = [
@@ -6579,6 +6591,62 @@ dependencies = [
 
 [[package]]
 name = "backend-optimizer-path-joinpath-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-joinrels"
+version = "0.0.0"
+dependencies = [
+ "backend-geqo-all-seams",
+ "backend-optimizer-path-joinpath",
+ "backend-optimizer-path-joinrels-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-partitioning-partbounds-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-joinrels-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-optimizer-path-pathkeys"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-path-pathkeys-seams",
+ "backend-optimizer-util-pathnode-seams",
+ "backend-optimizer-util-relnode-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-path-pathkeys-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -6616,6 +6684,15 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-appendinfo-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -6691,6 +6768,7 @@ name = "backend-optimizer-util-relnode-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-pathnodes",
 ]
 
@@ -6944,6 +7022,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-rel",
  "types-tuple",
 ]
@@ -12748,6 +12827,8 @@ dependencies = [
  "backend-nodes-copyfuncs",
  "backend-nodes-core",
  "backend-nodes-extensible",
+ "backend-optimizer-path-joinrels",
+ "backend-optimizer-path-pathkeys",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-pathnode",
  "backend-parser-parse-oper",

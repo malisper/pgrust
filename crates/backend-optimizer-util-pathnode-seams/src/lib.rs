@@ -1055,3 +1055,28 @@ seam_core::seam!(
         extra: &types_pathnodes::optimizer_plan::JoinPathExtraData,
     )
 );
+
+/* ======================================================================
+ * pathnode.c routines the join-relation enumerator (joinrels.c) drives:
+ * the semijoin RHS unique-ifiability test and the dummy childless-Append
+ * installer for `mark_dummy_rel`. (Additive — appended for joinrels.)
+ * ==================================================================== */
+
+seam_core::seam!(
+    /// `create_unique_path(root, rel, rel->cheapest_total_path, sjinfo) != NULL`
+    /// (pathnode.c) — can the relation's RHS be unique-ified for a semijoin?
+    /// Returns whether a `UniquePath` could be created (the C non-NULL test);
+    /// the path itself is cached on the rel by the owner.
+    pub fn can_create_unique_path(
+        root: &PlannerInfo,
+        rel: RelId,
+        sjinfo: &SpecialJoinInfo,
+    ) -> bool
+);
+seam_core::seam!(
+    /// `mark_dummy_rel(rel)` body (joinrels.c:1324, pathnode-side): evict the
+    /// rel's paths, set `rows = 0`, install a childless dummy `create_append_path`
+    /// in the rel's own memory context, and `set_cheapest`. Owned by pathnode.c
+    /// because it `create_append_path`/`add_path`/`set_cheapest`s.
+    pub fn install_dummy_append_path(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+);

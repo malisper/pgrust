@@ -5,6 +5,8 @@
 //! then a call panics loudly.
 
 #![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+#![allow(non_upper_case_globals)]
 
 use types_core::Oid;
 use types_error::PgResult;
@@ -87,4 +89,157 @@ seam_core::seam!(
     pub fn expr_input_collation_node<'mcx>(
         node: &types_nodes::nodes::Node<'mcx>,
     ) -> Oid
+);
+
+/* ======================================================================
+ * Node-inspection helpers reached by the optimizer pathkey/equivclass leaves.
+ *
+ * Two shapes:
+ *  - `&Expr`-keyed: pure inspections over the arena expression value (`Expr`,
+ *    the element of `PlannerInfo::node_arena`).
+ *  - `NodeId`+`&PlannerInfo`-keyed: the `TargetEntry` / `SortGroupClause`
+ *    payload reads. Those node kinds are NOT representable by the current
+ *    `node_arena: Vec<Expr>` model (`Expr` has no `TargetEntry` /
+ *    `SortGroupClause` variant), so the inspection is delegated whole to the
+ *    owner, which resolves the handle in its own (richer) node model.
+ *
+ * nodeFuncs-owned (nodeFuncs.c) except `equal` (equalfuncs.c), `copyObject`
+ * (copyfuncs.c), the `is_notclause` / `get_notclausearg` clause helpers
+ * (makefuncs.c / clauses.h), and the `get_sortgroupref_*` tlist helpers
+ * (optimizer/util/tlist.c) — all bundled here as the pathkeys consumer reaches
+ * each through this one inspection surface. Installed by their respective
+ * owners; until then a call panics.
+ * ==================================================================== */
+
+seam_core::seam!(
+    /// `exprCollation(node)` (nodeFuncs.c) — the collation of an expression node,
+    /// over the arena `Expr` value. Pure read.
+    pub fn exprCollation(expr: &Expr) -> Oid
+);
+
+seam_core::seam!(
+    /// `equal(a, b)` (equalfuncs.c) — deep structural equality of two expression
+    /// nodes, over the arena `Expr` value. `equal(NULL, NULL)` is true; this
+    /// helper is only called with two present nodes.
+    pub fn equal(a: &Expr, b: &Expr) -> bool
+);
+
+seam_core::seam!(
+    /// `copyObject(node)` (copyfuncs.c) — a deep copy of an expression node,
+    /// over the arena `Expr` value (the C `copyObject(var)` in
+    /// `find_var_for_subquery_tle`).
+    pub fn copyObject(expr: &Expr) -> Expr
+);
+
+seam_core::seam!(
+    /// `is_notclause(clause)` (nodes/makefuncs.h) — true iff `clause` is a
+    /// `BoolExpr` with `boolop == NOT_EXPR`.
+    pub fn is_notclause(clause: &Expr) -> bool
+);
+
+seam_core::seam!(
+    /// `get_notclausearg(notclause)` (clauses.h) — the (sole) argument of a NOT
+    /// `BoolExpr`, returned as the arena `Expr` value.
+    pub fn get_notclausearg(notclause: &Expr) -> Expr
+);
+
+seam_core::seam!(
+    /// `remove_nulling_relids(node, removable_relids, except_relids)`
+    /// (nodeFuncs.c) — strip the given nulling relids from any `Var`/PHV
+    /// `varnullingrels`/`phnullingrels` in `node`, returning the rewritten
+    /// expression value. `except_relids` of `None` is the C `NULL`.
+    pub fn remove_nulling_relids(
+        node: &Expr,
+        removable_relids: &types_pathnodes::Relids,
+        except_relids: &types_pathnodes::Relids,
+    ) -> Expr
+);
+
+seam_core::seam!(
+    /// `get_sortgroupref_tle(sortref, targetList)` (optimizer/util/tlist.c) — the
+    /// `TargetEntry` in `target_list` whose `ressortgroupref == sortref`,
+    /// returned as its `NodeId` handle (the C `elog(ERROR, "ORDER/GROUP BY
+    /// expression not found in targetlist")` is surfaced as a loud panic in the
+    /// owner's installed body). `target_list` entries are `NodeId` handles to
+    /// `TargetEntry` nodes, resolved in the owner's node model.
+    pub fn get_sortgroupref_tle(
+        root: &types_pathnodes::PlannerInfo,
+        sortref: u32,
+        target_list: &[types_pathnodes::NodeId],
+    ) -> types_pathnodes::NodeId
+);
+
+seam_core::seam!(
+    /// `get_sortgroupclause_expr(sortcl, targetList)` (optimizer/util/tlist.c) —
+    /// the expression `NodeId` of the `TargetEntry` referenced by the
+    /// `SortGroupClause`'s `tleSortGroupRef`. `sortcl` is supplied as the
+    /// `SortGroupClause` `NodeId`; entries are `TargetEntry` `NodeId`s, resolved
+    /// in the owner's node model.
+    pub fn get_sortgroupclause_expr(
+        root: &types_pathnodes::PlannerInfo,
+        sortcl: types_pathnodes::NodeId,
+        target_list: &[types_pathnodes::NodeId],
+    ) -> types_pathnodes::NodeId
+);
+
+seam_core::seam!(
+    /// `get_sortgroupref_clause_noerr(sortref, clauses)`
+    /// (optimizer/util/tlist.c) — the `SortGroupClause` `NodeId` in `clauses`
+    /// with `tleSortGroupRef == sortref`, or `None` if none (the `_noerr`
+    /// variant). `clauses` entries are `SortGroupClause` `NodeId`s.
+    pub fn get_sortgroupref_clause_noerr(
+        root: &types_pathnodes::PlannerInfo,
+        sortref: u32,
+        clauses: &[types_pathnodes::NodeId],
+    ) -> Option<types_pathnodes::NodeId>
+);
+
+/// The `SortGroupClause` payload reads pathkeys needs over a `NodeId` whose node
+/// is a `SortGroupClause` (resolved in the owner's node model): the
+/// `tleSortGroupRef`, `sortop`, `reverse_sort`, `nulls_first` fields, plus the
+/// `TargetEntry` reads (`ressortgroupref`, `resno`, `resjunk`, `expr`). Bundled
+/// as one struct-returning seam per node kind so the consumer reads all fields
+/// from one resolved call.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SortGroupClauseInfo {
+    /// `tleSortGroupRef`.
+    pub tle_sort_group_ref: u32,
+    /// `sortop` (0 if not sortable).
+    pub sortop: Oid,
+    /// `reverse_sort`.
+    pub reverse_sort: bool,
+    /// `nulls_first`.
+    pub nulls_first: bool,
+}
+
+seam_core::seam!(
+    /// Read the `SortGroupClause` fields off a `NodeId` resolving to a
+    /// `SortGroupClause`.
+    pub fn sortgroupclause_info(
+        root: &types_pathnodes::PlannerInfo,
+        sortcl: types_pathnodes::NodeId,
+    ) -> SortGroupClauseInfo
+);
+
+/// The `TargetEntry` payload reads pathkeys needs over a `NodeId` whose node is
+/// a `TargetEntry`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TargetEntryInfo {
+    /// `ressortgroupref`.
+    pub ressortgroupref: u32,
+    /// `resno`.
+    pub resno: i16,
+    /// `resjunk`.
+    pub resjunk: bool,
+    /// the `TargetEntry.expr` as a `NodeId` handle.
+    pub expr: types_pathnodes::NodeId,
+}
+
+seam_core::seam!(
+    /// Read the `TargetEntry` fields off a `NodeId` resolving to a
+    /// `TargetEntry`.
+    pub fn targetentry_info(
+        root: &types_pathnodes::PlannerInfo,
+        tle: types_pathnodes::NodeId,
+    ) -> TargetEntryInfo
 );

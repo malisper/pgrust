@@ -146,6 +146,8 @@ pub fn init_all() {
     backend_access_hash_core::init_seams();
     backend_access_hash_entry::init_seams();
     backend_nodes_extensible::init_seams();
+    backend_optimizer_path_joinrels::init_seams();
+    backend_optimizer_path_pathkeys::init_seams();
     backend_optimizer_util_clauses::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_parse_oper::init_seams();
@@ -898,6 +900,19 @@ mod recurrence_guard {
         ("backend_nodes_extensible", "rescan_custom_scan"),
         ("backend_nodes_extensible", "restr_pos_custom_scan"),
         ("backend_nodes_extensible", "shutdown_custom_scan"),
+        // DESIGN_DEBT (TD-PATHNODE-JOINRELS-GAP): pathnode.c's
+        // `can_create_unique_path` and `install_dummy_append_path` are NOT yet
+        // ported in the COMPLETE backend-optimizer-util-pathnode crate (their
+        // bodies pull in create_unique_path / create_append_path + the
+        // GetMemoryChunkContext recost dance that the pathnode port has not
+        // reached). joinrels.c (join_is_legal / mark_dummy_rel /
+        // populate_joinrel_with_paths) `::call`s them through
+        // backend-optimizer-util-pathnode-seams and seam-and-panics until the
+        // owner ports the two functions and installs the seams. Pay down by
+        // porting both fns into pathnode, installing them in its init_seams(),
+        // and DELETING these two entries.
+        ("backend_optimizer_util_pathnode", "can_create_unique_path"),
+        ("backend_optimizer_util_pathnode", "install_dummy_append_path"),
         ("backend_postmaster_bgworker", "background_worker_handle_from_token"),
         // DESIGN_DEBT (TD-LATCH-PROC-BRIDGE): the three SetLatch-by-proc seams
         // resolve another backend's PGPROC-embedded `procLatch` to a
