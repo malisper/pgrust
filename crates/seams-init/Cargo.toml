@@ -213,6 +213,7 @@ backend-replication-logical-launcher = { path = "../backend-replication-logical-
 backend-replication-logical-logical = { path = "../backend-replication-logical-logical" }
 backend-replication-logical-origin = { path = "../backend-replication-logical-origin" }
 backend-replication-logical-proto = { path = "../backend-replication-logical-proto" }
+backend-replication-logical-reorderbuffer = { path = "../backend-replication-logical-reorderbuffer" }
 backend-replication-logical-slotsync = { path = "../backend-replication-logical-slotsync" }
 backend-replication-logical-snapbuild = { path = "../backend-replication-logical-snapbuild" }
 backend-replication-syncrep-scanner = { path = "../backend-replication-syncrep-scanner" }
