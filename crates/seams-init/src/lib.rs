@@ -1177,6 +1177,83 @@ mod recurrence_guard {
         // the driver can convert its `RAW_PARSE_TYPE_NAME` output to a
         // `types_parsenodes::TypeName`. See DESIGN_DEBT.md.
         ("backend_parser_driver", "raw_parse_type_name"),
+        // DESIGN_DEBT (TD-HEAPAM-SUBFAMILY-SEAMS): five `heapam-seams` decls have
+        // NO body in the (COMPLETE) `backend-access-heap-heapam` owner — their
+        // C logic lives in heapam sub-families NOT ported into this owner slice:
+        //   * `index_compute_xid_horizon_for_tuples` (heapam.c index LP_DEAD
+        //     xid-horizon family; called by gist_insert / hashinsert),
+        //   * `log_heap_visible` (heapam.c VM-WAL family, XLOG_HEAP2_VISIBLE;
+        //     called by visibilitymap),
+        //   * `insert_one_tuple` (bootstrap.c `InsertOneTuple` form+insert batch;
+        //     owner's own NB at lib.rs:509 documents it as intentionally
+        //     uninstalled; called by backend-bootstrap-bootstrap),
+        //   * `read_pg_type` (bootstrap.c `populate_typ_list` catalog scan;
+        //     called by backend-bootstrap-bootstrap),
+        //   * `scan_indisclustered` (cluster.c `get_tables_to_cluster` pg_index
+        //     scan; called by backend-commands-cluster).
+        // None is `::set` anywhere; none has a non-panicking owner body. They
+        // loud-panic (mirror-pg-and-panic) until bootstrap.c / cluster.c / the
+        // heapam VM-WAL + index-xid-horizon legs are ported. See DESIGN_DEBT.md.
+        ("backend_access_heap_heapam", "index_compute_xid_horizon_for_tuples"),
+        ("backend_access_heap_heapam", "insert_one_tuple"),
+        ("backend_access_heap_heapam", "log_heap_visible"),
+        ("backend_access_heap_heapam", "read_pg_type"),
+        ("backend_access_heap_heapam", "scan_indisclustered"),
+        // DESIGN_DEBT (TD-ANALYZE-PLANCACHE-HANDLE-SEAMS): fourteen of these are
+        // `backend-parser-analyze-pc-seams` decls (the guard resolves the
+        // `-pc-seams` dir to the COMPLETE `backend-parser-analyze` owner) typed
+        // on `types_plancache::*Handle` (RawStmtHandle / QueryHandle / ...). The
+        // analyze owner does NOT depend on `-pc-seams` and has no handle
+        // producer; the only field-projection LOGIC it holds
+        // (`stmt_requires_parse_analysis` / `analyze_requires_snapshot` /
+        // `query_requires_rewrite_plan`) is `&Query`/`&RawStmt`-typed, NOT
+        // handle-typed, so it cannot satisfy the handle signatures. These are the
+        // plancache #159 de-handle keystone's seams (their sole consumer is the
+        // unported `backend-utils-cache-plancache`); see the
+        // plancache-159-blocked memory note. The remaining three
+        // (`pg_analyze_and_rewrite_fixedparams` / `analyze_and_rewrite_varparams`
+        // / `run_post_parse_analyze_hook`) are owner `-seams` decls with NO body:
+        // their C legs call `pg_rewrite_query` (rewriter unported) / the deferred
+        // jumble+post-parse-hook subsystem. All loud-panic
+        // (mirror-pg-and-panic). See DESIGN_DEBT.md.
+        ("backend_parser_analyze", "analyze_and_rewrite_fixedparams"),
+        ("backend_parser_analyze", "analyze_and_rewrite_varparams"),
+        ("backend_parser_analyze", "analyze_and_rewrite_withcb"),
+        ("backend_parser_analyze", "analyze_requires_snapshot"),
+        ("backend_parser_analyze", "pg_analyze_and_rewrite_fixedparams"),
+        ("backend_parser_analyze", "query_can_set_tag"),
+        ("backend_parser_analyze", "query_command_type_is_utility"),
+        ("backend_parser_analyze", "query_cte_queries"),
+        ("backend_parser_analyze", "query_has_cte_list"),
+        ("backend_parser_analyze", "query_has_rtable"),
+        ("backend_parser_analyze", "query_has_sublinks"),
+        ("backend_parser_analyze", "query_requires_rewrite_plan"),
+        ("backend_parser_analyze", "query_returning_list"),
+        ("backend_parser_analyze", "query_rtable_fields"),
+        ("backend_parser_analyze", "query_target_list"),
+        ("backend_parser_analyze", "query_utility_stmt"),
+        ("backend_parser_analyze", "run_post_parse_analyze_hook"),
+        ("backend_parser_analyze", "stmt_requires_parse_analysis"),
+        ("backend_parser_analyze", "walk_query_sublinks_for_locks"),
+        // DESIGN_DEBT (TD-BUFMGR-SHMEM-GUC-SEAMS): four `bufmgr-seams` decls have
+        // no installable owner body. `buffer_manager_shmem_init` (C
+        // `BufferManagerShmemInit(void)`) and `buffer_manager_shmem_size` (C
+        // `BufferManagerShmemSize(void)`) both read the file-global `NBuffers`,
+        // which has NO global home in this repo (every sub-sizer takes nbuffers
+        // explicitly); the owner exposes only a `BufferManagerShmemInit(nbuffers)
+        // -> Self` constructor + partial sub-sizers (StrategyShmemSize /
+        // BufTableShmemSize in buffer-support), and the shmem bootstrap caller
+        // (ipci `CreateOrAttachShmemStructs`) is unported. `io_method_sync`
+        // (`io_method == IOMETHOD_SYNC`) and `maintenance_io_concurrency` are
+        // outward GUC/aio seams whose live-value owners (aio.c io_method / the
+        // GUC value-read path) are unported — installed only in buffer-support
+        // test_support today, like the sibling effective_io_concurrency /
+        // io_combine_limit / io_direct_data GUC seams. All loud-panic
+        // (mirror-pg-and-panic). See DESIGN_DEBT.md.
+        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_init"),
+        ("backend_storage_buffer_bufmgr", "buffer_manager_shmem_size"),
+        ("backend_storage_buffer_bufmgr", "io_method_sync"),
+        ("backend_storage_buffer_bufmgr", "maintenance_io_concurrency"),
     ];
 
     /// CATALOG.tsv unit statuses that mean the owner crate is COMPLETE — its
