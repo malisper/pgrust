@@ -1148,42 +1148,10 @@ mod recurrence_guard {
         // `queryDesc->estate` borrow cannot be lent until that lands.
         // Keystone-blocked.
         ("backend_utils_mmgr_portalmem", "with_running_cursor"),
-        // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD): the recovery driver's
-        // `ReadRecord` retry loop (xlogrecovery #13 F1, readrecord.rs) reaches the
-        // WAL page-read driver solely through the prefetcher read-record seams,
-        // and inspects the decoded record through the `RecordRef`-keyed
-        // `xlog_rec_*` accessors. These five seams are declared but NOT installed:
-        //   * prefetcher_begin_read / prefetcher_read_record — declared in
-        //     backend-access-transam-xlogprefetcher-seams with the explicit note
-        //     "NOT installed: the page-read driver is not yet ported." The
-        //     "merged" xlogprefetcher unit ported only the prefetch-STATS shmem
-        //     (XLogPrefetchShmemSize/Init); the recovery read-record entry points
-        //     wrap the genuinely-unported hard-core WAL file I/O (XLogPageRead /
-        //     WaitForWALToBecomeAvailable / XLogFileRead{,AnyTLI} + restore_command
-        //     fetching), so they stay seam-and-panic until that driver lands.
-        //   * xlog_rec_rmid / xlog_rec_info / xlog_rec_total_len — declared in
-        //     xlogreader-seams keyed by the opaque `RecordRef(u64)` handle, but the
-        //     merged xlogreader models the record as a borrowed `&XLogReaderState`,
-        //     not a handle registry. The handle->reader mapping is owned by that
-        //     same unported page-read driver, so xlogreader cannot install them
-        //     without a forbidden token registry / a contract redesign.
-        // All five become real installs when the page-read driver (xlogprefetcher
-        // recovery leg) lands. See DESIGN_DEBT.md.
-        ("backend_access_transam_xlogprefetcher", "prefetcher_begin_read"),
-        ("backend_access_transam_xlogprefetcher", "prefetcher_read_record"),
-        ("backend_access_transam_xlogreader", "xlog_rec_info"),
-        ("backend_access_transam_xlogreader", "xlog_rec_rmid"),
-        ("backend_access_transam_xlogreader", "xlog_rec_total_len"),
         // DESIGN_DEBT (TD-XLOGRECOVERY-PAGEREAD, cont.): the WAL page-read driver
-        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable, now ported
-        // into backend-access-transam-xlogrecovery::pageread) reaches these
-        // still-unported owners on its streaming-source and stats legs:
-        //   * prefetcher_compute_stats — XLogPrefetcherComputeStats(prefetcher)
-        //     operates on the LIVE prefetcher instance the startup process owns;
-        //     that instance + InitWalRecovery allocation is the page-read holder
-        //     keystone (not yet landed), so the merged xlogprefetcher (stats-shmem
-        //     only) cannot install it without the held reader/prefetcher. Reached
-        //     only on the XLOG_FROM_STREAM no-data sleep path.
+        // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable, ported into
+        // backend-access-transam-xlogrecovery::pageread) reaches these
+        // still-unported owners on its streaming-source legs:
         //   * walreceiverfuncs streaming control (wal_rcv_streaming /
         //     xlog_shutdown_wal_rcv / request_xlog_streaming /
         //     set+reset_install_xlog_file_segment_active /
@@ -1191,9 +1159,8 @@ mod recurrence_guard {
         //     (the merged walreceiver bundle covers only walreceiver.c); these are
         //     the sanctioned walreceiver-fetch panic legs of the standby state
         //     machine, reachable only once recovery actually streams.
-        // All become real installs when walreceiverfuncs.c lands and the
-        // reader/prefetcher holder keystone is built. See DESIGN_DEBT.md.
-        ("backend_access_transam_xlogprefetcher", "prefetcher_compute_stats"),
+        // All become real installs when walreceiverfuncs.c lands. See
+        // DESIGN_DEBT.md.
         ("backend_replication_walreceiverfuncs", "wal_rcv_streaming"),
         ("backend_replication_walreceiverfuncs", "xlog_shutdown_wal_rcv"),
         ("backend_replication_walreceiverfuncs", "request_xlog_streaming"),

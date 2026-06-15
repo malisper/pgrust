@@ -207,11 +207,15 @@ pub struct TypMap {
 }
 
 /// `typedef struct _IndexList` — a declared-but-not-yet-built index.
-#[derive(Clone)]
+///
+/// `IndexInfo` no longer derives `Clone`/`Copy` (it now owns `ExprState` /
+/// `Opaque` members), so the list owns its `IndexInfo` by move and the struct
+/// is no longer `Clone`. The list lives in process-local bootstrap state, so
+/// the carried `IndexInfo` is `'static`.
 pub struct IndexList {
     pub il_heap: Oid,
     pub il_ind: Oid,
-    pub il_info: IndexInfo,
+    pub il_info: IndexInfo<'static>,
 }
 
 /* ----------------
@@ -1029,19 +1033,18 @@ fn AllocateAttribute() -> FormData_pg_attribute {
 ///
 /// The C copies the `IndexInfo` (`memcpy` of the scalar fields, then
 /// `copyObject` of `ii_Expressions`/`ii_Predicate`, `ii_ExpressionsState = NIL`,
-/// `ii_PredicateState = NULL`, and asserts no exclusion constraints). The
-/// shared `IndexInfo` vocabulary on this branch is trimmed to the fields
-/// consumers read (`ii_Unique`); it carries no expression/predicate/exclusion
-/// fields, so the C deep-copy reduces to a value copy (`Copy`) and the
-/// no-exclusion-constraint precondition is structural. The control flow — copy
-/// into the registered-index list, push onto its head — matches the C.
-pub fn index_register(heap: Oid, ind: Oid, index_info: &IndexInfo) {
+/// `ii_PredicateState = NULL`, and asserts no exclusion constraints). In the
+/// owned model `IndexInfo` is no longer `Copy`; the caller hands ownership of
+/// the just-built node (from `make_index_info`) straight in by value, and the
+/// registered-index list owns it directly. The control flow — record into the
+/// registered-index list, push onto its head — matches the C.
+pub fn index_register(heap: Oid, ind: Oid, index_info: IndexInfo<'static>) {
     /*
      * XXX mao 10/31/92 -- don't gc index reldescs at bootstrap time. The C
      * switches into a no-gc context for the copy; in the owned model the
      * registered list owns its copy directly.
      */
-    let il_info = *index_info;
+    let il_info = index_info;
 
     /* newind->il_next = ILHead; ILHead = newind; — push onto list head */
     let newind = IndexList {
