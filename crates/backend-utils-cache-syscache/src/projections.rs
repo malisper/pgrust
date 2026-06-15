@@ -15,9 +15,13 @@ use types_datum::Datum as KeyDatum;
 
 use crate::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheList1, SysCacheGetAttrNotNull,
-    AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, RELOID,
+    AGGFNOID, AMOPSTRATEGY, AMPROCNUM, CASTSOURCETARGET, CLAOID, PROCOID, RELOID,
 };
 use backend_utils_cache_syscache_seams::CastRow;
+use backend_nodes_read_seams as nodes_read_seams;
+use backend_utils_adt_varlena_seams as varlena_seams;
+use types_catalog::pg_aggregate::AggRow;
+use types_nodes::nodes::{Node, NodePtr};
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
 const Anum_pg_class_relam: i32 = 7;
@@ -43,6 +47,13 @@ const Anum_pg_amop_amopstrategy: i32 = 5;
 const Anum_pg_amop_amoppurpose: i32 = 6;
 const Anum_pg_amop_amopopr: i32 = 7;
 const Anum_pg_amop_amopsortfamily: i32 = 9;
+
+// `catalog/pg_proc.h` attribute numbers.
+const Anum_pg_proc_proargdefaults: i32 = 24;
+
+// `catalog/pg_aggregate.h` attribute numbers.
+const Anum_pg_aggregate_aggkind: i32 = 2;
+const Anum_pg_aggregate_aggnumdirectargs: i32 = 3;
 
 // `catalog/pg_amproc.h` attribute numbers.
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -215,4 +226,60 @@ pub(crate) fn search_amproc_list<'mcx>(
         });
     }
     Ok(rows)
+}
+
+/// `func_get_detail`'s default-argument extraction (`parse_func.c`):
+///
+/// ```c
+/// proargdefaults = SysCacheGetAttrNotNull(PROCOID, ftup, Anum_pg_proc_proargdefaults);
+/// str = TextDatumGetCString(proargdefaults);
+/// defaults = castNode(List, stringToNode(str));
+/// ```
+///
+/// `SearchSysCache1(PROCOID, funcid)` then the `proargdefaults` `pg_node_tree`
+/// column projected to its deserialized default-expression list (the elements
+/// of the `castNode(List, ...)`), each node allocated in `mcx`. The C call site
+/// only reaches this on `ndargs > 0`, where the column is `SysCacheGetAttrNotNull`
+/// (non-null) — so a SQL-null column or a cache miss is an `Err` here.
+pub(crate) fn proc_argdefaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for function {funcid}"
+        )));
+    };
+    // SysCacheGetAttrNotNull(PROCOID, ftup, Anum_pg_proc_proargdefaults).
+    let datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargdefaults)?;
+    // TextDatumGetCString(proargdefaults).
+    let s = varlena_seams::text_to_cstring_v::call(mcx, &datum)?;
+    // castNode(List, stringToNode(str)).
+    let node = nodes_read_seams::string_to_node::call(mcx, s.as_str())?;
+    ReleaseSysCache(tup);
+    match mcx::PgBox::into_inner(node) {
+        Node::List(elems) => Ok(elems),
+        _ => Err(PgError::error(
+            "proargdefaults: stringToNode did not yield a List",
+        )),
+    }
+}
+
+/// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` projected to the
+/// [`AggRow`] fields (`Form_pg_aggregate` `aggkind` / `aggnumdirectargs`).
+/// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller (`func_get_detail`)
+/// raises its own `cache lookup failed for aggregate %u` `elog(ERROR)`.
+pub(crate) fn agg_row_by_oid<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<AggRow>> {
+    let tuple = SearchSysCache1(mcx, AGGFNOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let row = AggRow {
+        aggkind: getattr_char(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggkind)?,
+        aggnumdirectargs: getattr_i16(mcx, AGGFNOID, &tup, Anum_pg_aggregate_aggnumdirectargs)?
+            as i32,
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(row))
 }

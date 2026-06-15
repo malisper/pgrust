@@ -153,6 +153,12 @@ pub struct ProcRow<'mcx> {
     pub proallargtypes: Option<OidArrayDatum<'mcx>>,
     /// The `proname` (used only by `FunctionIsVisibleExt`).
     pub proname: PgString<'mcx>,
+    /// `procform->prokind` (`Form_pg_proc`) — read by `func_get_detail`
+    /// (`parse_func.c`) to map the matched function onto its `FuncDetailCode`
+    /// (`PROKIND_AGGREGATE`/`FUNCTION`/`PROCEDURE`/`WINDOW`). The raw C `char`.
+    pub prokind: i8,
+    /// `procform->proretset` (`Form_pg_proc`) — `*retset` in `func_get_detail`.
+    pub proretset: bool,
 }
 
 /// The `pg_proc` facts `fetch_fp_info` (`tcop/fastpath.c`) reads out of the
