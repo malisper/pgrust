@@ -496,7 +496,7 @@ pub fn end_prepare(
             .errmsg("two-phase state file maximum length exceeded"));
     }
 
-    wal::xlog_ensure_record_space::call(builder.num_chunks as i32)?;
+    wal::xlog_ensure_record_space::call(0, builder.num_chunks as i32)?;
 
     miscinit::start_crit_section::call();
     proc::set_delay_chkpt_start::call(true);

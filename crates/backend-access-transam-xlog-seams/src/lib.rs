@@ -129,7 +129,7 @@ seam_core::seam!(
     /// `XLogEnsureRecordSpace(max_block_id, ndatas)` (xloginsert.c, owned with
     /// the xlog insert path): ensure the WAL insertion buffers can register
     /// `ndatas` rdata chunks. Can `ereport(ERROR)`, carried on `Err`.
-    pub fn xlog_ensure_record_space(ndatas: i32) -> PgResult<()>
+    pub fn xlog_ensure_record_space(max_block_id: i32, ndatas: i32) -> PgResult<()>
 );
 
 seam_core::seam!(

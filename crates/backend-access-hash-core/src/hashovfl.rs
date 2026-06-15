@@ -501,7 +501,7 @@ pub fn _hash_freeovflpage<'mcx>(
     bufmgr::lock_buffer::call(metabuf, BUFFER_LOCK_EXCLUSIVE)?;
 
     if relation_needs_wal(rel)? {
-        xlog::xlog_ensure_record_space::call(4 + nitups as i32)?;
+        xlog::xlog_ensure_record_space::call(HASH_XLOG_FREE_OVFL_BUFS, 4 + nitups as i32)?;
     }
 
     // START_CRIT_SECTION
@@ -766,7 +766,7 @@ pub fn _hash_squeezebucket<'mcx>(
                         debug_assert!(itups.len() == deletable.len());
 
                         if relation_needs_wal(rel)? {
-                            xlog::xlog_ensure_record_space::call(3 + itups.len() as i32)?;
+                            xlog::xlog_ensure_record_space::call(0, 3 + itups.len() as i32)?;
                         }
 
                         // START_CRIT_SECTION

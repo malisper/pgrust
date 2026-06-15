@@ -1628,6 +1628,7 @@ pub fn init_seams() {
     s::xlog_begin_insert::set(XLogBeginInsert);
     s::xlog_register_data::set(XLogRegisterData);
     s::xlog_register_buffer::set(XLogRegisterBuffer);
+    xlog_seam::xlog_ensure_record_space::set(XLogEnsureRecordSpace);
     s::xlog_register_block::set(|block_id, rlocator, forknum, blknum, page, flags| {
         XLogRegisterBlock(block_id, &rlocator, forknum, blknum, page, flags)
     });
