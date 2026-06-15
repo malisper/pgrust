@@ -103,6 +103,66 @@ fn form_deform_all_byval_no_nulls() {
     assert_eq!(cols[2], (Datum::from_i32(-1), false));
 }
 
+/// The composite/record-Datum carrier bridge (task #161): a formed tuple ->
+/// composite `Datum::ByRef` (`HeapTupleGetDatum`) round-trips back through
+/// `DatumGetHeapTupleHeader` with the composite-Datum header fields set and the
+/// columns intact.
+#[test]
+fn composite_datum_bridge_round_trip() {
+    use crate::{DatumGetHeapTupleHeader, HeapTupleGetDatum};
+
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // A 3-column record (int4, int8, int4) with a NULL in the middle so the
+    // null bitmap travels through the image too. tdtypeid 2249 = RECORDOID.
+    let td = tupdesc(mcx, &[byval(4, 4), byval(8, 8), byval(4, 4)]);
+    let values = vec![Datum::from_i32(42), Datum::null(), Datum::from_i32(-7)];
+    let isnull = vec![false, true, false];
+
+    let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
+
+    // FormedTuple -> composite Datum (the self-contained varlena header image).
+    let datum = HeapTupleGetDatum(mcx, &formed, &td).expect("HeapTupleGetDatum");
+    let bytes = match &datum {
+        Datum::ByRef(b) => b.clone(),
+        Datum::ByVal(_) => panic!("composite Datum must be ByRef"),
+    };
+    // The leading varlena length word (datum_len_) equals the image length.
+    let datum_len = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    assert_eq!(datum_len as usize, bytes.len());
+
+    // composite Datum -> FormedTuple, then deform: columns survive, the header
+    // carries the TDatum union arm with the descriptor's typeid/typmod.
+    let back = DatumGetHeapTupleHeader(mcx, &datum).expect("DatumGetHeapTupleHeader");
+    let hdr = back.tuple.t_data.as_ref().unwrap();
+    assert_eq!(
+        types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
+        2249, // RECORDOID
+    );
+    assert_eq!(
+        types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
+        -1,
+    );
+    assert_eq!(back.tuple.t_len as usize, bytes.len());
+
+    let cols = heap_deform_tuple(mcx, &back.tuple, &td, &back.data).expect("deform");
+    assert_eq!(cols.len(), 3);
+    assert_eq!(cols[0], (Datum::from_i32(42), false));
+    assert_eq!(cols[1].1, true); // NULL middle column
+    assert_eq!(cols[2], (Datum::from_i32(-7), false));
+}
+
+/// A by-value scalar Datum is not a composite value; decoding one is a loud
+/// caller bug.
+#[test]
+#[should_panic(expected = "by-value")]
+fn datum_get_heap_tuple_header_rejects_byval() {
+    use crate::DatumGetHeapTupleHeader;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let _ = DatumGetHeapTupleHeader(mcx, &Datum::from_i32(5));
+}
+
 #[test]
 fn form_deform_with_nulls_sets_bitmap() {
     let ctx = MemoryContext::new("test");

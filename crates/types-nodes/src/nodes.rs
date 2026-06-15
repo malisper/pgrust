@@ -654,6 +654,9 @@ const T_CurrentOfExpr: NodeTag = NodeTag(58);
 const T_NextValueExpr: NodeTag = NodeTag(59);
 const T_InferenceElem: NodeTag = NodeTag(60);
 const T_ReturningExpr: NodeTag = NodeTag(61);
+// `T_PlaceHolderVar` is a planner node (nodes/pathnodes.h), outside the
+// contiguous executor `Expr` run; value verified against `nodes/nodetags.h`.
+const T_PlaceHolderVar: NodeTag = NodeTag(319);
 
 /// `nodeTag((Node *) expr)` for an embedded expression node — the C tag of the
 /// concrete `Expr` variant. Every `Expr`-deriving node type has its generated
@@ -710,6 +713,7 @@ fn expr_tag(e: &crate::primnodes::Expr) -> NodeTag {
         Expr::NextValueExpr(_) => T_NextValueExpr,
         Expr::InferenceElem(_) => T_InferenceElem,
         Expr::ReturningExpr(_) => T_ReturningExpr,
+        Expr::PlaceHolderVar(_) => T_PlaceHolderVar,
     }
 }
 
