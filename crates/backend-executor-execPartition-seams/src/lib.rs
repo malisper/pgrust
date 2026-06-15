@@ -54,7 +54,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         rel: types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::PartitionTupleRouting>>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::PartitionTupleRouting<'mcx>>>
 );
 
 seam_core::seam!(
@@ -68,7 +68,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         root_result_rel_info: types_nodes::RriId,
-        proute: &mut types_nodes::PartitionTupleRouting,
+        proute: &mut types_nodes::PartitionTupleRouting<'mcx>,
         slot: types_nodes::SlotId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<types_nodes::RriId>
@@ -80,6 +80,6 @@ seam_core::seam!(
     /// per-partition resources). Closing relations can `ereport(ERROR)`.
     pub fn exec_cleanup_tuple_routing<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
-        proute: &mut types_nodes::PartitionTupleRouting,
+        proute: &mut types_nodes::PartitionTupleRouting<'mcx>,
     ) -> types_error::PgResult<()>
 );

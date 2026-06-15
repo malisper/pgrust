@@ -10,10 +10,13 @@
 //! - `TupleTableSlot *` → [`SlotId`] into the `EState`'s slot pool;
 //! - `ResultRelInfo *` → [`RriId`] into the `EState`'s result-rel pool.
 //!
-//! `TransitionCaptureState` and `PartitionTupleRouting` are defined here
-//! trimmed to the fields nodeModifyTable consumes; their logic is owned by
-//! trigger.c and execPartition.c respectively and reached through those units'
-//! seam crates. `OnConflictAction` (nodes/nodes.h) and the canonical owned
+//! `TransitionCaptureState` is defined here trimmed to the fields
+//! nodeModifyTable consumes; its logic is owned by trigger.c and reached
+//! through that unit's seam crate. `PartitionTupleRouting` (and its subsidiary
+//! `PartitionDispatchData`) is the full, canonical carrier homed here so the
+//! execPartition owner, its seam declarations, and the nodeModifyTable
+//! consumers all share one type; the routing logic itself is owned by
+//! execPartition.c and reached through its seam crate. `OnConflictAction` (nodes/nodes.h) and the canonical owned
 //! `EPQState` (execMain.c's EvalPlanQual machinery) are re-exported from their
 //! canonical homes (`crate::nodes` / `crate::execnodes`) rather than redefined.
 
@@ -23,10 +26,14 @@ use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo};
-use crate::execnodes::{PlanStateData, RriId, SlotId};
+use crate::execnodes::{Opaque, PlanStateData, RriId, SlotId};
 use crate::nodeindexscan::Plan;
 use crate::nodes::{CmdType, Node, NodeTag};
+use crate::partition::{PartitionDescData, PartitionKeyData};
 use crate::primnodes::{Expr, TargetEntry};
+use types_rel::Relation;
+use types_slot::TupleTableSlot;
+use types_tuple::attmap::AttrMap;
 
 // `OnConflictAction` is canonically defined in `crate::nodes` (nodes/nodes.h);
 // re-export it here so the modifytable port can reach it under the
@@ -454,14 +461,85 @@ pub struct TransitionCaptureState {
     pub tcs_original_insert_tuple: Option<SlotId>,
 }
 
-/// `struct PartitionTupleRouting` (executor/execPartition.h). nodeModifyTable
-/// holds only a forward-declared pointer and never reads its fields — the real
-/// layout is owned by execPartition.c and reached through its seam crate. Kept
-/// opaque here (a real owned struct with no consumed fields) per the
-/// inherited-opacity rule.
-#[derive(Debug, Default)]
-pub struct PartitionTupleRouting {
-    _private: (),
+/// `PartitionDispatchData` (executor/execPartition.c, private): per-partitioned-
+/// table info needed to route a tuple to any of its partitions. Always
+/// encapsulated in a [`PartitionTupleRouting`].
+///
+/// This struct's logic is owned by execPartition.c and reached through that
+/// unit's seam crate; the layout is homed here (not in the owner crate) so the
+/// owner, the seam declarations, and the nodeModifyTable consumers all share one
+/// canonical carrier type (see [`PartitionTupleRouting`]).
+///
+/// The C struct ends with a `int indexes[FLEXIBLE_ARRAY_MEMBER]` tail
+/// (`partdesc->nparts` entries); here that is the owned `indexes` `PgVec`.
+#[derive(Debug)]
+pub struct PartitionDispatchData<'mcx> {
+    /// `Relation reldesc` — relation descriptor of the table.
+    pub reldesc: Option<Relation<'mcx>>,
+    /// `PartitionKey key` — partition key information of the table.
+    pub key: Option<PgBox<'mcx, PartitionKeyData<'mcx>>>,
+    /// `List *keystate` — `ExprState`s for the partition-key expressions
+    /// (`NIL` until first `FormPartitionKeyDatum`).
+    pub keystate: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    /// `PartitionDesc partdesc` — partition descriptor of the table.
+    pub partdesc: Option<PgBox<'mcx, PartitionDescData<'mcx>>>,
+    /// `TupleTableSlot *tupslot` — standalone slot for this table's tupdesc, or
+    /// `None` if no tuple conversion from the parent is required.
+    pub tupslot: Option<TupleTableSlot>,
+    /// `AttrMap *tupmap` — parent→this-table rowtype map, or `None` if no
+    /// conversion is required.
+    pub tupmap: Option<PgBox<'mcx, AttrMap<'mcx>>>,
+    /// `int indexes[FLEXIBLE_ARRAY_MEMBER]` — per-partition index into the
+    /// `PartitionTupleRouting` `partitions` (leaf) or `partition_dispatch_info`
+    /// (sub-partitioned) array; -1 if nothing allocated yet.
+    pub indexes: PgVec<'mcx, i32>,
+}
+
+/// `PartitionDispatch` — owned alias (the C `PartitionDispatchData *`); in the
+/// owned model a dispatch is addressed by its index into the routing's
+/// `partition_dispatch_info` pool.
+pub type PartitionDispatchId = usize;
+
+/// `struct PartitionTupleRouting` (executor/execPartition.c, opaque in
+/// execPartition.h): everything required to route a tuple inserted into a
+/// partitioned table to one of its leaf partitions. Allocated in the per-query
+/// context (`memcxt`).
+///
+/// The routing logic is owned by execPartition.c and reached through that
+/// unit's seam crate; the layout is homed here (not in the owner crate) so the
+/// owner's routing fns, the seam declarations, and the nodeModifyTable
+/// consumers (`ModifyTableState.mt_partition_tuple_routing`) all share one
+/// canonical carrier type. Mirrors the C struct field-for-field.
+#[derive(Debug)]
+pub struct PartitionTupleRouting<'mcx> {
+    /// `Relation partition_root` — the partitioned table targeted by the
+    /// command.
+    pub partition_root: Option<Relation<'mcx>>,
+    /// `PartitionDispatch *partition_dispatch_info` — one per partitioned table
+    /// touched by routing; element 0 is always the target table.
+    pub partition_dispatch_info: PgVec<'mcx, PgBox<'mcx, PartitionDispatchData<'mcx>>>,
+    /// `ResultRelInfo **nonleaf_partitions` — fake `ResultRelInfo`s (ids into
+    /// the EState pool) for nonleaf partitions, used to check the partition
+    /// constraint; a `None` element is the C `NULL` (root level).
+    pub nonleaf_partitions: PgVec<'mcx, Option<RriId>>,
+    /// `int num_dispatch` — items stored in `partition_dispatch_info`.
+    pub num_dispatch: i32,
+    /// `int max_dispatch` — allocated size of `partition_dispatch_info`
+    /// (tracked for 1:1 mirror of the C grow logic).
+    pub max_dispatch: i32,
+    /// `ResultRelInfo **partitions` — one per leaf partition touched by
+    /// routing (ids into the EState pool); some borrowed from the owning
+    /// `ModifyTableState`, the rest built here.
+    pub partitions: PgVec<'mcx, RriId>,
+    /// `bool *is_borrowed_rel` — parallel to `partitions`: whether the entry is
+    /// borrowed from the owning `ModifyTableState` (do not close on cleanup).
+    pub is_borrowed_rel: PgVec<'mcx, bool>,
+    /// `int num_partitions` — items stored in `partitions`.
+    pub num_partitions: i32,
+    /// `int max_partitions` — allocated size of `partitions`.
+    pub max_partitions: i32,
+    /// `MemoryContext memcxt` — context used to allocate subsidiary structs.
+    pub memcxt: Opaque,
 }
 
 /// `ModifyTableState` (nodes/execnodes.h) — exec state for a ModifyTable node.
@@ -508,7 +586,7 @@ pub struct ModifyTableState<'mcx> {
     /// `TupleTableSlot *mt_root_tuple_slot`.
     pub mt_root_tuple_slot: Option<SlotId>,
     /// `struct PartitionTupleRouting *mt_partition_tuple_routing`.
-    pub mt_partition_tuple_routing: Option<PgBox<'mcx, PartitionTupleRouting>>,
+    pub mt_partition_tuple_routing: Option<PgBox<'mcx, PartitionTupleRouting<'mcx>>>,
     /// `struct TransitionCaptureState *mt_transition_capture`.
     pub mt_transition_capture: Option<PgBox<'mcx, TransitionCaptureState>>,
     /// `struct TransitionCaptureState *mt_oc_transition_capture`.

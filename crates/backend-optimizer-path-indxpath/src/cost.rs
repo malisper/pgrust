@@ -62,7 +62,7 @@ pub fn adjust_rowcount_for_semijoins(
             // Estimate number of unique-ified rows.
             let nraw = approximate_joinrel_size(root, &sjinfo.syn_righthand);
             let nunique =
-                selfuncs::estimate_num_groups::call(root, &sjinfo.semi_rhs_exprs, nraw);
+                selfuncs::estimate_num_groups::call(root, &sjinfo.semi_rhs_exprs, nraw, None);
             if rowcount > nunique {
                 rowcount = nunique;
             }

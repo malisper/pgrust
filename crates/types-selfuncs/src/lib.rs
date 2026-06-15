@@ -26,6 +26,20 @@ pub const DEFAULT_RANGE_INEQ_SEL: f64 = 0.005;
 /// `DEFAULT_MULTIRANGE_INEQ_SEL` (selfuncs.h) — `0.005`.
 pub const DEFAULT_MULTIRANGE_INEQ_SEL: f64 = 0.005;
 
+/// `SELFLAG_USED_DEFAULT` (selfuncs.h) — set in [`EstimationInfo::flags`] when a
+/// selectivity estimation fell back on one of the `DEFAULT_*` constants.
+pub const SELFLAG_USED_DEFAULT: u32 = 1 << 0;
+
+/// `EstimationInfo` (selfuncs.h) — a set of flags some selectivity-estimation
+/// functions pass back to callers to describe assumptions made during the
+/// estimation (e.g. [`SELFLAG_USED_DEFAULT`]). Mirrors the C struct
+/// field-for-field.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct EstimationInfo {
+    /// `uint32 flags` — flags marking special properties of the estimation.
+    pub flags: u32,
+}
+
 /// `ATTSTATSSLOT_VALUES` (lsyscache.h) — request the slot's `stavalues` array.
 pub const ATTSTATSSLOT_VALUES: i32 = 0x01;
 /// `ATTSTATSSLOT_NUMBERS` (lsyscache.h) — request the slot's `stanumbers` array.

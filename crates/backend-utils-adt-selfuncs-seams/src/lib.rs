@@ -18,17 +18,24 @@ use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{NodeId, PlannerInfo};
-use types_selfuncs::{ConstNodeInfo, StatsTuple, VariableStatData};
+use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
 
 seam_core::seam!(
-    /// `estimate_num_groups(root, groupExprs, input_rows, NULL, NULL)`
+    /// `estimate_num_groups(root, groupExprs, input_rows, NULL, estinfo)`
     /// (selfuncs.c) — estimate the number of distinct groups the given grouping
     /// expressions take over `input_rows` rows. The expression list crosses as a
     /// borrowed slice of arena node handles (`SpecialJoinInfo.semi_rhs_exprs`).
+    ///
+    /// `estinfo` mirrors the C `EstimationInfo *estinfo` out-parameter: callers
+    /// that pass `Some(&mut info)` receive estimation flags back (the owner ORs
+    /// in [`types_selfuncs::SELFLAG_USED_DEFAULT`] when it falls back on a
+    /// default), exactly as C does. `None` mirrors C `NULL` (the `pgset`
+    /// argument is always `NULL` in the repo's callers, so it is omitted).
     pub fn estimate_num_groups(
         root: &PlannerInfo,
         group_exprs: &[NodeId],
         input_rows: f64,
+        estinfo: Option<&mut EstimationInfo>,
     ) -> f64
 );
 

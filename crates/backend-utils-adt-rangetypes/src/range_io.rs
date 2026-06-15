@@ -10,6 +10,7 @@
 use backend_utils_adt_format_type_seams as format_type_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_typcache_seams as typcache_seams;
+use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
@@ -165,42 +166,58 @@ pub fn range_in<'mcx>(
     let mut upper = RangeBound::default();
 
     if range_has_lbound(flags) {
-        let _lbound_str = lbound_str.expect("RANGE_HAS_LBOUND implies a parsed lower bound string");
+        let lbound_str = lbound_str.expect("RANGE_HAS_LBOUND implies a parsed lower bound string");
         // C: InputFunctionCallSafe(&cache->typioproc, lbound_str,
         //                          cache->typioparam, typmod, escontext, &lower.val)
-        let _ = (&cache.typiofunc, &cache.typioparam, &_lbound_str);
-        panic!(
-            "range_in: InputFunctionCallSafe on element typioproc \
-             (backend-utils-fmgr-fmgr) not ported into this unit yet"
-        );
+        //
+        // The scaffold carries no escontext (hard-error caller), so
+        // InputFunctionCallSafe is equivalent to InputFunctionCall: the element
+        // type's text input function is resolved by its OID (`cache.typiofunc`)
+        // and run, raising on error rather than returning the soft-error `false`
+        // that would `PG_RETURN_NULL`. The seam yields the element value as the
+        // bare word straight into `lower.val`.
+        lower.val = fmgr_seams::input_function_call::call(
+            mcx,
+            cache.typiofunc,
+            Some(lbound_str.as_str()),
+            cache.typioparam,
+            _typmod,
+        )?;
     }
     if range_has_ubound(flags) {
-        let _ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
+        let ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
         // C: InputFunctionCallSafe(&cache->typioproc, ubound_str,
         //                          cache->typioparam, typmod, escontext, &upper.val)
-        let _ = &_ubound_str;
-        panic!(
-            "range_in: InputFunctionCallSafe on element typioproc \
-             (backend-utils-fmgr-fmgr) not ported into this unit yet"
-        );
+        upper.val = fmgr_seams::input_function_call::call(
+            mcx,
+            cache.typiofunc,
+            Some(ubound_str.as_str()),
+            cache.typioparam,
+            _typmod,
+        )?;
     }
 
-    #[allow(unreachable_code)]
-    {
-        lower.infinite = flags & RANGE_LB_INF != 0;
-        lower.inclusive = flags & RANGE_LB_INC != 0;
-        lower.lower = true;
-        upper.infinite = flags & RANGE_UB_INF != 0;
-        upper.inclusive = flags & RANGE_UB_INC != 0;
-        upper.lower = false;
+    lower.infinite = flags & RANGE_LB_INF != 0;
+    lower.inclusive = flags & RANGE_LB_INC != 0;
+    lower.lower = true;
+    upper.infinite = flags & RANGE_UB_INF != 0;
+    upper.inclusive = flags & RANGE_UB_INC != 0;
+    upper.lower = false;
 
-        // serialize and canonicalize
-        make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
-    }
+    // serialize and canonicalize
+    make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
 }
 
 /// `range_out(range)` body (rangetypes.c:139): the canonical text form.
-pub fn range_out(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<String> {
+///
+/// Takes `Mcx<'mcx>` because the element type's output function allocates its
+/// `char *` result in a memory context (the bytes the seam returns are charged
+/// to `mcx`); C charges them to `CurrentMemoryContext`.
+pub fn range_out<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache: &RangeIOData,
+    range: RangeTypeP<'_>,
+) -> PgResult<String> {
     // check_stack_depth();
 
     // C: cache = get_range_io_data(fcinfo, RangeTypeGetOid(range), IOFunc_output);
@@ -213,21 +230,29 @@ pub fn range_out(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<String>
     // call element type's output function
     let lbound_str: Option<String> = if range_has_lbound(flags) {
         // C: lbound_str = OutputFunctionCall(&cache->typioproc, lower.val);
-        let _ = (&cache.typiofunc, &lower.val);
-        panic!(
-            "range_out: OutputFunctionCall on element typioproc \
-             (backend-utils-fmgr-fmgr) not ported into this unit yet"
-        );
+        // The element output function is resolved by its OID (`cache.typiofunc`)
+        // and run on the bound value. The deserialized `lower.val` is the bare
+        // element-value word (a scalar for by-value types, a pointer into the
+        // range object for by-reference types); it crosses to the seam as the
+        // owned per-attribute value model's by-value word. The result is the
+        // NUL-excluded text bytes.
+        let bytes = fmgr_seams::oid_output_function_call::call(
+            mcx,
+            cache.typiofunc,
+            &datum_word_to_io_value(lower.val),
+        )?;
+        Some(io_bytes_to_string(&bytes))
     } else {
         None
     };
     let ubound_str: Option<String> = if range_has_ubound(flags) {
         // C: ubound_str = OutputFunctionCall(&cache->typioproc, upper.val);
-        let _ = &upper.val;
-        panic!(
-            "range_out: OutputFunctionCall on element typioproc \
-             (backend-utils-fmgr-fmgr) not ported into this unit yet"
-        );
+        let bytes = fmgr_seams::oid_output_function_call::call(
+            mcx,
+            cache.typiofunc,
+            &datum_word_to_io_value(upper.val),
+        )?;
+        Some(io_bytes_to_string(&bytes))
     } else {
         None
     };
@@ -241,7 +266,6 @@ pub fn range_out(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<String>
 /// Binary representation: the first byte is the flags, then the lower bound (if
 /// present), then the upper bound (if present). Each bound is a 4-byte length
 /// header and the subtype send function's binary image.
-#[allow(unused_variables, unreachable_code)]
 pub fn range_recv<'mcx>(
     mcx: Mcx<'mcx>,
     cache: &RangeIOData,
@@ -252,70 +276,80 @@ pub fn range_recv<'mcx>(
 
     // C: cache = get_range_io_data(fcinfo, rngtypoid, IOFunc_receive);
 
+    // The wire buffer is a forward-only cursor (the C `StringInfo` read cursor).
+    let mut cur: &[u8] = buf;
+
     // receive the flags ...
     // C: flags = (unsigned char) pq_getmsgbyte(buf);
-    // The wire-buffer read (pq_getmsgbyte / pq_getmsgint / pq_getmsgbytes /
-    // pq_getmsgend) is owned by pqformat (backend-libpq-pqformat), unported
-    // into this unit. Mirror PG and panic rather than re-derive the reader.
-    let flags: u8 = panic!(
-        "range_recv: pq_getmsgbyte/pq_getmsgint/pq_getmsgbytes \
-         (backend-libpq-pqformat) not ported into this unit yet"
-    );
+    let flags = pq_getmsgbyte(&mut cur)?;
 
-    {
-        // Mask out any unsupported flags, particularly RANGE_xB_NULL which would
-        // confuse following tests. range_serialize cleans up the rest.
-        let flags = flags
-            & (RANGE_EMPTY | RANGE_LB_INC | RANGE_LB_INF | RANGE_UB_INC | RANGE_UB_INF);
+    // Mask out any unsupported flags, particularly RANGE_xB_NULL which would
+    // confuse following tests. range_serialize cleans up the rest.
+    let flags = flags & (RANGE_EMPTY | RANGE_LB_INC | RANGE_LB_INF | RANGE_UB_INC | RANGE_UB_INF);
 
-        let mut lower = RangeBound::default();
-        let mut upper = RangeBound::default();
+    let mut lower = RangeBound::default();
+    let mut upper = RangeBound::default();
 
-        // receive the bounds ...
-        if range_has_lbound(flags) {
-            // C: bound_len = pq_getmsgint(buf, 4);
-            //    bound_data = pq_getmsgbytes(buf, bound_len);
-            //    initStringInfo(&bound_buf); appendBinaryStringInfo(...);
-            //    lower.val = ReceiveFunctionCall(&cache->typioproc, &bound_buf,
-            //                                    cache->typioparam, typmod);
-            let _ = (&cache.typiofunc, &cache.typioparam);
-            lower.val = panic!(
-                "range_recv: pq_getmsgint/pq_getmsgbytes \
-                 (backend-libpq-pqformat) + ReceiveFunctionCall \
-                 (backend-utils-fmgr-fmgr) not ported into this unit yet"
-            );
-        } else {
-            lower.val = types_datum::datum::Datum::from_usize(0);
-        }
-
-        if range_has_ubound(flags) {
-            // C: same as above for upper.val
-            upper.val = panic!(
-                "range_recv: pq_getmsgint/pq_getmsgbytes \
-                 (backend-libpq-pqformat) + ReceiveFunctionCall \
-                 (backend-utils-fmgr-fmgr) not ported into this unit yet"
-            );
-        } else {
-            upper.val = types_datum::datum::Datum::from_usize(0);
-        }
-
-        // C: pq_getmsgend(buf);
-
-        // finish constructing RangeBound representation
-        lower.infinite = flags & RANGE_LB_INF != 0;
-        lower.inclusive = flags & RANGE_LB_INC != 0;
-        lower.lower = true;
-        upper.infinite = flags & RANGE_UB_INF != 0;
-        upper.inclusive = flags & RANGE_UB_INC != 0;
-        upper.lower = false;
-
-        // serialize and canonicalize
-        make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
+    // receive the bounds ...
+    if range_has_lbound(flags) {
+        // C: bound_len = pq_getmsgint(buf, 4);
+        //    bound_data = pq_getmsgbytes(buf, bound_len);
+        //    initStringInfo(&bound_buf); appendBinaryStringInfo(...);
+        //    lower.val = ReceiveFunctionCall(&cache->typioproc, &bound_buf,
+        //                                    cache->typioparam, typmod);
+        let bound_len = pq_getmsgint32(&mut cur)? as usize;
+        let bound_data = pq_getmsgbytes(&mut cur, bound_len)?;
+        lower.val = fmgr_seams::receive_function_call::call(
+            mcx,
+            cache.typiofunc,
+            bound_data,
+            cache.typioparam,
+            _typmod,
+        )?;
+    } else {
+        lower.val = types_datum::datum::Datum::from_usize(0);
     }
+
+    if range_has_ubound(flags) {
+        // C: same as above for upper.val
+        let bound_len = pq_getmsgint32(&mut cur)? as usize;
+        let bound_data = pq_getmsgbytes(&mut cur, bound_len)?;
+        upper.val = fmgr_seams::receive_function_call::call(
+            mcx,
+            cache.typiofunc,
+            bound_data,
+            cache.typioparam,
+            _typmod,
+        )?;
+    } else {
+        upper.val = types_datum::datum::Datum::from_usize(0);
+    }
+
+    // C: pq_getmsgend(buf);
+    pq_getmsgend(&cur)?;
+
+    // finish constructing RangeBound representation
+    lower.infinite = flags & RANGE_LB_INF != 0;
+    lower.inclusive = flags & RANGE_LB_INC != 0;
+    lower.lower = true;
+    upper.infinite = flags & RANGE_UB_INF != 0;
+    upper.inclusive = flags & RANGE_UB_INC != 0;
+    upper.lower = false;
+
+    // serialize and canonicalize
+    make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
 }
 
 /// `range_send(range)` body (rangetypes.c:263): the binary wire image.
-pub fn range_send(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
+///
+/// Takes `Mcx<'mcx>` because the element type's send function allocates its
+/// `bytea *` result in a memory context (the payload bytes the seam returns are
+/// charged to `mcx`); C charges them to `CurrentMemoryContext`.
+pub fn range_send<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache: &RangeIOData,
+    range: RangeTypeP<'_>,
+) -> PgResult<Vec<u8>> {
     // check_stack_depth();
 
     // C: cache = get_range_io_data(fcinfo, RangeTypeGetOid(range), IOFunc_send);
@@ -333,27 +367,79 @@ pub fn range_send(cache: &RangeIOData, range: RangeTypeP<'_>) -> PgResult<Vec<u8
         // C: bound = PointerGetDatum(SendFunctionCall(&cache->typioproc, lower.val));
         //    bound_len = VARSIZE(bound) - VARHDRSZ; bound_data = VARDATA(bound);
         //    pq_sendint32(buf, bound_len); pq_sendbytes(buf, bound_data, bound_len);
-        let _ = (&cache.typiofunc, &lower.val);
-        let _: () = panic!(
-            "range_send: SendFunctionCall on element typioproc \
-             (backend-utils-fmgr-fmgr) + pq_sendint32/pq_sendbytes \
-             (backend-libpq-pqformat) not ported into this unit yet"
-        );
+        //
+        // The seam resolves the element send function by OID and returns the
+        // `bytea` payload with the varlena header already stripped (so its
+        // length is the C `VARSIZE - VARHDRSZ` and the slice is `VARDATA`).
+        let payload =
+            fmgr_seams::oid_send_function_call::call(mcx, cache.typiofunc, &datum_word_to_io_value(lower.val))?;
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&payload);
     }
 
     if range_has_ubound(flags) {
         // C: same as above for upper.val
-        let _ = &upper.val;
-        let _: () = panic!(
-            "range_send: SendFunctionCall on element typioproc \
-             (backend-utils-fmgr-fmgr) + pq_sendint32/pq_sendbytes \
-             (backend-libpq-pqformat) not ported into this unit yet"
-        );
+        let payload =
+            fmgr_seams::oid_send_function_call::call(mcx, cache.typiofunc, &datum_word_to_io_value(upper.val))?;
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&payload);
     }
 
     // C: PG_RETURN_BYTEA_P(pq_endtypsend(buf));
-    #[allow(unreachable_code)]
     Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Inward seam adapters: the generic range I/O procs the built-in range types
+// register and that `multirangetypes` invokes via the rangetypes-seams
+// `range_in` / `range_out` / `range_recv` / `range_send` seams. Each resolves
+// the per-direction element I/O cache (`get_range_io_data`, which the boundary
+// also does for the `PG_FUNCTION_ARGS` entries) then runs the kernel.
+// ---------------------------------------------------------------------------
+
+/// Inward seam shape for `range_in` (rangetypes-seams). Resolves the input
+/// cache then runs the kernel. The hard-error scaffold has no soft (`escontext`)
+/// failures, so the result is always `Ok(Some(_))` or `Err` (the seam's
+/// `Ok(None)` soft-error case never arises here).
+pub fn range_in_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    input: &str,
+    rngtypoid: Oid,
+    typmod: i32,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
+    let cache = get_range_io_data(rngtypoid, IOFuncSelector::Input)?;
+    Ok(Some(range_in(mcx, &cache, input, typmod)?))
+}
+
+/// Inward seam shape for `range_out` (rangetypes-seams). The seam returns an
+/// owned `String`, so the element output function's transient allocations are
+/// run against a private scratch context dropped on return (mirroring the
+/// `bounds_adjacent` / `range_adjacent` adapters).
+pub fn range_out_seam(range: RangeTypeP<'_>) -> PgResult<String> {
+    let cache = get_range_io_data(range.rangetypid(), IOFuncSelector::Output)?;
+    let scratch = mcx::MemoryContext::new_bump("range_out element output");
+    range_out(scratch.mcx(), &cache, range)
+}
+
+/// Inward seam shape for `range_recv` (rangetypes-seams). Resolves the receive
+/// cache then runs the kernel; the result range escapes in `mcx`.
+pub fn range_recv_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &[u8],
+    rngtypoid: Oid,
+    typmod: i32,
+) -> PgResult<RangeTypeP<'mcx>> {
+    let cache = get_range_io_data(rngtypoid, IOFuncSelector::Receive)?;
+    range_recv(mcx, &cache, buf, typmod)
+}
+
+/// Inward seam shape for `range_send` (rangetypes-seams). The seam returns an
+/// owned `Vec<u8>`, so the element send function's transient allocations are run
+/// against a private scratch context dropped on return.
+pub fn range_send_seam(range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
+    let cache = get_range_io_data(range.rangetypid(), IOFuncSelector::Send)?;
+    let scratch = mcx::MemoryContext::new_bump("range_send element send");
+    range_send(scratch.mcx(), &cache, range)
 }
 
 /// `range_parse(string, &flags, &lbound, &ubound)` (rangetypes.c:2386): split a
@@ -647,4 +733,86 @@ fn strncasecmp_prefix(haystack: &[u8], lit: &[u8]) -> bool {
 fn malformed_literal(string: &str) -> PgError {
     PgError::error(format!("malformed range literal: \"{string}\""))
         .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+}
+
+/// Cross a deserialized bound `Datum` (the bare element-value word, as
+/// `range_deserialize`/`fetch_att` produce it) to the by-OID I/O seam's owned
+/// per-attribute value model. The word is a scalar for by-value element types
+/// or a pointer (into the range object) for by-reference ones, exactly as C's
+/// `Datum` carries it into `OutputFunctionCall`/`SendFunctionCall`; either way
+/// it crosses as the raw by-value word the owner re-interprets through the
+/// resolved `FmgrInfo`.
+#[inline]
+fn datum_word_to_io_value(
+    val: types_datum::datum::Datum,
+) -> types_tuple::backend_access_common_heaptuple::Datum<'static> {
+    types_tuple::backend_access_common_heaptuple::Datum::ByVal(val.as_usize())
+}
+
+/// Decode the element type's text output bytes (the NUL-excluded `char *` image
+/// the output-function seam returns) into the owned `String` the deparser
+/// escapes. The output function emits valid server-encoding (UTF-8) text.
+#[inline]
+fn io_bytes_to_string(bytes: &[u8]) -> String {
+    core::str::from_utf8(bytes)
+        .expect("type output function returns valid UTF-8 text")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// pqformat-style binary cursor helpers (pqformat.c), over the `&mut &[u8]`
+// receive cursor. The wire integers are network byte order (big-endian),
+// mirroring `pq_getmsgint`. Same shape as the sibling
+// `multirangetypes::typcache_io` cursor readers (pqformat is not ported into
+// this unit; the readers are re-derived locally, matching that precedent).
+// ---------------------------------------------------------------------------
+
+/// `pq_getmsgbyte(buf)` — read one byte, advancing the cursor. `Err` is the C
+/// `errmsg("insufficient data left in message")`.
+fn pq_getmsgbyte(buf: &mut &[u8]) -> PgResult<u8> {
+    if buf.is_empty() {
+        return Err(insufficient_data());
+    }
+    let (head, tail) = buf.split_at(1);
+    *buf = tail;
+    Ok(head[0])
+}
+
+/// `pq_getmsgint(buf, 4)` — read a big-endian `uint32`, advancing the cursor.
+/// `Err` is the C `errmsg("insufficient data left in message")`.
+fn pq_getmsgint32(buf: &mut &[u8]) -> PgResult<u32> {
+    if buf.len() < 4 {
+        return Err(insufficient_data());
+    }
+    let (head, tail) = buf.split_at(4);
+    let v = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    *buf = tail;
+    Ok(v)
+}
+
+/// `pq_getmsgbytes(buf, datalen)` — consume `datalen` bytes, advancing the
+/// cursor. `Err` is the C `errmsg("insufficient data left in message")`.
+fn pq_getmsgbytes<'a>(buf: &mut &'a [u8], datalen: usize) -> PgResult<&'a [u8]> {
+    if datalen > buf.len() {
+        return Err(insufficient_data());
+    }
+    let (head, tail) = buf.split_at(datalen);
+    *buf = tail;
+    Ok(head)
+}
+
+/// `pq_getmsgend(buf)` — verify the message is fully consumed; C raises
+/// `errmsg("invalid message format")` otherwise.
+fn pq_getmsgend(buf: &&[u8]) -> PgResult<()> {
+    if !buf.is_empty() {
+        return Err(PgError::error("invalid message format".to_string())
+            .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION));
+    }
+    Ok(())
+}
+
+/// The C `ereport(ERROR, errcode(ERRCODE_PROTOCOL_VIOLATION),
+/// errmsg("insufficient data left in message"))` shared by the cursor readers.
+fn insufficient_data() -> PgError {
+    PgError::error("insufficient data left in message".to_string())
 }

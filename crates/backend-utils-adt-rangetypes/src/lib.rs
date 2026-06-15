@@ -121,10 +121,14 @@ pub fn init_seams() {
     seams::range_intersect_internal::set(range_setops::range_intersect_internal);
     seams::range_split_internal::set(range_setops::range_split_internal_seam);
 
-    // range_in / range_out / range_recv / range_send are NOT installed: their
-    // bodies (range_io) depend on get_range_io_data + element typioproc calls
-    // (lookup_type_cache / get_type_io_data / fmgr / pqformat) that are not
-    // ported into this unit yet and panic loudly. Installing them would wire a
-    // panic stub, not a real implementation, so they are left unset until those
-    // owners land.
+    // Generic range I/O procs (range_io). Now fully wired: get_range_io_data
+    // resolves the element type's typcache + I/O proc OID through the
+    // typcache/lsyscache seams, and the element typioproc calls go through the
+    // by-OID fmgr I/O seams (input/output/receive/send_function_call). The
+    // out/send adapters return owned String/Vec, so their element-fn transient
+    // allocations run against a private scratch context.
+    seams::range_in::set(range_io::range_in_seam);
+    seams::range_out::set(range_io::range_out_seam);
+    seams::range_recv::set(range_io::range_recv_seam);
+    seams::range_send::set(range_io::range_send_seam);
 }

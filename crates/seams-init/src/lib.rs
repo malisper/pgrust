@@ -796,9 +796,6 @@ mod recurrence_guard {
         // (or are re-homed to their proper -seams crates).
         ("backend_commands_functioncmds", "aclcheck_error_type"),
         ("backend_commands_functioncmds", "get_language_oid"),
-        ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
-        ("backend_executor_execPartition", "exec_find_partition"),
-        ("backend_executor_execPartition", "exec_setup_partition_tuple_routing"),
         ("backend_executor_execProcnode", "clear_param_execplan"),
         ("backend_executor_execProcnode", "exec_set_param_plan_for_pending"),
         ("backend_executor_execProcnode", "link_subplan_planstate"),
@@ -993,20 +990,6 @@ mod recurrence_guard {
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
         ("backend_utils_adt_misc2", "make_expanded_object_read_only_internal_v"),
-        // DESIGN_DEBT: the generic range I/O procs `range_in`/`range_out`/
-        // `range_recv`/`range_send` (rangetypes.c) parse/render a range by
-        // calling the *element* subtype's I/O proc through the fmgr Datum lane
-        // (InputFunctionCallSafe / OutputFunctionCall / ReceiveFunctionCall /
-        // SendFunctionCall on `cache->typioproc`). That per-element fmgr
-        // dispatch is not ported into this unit, so the real kernels in
-        // `range_io.rs` deliberately mirror-pg-and-panic. Installing the seams
-        // would only forward a call into a guaranteed panic, so they are held
-        // here until the element-I/O fmgr lane lands. Consumed by multirange I/O
-        // (backend-utils-adt-multirangetypes::typcache_io).
-        ("backend_utils_adt_rangetypes", "range_in"),
-        ("backend_utils_adt_rangetypes", "range_out"),
-        ("backend_utils_adt_rangetypes", "range_recv"),
-        ("backend_utils_adt_rangetypes", "range_send"),
         // DESIGN_DEBT (#159 K1 follow-on: plancache de-handle): every consumer-
         // facing plancache seam in backend-utils-cache-plancache-seams is written
         // against a VALUE-typed contract — `mcx: Mcx<'mcx>` allocation plus owned

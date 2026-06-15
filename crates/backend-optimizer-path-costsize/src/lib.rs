@@ -35,6 +35,7 @@ use types_pathnodes::{
 
 use backend_optimizer_path_costsize_seams as cz;
 use backend_optimizer_util_pathnode_seams as ps;
+use backend_utils_adt_selfuncs_seams as selfuncs;
 
 pub mod exprcost;
 pub mod joins;
@@ -787,7 +788,8 @@ fn cost_incremental_sort_compute(
     }
 
     if !unknown_varno {
-        input_groups = cz::estimate_num_groups::call(root, &presorted_exprs, input_tuples);
+        input_groups =
+            selfuncs::estimate_num_groups::call(root, &presorted_exprs, input_tuples, None);
     }
 
     let group_tuples = input_tuples / input_groups;

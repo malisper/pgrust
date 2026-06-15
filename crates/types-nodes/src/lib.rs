@@ -103,8 +103,8 @@ pub use execnodes::{
 pub use primnodes::CurrentOfExpr;
 pub use modifytable::{
     EPQState as ModifyTableEPQState, MergeAction, MergeActionState, MergeMatchKind, ModifyTable,
-    ModifyTableState, OnConflictSetState, OverridingKind, PartitionTupleRouting, ResultRelHash,
-    TransitionCaptureState,
+    ModifyTableState, OnConflictSetState, OverridingKind, PartitionDispatchData,
+    PartitionDispatchId, PartitionTupleRouting, ResultRelHash, TransitionCaptureState,
 };
 pub use instrument::Instrumentation;
 pub use jointype::{

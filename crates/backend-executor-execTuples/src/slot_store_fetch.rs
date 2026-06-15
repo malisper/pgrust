@@ -17,7 +17,7 @@ use types_nodes::TupleSlotKind;
 use types_storage::buf::{Buffer, BufferIsValid};
 // The canonical value enum.
 use types_tuple::backend_access_common_heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
-use types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
+use types_tuple::heaptuple::{TupleDesc, MINIMAL_TUPLE_OFFSET};
 
 use crate::slot_ops_vtables::{
     slot_clear, slot_copyslot, slot_materialize, slot_release, tts_buffer_heap_copy_heap_tuple,
@@ -425,6 +425,66 @@ pub fn ExecResetOneSlot(slot: &mut SlotData<'_>) -> PgResult<()> {
             )?;
         }
     }
+    Ok(())
+}
+
+/// `ExecSetSlotDescriptor(slot, tupdesc)` (execTuples.c): swap the tuple
+/// descriptor of a non-fixed slot, reallocating the `tts_values`/`tts_isnull`
+/// arrays and re-pinning the descriptor.
+///
+/// ```c
+/// Assert(!TTS_FIXED(slot));
+/// ExecClearTuple(slot);
+/// if (slot->tts_tupleDescriptor) ReleaseTupleDesc(slot->tts_tupleDescriptor);
+/// if (slot->tts_values) pfree(slot->tts_values);
+/// if (slot->tts_isnull) pfree(slot->tts_isnull);
+/// slot->tts_tupleDescriptor = tupdesc;
+/// PinTupleDesc(tupdesc);
+/// slot->tts_values = MemoryContextAlloc(slot->tts_mcxt, natts * sizeof(Datum));
+/// slot->tts_isnull = MemoryContextAlloc(slot->tts_mcxt, natts * sizeof(bool));
+/// ```
+///
+/// The C `pfree` of the old Datum/isnull arrays is the owned `PgVec`s being
+/// reallocated below; old refcounted descriptors are released, non-refcounted
+/// ones are dropped (matching `ReleaseTupleDesc`'s `tdrefcount >= 0` guard).
+pub fn ExecSetSlotDescriptor<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    tupdesc: TupleDesc<'mcx>,
+) -> PgResult<()> {
+    // Assert(!TTS_FIXED(slot));
+    debug_assert!(!slot.base().is_fixed());
+
+    // For safety, make sure slot is empty before changing it.
+    slot_clear(slot);
+
+    let base = slot.base_mut();
+
+    // Release any old descriptor (refcounted ones get DecrTupleDescRefCount;
+    // non-refcounted ones are simply dropped). Also drops the old Datum/isnull
+    // arrays (C: pfree(tts_values)/pfree(tts_isnull)).
+    if let Some(old) = base.tts_tupleDescriptor.take() {
+        if old.tdrefcount >= 0 {
+            backend_access_common_tupdesc::DecrTupleDescRefCount(mcx::PgBox::into_inner(old))?;
+        }
+    }
+
+    // Install the new descriptor; if it's refcounted, bump its refcount.
+    let mut tupdesc = tupdesc.expect("ExecSetSlotDescriptor: tupdesc must be non-NULL");
+    let natts = tupdesc.natts as usize;
+    if tupdesc.tdrefcount >= 0 {
+        backend_access_common_tupdesc::IncrTupleDescRefCount(&mut tupdesc)?;
+    }
+    base.tts_tupleDescriptor = Some(tupdesc);
+
+    // Allocate Datum/isnull arrays of the appropriate size.
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    base.tts_values = values;
+    base.tts_isnull = isnull;
+
     Ok(())
 }
 

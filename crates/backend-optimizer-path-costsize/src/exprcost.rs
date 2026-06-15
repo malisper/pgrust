@@ -11,6 +11,8 @@ use types_pathnodes::{
 
 use backend_optimizer_path_costsize_seams as cz;
 use backend_optimizer_util_pathnode_seams as ps;
+use backend_utils_adt_selfuncs_seams as selfuncs;
+use types_selfuncs::{EstimationInfo, SELFLAG_USED_DEFAULT};
 
 use crate::{
     ceil, clamp_row_est, cost_qual_eval, cpu_operator_cost, cpu_tuple_cost,
@@ -351,13 +353,20 @@ pub fn cost_memoize_rescan(root: &PlannerInfo, mpath_id: PathId) -> (Cost, Cost)
 
     let est_cache_entries = (hash_mem_bytes / est_entry_bytes).floor();
 
-    let ndistinct = cz::estimate_num_groups::call(root, &param_exprs, calls);
+    // estimate on the distinct number of parameter values
+    let mut estinfo = EstimationInfo::default();
+    let mut ndistinct =
+        selfuncs::estimate_num_groups::call(root, &param_exprs, calls, Some(&mut estinfo));
 
-    // SELFLAG_USED_DEFAULT handling: estimate_num_groups returning the default
-    // for our purposes is conveyed by the owner via a separate flag; the fabled
-    // seam returns only the value, so the default-fallback assignment
-    // (`ndistinct = calls`) is applied by the owner inside estimate_num_groups
-    // semantics. We use the returned value directly.
+    // When the estimation fell back on using a default value, it's a bit too
+    // risky to assume that it's ok to use a Memoize node.  The use of a default
+    // could cause us to use a Memoize node when it's really inappropriate to do
+    // so.  If we see that this has been done, then we'll assume that every call
+    // will have unique parameters, which will almost certainly mean a
+    // MemoizePath will never survive add_path(). (costsize.c:2589-2592)
+    if (estinfo.flags & SELFLAG_USED_DEFAULT) != 0 {
+        ndistinct = calls;
+    }
 
     let pg_uint32_max = u32::MAX as f64;
     let est_entries = Min(Min(ndistinct, est_cache_entries), pg_uint32_max);
@@ -416,7 +425,14 @@ pub fn cost_memoize_rescan_set_entries(root: &mut PlannerInfo, mpath_id: PathId)
         est_entry_bytes += get_expr_width(root, pe) as f64;
     }
     let est_cache_entries = (hash_mem_bytes / est_entry_bytes).floor();
-    let ndistinct = cz::estimate_num_groups::call(root, &param_exprs, calls);
+    let mut estinfo = EstimationInfo::default();
+    let mut ndistinct =
+        selfuncs::estimate_num_groups::call(root, &param_exprs, calls, Some(&mut estinfo));
+    // Same SELFLAG_USED_DEFAULT override as cost_memoize_rescan (costsize.c:2589):
+    // est_entries is computed from the corrected ndistinct.
+    if (estinfo.flags & SELFLAG_USED_DEFAULT) != 0 {
+        ndistinct = calls;
+    }
     let pg_uint32_max = u32::MAX as f64;
     let est_entries = Min(Min(ndistinct, est_cache_entries), pg_uint32_max);
     if let PathNode::MemoizePath(mp) = root.path_mut(mpath_id) {
