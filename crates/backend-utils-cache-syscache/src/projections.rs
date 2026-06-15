@@ -17,8 +17,8 @@ use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheAttName,
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, AUTHNAME, AUTHOID,
-    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID,
-    INDEXRELID, LANGOID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID,
+    CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPEROID,
+    FOREIGNSERVEROID, INDEXRELID, LANGOID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
@@ -505,6 +505,75 @@ const Anum_pg_opclass_oid: i32 = 1;
 /// (the catcache ignores keys beyond `cc_nkeys`).
 const UNUSED_KEY: SysCacheKey<'static> = SysCacheKey::Value(KeyDatum::null());
 
+/* ---------------------------------------------------------------------------
+ * pg_constraint projections for backend-catalog-pg-constraint
+ * ------------------------------------------------------------------------- */
+
+use types_catalog::pg_constraint::{
+    ConstraintFormCopy, FormData_pg_constraint, Anum_pg_constraint_conname,
+    Anum_pg_constraint_connamespace, Anum_pg_constraint_contype, Anum_pg_constraint_condeferrable,
+    Anum_pg_constraint_condeferred, Anum_pg_constraint_conenforced, Anum_pg_constraint_convalidated,
+    Anum_pg_constraint_conrelid, Anum_pg_constraint_contypid, Anum_pg_constraint_conindid,
+    Anum_pg_constraint_conparentid, Anum_pg_constraint_confrelid, Anum_pg_constraint_confupdtype,
+    Anum_pg_constraint_confdeltype, Anum_pg_constraint_confmatchtype, Anum_pg_constraint_conislocal,
+    Anum_pg_constraint_coninhcount, Anum_pg_constraint_connoinherit, Anum_pg_constraint_conperiod,
+};
+
+/// `Anum_pg_constraint_oid` (`catalog/pg_constraint.h`).
+const Anum_pg_constraint_oid: i32 = 1;
+/// `NAMEDATALEN` (`pg_config_manual.h`).
+const NAMEDATALEN: usize = 64;
+
+/// A `name` attribute (`NameData` bytes) as the NUL-padded fixed 64-byte image
+/// (`(Form_pg_constraint)->conname`). The deformed `name` column is a 64-byte
+/// by-reference value; we copy up to `NAMEDATALEN` into a zero-padded buffer.
+fn getattr_namedata(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<[u8; NAMEDATALEN]> {
+    let value = SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?;
+    let mut n = [0u8; NAMEDATALEN];
+    if let Datum::ByRef(b) = &value {
+        let take = core::cmp::min(NAMEDATALEN, b.len());
+        n[..take].copy_from_slice(&b[..take]);
+    }
+    Ok(n)
+}
+
+/// `(Form_pg_constraint) GETSTRUCT(tup)` — the fixed-width scalar columns
+/// (Anum 1..=20) projected off a held `pg_constraint` `FormedTuple` via the
+/// `CONSTROID` cache tuple descriptor (`heap_getattr`).
+fn deform_constraint_form(
+    mcx: Mcx<'_>,
+    tup: &FormedTuple<'_>,
+) -> PgResult<FormData_pg_constraint> {
+    Ok(FormData_pg_constraint {
+        oid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_oid)?,
+        conname: getattr_namedata(mcx, CONSTROID, tup, Anum_pg_constraint_conname as i32)?,
+        connamespace: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_connamespace as i32)?,
+        contype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_contype as i32)?,
+        condeferrable: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_condeferrable as i32)?,
+        condeferred: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_condeferred as i32)?,
+        conenforced: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conenforced as i32)?,
+        convalidated: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_convalidated as i32)?,
+        conrelid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conrelid as i32)?,
+        contypid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_contypid as i32)?,
+        conindid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conindid as i32)?,
+        conparentid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_conparentid as i32)?,
+        confrelid: getattr_oid(mcx, CONSTROID, tup, Anum_pg_constraint_confrelid as i32)?,
+        confupdtype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confupdtype as i32)?,
+        confdeltype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confdeltype as i32)?,
+        confmatchtype: getattr_char(mcx, CONSTROID, tup, Anum_pg_constraint_confmatchtype as i32)?,
+        conislocal: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conislocal as i32)?,
+        coninhcount: getattr_i16(mcx, CONSTROID, tup, Anum_pg_constraint_coninhcount as i32)?,
+        connoinherit: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_connoinherit as i32)?,
+        conperiod: getattr_bool(mcx, CONSTROID, tup, Anum_pg_constraint_conperiod as i32)?,
+    })
+}
+
+/// `bool` attribute (`as_bool` of the by-value datum).
 fn getattr_bool(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, attnum: i32) -> PgResult<bool> {
     Ok(byval(SysCacheGetAttrNotNull(mcx, cache_id, tup, attnum)?)?.as_bool())
 }
@@ -575,6 +644,58 @@ pub(crate) fn rel_relkind(relid: Oid) -> PgResult<Option<u8>> {
     let relkind = getattr_char(mcx, RELOID, &tup, Anum_pg_class_relkind)? as u8;
     ReleaseSysCache(tup);
     Ok(Some(relkind))
+}
+
+/// `GetSysCacheHashValue1(CONSTROID, ObjectIdGetDatum(oid))` — the catcache
+/// hash value for a `pg_constraint` row.
+pub(crate) fn get_syscache_hash_value_constroid(oid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue1(CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(oid)))
+}
+
+/// `SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid))` projected to the
+/// scalar [`FormData_pg_constraint`] columns plus the heap TID (`tup->t_self`),
+/// then `ReleaseSysCache`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`);
+/// the caller raises `cache lookup failed for constraint %u`.
+///
+/// The `conkey` array column is not materialized here: none of this seam's
+/// consumers (`RemoveConstraintById` / `RenameConstraintById` /
+/// `ConstraintSetParentConstraint` / `get_ri_constraint_root` /
+/// `constraint_type_oids`) read `conkey`, and C never detoasts it on these
+/// paths — so `conkey` is `None`, matching the C reads and avoiding spurious
+/// detoast `ereport`s the C code never performs.
+pub(crate) fn search_constraint_form_by_oid(
+    conoid: Oid,
+) -> PgResult<Option<ConstraintFormCopy>> {
+    let scratch = MemoryContext::new("syscache pg_constraint form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let form = deform_constraint_form(mcx, &tup)?;
+    let tid = tup.tuple.t_self;
+    ReleaseSysCache(tup);
+    Ok(Some(ConstraintFormCopy {
+        form,
+        conkey: None,
+        tid,
+    }))
+}
+
+/// `relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` +
+/// `((Form_pg_class) GETSTRUCT(relTup))->relchecks` (RemoveConstraintById).
+/// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller raises `cache
+/// lookup failed for relation %u`.
+pub(crate) fn fetch_relchecks(relid: Oid) -> PgResult<Option<i16>> {
+    let scratch = MemoryContext::new("syscache pg_class relchecks projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let relchecks = getattr_i16(mcx, RELOID, &tup, Anum_pg_class_relchecks)?;
+    ReleaseSysCache(tup);
+    Ok(Some(relchecks))
 }
 
 /// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` of the fixed-width

@@ -138,6 +138,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `inline_set_returning_function(root, rte)` (clauses.c:5134) — the full
+    /// set-returning-function inliner: inspect the FUNCTION RTE's single
+    /// `RangeTblFunction`/`FuncExpr`, run the gate ladder (LANGUAGE SQL, no
+    /// SECURITY DEFINER, simple `RETURN QUERY`-able prosrc, polymorphic
+    /// resolution, etc.), and on success parse + rewrite + validate the
+    /// function body into a single owned `Query` to substitute as the RTE's
+    /// subquery (`Ok(Some)`), or `Ok(None)` to decline. `Err` carries the
+    /// parse/analyze `ereport(ERROR)`. **Owner: the clauses.c SRF-inliner leg
+    /// (gated on the SQL-function parse/rewrite path); seam-and-panics until it
+    /// lands.** Unlike the `_core` variant above (which returns an `Expr` keyed
+    /// by funcid for the scalar-SQL-inline path), this returns the inlined
+    /// `Query` that `preprocess_function_rtes` (prepjointree.c:931) stores into
+    /// `rte->subquery`.
+    pub fn inline_set_returning_function<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut types_pathnodes::PlannerInfo,
+        rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    ) -> PgResult<Option<types_nodes::copy_query::Query<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SupportRequestSimplify` (clauses.c): call the function's planner
     /// support function `prosupport` to attempt a custom simplification.
     /// `Ok(None)` = no simplification. `Err` carries the support function's

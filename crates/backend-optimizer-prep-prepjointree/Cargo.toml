@@ -20,6 +20,10 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
+# FAMILY 6 (preprocess_function_rtes): inline_set_returning_function seam.
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+# FAMILY 6 (pull_up_constant_function): get_expr_result_type.
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 
 # FAMILY 1 (pull_up_sublinks) calls the re-keyed SubLink → join conversions.
 backend-optimizer-plan-subselect-pullup-seams = { path = "../backend-optimizer-plan-subselect-pullup-seams" }

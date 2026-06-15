@@ -29,6 +29,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod delete;
+pub mod fetch;
 pub mod freeze;
 pub mod index_delete;
 pub mod inplace;
@@ -431,6 +432,19 @@ pub fn init_seams() {
     heapam_seam::heap_index_delete_tuples::set(|mcx, rel, delstate| {
         index_delete::heap_index_delete_tuples(mcx, rel, delstate)
     });
+
+    // FETCH — the single-tuple fetch entry points. `heap_fetch` is consumed by
+    // the lock family's `heap_lock_updated_tuple_rec` (update-chain walk under
+    // SnapshotAny); `heap_hot_search_buffer` by `index_delete`'s
+    // `heap_index_delete_tuples` (HOT-chain vacuumability test).
+    heapam_seam::heap_fetch::set(|mcx, relation, snapshot, tid, keep_buf| {
+        fetch::heap_fetch(mcx, relation, snapshot, tid, keep_buf)
+    });
+    heapam_seam::heap_hot_search_buffer::set(
+        |mcx, tid, rel, buf, snapshot, want_all_dead, first_call| {
+            fetch::heap_hot_search_buffer(mcx, tid, rel, buf, snapshot, want_all_dead, first_call)
+        },
+    );
 
     // F2 INSERT — the cross-family heap-insert entry points.
     heapam_seam::heap_insert::set(|mcx, rel, tup, cid, options, bistate| {
