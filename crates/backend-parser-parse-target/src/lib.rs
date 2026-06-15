@@ -2170,5 +2170,41 @@ fn node_to_var(n: Node<'_>) -> Option<Var> {
     }
 }
 
+// ===========================================================================
+// Inward seam installer (owner of `backend-parser-target-seams`).
+// ===========================================================================
+
+/// Seam body for `backend_parser_target_seams::transform_target_entry`, the
+/// `transformTargetEntry` leg parse_clause.c reaches across the
+/// parse_target ⇆ parse_clause cycle. The consumer always supplies an
+/// already-transformed `expr` (it ran `transformExpr` itself), so it is passed
+/// by value as `Some(expr)`; `node` is the original parse node (cloned for the
+/// `FigureColname` read inside `transformTargetEntry`).
+fn transform_target_entry_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    node: &Node<'mcx>,
+    expr: Expr,
+    expr_kind: ParseExprKind,
+    colname: Option<&str>,
+    resjunk: bool,
+) -> PgResult<types_nodes::primnodes::TargetEntry<'mcx>> {
+    transformTargetEntry(
+        mcx,
+        pstate,
+        Some(node.clone_in(mcx)?),
+        Some(expr),
+        expr_kind,
+        colname.map(String::from),
+        resjunk,
+    )
+}
+
+/// Install this crate's inward seams (owner of `backend-parser-target-seams`,
+/// which maps to `parse_target.c`).
+pub fn init_seams() {
+    backend_parser_target_seams::transform_target_entry::set(transform_target_entry_seam);
+}
+
 #[cfg(test)]
 mod tests;

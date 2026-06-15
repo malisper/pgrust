@@ -33,6 +33,9 @@ backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 
+# Owner of the inward seams this crate installs.
+backend-parser-target-seams = { path = "../backend-parser-target-seams" }
+
 # Outward dependency seams.
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
