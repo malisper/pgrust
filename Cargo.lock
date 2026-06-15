@@ -7413,9 +7413,12 @@ name = "backend-optimizer-prep-prepjointree"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-plan-subselect-pullup-seams",
  "backend-optimizer-prep-prepjointree-seams",
  "backend-optimizer-util-clauses",
  "backend-rewrite-core",
+ "backend-tcop-postgres-seams",
  "mcx",
  "seam-core",
  "types-core",

@@ -46,6 +46,35 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `convert_VALUES_to_ANY(root, testexpr, values)` (subselect.c): the
+    /// `pull_up_sublinks_qual_recurse` fast path that tries to rewrite
+    /// `x op (VALUES (a), (b), ...)` (an `ANY` SubLink over a constant
+    /// single-column VALUES list of ≥2 rows) directly into a
+    /// `ScalarArrayOpExpr` (`x op ANY (ARRAY[...])`), avoiding a semijoin
+    /// entirely. Returns `None` when the SubLink isn't a simplifiable VALUES
+    /// sequence (the common case, where the caller then falls through to
+    /// `convert_ANY_sublink_to_join`).
+    ///
+    /// **Deferred to the planmain stage** alongside `make_subplan` /
+    /// `build_subplan` / `convert_EXISTS_to_ANY`: its body needs
+    /// `convert_testexpr` + `eval_const_expressions` + `make_SAOP_expr`, which
+    /// are part of the still-unported SubPlan-building half of subselect.c. The
+    /// owner installs a seam-and-panic body until then; `pull_up_sublinks` (its
+    /// only caller) is itself reachable only from the unported
+    /// `subquery_planner`, so this panic is latent.
+    ///
+    /// C takes `(root, testexpr, values)` extracted from the `ANY` SubLink; here
+    /// the whole `&SubLink` is handed in so the owner derefs its embedded-owned
+    /// `subselect` / `testexpr` itself (matching the sibling conversions and
+    /// avoiding a `'static`-subselect lifetime dance at the call site).
+    pub fn convert_VALUES_to_ANY<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &types_pathnodes::PlannerInfo,
+        sublink: &types_nodes::primnodes::SubLink,
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>
+);
+
+seam_core::seam!(
     /// `convert_EXISTS_sublink_to_join(root, sublink, under_not, available_rels)`
     /// (subselect.c): try to convert a top-level `EXISTS` (or `NOT EXISTS`,
     /// via `under_not`) SubLink into a semijoin / antijoin. On success returns a
