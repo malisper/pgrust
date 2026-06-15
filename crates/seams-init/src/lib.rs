@@ -193,6 +193,7 @@ pub fn init_all() {
     backend_optimizer_prep_preptlist::init_seams();
     backend_optimizer_prep_prepagg::init_seams();
     backend_optimizer_plan_subselect_pullup::init_seams();
+    backend_optimizer_plan_analyzejoins::init_seams();
     backend_optimizer_util_inherit_predtest::init_seams();
     backend_optimizer_util_pathnode::init_seams();
     backend_parser_coerce::init_seams();
