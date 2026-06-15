@@ -24,6 +24,7 @@ extern crate alloc;
 mod buf_lock;
 mod mgr;
 mod ops;
+mod page;
 mod refcount;
 
 pub use mgr::BufferManager;
@@ -126,6 +127,82 @@ fn mark_buffer_dirty_hint(buf: Buffer, buffer_std: bool) {
         .expect("MarkBufferDirtyHint: bad buffer ID or WAL hint-FPI failed");
 }
 
+// --- F1d: mark-dirty + page access + BufferGet* accessor seams (bufmgr.c) --
+
+/// `MarkBufferDirty(buffer)` installed seam (bufmgr.c) — mark the buffer's
+/// contents dirty. Called inside a critical section; the C path only `Assert`s,
+/// so the seam is infallible and the rare bad-ID / unpinned `ereport(ERROR)`
+/// becomes a loud panic here.
+fn mark_buffer_dirty(buffer: Buffer) {
+    BufferManager::global_expect()
+        .MarkBufferDirty(buffer)
+        .expect("MarkBufferDirty: bad buffer ID or buffer not pinned");
+}
+
+/// `BufferGetPage(buffer)` write-access installed seam (bufpage.h): run `f` over
+/// the buffer's live page bytes (`BLCKSZ`) under the caller's content lock.
+fn with_buffer_page(
+    buffer: Buffer,
+    f: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<()>,
+) -> types_error::PgResult<()> {
+    BufferManager::global_expect().with_buffer_page(buffer, f)
+}
+
+/// `BufferGetBlockNumber(buffer)` installed seam (bufmgr.c). The C path only
+/// `Assert`s the pin; a bad-ID becomes a loud panic.
+fn buffer_get_block_number(buf: Buffer) -> types_core::primitive::BlockNumber {
+    BufferManager::global_expect()
+        .BufferGetBlockNumber(buf)
+        .expect("BufferGetBlockNumber: bad buffer ID")
+}
+
+/// `BufferGetTag(buf, ...)` installed seam (bufmgr.c) — the relation/fork/block
+/// this buffer currently holds.
+fn buffer_get_tag(
+    buf: Buffer,
+) -> types_error::PgResult<(
+    types_storage::RelFileLocator,
+    types_core::primitive::ForkNumber,
+    types_core::primitive::BlockNumber,
+)> {
+    BufferManager::global_expect().BufferGetTag(buf)
+}
+
+/// `BufferGetPage(buffer)` snapshot-copy installed seam (bufmgr.h) — an owned
+/// copy of the buffer's page image in `mcx`.
+fn buffer_get_page<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    buf: Buffer,
+) -> types_error::PgResult<mcx::PgVec<'mcx, u8>> {
+    BufferManager::global_expect().BufferGetPageOwned(mcx, buf)
+}
+
+/// `BufferGetLSNAtomic(buffer)` installed seam (bufmgr.c) — the page LSN read
+/// under the header spinlock.
+fn buffer_get_lsn_atomic(buf: Buffer) -> types_error::PgResult<types_core::primitive::XLogRecPtr> {
+    BufferManager::global_expect().BufferGetLSNAtomic(buf)
+}
+
+/// `PageInit(BufferGetPage(buf), BLCKSZ, 0)` installed seam (bufpage.c).
+fn page_init(buf: Buffer) -> types_error::PgResult<()> {
+    BufferManager::global_expect().page_init(buf)
+}
+
+/// `PageSetLSN(BufferGetPage(buffer), lsn)` installed seam (bufpage.h).
+fn page_set_lsn(buffer: Buffer, lsn: types_core::XLogRecPtr) -> types_error::PgResult<()> {
+    BufferManager::global_expect().page_set_lsn(buffer, lsn)
+}
+
+/// `PageGetLSN(BufferGetPage(buffer))` installed seam (bufpage.h).
+fn page_get_lsn(buffer: Buffer) -> types_error::PgResult<types_core::XLogRecPtr> {
+    BufferManager::global_expect().page_get_lsn(buffer)
+}
+
+/// `PageIsNew(BufferGetPage(buffer))` installed seam (bufpage.h).
+fn page_is_new(buffer: Buffer) -> types_error::PgResult<bool> {
+    BufferManager::global_expect().page_is_new(buffer)
+}
+
 /// Install this crate's inward seams. F1a installs the four header/freelist
 /// seams that unblock the buffer-support freelist clock sweep; F1b installs the
 /// pin/unpin/release/refcount seams (`release_buffer` / `unlock_release_buffer`
@@ -150,4 +227,15 @@ pub fn init_seams() {
     );
     backend_storage_buffer_bufmgr_seams::is_buffer_cleanup_ok::set(is_buffer_cleanup_ok);
     backend_storage_buffer_bufmgr_seams::mark_buffer_dirty_hint::set(mark_buffer_dirty_hint);
+    // F1d
+    backend_storage_buffer_bufmgr_seams::mark_buffer_dirty::set(mark_buffer_dirty);
+    backend_storage_buffer_bufmgr_seams::with_buffer_page::set(with_buffer_page);
+    backend_storage_buffer_bufmgr_seams::buffer_get_block_number::set(buffer_get_block_number);
+    backend_storage_buffer_bufmgr_seams::buffer_get_tag::set(buffer_get_tag);
+    backend_storage_buffer_bufmgr_seams::buffer_get_page::set(buffer_get_page);
+    backend_storage_buffer_bufmgr_seams::buffer_get_lsn_atomic::set(buffer_get_lsn_atomic);
+    backend_storage_buffer_bufmgr_seams::page_init::set(page_init);
+    backend_storage_buffer_bufmgr_seams::page_set_lsn::set(page_set_lsn);
+    backend_storage_buffer_bufmgr_seams::page_get_lsn::set(page_get_lsn);
+    backend_storage_buffer_bufmgr_seams::page_is_new::set(page_is_new);
 }

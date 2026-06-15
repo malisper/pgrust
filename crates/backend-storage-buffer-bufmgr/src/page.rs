@@ -1,0 +1,306 @@
+//! Dirty-marking, page access, and buffer accessors (bufmgr.c / bufpage.h) —
+//! the F1d high-fan-in seam set on already-resident, pinned (and
+//! content-locked, where the C requires it) shared buffers.
+//!
+//! F1d (this stage): `MarkBufferDirty`, `BufferGetBlockNumber` / `BufferGetTag`
+//! / `BufferGetLSNAtomic`, the `BufferGetPage` page-access primitives
+//! (`with_buffer_page` in-place mutation + `buffer_get_page` owned snapshot),
+//! and the bufpage page primitives (`PageInit` / `PageSetLSN` / `PageGetLSN` /
+//! `PageIsNew`) routed through a pinned buffer. No I/O, no allocation of shared
+//! state, no victim selection (those are F2/F3/F5); the page bytes are the
+//! crate-owned `blocks` array, read/written under the caller's content lock
+//! exactly where C dereferences `BufferGetPage(buffer)`.
+
+use std::sync::atomic::Ordering;
+
+use types_core::primitive::{BlockNumber, Buffer, XLogRecPtr, BLCKSZ};
+use types_error::{PgError, PgResult};
+use types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED};
+use types_storage::RelFileLocator;
+
+use crate::mgr::BufferManager;
+
+impl BufferManager {
+    /// `MarkBufferDirty(buffer)` (bufmgr.c:2640) — mark the contents of a buffer
+    /// dirty. The buffer must be pinned and exclusive-content-locked by the
+    /// caller. Faithful to the lock-free CAS loop setting `BM_DIRTY |
+    /// BM_JUST_DIRTIED` (with the `BM_LOCKED` header-spinlock wait), plus the
+    /// dirty-accounting on the 0->1 transition.
+    pub fn MarkBufferDirty(&self, buffer: Buffer) -> PgResult<()> {
+        // if (!BufferIsValid(buffer)) elog(ERROR, "bad buffer ID"). A local
+        // buffer (negative handle) is valid; it routes to MarkLocalBufferDirty.
+        if !self.buffer_is_valid(buffer) && !crate::buf_lock::buffer_is_local(buffer) {
+            return Err(PgError::error(format!("bad buffer ID: {buffer}")));
+        }
+        // if (BufferIsLocal(buffer)) { MarkLocalBufferDirty(buffer); return; }
+        if crate::buf_lock::buffer_is_local(buffer) {
+            return backend_storage_buffer_bufmgr_seams::mark_local_buffer_dirty::call(buffer);
+        }
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        // Assert(BufferIsPinned(buffer)).
+
+        // Assert(GetPrivateRefCount(buffer) > 0).
+        if self.private_refcount().get(buf_id as i32) == 0 {
+            return Err(PgError::error("MarkBufferDirty: buffer is not pinned"));
+        }
+        // Assert(LWLockHeldByMeInMode(BufferDescriptorGetContentLock(bufHdr),
+        //        LW_EXCLUSIVE)).
+        debug_assert!(
+            backend_storage_lmgr_lwlock::LWLockHeldByMe(self.content_lock(buf_id)),
+            "MarkBufferDirty: caller must hold the exclusive content lock"
+        );
+
+        let state = &self.states_atomic(buf_id);
+        let mut old_buf_state = state.load(Ordering::Acquire);
+        loop {
+            if old_buf_state & BM_LOCKED != 0 {
+                old_buf_state = self.wait_buf_hdr_unlocked(buf_id);
+            }
+
+            let buf_state = old_buf_state | BM_DIRTY | BM_JUST_DIRTIED;
+
+            // C `pg_atomic_compare_exchange_u32` has FULL barrier semantics
+            // (atomics.h:370); `SeqCst` on both orderings matches it
+            // (`AcqRel`/`Acquire` would be genuinely weaker).
+            match state.compare_exchange_weak(
+                old_buf_state,
+                buf_state,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    // If the buffer was not dirty already, do vacuum accounting.
+                    if old_buf_state & BM_DIRTY == 0 {
+                        // VacuumPageDirty++; pgBufferUsage.shared_blks_dirtied++;
+                        // VacuumCostBalance bump (if VacuumCostActive).
+                        backend_storage_buffer_bufmgr_seams::count_buffer_dirtied::call();
+                    }
+                    break;
+                }
+                Err(actual) => old_buf_state = actual,
+            }
+        }
+        Ok(())
+    }
+
+    // -- accessors (bufmgr.c) ----------------------------------------------
+
+    /// `BufferGetBlockNumber(buffer)` (bufmgr.c:3994) — the block number the
+    /// buffer currently holds. The caller must hold a pin (so the tag is
+    /// stable). Pure read of the descriptor tag.
+    pub fn BufferGetBlockNumber(&self, buffer: Buffer) -> PgResult<BlockNumber> {
+        // Assert(BufferIsPinned(buffer)).
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.desc_tag(buf_id).blockNum)
+    }
+
+    /// `BufferGetTag(buffer, *rlocator, *forknum, *blknum)` (bufmgr.c:4018) — the
+    /// relation/fork/block this buffer currently holds, returned as one owned
+    /// triple. The caller must hold a pin.
+    pub fn BufferGetTag(
+        &self,
+        buffer: Buffer,
+    ) -> PgResult<(RelFileLocator, types_core::primitive::ForkNumber, BlockNumber)> {
+        // Assert(BufferIsPinned(buffer)).
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        let tag = self.desc_tag(buf_id);
+        // BufTagGetRelFileLocator(&tag) / BufTagGetForkNum(&tag) (buf_internals.h).
+        let rlocator = RelFileLocator {
+            spcOid: tag.spcOid,
+            dbOid: tag.dbOid,
+            relNumber: tag.relNumber,
+        };
+        Ok((rlocator, tag.forkNum, tag.blockNum))
+    }
+
+    /// `BufferGetLSNAtomic(buffer)` (bufmgr.c:4486) — atomically read a pinned
+    /// buffer's page LSN. The caller must hold at least a share lock on the
+    /// buffer. For shared buffers the header spinlock is taken so the read is
+    /// consistent against a concurrent `MarkBufferDirtyHint` LSN stamp; the
+    /// checksums-disabled / unlogged fast path returns the LSN without the lock.
+    pub fn BufferGetLSNAtomic(&self, buffer: Buffer) -> PgResult<XLogRecPtr> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+
+        // If we don't need locking for correctness, fastpath out: a local buffer
+        // (out of this core), an unlogged/temp buffer, or checksums + WAL hints
+        // both disabled. We model the always-correct path: take the header lock
+        // for a shared, permanent buffer when hint-bit WAL is in play; otherwise
+        // a bare read. To stay faithful to the single-impl contract and avoid a
+        // racy read, take the header lock unconditionally here (the fast path is
+        // a pure optimisation that never changes the value observed).
+        // Assert(BufferIsPinned(buffer)).
+        // Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(bufHdr))).
+        let buf_state = self.lock_buf_hdr(buf_id);
+        let lsn = self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageGetLSN(&page)
+        });
+        self.unlock_buf_hdr(buf_id, buf_state);
+        Ok(lsn)
+    }
+
+    // -- page access (BufferGetPage, bufpage.h) ----------------------------
+
+    /// `BufferGetPage(buffer)` (bufmgr.h) — run `f` over the buffer's live page
+    /// bytes (`BLCKSZ`) for in-place read/write. The caller already holds the
+    /// pin and (for a write or a consistent read) the content lock, so the
+    /// closure operates on the shared page directly — modelling C's bare `Page`
+    /// pointer without handing out an aliasable `&'static mut`. `f`'s `Err`
+    /// propagates.
+    pub fn with_buffer_page(
+        &self,
+        buffer: Buffer,
+        f: &mut dyn FnMut(&mut [u8]) -> PgResult<()>,
+    ) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, f)
+    }
+
+    /// `BufferGetPage(buffer)` (bufmgr.h) materialised as an owned snapshot copy
+    /// of the page image in `mcx` (the consumer reads page-format fields off
+    /// it). The caller holds the pin / content lock. `Err` carries OOM.
+    pub fn BufferGetPageOwned<'mcx>(
+        &self,
+        mcx: mcx::Mcx<'mcx>,
+        buffer: Buffer,
+    ) -> PgResult<mcx::PgVec<'mcx, u8>> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block(buf_id, |block| mcx::slice_in(mcx, block))
+    }
+
+    // -- bufpage page primitives over a pinned buffer (bufpage.c/.h) -------
+
+    /// `PageInit(BufferGetPage(buf), BLCKSZ, 0)` (bufpage.c) — initialise a
+    /// fresh (all-zero) page's header. The caller holds the exclusive content
+    /// lock. `Err` carries any page-init `ereport(ERROR)`.
+    pub fn page_init(&self, buffer: Buffer) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            backend_storage_page::PageInit(block, BLCKSZ, 0)
+        })
+    }
+
+    /// `PageSetLSN(BufferGetPage(buffer), lsn)` (bufpage.h) — stamp the page
+    /// LSN. The caller holds the exclusive content lock.
+    pub fn page_set_lsn(&self, buffer: Buffer, lsn: XLogRecPtr) -> PgResult<()> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        self.with_block_mut(buf_id, |block| {
+            let mut page = backend_storage_page::PageMut::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageSetLSN(&mut page, lsn);
+            Ok(())
+        })
+    }
+
+    /// `PageGetLSN(BufferGetPage(buffer))` (bufpage.h) — the page LSN. Unlike
+    /// [`Self::BufferGetLSNAtomic`] this is the bare, non-atomic accessor (the
+    /// caller already holds the exclusive content lock that serialises the
+    /// stamp).
+    pub fn page_get_lsn(&self, buffer: Buffer) -> PgResult<XLogRecPtr> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageGetLSN(&page)
+        }))
+    }
+
+    /// `PageIsNew(BufferGetPage(buffer))` (bufpage.h) — whether the buffer's
+    /// page is all-zeroes (`pd_upper == 0`).
+    pub fn page_is_new(&self, buffer: Buffer) -> PgResult<bool> {
+        let buf_id = self.buffer_to_buf_id_pub(buffer)?;
+        Ok(self.with_block(buf_id, |block| {
+            let page = backend_storage_page::PageRef::new(block)
+                .expect("buffer block is BLCKSZ");
+            backend_storage_page::PageIsNew(&page)
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install_stubs() {
+        crate::mgr::test_seams::install();
+    }
+
+    fn mk() -> BufferManager {
+        BufferManager::new(4)
+    }
+
+    #[test]
+    fn mark_buffer_dirty_sets_flags_and_counts_once() {
+        install_stubs();
+        backend_storage_buffer_bufmgr_seams::count_buffer_dirtied::set(|| {});
+        let bm = mk();
+        // Pin + take the exclusive content lock (LWLockHeldByMe debug_assert).
+        let _ = bm.pin_buffer_for_test(0, false);
+        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+            .unwrap();
+        assert_eq!(bm.read_state(0) & BM_DIRTY, 0);
+        bm.MarkBufferDirty(1).unwrap();
+        assert_ne!(bm.read_state(0) & BM_DIRTY, 0);
+        // BM_JUST_DIRTIED also set.
+        assert_ne!(bm.read_state(0) & BM_JUST_DIRTIED, 0);
+        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_UNLOCK)
+            .unwrap();
+    }
+
+    #[test]
+    fn mark_buffer_dirty_rejects_unpinned_and_invalid() {
+        install_stubs();
+        let bm = mk();
+        assert!(bm.MarkBufferDirty(0).is_err()); // invalid id
+        assert!(bm.MarkBufferDirty(2).is_err()); // not pinned
+    }
+
+    #[test]
+    fn block_number_and_tag_read_descriptor() {
+        install_stubs();
+        let bm = mk();
+        let _ = bm.pin_buffer_for_test(0, false);
+        // Default tag is zeroed: block 0, fork main(0).
+        assert_eq!(bm.BufferGetBlockNumber(1).unwrap(), 0);
+        let (rloc, _fork, blk) = bm.BufferGetTag(1).unwrap();
+        assert_eq!(blk, 0);
+        assert_eq!(rloc.relNumber, 0);
+    }
+
+    #[test]
+    fn page_init_and_lsn_roundtrip() {
+        install_stubs();
+        let bm = mk();
+        let _ = bm.pin_buffer_for_test(0, false);
+        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+            .unwrap();
+        // A fresh (all-zero) page is "new".
+        assert!(bm.page_is_new(1).unwrap());
+        bm.page_init(1).unwrap();
+        // After PageInit pd_upper != 0 -> not new.
+        assert!(!bm.page_is_new(1).unwrap());
+        bm.page_set_lsn(1, 0x1234_5678).unwrap();
+        assert_eq!(bm.page_get_lsn(1).unwrap(), 0x1234_5678);
+        assert_eq!(bm.BufferGetLSNAtomic(1).unwrap(), 0x1234_5678);
+        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_UNLOCK)
+            .unwrap();
+    }
+
+    #[test]
+    fn with_buffer_page_mutates_in_place() {
+        install_stubs();
+        let bm = mk();
+        let _ = bm.pin_buffer_for_test(0, false);
+        bm.with_buffer_page(1, &mut |b| {
+            b[100] = 0xAB;
+            Ok(())
+        })
+        .unwrap();
+        bm.with_buffer_page(1, &mut |b| {
+            assert_eq!(b[100], 0xAB);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
