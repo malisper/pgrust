@@ -101,14 +101,14 @@ fn table_endscan_bm(scan: TableScanDesc<'_>) -> PgResult<()> {
 /// Adapter for `backend-access-table-tableam-bm-seams::table_rescan` — the
 /// bitmap-scan `table_rescan(scan, NULL)` form, i.e. [`table_rescan`] with no
 /// scan keys.
-fn table_rescan_bm(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
-    table_rescan(scan, None)
+fn table_rescan_bm<'mcx>(mcx: Mcx<'mcx>, scan: &mut TableScanDescData<'mcx>) -> PgResult<()> {
+    table_rescan(mcx, scan, None)
 }
 
 /// Adapter for `backend-access-table-tableam-seams::table_rescan` — the seqscan
 /// `table_rescan(scan, NULL)` form (`nodeSeqscan.c`'s `ExecReScanSeqScan`).
-fn table_rescan_seam(scan: &mut TableScanDescData<'_>) -> PgResult<()> {
-    table_rescan(scan, None)
+fn table_rescan_seam<'mcx>(mcx: Mcx<'mcx>, scan: &mut TableScanDescData<'mcx>) -> PgResult<()> {
+    table_rescan(mcx, scan, None)
 }
 
 /// Adapter for `backend-access-table-tableam-seams::table_beginscan` — the
@@ -564,8 +564,9 @@ pub fn table_index_fetch_tuple_check<'mcx>(
 // ===========================================================================
 
 /// `table_tuple_get_latest_tid(scan, tid)`.
-pub fn table_tuple_get_latest_tid(
-    scan: &mut TableScanDescData<'_>,
+pub fn table_tuple_get_latest_tid<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
     tid: &mut ItemPointerData,
 ) -> PgResult<()> {
     let tableam = am(&scan.rs_rd);
@@ -591,7 +592,7 @@ pub fn table_tuple_get_latest_tid(
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
-    (tableam.tuple_get_latest_tid)(scan, tid)
+    (tableam.tuple_get_latest_tid)(mcx, scan, tid)
 }
 
 // ===========================================================================
@@ -616,9 +617,13 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
 }
 
 /// `table_rescan(scan, key)` (tableam.h inline) — restart a relation scan.
-pub fn table_rescan(scan: &mut TableScanDescData<'_>, key: Option<&[ScanKeyData]>) -> PgResult<()> {
+pub fn table_rescan<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    key: Option<&[ScanKeyData]>,
+) -> PgResult<()> {
     let routine = am(&scan.rs_rd);
-    (routine.scan_rescan)(scan, key, false, false, false, false)
+    (routine.scan_rescan)(mcx, scan, key, false, false, false, false)
 }
 
 /// `table_tuple_tid_valid(scan, tid)` (tableam.h inline) — verify `tid` is a
@@ -671,8 +676,10 @@ pub fn table_tuple_insert<'mcx>(
 
 /// `table_tuple_delete(rel, tid, cid, snapshot, crosscheck, wait, tmfd,
 /// changingPart)` (tableam.h inline).
-pub fn table_tuple_delete(
-    rel: &Relation<'_>,
+#[allow(clippy::too_many_arguments)]
+pub fn table_tuple_delete<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     cid: types_core::xact::CommandId,
     snapshot: &Snapshot,
@@ -681,7 +688,7 @@ pub fn table_tuple_delete(
     tmfd: &mut TM_FailureData,
     changingPart: bool,
 ) -> PgResult<TM_Result> {
-    (am(rel).tuple_delete)(rel, tid, cid, snapshot, crosscheck, wait, tmfd, changingPart)
+    (am(rel).tuple_delete)(mcx, rel, tid, cid, snapshot, crosscheck, wait, tmfd, changingPart)
 }
 
 /// `table_tuple_update(rel, otid, slot, cid, snapshot, crosscheck, wait,
@@ -757,8 +764,9 @@ pub fn simple_table_tuple_insert<'mcx>(
 /// target tuple are not expected (for example, because we have a lock on the
 /// relation associated with the tuple). Any failure is reported via
 /// `ereport()`.
-pub fn simple_table_tuple_delete(
-    rel: &Relation<'_>,
+pub fn simple_table_tuple_delete<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
     tid: &ItemPointerData,
     snapshot: &Snapshot,
 ) -> PgResult<()> {
@@ -766,6 +774,7 @@ pub fn simple_table_tuple_delete(
 
     let cid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
     let result = table_tuple_delete(
+        mcx,
         rel,
         tid,
         cid,

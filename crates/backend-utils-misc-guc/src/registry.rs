@@ -26,7 +26,7 @@ use types_guc::{
     GucContext, GucSource, GUC_ALLOW_IN_PARALLEL, GUC_IS_NAME, GUC_NO_RESET, GUC_UNIT, PGC_BACKEND,
     PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET, PGC_SU_BACKEND, PGC_S_CLIENT,
     PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_DEFAULT, PGC_S_FILE, PGC_S_GLOBAL, PGC_S_OVERRIDE,
-    PGC_S_USER, PGC_USERSET,
+    PGC_S_SESSION, PGC_S_USER, PGC_USERSET,
 };
 
 use backend_utils_misc_guc_tables::GucHookExtra;
@@ -36,14 +36,16 @@ use crate::enum_lookup::{
 };
 use crate::model::{
     config_bool, config_enum, config_generic, config_int, config_real, config_string,
-    config_var_val, GUC_PENDING_RESTART,
+    config_var_val, config_var_value, GucStack, GUC_NEEDS_REPORT, GUC_PENDING_RESTART, GUC_LOCAL,
+    GUC_SAVE, GUC_SET, GUC_SET_LOCAL,
 };
+use types_guc::GUC_REPORT;
 use crate::name::{guc_name_eq, MAP_OLD_GUC_NAMES};
 use crate::units::{
     convert_int_from_base_unit, convert_real_from_base_unit, get_config_unit_name, parse_int,
     parse_real, ParseNum,
 };
-use crate::GUC_ACTION_SAVE;
+use crate::{GUC_ACTION_LOCAL, GUC_ACTION_SAVE, GUC_ACTION_SET};
 
 /// `GucAction` (`utils/guc.h`): GUC_ACTION_SET/LOCAL/SAVE (see crate root).
 pub type GucAction = u32;
@@ -737,6 +739,30 @@ pub fn get_config_option_by_name(
     }
 }
 
+/// `GetConfigOptionFlags(name, missing_ok)` (guc.c:4452): the variable's
+/// `config_generic.flags` bitmask (the accessor pg_settings-style callers use).
+/// Returns `Ok(0)` for a missing variable when `missing_ok`, else an
+/// `unrecognized configuration parameter` error.
+pub fn get_config_option_flags(
+    reg: &GucRegistry,
+    name: &str,
+    missing_ok: bool,
+) -> PgResult<i32> {
+    match reg.find_option(name) {
+        Some(record) => Ok(record.gen().flags),
+        None => {
+            if missing_ok {
+                Ok(0)
+            } else {
+                Err(err(
+                    ERRCODE_UNDEFINED_OBJECT,
+                    format!("unrecognized configuration parameter \"{name}\""),
+                ))
+            }
+        }
+    }
+}
+
 /// `set_config_option`/`set_config_with_handle` core (guc.c:3341/3405).
 ///
 /// Returns `Ok(1)` applied, `Ok(0)` rejected-below-ERROR, `Ok(-1)` skipped, and
@@ -856,6 +882,11 @@ pub fn set_config_option(
 
     if change_val {
         let record = &mut reg.vars[idx];
+        // Save old value to support transaction abort (guc.c:3754). Skipped when
+        // makeDefault, exactly as C.
+        if !make_default {
+            push_old_value(record, action);
+        }
         apply_value(record, newval.clone(), newextra, source, context, srole);
     }
     if make_default {
@@ -1052,6 +1083,397 @@ fn make_default_bookkeeping(
             s.srole = srole;
         }
         stack = s.prev.as_deref_mut();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The transactional GUC stack (guc_stack.c). In C this is the per-variable
+// intrusive `GucStack` list (`conf->gen.stack`) chained from `guc_stack_list`;
+// here every variable carries its own `Option<Box<GucStack>>` (model.rs) and
+// `AtEOXact_GUC` iterates the whole registry instead of a separate slist (the
+// per-variable list and the registry-wide scan are behavior-equivalent).
+// ---------------------------------------------------------------------------
+
+/// `set_stack_value(gconf, val)` (guc.c:812): copy the variable's *current* live
+/// value into a stack-entry slot. The model's `config_*.value` mirrors
+/// `*conf->variable` (the live storage), so reading it is the faithful analog of
+/// C's `*((struct config_bool *) gconf)->variable`. The `extra` field is copied
+/// too (C `set_extra_field(gconf, &val->extra, gconf->extra)`).
+fn set_stack_value(record: &GucVariable, val: &mut config_var_value) {
+    let cur = match record {
+        GucVariable::Bool(c) => config_var_val::Boolval(current_bool(c)),
+        GucVariable::Int(c) => config_var_val::Intval(current_int(c)),
+        GucVariable::Real(c) => config_var_val::Realval(current_real(c)),
+        GucVariable::String(c) => config_var_val::Stringval(current_string(c)),
+        GucVariable::Enum(c) => config_var_val::Enumval(current_enum(c)),
+    };
+    val.val = Some(cur);
+    // C copies conf->gen.extra (a refcounted void*) into the stack entry. The
+    // model's GucHookExtra is a non-Clone `Box<dyn Any>` with no identity, and on
+    // restore the assign hook is re-run with `None` extra (as the RESET path in
+    // `apply_value` already does); so the stack entry carries no extra. Behavior
+    // is preserved for every GUC whose assign hook does not depend on a cached
+    // extra payload (the documented model boundary, audit finding "reset_extra").
+    let _ = record;
+    val.extra = None;
+}
+
+/// `discard_stack_value(gconf, val)` (guc.c:846): clear a no-longer-needed stack
+/// entry value (and its extra). For scalar types this is a no-op in C (the value
+/// is inline); here we drop the owned value/extra, which is the faithful analog
+/// of C's `set_string_field(NULL)` + `set_extra_field(NULL)`.
+fn discard_stack_value(val: &mut config_var_value) {
+    val.val = None;
+    val.extra = None;
+}
+
+fn current_bool(c: &config_bool) -> bool {
+    if c.variable.installed() {
+        c.variable.read()
+    } else {
+        c.value.unwrap_or(c.reset_val)
+    }
+}
+fn current_int(c: &config_int) -> i32 {
+    if c.variable.installed() {
+        c.variable.read()
+    } else {
+        c.value.unwrap_or(c.reset_val)
+    }
+}
+fn current_real(c: &config_real) -> f64 {
+    if c.variable.installed() {
+        c.variable.read()
+    } else {
+        c.value.unwrap_or(c.reset_val)
+    }
+}
+fn current_enum(c: &config_enum) -> i32 {
+    if c.variable.installed() {
+        c.variable.read()
+    } else {
+        c.value.unwrap_or(c.reset_val)
+    }
+}
+fn current_string(c: &config_string) -> Option<String> {
+    if c.variable.installed() {
+        c.variable.read()
+    } else {
+        c.value.clone().unwrap_or_else(|| c.reset_val.clone())
+    }
+}
+
+/// `push_old_value(gconf, action)` (guc.c:2134): push the variable's previous
+/// state during a transactional assignment, so `AtEOXact_GUC` can roll it back.
+/// A no-op when no nesting level is open (`GUCNestLevel == 0`).
+fn push_old_value(record: &mut GucVariable, action: GucAction) {
+    let nest_level = crate::guc_nest_level();
+    // If we're not inside a nest level, do nothing.
+    if nest_level == 0 {
+        return;
+    }
+
+    // Do we already have a stack entry of the current nest level?
+    let has_current = record
+        .gen()
+        .stack
+        .as_ref()
+        .is_some_and(|s| s.nest_level >= nest_level);
+    if has_current {
+        // Snapshot the live value first (needed for the SET-then-SET-LOCAL case),
+        // before taking a mutable borrow of the stack entry.
+        let masked_snapshot = if action == GUC_ACTION_LOCAL {
+            let mut v = config_var_value::default();
+            set_stack_value(record, &mut v);
+            Some((record.gen().scontext, record.gen().srole, v))
+        } else {
+            None
+        };
+        let stack = record.gen_mut().stack.as_mut().unwrap();
+        debug_assert!(stack.nest_level == nest_level);
+        match action {
+            GUC_ACTION_SET => {
+                // SET overrides any prior action at same nest level.
+                if stack.state == GUC_SET_LOCAL {
+                    // must discard old masked value
+                    discard_stack_value(&mut stack.masked);
+                }
+                stack.state = GUC_SET;
+            }
+            GUC_ACTION_LOCAL => {
+                if stack.state == GUC_SET {
+                    // SET followed by SET LOCAL: remember SET's value.
+                    let (sc, sr, v) = masked_snapshot.unwrap();
+                    stack.masked_scontext = sc;
+                    stack.masked_srole = sr;
+                    stack.masked = v;
+                    stack.state = GUC_SET_LOCAL;
+                }
+                // in all other cases, no change to stack entry
+            }
+            _ /* GUC_ACTION_SAVE */ => {
+                // Could only have a prior SAVE of same variable.
+                debug_assert!(stack.state == GUC_SAVE);
+            }
+        }
+        return;
+    }
+
+    // Push a new stack entry. Snapshot the current value first.
+    let mut prior = config_var_value::default();
+    set_stack_value(record, &mut prior);
+
+    let gen = record.gen_mut();
+    let prev = gen.stack.take();
+    let state = match action {
+        GUC_ACTION_SET => GUC_SET,
+        GUC_ACTION_LOCAL => GUC_LOCAL,
+        _ => GUC_SAVE,
+    };
+    let stack = GucStack {
+        prev,
+        nest_level,
+        state,
+        source: gen.source,
+        scontext: gen.scontext,
+        masked_scontext: gen.scontext,
+        srole: gen.srole,
+        masked_srole: gen.srole,
+        prior,
+        masked: config_var_value::default(),
+    };
+    gen.stack = Some(Box::new(stack));
+}
+
+/// Restore a stacked value onto a variable's live storage + run its assign hook,
+/// the per-type body of the `if (restorePrior || restoreMasked)` block in
+/// `AtEOXact_GUC` (guc.c:2376-2495). Returns whether the live value changed.
+fn restore_stacked_value(
+    record: &mut GucVariable,
+    newvalue: &config_var_value,
+) -> bool {
+    let newval = newvalue.val.as_ref();
+    let newextra = newvalue.extra.as_ref();
+    let mut changed = false;
+    match (record, newval) {
+        (GucVariable::Bool(c), Some(config_var_val::Boolval(nv))) => {
+            if current_bool(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+                if let Some(slot) = c.assign_hook {
+                    (slot.get())(*nv, newextra);
+                }
+                c.value = Some(*nv);
+                if c.variable.installed() {
+                    c.variable.write(*nv);
+                }
+                c.gen.extra = None;
+                changed = true;
+            }
+        }
+        (GucVariable::Int(c), Some(config_var_val::Intval(nv))) => {
+            if current_int(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+                if let Some(slot) = c.assign_hook {
+                    (slot.get())(*nv, newextra);
+                }
+                c.value = Some(*nv);
+                if c.variable.installed() {
+                    c.variable.write(*nv);
+                }
+                c.gen.extra = None;
+                changed = true;
+            }
+        }
+        (GucVariable::Real(c), Some(config_var_val::Realval(nv))) => {
+            if current_real(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+                if let Some(slot) = c.assign_hook {
+                    (slot.get())(*nv, newextra);
+                }
+                c.value = Some(*nv);
+                if c.variable.installed() {
+                    c.variable.write(*nv);
+                }
+                c.gen.extra = None;
+                changed = true;
+            }
+        }
+        (GucVariable::String(c), Some(config_var_val::Stringval(nv))) => {
+            let differs = match (current_string(c), nv) {
+                (Some(a), Some(b)) => a != *b,
+                (None, None) => false,
+                _ => true,
+            };
+            if differs || extra_differs(c.gen.extra.as_ref(), newextra) {
+                if let Some(slot) = c.assign_hook {
+                    (slot.get())(nv.as_deref(), newextra);
+                }
+                c.value = Some(nv.clone());
+                if c.variable.installed() {
+                    c.variable.write(nv.clone());
+                }
+                c.gen.extra = None;
+                changed = true;
+            }
+        }
+        (GucVariable::Enum(c), Some(config_var_val::Enumval(nv))) => {
+            if current_enum(c) != *nv || extra_differs(c.gen.extra.as_ref(), newextra) {
+                if let Some(slot) = c.assign_hook {
+                    (slot.get())(*nv, newextra);
+                }
+                c.value = Some(*nv);
+                if c.variable.installed() {
+                    c.variable.write(*nv);
+                }
+                c.gen.extra = None;
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+/// `conf->gen.extra != newextra`: the C pointer-identity compare. The model's
+/// `GucHookExtra` is an opaque payload with no identity; conservatively report a
+/// difference only when one side is present and the other absent (so a present
+/// extra is always re-installed, never dropped).
+fn extra_differs(cur: Option<&GucHookExtra>, new: Option<&GucHookExtra>) -> bool {
+    cur.is_some() != new.is_some()
+}
+
+/// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c:2262), the per-variable rollback
+/// walk. The caller ([`crate::at_eoxact_guc`]) owns the `GUCNestLevel` update.
+/// During abort, discard all GUC settings applied at nesting levels >=
+/// `nest_level`; on commit, fold/keep per the stack-state rules.
+pub fn at_eoxact_guc(reg: &mut GucRegistry, is_commit: bool, nest_level: i32) {
+    debug_assert!(nest_level > 0);
+    for record in reg.iter_mut() {
+        pop_var_stack(record, is_commit, nest_level);
+    }
+}
+
+/// Process and pop one variable's stack entries within the nest level
+/// (the `while ((stack = gconf->stack) ...)` loop body of `AtEOXact_GUC`).
+fn pop_var_stack(record: &mut GucVariable, is_commit: bool, nest_level: i32) {
+    loop {
+        // Peek the top stack entry.
+        let top_level = match record.gen().stack.as_ref() {
+            Some(s) if s.nest_level >= nest_level => s.nest_level,
+            _ => break,
+        };
+
+        // Pop the top entry off the chain so we can inspect/own it.
+        let mut stack = record.gen_mut().stack.take().unwrap();
+        let prev_opt = stack.prev.take(); // detaches prev from `stack`
+        let prev_level = prev_opt.as_ref().map(|p| p.nest_level);
+
+        let mut restore_prior = false;
+        let mut restore_masked = false;
+
+        if !is_commit {
+            // if abort, always restore prior value
+            restore_prior = true;
+        } else if stack.state == GUC_SAVE {
+            restore_prior = true;
+        } else if stack.nest_level == 1 {
+            // transaction commit
+            if stack.state == GUC_SET_LOCAL {
+                restore_masked = true;
+            } else if stack.state == GUC_SET {
+                // we keep the current active value
+                discard_stack_value(&mut stack.prior);
+            } else {
+                // must be GUC_LOCAL
+                restore_prior = true;
+            }
+        } else if prev_opt.is_none() || prev_level.unwrap() < stack.nest_level - 1 {
+            // decrement entry's level and do not pop it: re-link prev and keep.
+            stack.nest_level = top_level - 1;
+            stack.prev = prev_opt;
+            record.gen_mut().stack = Some(stack);
+            continue;
+        } else {
+            // Merge this stack entry into prev.
+            let mut prev = prev_opt.unwrap();
+            match stack.state {
+                GUC_SAVE => debug_assert!(false, "can't get here"),
+                GUC_SET => {
+                    // next level always becomes SET
+                    discard_stack_value(&mut stack.prior);
+                    if prev.state == GUC_SET_LOCAL {
+                        discard_stack_value(&mut prev.masked);
+                    }
+                    prev.state = GUC_SET;
+                }
+                GUC_LOCAL => {
+                    if prev.state == GUC_SET {
+                        // LOCAL migrates down
+                        prev.masked_scontext = stack.scontext;
+                        prev.masked_srole = stack.srole;
+                        prev.masked = core::mem::take(&mut stack.prior);
+                        prev.state = GUC_SET_LOCAL;
+                    } else {
+                        // else just forget this stack level
+                        discard_stack_value(&mut stack.prior);
+                    }
+                }
+                _ /* GUC_SET_LOCAL */ => {
+                    // prior state at this level no longer wanted
+                    discard_stack_value(&mut stack.prior);
+                    // copy down the masked state
+                    prev.masked_scontext = stack.masked_scontext;
+                    prev.masked_srole = stack.masked_srole;
+                    if prev.state == GUC_SET_LOCAL {
+                        discard_stack_value(&mut prev.masked);
+                    }
+                    prev.masked = core::mem::take(&mut stack.masked);
+                    prev.state = GUC_SET_LOCAL;
+                }
+            }
+            // Pop `stack`, prev becomes the new top.
+            record.gen_mut().stack = Some(prev);
+            continue;
+        }
+
+        let mut changed = false;
+        if restore_prior || restore_masked {
+            let (newvalue, newsource, newscontext, newsrole) = if restore_masked {
+                (
+                    core::mem::take(&mut stack.masked),
+                    PGC_S_SESSION,
+                    stack.masked_scontext,
+                    stack.masked_srole,
+                )
+            } else {
+                (
+                    core::mem::take(&mut stack.prior),
+                    stack.source,
+                    stack.scontext,
+                    stack.srole,
+                )
+            };
+
+            changed = restore_stacked_value(record, &newvalue);
+
+            // Release stacked values (already taken above / discard the rest).
+            discard_stack_value(&mut stack.prior);
+            discard_stack_value(&mut stack.masked);
+
+            // Restore source information.
+            let gen = record.gen_mut();
+            gen.source = newsource;
+            gen.scontext = newscontext;
+            gen.srole = newsrole;
+        }
+
+        // Pop the GUC's state stack.
+        record.gen_mut().stack = prev_opt;
+
+        // Report new value if we changed it.
+        if changed && (record.gen().flags & GUC_REPORT) != 0 {
+            let gen = record.gen_mut();
+            if gen.status & GUC_NEEDS_REPORT == 0 {
+                gen.status |= GUC_NEEDS_REPORT;
+            }
+        }
     }
 }
 

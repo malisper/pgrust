@@ -437,8 +437,9 @@ fn TidNext<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStateData<'mcx>) -
         // For WHERE CURRENT OF, the cursor's tuple might since have been
         // updated; fetch the version current according to our snapshot.
         if node.tss_isCurrentOf {
+            let mcx = estate.es_query_cxt;
             let scan = node.ss_currentScanDesc.as_deref_mut().unwrap();
-            tableam::table_tuple_get_latest_tid(scan, &mut tid)?;
+            tableam::table_tuple_get_latest_tid(mcx, scan, &mut tid)?;
         }
 
         // if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot))
@@ -783,8 +784,9 @@ pub fn ExecReScanTidScan<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStat
 
     // not really necessary, but seems good form
     // if (node->ss.ss_currentScanDesc) table_rescan(node->ss.ss_currentScanDesc, NULL);
+    let mcx = estate.es_query_cxt;
     if let Some(scan) = node.ss_currentScanDesc.as_deref_mut() {
-        tableam::table_rescan(scan, None)?;
+        tableam::table_rescan(mcx, scan, None)?;
     }
 
     // ExecScanReScan(&node->ss);
