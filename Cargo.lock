@@ -1553,6 +1553,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-multixact"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-multixact-seams",
+ "backend-access-transam-slru",
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-storage-ipc-pmsignal-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-pc-seams",
+ "libc",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-wal",
+ "types-xlog-records",
+]
+
+[[package]]
 name = "backend-access-transam-multixact-seams"
 version = "0.0.0"
 dependencies = [
@@ -12459,6 +12491,7 @@ dependencies = [
  "backend-access-transam-clog",
  "backend-access-transam-commit-ts",
  "backend-access-transam-generic-xlog",
+ "backend-access-transam-multixact",
  "backend-access-transam-parallel",
  "backend-access-transam-subtrans",
  "backend-access-transam-timeline",
