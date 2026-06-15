@@ -94,3 +94,24 @@ seam_core::seam!(
         typenames: &[ParseTypeName],
     ) -> PgResult<PgString<'mcx>>
 );
+
+seam_core::seam!(
+    /// `LookupTypeNameOid(NULL, typeName, missing_ok)` (parse_type.c) over the
+    /// opclasscmds/function `TypeName` carrier (`types_opclass::TypeName`),
+    /// resolving a (possibly schema-qualified) type name to its OID. With
+    /// `missing_ok = true` a missing type yields `InvalidOid` (no error); else
+    /// it raises. Used by `LookupFuncWithArgs` (parse_func.c) to resolve the
+    /// `objargs` of an `ObjectWithArgs`.
+    pub fn lookup_type_name_oid_owa(type_name: &TypeName, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `FuncNameAsType(funcname)` (parse_func.c) reduced to its `parse_type.c`
+    /// dependency: `LookupTypeNameExtended(NULL,
+    /// makeTypeNameFromNameList(funcname), NULL, false, false)` then the
+    /// `typisdefined && !typeTypeRelid` filter, returning the matching scalar
+    /// type's OID or `InvalidOid` (shell and composite types are ignored). The
+    /// name crosses as the `String`-list components. `Err` is reserved for
+    /// catalog-path `ereport(ERROR)`s; an absent type is `Ok(InvalidOid)`.
+    pub fn func_name_as_type<'mcx>(funcname: &[PgString<'_>]) -> PgResult<Oid>
+);

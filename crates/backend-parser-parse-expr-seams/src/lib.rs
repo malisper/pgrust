@@ -73,3 +73,12 @@ seam_core::seam!(
     /// error's `errposition`. Returns 0 when `location < 0`.
     pub fn parser_errposition(source_text: &str, location: i32) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `ParseExprKindName(exprKind)` (parse_expr.c): a human-readable SQL
+    /// construct name for a [`ParseExprKind`] (e.g. `"WHERE"`, `"GROUP BY"`),
+    /// used in `set-returning functions are not allowed in %s` and similar
+    /// error messages. Owned by parse_expr.c; consumed by
+    /// `check_srf_call_placement` (parse_func.c) across the parser cycle.
+    pub fn parse_expr_kind_name(expr_kind: ParseExprKind) -> &'static str
+);

@@ -22,6 +22,9 @@ types-rel = { path = "../types-rel" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 
+# Inward seam contract owned by this crate.
+backend-parser-clause-seams = { path = "../backend-parser-clause-seams" }
+
 # Merged sibling owners called directly (cycle-free).
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }

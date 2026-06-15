@@ -172,6 +172,8 @@ backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-inherit-predtest = { path = "../backend-optimizer-util-inherit-predtest" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
+backend-parser-clause = { path = "../backend-parser-clause" }
+backend-parser-func = { path = "../backend-parser-func" }
 backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-parser-relation = { path = "../backend-parser-relation" }

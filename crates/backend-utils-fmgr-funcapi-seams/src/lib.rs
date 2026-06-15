@@ -108,3 +108,16 @@ seam_core::seam!(
         s: &str,
     ) -> PgResult<Datum<'mcx>>
 );
+
+seam_core::seam!(
+    /// `get_expr_result_tupdesc(expr, noError)` (funcapi.c): get the tuple
+    /// descriptor describing the result of an expression of composite type. Used
+    /// by `ParseComplexProjection` (parse_func.c). With `no_error = true` an
+    /// unresolvable result type yields `Ok(None)` (the C `NULL` return); with
+    /// `no_error = false` it raises. The descriptor is owned in `mcx`.
+    pub fn get_expr_result_tupdesc<'mcx>(
+        mcx: Mcx<'mcx>,
+        expr: &types_nodes::primnodes::Expr,
+        no_error: bool,
+    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);

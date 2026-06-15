@@ -2063,6 +2063,7 @@ fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
 pub fn init_seams() {
     me::analyze_one_exec_param::set(analyze_one_exec_param_impl);
     me::parser_errposition::set(parser_errposition_impl);
+    me::parse_expr_kind_name::set(ParseExprKindName);
     me::transformExpr::set(transformExpr);
 }
 
