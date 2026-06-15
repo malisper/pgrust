@@ -59,6 +59,8 @@ const BRIN_AM_OID: Oid = 3580;
 const F_BTHANDLER: Oid = 330;
 /// `F_HASHHANDLER` (pg_proc.dat oid 331) — the hash AM handler function.
 const F_HASHHANDLER: Oid = 331;
+/// `F_GISTHANDLER` (pg_proc.dat oid 332) — the GiST AM handler function.
+const F_GISTHANDLER: Oid = 332;
 /// `F_GINHANDLER` (pg_proc.dat oid 333) — the GIN AM handler function.
 const F_GINHANDLER: Oid = 333;
 /// `F_BRINHANDLER` (pg_proc.dat oid 335) — the BRIN AM handler function.
@@ -97,6 +99,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmRoutine> {
     let routine = match amhandler {
         F_BTHANDLER => backend_access_nbtree_nbtree::bthandler(),
         F_HASHHANDLER => backend_access_hash_entry::hashhandler(),
+        F_GISTHANDLER => backend_access_gist_core::gisthandler(),
         F_GINHANDLER => backend_access_gin_ginutil::ginhandler(),
         F_BRINHANDLER => backend_access_brin_scan::brinhandler(),
         // A handler the built-in fmgr table doesn't carry would be a

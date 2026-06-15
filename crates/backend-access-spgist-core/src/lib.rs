@@ -94,13 +94,13 @@ use types_spgist::{
 
 /// `MAXALIGN(x)` (c.h): round up to `MAXIMUM_ALIGNOF` (8).
 #[inline]
-const fn MAXALIGN(x: usize) -> usize {
+pub(crate) const fn MAXALIGN(x: usize) -> usize {
     (x + 7) & !7
 }
 
 /// `MAXALIGN_DOWN(x)` (c.h).
 #[inline]
-const fn MAXALIGN_DOWN(x: usize) -> usize {
+pub(crate) const fn MAXALIGN_DOWN(x: usize) -> usize {
     x & !7
 }
 
@@ -108,7 +108,7 @@ const fn MAXALIGN_DOWN(x: usize) -> usize {
 /// header size already MAXALIGN'd.
 const SIZEOF_SPGIST_INNER_TUPLE_DATA: usize = core::mem::size_of::<SpGistInnerTupleData>();
 /// `sizeof(SpGistLeafTupleData)` (12 bytes), the leaf-tuple header.
-const SIZEOF_SPGIST_LEAF_TUPLE_DATA: usize = core::mem::size_of::<SpGistLeafTupleData>();
+pub(crate) const SIZEOF_SPGIST_LEAF_TUPLE_DATA: usize = core::mem::size_of::<SpGistLeafTupleData>();
 /// `sizeof(SpGistNodeTupleData)` == `sizeof(IndexTupleData)` (8 bytes).
 const SIZEOF_SPGIST_NODE_TUPLE_DATA: usize = core::mem::size_of::<SpGistNodeTupleData>();
 /// `sizeof(SpGistDeadTupleData)` (16 bytes).
@@ -116,23 +116,23 @@ const SIZEOF_SPGIST_DEAD_TUPLE_DATA: usize = core::mem::size_of::<SpGistDeadTupl
 /// `sizeof(SpGistPageOpaqueData)` (8 bytes).
 const SIZEOF_SPGIST_PAGE_OPAQUE_DATA: usize = core::mem::size_of::<SpGistPageOpaqueData>();
 /// `sizeof(ItemIdData)` (4 bytes).
-const SIZEOF_ITEM_ID_DATA: usize = 4;
+pub(crate) const SIZEOF_ITEM_ID_DATA: usize = 4;
 /// `sizeof(Datum)` (8 bytes on a 64-bit build).
-const SIZEOF_DATUM: usize = 8;
+pub(crate) const SIZEOF_DATUM: usize = 8;
 /// `sizeof(IndexAttributeBitMapData)` (`(INDEX_MAX_KEYS + 8 - 1) / 8` = 4 bytes
 /// for `INDEX_MAX_KEYS == 32`).
 const SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA: usize = 4;
 
 /// `SGITHDRSZ` (spgist_private.h): `MAXALIGN(sizeof(SpGistInnerTupleData))`.
-const SGITHDRSZ: usize = MAXALIGN(SIZEOF_SPGIST_INNER_TUPLE_DATA);
+pub(crate) const SGITHDRSZ: usize = MAXALIGN(SIZEOF_SPGIST_INNER_TUPLE_DATA);
 /// `SGDTSIZE` (spgist_private.h): `MAXALIGN(sizeof(SpGistDeadTupleData))`.
-const SGDTSIZE: usize = MAXALIGN(SIZEOF_SPGIST_DEAD_TUPLE_DATA);
+pub(crate) const SGDTSIZE: usize = MAXALIGN(SIZEOF_SPGIST_DEAD_TUPLE_DATA);
 
 /// `SGLTHDRSZ(hasnulls)` (spgist_private.h):
 /// `MAXALIGN(sizeof(SpGistLeafTupleData) + (hasnulls ?
 /// sizeof(IndexAttributeBitMapData) : 0))`.
 #[inline]
-const fn SGLTHDRSZ(hasnulls: bool) -> usize {
+pub(crate) const fn SGLTHDRSZ(hasnulls: bool) -> usize {
     if hasnulls {
         MAXALIGN(SIZEOF_SPGIST_LEAF_TUPLE_DATA + SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA)
     } else {
@@ -143,15 +143,15 @@ const fn SGLTHDRSZ(hasnulls: bool) -> usize {
 /// `SPGIST_PAGE_CAPACITY` (spgist_private.h):
 /// `MAXALIGN_DOWN(BLCKSZ - SizeOfPageHeaderData -
 /// MAXALIGN(sizeof(SpGistPageOpaqueData)))`.
-const SPGIST_PAGE_CAPACITY: usize = MAXALIGN_DOWN(
+pub(crate) const SPGIST_PAGE_CAPACITY: usize = MAXALIGN_DOWN(
     BLCKSZ as usize - SizeOfPageHeaderData as usize - MAXALIGN(SIZEOF_SPGIST_PAGE_OPAQUE_DATA),
 );
 
 /// `INDEX_SIZE_MASK` (itup.h): the 13 bits of `t_info` that hold the index
 /// tuple size.
-const INDEX_SIZE_MASK: u16 = 0x1FFF;
+pub(crate) const INDEX_SIZE_MASK: u16 = 0x1FFF;
 /// `INDEX_NULL_MASK` (itup.h): the `t_info` bit marking a NULL index attribute.
-const INDEX_NULL_MASK: u16 = 0x8000;
+pub(crate) const INDEX_NULL_MASK: u16 = 0x8000;
 
 // ===========================================================================
 // Page-opaque / metapage byte accessors against the BLCKSZ page bytes.
@@ -171,37 +171,37 @@ const META_OFFSET: usize = MAXALIGN(SizeOfPageHeaderData as usize);
 
 /// `SpGistPageGetOpaque(page)->flags` (read).
 #[inline]
-fn opaque_flags(page: &[u8]) -> u16 {
+pub(crate) fn opaque_flags(page: &[u8]) -> u16 {
     u16::from_ne_bytes([page[OPAQUE_OFFSET], page[OPAQUE_OFFSET + 1]])
 }
 
 /// `SpGistPageIsLeaf(page)` (spgist_private.h): `flags & SPGIST_LEAF`.
 #[inline]
-fn SpGistPageIsLeaf(page: &[u8]) -> bool {
+pub(crate) fn SpGistPageIsLeaf(page: &[u8]) -> bool {
     opaque_flags(page) & SPGIST_LEAF != 0
 }
 
 /// `SpGistPageStoresNulls(page)`: `flags & SPGIST_NULLS`.
 #[inline]
-fn SpGistPageStoresNulls(page: &[u8]) -> bool {
+pub(crate) fn SpGistPageStoresNulls(page: &[u8]) -> bool {
     opaque_flags(page) & SPGIST_NULLS != 0
 }
 
 /// `SpGistPageIsDeleted(page)`: `flags & SPGIST_DELETED`.
 #[inline]
-fn SpGistPageIsDeleted(page: &[u8]) -> bool {
+pub(crate) fn SpGistPageIsDeleted(page: &[u8]) -> bool {
     opaque_flags(page) & types_spgist::SPGIST_DELETED != 0
 }
 
 /// `SpGistPageGetOpaque(page)->nPlaceholder` (read).
 #[inline]
-fn opaque_n_placeholder(page: &[u8]) -> u16 {
+pub(crate) fn opaque_n_placeholder(page: &[u8]) -> u16 {
     u16::from_ne_bytes([page[OPAQUE_OFFSET + 4], page[OPAQUE_OFFSET + 5]])
 }
 
 /// `SpGistPageGetOpaque(page)->nPlaceholder = v`.
 #[inline]
-fn set_opaque_n_placeholder(page: &mut [u8], v: u16) {
+pub(crate) fn set_opaque_n_placeholder(page: &mut [u8], v: u16) {
     page[OPAQUE_OFFSET + 4..OPAQUE_OFFSET + 6].copy_from_slice(&v.to_ne_bytes());
 }
 
@@ -620,7 +620,7 @@ pub fn SpGistUpdateMetaPage<'mcx>(index: &Relation<'mcx>) -> PgResult<()> {
 /// `GET_LUP(cache, flags)` index (spgutils.c:490): the cache slot for `flags`,
 /// masked with `SPGIST_CACHED_PAGES` for paranoia's sake.
 #[inline]
-fn get_lup_index(flags: i32) -> usize {
+pub(crate) fn get_lup_index(flags: i32) -> usize {
     (flags as u32 as usize) % SPGIST_CACHED_PAGES
 }
 
@@ -675,7 +675,7 @@ fn allocNewBuffer<'mcx>(
 /// `SpGistGetTargetPageFreeSpace(index)` (spgist_private.h):
 /// `BLCKSZ * (100 - RelationGetFillFactor(index, SPGIST_DEFAULT_FILLFACTOR)) / 100`.
 #[inline]
-fn SpGistGetTargetPageFreeSpace(index: &Relation<'_>) -> usize {
+pub(crate) fn SpGistGetTargetPageFreeSpace(index: &Relation<'_>) -> usize {
     BLCKSZ as usize * (100 - index.get_fillfactor(SPGIST_DEFAULT_FILLFACTOR) as usize) / 100
 }
 
@@ -902,7 +902,7 @@ pub fn SpGistGetInnerTypeSize(att: &SpGistTypeDesc, datum: &Datum<'_>) -> usize 
 
 /// `memcpyInnerDatum(target, att, datum)` (spgutils.c:796) — copy the given
 /// non-null datum to `target`, in the inner-tuple case.
-fn memcpyInnerDatum(target: &mut [u8], att: &SpGistTypeDesc, datum: &Datum<'_>) {
+pub(crate) fn memcpyInnerDatum(target: &mut [u8], att: &SpGistTypeDesc, datum: &Datum<'_>) {
     if att.attbyval {
         // memcpy(target, &datum, sizeof(Datum)) — the raw machine word.
         target[..SIZEOF_DATUM].copy_from_slice(&datum.as_usize().to_ne_bytes());
@@ -1027,7 +1027,7 @@ pub fn spgFormLeafTuple<'mcx>(
 }
 
 /// Serialize a [`SpGistLeafTupleData`] header into the first 12 bytes of `tup`.
-fn write_leaf_header(tup: &mut [u8], header: &SpGistLeafTupleData) {
+pub(crate) fn write_leaf_header(tup: &mut [u8], header: &SpGistLeafTupleData) {
     tup[0..4].copy_from_slice(&header.bits.to_ne_bytes());
     tup[4..6].copy_from_slice(&header.t_info.to_ne_bytes());
     write_item_pointer(&mut tup[6..12], &header.heapPtr);
@@ -1091,12 +1091,12 @@ pub fn spgFormNodeTuple<'mcx>(
 
 /// `SGNTHDRSZ` (spgist_private.h): `MAXALIGN(sizeof(SpGistNodeTupleData))`.
 #[inline]
-const fn SGNTHDRSZ() -> usize {
+pub(crate) const fn SGNTHDRSZ() -> usize {
     MAXALIGN(SIZEOF_SPGIST_NODE_TUPLE_DATA)
 }
 
 /// Serialize a [`SpGistNodeTupleData`] header into the first 8 bytes of `tup`.
-fn write_node_header(tup: &mut [u8], header: &SpGistNodeTupleData) {
+pub(crate) fn write_node_header(tup: &mut [u8], header: &SpGistNodeTupleData) {
     write_item_pointer(&mut tup[0..6], &header.t_tid);
     tup[6..8].copy_from_slice(&header.t_info.to_ne_bytes());
 }
@@ -1104,14 +1104,14 @@ fn write_node_header(tup: &mut [u8], header: &SpGistNodeTupleData) {
 /// `IndexTupleSize` of a node tuple (an `IndexTupleData`): `t_info &
 /// INDEX_SIZE_MASK`.
 #[inline]
-fn node_tuple_size(node: &[u8]) -> usize {
+pub(crate) fn node_tuple_size(node: &[u8]) -> usize {
     let t_info = u16::from_ne_bytes([node[6], node[7]]);
     (t_info & INDEX_SIZE_MASK) as usize
 }
 
 /// `IndexTupleHasNulls` of a node tuple: `t_info & INDEX_NULL_MASK`.
 #[inline]
-fn node_tuple_has_nulls(node: &[u8]) -> bool {
+pub(crate) fn node_tuple_has_nulls(node: &[u8]) -> bool {
     let t_info = u16::from_ne_bytes([node[6], node[7]]);
     t_info & INDEX_NULL_MASK != 0
 }
@@ -1199,7 +1199,7 @@ pub fn spgFormInnerTuple<'mcx>(
 
 /// Serialize a [`SpGistInnerTupleData`] header into the first 8 bytes of `tup`
 /// (the 4-byte packed bit word followed by the uint16 size).
-fn write_inner_header(tup: &mut [u8], header: &SpGistInnerTupleData) {
+pub(crate) fn write_inner_header(tup: &mut [u8], header: &SpGistInnerTupleData) {
     tup[0..4].copy_from_slice(&header.bits.to_ne_bytes());
     tup[4..6].copy_from_slice(&header.size.to_ne_bytes());
     // offsets 6..8 are padding (already zeroed by palloc0).
@@ -1353,7 +1353,7 @@ pub fn spgExtractNodeLabels<'mcx>(
 /// `SGNTDATUM(node, state)` (spgist_private.h): fetch an inner datum (label or
 /// prefix) of the given type from the bytes following the inner/node header.
 /// Pass-by-value types are stored in their Datum representation.
-fn read_inner_datum<'mcx>(
+pub(crate) fn read_inner_datum<'mcx>(
     mcx: Mcx<'mcx>,
     att: &SpGistTypeDesc,
     data: &[u8],
@@ -1376,7 +1376,7 @@ fn read_inner_datum<'mcx>(
 }
 
 /// Read a [`SpGistInnerTupleData`] header from the inner tuple bytes.
-fn read_inner_header(tup: &[u8]) -> SpGistInnerTupleData {
+pub(crate) fn read_inner_header(tup: &[u8]) -> SpGistInnerTupleData {
     SpGistInnerTupleData {
         bits: u32::from_ne_bytes([tup[0], tup[1], tup[2], tup[3]]),
         size: u16::from_ne_bytes([tup[4], tup[5]]),
@@ -1586,7 +1586,7 @@ fn OidIsValid(oid: Oid) -> bool {
 }
 
 /// Serialize an [`ItemPointerData`] (6 bytes: block hi/lo + offset).
-fn write_item_pointer(dst: &mut [u8], ip: &ItemPointerData) {
+pub(crate) fn write_item_pointer(dst: &mut [u8], ip: &ItemPointerData) {
     dst[0..2].copy_from_slice(&ip.ip_blkid.bi_hi.to_ne_bytes());
     dst[2..4].copy_from_slice(&ip.ip_blkid.bi_lo.to_ne_bytes());
     dst[4..6].copy_from_slice(&ip.ip_posid.to_ne_bytes());
@@ -1605,6 +1605,9 @@ fn elog_internal(level: types_error::ErrorLevel, msg: alloc::string::String) -> 
 /// `opfamily_can_sort_type` (lsyscache). So `init_seams()` is empty, like
 /// `backend-access-gin-ginutil`'s.
 pub fn init_seams() {}
+
+pub mod spgdoinsert;
+pub use spgdoinsert::{spgPageIndexMultiDelete, spgUpdateNodeLink, spgdoinsert};
 
 #[cfg(test)]
 mod tests;
