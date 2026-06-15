@@ -228,6 +228,14 @@ pub fn GISTSearchItemIsHeap(item: &GISTSearchItem<'_>) -> bool {
     item.blkno == types_core::InvalidBlockNumber
 }
 
+/// `GISTScanOpaqueData` is the concrete type stored in `IndexScanDescData.opaque`
+/// (C's `void *opaque`); the A0 [`types_tableam::amopaque::AmOpaque`] carrier
+/// downcasts to it in the GiST scan callbacks. The tag is defined centrally in
+/// `types_tableam::amopaque::tags::GIST_SCAN`.
+impl<'mcx> types_tableam::amopaque::AmOpaqueType<'mcx> for GISTScanOpaqueData<'mcx> {
+    const TAG: types_tableam::amopaque::AmOpaqueTag = types_tableam::amopaque::tags::GIST_SCAN;
+}
+
 /// The pairing-heap comparator function-pointer type for the
 /// [`GISTSearchItem`] search queue. A plain `fn` (not a closure) because the
 /// only state the comparator needs — `scan->numberOfOrderBys` — is carried by

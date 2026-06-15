@@ -25,6 +25,7 @@ backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
 backend-catalog-pg-parameter-acl-seams = { path = "../backend-catalog-pg-parameter-acl-seams" }
 backend-commands-amcmds-seams = { path = "../backend-commands-amcmds-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-commands-proclang-seams = { path = "../backend-commands-proclang-seams" }
 backend-commands-opclasscmds-seams = { path = "../backend-commands-opclasscmds-seams" }
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 backend-commands-policy-seams = { path = "../backend-commands-policy-seams" }

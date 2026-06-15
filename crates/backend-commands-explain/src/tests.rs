@@ -10,12 +10,14 @@ use types_nodes::planstate::PlanStateNode;
 
 fn empty_plan<'mcx>() -> Plan<'mcx> {
     Plan {
+        disabled_nodes: 0,
         startup_cost: 0.00,
         total_cost: 0.01,
         targetlist: None,
         qual: None,
         plan_rows: 1.0,
         parallel_aware: false,
+        parallel_safe: false,
         async_capable: false,
         plan_node_id: 0,
         plan_width: 4,

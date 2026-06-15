@@ -251,6 +251,44 @@ fn seam_txn_is_prepared(handle: ReorderBufferHandle, txn: TxnHandle) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Change-replay entry points (consumed by decode.c).
+// ---------------------------------------------------------------------------
+
+fn seam_assign_child(
+    handle: ReorderBufferHandle,
+    xid: TransactionId,
+    subxid: TransactionId,
+    lsn: XLogRecPtr,
+) {
+    with_buffer(handle, |rb| rb.assign_child(xid, subxid, lsn));
+}
+
+fn seam_commit_child(
+    handle: ReorderBufferHandle,
+    xid: TransactionId,
+    subxid: TransactionId,
+    commit_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+) {
+    with_buffer(handle, |rb| rb.commit_child(xid, subxid, commit_lsn, end_lsn));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seam_commit(
+    handle: ReorderBufferHandle,
+    xid: TransactionId,
+    commit_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    commit_time: types_core::primitive::TimestampTz,
+    origin_id: types_core::primitive::RepOriginId,
+    origin_lsn: XLogRecPtr,
+) {
+    with_buffer(handle, |rb| {
+        rb.commit(xid, commit_lsn, end_lsn, commit_time, origin_id, origin_lsn)
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Active tuplecid hash (the `static HTAB *tuplecid_data` that
 // SetupHistoricSnapshot points at, owned here because reorderbuffer builds and
 // owns the per-txn `tuplecid_hash`). ReorderBufferProcessTXN (change-replay
@@ -393,4 +431,9 @@ pub fn init_seams() {
     s::reorder_buffer_txn_xid::set(seam_txn_xid);
     s::reorder_buffer_txn_restart_decoding_lsn::set(seam_txn_restart_decoding_lsn);
     s::reorder_buffer_txn_is_prepared::set(seam_txn_is_prepared);
+
+    // Change-replay family entry points (consumed by decode.c).
+    s::ReorderBufferAssignChild::set(seam_assign_child);
+    s::ReorderBufferCommitChild::set(seam_commit_child);
+    s::ReorderBufferCommit::set(seam_commit);
 }

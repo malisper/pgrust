@@ -678,3 +678,21 @@ pub fn check_rolespec_name(role: Option<&RoleSpec<'_>>, detail_msg: Option<&str>
     }
     Ok(())
 }
+
+/// `has_bypassrls_privilege(roleid)` (catalog/aclchk.c) — does `roleid` bypass
+/// row-level security? Superusers always do; otherwise read `rolbypassrls` off
+/// the role's `pg_authid` (AUTHOID) row, defaulting to `false` on a cache miss.
+pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool> {
+    // Superusers bypass all permission checking.
+    if superuser_seams::superuser_arg::call(roleid)? {
+        return Ok(true);
+    }
+
+    let scratch = MemoryContext::new("has_bypassrls_privilege");
+    let mcx = scratch.mcx();
+    let result = match syscache_seams::lookup_authid_by_oid::call(mcx, roleid)? {
+        Some(row) => row.rolbypassrls,
+        None => false,
+    };
+    Ok(result)
+}

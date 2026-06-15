@@ -24,6 +24,10 @@ pub const CUSTOMPATH_SUPPORT_MARK_RESTORE: u32 = 0x0002;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `int disabled_nodes` — count of disabled nodes at and below this plan
+    /// node (the planner's `enable_*`-GUC disable accumulator; created by
+    /// costsize and propagated up the plan tree in createplan).
+    pub disabled_nodes: i32,
     /// `Cost startup_cost` — cost expended before fetching any tuples. `Cost`
     /// is `double` in C.
     pub startup_cost: f64,
@@ -38,6 +42,10 @@ pub struct Plan<'mcx> {
     pub plan_rows: f64,
     /// `bool parallel_aware` — engage parallel-aware logic?
     pub parallel_aware: bool,
+    /// `bool parallel_safe` — OK to use as part of a parallel plan? Set by
+    /// `copy_generic_path_info` / `copy_plan_costsize` (createplan.c) from the
+    /// `Path`'s parallel-safety; read by setrefs.c and the parallel planner.
+    pub parallel_safe: bool,
     /// `bool async_capable` — engage asynchronous-capable logic?
     pub async_capable: bool,
     /// `int plan_node_id` — unique across the entire final plan tree; used as
@@ -82,6 +90,7 @@ impl Plan<'_> {
             None => None,
         };
         Ok(Plan {
+            disabled_nodes: self.disabled_nodes,
             startup_cost: self.startup_cost,
             total_cost: self.total_cost,
             async_capable: self.async_capable,
@@ -90,6 +99,7 @@ impl Plan<'_> {
             qual,
             plan_rows: self.plan_rows,
             parallel_aware: self.parallel_aware,
+            parallel_safe: self.parallel_safe,
             plan_width: self.plan_width,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),

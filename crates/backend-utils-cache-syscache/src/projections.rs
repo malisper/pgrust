@@ -18,8 +18,8 @@ use crate::{
     SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, AGGFNOID, AMOPSTRATEGY, AMPROCNUM, ATTNAME, ATTNUM, AUTHNAME, AUTHOID,
     CASTSOURCETARGET, CLAAMNAMENSP, CLAOID, COLLOID, CONSTROID, FOREIGNDATAWRAPPERNAME,
-    FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGOID,
-    PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
+    FOREIGNDATAWRAPPEROID, FOREIGNSERVERNAME, FOREIGNSERVEROID, FOREIGNTABLEREL, INDEXRELID, LANGNAME,
+    LANGOID, PROCOID, RELOID, TYPEOID, USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use types_core::AttrNumber;
@@ -27,7 +27,8 @@ use types_fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
 use backend_utils_misc_guc_seams as guc_seams;
 use backend_utils_error::ereport;
-use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
+use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING};
+use types_core::primitive::OidIsValid;
 use types_tuple::heaptuple::HeapTupleHeaderGetRawXmin;
 use backend_utils_cache_syscache_seams::{PgClassFullForm, PgProcForm};
 use types_cache::AuthIdRow;
@@ -715,6 +716,7 @@ const Anum_pg_authid_rolname: i32 = 2;
 const Anum_pg_authid_rolsuper: i32 = 3;
 const Anum_pg_authid_rolcanlogin: i32 = 7;
 const Anum_pg_authid_rolreplication: i32 = 8;
+const Anum_pg_authid_rolbypassrls: i32 = 9;
 const Anum_pg_authid_rolconnlimit: i32 = 10;
 
 // `catalog/pg_language.h` attribute numbers.
@@ -1280,6 +1282,7 @@ fn project_authid<'mcx>(mcx: Mcx<'mcx>, tup: &FormedTuple<'_>) -> PgResult<AuthI
         rolsuper: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolsuper)?,
         rolcanlogin: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolcanlogin)?,
         rolreplication: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolreplication)?,
+        rolbypassrls: getattr_bool(mcx, AUTHOID, tup, Anum_pg_authid_rolbypassrls)?,
         rolconnlimit: getattr_i32(mcx, AUTHOID, tup, Anum_pg_authid_rolconnlimit)?,
     })
 }
@@ -1302,6 +1305,35 @@ pub(crate) fn lookup_language<'mcx>(
     ReleaseSysCache(tup);
     Ok(Some(info))
 }
+
+/// `get_language_oid(langname, missing_ok)` (proclang.c:411): the procedural
+/// language's OID via `GetSysCacheOid1(LANGNAME, Anum_pg_language_oid,
+/// CStringGetDatum(langname))`. A miss with `missing_ok = false` raises
+/// `ERRCODE_UNDEFINED_OBJECT`; with `missing_ok = true` it returns `InvalidOid`.
+///
+/// proclang.c is unported, but its sole logic is this syscache OID lookup, so the
+/// merged syscache owner installs the `proclang-seams` seam (cross-crate install).
+pub(crate) fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("syscache language oid-by-name");
+    let oid = GetSysCacheOid(
+        scratch.mcx(),
+        LANGNAME,
+        Anum_pg_language_oid as i16,
+        SysCacheKey::Str(langname),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?;
+    if !OidIsValid(oid) && !missing_ok {
+        ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("language \"{}\" does not exist", langname))
+            .finish(ErrorLocation::new("commands/proclang.c", 0, "get_language_oid"))?;
+    }
+    Ok(oid)
+}
+
+const Anum_pg_language_oid: i32 = 1;
 
 /// `SearchSysCache1(INDEXRELID, index_oid)` then whether `indpred` is non-null
 /// (`!heap_attisnull(rd_indextuple, Anum_pg_index_indpred, NULL)`).

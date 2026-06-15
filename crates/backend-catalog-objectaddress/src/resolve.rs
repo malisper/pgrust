@@ -279,8 +279,8 @@ pub fn get_object_address<'mcx>(
                 let type_id = backend_parser_parse_type_seams::lookup_type_name_oid::call(
                     typename, missing_ok,
                 )?;
-                let lang_id = backend_commands_functioncmds_seams::get_language_oid::call(
-                    langname.to_string(),
+                let lang_id = backend_commands_proclang_seams::get_language_oid::call(
+                    langname,
                     missing_ok,
                 )?;
                 address.classId = TransformRelationId;
@@ -506,8 +506,8 @@ pub fn get_object_address_unqualified(
         }
         OBJECT_LANGUAGE => {
             address.classId = LanguageRelationId;
-            address.objectId = backend_commands_functioncmds_seams::get_language_oid::call(
-                name.to_string(),
+            address.objectId = backend_commands_proclang_seams::get_language_oid::call(
+                name,
                 missing_ok,
             )?;
         }

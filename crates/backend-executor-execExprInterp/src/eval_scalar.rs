@@ -31,7 +31,9 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use backend_utils_fmgr_fmgr_seams::{function_call1_coll, function_call2_coll};
+use backend_utils_fmgr_fmgr_seams::{
+    function_call1_coll, function_call2_coll, function_call_invoke,
+};
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
 use types_datum::Datum;
@@ -53,6 +55,105 @@ use types_nodes::execexpr::{ExprEvalStepData, ExprState, ResultCell};
 use types_nodes::execnodes::EcxtId;
 use types_nodes::EStateData;
 
+/// Read the `(fn_oid, fncollation)` of an `EEOP_FUNCEXPR*` step's `Func`
+/// payload, then gather its per-argument result cells (`arg_cells`) into the
+/// call frame's `args[]` (the C recursion writes `fcinfo->args[i]` directly;
+/// the owned model gathers them here, immediately before dispatch).
+///
+/// `func_step_inputs(state, op)` returns `(fn_oid, fncollation, args, nargs)`.
+fn func_step_inputs<'mcx>(
+    state: &ExprState<'mcx>,
+    op: usize,
+) -> (
+    types_core::primitive::Oid,
+    types_core::primitive::Oid,
+    Vec<types_datum::NullableDatum>,
+    usize,
+) {
+    match step_data(state, op) {
+        ExprEvalStepData::Func {
+            finfo,
+            fcinfo_data,
+            arg_cells,
+            nargs,
+            ..
+        } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_FUNCEXPR: op->d.func.finfo not resolved");
+            let fcinfo = fcinfo_data
+                .as_ref()
+                .expect("EEOP_FUNCEXPR: op->d.func.fcinfo_data missing");
+            let cells = arg_cells
+                .as_ref()
+                .expect("EEOP_FUNCEXPR: op->d.func.arg_cells missing");
+            // fcinfo->args[i].value  = *cell.value (the bare word);
+            // fcinfo->args[i].isnull =  cell.isnull.
+            let args: Vec<types_datum::NullableDatum> = cells
+                .iter()
+                .map(|&cell| {
+                    let c = state.result_cells.get(cell);
+                    types_datum::NullableDatum {
+                        value: word_of(&c.value),
+                        isnull: c.isnull,
+                    }
+                })
+                .collect();
+            (finfo.fn_oid, fcinfo.fncollation, args, *nargs as usize)
+        }
+        other => unreachable!("EEOP_FUNCEXPR step carries the wrong payload: {other:?}"),
+    }
+}
+
+/// `ExecInterpExecuteFuncStep` core — the shared body for the `EEOP_FUNCEXPR`
+/// (and strict / fusage) opcodes:
+///
+/// ```c
+/// fcinfo->isnull = false;
+/// d = op->d.func.fn_addr(fcinfo);
+/// *op->resvalue = d;
+/// *op->resnull = fcinfo->isnull;
+/// ```
+///
+/// The resolved `FmgrInfo` carries only `fn_oid` (the fmgr-seam contract), so
+/// the dispatch goes through `function_call_invoke`, which re-resolves by OID
+/// and runs the function under `fcinfo->fncollation` (#296: the collation now
+/// survives on the widened call frame). The returned bare result word is wrapped
+/// back into the canonical by-value `Datum` (the transitional interp bridge,
+/// matching the rest of this layer). `strict` applies C's NULL-arg
+/// short-circuit before the call.
+pub fn exec_func_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    op: usize,
+    strict: bool,
+) -> PgResult<()> {
+    let (fn_oid, collation, args, _nargs) = func_step_inputs(state, op);
+    let (resvalue_id, resnull_id) = res_cells(state, op);
+    let _ = resnull_id; // value/is-null share one cell
+
+    // C (the _STRICT opcodes): for (argno = 0; argno < nargs; argno++)
+    //                              if (args[argno].isnull) { *op->resnull = true; return; }
+    if strict && args.iter().any(|a| a.isnull) {
+        state
+            .result_cells
+            .set(resvalue_id, ResultCell { value: DatumV::null(), isnull: true });
+        return Ok(());
+    }
+
+    // fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo); read back isnull.
+    let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+
+    // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
+    state.result_cells.set(
+        resvalue_id,
+        ResultCell {
+            value: DatumV::from_usize(word.as_usize()),
+            isnull,
+        },
+    );
+    Ok(())
+}
+
 /// `ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 /// ExprContext *econtext)` — call a (non-strict) function, tracking usage stats.
 pub fn ExecEvalFuncExprFusage<'mcx>(
@@ -72,18 +173,25 @@ pub fn ExecEvalFuncExprFusage<'mcx>(
     // *op->resnull = fcinfo->isnull;
     // pgstat_end_function_usage(&fcusage, true);
     //
-    // The step payload (d.func.fcinfo_data / fn_addr) IS modeled. The genuine
-    // blocker is invoking the call frame: setting fcinfo->isnull, dispatching
-    // op->d.func.fn_addr(fcinfo), and reading fcinfo->isnull back — the
-    // FunctionCallInfoBaseData is trimmed (no args[]/isnull until fmgr widens
-    // it; see crate::justs). pgstat_init/end_function_usage additionally need
-    // the pgstat owner. Faithful once fmgr widens the call frame.
+    // #296: the call-frame dispatch itself is now modeled (exec_func_step) —
+    // the fmgr-widened FunctionCallInfoBaseData carries fncollation/args/isnull,
+    // and function_call_invoke re-dispatches by fn_oid. The REMAINING blocker is
+    // the pgstat usage tracking that wraps the call
+    // (pgstat_init_function_usage / pgstat_end_function_usage): the FUSAGE
+    // opcodes are selected precisely when pgstat_track_functions > fn_stats, so
+    // they exist to record per-function execution stats — there is no pgstat
+    // function-usage seam (the pgstat owner is unported), and silently running
+    // the call without the surrounding init/end usage would drop the very stats
+    // this opcode variant exists to collect. Mirror-PG-and-panic until the
+    // pgstat function-usage seam lands; the non-FUSAGE EEOP_FUNCEXPR family is
+    // the common, stats-free path and runs through exec_func_step.
     let _ = (state, op, econtext, estate);
     panic!(
-        "ExecEvalFuncExprFusage: invoking op.d.func.fn_addr(fcinfo) (set \
-         fcinfo->isnull, dispatch, read back) needs the fmgr-widened \
-         FunctionCallInfoBaseData (trimmed model has no args[]/isnull), and the \
-         usage tracking needs the pgstat owner; blocked until fmgr (+ pgstat) land"
+        "ExecEvalFuncExprFusage: the function call itself is modeled \
+         (exec_func_step), but the pgstat_init/end_function_usage tracking that \
+         wraps it has no seam (pgstat owner unported); skipping it would drop the \
+         per-function stats this FUSAGE opcode exists to collect. Blocked until \
+         the pgstat function-usage seam lands"
     )
 }
 
@@ -110,18 +218,18 @@ pub fn ExecEvalFuncExprStrictFusage<'mcx>(
     // *op->resnull = fcinfo->isnull;
     // pgstat_end_function_usage(&fcusage, true);
     //
-    // The strict-NULL scan reads fcinfo->args[argno].isnull and the call reads
-    // fcinfo->isnull — both absent from the trimmed FunctionCallInfoBaseData
-    // (fmgr widens it). The per-arg cells the compiler gathered are named by
-    // d.func.arg_cells; reading them, the call dispatch, and the usage tracking
-    // are blocked on fmgr (+ pgstat).
+    // #296: the strict-NULL arg scan and the call dispatch are now modeled
+    // (exec_func_step with strict=true reads the gathered fcinfo->args[i].isnull
+    // and dispatches through function_call_invoke). The REMAINING blocker is the
+    // pgstat usage tracking — see ExecEvalFuncExprFusage. Mirror-PG-and-panic
+    // until the pgstat function-usage seam lands.
     let _ = (state, op, econtext, estate);
     panic!(
-        "ExecEvalFuncExprStrictFusage: the strict-NULL arg scan \
-         (fcinfo->args[i].isnull) and op.d.func.fn_addr(fcinfo) dispatch need \
-         the fmgr-widened FunctionCallInfoBaseData (trimmed model has no \
-         args[]/isnull), and usage tracking needs pgstat; blocked until fmgr (+ \
-         pgstat) land"
+        "ExecEvalFuncExprStrictFusage: the strict-NULL scan + call are modeled \
+         (exec_func_step), but the pgstat_init/end_function_usage tracking has \
+         no seam (pgstat owner unported); skipping it would drop the per-function \
+         stats this FUSAGE opcode exists to collect. Blocked until the pgstat \
+         function-usage seam lands"
     )
 }
 
