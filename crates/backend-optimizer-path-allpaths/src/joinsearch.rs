@@ -16,15 +16,11 @@ use crate::{enable_geqo, geqo_threshold, generate_partitionwise_join_paths,
 
 /// A node of the planner's "joinlist" (see `deconstruct_jointree`): either a
 /// leaf range-table reference (`RangeTblRef`, by 1-based rtindex) or a nested
-/// sub-joinlist (`List`). This is the owned analogue of the C `List *joinlist`
-/// whose elements are `RangeTblRef *` or `List *`.
-#[derive(Clone, Debug)]
-pub enum JoinlistNode {
-    /// `RangeTblRef { rtindex }`.
-    Rel(i32),
-    /// A nested sub-joinlist (`List`).
-    Sub(Vec<JoinlistNode>),
-}
+/// sub-joinlist (`List`). The canonical type lives in `types-pathnodes` so the
+/// `deconstruct_jointree` producer (initsplan.c), the `remove_useless_joins`
+/// trimmers (analyzejoins.c), the cross-crate seams that carry it, and this
+/// `make_one_rel` consumer all name one type.
+pub use types_pathnodes::JoinlistNode;
 
 /// `make_rel_from_joinlist` (allpaths.c:3351) — build access paths using a
 /// joinlist to guide the join-path search. Returns the final rel, or `None` for

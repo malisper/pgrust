@@ -1404,6 +1404,8 @@ name = "backend-access-index-amapi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-scan",
+ "backend-access-brin-validate",
+ "backend-access-gin-core-probe",
  "backend-access-gin-ginutil",
  "backend-access-hash-entry",
  "backend-access-hashvalidate",
@@ -7780,6 +7782,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-init-subselect-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-pathnodes",
+]
+
+[[package]]
 name = "backend-optimizer-plan-planner-pc-seams"
 version = "0.0.0"
 dependencies = [
@@ -7798,6 +7809,37 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small"
+version = "0.0.0"
+dependencies = [
+ "backend-optimizer-path-allpaths",
+ "backend-optimizer-path-equivclass",
+ "backend-optimizer-plan-init-subselect-seams",
+ "backend-optimizer-plan-small-seams",
+ "backend-optimizer-rte-seams",
+ "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-clauses",
+ "backend-optimizer-util-joininfo",
+ "backend-optimizer-util-pathnode",
+ "backend-optimizer-util-relnode",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-plan-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-pathnodes",
 ]
 
 [[package]]
@@ -14926,10 +14968,8 @@ dependencies = [
  "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
- "backend-access-gin-ginget",
- "backend-access-gin-gininsert",
  "backend-access-gin-ginscan",
- "backend-access-gin-ginvacuum",
+ "backend-access-gist-core",
  "backend-access-gist-proc",
  "backend-access-hash-core",
  "backend-access-hash-entry",

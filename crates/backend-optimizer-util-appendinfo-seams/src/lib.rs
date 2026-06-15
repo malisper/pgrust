@@ -45,3 +45,11 @@ seam_core::seam!(
         appinfos: &[AppendRelInfo],
     ) -> PgResult<Vec<RinfoId>>
 );
+seam_core::seam!(
+    /// `distribute_row_identity_vars(root)` (appendinfo.c) — distribute any
+    /// UPDATE/DELETE/MERGE row-identity variables to the target relations once
+    /// appendrel expansion is finished. `query_planner` (planmain.c) calls this
+    /// on the general join path after `add_other_rels_to_query`. Void in C; can
+    /// `palloc`, so it returns [`PgResult`].
+    pub fn distribute_row_identity_vars(root: &mut PlannerInfo) -> PgResult<()>
+);
