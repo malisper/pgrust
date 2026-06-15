@@ -8483,6 +8483,7 @@ dependencies = [
  "backend-optimizer-util-relnode-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-init-miscinit-seams",
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
