@@ -386,7 +386,7 @@ fn systable_getnext<'mcx>(
             mcx,
             iscan,
             ForwardScanDirection,
-            live.slot.base_mut(),
+            &mut live.slot,
         )? {
             let tup = fetch_slot_heap_tuple(mcx, &live.slot)?;
             // We currently don't need to support lossy index operators for any
@@ -406,7 +406,7 @@ fn systable_getnext<'mcx>(
             mcx,
             scan,
             ForwardScanDirection,
-            live.slot.base_mut(),
+            &mut live.slot,
         )? {
             Some(fetch_slot_heap_tuple(mcx, &live.slot)?)
         } else {
@@ -647,7 +647,7 @@ fn systable_getnext_ordered<'mcx>(
         .expect("systable_getnext_ordered on a non-index scan");
 
     let htup: Option<FormedTuple<'mcx>> =
-        if indexam::index_getnext_slot(mcx, iscan, direction, live.slot.base_mut())? {
+        if indexam::index_getnext_slot(mcx, iscan, direction, &mut live.slot)? {
             let tup = fetch_slot_heap_tuple(mcx, &live.slot)?;
             // See notes in systable_getnext.
             if iscan.xs_recheck {

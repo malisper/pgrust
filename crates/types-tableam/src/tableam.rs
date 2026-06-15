@@ -11,7 +11,7 @@ use mcx::{Mcx, PgVec};
 use types_core::xact::CommandId;
 use types_core::TransactionId;
 use types_error::PgResult;
-use types_slot::{TupleSlotKind, TupleTableSlot};
+use types_slot::{SlotData, TupleSlotKind};
 use types_rel::Relation;
 use types_scan::sdir::ScanDirection;
 use types_snapshot::SnapshotData;
@@ -170,7 +170,7 @@ pub struct TableAmRoutine {
         mcx: Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
         direction: ScanDirection,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>,
 
     /// `parallelscan_estimate(rel)` — DSM space needed for the AM's shared
@@ -206,7 +206,7 @@ pub struct TableAmRoutine {
         scan: &mut IndexFetchTableData<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
         call_again: &mut bool,
         all_dead: Option<&mut bool>,
     ) -> PgResult<bool>,
@@ -234,7 +234,7 @@ pub struct TableAmRoutine {
         rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>,
 
     /// `tuple_tid_valid(scan, tid)` — is `tid` potentially valid (within the
@@ -251,7 +251,7 @@ pub struct TableAmRoutine {
     pub tuple_insert: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
         cid: CommandId,
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
@@ -276,7 +276,7 @@ pub struct TableAmRoutine {
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         otid: &ItemPointerData,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
         cid: CommandId,
         snapshot: &Snapshot,
         crosscheck: &Snapshot,
@@ -294,7 +294,7 @@ pub struct TableAmRoutine {
         rel: &Relation<'mcx>,
         tid: &ItemPointerData,
         snapshot: &Snapshot,
-        slot: &mut TupleTableSlot<'mcx>,
+        slot: &mut SlotData<'mcx>,
         cid: CommandId,
         mode: LockTupleMode,
         wait_policy: LockWaitPolicy,
