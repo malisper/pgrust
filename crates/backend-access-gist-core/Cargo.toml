@@ -60,7 +60,19 @@ backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray
 # Backend PRNG (pg_prng.c): pg_prng_bool for gistchoose's tie-break.
 pg-prng = { path = "../pg-prng" }
 
-# gistxlog.c seam (unported sibling): gistXLogPageReuse (gistNewBuffer recycle).
+# gistxlog.c seams (unported F7 sibling): gistXLogPageReuse / gistXLogSplit /
+# gistXLogUpdate / gistXLogDelete / gistGetFakeLSN (reached by the insert spine).
 backend-access-gist-core-seams = { path = "../backend-access-gist-core-seams" }
+
+# Predicate locking (predicate.c): CheckForSerializableConflictIn /
+# PredicateLockPageSplit (insert spine conflict points).
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+
+# Heap AM (heapam_visibility / heapam.c): index_compute_xid_horizon_for_tuples
+# (gistprunepage snapshot conflict horizon).
+backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+
+# Recursion guard (postgres.c): check_stack_depth (gistSplit recursion).
+backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 
 [dev-dependencies]

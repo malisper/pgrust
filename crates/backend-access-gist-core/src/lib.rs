@@ -29,20 +29,24 @@
 
 extern crate alloc;
 
+pub mod gist_insert;
 pub mod gist_page;
+pub mod gistsplit;
 pub mod gistutil;
 
+pub use gist_insert::{gistSplit, gistdoinsert, gistplacetopage, gistprunepage};
 pub use gist_page::{
     gist_page_flags, gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage,
     gistfillbuffer, gistinitpage, set_gist_page_flags, set_gist_page_rightlink, GISTInitBuffer,
-    GiSTPageSize, GistClearFollowRight, GistFollowRight, GistMarkFollowRight, GistPageGetDeleteXid,
-    GistPageIsDeleted, GistPageIsLeaf,
+    GiSTPageSize, GistClearFollowRight, GistClearPageHasGarbage, GistFollowRight, GistMarkFollowRight,
+    GistPageGetDeleteXid, GistPageHasGarbage, GistPageIsDeleted, GistPageIsLeaf,
 };
+pub use gistsplit::gistSplitByKey;
 pub use gistutil::{
     gistCompressValues, gistDeCompressAtt, gistFetchTuple, gistFormTuple, gistKeyIsEQ,
     gistMakeUnionItVec, gistMakeUnionKey, gistNewBuffer, gist_page_recyclable, gistchoose,
-    gistdentryinit, gistextractpage, gistfitpage, gistgetadjusted, gistnospace, gistpenalty,
-    gistunion, initGISTstate,
+    gistdentryinit, gistextractpage, gistfillitupvec, gistfitpage, gistgetadjusted, gistjoinvector,
+    gistnospace, gistpenalty, gistunion, initGISTstate,
 };
 
 /// Install this crate's inward seams. The GiST core's *outward*-facing utility

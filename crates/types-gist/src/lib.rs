@@ -12,7 +12,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_core::primitive::{
     uint16, BlockNumber, OffsetNumber, Oid, Size, XLogRecPtr,
 };
@@ -20,7 +20,7 @@ use types_core::xact::FullTransactionId;
 use types_storage::storage::Buffer;
 use types_tableam::genam::IndexOrderByDistance;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDesc};
+use types_tuple::heaptuple::{HeapTuple, ItemPointerData, TupleDesc};
 
 // ---------------------------------------------------------------------------
 // gist.h — amproc indexes
@@ -297,10 +297,12 @@ pub struct gistxlogPage {
 pub struct SplitPageLayout<'mcx> {
     pub block: gistxlogPage,
     /// `IndexTupleData *list` — the page's tuples (concatenated on-disk form).
-    pub list: Vec<u8>,
+    pub list: PgVec<'mcx, u8>,
     pub lenlist: i32,
-    /// `IndexTuple itup` — union key (downlink) for the page.
-    pub itup: IndexTuple<'mcx>,
+    /// `IndexTuple itup` — union key (downlink) for the page; the on-disk index
+    /// tuple byte image (`None` for the synthetic root page). In the owned model
+    /// an index tuple is its contiguous byte image, not a header-only carrier.
+    pub itup: Option<PgVec<'mcx, u8>>,
     /// `Page page` — block number of the page being written, once assigned.
     pub page: BlockNumber,
     /// `Buffer buffer` — to write after all proceed.
@@ -363,8 +365,9 @@ pub struct GISTInsertState {
 pub struct GISTPageSplitInfo<'mcx> {
     /// `Buffer buf` — the split page "half".
     pub buf: Buffer,
-    /// `IndexTuple downlink` — downlink for this half.
-    pub downlink: IndexTuple<'mcx>,
+    /// `IndexTuple downlink` — downlink for this half; the on-disk index tuple
+    /// byte image (an index tuple is its contiguous byte image here).
+    pub downlink: PgVec<'mcx, u8>,
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ use types_nodes::planstate::PlanStateNode;
 
 fn empty_plan<'mcx>() -> Plan<'mcx> {
     Plan {
+        disabled_nodes: 0,
         startup_cost: 0.00,
         total_cost: 0.01,
         targetlist: None,
