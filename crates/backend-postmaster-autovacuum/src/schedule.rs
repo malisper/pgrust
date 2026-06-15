@@ -417,6 +417,7 @@ pub fn perform_work_item(i: i32) -> PgResult<()> {
         /* deleted2: */
         return Ok(());
     }
+    let cur_datname = cur_datname.unwrap();
     let cur_nspname = cur_nspname.unwrap();
     let cur_relname = cur_relname.unwrap();
 
@@ -427,17 +428,63 @@ pub fn perform_work_item(i: i32) -> PgResult<()> {
 
     /*
      * We will abort the current work item if something errors out, and
-     * continue with the next one.
+     * continue with the next one; in particular, this happens if we are
+     * interrupted with SIGINT.  Note that this means that the work item list
+     * can be lossy.
+     *
+     * The C body runs the dispatch in PG_TRY; on error PG_CATCH adorns the
+     * in-flight error with autovacuum's errcontext line, emits it, aborts and
+     * restarts the transaction, and proceeds with the next work item.  Here
+     * the closure plays the PG_TRY role and the Err arm plays PG_CATCH (the
+     * HOLD_INTERRUPTS/EmitErrorReport/AbortOutOfAnyTransaction/FlushErrorState/
+     * MemoryContextReset(PortalContext)/StartTransactionCommand/RESUME_INTERRUPTS
+     * sequence is the foreign seam body).
      */
-    match seam::workitem_get_type::call(i) {
-        x if x == AVW_BRINSummarizeRange => {
-            let blkno = seam::workitem_get_block_number::call(i);
-            seam::perform_brin_summarize_range::call(avw_relation, blkno)?;
+    let result: PgResult<()> = (|| {
+        /*
+         * Have at it.  Functions called here are responsible for any required
+         * user switch and sandbox.
+         */
+        match seam::workitem_get_type::call(i) {
+            x if x == AVW_BRINSummarizeRange => {
+                let blkno = seam::workitem_get_block_number::call(i);
+                seam::perform_brin_summarize_range::call(avw_relation, blkno)?;
+            }
+            other => {
+                elog(WARNING, format!("unrecognized work item found: type {other}")).ok();
+            }
         }
-        other => {
-            elog(WARNING, format!("unrecognized work item found: type {other}")).ok();
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            /*
+             * Clear a possible query-cancel signal, to avoid a late reaction to
+             * an automatically-sent signal because of vacuuming the current
+             * table (we're done with it, so it would make no sense to cancel at
+             * this point.)
+             */
+            seam::set_query_cancel_pending::call(false);
+        }
+        Err(mut err) => {
+            /*
+             * Abort the transaction, start a new one, and proceed with the next
+             * work item; adorn the in-flight error with autovacuum's errcontext
+             * line first.
+             */
+            err.add_context_line(format!(
+                "processing work entry for relation \"{}.{}.{}\"",
+                cur_datname, cur_nspname, cur_relname
+            ));
+            seam::emit_report_and_restart_after_table_error::call(err);
         }
     }
+
+    /* Make sure we're back in AutovacMemCxt */
+    seam::switch_to_autovac_mem_cxt::call();
+
+    /* We intentionally do not set did_vacuum here */
 
     Ok(())
 }
