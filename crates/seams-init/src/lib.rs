@@ -661,6 +661,20 @@ mod recurrence_guard {
     ///
     /// Entry = (owner-crate-lib-name, seam-fn). Keep sorted.
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
+        // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
+        // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
+        // `init_local_reloptions(&relopts, 0)` +
+        // `FunctionCall1(procinfo, PointerGetDatum(&relopts))` +
+        // `build_local_reloptions(&relopts, attoptions, validate)`. The reloptions
+        // owner HAS the two helper bodies (`init_local_reloptions`,
+        // `build_local_reloptions`), but the middle leg invokes the opclass's
+        // options-parsing SUPPORT PROCEDURE through fmgr (`FunctionCall1`), passing
+        // a *pointer* to the stack `LocalRelOpts` as a Datum that the proc mutates
+        // in place. The reloptions crate has no fmgr dependency, and the bare-word
+        // `Datum(usize)` model has no pointer lane to carry `&mut LocalRelOpts`
+        // through the call — the same fmgr-Datum-pointer bridge that is unported
+        // workspace-wide. Installing would just relocate the runtime panic into the
+        // fmgr leg. Pay down once the pointer-Datum/fmgr dispatch bridge lands.
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
         // DESIGN_DEBT (TD-CREATE-PARTIAL-BITMAP-PATHS): `create_partial_bitmap_paths`
         // is owned by `optimizer/path/allpaths.c`, NOT costsize.c — but the
