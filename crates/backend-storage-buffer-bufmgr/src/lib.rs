@@ -21,6 +21,8 @@
 
 extern crate alloc;
 
+#[path = "alloc.rs"]
+mod bufalloc;
 mod buf_lock;
 mod mgr;
 mod ops;

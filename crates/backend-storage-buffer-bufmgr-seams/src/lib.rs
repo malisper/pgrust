@@ -617,6 +617,23 @@ seam_core::seam!(
     pub fn count_buffer_dirtied()
 );
 
+seam_core::seam!(
+    /// `ResourceOwnerRememberBufferIO(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// record one in-progress buffer I/O on the current resource owner so a
+    /// transaction/portal abort can clean up a buffer left mid-I/O. The buffer-IO
+    /// `ResourceOwnerDesc` is defined in bufmgr.c; installed by resowner when it
+    /// ports (panic-until-owner). Infallible in C (the enlarge that may `ereport`
+    /// is the earlier `resowner_enlarge` call in `StartBufferIO`).
+    pub fn remember_buffer_io(buffer: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetBufferIO(CurrentResourceOwner, buffer)` (bufmgr.c) —
+    /// drop the record of one in-progress buffer I/O from the current resource
+    /// owner (`TerminateBufferIO` with `forget_owner`). Infallible in C.
+    pub fn forget_buffer_io(buffer: types_storage::storage::Buffer)
+);
+
 // ---------------------------------------------------------------------------
 // LockBufferForCleanup recovery-conflict (InHotStandby) deep leg (bufmgr.c).
 //

@@ -9450,6 +9450,8 @@ dependencies = [
  "backend-access-transam-xloginsert-seams",
  "backend-catalog-storage-seams",
  "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-buffer-support",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-proc-seams",
@@ -9461,6 +9463,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

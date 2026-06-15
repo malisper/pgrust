@@ -13,6 +13,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
+# F2a `BufferAlloc` tests relpersistence against RELPERSISTENCE_PERMANENT.
+types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 # The per-buffer content LWLock array (one real LWLock per buffer, tranche
 # LWTRANCHE_BUFFER_CONTENT) is a DIRECT dependency: LockBuffer maps a Buffer to
@@ -24,6 +26,11 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 # This crate OWNS and installs the bufmgr seams (the 4 header/freelist seams in
 # F1a; the rest in F1b-d).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# F2a: the buffer-mapping hash table (BufTable) + the strategy/freelist control
+# block (BufferStrategyControl + ClockSweep) live in the buffer-support crate
+# (buf_table.c / freelist.c). BufferManager OWNS one of each (BufferManagerShmemInit
+# == InitBufTable + StrategyInitialize) and drives victim selection through them.
+backend-storage-buffer-support = { path = "../backend-storage-buffer-support" }
 # WakePinCountWaiter signals the parked pin-count waiter via its process latch
 # (ProcSendSignal == SetLatch on procLatch) — an outward proc seam. Also
 # my_proc_number / proc_wait_for_signal / my_proc_set_delay_chkpt_start (F1c).
@@ -44,3 +51,6 @@ backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-s
 # Test-only: stub HOLD_INTERRUPTS/RESUME_INTERRUPTS for the direct LWLock
 # content-lock path exercised by the F1c lock tests.
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# Test-only: stub ShmemInitStruct so BufferManagerShmemInit can stand up the
+# buffer-support BufTable + StrategyControl (F2a) without a real shmem segment.
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }

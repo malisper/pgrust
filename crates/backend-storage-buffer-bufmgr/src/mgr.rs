@@ -15,10 +15,14 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering;
 
+use backend_storage_buffer_support::{BufTable, BufferStrategyControl};
 use types_condvar::ConditionVariable;
 use types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
 use types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
-use types_storage::storage::{pg_atomic_uint32, LWLock, LWTRANCHE_BUFFER_CONTENT};
+use types_storage::storage::{
+    pg_atomic_uint32, LWLock, LWLockMode, LWTRANCHE_BUFFER_CONTENT, BUFFER_MAPPING_LWLOCK_OFFSET,
+    NUM_BUFFER_PARTITIONS,
+};
 
 use crate::refcount::PrivateRefCount;
 
@@ -100,6 +104,13 @@ pub struct BufferManager {
     io_cvs: Vec<ConditionVariable>,
     /// The per-backend private pin counts (NOT shmem).
     private_refcount: PrivateRefCount,
+    /// `SharedBufHash` (buf_table.c) — the buffer-mapping hash table
+    /// (`BufferTag -> buf_id`). Reached under a `BufferMappingLock` partition
+    /// lock, exactly as in C. Owned by the manager (`InitBufTable`).
+    buf_table: BufTable,
+    /// `StrategyControl` (freelist.c) — the freelist head + clock-sweep hand +
+    /// allocation counters. Drives victim selection through [`ClockSweep`].
+    strategy_control: BufferStrategyControl,
     /// `NBuffers`.
     nbuffers: u32,
     /// `PinCountWaitBuf` (bufmgr.c:183) — the single buffer this backend
@@ -161,6 +172,18 @@ impl BufferManager {
             io_cvs.push(cv);
         }
 
+        // SharedBufHash — InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS) so a
+        // backend can hold the new entry's slot while still holding the old
+        // entry's slot during a buffer reassignment (buf_init.c:127 /
+        // shmem.c sizing rationale).
+        let buf_table = BufTable::InitBufTable(nbuffers as i32 + NUM_BUFFER_PARTITIONS)
+            .expect("InitBufTable failed in BufferManagerShmemInit");
+
+        // StrategyControl — StrategyInitialize(NBuffers). The "init once" path
+        // seeds the freelist 0..NBuffers and the clock hand at 0 (freelist.c).
+        let strategy_control = BufferStrategyControl::StrategyInitialize(nbuffers)
+            .expect("StrategyInitialize failed in BufferManagerShmemInit");
+
         Self {
             states,
             fields: RefCell::new(fields),
@@ -168,6 +191,8 @@ impl BufferManager {
             content_locks,
             io_cvs,
             private_refcount: PrivateRefCount::default(),
+            buf_table,
+            strategy_control,
             nbuffers,
             pin_count_wait_buf: Cell::new(-1),
         }
@@ -397,6 +422,55 @@ impl BufferManager {
         let start = buf_id * BLCKSZ;
         f(&blocks[start..start + BLCKSZ])
     }
+
+    // -- F2a: buffer-mapping table + strategy control + mapping locks ------
+
+    /// `SharedBufHash` (buf_table.c) — the buffer-mapping hash table, reached
+    /// under the partition's `BufferMappingLock` by the alloc/invalidate paths.
+    #[allow(dead_code)]
+    pub(crate) fn buf_table(&self) -> &BufTable {
+        &self.buf_table
+    }
+
+    /// `StrategyControl` (freelist.c) — the freelist/clock-sweep control block.
+    #[allow(dead_code)]
+    pub(crate) fn strategy_control(&self) -> &BufferStrategyControl {
+        &self.strategy_control
+    }
+
+    /// `GetBufferDescriptor(buf_id)->tag = tag` — set a victim's new tag under
+    /// the caller-held header spinlock (`BufferAlloc` / `InvalidateVictimBuffer`).
+    #[allow(dead_code)]
+    pub(crate) fn set_desc_tag(&self, buf_id: usize, tag: buftag) {
+        self.fields.borrow_mut()[buf_id].tag = tag;
+    }
+
+    /// `GetBufferDescriptor(buf_id)->io_wref = io_wref` — stamp / clear the
+    /// AIO wait reference under the caller-held header spinlock
+    /// (`StartBufferIO` staging / `TerminateBufferIO` release; `io_wref` is a
+    /// spinlock-protected field like `tag`).
+    #[allow(dead_code)]
+    pub(crate) fn set_io_wref(&self, buf_id: usize, io_wref: PgAioWaitRef) {
+        self.fields.borrow_mut()[buf_id].io_wref = io_wref;
+    }
+
+    /// `LWLockAcquire(BufMappingPartitionLock(partition), mode)` — take the
+    /// `BufferMappingLock` for `partition` (the `MainLWLockArray` slot at
+    /// `BUFFER_MAPPING_LWLOCK_OFFSET + partition`). Returns the RAII guard whose
+    /// drop is `LWLockRelease`. Direct lwlock dep (no central seam).
+    #[allow(dead_code)]
+    pub(crate) fn map_acquire(
+        &self,
+        partition: u32,
+        mode: LWLockMode,
+    ) -> types_error::PgResult<backend_storage_lmgr_lwlock::MainLWLockGuard> {
+        let my = backend_storage_lmgr_proc_seams::my_proc_number::call();
+        backend_storage_lmgr_lwlock::LWLockAcquireMain(
+            (BUFFER_MAPPING_LWLOCK_OFFSET + partition as i32) as usize,
+            mode,
+            my,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +491,14 @@ pub(crate) mod test_seams {
             sb::forget_buffer::set(|_b| {});
             sb::resowner_enlarge::set(|| Ok(()));
             backend_storage_lmgr_proc_seams::my_proc_number::set(|| 0);
+            // `BufferManagerShmemInit` now also stands up the buffer-support
+            // BufTable + StrategyControl (`InitBufTable` / `StrategyInitialize`),
+            // both of which carve their backing store via `ShmemInitStruct`.
+            // In tests there is no real shmem segment, so return "(null, first
+            // creation)" exactly like the buffer-support test harness does.
+            backend_storage_ipc_shmem_seams::shmem_init_struct::set(|_name, _size| {
+                Ok((core::ptr::null_mut(), false))
+            });
             // The direct LWLock content-lock path brackets each acquire/release
             // with HOLD_INTERRUPTS/RESUME_INTERRUPTS (globals.c); stub them.
             backend_utils_init_small_seams::hold_interrupts::set(|| {});
