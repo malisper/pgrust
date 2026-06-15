@@ -81,13 +81,18 @@ fn set_proc_cv_wait_link(procno: ProcNumber, node: proclist_node) {
 
 // ---- latch / semaphore (foreign: latch.c / sysv_sema) ----
 
-fn set_proc_latch(_procno: ProcNumber) {
-    // `SetLatch(&GetPGProcByNumber(procno)->procLatch)` reaches the latch
-    // embedded in the PGPROC. latch.c's `SetLatch` resolves a registry
-    // `LatchHandle`, which does not yet know the PGPROC-embedded `procLatch`;
-    // registering it is the latch <-> proc integration step, so this aborts
-    // loudly until that bridge lands.
-    panic!("SetLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
+fn set_proc_latch(procno: ProcNumber) {
+    // `SetLatch(&GetPGProcByNumber(procno)->procLatch)`: name this slot's
+    // embedded latch in the proc-tagged handle space and let latch.c's
+    // `SetLatch` resolve it back through `with_proc_latch` to the real
+    // `&proc->procLatch`.
+    backend_storage_ipc_latch_seams::set_latch::call(
+        crate::proc_shmem::proc_latch_handle(procno),
+    );
+}
+
+fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
+    crate::proc_shmem::with_proc_latch(procno, f);
 }
 
 fn pg_semaphore_lock(procno: ProcNumber) {
@@ -824,6 +829,7 @@ pub(crate) fn install() {
     seams::proc_cv_wait_link::set(proc_cv_wait_link);
     seams::set_proc_cv_wait_link::set(set_proc_cv_wait_link);
     seams::set_proc_latch::set(set_proc_latch);
+    seams::with_proc_latch::set(with_proc_latch);
     seams::pg_semaphore_lock::set(pg_semaphore_lock);
     seams::pg_semaphore_unlock::set(pg_semaphore_unlock);
     seams::proc_wait_for_signal::set(proc_wait_for_signal);

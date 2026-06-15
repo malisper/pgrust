@@ -11,7 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 libc = "0.2"
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-storage-ipc-waiteventset-seams = { path = "../backend-storage-ipc-waiteventset-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

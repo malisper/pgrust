@@ -140,7 +140,7 @@ fn set_latch_quick_exit_when_already_set() {
     install_seams_once();
     let h = allocate_latch();
     InitLatch(h);
-    lookup_latch(h).is_set.store(true, SeqCst);
+    lookup_latch(h).is_set.store(1, SeqCst);
     SetLatch(h);
     assert_eq!(calls(), vec![]);
 }

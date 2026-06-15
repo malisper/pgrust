@@ -323,33 +323,41 @@ pub(crate) fn on_shmem_exit(callback: fn(i32, Datum<'static>) -> PgResult<()>, a
 
 // ---- latch ----
 //
-// `OwnLatch`/`DisownLatch` (latch.c) and `SwitchToSharedLatch`/
-// `SwitchBackToLocalLatch` (miscinit.c) operate on the latch *embedded in this
-// backend's PGPROC* (`&MyProc->procLatch`). The ported latch unit reaches
-// latches through a handle registry that does not yet know the PGPROC-embedded
-// `procLatch`; registering it (so `OwnLatch` can resolve the handle and
-// `SwitchToSharedLatch` can repoint `MyLatch` at it) is the latch <-> proc
-// integration step. Until that bridge lands these abort loudly rather than call
-// the registry with an unregistered handle.
+// `OwnLatch`/`DisownLatch` (latch.c) operate on the latch *embedded in this
+// backend's PGPROC* (`&MyProc->procLatch`). The latch unit names a per-PGPROC
+// `procLatch` in its proc-tagged handle space (`LatchHandle::proc`), which it
+// resolves back to the real embedded latch through `with_proc_latch`; so these
+// dispatch through the latch seams with the proc-tagged handle.
+// `SwitchToSharedLatch`/`SwitchBackToLocalLatch` are miscinit.c functions that
+// repoint `MyLatch` (globals.c) at / off the shared `procLatch`; they are
+// reached through the miscinit seams.
 
-/// `OwnLatch(&GetPGProcByNumber(procno)->procLatch)`.
-pub(crate) fn own_latch(_procno: ProcNumber) {
-    panic!("OwnLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
+/// `OwnLatch(&GetPGProcByNumber(procno)->procLatch)`. C `OwnLatch` can
+/// `elog(PANIC)` if the latch is already owned; on this `InitProcess` /
+/// `InitAuxiliaryProcess` path that is a fatal process abort, so surface it as
+/// a panic.
+pub(crate) fn own_latch(procno: ProcNumber) {
+    backend_storage_ipc_latch_seams::own_latch::call(
+        crate::proc_shmem::proc_latch_handle(procno),
+    )
+    .expect("OwnLatch(&proc->procLatch)");
 }
 
 /// `DisownLatch(&GetPGProcByNumber(procno)->procLatch)`.
-pub(crate) fn disown_latch(_procno: ProcNumber) {
-    panic!("DisownLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
+pub(crate) fn disown_latch(procno: ProcNumber) {
+    backend_storage_ipc_latch_seams::disown_latch::call(crate::proc_shmem::proc_latch_handle(procno));
 }
 
 /// `SwitchToSharedLatch()` (miscinit.c).
 pub(crate) fn switch_to_shared_latch() {
-    panic!("SwitchToSharedLatch(): latch <-> proc PGPROC-latch bridge not yet wired")
+    backend_utils_init_miscinit_seams::switch_to_shared_latch::call()
+        .expect("SwitchToSharedLatch()");
 }
 
 /// `SwitchBackToLocalLatch()` (miscinit.c).
 pub(crate) fn switch_back_to_local_latch() {
-    panic!("SwitchBackToLocalLatch(): latch <-> proc PGPROC-latch bridge not yet wired")
+    backend_utils_init_miscinit_seams::switch_back_to_local_latch::call()
+        .expect("SwitchBackToLocalLatch()");
 }
 
 // ---- pgstat wait events ----

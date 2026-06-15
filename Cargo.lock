@@ -9657,7 +9657,9 @@ name = "backend-storage-ipc-latch"
 version = "0.0.0"
 dependencies = [
  "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-waiteventset-seams",
+ "backend-storage-lmgr-proc-seams",
  "backend-utils-init-small-seams",
  "libc",
  "types-core",
@@ -10240,6 +10242,7 @@ dependencies = [
  "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-timeout-seams",

@@ -45,6 +45,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `OwnLatch(latch)`: associate a shared latch (e.g.
+    /// `&MyProc->procLatch`) with the current process so it can wait on it.
+    /// `elog(PANIC)` if the latch is already owned, hence `PgResult`.
+    pub fn own_latch(latch: types_storage::latch::LatchHandle) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `DisownLatch(latch)`: disown a shared latch currently owned by the
+    /// current process (e.g. `&proc->procLatch` in `ProcKill`). Infallible in
+    /// C.
+    pub fn disown_latch(latch: types_storage::latch::LatchHandle)
+);
+
+seam_core::seam!(
     /// `WaitLatch(latch, wakeEvents, timeout, wait_event_info)`
     /// (`storage/ipc/latch.c`): wait for the latch to be set or for one of
     /// the other requested events; returns the bitmask of events that

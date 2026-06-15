@@ -27,6 +27,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SwitchToSharedLatch()` (miscinit.c) — repoint `MyLatch` from the
+    /// process-local latch to this backend's shared `&MyProc->procLatch`
+    /// (called by `InitProcess`/`InitAuxiliaryProcess` after `OwnLatch`).
+    /// Touches the FeBe wait set, which can `ereport(ERROR)`, hence `PgResult`.
+    pub fn switch_to_shared_latch() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `SwitchBackToLocalLatch()` (miscinit.c) — repoint `MyLatch` back to the
+    /// process-local latch (called by `ProcKill`/`AuxiliaryProcKill`).
+    pub fn switch_back_to_local_latch() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `process_shmem_requests_in_progress` (miscinit.c) — true only while the
     /// postmaster is running registered `shmem_request_hook`s.
     pub fn process_shmem_requests_in_progress() -> bool
